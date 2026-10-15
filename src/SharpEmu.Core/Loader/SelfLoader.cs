@@ -334,9 +334,6 @@ public sealed class SelfLoader : ISelfLoader
             effectiveImportStubs,
             runtimeSymbols);
         _ = GuestSyscallPatcher.Patch(virtualMemory, programHeaders, imageBase, effectiveImportStubs, _moduleManager);
-        var finalizedImportStubs = effectiveImportStubs.Count == 0
-            ? EmptyImportStubs
-            : effectiveImportStubs;
         var finalizedRuntimeSymbols = runtimeSymbols.Count == 0
             ? EmptyRuntimeSymbols
             : runtimeSymbols;
@@ -359,7 +356,13 @@ public sealed class SelfLoader : ISelfLoader
             GuestBytePatcher.ApplyFromEnvironment(virtualMemory, programHeaders, imageBase);
             ApplyTitleDisplayPatch(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId);
             EngineResolution.ApplyMainExecutable(virtualMemory, programHeaders, imageBase);
+            ApplyDemonsSoulsIdleNap(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId, effectiveImportStubs);
         }
+
+        // After the patches above, which may add import stubs.
+        var finalizedImportStubs = effectiveImportStubs.Count == 0
+            ? EmptyImportStubs
+            : effectiveImportStubs;
 
         // Before the red-zone pass: it only rewrites immediates in place, and the red-zone pass moves
         // instructions into trampolines and rewrites vector stores, which would hide its signatures.
@@ -701,6 +704,34 @@ public sealed class SelfLoader : ISelfLoader
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             Console.Error.WriteLine($"[LOADER][WARN] spin-nap patch failed: {exception.Message}");
+        }
+    }
+
+    /// <summary>Lets Demon's Souls' idle job workers sleep instead of spinning; see
+    /// <see cref="DemonsSoulsIdleNapPatch"/>. The nap's import stub joins the image's own.</summary>
+    private static void ApplyDemonsSoulsIdleNap(
+        IVirtualMemory virtualMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        string? titleId,
+        Dictionary<ulong, string> importStubs)
+    {
+        try
+        {
+            DemonsSoulsIdleNapPatch.Apply(virtualMemory, programHeaders, imageBase, titleId, nid =>
+            {
+                foreach (var (address, stubNid) in CreateImportStubMapping(virtualMemory, [nid]))
+                {
+                    importStubs[address] = stubNid;
+                    return address;
+                }
+
+                return 0;
+            });
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] idle job-worker nap patch failed: {exception.Message}");
         }
     }
 
