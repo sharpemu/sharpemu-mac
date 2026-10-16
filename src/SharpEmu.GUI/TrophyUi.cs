@@ -19,6 +19,12 @@ internal static class TrophyUi
     private static readonly IBrush ChipBrush = new SolidColorBrush(Color.FromArgb(24, 255, 255, 255));
     private static readonly IBrush ChipBorderBrush = new SolidColorBrush(Color.FromArgb(34, 255, 255, 255));
 
+    // A .zar game keeps its metadata, trophy package included, in its cache folder.
+    public static string? GameDirectory(string gamePath) =>
+        SharpEmu.HLE.FileSystem.ZArchive.IsArchivePath(gamePath)
+            ? SharpEmu.HLE.FileSystem.ZArchiveCache.GetCacheRoot(gamePath)
+            : Path.GetDirectoryName(gamePath);
+
     public static string GradeName(int grade) =>
         Localization.Instance.Get($"Trophies.Grade.{Math.Clamp(grade, 1, 4)}");
 

@@ -86,7 +86,7 @@ internal sealed class TrophyPage : UserControl
     {
         _games = games;
         Focus();
-        if (Path.GetDirectoryName(game.Path) is not { } directory)
+        if (TrophyUi.GameDirectory(game.Path) is not { } directory)
         {
             return;
         }

@@ -157,7 +157,7 @@ public partial class TrophyHubView : UserControl
     private async Task LoadAsync()
     {
         _summaries = await Task.Run(() => _games
-            .Select(game => (Game: game, Directory: Path.GetDirectoryName(game.Path)))
+            .Select(game => (Game: game, Directory: TrophyUi.GameDirectory(game.Path)))
             .Where(entry => entry.Directory is not null)
             .AsParallel()
             .Select(entry => new GameSummary(

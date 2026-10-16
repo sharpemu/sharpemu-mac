@@ -19,6 +19,7 @@ public static class ZArchiveCache
         "sce_sys/pic0.png",
         "sce_sys/pic1.png",
         "sce_sys/snd0.at9",
+        "sce_sys/trophy2/trophy00.ucp",
     ];
 
     private static string DefaultCacheParent => Path.Combine(AppContext.BaseDirectory, "user", "zar-cache");
