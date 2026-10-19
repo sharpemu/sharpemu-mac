@@ -96,6 +96,113 @@ public sealed unsafe class SpinLoopNapPatcherTests
         Assert.Equal(7u, ((delegate* unmanaged<uint>)image.Base)());
     }
 
+    // The rdtsc wrapper DS's WaitForJobs calls from its idle loop (app+0x863a20): rdtsc; shl rdx,32; or rax,rdx; ret.
+    private static readonly byte[] RdtscWrapper = [0x0F, 0x31, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xD0, 0xC3];
+
+    // mov ecx,4 ; loop: pause ; mov rax,rcx ; call callee ; dec ecx ; jnz loop ; mov eax,0x11223344 ; ret ; (pad) ; callee at 0x20
+    private static byte[] LoopCallingCallee(byte[] callee)
+    {
+        var function = new byte[0x20 + callee.Length];
+        byte[] head =
+        [
+            0xB9, 0x04, 0x00, 0x00, 0x00, // 0: mov ecx, 4
+            0xF3, 0x90,                   // 5: loop: pause
+            0x48, 0x89, 0xC8,             // 7: mov rax, rcx (the pause needs 3 relocatable bytes after it)
+            0xE8, 0x11, 0x00, 0x00, 0x00, // 10: call 0x20 (next ip 15)
+            0xFF, 0xC9,                   // 15: dec ecx
+            0x75, 0xF2,                   // 17: jnz loop (19 - 14 = 5)
+            0xB8, 0x44, 0x33, 0x22, 0x11, // 19: mov eax, 0x11223344
+            0xC3,                         // 24: ret
+        ];
+        head.CopyTo(function, 0);
+        Array.Fill(function, (byte)0xCC, head.Length, 0x20 - head.Length);
+        callee.CopyTo(function, 0x20);
+        return function;
+    }
+
+    [Fact]
+    public void PatchesAPauseLoopThatCallsASmallLeafAndStaysTransparent()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var image = SpinImage.Create(LoopCallingCallee(RdtscWrapper));
+        Assert.Equal(1, image.Result.PauseSites);
+        Assert.Equal(1, image.Result.PatchedSites);
+        Assert.Equal(0, image.Result.NonLoopSites);
+        Assert.Equal(0xE9, image.ReadByte(5)); // the pause is now a jmp into the trampoline
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Theory]
+    [InlineData("call", new byte[] { 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3 })]
+    [InlineData("indirect jump", new byte[] { 0xFF, 0xE0, 0xC3 })]
+    [InlineData("indirect call", new byte[] { 0xFF, 0xD0, 0xC3 })]
+    [InlineData("syscall", new byte[] { 0x0F, 0x05, 0xC3 })]
+    [InlineData("no return", new byte[] { 0x90, 0x90, 0x90 })]
+    public void LeavesAPauseLoopThatCallsANonLeafAlone(string reason, byte[] callee)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var image = SpinImage.Create(LoopCallingCallee(callee));
+        Assert.True(image.Result.NonLoopSites == 1, reason);
+        Assert.Equal(0, image.Result.PatchedSites);
+        Assert.Equal(0xF3, image.ReadByte(5));
+    }
+
+    [Theory]
+    [InlineData(true, new byte[] { 0x0F, 0x31, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xD0, 0xC3 })]
+    // push rbp ; mov rbp,rsp ; sub rsp,0x20 ; rdtsc ; leave ; ret
+    [InlineData(true, new byte[] { 0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x20, 0x0F, 0x31, 0xC9, 0xC3 })]
+    // cmp edi,0 ; je +2 ; nop ; xor eax,eax ; ret  (forward branch inside the callee)
+    [InlineData(true, new byte[] { 0x83, 0xFF, 0x00, 0x74, 0x01, 0x90, 0x31, 0xC0, 0xC3 })]
+    // sub rsp,0x1000 ; ret  (a stack adjustment beyond a leaf frame)
+    [InlineData(false, new byte[] { 0x48, 0x81, 0xEC, 0x00, 0x10, 0x00, 0x00, 0xC3 })]
+    // dec ecx ; jnz -4 ; ret  (a backward branch: the callee is a loop of its own)
+    [InlineData(false, new byte[] { 0xFF, 0xC9, 0x75, 0xFC, 0xC3 })]
+    // jmp +0x40 (tail call out of the function)
+    [InlineData(false, new byte[] { 0xEB, 0x40, 0xC3 })]
+    public void SmallLeafFunctionRule(bool expected, byte[] callee)
+    {
+        var padded = new byte[0x80];
+        Array.Fill(padded, (byte)0xCC);
+        callee.CopyTo(padded, 0x10);
+        Assert.Equal(expected, GuestRedZonePatcher.IsSmallLeafFunction(padded, 0x1000, 0x1010));
+        Assert.False(GuestRedZonePatcher.IsSmallLeafFunction(padded, 0x1000, 0x2000));
+    }
+
+    [Fact]
+    public void PatchesAPauseWhoseBackEdgeIsOutOfLineFarFromIt()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        // The shape of DS's WaitForJobs idle loop: the path from the pause back to itself runs through a
+        // forward branch and a far out-of-line jmp, so no backward branch sits within 96 bytes of the pause.
+        //   mov ecx,4 ; loop: pause ; dec ecx ; jnz far ; mov eax,0x11223344 ; ret ; ... ; far: jmp loop
+        var function = new byte[0x80];
+        Array.Fill(function, (byte)0xCC);
+        byte[] head =
+        [
+            0xB9, 0x04, 0x00, 0x00, 0x00,             // 0: mov ecx, 4
+            0xF3, 0x90,                               // 5: loop: pause
+            0xFF, 0xC9,                               // 7: dec ecx
+            0x0F, 0x85, 0x61, 0x00, 0x00, 0x00,       // 9: jnz 0x70 (next ip 15)
+            0xB8, 0x44, 0x33, 0x22, 0x11,             // 15: mov eax, 0x11223344
+            0xC3,                                     // 20: ret
+        ];
+        head.CopyTo(function, 0);
+        function[0x70] = 0xEB; // jmp loop (next ip 0x72, 5 - 0x72 = -0x6D)
+        function[0x71] = 0x93;
+
+        using var image = SpinImage.Create(function);
+        Assert.Equal(1, image.Result.PauseSites);
+        Assert.Equal(1, image.Result.PatchedSites);
+        Assert.Equal(0, image.Result.NonLoopSites);
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
     // Data cell the locked-loop tests' RIP-relative operands point at (inside the image, past the code).
     private const int DataOffset = 0x800;
 
