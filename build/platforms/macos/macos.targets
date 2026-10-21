@@ -48,6 +48,22 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <_SharpEmuMacCheckFlags Condition="'$(SharpEmuMacForbidSdl)' == 'true'">$(_SharpEmuMacCheckFlags) --forbid-sdl</_SharpEmuMacCheckFlags>
   </PropertyGroup>
 
+  <!-- Rosetta places the initial host stack relative to the executable layout.
+       A stock apphost puts it in fixed guest memory (ASTRO BOT's libc heap at
+       0x300000000). Move read-only linker metadata above the guest VA limit,
+       preserving code/data addresses and PIE. Patch each final output after
+       SDK apphost creation/single-file bundling; never modify the SDK template. -->
+  <Target Name="SharpEmuMacPlaceBuildHostStack" AfterTargets="Build"
+    Condition="'$(MSBuildProjectName)' == 'SharpEmu.CLI' And '$(RuntimeIdentifier)' == 'osx-x64' And '$(UseAppHost)' == 'true' And Exists('$(TargetDir)$(AssemblyName)')">
+    <Exec Command="python3 &quot;$(RepoRoot)build/platforms/macos/place-host-stack.py&quot; &quot;$(TargetDir)$(AssemblyName)&quot;" />
+  </Target>
+
+  <Target Name="SharpEmuMacPlacePublishHostStack" AfterTargets="Publish"
+    BeforeTargets="SharpEmuMacValidatePublishOutput"
+    Condition="'$(MSBuildProjectName)' == 'SharpEmu.CLI' And '$(RuntimeIdentifier)' == 'osx-x64' And '$(UseAppHost)' == 'true' And Exists('$(PublishDir)$(AssemblyName)')">
+    <Exec Command="python3 &quot;$(RepoRoot)build/platforms/macos/place-host-stack.py&quot; &quot;$(PublishDir)$(AssemblyName)&quot;" />
+  </Target>
+
   <!-- Runs after the publish copy and after this project's own
        PublishFfmpegRuntime/RemoveNativeDebugSymbols post-publish steps, so it
        sees the artifact exactly as it ships. The script's non-zero exit is an

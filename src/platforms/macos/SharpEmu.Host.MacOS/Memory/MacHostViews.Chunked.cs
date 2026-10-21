@@ -105,7 +105,9 @@ internal sealed unsafe partial class MacHostViews
 
         var aliasSize = AlignUp(size, PageSize);
         var task = mach_task_self();
-        ulong alias = 0;
+        // Mach's ANYWHERE search begins at this address; keep the host alias
+        // above guest application VA instead of consuming a future fixed arena.
+        ulong alias = HostAliasStart;
         if (mach_vm_map(task, ref alias, aliasSize, GuestChunkBytes - 1, VM_FLAGS_ANYWHERE | GuestChunkTagFlags, 0, 0, 0,
                 VM_PROT_NONE, VM_PROT_READ_WRITE, VM_INHERIT_SHARE) != KERN_SUCCESS)
         {
