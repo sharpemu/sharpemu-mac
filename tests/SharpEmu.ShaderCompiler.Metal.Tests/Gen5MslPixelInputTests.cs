@@ -152,12 +152,45 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         AssertCompiles(perspective);
     }
 
-    [Fact]
-    public void CentroidOnlyBarycentrics_UseTheCentroidLocation()
+    public static TheoryData<uint, bool> BarycentricLocations
     {
-        var shader = Compile([Interp(20, 2, 1, 0, 0), .. ExportAndEnd(20, 20, 20, 20)], 0x44, cntl: [0, 1]);
-        Assert.Contains("[[barycentric_coord, centroid_perspective]]", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("[[barycentric_coord, centroid_no_perspective]]", shader.Source, StringComparison.Ordinal);
+        get
+        {
+            var cases = new TheoryData<uint, bool>();
+            foreach (var inputs in new uint[] { 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x11, 0x44, 0x77, 0xF844 })
+            {
+                cases.Add(inputs, false);
+                cases.Add(inputs, true);
+            }
+            return cases;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(BarycentricLocations))]
+    public void BarycentricLocations_CompileWithCenterBuiltIns(uint inputs, bool fromPrimitive)
+    {
+        // ASTRO BOT uses per-primitive vertex copies, compiled as MSL 3.2. Testing only
+        // vertex_value (MSL 4.0) misses that compiler's rejection of centroid/sample.
+        var shader = Compile([Interp(20, 2, 1, 0, 0), .. ExportAndEnd(0, 1, 20, 20)], inputs, cntl: [0, 1],
+            supportsPerVertex: !fromPrimitive, fromPrimitive: fromPrimitive);
+        if ((inputs & 0xFu) != 0)
+        {
+            if (fromPrimitive && (inputs & 0x70u) != 0)
+            {
+                Assert.Contains("sharpemu_bary_persp /= dot(sharpemu_bary_persp, float3(1.0f));", shader.Source, StringComparison.Ordinal);
+                Assert.DoesNotContain("[[barycentric_coord, center_perspective]]", shader.Source, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains("[[barycentric_coord, center_perspective]]", shader.Source, StringComparison.Ordinal);
+            }
+        }
+        if ((inputs & 0x70u) != 0)
+        {
+            Assert.Contains("[[barycentric_coord, center_no_perspective]]", shader.Source, StringComparison.Ordinal);
+        }
+        AssertCompiles(shader);
     }
 
     [Fact]
@@ -396,11 +429,12 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         uint[]? cntl = null,
         bool frontFaceAllBits = false,
         uint customMask = 0,
-        bool manualInterpolation = false)
+        bool manualInterpolation = false,
+        bool fromPrimitive = false)
     {
         var shader = Compile(pixelWords, inputs, cntl: cntl ?? [0, 1], outputKind: outputKind,
-            frontFaceAllBits: frontFaceAllBits, customMask: customMask, supportsPerVertex: !manualInterpolation,
-            manualInterpolation: manualInterpolation);
+            frontFaceAllBits: frontFaceAllBits, customMask: customMask, supportsPerVertex: !manualInterpolation && !fromPrimitive,
+            manualInterpolation: manualInterpolation, fromPrimitive: fromPrimitive);
         Assert.True(MetalNative.TryCompileLibrary(vertexSource, out var vertexLibrary, out var error), error);
         nint fragmentLibrary;
         Assert.True(
@@ -753,6 +787,102 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         }
         """;
 
+    private const string PrimitiveCopiesVertexSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct VsOut
+        {
+            float4 position [[position]];
+            float4 p0 [[user(locn0_v0)]];
+            float4 p1 [[user(locn0_v1)]];
+            float4 p2 [[user(locn0_v2)]];
+            float3 vertex_w [[user(sharpemu_vertex_w)]];
+        };
+        vertex VsOut primitive_copies_vs(uint id [[vertex_id]])
+        {
+            const float2 corners[3] = { float2(-1.0, -1.0), float2(-1.0, 3.0), float2(3.0, -1.0) };
+            const float w[3] = { 1.0, 2.0, 4.0 };
+            VsOut out;
+            out.position = float4(corners[id] * w[id], 0.5 * w[id], w[id]);
+            out.p0 = float4(10.0);
+            out.p1 = float4(20.0);
+            out.p2 = float4(40.0);
+            out.vertex_w = float3(1.0, 2.0, 4.0);
+            return out;
+        }
+        """;
+
+    [Theory]
+    [InlineData(0x1u, false)]
+    [InlineData(0x2u, false)]
+    [InlineData(0x4u, false)]
+    [InlineData(0x10u, true)]
+    [InlineData(0x20u, true)]
+    [InlineData(0x40u, true)]
+    public void PrimitiveBarycentrics_RenderTheCenterFallback(uint inputs, bool linear)
+    {
+        if (SkipWithoutMetalDevice("the per-primitive barycentric render test")) return;
+
+        // Request vertex differences to force built-in barycentrics rather than an
+        // ordinary interpolated user input. Export I/J and P10/P20 for readback.
+        uint[] words = [Interp(4, 2, 0, 0, 0), Interp(5, 2, 0, 0, 1), .. ExportAndEnd(0, 1, 4, 5)];
+        var texels = Render(PrimitiveCopiesVertexSource, "primitive_copies_vs", 3, words, inputs,
+            Gen5PixelOutputKind.Float, languageVersion: null, cntl: [0], fromPrimitive: true);
+        var vertices = new (double X, double Y)[]
+        {
+            (0, TargetHeight), (0, -TargetHeight * 1.0), (TargetWidth * 2.0, TargetHeight),
+        };
+        double[] inverseW = [1, 0.5, 0.25];
+        foreach (var (x, y) in new (uint, uint)[] { (1, 1), (7, 3), (12, 6) })
+        {
+            var offset = ((y * TargetWidth) + x) * 4;
+            for (var component = 0; component < 2; component++)
+            {
+                var values = new double[3];
+                values[component + 1] = linear ? 1 : inverseW[component + 1];
+                var expected = Interpolate(vertices, values, x + 0.5, y + 0.5);
+                if (!linear) expected /= Interpolate(vertices, inverseW, x + 0.5, y + 0.5);
+                var actual = BitConverter.UInt32BitsToSingle(texels[offset + component]);
+                Assert.True(Math.Abs(actual - expected) < 1e-3, $"({x},{y}) component {component}: {actual} != {expected}");
+            }
+            Assert.Equal(10f, BitConverter.UInt32BitsToSingle(texels[offset + 2]));
+            Assert.Equal(30f, BitConverter.UInt32BitsToSingle(texels[offset + 3]));
+        }
+    }
+
+    [Theory]
+    [InlineData(0x11u)]
+    [InlineData(0x22u)]
+    [InlineData(0x44u)]
+    public void MixedPrimitiveBarycentrics_ReconstructPerspectiveWithClipW(uint inputs)
+    {
+        if (SkipWithoutMetalDevice("the mixed per-primitive barycentric render test")) return;
+
+        uint[] words = [Interp(20, 2, 0, 0, 0), .. ExportAndEnd(0, 1, 2, 3)];
+        var texels = Render(PrimitiveCopiesVertexSource, "primitive_copies_vs", 3, words, inputs,
+            Gen5PixelOutputKind.Float, languageVersion: null, cntl: [0], fromPrimitive: true);
+        var vertices = new (double X, double Y)[]
+        {
+            (0, TargetHeight), (0, -TargetHeight * 1.0), (TargetWidth * 2.0, TargetHeight),
+        };
+        double[] inverseW = [1, 0.5, 0.25];
+        foreach (var (x, y) in new (uint, uint)[] { (1, 1), (7, 3), (12, 6) })
+        {
+            var offset = ((y * TargetWidth) + x) * 4;
+            for (var component = 0; component < 4; component++)
+            {
+                var linear = component >= 2;
+                var vertex = (component % 2) + 1;
+                var values = new double[3];
+                values[vertex] = linear ? 1 : inverseW[vertex];
+                var expected = Interpolate(vertices, values, x + 0.5, y + 0.5);
+                if (!linear) expected /= Interpolate(vertices, inverseW, x + 0.5, y + 0.5);
+                var actual = BitConverter.UInt32BitsToSingle(texels[offset + component]);
+                Assert.True(Math.Abs(actual - expected) < 1e-3, $"({x},{y}) component {component}: {actual} != {expected}");
+            }
+        }
+    }
+
     [Theory]
     [InlineData(1u << 1, false)]
     [InlineData(1u << 5, true)]
@@ -841,7 +971,8 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
 
     private void AssertCompiles(Gen5MslShader shader)
     {
-        if (!MetalNative.IsAvailable || (shader.UsesPerVertexInputs && !OperatingSystem.IsMacOSVersionAtLeast(26)))
+        if (SkipWithoutMetalDevice("the pixel input compile test") ||
+            (shader.UsesPerVertexInputs && !OperatingSystem.IsMacOSVersionAtLeast(26)))
         {
             return;
         }

@@ -1243,6 +1243,7 @@ public static partial class Gen5MslTranslator
         /// </summary>
         private void EmitPixelInputState(StringBuilder source)
         {
+            EmitBarycentricReconstruction(source);
             uint vgpr = 0;
 
             void Advance(int bit, uint dwordCount)

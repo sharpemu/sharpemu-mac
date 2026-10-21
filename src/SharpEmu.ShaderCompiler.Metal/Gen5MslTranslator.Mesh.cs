@@ -163,9 +163,10 @@ public static partial class Gen5MslTranslator
         return 16u + (16u * (uint)(parameters.Count + request.VertexInterpolants.Count)) + 48u;
     }
 
-    // One Gen5MeshPrimitive: three float4 per handed parameter, then the layer and viewport.
+    // Three float4 per handed parameter, clip W for its vertices, then layer/viewport.
     private static uint MeshPrimitiveBytesBound(ShaderCompileRequest request) =>
-        (48u * (uint)System.Numerics.BitOperations.PopCount(request.MeshPerVertexParameterMask)) + 16u;
+        (48u * (uint)System.Numerics.BitOperations.PopCount(request.MeshPerVertexParameterMask)) +
+        (request.MeshPerVertexParameterMask != 0 ? 16u : 0u) + 16u;
 
     /// <summary>The [[user]] name of one vertex's value of a param a mesh primitive hands
     /// the pixel stage (<see cref="ShaderCompileRequest.MeshPerVertexParameterMask"/>);
@@ -277,6 +278,11 @@ public static partial class Gen5MslTranslator
                 if (_writesViewportIndex)
                 {
                     source.AppendLine("    uint sharpemu_viewport [[viewport_array_index]];");
+                }
+
+                if (MeshPerVertexLocations.Any())
+                {
+                    source.AppendLine($"    float3 sharpemu_vertex_w [[user({VertexWInputName})]];");
                 }
 
                 foreach (var location in MeshPerVertexLocations)
@@ -414,6 +420,10 @@ public static partial class Gen5MslTranslator
 
             // Every vertex's value of each param handed per vertex, for the epilogue to
             // gather by the primitive's indices.
+            if (MeshPerVertexLocations.Any())
+            {
+                source.AppendLine($"    threadgroup float sharpemu_mesh_vertex_w[{mesh.MaxVertices}];");
+            }
             foreach (var location in MeshPerVertexLocations)
             {
                 source.AppendLine($"    threadgroup float4 sharpemu_mesh_param{location}[{mesh.MaxVertices}];");
@@ -820,6 +830,14 @@ public static partial class Gen5MslTranslator
                         "uint2(sharpemu_mesh_layer, sharpemu_mesh_viewport);");
                 }
 
+                if (MeshPerVertexLocations.Any())
+                {
+                    var clipW = _request.ClipSpace.WReciprocal
+                        ? "1.0f / sharpemu_out.sharpemu_position.w"
+                        : "sharpemu_out.sharpemu_position.w";
+                    source.AppendLine($"        sharpemu_mesh_vertex_w[sharpemu_tg_index] = {clipW};");
+                }
+
                 foreach (var location in MeshPerVertexLocations)
                 {
                     var value = _vertexOutputs.Contains(location) ? $"sharpemu_out.param{location}" : "float4(0.0f)";
@@ -907,6 +925,12 @@ public static partial class Gen5MslTranslator
                 // P0, P1 and P2 of the guest's V_INTERP: the values of the vertices in the
                 // order the primitive names them, which is also the order of Metal's
                 // [[barycentric_coord]] components for a mesh triangle.
+                if (MeshPerVertexLocations.Any())
+                {
+                    source.AppendLine("        primitive.sharpemu_vertex_w = float3(" +
+                        string.Join(", ", Enumerable.Range(0, 3).Select(vertex =>
+                            $"sharpemu_mesh_vertex_w[min(indices[{vertex}], {mesh.MaxVertices - 1}u)]")) + ");");
+                }
                 foreach (var location in MeshPerVertexLocations)
                 {
                     for (var vertex = 0u; vertex < 3u; vertex++)
