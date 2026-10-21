@@ -171,6 +171,11 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
     private static readonly nint MAP_FAILED = -1;
     private static int _sharedObjectCounter;
 
+    // Keep the canonical host alias out of the guest application's fixed VA.
+    // A kernel-chosen 16 GiB alias can otherwise cover a title's low arena
+    // (ASTRO BOT maps its libc heap at 0x300000000) before that title maps it.
+    private const ulong HostAliasStart = 0x100_0000_0000;
+
     public ulong PageSize { get; } = (ulong)Environment.SystemPageSize;
 
     public ulong Granularity => PageSize;
@@ -207,9 +212,24 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
                 return false;
             }
 
-            var alias = FailAliasMapForTests ? MAP_FAILED : mmap(0, (nuint)size, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor, 0);
+            var alias = FailAliasMapForTests ? MAP_FAILED : mmap(unchecked((nint)HostAliasStart), (nuint)size,
+                PROT_READ | PROT_WRITE, MAP_SHARED, descriptor, 0);
             if (alias == MAP_FAILED)
             {
+                close(descriptor);
+                return false;
+            }
+
+            // mmap may decline a hint. Never keep a private alias in guest VA
+            // if it chooses a different address; this successful mapping alone
+            // is ours to release, with no fixed replacement of foreign memory.
+            if ((ulong)alias < HostAliasStart)
+            {
+                if (munmap(alias, (nuint)size) != 0)
+                {
+                    MacMappedCopyState.Ledger?.QuarantineUnknownAlias();
+                    throw new InvalidOperationException("Could not release a host backing alias placed in guest memory.");
+                }
                 close(descriptor);
                 return false;
             }
