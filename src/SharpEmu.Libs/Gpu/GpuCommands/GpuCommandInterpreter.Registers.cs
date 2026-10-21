@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -66,6 +67,12 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var consumed = RegisterWriteTable.WriteContextPacket(TypedRegisters, in packet, offset, payload.Slice(1, (int)count));
+        if (ScissorTrace.Instance is { Active: true } trace)
+        {
+            for (var index = 0u; index < consumed && index < count; index++)
+                trace.RegisterWrite(TypedRegisters, SubmitId, QueueId, in packet,
+                    offset + index, payload[1 + (int)index], entry: index, count: count);
+        }
         if (offset == ContextRegisterOffset.PaScAaSampleLocations0 && count == SampleLocationRegisters.LocationCount)
         {
             RequireCentroidPriorityPacket(in packet);
@@ -236,6 +243,9 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The register table range exceeds the address space: address=0x{tableAddress:X16} count={count}.");
         }
 
+        if (bank == RegisterBank.Context && ScissorTrace.Instance is { Active: true } scissorTrace)
+            scissorTrace.RegisterTable(TypedRegisters, SubmitId, QueueId, in packet, tableAddress, count);
+
         Span<byte> tableBlock = stackalloc byte[entriesPerBlock * entryBytes];
         Span<byte> beforeSynchronization = stackalloc byte[entriesPerBlock * entryBytes];
         for (var index = 0u; index < count; index++)
@@ -294,6 +304,8 @@ public sealed partial class GpuCommandInterpreter
 
                     ClearCompositeDepthExtent(offset);
                     RegisterWriteTable.WriteContextEntry(TypedRegisters, offset, value, tableAddress);
+                    if (ScissorTrace.Instance is { Active: true } trace)
+                        trace.RegisterWrite(TypedRegisters, SubmitId, QueueId, in packet, offset, value, tableAddress, index, count);
                     break;
                 case RegisterBank.Shader:
                     if (offset == RegisterBankLayout.ShaderRegisterNop || rawOffset == RegisterTableSentinel)

@@ -77,6 +77,7 @@ public static class VertexAttributeFormats
             64 => (Format.R32G32Sfloat, 2u),
             63 => (Format.R32G32Sint, 2u),
             62 => (Format.R32G32Uint, 2u),
+            61 => (Format.R8G8B8A8Sint, 4u),
             60 => (Format.R8G8B8A8Uint, 4u),
             59 => (Format.R8G8B8A8Sscaled, 4u),
             58 => (Format.R8G8B8A8Uscaled, 4u),
@@ -84,6 +85,10 @@ public static class VertexAttributeFormats
             56 => (Format.R8G8B8A8Unorm, 4u),
             50 => (Format.A2B10G10R10UnormPack32, 4u),
             51 => (Format.A2B10G10R10SNormPack32, 4u),
+            52 => (Format.A2B10G10R10UscaledPack32, 4u),
+            53 => (Format.A2B10G10R10SscaledPack32, 4u),
+            54 => (Format.A2B10G10R10UintPack32, 4u),
+            55 => (Format.A2B10G10R10SintPack32, 4u),
             36 => (Format.B10G11R11UfloatPack32, 3u),
             29 => (Format.R16G16Sfloat, 2u),
             28 => (Format.R16G16Sint, 2u),
@@ -161,6 +166,8 @@ public static class VertexAttributeFormats
             (Format.R8G8B8A8SNorm, 2) => Format.R8G8SNorm,
             (Format.R8G8B8A8Uint, 1) => Format.R8Uint,
             (Format.R8G8B8A8Uint, 2) => Format.R8G8Uint,
+            (Format.R8G8B8A8Sint, 1) => Format.R8Sint,
+            (Format.R8G8B8A8Sint, 2) => Format.R8G8Sint,
             _ => null,
         };
         if (narrowed is null)

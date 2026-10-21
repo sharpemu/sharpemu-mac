@@ -49,7 +49,9 @@ public static class Gen5ShaderCallLinker
                 Append(instruction);
                 continue;
             }
-            if (!sites.TryGetValue(instruction.Pc, out var call) || call.Targets.Count == 0)
+            // A site whose table holds only null records has no target: it links to its fault, which the
+            // caller's own test of the target keeps it from reaching.
+            if (!sites.TryGetValue(instruction.Pc, out var call))
                 throw new InvalidOperationException($"The shader call has no resolved targets: pc=0x{instruction.Pc:X}.");
             if (call.ReturnRegister > 104 || call.AddressRegister > 104 || call.ArgumentRegister > 104 ||
                 call.ReturnRegister < call.ArgumentRegister + 2 && call.ArgumentRegister < call.ReturnRegister + 2)

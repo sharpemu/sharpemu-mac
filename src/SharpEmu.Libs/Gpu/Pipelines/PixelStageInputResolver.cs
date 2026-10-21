@@ -115,6 +115,7 @@ public static class PixelStageInputResolver
             InterpolatorSettings = PixelInputArrays.Share(interpolators, ref reuse.Interpolators),
             TargetOutputModes = PixelInputArrays.Share(outputModes, ref reuse.OutputModes),
             TargetExportMappings = PixelInputArrays.Share(mappings, ref reuse.ExportMappings),
+            TargetExportFormats = PixelInputArrays.Share<byte>(shaderInterface.TargetOutputModes, ref reuse.ExportFormats),
             ScratchDwords = shader.ScratchDwords,
             PositionX = (activeInputs & InputPositionX) != 0,
             PositionY = (activeInputs & InputPositionY) != 0,
@@ -149,6 +150,7 @@ public sealed class PixelInputArrays
 {
     internal uint[]? Interpolators;
     internal byte[]? OutputModes;
+    internal byte[]? ExportFormats;
     internal ColorComponentMap[]? ExportMappings;
 
     internal static T[] Share<T>(ReadOnlySpan<T> values, ref T[]? last) where T : IEquatable<T> =>

@@ -27,6 +27,11 @@ public sealed class ShaderResourcePlan
     public ScalarValueGraph Graph { get; }
     public ShaderStage Stage { get; }
     public ulong Hash { get; }
+
+    // The layout of this plan's loop-selected image tables: the most candidates and keys any of
+    // them has needed so far (see ResourceMaterializer.FitSharedImageTables).
+    internal int SharedImageCandidates;
+    internal int SharedImageKeys;
     public uint UserDataBase => Graph.UserDataBase;
     public uint UserDataCount => Graph.UserDataCount;
     public MemoryAccessTable Memory => Graph.Memory;

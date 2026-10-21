@@ -282,4 +282,40 @@ public sealed partial class GuestImageCacheTests
         Assert.Equal(clears ? uint.MaxValue : 0x10101010u, harness.ReadUInt32(metadataAddress + 4096));
         harness.Shutdown();
     }
+
+    // A texture can grow a surface into a mip chain whose range covers the surface's metadata slice. The fill that
+    // consumes the clear code then writes inside the image, and the clear must survive it.
+    [Fact]
+    public void NativeColorClear_SurvivesTheFillThatConsumesItsCodeInsideTheImage()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var metadataAddress = address + 0x3000;
+        harness.Write(metadataAddress, Enumerable.Repeat((byte)0x40, 4096).ToArray());
+        var chain = LinearRequest(address, 0x4008, GpuFormat.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new GpuExtent3D(2, 2, 1), 1, 8, 1);
+        chain.Description.Resources = new SubresourceCount(2, 1);
+        chain.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 32, Pitch = 2, Height = 2 };
+        chain.Description.MipLayout[1] = new MipLevelLayout { Offset = 0x4000, Size = 8, Pitch = 1, Height = 1 };
+        chain.View = chain.View with { LevelCount = 2 };
+        var chainIdentifier = harness.Find(ref chain);
+        var target = AsColorTarget(chain);
+        target.Description.Resources = new SubresourceCount(1, 1);
+        target.View = target.View with { LevelCount = 1 };
+        target.Description.Metadata.Kind = MetadataKind.Dcc;
+        target.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
+        target.Description.Metadata.NativeColorClear = true;
+        harness.Worker.Run(() => harness.Images.SynchronizeColorMetadata(target));
+        var identifier = harness.Find(ref target);
+        Assert.Equal(chainIdentifier, identifier);
+        harness.Worker.Run(() => harness.Images.ApplyNativeColorClear(identifier, target));
+        Assert.False(harness.Image(identifier).IsBufferModified);
+        harness.Worker.Run(() => harness.Images.AcquireColorTargetView(identifier, target));
+        var opaqueBlack = Enumerable.Range(0, 4).SelectMany(_ => Bytes((ushort)0, (ushort)0, (ushort)0, (ushort)0x3c00)).ToArray();
+        Assert.Equal(opaqueBlack, harness.ReadImageBytes(harness.Image(identifier)));
+        Assert.Equal(uint.MaxValue, harness.ReadUInt32(metadataAddress));
+        harness.Shutdown();
+        _vulkan.AssertNoValidationMessages();
+    }
 }

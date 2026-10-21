@@ -56,6 +56,8 @@ public static class ImageDescriptorBinding
     private const uint SampledCompare2DBinding = 43;
     private const uint SampledCompare2DArrayBinding = 44;
     private const uint SampledCompareCubeBinding = 45;
+    // Atomics on 64-bit texels declare their images with another format, so they get arrays of their own.
+    private const uint Atomic64UintBinding = 46;
 
     public static DescriptorBindingKind? ForImage(ImageResource image)
     {
@@ -152,12 +154,18 @@ public static class ImageDescriptorBinding
         {
             if (image.Atomic)
             {
-                if (image.NumericClass != ImageNumericClass.Uint)
+                if (image.NumericClass == ImageNumericClass.Uint64)
+                {
+                    baseBinding = Atomic64UintBinding;
+                }
+                else if (image.NumericClass != ImageNumericClass.Uint)
                 {
                     return null;
                 }
-
-                baseBinding = AtomicUintBinding;
+                else
+                {
+                    baseBinding = AtomicUintBinding;
+                }
             }
             else
             {
@@ -315,6 +323,11 @@ public static class ImageDescriptorBinding
             return (ImageResourceClass.Storage, offset / 5 == 0 ? ImageNumericClass.Float : ImageNumericClass.Uint, StorageDimensions[offset % 5], false);
         }
 
+        if (index >= Atomic64UintBinding && index < (uint)DescriptorBindingKind.Samplers)
+        {
+            return (ImageResourceClass.Storage, ImageNumericClass.Uint64, StorageDimensions[index - Atomic64UintBinding], true);
+        }
+
         if (index >= AtomicUintBinding && index < (uint)DescriptorBindingKind.Samplers)
         {
             return (ImageResourceClass.Storage, ImageNumericClass.Uint, StorageDimensions[index - AtomicUintBinding], true);
@@ -330,7 +343,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 {
     public const uint FirstImageBinding = 1;
     public const uint FirstStorageImageBinding = 22;
-    public const uint ImageBindingCount = 45;
+    public const uint ImageBindingCount = 50;
     public const uint NoShaderBase = uint.MaxValue;
     public const uint ShaderBaseDwordCount = 2;
     private const int ScalarRegisterCount = 256;
@@ -580,7 +593,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             return;
         }
 
-        var perDestination = scalarDestinations.Count > 1 ? 1u : instruction.DestinationWidth;
+        // A vector compare or carry writes a lane mask: one SGPR in a wave32 wave.
+        var perDestination = scalarDestinations.Count > 1 || instruction.Encoding is Gen5ShaderEncoding.Vopc or
+            Gen5ShaderEncoding.Vop3 ? 1u : instruction.DestinationWidth;
         foreach (var destination in scalarDestinations)
         {
             for (uint index = 0; index < perDestination && destination.Value + index < ScalarRegisterCount; index++)

@@ -209,6 +209,119 @@ public sealed class PageGuardTests : IDisposable
         Assert.Equal((0x31000UL, 0x1000UL, ReadWrite), _space.Protects[5]);
     }
 
+    // The guard looks a ledger record up once for the neighbouring pages it covers. Each page must still
+    // get the protection of its own record and watchers: these records end inside pages, touch one
+    // another and leave gaps.
+    [Theory]
+    [InlineData(3)]
+    [InlineData(29)]
+    public void WatchesAndReapplyDeriveEachPageFromItsOwnRecord(int seed)
+    {
+        const int pageCount = 64;
+        const ulong pageBytes = 0x1000;
+        using var guard = new PageGuard(_space);
+        var random = new System.Random(seed);
+        GuestPageProtection[] choices =
+        [
+            GuestPageProtection.None, GuestPageProtection.Read, GuestPageProtection.Read | GuestPageProtection.Execute,
+            ReadWrite, ReadWrite | GuestPageProtection.Execute,
+        ];
+        // The guest protection of each half page; a page derives from the record at its start.
+        var guest = Enumerable.Repeat(ReadWrite, pageCount * 2).ToArray();
+        var writeWatches = new int[pageCount];
+        var readWatched = new bool[pageCount];
+        var host = new GuestPageProtection?[pageCount];
+        var replayed = 0;
+
+        void SetRecords(int count)
+        {
+            for (var record = 0; record < count; record++)
+            {
+                var firstHalf = random.Next(pageCount * 2);
+                var halves = random.Next(1, Math.Min(12, pageCount * 2 - firstHalf) + 1);
+                var protection = choices[random.Next(choices.Length)];
+                guard.Permissions.Set(Block + (ulong)firstHalf * 0x800, (ulong)halves * 0x800, protection);
+                Array.Fill(guest, protection, firstHalf, halves);
+            }
+
+            guard.Reapply(Block, pageCount * pageBytes);
+        }
+
+        void Check()
+        {
+            for (; replayed < _space.Protects.Count; replayed++)
+            {
+                var (address, size, protection) = _space.Protects[replayed];
+                for (var offset = address - Block; offset < address - Block + size; offset += pageBytes)
+                    host[offset / pageBytes] = protection;
+            }
+
+            for (var page = 0; page < pageCount; page++)
+            {
+                var watchers = readWatched[page] ? GuestPageProtection.None
+                    : writeWatches[page] != 0 ? GuestPageProtection.Read : ReadWrite;
+                Assert.Equal(Derive(guest[page * 2], watchers), host[page]);
+            }
+        }
+
+        void Watch(int start, int end, bool add)
+        {
+            if (add)
+                guard.AddWatch(Block + (ulong)start * pageBytes, (ulong)(end - start) * pageBytes, blockReads: false);
+            else
+                guard.RemoveWatch(Block + (ulong)start * pageBytes, (ulong)(end - start) * pageBytes, blockReads: false);
+            for (var page = start; page < end; page++)
+                writeWatches[page] += add ? 1 : -1;
+        }
+
+        SetRecords(24);
+        Check();
+        Watch(0, pageCount, add: true);
+        Check();
+        Watch(5, 40, add: true);
+        Check();
+
+        var mask = new PageMask();
+        for (var page = 0; page < pageCount; page++)
+        {
+            if (random.Next(3) == 0)
+            {
+                mask.Set(page);
+                readWatched[page] = true;
+            }
+        }
+
+        // At least two runs, so the masked walk runs.
+        mask.Set(1);
+        mask.Unset(2);
+        mask.Set(40);
+        readWatched[1] = true;
+        readWatched[2] = false;
+        readWatched[40] = true;
+        guard.AddWatchMask(Block, mask, blockReads: true);
+        Check();
+        SetRecords(8);
+        Check();
+        guard.RemoveWatchMask(Block, mask, blockReads: true);
+        Array.Clear(readWatched);
+        Check();
+        Watch(0, pageCount, add: false);
+        Check();
+        SetRecords(8);
+        Check();
+        Watch(5, 40, add: false);
+        Check();
+        Assert.Empty(_fatals);
+    }
+
+    private static GuestPageProtection Derive(GuestPageProtection guest, GuestPageProtection watchers)
+    {
+        if (watchers == GuestPageProtection.None)
+            return GuestPageProtection.None;
+        var derived = guest & (GuestPageProtection.Read | GuestPageProtection.Execute);
+        return (watchers & GuestPageProtection.Write) != 0 ? derived | (guest & GuestPageProtection.Write) : derived;
+    }
+
     // Blocks one protection call so a concurrent Reapply has to queue behind the watcher update.
     private sealed class BlockingAddressSpace : IGuestAddressSpace
     {

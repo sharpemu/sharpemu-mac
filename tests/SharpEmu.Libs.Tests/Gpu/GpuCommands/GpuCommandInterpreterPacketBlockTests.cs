@@ -171,7 +171,7 @@ public sealed class GpuCommandInterpreterPacketBlockTests
         Assert.Equal(2, runner.Host.BlockReads.Count);
         Assert.Contains(runner.Host.BlockReads, read => read.Address == Nested);
         Assert.Contains(runner.Host.BlockReads, read => read.Address == Command);
-        Assert.Empty(runner.Host.GuestReads);
+        Assert.Equal(Nested, Assert.Single(runner.Host.GuestReads));
     }
 
     [Fact]

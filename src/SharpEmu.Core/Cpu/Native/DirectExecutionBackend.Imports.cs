@@ -47,6 +47,8 @@ public sealed partial class DirectExecutionBackend
 
 	private readonly object _importResultLogSampleGate = new();
 	private readonly Dictionary<string, int> _importResultLogSamples = new(StringComparer.Ordinal);
+	// Unresolved imports share the result sampler under the OK value, which no logged result uses.
+	private const int UnresolvedImportSampleKey = 0;
 	private int _il2CppExceptionDiagnosticCount;
 
     [ThreadStatic]
@@ -1017,9 +1019,13 @@ public sealed partial class DirectExecutionBackend
 				{
 					DumpIl2CppExceptionDiagnostic(cpuContext, value, num7);
 				}
-				Console.Error.WriteLine(
-					$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} name={DescribeUnresolvedImport(importStubEntry.Nid)} ret=0x{num7:X16} " +
-					$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
+				// A title that polls an export we lack would otherwise write a warning on every call.
+				if (ShouldSampleImportResult(importStubEntry.Nid, UnresolvedImportSampleKey, out var unresolvedOccurrence))
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][WARN] Import#{num} unresolved occurrence={unresolvedOccurrence}: nid={importStubEntry.Nid} name={DescribeUnresolvedImport(importStubEntry.Nid)} ret=0x{num7:X16} " +
+						$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
+				}
 				if ((importStubEntry.Traits & ImportTraits.MapDirectDiagnostic) != 0)
 				{
 					string value18 = string.Join(" ", importStubEntry.Nid.Select(delegate (char c)
@@ -2164,7 +2170,7 @@ public sealed partial class DirectExecutionBackend
 		// at stub setup, so the decision is now a single integer compare.
 		if (resultValue != entry.ExpectedBenignResult)
 		{
-			return true;
+			return ShouldSampleImportResult(nid, resultValue, out mutexOccurrence);
 		}
 
 		if (!_logExpectedImportResults)

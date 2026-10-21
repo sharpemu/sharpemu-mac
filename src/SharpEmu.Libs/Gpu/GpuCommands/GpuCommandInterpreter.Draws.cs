@@ -36,6 +36,8 @@ public sealed partial class GpuCommandInterpreter
             var sample = IndexedDrawTrace.Capture(indexCount, IndexTypeAndSize, indexAddress, _host.Memory.TryRead);
             IndexedDrawTrace.Write(sample, "command", SubmitId, packetAddress);
         }
+        if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+            trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
         _host.DrawIndexed(SubmitId, new DrawIndexedArguments(packetAddress, opcode, indexCount, indexAddress, IndexTypeAndSize, instanceCount, baseVertex, firstInstance, offsetSource)
         {
             MustExecute = DrawsMustExecute,
@@ -55,6 +57,8 @@ public sealed partial class GpuCommandInterpreter
             instanceCount = InstanceCount;
         }
 
+        if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+            trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
         _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, vertexCount, instanceCount, firstVertex, firstInstance, offsetSource)
         {
             MustExecute = DrawsMustExecute,
@@ -155,6 +159,8 @@ public sealed partial class GpuCommandInterpreter
             // range; the arguments pick the indices. The host falls back to reading them
             // itself when the draw needs the counts.
             _deferredInstanceCountAddress = argumentsAddress + 4;
+            if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+                trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
             _host.DrawIndexed(SubmitId, new DrawIndexedArguments(
                 packetAddress, opcode, gpuIndexCount, IndexBaseAddress, IndexTypeAndSize, 1, 0, 0,
                 DrawOffsetSource.IndirectArguments, argumentsAddress, UnboundedIndexBuffer: IndexBufferSize == 0)

@@ -278,33 +278,6 @@ public static partial class NetExports
         return FailResolver(ctx, id, resolver);
     }
 
-    [SysAbiExport(
-        Nid = "rMyh97BU5pY",
-        ExportName = "sceNetGetMemoryPoolStats",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNet")]
-    public static int NetGetMemoryPoolStats(CpuContext ctx)
-    {
-        var poolId = unchecked((int)ctx[CpuRegister.Rdi]);
-        if (!_pools.TryGetValue(poolId, out var pool))
-        {
-            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
-        }
-
-        var statsAddress = ctx[CpuRegister.Rsi];
-        if (statsAddress == 0)
-        {
-            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
-        }
-
-        // { pool size, max in-use, current in-use }: nothing is allocated from the pool.
-        Span<byte> stats = stackalloc byte[24];
-        BinaryPrimitives.WriteUInt64LittleEndian(stats, unchecked((ulong)pool.Size));
-        return ctx.Memory.TryWrite(statsAddress, stats)
-            ? ctx.SetReturn(0)
-            : SetNetError(ctx, NetErrorFault, NetErrnoFault);
-    }
-
     private static int ResolveMultipleRecords(CpuContext ctx)
     {
         var id = unchecked((int)ctx[CpuRegister.Rdi]);

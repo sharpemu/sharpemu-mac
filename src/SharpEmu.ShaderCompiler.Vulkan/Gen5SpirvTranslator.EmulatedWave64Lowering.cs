@@ -31,11 +31,15 @@ public static partial class Gen5SpirvTranslator
             private readonly bool _multiWave;
             private readonly uint _waveStride;
             private uint _rendezvousEpoch;
+            private uint _rendezvousArrivals;
+            private uint _runningLanes;
+            private uint _runningUpperLanes;
             private Ir.Gen5Wave64HalfMaskPlan? _halfMaskPlan;
             private bool _halfMaskPlanBuilt;
             private bool _synchronizeSharedMemory;
             private SharedMemoryPhase _sharedMemoryPhase;
             private uint? _emittingPc;
+            private readonly bool _canBePartial;
 
             private enum SharedMemoryPhase { None, Read, Write }
 
@@ -46,6 +50,23 @@ public static partial class Gen5SpirvTranslator
                 _waveCount = (uint)Math.Max((threads + GuestWaveLaneCount - 1) / GuestWaveLaneCount, 1);
                 _multiWave = _waveCount > 1;
                 _waveStride = _multiWave ? ExchangeDwordCount + 1 : ExchangeDwordCount;
+                _canBePartial = context._stage == Gen5SpirvStage.Compute && GroupCanBePartial(context, threads);
+            }
+
+            // A compute group runs only some of its lanes where a thread count can end inside it (a count the
+            // dispatch supplies, or a fixed one that is not a multiple of the group's size on its axis), and where
+            // its threads are not a whole number of waves.
+            private static bool GroupCanBePartial(CompilationContext context, ulong threads)
+            {
+                static bool EndsInside(uint count, uint size) =>
+                    count != ShaderCompileRequest.UnboundedThreadCount && count % size != 0;
+
+                var request = context._request;
+                return request.Bindings is { UsesDispatchThreadLimits: true } ||
+                    threads % GuestWaveLaneCount != 0 ||
+                    EndsInside(request.ThreadCountX, context._localSizeX) ||
+                    EndsInside(request.ThreadCountY, context._localSizeY) ||
+                    EndsInside(request.ThreadCountZ, context._localSizeZ);
             }
 
             private uint ExchangeTotalDwords => _waveCount * _waveStride;
@@ -100,11 +121,22 @@ public static partial class Gen5SpirvTranslator
                 _exchangeParity = _context.DeclareFunctionUint(
                     _context._module.Constant(_context._uintType, 0));
                 _context._module.AddName(_exchangeParity, "wave64ExchangeParity");
+                if (_canBePartial)
+                {
+                    _runningLanes = _context.DeclareFunctionUint(_context.UInt(0));
+                    _runningUpperLanes = _context.DeclareFunctionUint(_context.UInt(0));
+                    _context._module.AddName(_runningLanes, "wave64RunningLanes");
+                }
                 if (_multiWave)
                 {
                     _rendezvousEpoch = _context.DeclareFunctionUint(
                         _context._module.Constant(_context._uintType, 0));
                     _context._module.AddName(_rendezvousEpoch, "wave64RendezvousEpoch");
+                    if (_canBePartial)
+                    {
+                        _rendezvousArrivals = _context.DeclareFunctionUint(_context.UInt(2));
+                        _context._module.AddName(_rendezvousArrivals, "wave64RendezvousArrivals");
+                    }
                 }
             }
 
@@ -121,6 +153,86 @@ public static partial class Gen5SpirvTranslator
 
                 context.StoreS64(106, context._module.Constant64(context._ulongType, 0));
                 context.StoreS64(126, context._module.Constant64(context._ulongType, 1));
+            }
+
+            // At entry every invocation of the group is still present; the lanes past the thread count leave right
+            // after, and lanes a group smaller than its waves lacks never run. EXEC starts as the lanes that run, as a
+            // partial wave does on hardware. Each half leader publishes the running lanes of its half and clears the
+            // slots the half fills in later exchanges, and the lower leader of a wave without an upper half clears
+            // that half's slots: a half without running lanes reads as none in every exchange, not as what an earlier
+            // dispatch left there. A wave then meets at its rendezvous only with the halves that run.
+            public void StartWithRunningLanes(uint running)
+            {
+                var context = _context;
+                if (!_canBePartial || !UsesExchange || context._subgroupInvocationIdInput == 0)
+                {
+                    return;
+                }
+
+                var lane = context.GuestWaveLane();
+                var upperHalf = context.ShiftRightLogical(lane, context.UInt(5));
+                var owned = OwnHalfBallot(running);
+                var area = WaveExchangeBase();
+                context.EmitConditional(IsHalfWaveLeader(lane), () =>
+                {
+                    context.Store(ExchangePointer(area, upperHalf), owned);
+                    for (var slot = 2u; slot < ExchangeDwordCount; slot += 2)
+                    {
+                        context.Store(ExchangePointer(area, context.IAdd(context.UInt(slot), upperHalf)), context.UInt(0));
+                    }
+                });
+                var threads = (uint)((ulong)context._localSizeX * context._localSizeY * context._localSizeZ);
+                if (threads % GuestWaveLaneCount is > 0 and <= GuestWaveLaneCount / 2)
+                {
+                    var lastWaveLeader = context._module.AddInstruction(
+                        SpirvOp.IEqual,
+                        context._boolType,
+                        context.Load(context._uintType, context._localInvocationIndexInput),
+                        context.UInt(threads & ~(GuestWaveLaneCount - 1)));
+                    context.EmitConditional(lastWaveLeader, () =>
+                    {
+                        for (var slot = 1u; slot < ExchangeDwordCount; slot += 2)
+                        {
+                            context.Store(ExchangePointer(area, context.UInt(slot)), context.UInt(0));
+                        }
+                    });
+                }
+
+                WorkgroupBarrier();
+                var lower = context.Load(context._uintType, ExchangePointer(area, context.UInt(0)));
+                var upper = context.Load(context._uintType, ExchangePointer(area, context.UInt(1)));
+                context.StoreS64(126, context.Pair64(lower, upper));
+                if (_runningLanes != 0)
+                {
+                    context.Store(_runningLanes, lower);
+                    context.Store(_runningUpperLanes, upper);
+                }
+                if (_rendezvousArrivals != 0)
+                {
+                    uint Runs(uint mask) => context._module.AddInstruction(
+                        SpirvOp.Select, context._uintType, context.IsNotZero(mask), context.UInt(1), context.UInt(0));
+                    context.Store(_rendezvousArrivals, context.IAdd(Runs(lower), Runs(upper)));
+                }
+            }
+
+            // Whether a lane of the wave runs at all: a lane past the thread count leaves at entry.
+            public uint LaneRuns(uint lane)
+            {
+                var context = _context;
+                if (_runningLanes == 0)
+                {
+                    return context._module.ConstantBool(true);
+                }
+
+                var word = context._module.AddInstruction(
+                    SpirvOp.Select,
+                    context._uintType,
+                    context._module.AddInstruction(SpirvOp.ULessThan, context._boolType, context.BitwiseAnd(lane, context.UInt(63)), context.UInt(32)),
+                    context.Load(context._uintType, _runningLanes),
+                    context.Load(context._uintType, _runningUpperLanes));
+                return context.IsNotZero(context.BitwiseAnd(
+                    context.ShiftRightLogical(word, context.BitwiseAnd(lane, context.UInt(31))),
+                    context.UInt(1)));
             }
 
             public void BeginBlock()
@@ -362,12 +474,20 @@ public static partial class Gen5SpirvTranslator
                     context.ShiftLeftLogical64(owned, context._module.Constant64(context._ulongType, 32)));
             }
 
-            private uint IsHalfWaveLeader(uint lane) =>
-                _context._module.AddInstruction(
+            // The first lane of a half leads it. In a group that can be partial that lane may not run, so the first
+            // running lane of the half leads instead.
+            private uint IsHalfWaveLeader(uint lane)
+            {
+                var context = _context;
+                var leader = _canBePartial
+                    ? context.Ext(73, context._uintType, OwnHalfBallot(context._module.ConstantBool(true)))
+                    : context.UInt(0);
+                return context._module.AddInstruction(
                     SpirvOp.IEqual,
-                    _context._boolType,
-                    _context.BitwiseAnd(lane, _context.UInt(31)),
-                    _context.UInt(0));
+                    context._boolType,
+                    context.BitwiseAnd(lane, context.UInt(31)),
+                    leader);
+            }
 
             private uint BeginExchange()
             {
@@ -421,9 +541,9 @@ public static partial class Gen5SpirvTranslator
                 WorkgroupBarrier();
             }
 
-            // Both halves of the wave arrive, then wait until the counter shows two arrivals per
-            // rendezvous so far. The halves of one wave are co-resident in the workgroup, so the
-            // wait always ends.
+            // The halves of the wave that run arrive, then wait until the counter shows that many
+            // arrivals per rendezvous so far: two, or one where only one half runs. The halves of
+            // one wave are co-resident in the workgroup, so the wait always ends.
             private void WaveRendezvous()
             {
                 var context = _context;
@@ -439,7 +559,10 @@ public static partial class Gen5SpirvTranslator
                         context.UInt(1)));
                 var epoch = context.IAdd(context.Load(context._uintType, _rendezvousEpoch), context.UInt(1));
                 context.Store(_rendezvousEpoch, epoch);
-                var target = context._module.AddInstruction(SpirvOp.IMul, context._uintType, epoch, context.UInt(2));
+                var arrivals = _rendezvousArrivals != 0
+                    ? context.Load(context._uintType, _rendezvousArrivals)
+                    : context.UInt(2);
+                var target = context._module.AddInstruction(SpirvOp.IMul, context._uintType, epoch, arrivals);
 
                 var header = context._module.AllocateId();
                 var continueLabel = context._module.AllocateId();

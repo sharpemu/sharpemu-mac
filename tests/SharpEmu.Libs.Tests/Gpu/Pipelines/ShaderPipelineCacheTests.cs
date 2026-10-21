@@ -175,6 +175,39 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         }
     }
 
+    // SPI_SHADER_COL_FORMAT says what a compressed export carries. The pixel output names the format of the
+    // export that feeds it, and a draw with another format compiles another program.
+    [Fact]
+    public void PixelOutputsCarryTheExportFormatOfTheirTarget()
+    {
+        var guest = new PipelineTestGuest();
+        var vertexAddress = PipelineTestGuest.MemoryBase + 0x1000;
+        var pixelAddress = PipelineTestGuest.MemoryBase + 0x2000;
+        guest.RegisterProgram(vertexAddress, PipelineTestGuest.MemoryBase + 0x8000, PipelineTestGuest.EndProgram,
+            userDataAddress: PipelineTestGuest.MemoryBase + 0x9000);
+        guest.RegisterProgram(pixelAddress, PipelineTestGuest.MemoryBase + 0x8100, PipelineTestGuest.EndProgram);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks();
+        Array.Clear(banks.Context.ShaderInterface.TargetOutputModes);
+        banks.Context.ShaderInterface.TargetOutputModes[0] = (byte)Gen5ColorExportFormat.Unorm16Abgr;
+        banks.Context.ShaderInterface.ColorShaderMask = 15;
+        banks.Shader.Vertex.ExportAddress = vertexAddress;
+        banks.Shader.Pixel.Address = pixelAddress;
+        var mappings = Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray();
+        GraphicsPrograms Prepare() => cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel,
+            banks.Context.ShaderInterface, banks.Context, mappings, pixelActive: true, depthBound: false, depthAspectBound: false);
+        Gen5PixelOutputBinding LastOutput() => Assert.Single(guest.Compiler.Requests
+            .Last(request => request.Stage == SharpEmu.ShaderCompiler.Resources.ShaderStage.Pixel).PixelOutputs);
+
+        Assert.True(Prepare().Available);
+        Assert.Equal(Gen5ColorExportFormat.Unorm16Abgr, LastOutput().ExportFormat);
+        var compiled = guest.Compiler.Requests.Count;
+        banks.Context.ShaderInterface.TargetOutputModes[0] = (byte)Gen5ColorExportFormat.Fp16Abgr;
+        Assert.True(Prepare().Available);
+        Assert.True(guest.Compiler.Requests.Count > compiled);
+        Assert.Equal(Gen5ColorExportFormat.Fp16Abgr, LastOutput().ExportFormat);
+    }
+
     [Fact]
     public void FusedMeshPointerUpdatesWithoutCompilingAnotherProgram()
     {

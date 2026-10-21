@@ -114,7 +114,7 @@ public sealed class RegisterWriteTableTests
     public void DepthCountControl_PreservesDirectIndirectAndSavedContextValues()
     {
         var banks = NewBanks();
-        Assert.Equal(0u, banks.Context.DepthCountControl);
+        Assert.Equal(0x1100_0100u, banks.Context.DepthCountControl);
         WriteContext(banks, DbCountControl, 0x1103);
         Assert.Equal(0x1103u, banks.Context.DepthCountControl);
         var copy = banks.Context.Copy();
@@ -125,6 +125,26 @@ public sealed class RegisterWriteTableTests
         WriteContext(banks, DbCountControl, 1);
         banks.ApplyContextState(ContextStateOperation.Pop);
         Assert.Equal(0u, banks.Context.DepthCountControl);
+    }
+
+    [Fact]
+    public void DepthCountControl_ClearAndResetRestoreAgcDefaultWithoutChangingSnapshots()
+    {
+        var banks = NewBanks();
+        WriteContext(banks, DbCountControl, 1);
+        var snapshot = banks.Snapshot();
+
+        banks.ApplyContextState(ContextStateOperation.PushClear);
+        Assert.Equal(0x1100_0100u, banks.Context.DepthCountControl);
+        WriteContext(banks, DbCountControl, 0);
+        banks.ApplyContextState(ContextStateOperation.Clear);
+        Assert.Equal(0x1100_0100u, banks.Context.DepthCountControl);
+
+        banks.ApplyContextState(ContextStateOperation.Pop);
+        Assert.Equal(1u, banks.Context.DepthCountControl);
+        banks.Reset();
+        Assert.Equal(0x1100_0100u, banks.Context.DepthCountControl);
+        Assert.Equal(1u, snapshot.Context.DepthCountControl);
     }
 
     [Fact]

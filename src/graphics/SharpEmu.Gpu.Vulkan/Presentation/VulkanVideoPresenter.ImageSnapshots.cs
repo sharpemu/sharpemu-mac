@@ -17,6 +17,8 @@ using SharpEmu.Gpu.Vulkan.Images;
 using SharpEmu.Gpu.Vulkan.Pipelines;
 using SharpEmu.Gpu.Vulkan.Scheduling;
 
+using SharpEmu.Logging;
+
 namespace SharpEmu.Gpu.Vulkan.Presentation;
 
 internal static unsafe partial class VulkanVideoPresenter
@@ -55,7 +57,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var texture = prepared.Textures[index];
                 if (after && !texture.IsStorage) continue;
                 var phase = after ? "after" : "before";
-                var path = Path.Combine(AppContext.BaseDirectory, "user", "logs", "image-snapshots",
+                var path = Path.Combine(SharpEmuPaths.DataRoot, "user", "logs", "image-snapshots",
                     _imageSnapshotSession, $"{_snapshotComputeHash:X16}-compute-{sequence}-{phase}-image-{index}");
                 if (texture.CachedImage is { } image)
                     _imageCache.SaveDiagnosticImage(image, path);
@@ -85,7 +87,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _imageCache.SaveDiagnosticImage(_imageCache.GetImage(target.Image), SnapshotPath(sequence, $"output-{target.Slot}"));
         }
 
-        private string SnapshotPath(int sequence, string label) => Path.Combine(AppContext.BaseDirectory,
+        private string SnapshotPath(int sequence, string label) => Path.Combine(SharpEmuPaths.DataRoot,
             "user", "logs", "image-snapshots", _imageSnapshotSession, $"{_snapshotPixelHash:X16}-{sequence}-{label}");
     }
 }

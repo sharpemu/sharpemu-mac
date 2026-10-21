@@ -113,6 +113,23 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private Func<bool>? _commandThreadHasWork;
+        private Func<bool>? _guestQueueWaits;
+
+        private bool KeepBatchOpen()
+        {
+            // A minimized window waits in its loop before the next turn, so the batch goes out now.
+            if (!_batchOpen || _commandThread is null || _window.IsMinimized)
+            {
+                return false;
+            }
+
+            _commandThreadHasWork ??= () => _commandThread?.HasWork == true;
+            _guestQueueWaits ??= () => _commandStream.BlockedQueueCount != 0;
+            return OpenBatchPolicy.KeepOpen(_batchOpenedTicks, System.Diagnostics.Stopwatch.GetTimestamp,
+                _commandThreadHasWork, _guestQueueWaits);
+        }
+
         private void RenderCore()
         {
             using var profileScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Unattributed);
@@ -167,9 +184,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 : long.MaxValue;
             RunCommandStreamSlices(renderWorkDeadline);
 
-            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Flush))
+            if (!KeepBatchOpen())
             {
-                FlushBatchedGuestCommands();
+                using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Flush))
+                {
+                    FlushBatchedGuestCommands();
+                }
             }
 
             PerfOverlay.SetGuestCacheStatistics(

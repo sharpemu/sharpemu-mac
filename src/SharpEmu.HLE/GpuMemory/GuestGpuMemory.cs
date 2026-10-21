@@ -66,7 +66,6 @@ public sealed class GuestGpuMemory : IDisposable
     public bool TryResolveFault(FaultKind kind, ulong address)
     {
         using var profile = GpuMemoryAccessProfile.MeasureFault(kind);
-        const ulong faultSize = 8;
         // The slot trap owns its own pages and always resolves them: it reports the guest
         // instruction and then releases the watch, so the store that faulted can land.
         if (GuestSlotTrap.TryHandleFault(kind, address))
@@ -74,6 +73,11 @@ public sealed class GuestGpuMemory : IDisposable
             return true;
         }
 
+        // The fault names a byte in the page whose protection stopped the access, so the range ends
+        // with that page: a store to the last bytes of a span is still the span's, and an access
+        // that reaches into the next page faults again there.
+        const ulong accessBytes = 8;
+        var faultSize = Math.Min(accessBytes, TrackerLayout.PageBytes - (address & (TrackerLayout.PageBytes - 1)));
         if (!Covers(address, faultSize))
         {
             TraceFault("unregistered");
@@ -162,6 +166,22 @@ public sealed class GuestGpuMemory : IDisposable
         return true;
     }
 
+    // A managed write lands through a backing view that no page watch covers, so an upload on the
+    // GPU thread between MarkCpuWrite and the write copies the old bytes and leaves the pages clean
+    // without a fault. Both stores mark those pages again.
+    public void MarkCpuWriteLanded(ulong address, ulong size)
+    {
+        if (!Covers(address, size))
+        {
+            return;
+        }
+
+        // The new bytes must be visible before the store reads its page state.
+        Interlocked.MemoryBarrier();
+        Buffers?.MarkCpuWriteLanded(address, size);
+        _ = Images?.MarkCpuWrite(address, size);
+    }
+
     public bool Covers(ulong address, ulong size)
     {
         if (!new GuestSpan(address, size).IsValid)
@@ -171,6 +191,13 @@ public sealed class GuestGpuMemory : IDisposable
 
         var snapshot = Volatile.Read(ref _spanSnapshot) ?? throw new ObjectDisposedException(nameof(GuestGpuMemory));
         return snapshot.Contains(address, size);
+    }
+
+    // The registered span that holds the address.
+    public bool TryGetSpan(ulong address, out ulong start, out ulong end)
+    {
+        var snapshot = Volatile.Read(ref _spanSnapshot) ?? throw new ObjectDisposedException(nameof(GuestGpuMemory));
+        return snapshot.TryGetContaining(address, out start, out end);
     }
 
     public void ForEachSpan(Action<ulong, ulong> visit)

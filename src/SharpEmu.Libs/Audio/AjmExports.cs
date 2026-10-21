@@ -586,6 +586,14 @@ public static partial class AjmExports
     public static int AjmBatchJobRunSplitBufferRa(CpuContext ctx) => AjmBatchJobRunCore(ctx, split: true);
 
     /// <summary>
+    /// The split-buffer form of <see cref="AjmBatchJobDecode"/>: arrays of input and output AjmBuffer
+    /// descriptors, decoding as many frames as fit, with the SceAjmDecodeResult at the seventh argument.
+    /// </summary>
+    /// <summary>
+    /// The Ex form adds the ratio's change per sample in xmm1. Its integer arguments and its job are those of
+    /// sceAjmBatchJobSetResampleParameters, and the change per sample is not modelled, so it shares that body.
+    /// </summary>
+    /// <summary>
     /// Records the gapless-decode window for a looping voice. SharpEmu decodes
     /// whole superframes and does not trim lead-in/lead-out samples yet, so this
     /// only has to acknowledge the job instead of failing the batch.
@@ -1013,61 +1021,16 @@ public static partial class AjmExports
         ulong sidebandSize,
         bool split)
     {
-        var descriptors = split
-            ? Math.Min(inputCountOrSize, MaxBufferDescriptors) + Math.Min(outputCountOrSize, MaxBufferDescriptors)
-            : 0;
-        var jobSize = split
-            ? AjmJobRunSplitBaseSize + (descriptors * AjmBufferDescriptorBytes)
-            : AjmJobRunSize;
+        var jobSize = split ? SplitJobSize(inputCountOrSize, outputCountOrSize) : AjmJobRunSize;
         if (!TryAppendBatchJob(ctx, infoAddress, jobSize))
         {
             return ctx.SetReturn(OrbisAjmErrorJobCreation);
         }
 
         var multipleFrames = (flags & AjmJobRunFlagMultipleFrames) != 0;
-        Atrac9Config? config = null;
-        Atrac9DecodeResult result;
-
-        if (!TryGetInstance(instanceId, out var instance))
-        {
-            result = new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
-        }
-        else if (!TryCollectBuffers(ctx, split, inputAddress, inputCountOrSize, out var inputs, out var inputLength) ||
-                 !TryCollectBuffers(ctx, split, outputAddress, outputCountOrSize, out var outputs, out var outputLength))
-        {
-            result = new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
-        }
-        else if (inputs.Count == 0 && outputs.Count == 0)
-        {
-            // A run job without buffers only reports state through its sideband
-            // (format, gapless decode, codec info).
-            config = instance.Atrac9?.Config;
-            result = new Atrac9DecodeResult(0, 0, 0, instance.Atrac9?.TotalDecodedSamples ?? instance.Mp3?.TotalDecodedSamples ?? 0, 0);
-        }
-        else if (instance.Mp3 is not null)
-        {
-            result = DecodeMp3Scattered(ctx, instance, inputs, inputLength, outputs, outputLength);
-        }
-        else if (instance.Opus is null && (instance.Codec != Atrac9CodecType || instance.Atrac9 is null))
-        {
-            foreach (var buffer in outputs)
-            {
-                ClearGuestMemory(ctx, buffer.Address, (ulong)buffer.Length);
-            }
-
-            result = new Atrac9DecodeResult(
-                0,
-                inputLength,
-                0,
-                0,
-                inputLength != 0 || outputLength != 0 ? 1u : 0u);
-        }
-        else
-        {
-            config = instance.Atrac9?.Config;
-            result = DecodeScattered(ctx, instance, inputs, inputLength, outputs, outputLength, multipleFrames);
-            config ??= instance.Atrac9?.Config;
-        }
+        var result = DecodeJob(
+            ctx, instanceId, split, inputAddress, inputCountOrSize, outputAddress, outputCountOrSize, multipleFrames,
+            out var instance, out var config);
 
         WriteRunSideband(ctx, sidebandAddress, sidebandSize, flags, result, instance, config);
         Trace(
@@ -1078,6 +1041,69 @@ public static partial class AjmExports
         TraceBufferDescriptors(ctx, split, "in", inputAddress, inputCountOrSize);
         TraceBufferDescriptors(ctx, split, "out", outputAddress, outputCountOrSize);
         return ctx.SetReturn(0);
+    }
+
+    // SCE_AJM_JOB_RUN_SPLIT_SIZE(N) for the descriptors of one job.
+    private static ulong SplitJobSize(ulong inputCount, ulong outputCount) =>
+        AjmJobRunSplitBaseSize +
+        ((Math.Min(inputCount, MaxBufferDescriptors) + Math.Min(outputCount, MaxBufferDescriptors)) * AjmBufferDescriptorBytes);
+
+    /// <summary>
+    /// The decode body of the flag-driven jobs and of sceAjmBatchJobDecodeSplit: ATRAC9 and Opus instances decode,
+    /// any other codec stays a silence stub that reports the input consumed.
+    /// </summary>
+    private static Atrac9DecodeResult DecodeJob(
+        CpuContext ctx,
+        uint instanceId,
+        bool split,
+        ulong inputAddress,
+        ulong inputCountOrSize,
+        ulong outputAddress,
+        ulong outputCountOrSize,
+        bool multipleFrames,
+        out AjmInstanceState? instance,
+        out Atrac9Config? config)
+    {
+        config = null;
+        if (!TryGetInstance(instanceId, out var found))
+        {
+            instance = null;
+            return new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+        }
+
+        instance = found;
+        if (!TryCollectBuffers(ctx, split, inputAddress, inputCountOrSize, out var inputs, out var inputLength) ||
+            !TryCollectBuffers(ctx, split, outputAddress, outputCountOrSize, out var outputs, out var outputLength))
+        {
+            return new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+        }
+        if (inputs.Count == 0 && outputs.Count == 0)
+        {
+            config = found.Atrac9?.Config;
+            return new Atrac9DecodeResult(0, 0, 0, found.Atrac9?.TotalDecodedSamples ?? found.Mp3?.TotalDecodedSamples ?? 0, 0);
+        }
+        if (found.Mp3 is not null)
+            return DecodeMp3Scattered(ctx, found, inputs, inputLength, outputs, outputLength);
+
+        if (found.Opus is null && (found.Codec != Atrac9CodecType || found.Atrac9 is null))
+        {
+            foreach (var buffer in outputs)
+            {
+                ClearGuestMemory(ctx, buffer.Address, (ulong)buffer.Length);
+            }
+
+            return new Atrac9DecodeResult(
+                0,
+                inputLength,
+                0,
+                0,
+                inputLength != 0 || outputLength != 0 ? 1u : 0u);
+        }
+
+        config = found.Atrac9?.Config;
+        var result = DecodeScattered(ctx, found, inputs, inputLength, outputs, outputLength, multipleFrames);
+        config ??= found.Atrac9?.Config;
+        return result;
     }
 
     private static void TraceBufferDescriptors(

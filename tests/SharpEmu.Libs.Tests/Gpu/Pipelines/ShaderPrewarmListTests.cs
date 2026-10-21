@@ -32,16 +32,19 @@ public sealed class ShaderPrewarmListTests : IDisposable
         return shader.Spirv;
     }
 
-    private static (IShaderPipelineHost Host, byte[] Spirv) CompileAtRuntime(ShaderPrewarmList list, uint format, bool ieeeMode = false)
+    private static (IShaderPipelineHost Host, byte[] Spirv) CompileAtRuntime(ShaderPrewarmList list, uint format, bool ieeeMode = false,
+        bool imageInt64Atomics = false)
     {
         var guest = new PipelineTestGuest(request =>
         {
             Assert.Equal(ieeeMode, request.IeeeMode);
             Assert.Equal(FloatModeFor(ieeeMode), request.FloatMode);
             Assert.Equal(!ieeeMode, request.Dx10Clamp);
+            Assert.Equal(imageInt64Atomics, request.SupportsImageInt64Atomics);
             return Compile(request);
         });
         guest.Host.ShaderPrewarm = list;
+        guest.Host.ImageInt64AtomicsEnabled = imageInt64Atomics;
         guest.RegisterProgram(CodeAddress, HeaderAddress, PipelineTestGuest.FormatLoadProgram);
         var userData = PipelineTestGuest.BufferDescriptor(BufferAddress, 4, 64, format);
         var cursor = 0u;
@@ -62,13 +65,14 @@ public sealed class ShaderPrewarmListTests : IDisposable
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void ARecordedComputeProgramCompilesToTheSameSpirvAfterReload(bool ieeeMode)
+    [InlineData(false, true)]
+    public void ARecordedComputeProgramCompilesToTheSameSpirvAfterReload(bool ieeeMode, bool imageInt64Atomics = false)
     {
         byte[] runtime;
         IShaderPipelineHost host;
         using (var list = Open())
         {
-            (host, runtime) = CompileAtRuntime(list, BufferDescriptorWords.Format32UInt, ieeeMode);
+            (host, runtime) = CompileAtRuntime(list, BufferDescriptorWords.Format32UInt, ieeeMode, imageInt64Atomics);
         }
 
         using var reloaded = Open();
@@ -81,12 +85,14 @@ public sealed class ShaderPrewarmListTests : IDisposable
             Assert.Equal(ieeeMode, request.IeeeMode);
             Assert.Equal(FloatModeFor(ieeeMode), request.FloatMode);
             Assert.Equal(!ieeeMode, request.Dx10Clamp);
+            Assert.Equal(imageInt64Atomics, request.SupportsImageInt64Atomics);
             return Compile(request);
         });
         Assert.True(
             ShaderProgramCache.TryCompilePrewarm(
                 record, code, compiler, host.SharedInt64AtomicsEnabled, host.ExecGuardElisionEnabled,
-                host.ShaderSignedZeroInfNanPreserveFloat32Supported, out var compiled, out var layout, out var error),
+                host.ShaderSignedZeroInfNanPreserveFloat32Supported, out var compiled, out var layout, out var error,
+                imageInt64Atomics: host.ImageInt64AtomicsEnabled),
             error);
         Assert.NotNull(layout);
         Assert.False(layout.UsesMeshDrawParameters);

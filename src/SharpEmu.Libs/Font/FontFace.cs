@@ -12,6 +12,8 @@ internal sealed class FontFace(IFontFace face)
     public void Retain() { if (references == 0) throw new ObjectDisposedException(nameof(FontFace)); references++; }
     public void Release() { if (--references == 0) face.Dispose(); }
     public FontMetrics GetMetrics(float width, float height) => face.GetMetrics(width, height);
+    public FontGlyphMetrics GetGlyphMetrics(uint code, float width, float height) => face.GetGlyphMetrics(
+        (code & 0xffff0000) == 0x80000000 ? FontCharacter.FromGlyphId((ushort)code) : FontCharacter.FromUnicode(code), width, height);
     public FontGlyphBitmap GetGlyph(uint code, float width, float height) => face.GetGlyph(
         (code & 0xffff0000) == 0x80000000 ? FontCharacter.FromGlyphId((ushort)code) : FontCharacter.FromUnicode(code), width, height);
 }

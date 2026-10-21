@@ -251,7 +251,7 @@ public static partial class Ngs2Exports
 
             var description = rack.Description;
             var activeVoices = Voices.Values.Count(
-                voice => voice.RackHandle == handle && (voice.Playing || voice.Pcm is not null));
+                voice => voice.RackHandle == handle && (voice.Playing || voice.InUse));
             var renderCount = Systems.TryGetValue(rack.SystemHandle, out var system) ? system.RenderCount : 0;
 
             // SceNgs2RackInfo: name[64], rackHandle, bufferInfo (64), ownerSystemHandle,
@@ -619,6 +619,7 @@ public static partial class Ngs2Exports
             }
         }
 
+        speakerAngles[speakers] = speakerAngles[0] + unit;
         var matrix = ComputePanMatrix(speakerAngles, unit, layout, (int)speakers, panParams, (int)matrixFormat);
         var output = new byte[matrix.Length * sizeof(float)];
         for (var i = 0; i < matrix.Length; i++)
@@ -987,27 +988,17 @@ public static partial class Ngs2Exports
         uint skipSamples = 0;
         switch (type)
         {
-            case WaveformTypePcmI16:
-            case WaveformTypePcmF32:
+            case >= 0x10 and <= 0x1b:
             {
-                var frameBytes = channels * (type == WaveformTypePcmI16 ? 2UL : 4UL);
+                var frameBytes = channels * (ulong)PcmSampleBytes(type);
                 dataOffset = samplePosition * frameBytes;
                 dataSize = sampleCount * frameBytes;
                 break;
             }
             case WaveformTypeAtrac9:
             {
-                // configData holds the four ATRAC9 config bytes in memory order,
-                // as sceNgs2ParseWaveformData reports them.
-                LibAtrac9.Atrac9Config config;
-                try
-                {
-                    config = new LibAtrac9.Atrac9Config(format.Slice(12, 4).ToArray());
-                }
-                catch (InvalidDataException)
-                {
-                    return OrbisNgs2ErrorInvalidWaveformFormat;
-                }
+                var config = ReadAtrac9Config(format.Slice(12, 4));
+                if (config is null) return OrbisNgs2ErrorInvalidWaveformFormat;
 
                 if (config.ChannelCount != channels || config.SampleRate != sampleRate)
                 {
@@ -1021,6 +1012,16 @@ public static partial class Ngs2Exports
                     ? 0
                     : (skip + sampleCount + superframeSamples - 1) / superframeSamples * (ulong)config.SuperframeBytes;
                 skipSamples = sampleCount == 0 ? 0 : (uint)skip;
+                break;
+            }
+            case 0x1c:
+            {
+                const ulong frameSamples = 28;
+                var frameBytes = 16UL * channels;
+                var skip = sampleCount == 0 ? 0 : samplePosition % frameSamples;
+                dataOffset = samplePosition / frameSamples * frameBytes;
+                dataSize = (skip + sampleCount + frameSamples - 1) / frameSamples * frameBytes;
+                skipSamples = (uint)skip;
                 break;
             }
             default:

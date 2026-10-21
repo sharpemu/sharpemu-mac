@@ -10,6 +10,7 @@ using System.Linq;
 using SharpEmu.Core;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Memory;
+using SharpEmu.Core.Patches;
 using SharpEmu.HLE;
 
 namespace SharpEmu.Core.Loader;
@@ -91,6 +92,14 @@ public sealed class SelfLoader : ISelfLoader
 
     private IModuleManager? _moduleManager;
     private uint _nextTlsModuleId = 1;
+    private readonly GamePatchRepository _patchRepository;
+    private IReadOnlyList<GamePatch> _activePatches = [];
+
+    public SelfLoader() : this(GamePatchRepository.DefaultDirectory)
+    {
+    }
+
+    internal SelfLoader(string patchDirectory) => _patchRepository = new GamePatchRepository(patchDirectory);
 
     private static readonly IReadOnlyDictionary<ulong, string> EmptyImportStubs = new Dictionary<ulong, string>();
     private static readonly IReadOnlyDictionary<string, ulong> EmptyRuntimeSymbols =
@@ -126,7 +135,7 @@ public sealed class SelfLoader : ISelfLoader
         return Load(imageData, virtualMemory, moduleManager, fs: null, mountRoot: null);
     }
 
-    public SelfImage Load(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IFileSystem? fs, string? mountRoot)
+    public SelfImage Load(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IFileSystem? fs, string? mountRoot, string? imageName = null)
     {
         _moduleManager = moduleManager;
         return LoadCore(
@@ -135,10 +144,11 @@ public sealed class SelfLoader : ISelfLoader
             fs,
             mountRoot,
             clearVirtualMemory: true,
-            readParamJson: true);
+            readParamJson: true,
+            imageName: imageName);
     }
 
-    public SelfImage LoadAdditional(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IFileSystem? fs, string? mountRoot)
+    public SelfImage LoadAdditional(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IFileSystem? fs, string? mountRoot, string? imageName = null)
     {
         _moduleManager = moduleManager;
         return LoadCore(
@@ -147,7 +157,8 @@ public sealed class SelfLoader : ISelfLoader
             fs,
             mountRoot,
             clearVirtualMemory: false,
-            readParamJson: false);
+            readParamJson: false,
+            imageName: imageName);
     }
 
     private SelfImage LoadCore(
@@ -156,7 +167,8 @@ public sealed class SelfLoader : ISelfLoader
         IFileSystem? fs,
         string? mountRoot,
         bool clearVirtualMemory,
-        bool readParamJson)
+        bool readParamJson,
+        string? imageName = null)
     {
         ArgumentNullException.ThrowIfNull(virtualMemory);
 
@@ -172,6 +184,8 @@ public sealed class SelfLoader : ISelfLoader
 
         if (clearVirtualMemory)
         {
+            _activePatches = _patchRepository.LoadActive(applicationInfo.TitleId, applicationInfo.Version,
+                message => Console.Error.WriteLine($"[PATCH][WARN] {message}"));
             SharpEmu.Libs.Kernel.KernelMemoryCompatExports.ResetBackingMappings(virtualMemory as IGuestBackedSpace);
             virtualMemory.Clear();
             _nextTlsModuleId = 1;
@@ -283,6 +297,19 @@ public sealed class SelfLoader : ISelfLoader
             tlsModuleId,
             out var importedRelocations,
             out var importedModuleNames);
+        var executable = imageName ?? (clearVirtualMemory ? "eboot.bin" : string.Empty);
+        foreach (var patch in _activePatches.Where(patch => string.Equals(patch.Executable, executable, StringComparison.OrdinalIgnoreCase)))
+        {
+            if (patch.TryApply(virtualMemory, programHeaders, imageBase, out var patchError))
+            {
+                Console.Error.WriteLine($"[PATCH] Applied '{patch.Name}' to {executable} ({patch.Writes.Count} lines, {patch.AppVersion}).");
+            }
+            else
+            {
+                Console.Error.WriteLine($"[PATCH][WARN] Skipped '{patch.Name}' in {executable}: {patchError}");
+            }
+        }
+
         if (tlsModuleId != 0)
         {
             // Thread copies must include pointers written by relocation.

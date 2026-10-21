@@ -172,7 +172,7 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
     public GpuBuffer CreateBuffer(ulong size) => CreateBuffer([], size);
 
     // A clamp-to-edge sampler with one filter for both directions, kept until the runner is disposed.
-    public Sampler CreateSampler(Filter filter)
+    public Sampler CreateSampler(Filter filter, SamplerAddressMode addressMode = SamplerAddressMode.ClampToEdge, float maxLod = 1)
     {
         var info = new SamplerCreateInfo
         {
@@ -180,10 +180,10 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             MagFilter = filter,
             MinFilter = filter,
             MipmapMode = SamplerMipmapMode.Nearest,
-            AddressModeU = SamplerAddressMode.ClampToEdge,
-            AddressModeV = SamplerAddressMode.ClampToEdge,
-            AddressModeW = SamplerAddressMode.ClampToEdge,
-            MaxLod = 1,
+            AddressModeU = addressMode,
+            AddressModeV = addressMode,
+            AddressModeW = addressMode,
+            MaxLod = maxLod,
         };
         Require(_harness.Vk.CreateSampler(_harness.Device.Device, &info, null, out var sampler), "vkCreateSampler");
         _samplers.Add(sampler);
@@ -214,7 +214,9 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         IReadOnlyDictionary<DescriptorBindingKind, DescriptorImageInfo[]>? boundImages = null,
         ulong shaderBase = 0,
         uint[]? dispatchThreadLimits = null,
-        uint[]? meshDrawParameters = null)
+        uint[]? meshDrawParameters = null,
+        ulong[]? bufferRanges = null,
+        uint[]? memoryOffsets = null)
     {
         var vk = _harness.Vk;
         var device = _harness.Device.Device;
@@ -230,6 +232,12 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         {
             shaderData[layout.ShaderBaseDword] = (uint)shaderBase;
             shaderData[layout.ShaderBaseDword + 1] = (uint)(shaderBase >> 32);
+        }
+
+        if (memoryOffsets is not null)
+        {
+            for (var index = 0; index < memoryOffsets.Length; index++)
+                shaderData[layout.MemoryOffsetDword + (uint)index / 4] |= (memoryOffsets[index] & 0xFF) << (index % 4 * 8);
         }
 
         if (layout.UsesDispatchThreadLimits)
@@ -287,9 +295,12 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             }
 
             writes.Add((binding, type, infos.Count, count));
+            var first = infos.Count;
             foreach (var buffer in buffers)
             {
-                infos.Add(new DescriptorBufferInfo(buffer.Handle, 0, buffer.Size));
+                var range = descriptor.Kind == DescriptorBindingKind.Buffers && bufferRanges is not null && infos.Count - first < bufferRanges.Length
+                    ? bufferRanges[infos.Count - first] : buffer.Size;
+                infos.Add(new DescriptorBufferInfo(buffer.Handle, 0, range));
             }
         }
 

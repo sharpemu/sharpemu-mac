@@ -3,6 +3,8 @@
 
 using System.Buffers.Binary;
 using SharpEmu.Gpu.Vulkan.Buffers;
+using SharpEmu.HLE;
+using SharpEmu.Libs.Tests.Agc;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
@@ -607,6 +609,86 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         GlobalMemory(24, "GlobalAtomicAdd", AddressLow, OffsetRegister, 1, 2, offset, glc: true),
         BufferAccess(32, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 1),
         EndProgram(40));
+
+    // AMD's GPURT builds BVH T#s with a base of zero and node pointers that hold the whole node address
+    // (CalculateRawBvh64NodePointer); the type field of the T# (8) marks it a BVH. A null T# holds no BVH: nothing is read,
+    // and every result dword is invalid.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void RayIntersect_ABvhBasedAtZero_ReadsTheNodeItsPointerAddresses(bool typed)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true))
+        {
+            return;
+        }
+
+        const uint NodeOffset = 0x40;
+        const uint TriangleId = 0x04030201;
+        const float Depth = 10f;
+        (float X, float Y)[] vertices = [(0, 0), (4, 0), (0, 4)];
+        var node = new byte[(int)PageSize];
+        for (var vertex = 0; vertex < vertices.Length; vertex++)
+        {
+            WriteWord(node, (int)NodeOffset + vertex * 12, BitConverter.SingleToUInt32Bits(vertices[vertex].X));
+            WriteWord(node, (int)NodeOffset + vertex * 12 + 4, BitConverter.SingleToUInt32Bits(vertices[vertex].Y));
+            WriteWord(node, (int)NodeOffset + vertex * 12 + 8, BitConverter.SingleToUInt32Bits(Depth));
+        }
+
+        WriteWord(node, (int)NodeOffset + 60, TriangleId);
+        // The ray starts under the middle of the triangle and runs along +z: extent, origin, direction, inverse direction.
+        float[] ray = [1000f, 4f / 3, 4f / 3, 0f, 0f, 0f, 1f, float.PositiveInfinity, float.PositiveInfinity, 1f];
+        // The first load only makes the program one that reads through the page table, as every traversal does.
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            MoveVector(0, OffsetRegister, 0),
+            GlobalMemory(8, "GlobalLoadDword", AddressLow, OffsetRegister, 20, 20),
+            MoveVector(16, 0, typed ? (uint)((GuestBase + NodeOffset) >> 3) : 0),
+        };
+        for (var index = 0; index < ray.Length; index++)
+        {
+            instructions.Add(MoveVector((uint)(24 + index * 8), (uint)(1 + index), BitConverter.SingleToUInt32Bits(ray[index])));
+        }
+
+        // A base of zero, then every node index valid and the type in bits [127:124]; or a T# of zeros.
+        instructions.Add(MoveScalar(104, 8, 0));
+        instructions.Add(MoveScalar(112, 9, 0));
+        instructions.Add(MoveScalar(120, 10, typed ? uint.MaxValue : 0));
+        instructions.Add(MoveScalar(128, 11, typed ? 0x8000_03FFu : 0));
+        instructions.Add(RayIntersect(136));
+        instructions.Add(MoveVector(144, 11, 0));
+        instructions.Add(BufferAccess(152, "BufferStoreDwordx4", ResultRegister, 0, 4, vectorData: 12, offsetEnabled: true, vectorAddress: 11));
+        instructions.Add(EndProgram(160));
+        var run = new Run(vulkan, Program([.. instructions]));
+        run.MapPage(GuestBase, node);
+        run.Dispatch(GuestBase);
+        if (typed)
+        {
+            Assert.Equal(1u, run.ResultWord(12));
+            Assert.Equal(TriangleId, run.ResultWord(8));
+            Assert.Equal(Depth, BitConverter.UInt32BitsToSingle(run.ResultWord(0)) / BitConverter.UInt32BitsToSingle(run.ResultWord(4)), 3);
+        }
+        else
+        {
+            foreach (var offset in new uint[] { 0, 4, 8, 12 })
+            {
+                Assert.Equal(uint.MaxValue, run.ResultWord(offset));
+            }
+        }
+
+        run.Finish(output, nameof(RayIntersect_ABvhBasedAtZero_ReadsTheNodeItsPointerAddresses));
+    }
+
+    // IMAGE_BVH_INTERSECT_RAY v[12:15], v[0:10], s[8:11].
+    private static Gen5ShaderInstruction RayIntersect(uint pc)
+    {
+        const ulong Address = 0x1_0000_0000;
+        var memory = new FakeCpuMemory(Address, 0x1000);
+        Gen5ShaderAtomicDecodeTests.WriteProgram(memory, Address, [0xF1980F01, 0x00020C00]);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(new CpuContext(memory, Generation.Gen5), Address, out var program, out var error), error);
+        return program.Instructions[0] with { Pc = pc };
+    }
 
     private static byte[] Pattern(int length, uint seed = 5) => ImageTestHarness.Pattern(length, seed);
 

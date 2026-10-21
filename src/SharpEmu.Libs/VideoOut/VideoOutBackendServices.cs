@@ -10,6 +10,9 @@ namespace SharpEmu.Libs.VideoOut;
 /// Export registration and mutable guest state remain private to VideoOutExports.</summary>
 public static class VideoOutBackendServices
 {
+    public static void FinishRenderDiagnostics(string reason) =>
+        Gpu.Rendering.ScissorTrace.Instance?.Finish(reason);
+
     public static bool IsHdrOutputRequested => VideoOutExports.IsHdrOutputRequested;
 
     public static bool CanPresentFlip(ulong requestId, long timestamp) =>

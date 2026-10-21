@@ -3237,7 +3237,10 @@ public static partial class Gen5MslTranslator
                 : $"((v[{destination}] & 0xFFFF0000u) | {bits})";
         }
 
-        /// <summary>Rounds to f16 and preserves the unselected VGPR half.</summary>
+        /// <summary>
+        /// Rounds to f16 and preserves the unselected VGPR half. An SDWA word picks the field and what
+        /// becomes of the rest of the register itself.
+        /// </summary>
         private string Float16Result(
             Gen5ShaderInstruction instruction,
             uint destination,
@@ -3271,10 +3274,8 @@ public static partial class Gen5MslTranslator
         /// Wraps a float expression with VOP3/SDWA output modifiers and clamp,
         /// then bitcasts back to the register file's uint domain.
         /// </summary>
-        private string FloatResult(Gen5ShaderInstruction instruction, string expression)
-        {
-            return AsUInt($"({ApplyFloatOutputModifiers(instruction, expression)})");
-        }
+        private string FloatResult(Gen5ShaderInstruction instruction, string expression) =>
+            AsUInt($"({ApplyFloatOutputModifiers(instruction, expression)})");
 
         /// <summary>The lane's bit of a mask operand (VCC/EXEC/SGPR mask).</summary>
         private string MaskBitExpression(Gen5Operand operand) => operand switch

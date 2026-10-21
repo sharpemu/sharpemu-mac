@@ -289,10 +289,21 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     public void ColorTarget_RejectsUnsupportedRegisterStates()
     {
         using var fatal = new FatalScope();
-        Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.ColorTarget(RegisterWords.Color(Base, 64, 64, samplesLog2: 1), 0xF, 0, false));
+        Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.ColorTarget(RegisterWords.Color(Base, 64, 64, fragmentsLog2: 1), 0xF, 0, false));
         Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.ColorTarget(RegisterWords.Color(Base, 64, 64, maxMip: 1), 0xF, 0, false));
         Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.ColorTarget(RegisterWords.Color(Base, 64, 64, dimension: 3), 0xF, 0, false));
         Assert.Equal(3, fatal.Messages.Count);
+    }
+
+    [Fact]
+    public void ColorTarget_EqaaUsesTheFragmentCount()
+    {
+        using var fatal = new FatalScope();
+        var resolution = ImageRequestBuilders.ColorTarget(RegisterWords.Color(Base, 64, 64, GuestTileMode.RenderTarget, samplesLog2: 2, fragmentsLog2: 1), 0xF, 0, false);
+
+        Assert.NotNull(resolution);
+        Assert.Equal(2u, resolution.Value.Samples);
+        Assert.Equal(2u, resolution.Value.Request.Description.Samples);
     }
 
     [Theory]
@@ -405,6 +416,62 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(1u, single.View.LayerCount);
     }
 
+    [Theory]
+    [InlineData(false, 1u, 0u)]
+    [InlineData(true, 1u, 0u)]
+    [InlineData(false, 6u, 5u)]
+    [InlineData(true, 6u, 5u)]
+    [InlineData(false, 6u, 3u)]
+    [InlineData(true, 6u, 3u)]
+    public void Texture_CubeFaceCopiesAcceptPartialArrayViews(bool storage, uint layers, uint baseArray)
+    {
+        using var fatal = new FatalScope();
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits16_16_16_16Float,
+            8, 8, GuestImageType.Cube, layers: layers, baseArray: baseArray);
+        var shape = Sampled2D with { Cube = true, Arrayed = true, Storage = storage };
+        var request = ImageRequestBuilders.Texture(words, shape).Request;
+
+        Assert.Equal(new SubresourceCount(1, layers), request.Description.Resources);
+        Assert.Equal(GpuImageViewType.Type2DArray, request.View.Type);
+        Assert.Equal(baseArray, request.View.BaseLayer);
+        Assert.Equal(layers - baseArray, request.View.LayerCount);
+        Assert.Equal(storage ? GpuImageUsage.StorageBit : GpuImageUsage.SampledBit, request.View.Usage);
+        Assert.Empty(fatal.Messages);
+
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(request.Description);
+        Assert.NotEqual(0UL, image.GetOrCreateView(request.View).Handle);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void Texture_CapturedSingleFaceCubeDescriptorRemainsOneFace()
+    {
+        using var fatal = new FatalScope();
+        uint[] words = [0x033E4800, 0xC4700000, 0x0001C001, 0xB0900FAC, 0, 0x00700000, 0, 0];
+        var request = ImageRequestBuilders.Texture(words,
+            Sampled2D with { Cube = true, Arrayed = true }, 0x393A86CB7E41375C, 0).Request;
+
+        Assert.Equal(new GpuExtent3D(8, 8, 1), request.Description.Extent);
+        Assert.Equal(new SubresourceCount(1, 1), request.Description.Resources);
+        Assert.Equal(GpuFormat.R16G16B16A16Sfloat, request.View.Format);
+        Assert.Equal(GpuImageViewType.Type2DArray, request.View.Type);
+        Assert.Equal(1u, request.View.LayerCount);
+    }
+
+    [Theory]
+    [InlineData(8u, 16u, 0u)]
+    [InlineData(8u, 8u, 1u)]
+    public void Texture_CubeStillRejectsInvalidExtentOrSliceBounds(uint width, uint height, uint baseArray)
+    {
+        using var fatal = new FatalScope();
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits16_16_16_16Float,
+            width, height, GuestImageType.Cube, layers: 1, baseArray: baseArray);
+        Assert.Throws<SchedulerFatalException>(() =>
+            ImageRequestBuilders.Texture(words, Sampled2D with { Cube = true, Arrayed = true }));
+    }
+
     [Fact]
     public void Texture_NullDescriptorBindsAOneTexelImage()
     {
@@ -418,6 +485,35 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(GpuImageUsage.SampledBit, sampled.Request.View.Usage);
         Assert.Equal(ImageRole.StorageImage, storage.Request.Role);
         Assert.Equal(GpuFormat.R32Uint, storage.Request.Description.PixelFormat);
+        Assert.Equal(GpuImageUsage.StorageBit, storage.Request.View.Usage);
+    }
+
+    [Fact]
+    public void Texture_AnAtomicOnA64BitTexelViewsTheImageAsR64()
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits32_32UInt, 64, 64);
+        var shape = Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint, Atomic = true, Atomic64 = true, NativeInt64Atomics = true };
+        var wide = ImageRequestBuilders.Texture(words, shape);
+        var narrow = ImageRequestBuilders.Texture(words, shape with { Atomic64 = false });
+
+        // The image keeps its two-dword texels; the shader sees each as one 64-bit integer.
+        Assert.Equal(ImageRole.StorageImage, wide.Request.Role);
+        Assert.Equal(GpuFormat.R32G32Uint, wide.Request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R64Uint, wide.Request.View.Format);
+        Assert.Equal(GpuImageUsage.StorageBit, wide.Request.View.Usage);
+        Assert.Equal(GpuFormat.R32Uint, narrow.Request.View.Format);
+    }
+
+    [Fact]
+    public void Texture_NullDescriptorOfA64BitAtomicBindsAnR64Image()
+    {
+        var storage = ImageRequestBuilders.Texture(
+            new uint[8], Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint, Atomic = true, Atomic64 = true, NativeInt64Atomics = true });
+
+        Assert.Equal(ImageRole.StorageImage, storage.Request.Role);
+        Assert.Equal(GpuFormat.R64Uint, storage.Request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R64Uint, storage.Request.View.Format);
+        Assert.Equal(8u, storage.Request.Description.BytesPerBlock);
         Assert.Equal(GpuImageUsage.StorageBit, storage.Request.View.Usage);
     }
 
@@ -519,6 +615,32 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.True(uncompressed.Value.HasStencil);
         Assert.False(uncompressed.Value.HasHtile);
         Assert.False(uncompressed.Value.Request.Description.Metadata.StencilCompressed);
+    }
+
+    [Fact]
+    public void DepthTarget_ExpClearAccelerationLeavesTheAttachmentUnchanged()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var fatal = new FatalScope();
+        var plain = RegisterWords.Depth(Base, 64, 64, stencilBase: Base + 0x80000) with
+        {
+            ZInfo = (uint)GuestDepthFormat.Z32Float | (1u << 29),
+            StencilInfo = 0x00100981,
+            HtileBase = Base + 0x100000,
+        };
+        var expClear = plain with { ZInfo = plain.ZInfo | (1u << 27), StencilInfo = plain.StencilInfo | (1u << 27) };
+
+        var expected = ImageRequestBuilders.DepthTarget(plain, _vulkan.DeviceInfo);
+        var actual = ImageRequestBuilders.DepthTarget(expClear, _vulkan.DeviceInfo);
+
+        Assert.NotNull(expected);
+        Assert.NotNull(actual);
+        Assert.Equal(expected.Value.Format, actual.Value.Format);
+        Assert.Equal(expected.Value.HasHtile, actual.Value.HasHtile);
+        Assert.Equal(expected.Value.DepthSize, actual.Value.DepthSize);
+        Assert.Equal(expected.Value.StencilSize, actual.Value.StencilSize);
+        Assert.Equal(expected.Value.HtileSize, actual.Value.HtileSize);
+        Assert.Empty(fatal.Messages);
     }
 
     [Fact]

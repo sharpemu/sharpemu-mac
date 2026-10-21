@@ -38,6 +38,53 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFixture>
 {
     private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+    private static int RefindStaleBindings(bool[] stale, Action<int, bool> findAgain) =>
+        (int)PresenterType.GetMethod("RefindStaleBindings", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [stale.Length, (Func<int, bool>)(index => stale[index]), findAgain])!;
+
+    // Two bindings over the same memory whose images replace each other whenever one is found
+    // again: one of them ends as a null image instead of a fatal.
+    [Fact]
+    public void StaleBindings_ThatKeepReplacingEachOther_EndWithANullImage()
+    {
+        var stale = new[] { true, true };
+        var asNull = new bool[2];
+        var nulled = RefindStaleBindings(stale, (index, toNull) =>
+        {
+            stale[index] = false;
+            asNull[index] |= toNull;
+            if (!toNull)
+            {
+                stale[1 - index] = true;
+            }
+        });
+
+        Assert.Equal(1, nulled);
+        Assert.Equal([true, false], asNull);
+        Assert.Equal([false, false], stale);
+    }
+
+    // A binding replaced once by a later one is found again without a null image.
+    [Fact]
+    public void StaleBindings_ReplacedOnce_AreFoundAgain()
+    {
+        var stale = new[] { true, false };
+        var replaced = false;
+        var nulled = RefindStaleBindings(stale, (index, toNull) =>
+        {
+            Assert.False(toNull);
+            stale[index] = false;
+            if (index == 0 && !replaced)
+            {
+                replaced = true;
+                stale[1] = true;
+            }
+        });
+
+        Assert.Equal(0, nulled);
+        Assert.Equal([false, false], stale);
+    }
     private static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
     private static readonly Type ColorAttachmentType = typeof(VulkanVideoPresenter).GetNestedType("ColorAttachment", BindingFlags.NonPublic)!;
     private static readonly Type TextureResourceType = typeof(VulkanVideoPresenter).GetNestedType("TextureResource", BindingFlags.NonPublic)!;
@@ -565,6 +612,64 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
             _ => GpuFormat.R32Sfloat,
         };
         Assert.Equal(expected, request.View.Format);
+        presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
+        presenter.Harness.Finish();
+        presenter.Harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NullTexture_ForAVolume_IsAThreeDimensionalView(bool storage)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var texture = new GuestDrawTexture(0, 1, 1, 0, 0, [], false, storage,
+            Descriptor: [], Shape: new ShaderImageShape(true, false, storage, false, TextureNumericClass.Float));
+
+        var resource = presenter.Run(() => AcquireTexture(presenter, texture));
+        Assert.NotEqual(0UL, ((ImageView)GetFieldValue(resource, "View")).Handle);
+        var request = (ImageRequest)GetFieldValue(resource, "Request");
+        Assert.Equal(GpuImageViewType.Type3D, request.View.Type);
+        presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
+        presenter.Harness.Finish();
+        presenter.Harness.Shutdown();
+    }
+
+    // A null descriptor of a one-dimensional image binds a one-dimensional placeholder: a 1D view cannot be taken from
+    // a 2D image.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NullTexture_ForAOneDimensionalImage_IsAOneDimensionalView(bool storage)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var texture = new GuestDrawTexture(0, 1, 1, 0, 0, [], false, storage,
+            Descriptor: [], Shape: new ShaderImageShape(false, false, storage, false, TextureNumericClass.Float) with { OneDimensional = true });
+
+        var resource = presenter.Run(() => AcquireTexture(presenter, texture));
+        Assert.NotEqual(0UL, ((ImageView)GetFieldValue(resource, "View")).Handle);
+        var request = (ImageRequest)GetFieldValue(resource, "Request");
+        Assert.Equal(GpuImageViewType.Type1D, request.View.Type);
+        presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
+        presenter.Harness.Finish();
+        presenter.Harness.Shutdown();
+    }
+
+    // A null descriptor of a multisampled image binds a placeholder with the samples the shader declares.
+    [Fact]
+    public void NullTexture_ForAMultisampledImage_IsMultisampled()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var texture = new GuestDrawTexture(0, 1, 1, 0, 0, [], false, false,
+            Descriptor: [], Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float) with { Multisampled = true });
+
+        var resource = presenter.Run(() => AcquireTexture(presenter, texture));
+        var request = (ImageRequest)GetFieldValue(resource, "Request");
+        var image = (CachedImage)GetFieldValue(resource, "CachedImage");
+        Assert.Equal(request.Description.Samples, image.Backing.Samples);
         presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
         presenter.Harness.Finish();
         presenter.Harness.Shutdown();

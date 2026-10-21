@@ -232,6 +232,95 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Fact]
+    public void Scissor_FullTargetViewportRecoversFromAnOffscreenWindow()
+    {
+        var viewport = new ScreenViewportRegisters
+        {
+            WindowScissorRight = 784,
+            WindowScissorBottom = 784,
+        };
+        viewport.Viewports[0] = new ViewportRegisters
+        {
+            XScale = 1920,
+            YScale = -1080,
+            XOffset = 1920,
+            YOffset = 1080,
+            ScissorRight = 3840,
+            ScissorBottom = 2160,
+        };
+        var scanMode = new ScanModeRegisters { ViewportScissorEnable = true };
+
+        Assert.Equal(new ScissorRectangle(0, 0, 784, 784),
+            RenderExecutor.ResolveScissor(viewport, in scanMode, 3840, 2160));
+        Assert.Equal(new ScissorRectangle(0, 0, 3840, 2160),
+            RenderExecutor.ResolveScissor(viewport, in scanMode, 3840, 2160, recoverStaleWindow: true));
+
+        viewport.Viewports[0] = viewport.Viewports[0] with { XScale = 392, YScale = -392 };
+        Assert.Equal(new ScissorRectangle(0, 0, 784, 784),
+            RenderExecutor.ResolveScissor(viewport, in scanMode, 3840, 2160, recoverStaleWindow: true));
+    }
+
+    [Theory]
+    [InlineData(3840, 1620)] // The bottom 25% is clipped.
+    [InlineData(2880, 2160)] // The right 25% is clipped.
+    public void Scissor_FullTargetViewportRecoversFromAWindowSmallerInOnlyOneAxis(int windowRight, int windowBottom)
+    {
+        var viewport = new ScreenViewportRegisters
+        {
+            WindowScissorRight = windowRight,
+            WindowScissorBottom = windowBottom,
+        };
+        viewport.Viewports[0] = new ViewportRegisters
+        {
+            XScale = 1920, YScale = -1080, XOffset = 1920, YOffset = 1080,
+            ScissorRight = 3840, ScissorBottom = 2160,
+        };
+        var scanMode = new ScanModeRegisters { ViewportScissorEnable = true };
+
+        Assert.Equal(new ScissorRectangle(0, 0, windowRight, windowBottom),
+            RenderExecutor.ResolveScissor(viewport, in scanMode, 3840, 2160));
+        Assert.Equal(new ScissorRectangle(0, 0, 3840, 2160),
+            RenderExecutor.ResolveScissor(viewport, in scanMode, 3840, 2160, recoverStaleWindow: true));
+
+        viewport.WindowScissorLeft = 10;
+        Assert.Equal(new ScissorRectangle(10, 0, windowRight, windowBottom),
+            RenderExecutor.ResolveScissor(viewport, in scanMode, 3840, 2160, recoverStaleWindow: true));
+    }
+
+    [Theory]
+    [InlineData(64, 48)]
+    [InlineData(48, 64)]
+    public void DynamicState_FullTargetDrawRecoversAStalePartialWindow(int windowRight, int windowBottom)
+    {
+        var banks = Banks();
+        banks.Context.ScreenViewport.WindowScissorRight = windowRight;
+        banks.Context.ScreenViewport.WindowScissorBottom = windowBottom;
+        banks.Context.ScreenViewport.Viewports[0].ScissorRight = 64;
+        banks.Context.ScreenViewport.Viewports[0].ScissorBottom = 64;
+
+        Assert.Equal(new ScissorRectangle(0, 0, 64, 64), DrawAndTakeState(banks).Scissor);
+    }
+
+    [Fact]
+    public void Scissor_OffscreenWindowRemainsEffectiveAtItsOwnTargetSize()
+    {
+        var viewport = new ScreenViewportRegisters
+        {
+            WindowScissorRight = 784,
+            WindowScissorBottom = 784,
+        };
+        viewport.Viewports[0] = new ViewportRegisters
+        {
+            XScale = 392, YScale = -392, XOffset = 392, YOffset = 392,
+            ScissorRight = 784, ScissorBottom = 784,
+        };
+        var scanMode = new ScanModeRegisters { ViewportScissorEnable = true };
+
+        Assert.Equal(new ScissorRectangle(0, 0, 784, 784),
+            RenderExecutor.ResolveScissor(viewport, in scanMode, 784, 784, recoverStaleWindow: true));
+    }
+
+    [Fact]
     public void Scissor_UnsetScreenRectangleDefaultsToTheExtentAndAnEmptyRuleClearsIt()
     {
         var viewport = new ScreenViewportRegisters();

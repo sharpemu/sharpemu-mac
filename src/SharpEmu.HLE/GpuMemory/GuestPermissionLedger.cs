@@ -9,12 +9,17 @@ public sealed class GuestPermissionLedger
     private readonly object _gate = new();
     private readonly PermissionRangeTree _spans = new();
 
+    // The records as of the last whole change. Page tracking looks pages up on the render thread and in
+    // the fault handlers of the guest threads at once, so a lookup takes no lock: it reads this snapshot.
+    private PermissionRangeTree _published = new();
+
     public void Set(ulong address, ulong size, GuestPageProtection protection)
     {
         lock (_gate)
         {
             RemoveRangeRecords(address, address + size);
             _spans[address] = new PermissionRange(address, size, protection);
+            Volatile.Write(ref _published, _spans.Snapshot());
         }
     }
 
@@ -23,18 +28,27 @@ public sealed class GuestPermissionLedger
         lock (_gate)
         {
             RemoveRangeRecords(address, address + size);
+            Volatile.Write(ref _published, _spans.Snapshot());
         }
     }
 
     // A span without a record is read-write: every caller is gated by a registered span first.
-    public GuestPageProtection Lookup(ulong address)
+    // A lookup during a change answers from the records before it, as a locked one just before would.
+    public GuestPageProtection Lookup(ulong address) => Lookup(address, out _);
+
+    // validEnd is where the answer stops holding: the end of the record that holds the address, or the
+    // start of the next record in a gap. A caller walking pages upward reuses the answer below it.
+    public GuestPageProtection Lookup(ulong address, out ulong validEnd)
     {
-        lock (_gate)
+        if (Volatile.Read(ref _published).FindAtOrBelow(address, out var nextAddress) is { } span &&
+            span.Address + span.Size > address)
         {
-            return _spans.FindAtOrBelow(address) is { } span && span.Address + span.Size > address
-                ? span.Protection
-                : GuestPageProtection.Read | GuestPageProtection.Write;
+            validEnd = span.Address + span.Size;
+            return span.Protection;
         }
+
+        validEnd = nextAddress;
+        return GuestPageProtection.Read | GuestPageProtection.Write;
     }
 
     private void RemoveRangeRecords(ulong start, ulong end)

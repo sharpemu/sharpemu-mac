@@ -33,18 +33,28 @@ internal static class DescriptorBindingAliases
     // or none when they are all distinct. A materialization miss calls this twice, so the
     // dictionary and the group array are reused: growing a fresh dictionary per call was a
     // twentieth of the Metal worker.
-    public static List<uint> Group(IReadOnlyList<uint[]> descriptors, int count)
+    public static List<uint> Group(IReadOnlyList<uint[]> descriptors, IReadOnlyList<ImageSpecialization> images) =>
+        Group(descriptors, descriptors.Count, images);
+
+    public static List<uint> Group(IReadOnlyList<uint[]> descriptors, int count, IReadOnlyList<ImageSpecialization>? images = null)
     {
-        if (!Reuse) return GroupAllocating(descriptors, count);
+        if (!Reuse) return GroupAllocating(descriptors, count, images);
         if (count < 2) return [];
         var groups = _groups ??= new Dictionary<uint[], uint>(new WordComparer());
         var scratch = _scratch;
         if (scratch is null || scratch.Length < count) _scratch = scratch = new uint[Math.Max(count, 32)];
         groups.EnsureCapacity(count);
+        var ungrouped = 0;
         try
         {
             for (var index = 0; index < count; index++)
             {
+                if (images is not null && images[index].IndirectRoot != DescriptorConstants.NoIndex)
+                {
+                    scratch[index] = (uint)index;
+                    ungrouped++;
+                    continue;
+                }
                 if (!groups.TryGetValue(descriptors[index], out var group))
                 {
                     group = (uint)index;
@@ -53,7 +63,7 @@ internal static class DescriptorBindingAliases
                 scratch[index] = group;
             }
 
-            return groups.Count == count ? [] : [.. scratch.AsSpan(0, count)];
+            return groups.Count + ungrouped == count ? [] : [.. scratch.AsSpan(0, count)];
         }
         finally
         {
@@ -67,13 +77,21 @@ internal static class DescriptorBindingAliases
         }
     }
 
-    internal static List<uint> GroupAllocating(IReadOnlyList<uint[]> descriptors, int count)
+    internal static List<uint> GroupAllocating(IReadOnlyList<uint[]> descriptors, int count, IReadOnlyList<ImageSpecialization>? images = null)
     {
         if (count < 2) return [];
         var groups = new Dictionary<uint[], uint>(new WordComparer());
         var result = new List<uint>(count);
+        var ungrouped = 0;
         for (var index = 0; index < count; index++)
         {
+            if (images is not null && images[index].IndirectRoot != DescriptorConstants.NoIndex)
+            {
+                result.Add((uint)index);
+                ungrouped++;
+                continue;
+            }
+
             if (!groups.TryGetValue(descriptors[index], out var group))
             {
                 group = (uint)index;
@@ -81,7 +99,7 @@ internal static class DescriptorBindingAliases
             }
             result.Add(group);
         }
-        return groups.Count == count ? [] : result;
+        return groups.Count + ungrouped == count ? [] : result;
     }
 
     public static void Apply(ShaderResourceInfo info, ShaderResourceInfo source, ResourceSpecialization specialization)

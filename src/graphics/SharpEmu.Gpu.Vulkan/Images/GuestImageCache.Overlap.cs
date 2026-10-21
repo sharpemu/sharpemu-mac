@@ -38,6 +38,8 @@ public sealed partial class GuestImageCache
         return !exactFormat || cached.PixelFormat == requested.PixelFormat;
     }
 
+    // A block-compressed image is never a target or a display surface: its guest bytes keep the texture
+    // layout, also when it grew out of a target of the same memory and took that target's uses.
     private static ImageRole UploadRole(CachedImage image)
     {
         if (image.Description.IsDepth)
@@ -45,12 +47,12 @@ public sealed partial class GuestImageCache
             return ImageRole.DepthTarget;
         }
 
-        if (image.Uses.RenderTarget)
+        if (image.Uses.RenderTarget && !image.Description.IsBlock)
         {
             return ImageRole.ColorTarget;
         }
 
-        if (image.Uses.VideoOut)
+        if (image.Uses.VideoOut && !image.Description.IsBlock)
         {
             return ImageRole.DisplaySurface;
         }
@@ -296,13 +298,18 @@ public sealed partial class GuestImageCache
         return true;
     }
 
+    // A block-compressed image states its pitch and height in texels, and the uncompressed view of its blocks states them in blocks,
+    // so a side that is compressed is compared in blocks.
     private static bool SameMipLayout(in ImageDescription left, in ImageDescription right)
     {
+        var leftShift = left.IsBlock ? 2 : 0;
+        var rightShift = right.IsBlock ? 2 : 0;
         for (var level = 0; level < ImageDescription.MaxLevels; level++)
         {
             var a = left.MipLayout[level];
             var b = right.MipLayout[level];
-            if (a.Offset != b.Offset || a.Size != b.Size || a.Pitch != b.Pitch || a.Height != b.Height)
+            if (a.Offset != b.Offset || a.Size != b.Size || (a.Pitch >> leftShift) != (b.Pitch >> rightShift) ||
+                (a.Height >> leftShift) != (b.Height >> rightShift))
             {
                 return false;
             }
@@ -447,7 +454,10 @@ public sealed partial class GuestImageCache
 
         ref var cachedInfo = ref cached.Description;
         var currentTick = _scheduler.CurrentTick;
-        var safeToDelete = currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
+        // A title submits dozens of command buffers per frame, so an image it writes early in a frame and reads late
+        // in it is past the removal window in between. As in collection, an image used this frame is not stale.
+        var usedThisFrame = cached.Registered && _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex) >= _collectionTick;
+        var safeToDelete = !usedThisFrame && currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
         var requestedBlock = requested.BytesPerBlock * requested.Samples;
         var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
         var requestedBlockExtent = requested.BlockExtent;
@@ -503,6 +513,24 @@ public sealed partial class GuestImageCache
                 return new OverlapResolution(GrowImage(requested, cachedImageIdentifier));
             }
 
+            if (requested.IsVolume != cachedInfo.IsVolume)
+            {
+                if (safeToDelete)
+                {
+                    ReleaseImage(cachedImageIdentifier);
+                }
+
+                return new OverlapResolution(mergedImageIdentifier);
+            }
+
+            // A volume that gained slices keeps the layout of the slices it had: the deeper image starts with the contents of the shallower one.
+            if (requested.IsVolume && requested.Type == cachedInfo.Type && requested.Resources == cachedInfo.Resources &&
+                requested.Extent.Width >= cachedInfo.Extent.Width && requested.Extent.Height >= cachedInfo.Extent.Height &&
+                requested.Extent.Depth > cachedInfo.Extent.Depth && ViewFormatRules.AreCompatible(cachedInfo.PixelFormat, requested.PixelFormat))
+            {
+                return new OverlapResolution(GrowImage(requested, cachedImageIdentifier));
+            }
+
             throw SubmissionScheduler.Fatal(
                 $"An equal-address image overlap cannot be resolved: address=0x{requested.Data.Address:X16} requested={requested.Resources.Levels}x{requested.Resources.Layers} " +
                 $"cached={cachedInfo.Resources.Levels}x{cachedInfo.Resources.Layers} requestedSize=0x{requested.Data.Size:X16} cachedSize=0x{cachedInfo.Data.Size:X16} " +
@@ -553,7 +581,7 @@ public sealed partial class GuestImageCache
             ? source.Description.Resources.Layers : 0;
         try
         {
-            PopulateFromGuest(expandedImageIdentifier, ImageRequest.Refresh(description, UploadRole(source)),
+            PopulateFromGuest(expandedImageIdentifier, ImageRequest.Refresh(description, UploadRole(expanded)),
                 firstLayer == 0 ? "expand" : "expand-partial", firstLayer);
             var mip = source.Description.FindMatchingMipLevel(description);
             var layer = source.Description.FindMatchingArraySlice(description, mip);
@@ -593,10 +621,11 @@ public sealed partial class GuestImageCache
         source.Pitch == destination.Pitch && SameExtent(source.Extent, destination.Extent) &&
         source.FindMatchingArraySlice(destination, 0) == 0;
 
-    // A compute shader writes the blocks of a compressed image through an
-    // uncompressed view, but the driver could not give that image storage usage.
-    // The blocks move to an uncompressed image of the same memory; the next
-    // compressed request copies them back (the IsBlock branch of ResolveOverlap).
+    // A shader reaches the blocks of a compressed image through an uncompressed view the image
+    // cannot give: storage usage the driver refused, or more than one level or layer (Vulkan views
+    // blocks in an uncompressed format one level and one layer at a time). The blocks move to an
+    // uncompressed image of the same memory; the next compressed request copies them back (the
+    // IsBlock branch of ResolveOverlap).
     private ResourceSlotIdentifier ReplaceCompressedForStorage(in ImageDescription requested, ResourceSlotIdentifier cachedImageIdentifier)
     {
         var replacementImageIdentifier = InsertImage(requested);
@@ -613,7 +642,7 @@ public sealed partial class GuestImageCache
         return replacementImageIdentifier;
     }
 
-    private ResourceSlotIdentifier AssociateStencilRange(ResourceSlotIdentifier depthImageIdentifier, GuestSpan stencil)
+    private ResourceSlotIdentifier AssociateStencilRange(ResourceSlotIdentifier depthImageIdentifier, GuestSpan stencil, bool restoreNativeStencil = false)
     {
         if (!ImageDescription.IsValidRange(stencil))
         {
@@ -647,6 +676,21 @@ public sealed partial class GuestImageCache
 
         var record = _slots[association];
         TouchImage(record);
+        // A current ordinary image becomes an S8 proxy below. Preserve its native
+        // bytes before changing the owner; clean flags alone cannot refresh S8.
+        // Definite CPU/buffer updates instead use the normal stencil upload. A
+        // maybe-dirty hash may resolve unchanged, so it still needs preservation.
+        if (restoreNativeStencil && !record.DepthOwner.IsValid && record.Backing.Exists &&
+            !record.IsDefinitelyCpuDirty && !record.IsBufferModified &&
+            !depth.Description.Metadata.StencilCompressed && depth.Backing.Samples == 1 &&
+            record.Backing.Format is Format.R8Uint or Format.R8Unorm &&
+            record.Backing.ImageType == ImageType.Type2D && record.Backing.Samples == 1 &&
+            record.Backing.MipLevels == 1 && depth.Backing.MipLevels == 1 &&
+            record.Backing.Layers == depth.Backing.Layers && SameExtent(record.Backing.Extent.ToNeutral(), depth.Backing.Extent.ToNeutral()))
+        {
+            depth.CopyStencilStorage(record, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
+        }
+
         // Release the former image watch on conversion. Keep an active stencil watch on reuse.
         if (!record.DepthOwner.IsValid)
         {

@@ -49,6 +49,37 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
         harness.Shutdown();
     }
 
+    // An async readback waits only for the buffer's last recorded writer, and work recorded after it
+    // can still reach the buffer. Collection must keep the buffer alive until that work completes:
+    // destroying it at once let a later copy write into freed memory (ErrorDeviceLost, a write fault).
+    [Fact]
+    public void GarbageCollectorKeepsAnAsyncDownloadedBufferUntilSubmittedWorkCompletes()
+    {
+        if (_vulkan is null || !GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        using var fatal = new FatalScope();
+        Attach(harness, _vulkan);
+        var dirty = harness.MapBacked(0x10000, ReadWrite);
+        var buffer = harness.Worker.Run(() =>
+        {
+            var (written, offset) = harness.Cache.ObtainBuffer(dirty, 0x100, isWritten: true);
+            written.Fill(offset, 0x100, 0x0BADF00D);
+            return written;
+        });
+        harness.Cache.SetCollectionThresholds(1, 1);
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.RunGarbageCollector();
+            Assert.Equal(0, harness.Cache.BufferCount);
+            Assert.NotEqual(0UL, buffer.Handle.Handle);
+            harness.Scheduler.Finish();
+        });
+        Assert.Equal(0UL, buffer.Handle.Handle);
+        Assert.Equal(0x0BADF00Du, BitConverter.ToUInt32(harness.Read(dirty + 0xFC, 4)));
+        Detach(harness);
+        harness.Shutdown();
+    }
+
     private static void GpuWrite(CacheHarness harness, ulong address, uint value) => harness.Worker.Run(() =>
     {
         var (buffer, offset) = harness.Cache.ObtainBuffer(address, 0x100, isWritten: true);

@@ -262,6 +262,29 @@ public sealed class CompiledResourceTransactionTests
         Assert.Same(previous, snapshot);
     }
 
+    // A descriptor the shader loads from an absolute address of its own that nothing maps reads zero, as the
+    // evaluator reads it; the transaction used to fail the snapshot there.
+    [Fact]
+    public void UnmappedAbsoluteAddressReadsZeroAsTheReferenceDoes()
+    {
+        var plan = Extract(Program(
+            MoveScalar(0, 4, 0xE0040000),
+            MoveScalar(8, 5, 0xF),
+            ScalarLoad(16, 4, 8, 4),
+            BufferLoad(24, 8),
+            EndProgram(32)));
+        var transaction = Assert.IsType<CompiledResourceTransaction>(CompiledResourceTransaction.Build(plan));
+        var reads = 0;
+        var inputs = Inputs([], (ulong address, out uint word) => { reads++; word = 0xDEADBEEF; return false; });
+        Assert.True(Reference(plan, inputs, out var expectedDescriptors, out var expectedTable));
+        Assert.True(transaction.Evaluate(inputs, 0, out var descriptors, out var table));
+        Assert.True(reads > 0);
+        Assert.Equal(expectedTable, table);
+        Assert.Equal(expectedDescriptors.SelectMany(words => words.Dwords), descriptors.SelectMany(words => words.Dwords));
+        Assert.NotEmpty(descriptors);
+        Assert.All(descriptors.SelectMany(words => words.Dwords), word => Assert.Equal(0u, word));
+    }
+
     [Fact]
     public void ReaderExceptionsResetTheTablePhase()
     {

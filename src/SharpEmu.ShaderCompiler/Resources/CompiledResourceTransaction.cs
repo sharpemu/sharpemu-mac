@@ -128,7 +128,8 @@ internal sealed class CompiledResourceTransaction
                         CompileValue(handle.Operands[3], clean);
                     }
                     Require(Call(nameof(ReadWord), input, Expression.Constant(clean), Expression.Constant(value.Kind), low, high,
-                        offset, records, Expression.Constant((long)(int)plan.Memory[value.MemoryIndex].Offset), local,
+                        offset, records, Expression.Constant((long)(int)plan.Memory[value.MemoryIndex].Offset),
+                        Expression.Constant(RuntimeValueEvaluator.IsAbsoluteAddress(value.Kind, handle)), local,
                         Expression.Constant(plan), Expression.Constant(value)));
                     if (value.Kind == ScalarValueKind.ScalarAddressWord && value.Operands[1].IsConstant)
                         readSites.Add(body[^1], new ReadSite(low, high,
@@ -302,7 +303,7 @@ internal sealed class CompiledResourceTransaction
     }
 
     private static bool ReadWord(ResourceRuntimeInputs inputs, bool clean, ScalarValueKind kind, ulong low, ulong high,
-        ulong offset, ulong records, long immediate, out ulong value, ShaderResourcePlan plan, ScalarValue node)
+        ulong offset, ulong records, long immediate, bool absolute, out ulong value, ShaderResourcePlan plan, ScalarValue node)
     {
         value = 0;
         var addressBase = ((high << 32) | (uint)low) & 0x0000FFFFFFFFFFFFUL;
@@ -313,8 +314,9 @@ internal sealed class CompiledResourceTransaction
         if (state == RuntimeValueEvaluator.RawAddress.Zero) return true;
         var reader = clean ? inputs.ReadCleanMemory : inputs.ReadMemory;
         uint word;
+        // As in the evaluator: a null base, or an absolute address the shader carries that nothing maps, reads zero.
         using (ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.CompiledWordRead))
-            if (reader is null || !reader(address, out word)) return (addressBase & ~3UL) == 0;
+            if (reader is null || !reader(address, out word)) return (addressBase & ~3UL) == 0 || (absolute && reader is not null && !clean && !inputs.ReadsClean);
         value = word;
         ResourceMaterializationCache.RecordReadConsumer(plan, node, address);
         return true;

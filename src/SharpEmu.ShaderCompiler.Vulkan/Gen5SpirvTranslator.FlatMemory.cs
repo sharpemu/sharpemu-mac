@@ -19,9 +19,17 @@ public static partial class Gen5SpirvTranslator
                 uint Operand(int index)
                 {
                     var mask = high ? control.OpSelHiMask : control.OpSelMask;
+                    var negate = high ? control.NegHiMask : control.NegLoMask;
+                    var offset = (mask & (1u << index)) != 0 ? 16 : 0;
+                    var raw = GetRawSource(instruction, index);
+                    if ((negate & (1u << index)) != 0)
+                    {
+                        // The negate bit flips bit 15 of the selected half, as for the other packed ops.
+                        raw = BitwiseXor(raw, UInt(0x8000u << offset));
+                    }
+
                     var value = _module.AddInstruction(SpirvOp.BitFieldSExtract, _intType,
-                        Bitcast(_intType, GetRawSource(instruction, index)),
-                        UInt((mask & (1u << index)) != 0 ? 16u : 0u), UInt(16));
+                        Bitcast(_intType, raw), UInt((uint)offset), UInt(16));
                     return value;
                 }
                 var value = _module.AddInstruction(instruction.Opcode == "VPkAddI16" ? SpirvOp.IAdd : SpirvOp.ISub,

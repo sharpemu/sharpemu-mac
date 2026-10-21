@@ -16,12 +16,13 @@ internal static unsafe partial class VulkanVideoPresenter
         // This partial owns guest GPU submission execution and lifetime.
 
         // Batched submissions each carry up to a frame's worth of work, so a cap of
-        // 8 made draw preparation wait on the GPU once per frame; 32 keeps the CPU
-        // ahead. SHARPEMU_MAX_INFLIGHT_SUBMISSIONS overrides it.
+        // 8 made draw preparation wait on the GPU once per frame; at 32 a title that
+        // submits a few hundred times a frame still waited about twice a frame, so
+        // the cap is 64. SHARPEMU_MAX_INFLIGHT_SUBMISSIONS overrides it.
         private static readonly int MaxInFlightGuestSubmissions =
             int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_MAX_INFLIGHT_SUBMISSIONS"), out var inFlight) && inFlight > 0
                 ? inFlight
-                : 32;
+                : 64;
         // Scheduler ticks: the last submitted tick and the highest tick known retired.
         private ulong _submitTimeline;
         private ulong _completedTimeline;
@@ -41,6 +42,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // Translated draws are recorded into the scheduler's current buffer and
         // submitted once per drained work batch (one vkQueueSubmit per batch).
         private bool _batchOpen;
+        private long _batchOpenedTicks;
         private int _batchDrawCount;
         private readonly List<SubmissionUploadResources> _batchResources = new();
 
@@ -72,6 +74,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (!_batchOpen)
             {
                 _batchOpen = true;
+                _batchOpenedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
                 _batchDrawCount = 0;
             }
         }

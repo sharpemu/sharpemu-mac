@@ -171,6 +171,7 @@ public sealed class Gen5MslArgumentLayout
         var numericPart = numericClass switch
         {
             ImageNumericClass.Uint => "uint",
+            ImageNumericClass.Uint64 => "uint64",
             ImageNumericClass.Sint => "sint",
             _ => "float",
         };

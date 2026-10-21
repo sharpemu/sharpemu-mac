@@ -237,6 +237,47 @@ public sealed class GuestPageTracker
         return tracked;
     }
 
+    // After a write landed through the backing: every page the GPU does not own turns CPU-dirty, also in a
+    // block where another page of the range is GPU-dirty. GPU-dirty pages keep their owner.
+    public bool MarkLandedCpuWrite(ulong vaddr, ulong size)
+    {
+        RejectUploadCallbackReentry();
+        ValidateRange(vaddr, size);
+        var tracked = false;
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
+        {
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is { } region)
+            {
+                tracked = true;
+                if (!region.IsCpuDirtyThroughout(offset, bytes))
+                {
+                    using (region.Lock.Hold())
+                    {
+                        for (var page = offset & ~(PageBytes - 1); page < offset + bytes; page += PageBytes)
+                        {
+                            var start = Math.Max(page, offset);
+                            var length = Math.Min(page + PageBytes, offset + bytes) - start;
+                            if (!region.IsModified(WriteOrigin.Gpu, start, length))
+                            {
+                                region.MarkCpuWrite(region.BaseAddress + start, length);
+                            }
+                        }
+                    }
+                }
+            }
+
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
+
+        return tracked;
+    }
+
     public void ForEachDownloadRange(ulong vaddr, ulong size, bool clear, Action<ulong, ulong>? preflight, Action<ulong, ulong> visit)
     {
         RejectUploadCallbackReentry();

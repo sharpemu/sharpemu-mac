@@ -25,7 +25,11 @@ public sealed unsafe partial class GuestImageCache
         var range = metadata.Range;
         // Native metadata writes must finish before image discovery and final draw uploads.
         if (_bufferCache.HasGpuDirtyBytes(range.Address, range.Size))
+        {
+            if (SharpEmu.Libs.Diagnostics.DccWriterTrace.Enabled)
+                SharpEmu.Libs.Diagnostics.DccWriterTrace.ReportSync(range.Address, range.Size);
             _bufferCache.ReadMemory(range.Address, range.Size);
+        }
     }
 
     internal void ApplyNativeColorClear(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
@@ -118,6 +122,9 @@ public sealed unsafe partial class GuestImageCache
         var sliceSize = operation.MetadataSize;
         var code = operation.MetadataCode;
         var color = operation.Color;
+        // Consume the code first: an image whose range covers the slice takes the fill as a write to its memory,
+        // and the clear's ownership must have the last word.
+        _bufferCache.FillBuffer(address, sliceSize, uint.MaxValue, false);
         using (var held = _lock.Hold())
         {
             RefreshFromGuest(imageIdentifier, request);
@@ -156,8 +163,6 @@ public sealed unsafe partial class GuestImageCache
             TakeGpuOwnership(image);
         }
 
-        // Publish expanded keys only after the clear is recorded. The buffer path preserves ordering.
-        _bufferCache.FillBuffer(address, sliceSize, uint.MaxValue, false);
         if (ImageClearTrace.Enabled)
             ImageClearTrace.Write($"applied image=0x{description.Data.Address:X16} metadata=0x{address:X16} size=0x{sliceSize:X} layer={layer} code=0x{code:X2}");
     }

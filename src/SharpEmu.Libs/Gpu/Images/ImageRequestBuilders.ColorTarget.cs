@@ -151,7 +151,7 @@ public static partial class ImageRequestBuilders
         }
 
         var samples = SampleCount(words.FragmentsLog2);
-        if (samples == 0 || words.SamplesLog2 != words.FragmentsLog2)
+        if (samples == 0 || words.SamplesLog2 < words.FragmentsLog2)
         {
             throw GpuFatal.Fatal($"The render-target sample configuration is not supported: samples={words.SamplesLog2} fragments={words.FragmentsLog2}.");
         }

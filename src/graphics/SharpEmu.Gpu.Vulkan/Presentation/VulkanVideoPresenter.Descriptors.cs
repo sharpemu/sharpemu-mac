@@ -25,6 +25,14 @@ using VkBuffer = Silk.NET.Vulkan.Buffer;
 // This partial binds the resources of one stage: storage buffers, images, samplers and push data.
 internal static unsafe partial class VulkanVideoPresenter
 {
+    // The shader bounds a storage binding in whole dwords (OpArrayLength), so the view ends on a dword: a 16-bit element
+    // in the binding's last partial dword stays in range. A view that would not fit keeps its exact size.
+    internal static ulong StorageBufferViewRange(ulong bytes, ulong available, ulong maxRange)
+    {
+        var rounded = (bytes + 3) & ~3UL;
+        return rounded <= available && rounded <= maxRange ? rounded : bytes;
+    }
+
     private sealed partial class Presenter
     {
         private const ulong NullStorageBufferBytes = 16;
@@ -99,7 +107,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private static TextureNumericClass NumericClassOf(ImageResource image) => image.NumericClass switch
         {
-            ImageNumericClass.Uint => TextureNumericClass.Uint,
+            ImageNumericClass.Uint or ImageNumericClass.Uint64 => TextureNumericClass.Uint,
             ImageNumericClass.Sint => TextureNumericClass.Sint,
             _ => TextureNumericClass.Float,
         };
@@ -115,7 +123,9 @@ internal static unsafe partial class VulkanVideoPresenter
             R128: image.R128,
             Multisampled: image.Dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray,
             DepthCompare: image.DepthCompare,
-            Atomic: image.Atomic);
+            Atomic: image.Atomic,
+            Atomic64: image.Atomic64,
+            NativeInt64Atomics: true);
 
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _tracedTextureBindings = new();
         // The last lookup of one image of one program. A draw binds the same descriptor as the
@@ -517,8 +527,31 @@ internal static unsafe partial class VulkanVideoPresenter
                     continue;
                 }
 
-                _ = _bufferCache.FindBuffer(range.Base, ClampMappedSize(range.Base, range.Size));
+                var size = ClampMappedSize(range.Base, range.Size);
+                if (range.Written)
+                {
+                    _imageCache.PublishImagesUnderRawWrite(range.Base, size);
+                }
+
+                _ = _bufferCache.FindBuffer(range.Base, size);
             }
+        }
+
+        private static int _unresidentPrtBufferLines;
+
+        private bool IsUnresidentPrtPage(ulong address)
+        {
+            if (_guestMemory.CanRead(address, 1) || !GuestBackingServices.ContainsPrtRange(address, 1))
+            {
+                return false;
+            }
+
+            if (Interlocked.Exchange(ref _unresidentPrtBufferLines, 1) == 0)
+            {
+                Console.Error.WriteLine($"[GPU][INFO] A buffer starts in an unresident PRT page and binds as a null buffer: address=0x{address:X16}.");
+            }
+
+            return true;
         }
 
         // The cache buffer each descriptor's range lives in; a null descriptor has none.
@@ -539,13 +572,25 @@ internal static unsafe partial class VulkanVideoPresenter
                 var descriptor = BufferDescriptorWords.From(words);
                 var requested = descriptor.Footprint() ?? throw SubmissionScheduler.Fatal(
                     $"A storage buffer descriptor footprint overflows: buffer={index} stride={descriptor.Stride} records={descriptor.RecordCount} hash=0x{program.Hash:X16}.");
-                if (descriptor.Address == 0 || requested == 0)
+                if (descriptor.Address == 0 || requested == 0 || IsUnresidentPrtPage(descriptor.Address))
                 {
                     sources[index] = (descriptor, default);
                     continue;
                 }
 
                 var size = ClampMappedSize(descriptor.Address, requested, prepared, index);
+                var resource = prepared.Resources.Info.Buffers[index];
+                // Publishing a partly written image can grow a buffer past this range:
+                // every stage prepares here before any stage takes a buffer handle.
+                if (resource.Written && resource.Formatted)
+                {
+                    _imageCache.PublishImagesUnderFormattedWrite(descriptor.Address, size);
+                }
+                else if (resource.Written)
+                {
+                    _imageCache.PublishImagesUnderRawWrite(descriptor.Address, size);
+                }
+
                 sources[index] = (descriptor, _bufferCache.FindBuffer(descriptor.Address, size));
             }
 
@@ -664,7 +709,7 @@ internal static unsafe partial class VulkanVideoPresenter
             memoryOffset = 0;
             var address = descriptor.Address;
             var requested = descriptor.Footprint() ?? throw SubmissionScheduler.Fatal($"A storage buffer descriptor footprint overflows: buffer={slot} hash=0x{program.Hash:X16}.");
-            if (address == 0 || requested == 0)
+            if (address == 0 || requested == 0 || IsUnresidentPrtPage(address))
             {
                 return NullStorageBuffer();
             }
@@ -681,23 +726,28 @@ internal static unsafe partial class VulkanVideoPresenter
             var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, resource.Written, isTexelBuffer: resource.Formatted, bufferIdentifier, program.Hash);
             TraceBufferParameter(program.Hash, slot, address, size, buffer.Handle.Handle, offset, resource.Written);
             var alignedOffset = offset - offset % alignment;
+            // The shader adds the adjustment to its byte address, so a base that is only two byte aligned
+            // keeps the byte phase the guest's 16 bit accesses expect.
             var adjustment = offset - alignedOffset;
-            if (adjustment % sizeof(uint) != 0 || adjustment >= MaxMemoryOffsetAdjustment || size > maxRange - adjustment)
+            if (adjustment >= MaxMemoryOffsetAdjustment || size > maxRange - adjustment)
             {
                 throw SubmissionScheduler.Fatal($"A storage buffer offset adjustment is unsupported: buffer={slot} adjustment={adjustment} hash=0x{program.Hash:X16}.");
             }
 
             memoryOffset = (uint)adjustment;
-            if (resource.Formatted && resource.Written)
+            // The images a raw write covers in part, and all images under a formatted write, were published
+            // when the stage was prepared (FindBuffers).
+            if (resource.Written && resource.Formatted)
             {
-                _imageCache.InvalidateMemoryFromGpu(address, size);
+                _imageCache.InvalidateMemoryFromGpuAfterPublish(address, size);
             }
             else if (resource.Written)
             {
                 _imageCache.InvalidateMemoryCopiesFromGpu(address, size);
             }
 
-            return new BufferView(buffer.Handle, alignedOffset, size + adjustment);
+            return new BufferView(buffer.Handle, alignedOffset,
+                StorageBufferViewRange(size + adjustment, buffer.Size - alignedOffset, maxRange));
         }
 
         private BufferView UploadDwords(uint[] data, string label, ShaderProgramInfo program)
@@ -796,9 +846,49 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
                 else
                 {
+                    // A held command write or a pending dump lands before the shader reads the range.
+                    CompleteOverlappingPublications(range.Base, size, includeLabels: false);
                     // Stream buffers do not populate the device-address page table.
                     _ = _bufferCache.FindBuffer(range.Base, size);
                     _bufferCache.SynchronizeBuffersInRange(range.Base, size);
+                }
+            }
+        }
+
+        private const int MaxRebindPasses = 3;
+        private static readonly uint[] NullImageWords = new uint[8];
+        private static int _nullRebindReports;
+
+        // Finding an image again can replace another image of the same dispatch: two bindings over
+        // the same memory with layouts one cached image cannot hold at once, where the guest reads
+        // two views of one memory. The stale bindings are found again until none is left; one still
+        // losing its image after MaxRebindPasses reads as a null image. Returns how many did.
+        internal static int RefindStaleBindings(int count, Func<int, bool> isStale, Action<int, bool> findAgain)
+        {
+            var nulled = 0;
+            for (var pass = 0; ; pass++)
+            {
+                var refound = false;
+                for (var index = 0; index < count; index++)
+                {
+                    if (!isStale(index))
+                    {
+                        continue;
+                    }
+
+                    if (pass > MaxRebindPasses)
+                    {
+                        throw SubmissionScheduler.Fatal($"An image binding is stale after it was bound as a null image: image={index}.");
+                    }
+
+                    nulled += pass == MaxRebindPasses ? 1 : 0;
+                    findAgain(index, pass == MaxRebindPasses);
+                    refound = true;
+                }
+
+                if (!refound)
+                {
+                    return nulled;
                 }
             }
         }
@@ -810,23 +900,21 @@ internal static unsafe partial class VulkanVideoPresenter
             var info = prepared.Resources.Info;
             var snapshot = prepared.Stage.Resources;
             var images = prepared.Descriptors.Images;
-            for (var index = 0; index < images.Length; index++)
-            {
-                var binding = images[index];
-                if (binding.IsHostMovie)
+            var nulled = RefindStaleBindings(
+                images.Length,
+                index => !images[index].IsHostMovie && IsStaleImage(images[index].ImageIdentifier, out _),
+                (index, asNull) =>
                 {
-                    continue;
-                }
-
-                if (IsStaleImage(binding.ImageIdentifier, out var stale))
-                {
-                    if (stale is not null)
+                    if (_imageCache.TryGetImage(images[index].ImageIdentifier, out var stale))
                     {
                         stale.Binding = default;
                     }
 
-                    images[index] = binding = ResolveImageBinding(info.Images[index], snapshot.Images[index], program, index);
-                }
+                    images[index] = ResolveImageBinding(info.Images[index], asNull ? NullImageWords : snapshot.Images[index], program, index);
+                });
+            if (nulled != 0 && Interlocked.Increment(ref _nullRebindReports) <= 32)
+            {
+                Console.Error.WriteLine($"[GPU][WARN] {nulled} image binding(s) of 0x{program.Hash:X16} kept losing their image to another binding over the same memory; they read as null images");
             }
 
             for (var index = 0; index < images.Length; index++)

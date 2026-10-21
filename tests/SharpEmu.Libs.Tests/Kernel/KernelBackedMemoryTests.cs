@@ -252,7 +252,7 @@ public sealed class KernelBackedMemoryTests
     }
 
     [Fact]
-    public void SparseImageReadRejectsUnreservedAndOutOfApertureRanges()
+    public void SparseImageReadZeroesUnresidentApertureRangesAndRejectsOutsideIt()
     {
         using var test = new BackedKernelMemory();
         var address = SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport.ProbeGuestAddress(test.Host, 0x20000);
@@ -261,13 +261,14 @@ public sealed class KernelBackedMemoryTests
         try
         {
             var result = Enumerable.Repeat((byte)0xAB, 0x20000).ToArray();
-            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, result));
-            Assert.All(result, value => Assert.Equal(0xAB, value));
-            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, ulong.MaxValue, result));
+            Assert.True(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, result));
+            Assert.All(result, value => Assert.Equal(0, value));
+            var untouched = Enumerable.Repeat((byte)0xAB, 0x4000).ToArray();
+            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, ulong.MaxValue, untouched));
             Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, Span<byte>.Empty));
             SetPrtAperture(test, address, 0);
-            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, result.AsSpan(0, 0x4000)));
-            Assert.All(result, value => Assert.Equal(0xAB, value));
+            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, untouched));
+            Assert.All(untouched, value => Assert.Equal(0xAB, value));
         }
         finally
         {

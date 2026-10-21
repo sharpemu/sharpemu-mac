@@ -36,12 +36,50 @@ public static class GameServiceStubs
         return Ok(ctx);
     }
 
+    // Writes an optional output structure; a null pointer means it was not requested.
+    private static bool WriteOutput(CpuContext ctx, ulong address, ReadOnlySpan<byte> value) =>
+        address == 0 || ctx.Memory.TryWrite(address, value);
+
+    private static void Increment(Span<byte> counter) =>
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
+            counter, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(counter) + 1);
+
     // ---- NpTrophy2: trophy context/handle registration at boot ----
     public static int NpTrophy2CreateContext(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
     public static int NpTrophy2CreateHandle(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
     public static int NpTrophy2RegisterContext(CpuContext ctx) => Ok(ctx);
 
     // sceNpTrophy2GetGameInfo lives in NpTrophy2Exports (it fills the output structures).
+    // The counts of SceNpTrophy2GameDetails and SceNpTrophy2GameData. The groups, the title and the
+    // progress stay zero.
+    internal static void FillTrophy2GameInfo(
+        Span<byte> details,
+        Span<byte> data,
+        IReadOnlyList<SharpEmu.Libs.Np.TrophyService.Trophy> trophies)
+    {
+        details.Clear();
+        data.Clear();
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(details[4..], (uint)trophies.Count);
+        foreach (var trophy in trophies)
+        {
+            // Grades 1 to 4 (platinum, gold, silver, bronze) follow numTrophies in the details
+            // and unlockedTrophies in the data.
+            var hasGrade = trophy.Grade is >= 1 and <= 4;
+            if (hasGrade)
+            {
+                Increment(details[(4 + (trophy.Grade * 4))..]);
+            }
+
+            if (trophy.Unlocked)
+            {
+                Increment(data);
+                if (hasGrade)
+                {
+                    Increment(data[(trophy.Grade * 4)..]);
+                }
+            }
+        }
+    }
 
     // ---- CES: Shift-JIS <-> Unicode conversion setup (Japanese text) ----
 

@@ -13,7 +13,7 @@ public sealed class ImportResultLoggingTests
     private delegate bool ImportResultFilter(string nid, OrbisGen2Result result, out int mutexOccurrence);
 
     [NativeX64Fact]
-    public void MutexSelfLockWarningsAreSampledWithoutHidingOtherFailures()
+    public void RepeatedImportFailuresAreSampledPerImportAndResult()
     {
         var modules = new ModuleManager();
         modules.Freeze();
@@ -34,8 +34,13 @@ public sealed class ImportResultLoggingTests
             Assert.True(ShouldLog(nid, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT));
             Assert.True(ShouldLog(nid, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT));
         }
-        Assert.True(filter("another-import", OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK, out var otherOccurrence));
-        Assert.Equal(0, otherOccurrence);
+        for (var occurrence = 1; occurrence <= 10001; occurrence++)
+        {
+            Assert.Equal(occurrence <= 8 || occurrence == 10000,
+                filter("another-import", OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK, out var otherOccurrence));
+            Assert.Equal(occurrence, otherOccurrence);
+        }
+        Assert.True(ShouldLog("another-import", OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT));
         foreach (var nid in new[] { "2Z+PpY6CaJg", "tn3VlD0hG60" })
         foreach (var result in new[] { OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED })
         {

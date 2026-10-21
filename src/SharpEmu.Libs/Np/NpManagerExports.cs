@@ -65,6 +65,28 @@ public static class NpManagerExports
         return SetReturn(ctx, NpErrorSignedOut);
     }
 
+    // The account language and age are server requests like the reachability
+    // check above, and the offline profile is signed out: each request fails
+    // with SIGNED_OUT directly and through sceNpPollAsync.
+    [SysAbiExport(Nid = "3Tcz5bNCfZQ", ExportName = "sceNpGetAccountLanguage2", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
+    public static int NpGetAccountLanguage2(CpuContext ctx) => SignedOutAccountRequest(ctx);
+
+    [SysAbiExport(Nid = "+4DegjBqV1g", ExportName = "sceNpGetAccountAge", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
+    public static int NpGetAccountAge(CpuContext ctx) => SignedOutAccountRequest(ctx);
+
+    private static int SignedOutAccountRequest(CpuContext ctx)
+    {
+        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var userId = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (requestId <= 0 || userId == -1 || ctx[CpuRegister.Rdx] == 0)
+        {
+            return SetReturn(ctx, NpErrorInvalidArgument);
+        }
+
+        _requestResults[requestId] = NpErrorSignedOut;
+        return SetReturn(ctx, NpErrorSignedOut);
+    }
+
     [SysAbiExport(Nid = "GpLQDNKICac", ExportName = "sceNpCreateRequest", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
     public static int NpCreateRequest(CpuContext ctx) => SetReturn(ctx, NextLiveRequestId());
 
@@ -449,23 +471,6 @@ public static class NpManagerExports
     /// PSN account, which a signed-out profile does not have, so this fails SIGNED_OUT without
     /// writing the output. (The output layout is not confirmed by either reference.)
     /// </summary>
-    [SysAbiExport(
-        Nid = "3Tcz5bNCfZQ",
-        ExportName = "sceNpGetAccountLanguage2",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNpManager")]
-    public static int NpGetAccountLanguage2(CpuContext ctx)
-    {
-        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
-        if (requestId <= 0 || unchecked((int)ctx[CpuRegister.Rsi]) == -1 || ctx[CpuRegister.Rdx] == 0)
-        {
-            return SetReturn(ctx, NpErrorInvalidArgument);
-        }
-
-        _requestResults[requestId] = NpErrorSignedOut;
-        return SetReturn(ctx, NpErrorSignedOut);
-    }
-
     /// <summary>
     /// Gen5 ABI: request id, resolve retry count, then resolve, connect, send and receive
     /// timeouts in microseconds. The validation follows shadPS4 via the anyps5 notes and is

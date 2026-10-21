@@ -7,17 +7,28 @@ namespace SharpEmu.HLE.GpuMemory;
 
 internal readonly record struct PermissionRange(ulong Address, ulong Size, GuestPageProtection Protection);
 
+// Nodes never change once built: a change builds new nodes along its path and shares the rest, so a
+// snapshot stays whole while the tree changes and can be read without a lock.
 internal sealed class PermissionRangeTree : IEnumerable<PermissionRange>
 {
-    private sealed class Node(PermissionRange range)
+    private sealed class Node(PermissionRange range, Node? left, Node? right)
     {
-        internal PermissionRange Range = range;
-        internal Node? Left;
-        internal Node? Right;
-        internal int Height = 1;
+        internal readonly PermissionRange Range = range;
+        internal readonly Node? Left = left;
+        internal readonly Node? Right = right;
+        internal readonly int Height = 1 + Math.Max(left?.Height ?? 0, right?.Height ?? 0);
     }
 
     private Node? _root;
+
+    public PermissionRangeTree()
+    {
+    }
+
+    private PermissionRangeTree(Node? root) => _root = root;
+
+    // The records as they are now; later changes to this tree do not reach the snapshot.
+    public PermissionRangeTree Snapshot() => new(_root);
 
     public PermissionRange this[ulong address]
     {
@@ -25,28 +36,26 @@ internal sealed class PermissionRangeTree : IEnumerable<PermissionRange>
         {
             if (address != value.Address)
                 throw new ArgumentException("The key must match the permission-range address.", nameof(address));
-            var current = _root;
-            while (current is not null)
-            {
-                if (address == current.Range.Address)
-                {
-                    current.Range = value;
-                    return;
-                }
-                current = address < current.Range.Address ? current.Left : current.Right;
-            }
-            Add(value);
+            var added = false;
+            _root = Insert(_root, value, replace: true, ref added);
         }
     }
 
-    public PermissionRange? FindAtOrBelow(ulong address)
+    public PermissionRange? FindAtOrBelow(ulong address) => FindAtOrBelow(address, out _);
+
+    // nextAddress is the start of the first record above the address, or ulong.MaxValue without one.
+    public PermissionRange? FindAtOrBelow(ulong address, out ulong nextAddress)
     {
         var current = _root;
         PermissionRange? result = null;
+        nextAddress = ulong.MaxValue;
         while (current is not null)
         {
             if (current.Range.Address > address)
+            {
+                nextAddress = current.Range.Address;
                 current = current.Left;
+            }
             else
             {
                 result = current.Range;
@@ -76,92 +85,68 @@ internal sealed class PermissionRangeTree : IEnumerable<PermissionRange>
     public bool Add(PermissionRange range)
     {
         var added = false;
-        _root = Insert(_root, range, ref added);
+        _root = Insert(_root, range, replace: false, ref added);
         return added;
     }
 
     public void Remove(PermissionRange range) => _root = RemoveNode(_root, range.Address);
     public void Clear() => _root = null;
 
-    private static Node Insert(Node? node, PermissionRange range, ref bool added)
+    private static Node Insert(Node? node, PermissionRange range, bool replace, ref bool added)
     {
         if (node is null)
         {
             added = true;
-            return new Node(range);
+            return new Node(range, null, null);
         }
         if (range.Address < node.Range.Address)
-            node.Left = Insert(node.Left, range, ref added);
-        else if (range.Address > node.Range.Address)
-            node.Right = Insert(node.Right, range, ref added);
-        else
-            return node;
-        return Balance(node);
+            return Balance(node.Range, Insert(node.Left, range, replace, ref added), node.Right);
+        if (range.Address > node.Range.Address)
+            return Balance(node.Range, node.Left, Insert(node.Right, range, replace, ref added));
+        return replace ? new Node(range, node.Left, node.Right) : node;
     }
 
     private static Node? RemoveNode(Node? node, ulong address)
     {
         if (node is null) return null;
         if (address < node.Range.Address)
-            node.Left = RemoveNode(node.Left, address);
-        else if (address > node.Range.Address)
-            node.Right = RemoveNode(node.Right, address);
-        else
-        {
-            if (node.Left is null) return node.Right;
-            if (node.Right is null) return node.Left;
-            var successor = node.Right;
-            while (successor.Left is not null)
-                successor = successor.Left;
-            node.Range = successor.Range;
-            node.Right = RemoveNode(node.Right, successor.Range.Address);
-        }
-        return Balance(node);
+            return Balance(node.Range, RemoveNode(node.Left, address), node.Right);
+        if (address > node.Range.Address)
+            return Balance(node.Range, node.Left, RemoveNode(node.Right, address));
+        if (node.Left is null) return node.Right;
+        if (node.Right is null) return node.Left;
+        var successor = node.Right;
+        while (successor.Left is not null)
+            successor = successor.Left;
+        return Balance(successor.Range, node.Left, RemoveNode(node.Right, successor.Range.Address));
     }
 
     private static int Height(Node? node) => node?.Height ?? 0;
 
-    private static void UpdateHeight(Node node) =>
-        node.Height = 1 + Math.Max(Height(node.Left), Height(node.Right));
-
-    private static Node Balance(Node node)
+    // A new node over the two subtrees, rotated when one of them is two levels deeper.
+    private static Node Balance(PermissionRange range, Node? left, Node? right)
     {
-        UpdateHeight(node);
-        var difference = Height(node.Left) - Height(node.Right);
+        var difference = Height(left) - Height(right);
         if (difference > 1)
         {
-            if (Height(node.Left!.Left) < Height(node.Left.Right))
-                node.Left = RotateLeft(node.Left);
-            return RotateRight(node);
+            if (Height(left!.Left) < Height(left.Right))
+                left = RotateLeft(left.Range, left.Left, left.Right!);
+            return RotateRight(range, left, right);
         }
         if (difference < -1)
         {
-            if (Height(node.Right!.Right) < Height(node.Right.Left))
-                node.Right = RotateRight(node.Right);
-            return RotateLeft(node);
+            if (Height(right!.Right) < Height(right.Left))
+                right = RotateRight(right.Range, right.Left!, right.Right);
+            return RotateLeft(range, left, right);
         }
-        return node;
+        return new Node(range, left, right);
     }
 
-    private static Node RotateLeft(Node node)
-    {
-        var replacement = node.Right!;
-        node.Right = replacement.Left;
-        replacement.Left = node;
-        UpdateHeight(node);
-        UpdateHeight(replacement);
-        return replacement;
-    }
+    private static Node RotateLeft(PermissionRange range, Node? left, Node right) =>
+        new(right.Range, new Node(range, left, right.Left), right.Right);
 
-    private static Node RotateRight(Node node)
-    {
-        var replacement = node.Left!;
-        node.Left = replacement.Right;
-        replacement.Right = node;
-        UpdateHeight(node);
-        UpdateHeight(replacement);
-        return replacement;
-    }
+    private static Node RotateRight(PermissionRange range, Node left, Node? right) =>
+        new(left.Range, left.Left, new Node(range, left.Right, right));
 
     public IEnumerator<PermissionRange> GetEnumerator()
     {

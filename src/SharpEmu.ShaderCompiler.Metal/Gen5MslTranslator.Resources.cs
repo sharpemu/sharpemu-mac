@@ -291,7 +291,7 @@ public static partial class Gen5MslTranslator
             var isStorage = resourceClass == ImageResourceClass.Storage;
             var componentKind = numericClass switch
             {
-                ImageNumericClass.Uint => "uint",
+                ImageNumericClass.Uint or ImageNumericClass.Uint64 => "uint",
                 ImageNumericClass.Sint => "int",
                 _ => "float",
             };

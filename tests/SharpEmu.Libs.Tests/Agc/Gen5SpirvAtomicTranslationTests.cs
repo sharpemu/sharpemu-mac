@@ -17,6 +17,9 @@ public sealed class Gen5SpirvAtomicTranslationTests
     private const ulong ShaderAddress = 0x1_0000_0000;
     private const ulong BufferAddress = 0x1_0000_1000;
 
+    // SPIR-V decoration 23.
+    private const uint CoherentDecoration = 23;
+
     [Fact]
     public void BufferAtomics_EmitAtomicOpcodes()
     {
@@ -164,6 +167,29 @@ public sealed class Gen5SpirvAtomicTranslationTests
         Assert.Contains((ushort)SpirvOp.AtomicIAdd, opcodes);
     }
 
+    [Fact]
+    public void BufferAtomics_MakeGuestBuffersCoherent()
+    {
+        // BUFFER_ATOMIC_UMAX v1 against the V# in s[0:3]. A shader that publishes through an atomic shares that memory with the
+        // other thread groups, so its plain loads must not be served from a cache that predates their stores.
+        var spirv = CompileComputeSpirv(
+            [0xE0E04008, 0x80000100],
+            BufferDescriptorRegisters());
+
+        Assert.True(HasDecoration(spirv, CoherentDecoration));
+    }
+
+    [Fact]
+    public void BufferLoadsWithoutAtomics_KeepGuestBuffersNonCoherent()
+    {
+        // BUFFER_LOAD_DWORD v1 against the V# in s[0:3]: nothing in this program communicates through the buffer.
+        var spirv = CompileComputeSpirv(
+            [0xE0300000, 0x80000100],
+            BufferDescriptorRegisters());
+
+        Assert.False(HasDecoration(spirv, CoherentDecoration));
+    }
+
     private static Dictionary<uint, uint> BufferDescriptorRegisters() => new()
     {
         // V# in s[0:3]: base=BufferAddress, stride=0, numRecords=64 bytes, type=0.
@@ -232,6 +258,28 @@ public sealed class Gen5SpirvAtomicTranslationTests
         }
 
         return opcodes;
+    }
+
+    private static bool HasDecoration(byte[] spirv, uint decoration)
+    {
+        for (var offset = 5 * sizeof(uint); offset + sizeof(uint) <= spirv.Length;)
+        {
+            var word = BinaryPrimitives.ReadUInt32LittleEndian(
+                spirv.AsSpan(offset, sizeof(uint)));
+            var wordCount = Math.Max((int)(word >> 16), 1);
+            // OpDecorate <target> <decoration> [operands].
+            if ((ushort)word == (ushort)SpirvOp.Decorate &&
+                wordCount >= 3 &&
+                BinaryPrimitives.ReadUInt32LittleEndian(
+                    spirv.AsSpan(offset + (2 * sizeof(uint)), sizeof(uint))) == decoration)
+            {
+                return true;
+            }
+
+            offset += wordCount * sizeof(uint);
+        }
+
+        return false;
     }
 
     private static bool ContainsConstant(byte[] spirv, uint expected)

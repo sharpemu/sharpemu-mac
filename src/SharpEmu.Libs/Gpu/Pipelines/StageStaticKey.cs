@@ -102,9 +102,9 @@ public static class StageStaticKey
         key.Add(Bit(info.StencilExportEnable));
         key.Add(info.DepthExportFormat is { } depthFormat ? (uint)depthFormat : uint.MaxValue);
         key.Add(Bit(info.EarlyDepth));
-        foreach (var mode in info.TargetOutputModes)
+        for (var index = 0; index < info.TargetOutputModes.Length; index++)
         {
-            key.Add(mode);
+            key.Add(info.TargetOutputModes[index] | (uint)info.TargetExportFormats[index] << 8);
         }
 
         for (var first = 0; first < PixelInputInfo.TargetCount; first += 4)
@@ -131,6 +131,7 @@ public static class StageStaticKey
         key.Add(info.Execution.DeviceSubgroupLaneCount);
         key.Add(Bit(info.Geometry.InputTriangleStrip));
         key.Add(Bit(info.Geometry.InputPointList));
+        key.Add(Bit(info.Geometry.InputLineList));
         key.Add(info.Geometry.InputPrimitiveCountPerWorkgroup);
         key.Add(info.Geometry.InputVertexCountPerWorkgroup);
         key.Add(info.Geometry.OutputVertexCapacity);

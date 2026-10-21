@@ -644,10 +644,11 @@ public sealed partial class RenderExecutor
         var patternLength = 1;
         var uniform = true;
         patternWords[0] = value;
-        if (fill.PatternLength is { } lengthWord)
+        if (fill.Pattern is { } pattern)
         {
-            if (fill.Pattern is not { } pattern || !TryResolveFillWord(lengthWord, userData, out var length) || length == 0 ||
-                length > pattern.Length || length > patternWords.Length)
+            var length = (uint)pattern.Length;
+            if (length > patternWords.Length || (fill.PatternLength is { } lengthWord &&
+                (!TryResolveFillWord(lengthWord, userData, out length) || length == 0 || length > pattern.Length)))
             {
                 return RefuseBoundedFill(program, "pattern length");
             }

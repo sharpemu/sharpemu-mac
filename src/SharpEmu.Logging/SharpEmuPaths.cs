@@ -47,6 +47,49 @@ public static class SharpEmuPaths
     /// <summary>Marker file that selects portable mode for a macOS bundle.</summary>
     public const string PortableMarkerFileName = "portable.txt";
 
+    private static string PortableDirectory => TryGetMacBundleRoot(AppContext.BaseDirectory, out var bundle)
+        ? Path.GetDirectoryName(bundle)! : AppContext.BaseDirectory;
+
+    /// <summary>Marker file beside the executable that forces portable mode.</summary>
+    public static string PortableMarkerPath =>
+        Path.Combine(PortableDirectory, PortableMarkerFileName);
+
+    /// <summary>True when the portable marker file exists beside the executable.</summary>
+    public static bool IsPortableMarkerPresent() => File.Exists(PortableMarkerPath);
+
+    /// <summary>
+    /// True when the executable directory is writable, i.e. portable mode can
+    /// still be enabled from the GUI.
+    /// </summary>
+    public static bool CanWriteExecutableDirectory() => IsWritable(PortableDirectory);
+
+    /// <summary>
+    /// Creates or removes the portable marker. Returns false when the marker
+    /// could not be written or removed (read-only executable directory).
+    /// </summary>
+    public static bool SetPortableMarker(bool enabled)
+    {
+        try
+        {
+            if (enabled)
+            {
+                File.WriteAllText(
+                    PortableMarkerPath,
+                    "SharpEmu keeps its data (settings, saves, caches, logs) next to the executable while this file exists.\n");
+            }
+            else
+            {
+                File.Delete(PortableMarkerPath);
+            }
+
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private const string ApplicationSupportFolderName = "SharpEmu";
 
     /// <summary>
@@ -75,9 +118,21 @@ public static class SharpEmuPaths
             return Path.GetFullPath(configured);
         }
 
+        var userDirectory = Environment.GetEnvironmentVariable("SHARPEMU_USER_DIR");
+        if (!string.IsNullOrWhiteSpace(userDirectory))
+            return Path.GetFullPath(userDirectory);
+
         if (!TryGetMacBundleRoot(baseDirectory, out var bundleRoot))
         {
-            return baseDirectory;
+            if (File.Exists(Path.Combine(baseDirectory, PortableMarkerFileName)) ||
+                Directory.Exists(Path.Combine(baseDirectory, "user")) || IsWritable(baseDirectory))
+                return baseDirectory;
+            return OperatingSystem.IsLinux()
+                ? Path.Combine(XdgDataHome(), ApplicationSupportFolderName)
+                : OperatingSystem.IsMacOS()
+                    ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                        "Library", "Application Support", ApplicationSupportFolderName)
+                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ApplicationSupportFolderName);
         }
 
         // Portable mode: data sits beside SharpEmu.app, not inside it.
@@ -93,6 +148,38 @@ public static class SharpEmuPaths
             "Library",
             "Application Support",
             ApplicationSupportFolderName);
+    }
+
+    private static string XdgDataHome()
+    {
+        var dataHome = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+        if (!string.IsNullOrWhiteSpace(dataHome))
+        {
+            return dataHome;
+        }
+
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".local",
+            "share");
+    }
+
+    private static bool IsWritable(string directory)
+    {
+        try
+        {
+            var probe = Path.Combine(directory, $".sharpemu-write-probe-{Environment.ProcessId}");
+            using (File.Create(probe))
+            {
+            }
+
+            File.Delete(probe);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     /// <summary>Combines <paramref name="parts"/> onto <see cref="DataRoot"/>.</summary>

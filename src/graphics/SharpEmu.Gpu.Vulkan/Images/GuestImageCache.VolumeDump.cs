@@ -14,6 +14,8 @@ using SharpEmu.Libs.VideoOut;
 using SharpEmu.Gpu.Vulkan.Buffers;
 using SharpEmu.Gpu.Vulkan.Scheduling;
 
+using SharpEmu.Logging;
+
 namespace SharpEmu.Gpu.Vulkan.Images;
 
 public sealed unsafe partial class GuestImageCache
@@ -72,7 +74,7 @@ public sealed unsafe partial class GuestImageCache
         var totalSize = sourceSize + linear.Size;
         var download = new GpuBuffer(_device, _scheduler, GpuBufferUsage.Download, 0,
             BufferUsageFlags.TransferDstBit, totalSize);
-        var directory = Path.Combine(AppContext.BaseDirectory, "user", "logs", "volume-uploads", _volumeDumpSession);
+        var directory = Path.Combine(SharpEmuPaths.DataRoot, "user", "logs", "volume-uploads", _volumeDumpSession);
         var stem = $"{description.Data.Address:X16}-{_scheduler.CurrentTick}-{uploadNumber}";
         var manifest = System.Text.Json.JsonSerializer.Serialize(new
         {

@@ -378,6 +378,10 @@ public sealed partial class GuestImageCache
             return false;
         }
 
+        // Readbacks still to land keep the stored pages. An evicted image owns no pages, so they hear of the
+        // store before the owner checks, and outside the image lock.
+        _readbackLandings.NoteGuestStore(address, size);
+
         // Skip the lock only when neither image pages nor metadata can cover the write.
         if (!MayOwnPages(address, size) && !MayOverlapMetadata(address, size))
         {
@@ -424,6 +428,7 @@ public sealed partial class GuestImageCache
             throw SubmissionScheduler.Fatal($"The memory invalidation range is invalid: address=0x{address:X16} size=0x{size:X16}.");
         }
 
+        _readbackLandings.NoteGuestStore(address, size);
         using var held = _lock.Hold();
         InvalidateAliases(address, size);
     }
@@ -474,11 +479,22 @@ public sealed partial class GuestImageCache
         return covered;
     }
 
-    public void InvalidateMemoryFromGpu(ulong address, ulong size)
+    public void InvalidateMemoryFromGpu(ulong address, ulong size) => InvalidateMemoryFromGpu(address, size, publish: true);
+
+    // A formatted shader write whose images were published when its stage was prepared: the images under it
+    // lose their ownership only after its buffer took the contents of an image it starts at.
+    public void InvalidateMemoryFromGpuAfterPublish(ulong address, ulong size) => InvalidateMemoryFromGpu(address, size, publish: false);
+
+    private void InvalidateMemoryFromGpu(ulong address, ulong size, bool publish)
     {
         if (!IsValidRange(address, size))
         {
             return;
+        }
+
+        if (publish)
+        {
+            PublishPartlyWrittenImages(address, size);
         }
 
         using var held = _lock.Hold();
@@ -502,6 +518,124 @@ public sealed partial class GuestImageCache
         }
     }
 
+    // A write over part of a GPU-modified image leaves the image's other bytes in memory: its GPU-only
+    // contents move into the buffer over its range first, so its next upload, or another image over those
+    // bytes, starts from them instead of stale guest memory. Buffer bytes the GPU wrote under the image
+    // before it are older than its contents: a buffer write after it over part of it published it then.
+    // A raw binding over the whole image leaves it GPU-modified; its bytes may be newer than the image,
+    // so such an image is not published. A formatted write takes the ownership of the whole images under
+    // it too, which then publish as well. The buffer is obtained outside the lock; contents that cannot
+    // be copied are lost as before.
+    private void PublishPartlyWrittenImages(ulong address, ulong size, bool wholeImages = false)
+    {
+        List<ResourceSlotIdentifier>? partlyWritten = null;
+        using (var held = _lock.Hold())
+        {
+            foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+            {
+                var image = _slots[imageIdentifier];
+                var range = image.Description.Data;
+                if (image.IsGpuModified && !image.DepthOwner.IsValid && image.Overlaps(address, size) &&
+                    (wholeImages || address > range.Address || address + size < range.Address + range.Size) &&
+                    image.SafeToDownload && !image.RawWriteAfterGpuWrite && !HasNewerHandedOverImage(imageIdentifier, image))
+                {
+                    (partlyWritten ??= []).Add(imageIdentifier);
+                }
+            }
+
+            // Images over the same bytes publish in the order the GPU wrote them, so the buffer ends with
+            // the newest contents whichever image the owner table lists first.
+            partlyWritten?.Sort((left, right) => _slots[left].GpuWriteSequence.CompareTo(_slots[right].GpuWriteSequence));
+        }
+
+        foreach (var imageIdentifier in partlyWritten ?? [])
+        {
+            GuestSpan range;
+            using (var held = _lock.Hold())
+            {
+                if (_slots.TryGet(imageIdentifier) is not { IsGpuModified: true } image)
+                {
+                    continue;
+                }
+
+                range = image.Description.Data;
+            }
+
+            if (_bufferCache.ObtainBufferForImageWriteBack(range.Address, range.Size) is not { } buffer)
+            {
+                continue;
+            }
+
+            using (var held = _lock.Hold())
+            {
+                // The buffer was obtained outside the lock, which can land held writes and run completed work:
+                // the image must still be safe to download and the newest owner of its bytes.
+                if (_slots.TryGet(imageIdentifier) is { IsGpuModified: true, SafeToDownload: true, RawWriteAfterGpuWrite: false } image &&
+                    !HasNewerHandedOverImage(imageIdentifier, image) && TryDownloadImageToBuffer(image, buffer))
+                {
+                    image.ClearGpuModified();
+                    MarkOlderOverlappingImagesOverwritten(imageIdentifier, image);
+                }
+            }
+        }
+    }
+
+    // A newer GPU-written image over the same memory that has already handed its bytes to the buffer (or lost
+    // them to a CPU write): publishing this older image would put its stale contents over them. Newer images
+    // that still hold their bytes publish after this one, oldest first. The caller holds the lock.
+    private bool HasNewerHandedOverImage(ResourceSlotIdentifier imageIdentifier, CachedImage image)
+    {
+        var range = image.Description.Data;
+        foreach (var otherIdentifier in FindImagesInRange(range.Address, range.Size, pageOverlap: false))
+        {
+            if (otherIdentifier != imageIdentifier && _slots.TryGet(otherIdentifier) is { IsGpuModified: false } other &&
+                other.DepthOwner != imageIdentifier && other.GpuWriteSequence > image.GpuWriteSequence && other.Overlaps(range.Address, range.Size))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // After a publish the buffer holds this image's bytes over its whole range; an older GPU-written image
+    // over the same memory must not publish its contents over them later. The caller holds the lock.
+    private void MarkOlderOverlappingImagesOverwritten(ResourceSlotIdentifier imageIdentifier, CachedImage image)
+    {
+        var range = image.Description.Data;
+        foreach (var otherIdentifier in FindImagesInRange(range.Address, range.Size, pageOverlap: false))
+        {
+            if (otherIdentifier != imageIdentifier && _slots.TryGet(otherIdentifier) is { IsGpuModified: true } other &&
+                other.GpuWriteSequence < image.GpuWriteSequence && other.Overlaps(range.Address, range.Size))
+            {
+                other.MarkRawWriteAfterGpuWrite();
+            }
+        }
+    }
+
+    // A raw binding that covers only part of a GPU-modified image names memory the guest gave to a buffer.
+    // Before the shader writes it, the image's contents move into the buffer, so no later publish of the
+    // image can put them over the shader's bytes. A binding that covers an image whole may be a window
+    // that never writes there; the image keeps its bytes.
+    public void PublishImagesUnderRawWrite(ulong address, ulong size)
+    {
+        if (IsValidRange(address, size))
+        {
+            PublishPartlyWrittenImages(address, size);
+        }
+    }
+
+    // A formatted binding takes the ownership of every image under it once its buffer is obtained, while its
+    // shader may write only part of the window. The images it covers whole move their contents into the
+    // buffer first as well, so the bytes the shader leaves keep them.
+    public void PublishImagesUnderFormattedWrite(ulong address, ulong size)
+    {
+        if (IsValidRange(address, size))
+        {
+            PublishPartlyWrittenImages(address, size, wholeImages: true);
+        }
+    }
+
     // A GPU-modified image owns its bytes; a raw binding can overlap it without writing there.
     public void InvalidateMemoryCopiesFromGpu(ulong address, ulong size)
     {
@@ -515,8 +649,14 @@ public sealed partial class GuestImageCache
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
         {
             var image = _slots[imageIdentifier];
-            if (image.DepthOwner.IsValid || image.IsGpuModified || !image.Overlaps(address, size))
+            if (image.DepthOwner.IsValid || !image.Overlaps(address, size))
             {
+                continue;
+            }
+
+            if (image.IsGpuModified)
+            {
+                image.MarkRawWriteAfterGpuWrite();
                 continue;
             }
 

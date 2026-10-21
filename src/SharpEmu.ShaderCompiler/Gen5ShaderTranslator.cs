@@ -21,6 +21,7 @@ public static partial class Gen5ShaderTranslator
     private const ulong FusedContinuationAlignment = 0x100;
     private const ulong ShaderSizeOffset = 0x44;
     private const uint MaximumDeclaredShaderSizeBytes = 1024 * 1024;
+    private const uint NullScalarRegister = 125;
     private static readonly ConditionalWeakTable<object, FusedProgramRegistry> _fusedProgramsByMemory = new();
 
     private sealed class FusedProgramRegistry
@@ -72,7 +73,8 @@ public static partial class Gen5ShaderTranslator
 
     /// <summary>
     /// Records the two code objects that AGC joins into one hardware shader.
-    /// The entry code transfers control to the continuation with S_SETPC_B64.
+    /// The entry code transfers control to the continuation with S_SETPC_B64, or with an
+    /// S_SWAPPC_B64 that writes the return address to NULL.
     /// </summary>
     public static void RegisterFusedProgram(
         CpuContext ctx,
@@ -334,6 +336,12 @@ public static partial class Gen5ShaderTranslator
         return true;
     }
 
+    // S_SWAPPC_B64 stores the address of the next instruction in its destination. With the NULL destination
+    // it stores nothing, so it jumps like S_SETPC_B64 does and the code after it is not reached from here.
+    private static bool IsSwapProgramCounterWithoutReturnAddress(Gen5ShaderInstruction instruction) =>
+        string.Equals(instruction.Opcode, "SSwappcB64", StringComparison.Ordinal) &&
+        instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: NullScalarRegister }];
+
     private static bool TryDecodeProgramSegment(
         CpuContext ctx,
         ulong address,
@@ -465,7 +473,8 @@ public static partial class Gen5ShaderTranslator
             }
 
             if (stopAtSetProgramCounter &&
-                string.Equals(name, "SSetpcB64", StringComparison.Ordinal) &&
+                (string.Equals(name, "SSetpcB64", StringComparison.Ordinal) ||
+                 IsSwapProgramCounterWithoutReturnAddress(instruction)) &&
                 (!coverForwardBranches || pc > furthestForwardBranchTarget))
             {
                 program = new Gen5ShaderProgram(address, instructions);
@@ -1615,7 +1624,7 @@ public static partial class Gen5ShaderTranslator
             0x36D => "VAdd3U32",
             0x36F => "VLshlOrU32",
             0x178 => "VXor3B32",
-            // VOP1 opcode 0x52 is available through VOP3 as opcode 0x1D2.
+            // VOP1 opcodes 0x50-0x53 are available through VOP3 as opcodes 0x1D0-0x1D3.
             0x1D2 => "VCvtU16F16",
             0x371 => "VAndOrB32",
             0x372 => "VOr3U32",

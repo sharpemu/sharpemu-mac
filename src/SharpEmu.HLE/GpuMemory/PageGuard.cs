@@ -316,9 +316,13 @@ public sealed class PageGuard : IDisposable
         var runStart = begin;
         var runAllowedAccess = GuestPageProtection.None;
         var runGuestAccess = GuestPageProtection.None;
+        var guestAccess = GuestPageProtection.None;
+        var guestValidEnd = 0UL;
         for (var address = begin; address < end; address += PageBytes)
         {
-            var guestAccess = Permissions.Lookup(address);
+            // Neighbouring pages mostly share a ledger record: look up again only where its answer stops holding.
+            if (address >= guestValidEnd)
+                guestAccess = Permissions.Lookup(address, out guestValidEnd);
             var allowedAccess = Derive(guestAccess, block.Pages[(int)(address % BlockBytes / PageBytes)].GetAllowedAccess());
             if (address != begin && (allowedAccess != runAllowedAccess || guestAccess != runGuestAccess))
             {
@@ -340,8 +344,11 @@ public sealed class PageGuard : IDisposable
         // Allocate before adding protection, never while resolving a fault.
         if (track) block.WriteRestorations ??= new long[PagesPerBlock];
         var restorationVersion = 0L;
-        var runGuestAccess = Permissions.Lookup(blockBase + (ulong)first * PageBytes);
-        var allowedAccess = Derive(runGuestAccess, pages[first].GetAllowedAccess());
+        // Neighbouring pages mostly share a ledger record: look up again only where its answer stops holding.
+        // A ledger change waits for this block lock and then derives its pages again (Reapply).
+        var guest = Permissions.Lookup(blockBase + (ulong)first * PageBytes, out var guestValidEnd);
+        var runGuestAccess = guest;
+        var allowedAccess = Derive(guest, pages[first].GetAllowedAccess());
         var rangeBegin = 0;
         var rangeBytes = 0UL;
         var potentialRangeBytes = 0UL;
@@ -364,7 +371,8 @@ public sealed class PageGuard : IDisposable
             var address = blockBase + (ulong)pageIndex * PageBytes;
             var update = !masked || mask.Get(pageIndex);
 
-            var guest = Permissions.Lookup(address);
+            if (address >= guestValidEnd)
+                guest = Permissions.Lookup(address, out guestValidEnd);
             var oldAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
             var newCount = pages[pageIndex].ChangeWatchCount(update ? (track ? 1 : -1) : 0, isRead, address, WriteWatchLimit);
             if (update && !isRead)

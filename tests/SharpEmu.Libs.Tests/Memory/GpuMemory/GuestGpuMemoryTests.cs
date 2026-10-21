@@ -304,12 +304,27 @@ public sealed class GuestGpuMemoryTests
         _memory.Register(0x10000, 0x1000, ReadWrite);
 
         Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x20000));
-        Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x10FFC));
         Assert.False(_memory.MarkCpuWrite(0x20000, 0x10));
         Assert.Empty(_stores.Calls);
 
         Assert.True(_memory.MarkCpuWrite(0x10100, 0x10));
         Assert.Equal(new[] { "buffer.write 10100+10", "image.write 10100+10" }, _stores.Calls);
+
+        _memory.Unregister(0x10000, 0x1000);
+        _memory.Dispose();
+    }
+
+    // The fault address lies in the page whose protection stopped the access; a store to the last
+    // bytes of a span is resolved there, and an access that also reaches the next page faults again on it.
+    [Fact]
+    public void TryResolveFault_ResolvesAccessesToTheLastBytesOfASpan()
+    {
+        _stores.BufferHandles = true;
+        _memory.Register(0x10000, 0x1000, ReadWrite);
+
+        Assert.True(_memory.TryResolveFault(FaultKind.Write, 0x10FFC));
+        Assert.True(_memory.TryResolveFault(FaultKind.Read, 0x10FFC));
+        Assert.Equal(new[] { "buffer.write 10FFC+4", "image.write 10FFC+4", "buffer.pull 10FFC+4" }, _stores.Calls);
 
         _memory.Unregister(0x10000, 0x1000);
         _memory.Dispose();

@@ -48,8 +48,45 @@ public sealed class Http2ExportsTests
         Assert.Equal(unchecked((int)0x817B5224), Http2Exports.Http2SendRequest(ctx));
 
         ctx[CpuRegister.Rdi] = unchecked((uint)requestId);
+        ctx[CpuRegister.Rcx] = MemoryBase + 0x400;
+        ctx[CpuRegister.R8] = 0;
+        Assert.Equal(unchecked((int)0x817B5224), Http2Exports.Http2SendRequestAsync(ctx));
+
+        ctx[CpuRegister.Rdi] = unchecked((uint)requestId);
         Assert.Equal(0, Http2Exports.Http2DeleteRequest(ctx));
         Assert.Equal(unchecked((int)0x817B1100), Http2Exports.Http2DeleteRequest(ctx));
+        Assert.Equal(unchecked((int)0x817B1100), Http2Exports.Http2SendRequestAsync(ctx));
+    }
+
+    [Fact]
+    public void GetMemoryPoolStats_ReportsTheContextPoolWithNothingInUse()
+    {
+        Http2Exports.ResetRuntimeState();
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        ctx[CpuRegister.Rdi] = 1;
+        ctx[CpuRegister.Rsi] = 2;
+        ctx[CpuRegister.Rdx] = 0x18000;
+        ctx[CpuRegister.Rcx] = 4;
+        Assert.Equal(0, Http2Exports.Http2Init(ctx));
+        var contextId = ctx[CpuRegister.Rax];
+
+        var statsAddress = MemoryBase + 0x100;
+        Assert.True(memory.TryWrite(statsAddress, Enumerable.Repeat((byte)0xCC, 32).ToArray()));
+        ctx[CpuRegister.Rdi] = contextId;
+        ctx[CpuRegister.Rsi] = statsAddress;
+        Assert.Equal(0, Http2Exports.Http2GetMemoryPoolStats(ctx));
+        var stats = new byte[32];
+        Assert.True(memory.TryRead(statsAddress, stats));
+        Assert.Equal(0x18000UL, BitConverter.ToUInt64(stats, 0));
+        Assert.All(stats[8..], value => Assert.Equal(0, value));
+
+        ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(unchecked((int)0x817B1225), Http2Exports.Http2GetMemoryPoolStats(ctx));
+
+        ctx[CpuRegister.Rdi] = 0x7FFF_FFFF;
+        ctx[CpuRegister.Rsi] = statsAddress;
+        Assert.Equal(unchecked((int)0x817B1100), Http2Exports.Http2GetMemoryPoolStats(ctx));
     }
 
     [Fact]
@@ -153,6 +190,8 @@ public sealed class Http2ExportsTests
         Assert.Equal(0, Http2Exports.Http2SetRecvTimeOut(ctx));
         ctx[CpuRegister.Rsi] = 303;
         Assert.Equal(0, Http2Exports.Http2SetSendTimeOut(ctx));
+        ctx[CpuRegister.Rsi] = 505;
+        Assert.Equal(0, Http2Exports.Http2SetResolveTimeOut(ctx));
 
         ctx[CpuRegister.Rsi] = 7;
         Assert.Equal(0, Http2Exports.Http2SetAuthEnabled(ctx));
@@ -169,6 +208,7 @@ public sealed class Http2ExportsTests
         Assert.Equal(101u, templateOptions.ConnectTimeoutMicroseconds);
         Assert.Equal(202u, templateOptions.ReceiveTimeoutMicroseconds);
         Assert.Equal(303u, templateOptions.SendTimeoutMicroseconds);
+        Assert.Equal(505u, templateOptions.ResolveTimeoutMicroseconds);
         Assert.True(templateOptions.AuthEnabled);
         Assert.Equal(0x1111_2222UL, templateOptions.SslCallback);
         Assert.Equal(0x3333_4444UL, templateOptions.SslUserArgument);
@@ -205,6 +245,7 @@ public sealed class Http2ExportsTests
             Http2Exports.Http2SetConnectTimeOut,
             Http2Exports.Http2SetRecvTimeOut,
             Http2Exports.Http2SetSendTimeOut,
+            Http2Exports.Http2SetResolveTimeOut,
             Http2Exports.Http2SetAuthEnabled,
             Http2Exports.Http2SetSslCallback,
         ];
@@ -301,6 +342,9 @@ public sealed class Http2ExportsTests
     [InlineData("-HIO4VT87v8", "sceHttp2SetConnectTimeOut")]
     [InlineData("izvHhqgDt44", "sceHttp2SetRecvTimeOut")]
     [InlineData("XPtW45xiLHk", "sceHttp2SetSendTimeOut")]
+    [InlineData("ACjtE27aErY", "sceHttp2SetResolveTimeOut")]
+    [InlineData("otUQuZa-mv0", "sceHttp2GetMemoryPoolStats")]
+    [InlineData("A+NVAFu4eCg", "sceHttp2SendRequestAsync")]
     [InlineData("jjFahkBPCYs", "sceHttp2SetAuthEnabled")]
     [InlineData("nrPfOE8TQu0", "sceHttp2AddRequestHeader")]
     [InlineData("YrWX+DhPHQY", "sceHttp2SetSslCallback")]

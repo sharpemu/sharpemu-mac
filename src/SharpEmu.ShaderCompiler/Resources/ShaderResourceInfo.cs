@@ -21,6 +21,8 @@ public enum ImageNumericClass : byte
     Float,
     Uint,
     Sint,
+    // A 64-bit unsigned view of a 64 bits per texel image; only image atomics use it.
+    Uint64,
 }
 
 public enum ImageMipMode : byte
@@ -249,6 +251,10 @@ public sealed record IndirectImageSelector(
     // A dense table a V# describes, read through a per-entry handle table on the device
     // instead of a bounded set of bound candidates.
     public bool Bindless { get; init; }
+
+    // The key is selected by a value the whole wave shares (a loop counter), not by a lane's value. Such an image
+    // used to read as a null image, so a table the host cannot read stays null instead of failing the program.
+    public bool SharedSelector { get; init; }
 
     // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
     public uint MaterialImmediate { get; init; }

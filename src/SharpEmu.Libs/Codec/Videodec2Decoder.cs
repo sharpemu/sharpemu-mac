@@ -202,6 +202,7 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
             // Must be set before any ffmpeg.* call, or bindings resolve against the empty default RootPath.
             ffmpeg.RootPath = Path.Combine(AppContext.BaseDirectory, "plugins");
             DynamicallyLoadedBindings.Initialize();
+            ffmpeg.av_log_set_level(ffmpeg.AV_LOG_ERROR);
         }
     }
 

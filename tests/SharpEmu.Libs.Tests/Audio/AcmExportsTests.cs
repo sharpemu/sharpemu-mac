@@ -99,7 +99,24 @@ public sealed class AcmExportsTests : IDisposable
             Assert.Equal("sceAcmBatchStartBuffers", start.Name);
             Assert.True(manager.TryGetExport("RLN3gRlXJLE", out var wait));
             Assert.Equal("sceAcmBatchWait", wait.Name);
+            Assert.True(manager.TryGetExport("GTfJ64qFCPw", out var priority));
+            Assert.Equal("sceAcmBatchJobPriority", priority.Name);
         }
+    }
+
+    [Fact]
+    public void BatchJobPriority_SucceedsAndLeavesTheBatchAsBuilt()
+    {
+        const ulong infoAddress = MemoryBase + 0x500;
+        WriteUInt64(infoAddress, MemoryBase + 0x800);
+        WriteUInt64(infoAddress + 8, 0x40);
+        WriteUInt64(infoAddress + 16, 0x400);
+        var info = ReadBytes(infoAddress, 24);
+
+        _ctx[CpuRegister.Rdi] = infoAddress;
+        _ctx[CpuRegister.Rsi] = 1;
+        Assert.Equal(0, AcmExports.AcmBatchJobPriority(_ctx));
+        Assert.Equal(info, ReadBytes(infoAddress, 24));
     }
 
     [Fact]

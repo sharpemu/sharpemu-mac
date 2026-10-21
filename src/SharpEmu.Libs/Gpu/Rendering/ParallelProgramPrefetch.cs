@@ -38,6 +38,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // The gate the worker sleeps on; long.MaxValue while it does not.
     private long _sleepingOnGate = long.MaxValue;
     private bool _paused;
+    // Set while the worker sleeps because of a pause, under _lock.
+    private bool _waitingOnPause;
     private bool _running;
     private bool _stopping;
 
@@ -138,12 +140,17 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
     }
 
+    // Wakes the worker only when the pause holds it. The render thread pauses around every relay
+    // batch, and a pulse to a worker idle in its queue wait costs a kernel call each time.
     public void Resume()
     {
         lock (_lock)
         {
             _paused = false;
-            Monitor.PulseAll(_lock);
+            if (_waitingOnPause)
+            {
+                Monitor.PulseAll(_lock);
+            }
         }
     }
 
@@ -241,7 +248,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                         break;
                     }
 
+                    _waitingOnPause = _paused;
                     Monitor.Wait(_lock, 50);
+                    _waitingOnPause = false;
                 }
 
                 Volatile.Write(ref _sleepingOnGate, long.MaxValue);

@@ -421,14 +421,15 @@ public static partial class Gen5SpirvTranslator
             var group = Load(_uvec3Type, _workGroupIdInput);
             var groupX = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, group, 0);
             var groupY = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, group, 1);
+            var primitiveVertexStep = mesh.InputPointList || mesh.InputTriangleStrip ? 1u : mesh.InputLineList ? 2u : 3u;
             var primitiveStart = _module.AddInstruction(SpirvOp.IMul, _uintType,
                 groupX, UInt(mesh.InputPrimitiveCountPerWorkgroup));
             var vertexStart = _module.AddInstruction(SpirvOp.IMul, _uintType,
-                primitiveStart, UInt(mesh.InputPointList || mesh.InputTriangleStrip ? 1u : 3u));
+                primitiveStart, UInt(primitiveVertexStep));
             var remaining = SaturatingSubtract(drawCount, vertexStart);
             var vertices = UnsignedMinimum(remaining, UInt(mesh.InputVertexCountPerWorkgroup));
             var primitives = mesh.InputPointList ? vertices : mesh.InputTriangleStrip ? SaturatingSubtract(vertices, UInt(2))
-                : _module.AddInstruction(SpirvOp.UDiv, _uintType, vertices, UInt(3));
+                : _module.AddInstruction(SpirvOp.UDiv, _uintType, vertices, UInt(primitiveVertexStep));
             var wave = _module.AddInstruction(SpirvOp.UDiv, _uintType,
                 lane, UInt(_waveLaneCount));
             var waveBase = _module.AddInstruction(SpirvOp.IMul, _uintType,
@@ -443,11 +444,12 @@ public static partial class Gen5SpirvTranslator
                 ShiftLeftLogical(UInt(waveCount), UInt(28)));
             StoreS(3, BitwiseOr(waveInfo, BitwiseOr(waveVertices,
                 ShiftLeftLogical(wavePrimitives, UInt(8)))));
+            // The thread group's vertex and primitive counts, as the vertex route stores them in s2.
+            StoreS(2, BitwiseOr(ShiftLeftLogical(vertices, UInt(12)), ShiftLeftLogical(primitives, UInt(22))));
 
-            var first = _module.AddInstruction(SpirvOp.IMul, _uintType, lane,
-                UInt(mesh.InputPointList || mesh.InputTriangleStrip ? 1u : 3u));
+            var first = _module.AddInstruction(SpirvOp.IMul, _uintType, lane, UInt(primitiveVertexStep));
             var second = mesh.InputPointList ? UInt(0) : IAdd(first, UInt(1));
-            var third = mesh.InputPointList ? UInt(0) : IAdd(first, UInt(2));
+            var third = mesh.InputPointList || mesh.InputLineList ? UInt(0) : IAdd(first, UInt(2));
             if (mesh.InputTriangleStrip)
             {
                 var odd = IsNotZero(BitwiseAnd(IAdd(primitiveStart, lane), UInt(1)));

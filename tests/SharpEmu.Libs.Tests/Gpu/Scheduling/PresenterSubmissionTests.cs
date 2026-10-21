@@ -71,6 +71,7 @@ public sealed class PresenterSubmissionTests
         Set(presenter, "_supportsPreciseOcclusion", supported);
         var context = commands.GetInterpreter(0).TypedRegisters.Context;
 
+        context.DepthCountControl = 0;
         Invoke(presenter, "SetOcclusionCounting", context.DepthCountControl);
         Assert.Null(Get(presenter, "_occlusionQueries"));
         context.DepthCountControl = 0x100;

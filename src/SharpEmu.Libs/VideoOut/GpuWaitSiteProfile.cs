@@ -7,7 +7,7 @@ namespace SharpEmu.Libs.VideoOut;
 
 public static class GpuWaitSiteProfile
 {
-    private const int SiteFrames = 5;
+    private const int SiteFrames = 9;
 
     private static readonly object _gate = new();
     private static readonly Dictionary<string, (long Count, long Ticks)> _sites = new(StringComparer.Ordinal);

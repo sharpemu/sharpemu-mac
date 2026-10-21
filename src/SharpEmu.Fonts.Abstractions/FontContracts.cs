@@ -21,6 +21,9 @@ public readonly record struct FontCharacter
 /// <summary>Pixel metrics: ascent is negative, descent is positive, and leading is extra line spacing.</summary>
 public readonly record struct FontMetrics(float Ascent, float Descent, float Leading);
 
+/// <summary>Pixel bounds, bearings and horizontal advance without raster coverage.</summary>
+public readonly record struct FontGlyphMetrics(int Width, int Height, float BearingX, float BearingY, float Advance);
+
 /// <summary>
 /// Immutable, tightly packed, top-to-bottom Alpha8 coverage. Construction copies
 /// the supplied bytes; the result remains valid after its face is disposed.
@@ -39,6 +42,7 @@ public sealed class FontGlyphBitmap
     public bool HasGlyph { get; }
     public bool UsedFallback { get; }
     public ReadOnlyMemory<byte> Coverage => _coverage;
+    public FontGlyphMetrics Metrics => new(Width, Height, BearingX, BearingY, Advance);
     public FontGlyphBitmap(int width, int height, float bearingX, float bearingY, float advance,
         ReadOnlySpan<byte> coverage, ushort glyphId, bool hasGlyph, bool usedFallback = false)
     {
@@ -62,6 +66,8 @@ public interface IFontFace : IDisposable
 {
     FontMetrics GetMetrics(float pixelWidth, float pixelHeight);
     FontGlyphBitmap GetGlyph(FontCharacter character, float pixelWidth, float pixelHeight);
+    FontGlyphMetrics GetGlyphMetrics(FontCharacter character, float pixelWidth, float pixelHeight) =>
+        GetGlyph(character, pixelWidth, pixelHeight).Metrics;
 }
 
 /// <summary>Creates owned faces; font bytes are copied or retained independently before returning.</summary>

@@ -4,7 +4,9 @@
 using Avalonia.Controls;
 using Avalonia.Data;
 using SharpEmu.GUI;
+using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.GUI;
@@ -181,6 +183,31 @@ public sealed class LocalizationTests : IDisposable
             Assert.True(
                 empty.Length == 0,
                 $"{resourceName} has empty option values: {string.Join(", ", empty)}");
+        }
+    }
+
+    [Fact]
+    public void EmbeddedLanguages_ContainEveryPatchKeyAndPreserveFormatArguments()
+    {
+        var assembly = typeof(SharpEmu.Application.LauncherLocalization).Assembly;
+        var english = ReadEmbeddedLanguage(assembly, "Languages.en.json");
+        var patchKeys = english.Keys.Where(key => key == "Library.Context.Patches" ||
+            key.StartsWith("Library.Patches.", StringComparison.Ordinal)).ToArray();
+        Assert.NotEmpty(patchKeys);
+
+        foreach (var resourceName in assembly.GetManifestResourceNames().Where(name =>
+            name.StartsWith("Languages.", StringComparison.Ordinal) && name.EndsWith(".json", StringComparison.Ordinal)))
+        {
+            var language = ReadEmbeddedLanguage(assembly, resourceName);
+            foreach (var key in patchKeys)
+            {
+                Assert.True(language.TryGetValue(key, out var value), $"{resourceName} is missing {key}.");
+                Assert.False(string.IsNullOrWhiteSpace(value), $"{resourceName} has an empty value for {key}.");
+                var expected = Regex.Matches(english[key], @"\{\d+\}").Select(match => match.Value).Order().ToArray();
+                var actual = Regex.Matches(value, @"\{\d+\}").Select(match => match.Value).Order().ToArray();
+                Assert.True(expected.SequenceEqual(actual), $"{resourceName} has different format arguments for {key}.");
+                _ = string.Format(CultureInfo.InvariantCulture, value, "1.4.0", 10);
+            }
         }
     }
 

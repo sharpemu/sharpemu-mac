@@ -165,6 +165,20 @@ public static class AcmExports
     public static int AcmBatchJobNotification(CpuContext ctx) =>
         AdvanceBatchInfo(ctx, 32);
 
+    // Sets the priority of the batch being built. No ACM DSP job runs here, so
+    // there is no queue to order: the request succeeds and the batch is left
+    // as built.
+    [SysAbiExport(
+        Nid = "GTfJ64qFCPw",
+        ExportName = "sceAcmBatchJobPriority",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAcm")]
+    public static int AcmBatchJobPriority(CpuContext ctx)
+    {
+        Trace($"batch_job_priority info=0x{ctx[CpuRegister.Rdi]:X16} priority={unchecked((uint)ctx[CpuRegister.Rsi])}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
     [SysAbiExport(
         Nid = "u70oWo92SYQ",
         ExportName = "sceAcm_ConvReverb_SharedInput",

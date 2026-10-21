@@ -58,6 +58,53 @@ public sealed class CompiledResourceEvaluatorTests
         Assert.False(evaluator.Evaluate(select, out _));
     }
 
+    // The clean reader also refuses mapped words the GPU still owns, so its refusal at an absolute address stays unknown;
+    // only the regular reader's refusal means that nothing maps the address.
+    [Fact]
+    public void ACleanReadRefusalAtAnAbsoluteAddressStaysUnknown()
+    {
+        var plan = Extract(Program(
+            MoveScalar(0, 4, 0xE0040000),
+            MoveScalar(8, 5, 0xF),
+            ScalarLoad(16, 4, destination: 6),
+            EndProgram(24)));
+        static bool Mapped(ulong address, out uint word) { word = 0x12345678; return true; }
+        static bool GpuOwned(ulong address, out uint word) { word = 0; return false; }
+        var inputs = Inputs([], Mapped, GpuOwned);
+        using var scratch = RuntimeEvaluationScratch.Rent();
+        var clean = new RuntimeValueEvaluator(scratch, plan, inputs.WithReader(inputs.ReadCleanMemory), useCompiled: false);
+        Assert.False(clean.EvaluateWide(plan.TableReads[0].Value, out _));
+    }
+
+    [Fact]
+    public void CompiledAndInterpretedReadsAtAnUnmappedAbsoluteAddressBothReadZero()
+    {
+        var plan = Extract(Program(
+            MoveScalar(0, 4, 0xE0040000),
+            MoveScalar(8, 5, 0xF),
+            ScalarLoad(16, 4, 8, 4),
+            BufferLoad(24, 8),
+            EndProgram(32)));
+        Assert.NotNull(plan.CompileEvaluatorNow());
+        static bool Unmapped(ulong address, out uint word)
+        {
+            word = 0xDEADBEEF;
+            return false;
+        }
+
+        using var compiledScratch = RuntimeEvaluationScratch.Rent();
+        using var interpretedScratch = RuntimeEvaluationScratch.Rent();
+        var compiled = new RuntimeValueEvaluator(compiledScratch, plan, Inputs([], Unmapped));
+        var interpreted = new RuntimeValueEvaluator(interpretedScratch, plan, Inputs([], Unmapped), useCompiled: false);
+        foreach (var value in plan.DescriptorSources[0].Dwords)
+        {
+            Assert.True(interpreted.EvaluateWide(value, out var expected));
+            Assert.True(compiled.EvaluateWide(value, out var actual));
+            Assert.Equal(0ul, expected);
+            Assert.Equal(0ul, actual);
+        }
+    }
+
     [Fact]
     public void CompiledAndInterpretedTableReadsHaveIdenticalOrderAndFailure()
     {

@@ -213,6 +213,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     // Per-vertex pixel inputs need MSL 4.0, and this host compiles every library at 3.2.
     bool IShaderPipelineHost.PerVertexPixelInputsSupported => false;
+    bool IShaderPipelineHost.ImageInt64AtomicsEnabled => false;
 
     RenderHostLimits IShaderPipelineHost.Limits => new(MaxDimension, MaxDimension, MaxDimension, MaxDimension);
 
@@ -570,7 +571,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         NumericClass: image.NumericClass switch
         {
             ImageNumericClass.Float => TextureNumericClass.Float,
-            ImageNumericClass.Uint => TextureNumericClass.Uint,
+            ImageNumericClass.Uint or ImageNumericClass.Uint64 => TextureNumericClass.Uint,
             ImageNumericClass.Sint => TextureNumericClass.Sint,
             _ => TextureNumericClass.Unsupported,
         },

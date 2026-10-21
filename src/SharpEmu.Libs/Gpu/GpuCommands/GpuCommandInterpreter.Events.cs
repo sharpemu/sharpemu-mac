@@ -342,7 +342,10 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The clear-state flags are not supported: flags=0x{payload[0]:X8} address=0x{packet.PacketAddress:X16}.");
         }
 
+        var before = TypedRegisters.Context;
         TypedRegisters.ApplyContextState(ContextStateOperation.Clear);
+        if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+            trace.ContextOperation(SubmitId, QueueId, packet.PacketAddress, $"ClearState(flags=0x{payload[0]:X8})", TypedRegisters, before);
         return 1;
     }
 
@@ -353,20 +356,30 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The context-state packet is not supported: length={packet.Length} operation={payload[0]} address=0x{packet.PacketAddress:X16}.");
         }
 
-        TypedRegisters.ApplyContextState((ContextStateOperation)payload[0]);
+        var before = TypedRegisters.Context;
+        var operation = (ContextStateOperation)payload[0];
+        TypedRegisters.ApplyContextState(operation);
+        if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+            trace.ContextOperation(SubmitId, QueueId, packet.PacketAddress, operation.ToString(), TypedRegisters, before);
         return packet.Length - 1;
     }
 
     internal uint DispatchResetPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
         RequireHeader(packet, PacketHeader.Make(2, PacketOpcode.Nop, PacketCustomCode.DispatchReset));
+        var before = TypedRegisters.Context;
         ResetForQueueReset();
+        if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+            trace.ContextOperation(SubmitId, QueueId, packet.PacketAddress, "DispatchReset", TypedRegisters, before);
         return 1;
     }
 
     internal uint DrawResetPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
+        var before = TypedRegisters.Context;
         ResetForQueueReset();
+        if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+            trace.ContextOperation(SubmitId, QueueId, packet.PacketAddress, "DrawReset", TypedRegisters, before);
         return packet.Length - 1;
     }
 

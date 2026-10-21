@@ -385,6 +385,16 @@ public partial class MainWindow : Window
         RefreshRateBox.SelectionChanged += (_, _) => OnHostRefreshRateChanged();
         ScalingModeBox.SelectionChanged += (_, _) => _settings.ScalingMode = SelectedComboText(ScalingModeBox, "Fit");
         VSyncToggle.IsCheckedChanged += (_, _) => _settings.VSync = VSyncToggle.IsChecked == true;
+        PortableDataToggle.IsCheckedChanged += (_, _) =>
+        {
+            var enabled = PortableDataToggle.IsChecked == true;
+            if (!SharpEmu.Logging.SharpEmuPaths.SetPortableMarker(enabled))
+            {
+                // Read-only executable directory: revert the switch, the
+                // marker could not be written.
+                PortableDataToggle.IsChecked = !enabled;
+            }
+        };
         HdrModeBox.SelectionChanged += (_, _) => _settings.HdrMode = SelectedComboText(HdrModeBox, "Auto");
         OverlayEnabledToggle.IsCheckedChanged += (_, _) => _settings.OverlayEnabled = OverlayEnabledToggle.IsChecked == true;
         OverlayModeBox.SelectionChanged += (_, _) => _settings.OverlayMode = SelectedComboText(OverlayModeBox, "TitleBar");
@@ -432,6 +442,7 @@ public partial class MainWindow : Window
         CtxCopyTitleId.Click += async (_, _) =>
             await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId);
         CtxGameSettings.Click += (_, _) => OpenSelectedGameSettings();
+        CtxPatches.Click += async (_, _) => await OpenSelectedGamePatchesAsync();
         CtxTrophies.Click += (_, _) => OpenSelectedGameTrophies();
         InitializeTrophies();
         CtxRemove.Click += (_, _) => RemoveSelectedFromLibrary();
@@ -1511,6 +1522,9 @@ public partial class MainWindow : Window
         LoadHostDisplayOptions();
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         VSyncToggle.IsChecked = _settings.VSync;
+        PortableDataToggle.IsEnabled = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent() ||
+            SharpEmu.Logging.SharpEmuPaths.CanWriteExecutableDirectory();
+        PortableDataToggle.IsChecked = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent();
         HdrModeBox.SelectedIndex = ChoiceIndex(_settings.HdrMode, "Auto", "On", "Off");
         OverlayEnabledToggle.IsChecked = _settings.OverlayEnabled;
         OverlayModeBox.SelectedIndex = ChoiceIndex(_settings.OverlayMode, "Full", "Minimal", "TitleBar");
@@ -2404,6 +2418,7 @@ public partial class MainWindow : Window
         CtxGameSettings.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
         CtxPackZar.IsEnabled = !ZArchive.IsArchivePath(game.Path);
         CtxTrophies.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
+        CtxPatches.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
     }
 
     // Packs the selected game's folder into a .zar chosen by the user, beside the folder by default.
@@ -2681,7 +2696,8 @@ public partial class MainWindow : Window
         }
 
         var directory = ZArchive.IsArchivePath(game.Path)
-            ? ZArchiveCache.GetCacheRoot(game.Path)
+            ? ZArchiveCache.GetCacheRoot(game.Path,
+                Path.Combine(SharpEmu.Logging.SharpEmuPaths.DataRoot, "user", "zar-cache"))
             : Path.GetDirectoryName(game.Path);
         var sndPath = directory is null ? null : Path.Combine(directory, "sce_sys", "snd0.at9");
         if (sndPath is not null && File.Exists(sndPath))
@@ -3063,8 +3079,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Builds "user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log" next to the emulator
-    /// executable, following the same portable-data convention as savedata.
+    /// Builds "user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log" under the user data root,
+    /// following the same convention as savedata.
     /// </summary>
     private string? BuildLogFilePath(string? titleId)
     {

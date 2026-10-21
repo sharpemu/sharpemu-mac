@@ -88,13 +88,14 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var dwordCount = (uint)ctx[CpuRegister.Rsi];
-        if (commandBufferAddress == 0 || dwordCount < 2 || dwordCount > 0x4001)
+        if (commandBufferAddress == 0 || dwordCount == 0 || dwordCount > MaximumNopDwords)
         {
             return ReturnPointer(ctx, 0);
         }
 
+        // A type-3 packet is at least two dwords; a single dword is the type-2 filler.
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, dwordCount, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(dwordCount, ItNop, RZero)))
+            !TryWriteUInt32(ctx, commandAddress, dwordCount == 1 ? Type2FillerHeader : Pm4(dwordCount, ItNop, RZero)))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -110,9 +111,9 @@ public static partial class AgcExports
         return ReturnPointer(ctx, commandAddress);
     }
 
-    // RenderThread/Subrender probe this before writing a NOP. Unresolved
-    // GetSize returns NOT_FOUND and leaves command-buffer sizing broken.
-    // CbNop rejects dwordCount < 2, so report that floor.
+    // Titles probe this before writing a NOP and reserve the bytes it reports. Unresolved
+    // GetSize returns NOT_FOUND and leaves command-buffer sizing broken. The argument is
+    // the NOP's length in dwords; a length CbNop does not write reports no size.
     [SysAbiExport(
         Nid = "t7PlZ9nt5Lc",
         ExportName = "sceAgcCbNopGetSize",
@@ -120,7 +121,10 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int CbNopGetSize(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 2u * sizeof(uint);
+        var dwordCount = (uint)ctx[CpuRegister.Rdi];
+        ctx[CpuRegister.Rax] = dwordCount is >= 1 and <= MaximumNopDwords
+            ? dwordCount * sizeof(uint)
+            : 0;
         return (int)ctx[CpuRegister.Rax];
     }
 
@@ -182,22 +186,51 @@ public static partial class AgcExports
         var baseAddress = ctx[CpuRegister.Rdx];
         var sizeBytes = ctx[CpuRegister.Rcx];
         var pollCycles = (uint)ctx[CpuRegister.R8];
-        var noSize = sizeBytes == ulong.MaxValue;
-        if (commandBufferAddress == 0 ||
-            (!noSize && (sizeBytes & 0xFF) != 0) ||
-            (!noSize && (sizeBytes >> 40) != 0) ||
-            (baseAddress & 0xFF) != 0 ||
-            (baseAddress >> 40) != 0)
+        if (commandBufferAddress == 0 || !TryEncloseAcquireRange(baseAddress, sizeBytes, out var baseUnits, out var sizeUnits))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(8, ItNop, RAcquireMem), 0x8000_0000u, noSize ? 0 : (uint)(sizeBytes >> 8), 0, (uint)(baseAddress >> 8), 0, pollCycles / 40, gcrControl))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(8, ItNop, RAcquireMem), 0x8000_0000u, sizeUnits, 0, baseUnits, 0, pollCycles / 40, gcrControl))
         {
             return ReturnPointer(ctx, 0);
         }
 
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    // ACQUIRE_MEM takes its range in 256-byte units below 1 TiB. The library accepts any byte range and writes the
+    // units that enclose it, as AMD's PAL does (BuildAcquireMemInternal): the SDK's label sync asks for the 32 bytes of
+    // a label. A size of all ones (the whole memory) and a size of zero are written as zero units, as before.
+    internal static bool TryEncloseAcquireRange(ulong baseAddress, ulong sizeBytes, out uint baseUnits, out uint sizeUnits)
+    {
+        const ulong Limit = 1UL << 40;
+        baseUnits = 0;
+        sizeUnits = 0;
+        if (baseAddress >= Limit)
+        {
+            return false;
+        }
+
+        baseUnits = (uint)(baseAddress >> 8);
+        if (sizeBytes == ulong.MaxValue || sizeBytes == 0)
+        {
+            return true;
+        }
+
+        if (sizeBytes > Limit - baseAddress)
+        {
+            return false;
+        }
+
+        var units = (baseAddress + sizeBytes - (baseAddress & ~0xFFUL) + 0xFF) >> 8;
+        if (units > uint.MaxValue)
+        {
+            return false;
+        }
+
+        sizeUnits = (uint)units;
+        return true;
     }
 
     // Matches the fixed 8-dword ACQUIRE_MEM packet AcbAcquireMem writes above.
@@ -448,18 +481,14 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        var noSize = sizeBytes == ulong.MaxValue;
         if (commandBufferAddress == 0 ||
             engine > 1 ||
-            (!noSize && (sizeBytes & 0xFF) != 0) ||
-            (!noSize && (sizeBytes >> 40) != 0) ||
-            (baseAddress & 0xFF) != 0 ||
-            (baseAddress >> 40) != 0)
+            !TryEncloseAcquireRange(baseAddress, sizeBytes, out var baseUnits, out var sizeUnits))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(8, ItNop, RAcquireMem), (engine << 31) | cbDbOp, noSize ? 0 : (uint)(sizeBytes >> 8), 0, (uint)(baseAddress >> 8), 0, pollCycles / 40, gcrControl))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(8, ItNop, RAcquireMem), (engine << 31) | cbDbOp, sizeUnits, 0, baseUnits, 0, pollCycles / 40, gcrControl))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -766,6 +795,14 @@ public static partial class AgcExports
 
         return ReturnPointer(ctx, commandAddress);
     }
+
+    [SysAbiExport(
+        Nid = "w8HVkEeXPv8",
+        ExportName = "sceAgcDcbDispatchIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDispatchIndirectGetSize(CpuContext ctx) =>
+        ctx.SetReturn(3 * sizeof(uint));
 
     [SysAbiExport(
         Nid = "+kSrjIVxKFE",

@@ -40,18 +40,53 @@ public static partial class KernelMemoryCompatExports
                 !KernelRuntimeCompatExports.ContainsPrtRange(address, size))
                 return false;
 
-            var regions = GetMappingSlices(address, size);
-            if (!MappingsCoverRange(regions, address, size) ||
-                regions.Any(region => !region.IsReserved && !backing.IsBackedRange(region.Address, region.Length)))
+            // Keep mappings stable while copying resident bytes and clearing reserved gaps.
+            destination.Clear();
+            foreach (var region in GetMappingSlices(address, size))
+            {
+                if (region.IsReserved)
+                    continue;
+                if (backing.IsBackedRange(region.Address, region.Length))
+                {
+                    if (!backing.TryReadBacking(region.Address, destination.Slice((int)(region.Address - address), (int)region.Length)))
+                        return false;
+                    continue;
+                }
+
+                var regionEnd = region.Address + region.Length;
+                for (var chunk = region.Address; chunk < regionEnd;)
+                {
+                    var next = Math.Min(regionEnd, (chunk & ~(PrtResidencyProbeBytes - 1)) + PrtResidencyProbeBytes);
+                    if (backing.IsBackedRange(chunk, next - chunk) &&
+                        !backing.TryReadBacking(chunk, destination.Slice((int)(chunk - address), (int)(next - chunk))))
+                        return false;
+                    chunk = next;
+                }
+            }
+            return true;
+        }
+    }
+
+    private const ulong PrtResidencyProbeBytes = 0x4000;
+
+    internal static bool TryWritePrtBacking(IGuestBackedSpace backing, ulong address, ReadOnlySpan<byte> source)
+    {
+        var size = (ulong)source.Length;
+        lock (_memoryGate)
+        {
+            if (!ReferenceEquals(backing, _backingOwner) ||
+                !KernelRuntimeCompatExports.ContainsPrtRange(address, size))
                 return false;
 
-            // Keep mappings stable while copying resident bytes and clearing reserved gaps.
+            var regions = GetMappingSlices(address, size);
+            if (regions.Any(region => !region.IsReserved && !backing.IsBackedRange(region.Address, region.Length)))
+                return false;
+
             foreach (var region in regions)
             {
-                var target = destination.Slice((int)(region.Address - address), (int)region.Length);
                 if (region.IsReserved)
-                    target.Clear();
-                else if (!backing.TryReadBacking(region.Address, target))
+                    continue;
+                if (!backing.TryWriteBacking(region.Address, source.Slice((int)(region.Address - address), (int)region.Length)))
                     return false;
             }
             return true;

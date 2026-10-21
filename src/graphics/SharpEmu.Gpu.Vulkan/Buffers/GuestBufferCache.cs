@@ -46,6 +46,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly IGpuQueueRelay _relay;
     private readonly GuestBufferUploader _uploader;
     private readonly IGuestBackedSpace _backing;
+    private readonly ICpuMemory _guest;
     private readonly BdaFaultProcessor _faults;
     private readonly GpuBuffer _gds;
     private readonly GpuBuffer _bdaPageTable;
@@ -54,6 +55,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private long _gpuModifiedVersion;
     private readonly GuestPageTracker _tracker;
     private readonly GpuRingBuffer _staging;
+    private readonly ParallelGuestCopy _sweepCopy;
     private readonly GpuRingBuffer _stream;
     private readonly GpuRingBuffer _download;
     private readonly GpuRingBuffer _deviceRing;
@@ -75,12 +77,15 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _scheduler = scheduler;
         _relay = relay;
         _backing = backing;
+        _guest = guest;
         _faults = new BdaFaultProcessor(device, scheduler, this, CachingPageBits, CachingPageCount);
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
         _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
         _tracker = new GuestPageTracker(pages);
         _staging = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Upload, 512 * MiB);
         _uploader = new GuestBufferUploader(device, scheduler, guest, _staging);
+        // Up to three helper threads copy a large sweep's guest bytes with the render thread.
+        _sweepCopy = new ParallelGuestCopy(guest, Math.Clamp(Environment.ProcessorCount - 1, 0, 3));
         _stream = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Stream, 64 * MiB);
         _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 64 * MiB);
         _deviceRing = new GpuRingBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 128 * MiB);
@@ -145,6 +150,15 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"buffer-write tracked={tracked} completed={completed}");
         return tracked && completed;
+    }
+
+    // A managed write has landed: pages an upload cleaned between MarkCpuWrite and the write turn
+    // CPU-dirty again. GPU-dirty pages stay as they are, since a download now would replace the new bytes.
+    void IGuestBufferStore.MarkCpuWriteLanded(ulong address, ulong size)
+    {
+        var tracked = _tracker.MarkLandedCpuWrite(address, size);
+        if (GuestGpuMemoryHook.Traces(address, size))
+            GuestGpuMemoryHook.Trace(address, size, $"buffer-write-landed tracked={tracked}");
     }
 
     public bool TrySynchronizeCpuRead(ulong address, ulong size) =>
@@ -277,6 +291,18 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         else OverlayGuestPublications?.Invoke(buffer, buffer.Offset(guestAddress), guestAddress, size);
 
         return (buffer, buffer.Offset(guestAddress));
+    }
+
+    // The image cache publishes an image's GPU-only contents into the buffer over the same bytes before a
+    // partial write drops them; the buffer then owns them, as after any GPU write. Null without backing.
+    public GpuBuffer? ObtainBufferForImageWriteBack(ulong guestAddress, ulong size)
+    {
+        if (!IsValidRange(guestAddress, size) || !_backing.IsBackedRange(guestAddress, size))
+        {
+            return null;
+        }
+
+        return ObtainBuffer(guestAddress, size, isWritten: true).Buffer;
     }
 
     public (GpuBuffer Buffer, ulong Offset) ObtainBufferForImage(ulong guestAddress, ulong size)
@@ -711,6 +737,33 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void ProcessFaultBuffer() => _faults.ProcessFaultBuffer();
 
+    // The registered guest memory; a device-address fault inside it brings in the window around the page.
+    internal GuestGpuMemory? GpuMemory { get; set; }
+
+    // A shader reaches some memory only through pointers it reads on the GPU, such as the nodes of a
+    // ray-tracing structure, and walks it a page at a time. A page the cache does not hold reads zeros and
+    // drops stores until the fault is processed, so a fault brings in the aligned window around the page,
+    // clipped to its registered span. A window the guest cannot read in one piece keeps the single page.
+    internal const ulong DeviceAddressFaultWindow = 2 * MiB;
+
+    internal GuestSpan DeviceAddressFaultRange(ulong pageAddress, ulong pageSize)
+    {
+        if (GpuMemory is { } memory && memory.TryGetSpan(pageAddress, out var spanStart, out var spanEnd))
+        {
+            var windowStart = pageAddress & ~(DeviceAddressFaultWindow - 1);
+            var start = Math.Max(windowStart, spanStart);
+            var end = Math.Min(windowStart + DeviceAddressFaultWindow, spanEnd);
+            if (pageAddress + pageSize <= end && _guest.CanRead(start, end - start))
+            {
+                return new GuestSpan(start, end - start);
+            }
+        }
+
+        return new GuestSpan(pageAddress, pageSize);
+    }
+
+    internal bool CanReadGuest(ulong address, ulong size) => _guest.CanRead(address, size);
+
     // Uploads every mapped range before a BDA draw; the fault pass runs at the next collection.
     // Every device-address program prepares all GPU-mapped memory; visiting each registered
     // buffer per dispatch cost ~17 % of the Demon's Souls render thread. The same work is done
@@ -762,8 +815,19 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var epoch = _tracker.CpuDirtyEpoch;
             if (epoch != _bdaSweepEpoch || mapping != _bdaSweepMapping)
             {
-                foreach (var span in spans)
-                    _tracker.ForEachPossiblyCpuDirtyRange(span.Address, span.Size, _uploadDirtyBuffersInRange ??= UploadDirtyBuffersInRange);
+                // The buffers' copies are collected as the sweep visits them and staged when it ends.
+                _sweepActive = true;
+                try
+                {
+                    foreach (var span in spans)
+                        _tracker.ForEachPossiblyCpuDirtyRange(span.Address, span.Size, _uploadDirtyBuffersInRange ??= UploadDirtyBuffersInRange);
+                }
+                finally
+                {
+                    _sweepActive = false;
+                    FlushSweepUploads();
+                }
+
                 _bdaSweepEpoch = epoch;
                 _bdaSweepMapping = mapping;
             }
@@ -778,6 +842,23 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private Action<ulong, ulong>? _uploadDirtyBuffersInRange;
     private long _bdaSweepEpoch = -1;
     private ulong _bdaSweepMapping;
+
+    // The uploads of the running sweep: each one's copies are a run of _sweepCopies, with source
+    // offsets inside its own bytes until they are staged.
+    private readonly record struct SweepUpload(GpuBuffer Buffer, ulong GuestAddress, ulong Size, int FirstCopy, int CopyCount, ulong TotalSize);
+    private readonly List<SweepUpload> _sweepUploads = [];
+    private readonly List<BufferCopy> _sweepCopies = [];
+    private ParallelGuestCopy.Piece[] _sweepPieces = [];
+    private bool _sweepActive;
+
+    // A sweep that stages fewer bytes copies them on the render thread alone.
+    internal const ulong ParallelSweepCopyBytes = 256 * 1024;
+
+    // Guest bytes per piece a copying thread takes.
+    private const ulong SweepPieceBytes = 64 * 1024;
+
+    // A sweep that stages more bytes stages each buffer on its own; tests lower it.
+    internal ulong SweepStagingLimit { get; set; } = ulong.MaxValue;
 
     private void TouchBuffersInRange(ulong guestAddress, ulong size)
     {
@@ -799,6 +880,101 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var finish = Math.Min(buffer.CpuAddress + buffer.Size, end);
             if (start < finish && _tracker.MayHaveCpuDirtyPages(start, finish - start))
                 _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
+        }
+    }
+
+    // A visited buffer's copies wait for the end of the sweep. The tracker has protected its pages
+    // by then, so the bytes staged later are as new as the visit or newer, and a later CPU write
+    // marks the pages dirty again.
+    private void DeferSweepUpload(GpuBuffer buffer, ulong guestAddress, ulong size, List<BufferCopy> copies, ulong totalSize)
+    {
+        if (copies.Count != 0)
+        {
+            _sweepUploads.Add(new SweepUpload(buffer, guestAddress, size, _sweepCopies.Count, copies.Count, totalSize));
+            _sweepCopies.AddRange(copies);
+        }
+    }
+
+    // A sweep visits many buffers with a few dirty pages each: they share one staging reservation and
+    // one copy of their guest bytes, and each buffer's copy is recorded as SynchronizeBuffer records
+    // it, after all the bytes are staged.
+    private void FlushSweepUploads()
+    {
+        if (_sweepUploads.Count == 0)
+        {
+            return;
+        }
+
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferDirtySyncUpload);
+        try
+        {
+            var copies = CollectionsMarshal.AsSpan(_sweepCopies);
+            ulong total = 0;
+            foreach (var upload in _sweepUploads)
+                total += upload.TotalSize;
+
+            if (total <= SweepStagingLimit && _staging.TryMap(total, out var baseOffset, 4) && StageSweep(copies, baseOffset, total))
+            {
+                _staging.Commit();
+                var uploadBase = baseOffset;
+                foreach (var upload in _sweepUploads)
+                {
+                    var regions = copies.Slice(upload.FirstCopy, upload.CopyCount);
+                    foreach (ref var copy in regions)
+                        copy.SrcOffset += uploadBase;
+                    RecordUpload(upload.Buffer, _staging, regions, upload.GuestAddress, upload.Size, upload.TotalSize);
+                    uploadBase += upload.TotalSize;
+                }
+
+                return;
+            }
+
+            // More than the ring holds at once, or a read failed: each buffer stages on its own, as
+            // outside a sweep, which also reports a failed read.
+            foreach (var upload in _sweepUploads)
+            {
+                var regions = copies.Slice(upload.FirstCopy, upload.CopyCount);
+                if (_uploader.PrepareSource(upload.Buffer.CpuAddress, regions, upload.TotalSize, upload.GuestAddress, upload.Size) is { } source)
+                    RecordUpload(upload.Buffer, source, regions, upload.GuestAddress, upload.Size, upload.TotalSize);
+            }
+        }
+        finally
+        {
+            _sweepUploads.Clear();
+            _sweepCopies.Clear();
+        }
+    }
+
+    // Copies the sweep's guest bytes into the reservation at baseOffset, each buffer's after the last;
+    // helper threads take part once the sweep stages ParallelSweepCopyBytes. False when a read failed.
+    private bool StageSweep(Span<BufferCopy> copies, ulong baseOffset, ulong total)
+    {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStagingUpload);
+        var pieces = 0;
+        foreach (var copy in copies)
+            pieces += (int)((copy.Size + SweepPieceBytes - 1) / SweepPieceBytes);
+        if (_sweepPieces.Length < pieces)
+            _sweepPieces = new ParallelGuestCopy.Piece[Math.Max(pieces, _sweepPieces.Length * 2)];
+
+        var count = 0;
+        var uploadBase = baseOffset;
+        fixed (byte* mapped = _staging.Mapped)
+        {
+            foreach (var upload in _sweepUploads)
+            {
+                foreach (var copy in copies.Slice(upload.FirstCopy, upload.CopyCount))
+                {
+                    var guestAddress = upload.Buffer.CpuAddress + copy.DstOffset;
+                    var staged = mapped + uploadBase + copy.SrcOffset;
+                    for (ulong done = 0; done < copy.Size; done += SweepPieceBytes)
+                        _sweepPieces[count++] = new ParallelGuestCopy.Piece(guestAddress + done, (nint)(staged + done),
+                            (int)Math.Min(SweepPieceBytes, copy.Size - done));
+                }
+
+                uploadBase += upload.TotalSize;
+            }
+
+            return _sweepCopy.Run(_sweepPieces, count, parallel: total >= ParallelSweepCopyBytes);
         }
     }
 
@@ -979,6 +1155,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _download.Dispose();
         _stream.Dispose();
         _staging.Dispose();
+        _sweepCopy.Dispose();
         _bdaPageTable.Dispose();
         _gds.Dispose();
         _faults.Dispose();
@@ -1596,7 +1773,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         _tracker.UntrackMemory(buffer.CpuAddress, buffer.Size);
         Unregister(bufferIdentifier);
-        _registry.CompleteRetirement(bufferIdentifier);
+        CompleteRetirementAfterSubmittedWork(bufferIdentifier);
     }
 
     private void WriteDataBuffer(GpuBuffer buffer, ulong address, ReadOnlySpan<byte> source)
@@ -1665,6 +1842,15 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         Unregister(bufferIdentifier);
+        CompleteRetirementAfterSubmittedWork(bufferIdentifier);
+    }
+
+    // Unregistering clears the buffer's page-table entries only for work recorded from now
+    // on. Work already recorded or in flight can still reach it through its device address
+    // (an async readback waits only for its last recorded writer), so it is destroyed once
+    // that work completes.
+    private void CompleteRetirementAfterSubmittedWork(ResourceSlotIdentifier bufferIdentifier)
+    {
         if (_scheduler.Active)
         {
             _scheduler.QueueCompletionAction(() => _registry.CompleteRetirement(bufferIdentifier));
@@ -1964,7 +2150,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             _uploadCollector ??= collector;
         }
 
-        collector.Begin(this, buffer, guestAddress, size);
+        collector.Begin(this, buffer, guestAddress, size, defer: _sweepActive && !isWritten && !isTexelBuffer);
         try
         {
             return SynchronizeBufferCore(collector, buffer, guestAddress, size, isWritten, isTexelBuffer, preserveCpuWriteHotPages, startedAt);
@@ -1983,6 +2169,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         private GpuBuffer _buffer = null!;
         private ulong _guestAddress;
         private ulong _size;
+        private bool _defer;
         public readonly List<BufferCopy> Copies = new();
         public ulong TotalSize;
         public GpuBuffer? Source;
@@ -1997,16 +2184,24 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 Copies.Add(new BufferCopy(TotalSize, _buffer.Offset(address), bytes));
                 TotalSize += bytes;
             };
-            Upload = () => Source = _cache._uploader.PrepareSource(_buffer.CpuAddress, CollectionsMarshal.AsSpan(Copies), TotalSize, _guestAddress, _size);
+            // A sweep takes the copies to stage with its other buffers; Source then stays null.
+            Upload = () =>
+            {
+                if (_defer)
+                    _cache.DeferSweepUpload(_buffer, _guestAddress, _size, Copies, TotalSize);
+                else
+                    Source = _cache._uploader.PrepareSource(_buffer.CpuAddress, CollectionsMarshal.AsSpan(Copies), TotalSize, _guestAddress, _size);
+            };
         }
 
-        public void Begin(GuestBufferCache cache, GpuBuffer buffer, ulong guestAddress, ulong size)
+        public void Begin(GuestBufferCache cache, GpuBuffer buffer, ulong guestAddress, ulong size, bool defer)
         {
             InUse = true;
             _cache = cache;
             _buffer = buffer;
             _guestAddress = guestAddress;
             _size = size;
+            _defer = defer;
         }
 
         public void End()
@@ -2031,42 +2226,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var totalSize = collector.TotalSize;
         if (source != null)
         {
-            foreach (var copy in copies)
-            {
-                buffer.NoteGpuWrite(copy.DstOffset, copy.Size);
-            }
-
-            if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-upload", guestAddress, size, $"bytes={totalSize} copies={copies.Count}");
-            var command = _scheduler.Current;
-            command.EndRendering();
-            var native = new CommandBuffer(command.Handle);
-            var vk = _device.Vk;
-            var before = new BufferMemoryBarrier2
-            {
-                SType = StructureType.BufferMemoryBarrier2,
-                SrcAccessMask = AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit | AccessFlags2.TransferReadBit | AccessFlags2.TransferWriteBit,
-                DstAccessMask = AccessFlags2.TransferWriteBit,
-                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                Buffer = buffer.Handle,
-                Offset = 0,
-                Size = buffer.Size,
-            };
-            VulkanSynchronization.PipelineBarrier(vk,
-                native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
-                0, null, 1, &before, 0, null);
-            var regions = CollectionsMarshal.AsSpan(copies);
-            fixed (BufferCopy* pointer = regions)
-            {
-                vk.CmdCopyBuffer(native, source.Handle, buffer.Handle, (uint)regions.Length, pointer);
-            }
-
-            var after = before;
-            after.SrcAccessMask = AccessFlags2.TransferWriteBit;
-            after.DstAccessMask = AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit;
-            VulkanSynchronization.PipelineBarrier(vk,
-                native, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, DependencyFlags.ByRegionBit,
-                0, null, 1, &after, 0, null);
+            RecordUpload(buffer, source, CollectionsMarshal.AsSpan(copies), guestAddress, size, totalSize);
         }
 
         if (BufferUploadProfile.Enabled)
@@ -2079,6 +2239,47 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         return isTexelBuffer && SynchronizeTexelFromImage(buffer, guestAddress, size);
+    }
+
+    // Records the copy of staged guest bytes into the buffer, ordered after earlier work on the buffer
+    // and before later reads of it.
+    private void RecordUpload(GpuBuffer buffer, GpuBuffer source, Span<BufferCopy> regions, ulong guestAddress, ulong size, ulong totalSize)
+    {
+        foreach (var copy in regions)
+        {
+            buffer.NoteGpuWrite(copy.DstOffset, copy.Size);
+        }
+
+        if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-upload", guestAddress, size, $"bytes={totalSize} copies={regions.Length}");
+        var command = _scheduler.Current;
+        command.EndRendering();
+        var native = new CommandBuffer(command.Handle);
+        var vk = _device.Vk;
+        var before = new BufferMemoryBarrier2
+        {
+            SType = StructureType.BufferMemoryBarrier2,
+            SrcAccessMask = AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit | AccessFlags2.TransferReadBit | AccessFlags2.TransferWriteBit,
+            DstAccessMask = AccessFlags2.TransferWriteBit,
+            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            Buffer = buffer.Handle,
+            Offset = 0,
+            Size = buffer.Size,
+        };
+        VulkanSynchronization.PipelineBarrier(vk,
+            native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
+            0, null, 1, &before, 0, null);
+        fixed (BufferCopy* pointer = regions)
+        {
+            vk.CmdCopyBuffer(native, source.Handle, buffer.Handle, (uint)regions.Length, pointer);
+        }
+
+        var after = before;
+        after.SrcAccessMask = AccessFlags2.TransferWriteBit;
+        after.DstAccessMask = AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit;
+        VulkanSynchronization.PipelineBarrier(vk,
+            native, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, DependencyFlags.ByRegionBit,
+            0, null, 1, &after, 0, null);
     }
 
     private bool SynchronizeTexelFromImage(GpuBuffer buffer, ulong guestAddress, ulong size)

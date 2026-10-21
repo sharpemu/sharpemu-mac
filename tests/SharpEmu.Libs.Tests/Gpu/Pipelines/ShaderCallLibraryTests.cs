@@ -109,6 +109,84 @@ public sealed class ShaderCallLibraryTests
         Assert.All(targets, target => Assert.Same(targets[0].Program, target.Program));
     }
 
+    // The direct form needs only its two loads before the call: at the start of a program fewer than six instructions
+    // stand before it.
+    [Fact]
+    public void DirectRecordLoadsLinkAtTheStartOfAProgram()
+    {
+        var caller = Program(
+            ScalarBufferLoad(0, 4, 14, 2, immediateOffset: 32),
+            ScalarBufferLoad(8, 4, 16, 2, immediateOffset: 40),
+            new(16, Gen5ShaderEncoding.Sopp, "SWaitcnt", [0xBF8C0000], [], [], null),
+            Sopc(20, "SCmpLgU64", Operand(0), Gen5Operand.Scalar(14)),
+            Branch(24, "SCbranchScc0", 1),
+            Sop1(28, "SSwappcB64", 14, Gen5Operand.Scalar(14)), EndProgram(32));
+        var memory = new MemoryAccessTable();
+        memory.Add(new() { Pc = 0, Kind = MemoryResourceKind.ScalarBuffer, Resource = 0 });
+        var snapshot = new ResourceSnapshot { Buffers = [[0, 0, 0, 0]] };
+        var library = ShaderCallLibrary.Read(caller, memory, snapshot, (ulong address, out uint word) => { word = 0; return false; });
+        var site = Assert.Single(library.Calls);
+        Assert.Equal(28u, site.Pc);
+        Assert.Empty(site.Targets);
+    }
+
+    // A caller may load the record straight into the call registers, the argument pair 8 bytes after the target
+    // pair, and test the target before it calls. A null target leaves the site without targets.
+    [Theory]
+    [InlineData(0x200000u, 40)]
+    [InlineData(0u, 40)]
+    [InlineData(0x200000u, 48)]
+    public void DirectRecordLoads_ReadTheTargetAndItsArgumentBehindTheNullCheck(uint target, int argumentOffset)
+    {
+        var caller = DirectRecordCaller(argumentOffset);
+        var memory = new MemoryAccessTable();
+        memory.Add(new() { Pc = 0, Kind = MemoryResourceKind.ScalarBuffer, Resource = 0 });
+        memory.Add(new() { Pc = 20, Kind = MemoryResourceKind.ScalarBuffer, Resource = 0 });
+        var snapshot = new ResourceSnapshot { Buffers = [[0x1000, 16u << 16, 4, 0]] };
+        var words = new Dictionary<ulong, uint>
+        {
+            [0x1020] = target, [0x1028] = 0x3000,
+            [0x200000] = 0xBF800000, [0x200004] = 0xBE80200E,
+        };
+        for (var address = 0x1000ul; address < 0x1040; address += 4) words.TryAdd(address, 0);
+        ShaderCallLibrary Read() => ShaderCallLibrary.Read(caller, memory, snapshot,
+            (ulong address, out uint word) => words.TryGetValue(address, out word));
+        if (argumentOffset != 40)
+        {
+            Assert.Throws<InvalidOperationException>(Read);
+            return;
+        }
+        var site = Assert.Single(Read().Calls);
+        Assert.Equal((14u, 16u, 14u), (site.AddressRegister, site.ArgumentRegister, site.ReturnRegister));
+        Assert.Equal(target == 0 ? 0 : 1, site.Targets.Count);
+        if (target != 0) Assert.Equal(0x3000ul, site.Targets[0].Argument);
+        var linked = Gen5ShaderCallLinker.Link(caller, [site]);
+        Assert.DoesNotContain(linked.Instructions, instruction => instruction.Opcode == "SSwappcB64");
+        Assert.Single(linked.Instructions, instruction => instruction.Control is ShaderCallFaultControl);
+    }
+
+    // A buffer without records reads zero for every load of the record: a null target, so the call has no target.
+    [Fact]
+    public void ADescriptorWithoutRecordsLeavesTheCallWithoutTargets()
+    {
+        var memory = new MemoryAccessTable();
+        memory.Add(new() { Pc = 0, Kind = MemoryResourceKind.ScalarBuffer, Resource = 0 });
+        var snapshot = new ResourceSnapshot { Buffers = [[0, 0, 0, 0]] };
+        var site = Assert.Single(ShaderCallLibrary.Read(DirectRecordCaller(40), memory, snapshot,
+            (ulong address, out uint word) => { word = 0; return false; }).Calls);
+        Assert.Empty(site.Targets);
+        Assert.Equal((14u, 16u, 36ul), (site.AddressRegister, site.ArgumentRegister, site.ReturnAddress));
+    }
+
+    private static Gen5ShaderProgram DirectRecordCaller(int argumentOffset) => Program(
+        ScalarBufferLoad(0, 4, 14, 2, immediateOffset: 32),
+        new(8, Gen5ShaderEncoding.Sopp, "SWaitcnt", [0xBF8C0000], [], [], null),
+        Sopc(12, "SCmpLgU64", Operand(0), Gen5Operand.Scalar(14)),
+        Branch(16, "SCbranchScc0", 4),
+        ScalarBufferLoad(20, 4, 16, 2, immediateOffset: argumentOffset),
+        new(28, Gen5ShaderEncoding.Sopp, "SWaitcnt", [0xBF8C0000], [], [], null),
+        Sop1(32, "SSwappcB64", 14, Gen5Operand.Scalar(14)), EndProgram(36));
+
     [Fact]
     public void Identity_TracksTableCodeAndCallerAddress()
     {

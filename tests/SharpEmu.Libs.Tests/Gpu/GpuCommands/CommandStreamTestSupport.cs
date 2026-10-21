@@ -118,6 +118,19 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
     // Qword values the GPU owns; the synchronized read lands them in memory first, as a download would.
     public Dictionary<ulong, ulong> PendingGpuValues { get; } = new();
 
+    // Addresses read through the operand reader, which a host runs behind the work before the packet.
+    public List<ulong> OperandReads { get; } = new();
+
+    // The work before the packet, completed by an operand read (a GPU pass that writes a buffer).
+    public Action<ulong>? BeforeOperandRead { get; set; }
+
+    public bool TryReadGuestOperand(ulong address, Span<byte> destination)
+    {
+        OperandReads.Add(address);
+        BeforeOperandRead?.Invoke(address);
+        return TryReadGuest(address, destination);
+    }
+
     public bool TryReadGuest(ulong address, Span<byte> destination)
     {
         GuestReads.Add(address);

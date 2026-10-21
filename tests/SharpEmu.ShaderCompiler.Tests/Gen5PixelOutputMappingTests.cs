@@ -153,6 +153,24 @@ public sealed class Gen5PixelOutputMappingTests
         Assert.Contains("(float)as_type<half2>(v1)[1]", metal.Source);
     }
 
+    // SPI_SHADER_COL_FORMAT decides what a compressed export carries: two halves, or two normalized
+    // 16-bit values (an engine packs integer bits into a UNORM16 target this way).
+    [Theory]
+    [InlineData(Gen5ColorExportFormat.Fp16Abgr, 62u, "(float)as_type<half2>(v1)[1]")]
+    [InlineData(Gen5ColorExportFormat.Unorm16Abgr, 61u, "(float(as_type<ushort2>(v1)[1]) * (1.0f / 65535.0f))")]
+    [InlineData(Gen5ColorExportFormat.Snorm16Abgr, 60u, "max(float(as_type<short2>(v1)[1]) * (1.0f / 32767.0f), -1.0f)")]
+    public void CompressedFloatExportUnpacksItsDeclaredFormat(Gen5ColorExportFormat format, uint unpack, string metalComponent)
+    {
+        var request = CompressedPixelRequest(Gen5PixelOutputKind.Float, 15, format);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var unpacks = ReadInstructions(shader.Spirv)
+            .Where(instruction => instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] is 60 or 61 or 62)
+            .Select(instruction => instruction.Operands[3]).ToArray();
+        Assert.Equal(Enumerable.Repeat(unpack, 4), unpacks);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
+        Assert.Contains(metalComponent, metal.Source);
+    }
+
     [Theory]
     [InlineData(0u, 1u, true)]
     [InlineData(1u, 1u, false)]
@@ -184,7 +202,8 @@ public sealed class Gen5PixelOutputMappingTests
         ValidateDepthModule(shader.Spirv);
     }
 
-    private static ShaderCompileRequest CompressedPixelRequest(Gen5PixelOutputKind kind, uint enableMask)
+    private static ShaderCompileRequest CompressedPixelRequest(Gen5PixelOutputKind kind, uint enableMask,
+        Gen5ColorExportFormat format = Gen5ColorExportFormat.Fp16Abgr)
     {
         var export = new Gen5ShaderInstruction(
             0, Gen5ShaderEncoding.Exp, "Exp", [],
@@ -194,7 +213,7 @@ public sealed class Gen5PixelOutputMappingTests
         var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel);
         return new ShaderCompileRequest(plan, resources, layout)
         {
-            PixelOutputs = [new(0, 0, kind)],
+            PixelOutputs = [new(0, 0, kind) { ExportFormat = format }],
         };
     }
 

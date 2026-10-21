@@ -190,6 +190,9 @@ public sealed partial class GuestImageCache
 
     internal void SetLinearReadback(bool enabled) => _readbackLinearImages = enabled;
 
+    // Runs inside a readback's landing once it has decided which pages to write, before it writes them.
+    internal Action? LandingDecidedForTest { get; set; }
+
     internal List<ResourceSlotIdentifier> FindImagesInRangeForTest(ulong address, ulong size, bool pageOverlap)
     {
         using var held = _lock.Hold();

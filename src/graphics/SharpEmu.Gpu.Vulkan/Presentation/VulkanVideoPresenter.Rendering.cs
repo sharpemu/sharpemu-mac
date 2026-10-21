@@ -221,7 +221,14 @@ internal static unsafe partial class VulkanVideoPresenter
         private ulong ClampMappedSize(ulong address, ulong size, PreparedStageBindings? prepared, int bufferIndex)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferMappedRangeValidation);
-            if (address == 0 || size == 0 || size > ulong.MaxValue - address || !_guestMemory.CanRead(address, 1))
+            // A whole readable range is the common case and answers for its start too.
+            var valid = address != 0 && size != 0 && size <= ulong.MaxValue - address;
+            if (valid && _guestMemory.CanRead(address, size))
+            {
+                return size;
+            }
+
+            if (!valid || !_guestMemory.CanRead(address, 1))
             {
                 var context = string.Empty;
                 if (prepared is not null)
@@ -234,11 +241,6 @@ internal static unsafe partial class VulkanVideoPresenter
                         $"user_data=[{string.Join(",", prepared.Stage.Resources.UserData.Select(word => $"{word:X8}"))}]";
                 }
                 throw SubmissionScheduler.Fatal($"The buffer range starts in unmapped memory: address=0x{address:X16} size=0x{size:X16}.{context}");
-            }
-
-            if (_guestMemory.CanRead(address, size))
-            {
-                return size;
             }
 
             // Keep the readable prefix only; a later mapping must not hide a gap.

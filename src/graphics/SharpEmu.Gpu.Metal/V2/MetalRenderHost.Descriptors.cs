@@ -251,7 +251,7 @@ internal sealed partial class MetalRenderHost
         DynamicMip: image.MipMode == ImageMipMode.DynamicStorage,
         NumericClass: image.NumericClass switch
         {
-            ImageNumericClass.Uint => TextureNumericClass.Uint,
+            ImageNumericClass.Uint or ImageNumericClass.Uint64 => TextureNumericClass.Uint,
             ImageNumericClass.Sint => TextureNumericClass.Sint,
             _ => TextureNumericClass.Float,
         },

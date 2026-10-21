@@ -225,12 +225,28 @@ public static partial class AgcExports
         DcbSetRegistersIndirect(ctx, RCxRegsIndirect, "cx");
 
     [SysAbiExport(
+        Nid = "GBCh3zCihoU",
+        ExportName = "sceAgcDcbSetCxRegistersIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetCxRegistersIndirectGetSize(CpuContext ctx) =>
+        DcbSetRegistersIndirectGetSize(ctx);
+
+    [SysAbiExport(
         Nid = "-HOOCn0JY48",
         ExportName = "sceAgcDcbSetShRegistersIndirect",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
     public static int DcbSetShRegistersIndirect(CpuContext ctx) =>
         DcbSetRegistersIndirect(ctx, RShRegsIndirect, "sh");
+
+    [SysAbiExport(
+        Nid = "nNlUtdDDvZ0",
+        ExportName = "sceAgcDcbSetShRegistersIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetShRegistersIndirectGetSize(CpuContext ctx) =>
+        DcbSetRegistersIndirectGetSize(ctx);
 
     [SysAbiExport(
         Nid = "pFLArOT53+w",
@@ -260,6 +276,14 @@ public static partial class AgcExports
         DcbSetRegistersIndirect(ctx, RUcRegsIndirect, "uc");
 
     [SysAbiExport(
+        Nid = "UQGTw4xRlcM",
+        ExportName = "sceAgcDcbSetUcRegistersIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetUcRegistersIndirectGetSize(CpuContext ctx) =>
+        DcbSetRegistersIndirectGetSize(ctx);
+
+    [SysAbiExport(
         Nid = "w4-d0n60hdo",
         ExportName = "sceAgcDcbSetUcRegisterDirect",
         Target = Generation.Gen5,
@@ -278,6 +302,9 @@ public static partial class AgcExports
         ctx[CpuRegister.Rax] = 3u * sizeof(uint);
         return (int)ctx[CpuRegister.Rax];
     }
+
+    // DcbSetRegistersIndirect writes the same five dwords for every register space.
+    private static int DcbSetRegistersIndirectGetSize(CpuContext ctx) => ctx.SetReturn(5 * sizeof(uint));
 
     private static int DcbSetRegistersIndirect(CpuContext ctx, uint packetRegister, string registerSpace)
     {

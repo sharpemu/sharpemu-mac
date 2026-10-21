@@ -25,18 +25,20 @@ internal static class MeshDrawPlanner
         var waveSize = (context.ShaderStages & 0x00400000u) != 0 ? 32u : 64u;
         var triangleStrip = userConfig.PrimitiveType == (uint)GuestPrimitiveType.TriangleStrip;
         var pointList = userConfig.PrimitiveType == (uint)GuestPrimitiveType.PointList;
+        var lineList = userConfig.PrimitiveType == (uint)GuestPrimitiveType.LineList;
         if (!fusedGeometry && ((context.ShaderStages & 0x0200203Fu) != 0x2000u || verticesPerPrimitive != 0))
             return null;
-        if ((!triangleStrip && !pointList && userConfig.PrimitiveType != (uint)GuestPrimitiveType.TriangleList) ||
-            (pointList && !fusedGeometry) ||
+        if ((!triangleStrip && !pointList && !lineList && userConfig.PrimitiveType != (uint)GuestPrimitiveType.TriangleList) ||
+            ((pointList || lineList) && !fusedGeometry) ||
             shaderInterface.GeometryOutputPrimitiveType != 2 ||
             (fusedGeometry && verticesPerPrimitive < 3) || group.PrimitiveGroupSize == 0 ||
-            group.VertexGroupSize < (pointList ? 1 : 3) || outputVertexCapacity == 0)
+            group.VertexGroupSize < (pointList ? 1 : lineList ? 2 : 3) || outputVertexCapacity == 0)
         {
             return null;
         }
 
         var inputPrimitives = pointList ? (uint)group.VertexGroupSize
+            : lineList ? (uint)group.VertexGroupSize / 2
             : triangleStrip ? (uint)group.VertexGroupSize - 2 : (uint)group.VertexGroupSize / 3;
         var outputCapacity = fusedGeometry ? outputVertexCapacity / verticesPerPrimitive
             : triangleStrip ? (outputVertexCapacity >= 3 ? outputVertexCapacity - 2 : 0) : outputVertexCapacity / 3;
@@ -71,8 +73,10 @@ internal static class MeshDrawPlanner
                 ThreadsPerGroup = threadsPerGroup,
                 InputTriangleStrip = triangleStrip,
                 InputPointList = pointList,
+                InputLineList = lineList,
                 InputPrimitiveCountPerWorkgroup = inputPrimitiveCountPerWorkgroup,
                 InputVertexCountPerWorkgroup = pointList ? inputPrimitiveCountPerWorkgroup
+                    : lineList ? inputPrimitiveCountPerWorkgroup * 2
                     : triangleStrip ? inputPrimitiveCountPerWorkgroup + 2 : inputPrimitiveCountPerWorkgroup * 3,
                 OutputVertexCapacity = outputVertexCapacity,
                 OutputPrimitiveCapacity = outputPrimitiveCapacity,

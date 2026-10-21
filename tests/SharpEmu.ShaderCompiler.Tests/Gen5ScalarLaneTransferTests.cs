@@ -210,6 +210,25 @@ public sealed class Gen5ScalarLaneTransferTests
         Assert.Equal(new uint[] { 1, 4, 5 }, registers);
     }
 
+    // A VOP3 compare writes its lane mask to one SGPR in a wave32 wave, so the next register keeps its user data.
+    [Theory]
+    [InlineData("VCmpGtU64")]
+    [InlineData("VCmpEqF64")]
+    public void VectorCompareMaskKeepsTheAdjacentUserDataRegisterLive(string opcode)
+    {
+        var program = new Gen5ShaderProgram(0,
+        [
+            new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vop3, opcode, [0u, 0u],
+                [Gen5Operand.Vector(0), Gen5Operand.Vector(2)], [Gen5Operand.Scalar(4)],
+                new Gen5Vop3Control(0, 0, 0, false, 0, 4)),
+            ResourceTestProgram.MoveScalarRegister(8, 6, 5),
+            ResourceTestProgram.EndProgram(12),
+        ]);
+
+        var registers = BindingLayout.CollectUserDataRegisters(program, 0, 8);
+        Assert.Equal(new uint[] { 5 }, registers);
+    }
+
     [Fact]
     public void ScalarBlockerOpcodesMatchRdna2Semantics()
     {

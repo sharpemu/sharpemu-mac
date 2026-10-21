@@ -8,6 +8,8 @@ using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
 
+using SharpEmu.Libs.Gpu.Images;
+
 namespace SharpEmu.Libs.Tests.Gpu.Images;
 
 public sealed partial class GuestImageCacheTests
@@ -69,5 +71,39 @@ public sealed partial class GuestImageCacheTests
         Assert.Equal(firstId, harness.Find(ref swizzled));
         Assert.Equal(GpuComponentSwizzle.B, swizzled.View.Mapping.R);
         Assert.Equal(baseline.Hits, harness.Images.LookupMemoCounters.Hits);
+    }
+
+    // A title submits dozens of command buffers per frame. An image it writes early in a frame and reads late in it
+    // is past the removal window of submissions in between, and an unrelated image the frame requested inside its
+    // memory deleted it with its contents: its next use uploaded stale guest memory. An image used this frame stays;
+    // after the frame ends, the overlapping request deletes it as before.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FindImage_AnUnrelatedImageInsideAnImageUsedThisFrameKeepsItsContents(bool frameEnded)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 128;
+        const uint deviceValue = 0x11223344;
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var written = LinearRequest(address, width * width * 4, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(width, width, 1), 1, 4, 1);
+        var writtenId = harness.Acquire(ref written);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, width * width * 4, deviceValue)));
+        AgeBeyondTheRemovalWindow(harness, writtenId, endFrame: frameEnded);
+
+        var inside = LinearRequest(address + 0x8000, 0x4000, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(64, 64, 1), 1, 4, 1);
+        harness.Acquire(ref inside);
+
+        Assert.Equal(!frameEnded, harness.Images.Contains(writtenId));
+        if (!frameEnded)
+        {
+            Assert.True(harness.Image(writtenId).IsGpuModified);
+            Assert.Equal(Bytes(Enumerable.Repeat(deviceValue, (int)(width * width)).ToArray()), harness.ReadImageBytes(harness.Image(writtenId)));
+        }
+
+        harness.Shutdown();
     }
 }

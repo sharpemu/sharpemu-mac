@@ -189,6 +189,27 @@ public sealed class GpuCommandInterpreterLoopTests
         Assert.Equal(5u, runner.Interpreter.InstanceCount);
     }
 
+    // A GPU pass earlier in the stream can build the buffer a packet calls or chains to (a dispatch
+    // list): the list holds padding until that work ran. The submitted buffer is the guest's own.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CalledBuffer_IsReadBehindTheWorkBeforeTheCall(bool chain)
+    {
+        var runner = new StreamRunner();
+        runner.Load(Nested, [0x80000000, 0x80000000]);
+        runner.Host.BeforeOperandRead = address =>
+        {
+            if (address == Nested) runner.Load(Nested, CreateInstanceCountPacket(5));
+        };
+
+        var progress = runner.Run(CreateInstanceCountPacket(2), IndirectBuffer(Nested, 2, chain));
+
+        Assert.Equal(SubmissionProgress.Complete, progress);
+        Assert.Equal(5u, runner.Interpreter.InstanceCount);
+        Assert.DoesNotContain(Command, runner.Host.OperandReads);
+    }
+
     [Fact]
     public void IndirectBufferPaddingAndRingChunkAdvance()
     {

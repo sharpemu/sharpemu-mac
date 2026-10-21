@@ -563,6 +563,34 @@ public sealed class Gen5MeshShaderTests
         }
     }
 
+    // A wave reduction in a mesh program ends with V_READLANE_B32 of the row results (lanes 15 and 31 of a wave32).
+    // The read takes the selected lane of the host subgroup that runs the wave, not the invocation's own value.
+    [Theory]
+    [InlineData(32u)]
+    [InlineData(64u)]
+    public void MeshReadlaneReadsTheSelectedLane(uint waveSize)
+    {
+        var program = ResourceTestProgram.Program(ResourceTestProgram.ReadLane(0, 4, 1, 15),
+            ResourceTestProgram.EndProgram(8));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Mesh);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            WaveSize = waveSize, LocalSizeX = waveSize,
+            Mesh = new MeshShaderConfiguration(32, 30, 0, 1, 1, 0, false, waveSize, InputPointList: true),
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var words = new uint[shader.Spirv.Length / 4];
+        Buffer.BlockCopy(shader.Spirv, 0, words, 0, shader.Spirv.Length);
+        var laneReads = 0;
+        for (var offset = 5; offset < words.Length; offset += (int)(words[offset] >> 16))
+        {
+            if ((SpirvOp)(words[offset] & 0xffff) is SpirvOp.GroupNonUniformBroadcast or SpirvOp.GroupNonUniformShuffle)
+                laneReads++;
+        }
+        Assert.True(laneReads > 0);
+        ValidateWithInstalledSdk(shader.Spirv);
+    }
+
     [Fact]
     public void NativeWave64ReadFirstLaneIncludesTheUpperBallotWord()
     {

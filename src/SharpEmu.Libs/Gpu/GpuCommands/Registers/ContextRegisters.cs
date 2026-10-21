@@ -376,7 +376,8 @@ public sealed class ContextRegisters
 
     public float LineWidth = 1f;
     public uint PrimitiveResetIndex = 0xFFFF_FFFFu;
-    public uint DepthCountControl;
+    // AGC's initial/clear context enables Z-pass counter zero on both slices.
+    public uint DepthCountControl = 0x1100_0100u;
     public BlendRegisters[] BlendControls = NewBlendControls();
     public BlendColorRegisters BlendColor;
     public ColorTargetWords[] ColorTargets = new ColorTargetWords[ColorTargetCount];

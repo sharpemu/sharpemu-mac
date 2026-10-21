@@ -488,6 +488,8 @@ public static class AvPlayerExports
         public ulong AudioBufferBase { get; set; }
         public int NextAudioBuffer { get; set; }
         public long NextAudioFrameIndex { get; set; }
+        // The playback clock when the audio stream ran out; negative while it has not.
+        public double AudioEndedSeconds { get; set; } = -1;
         public byte[]? FallbackPresentationPixels { get; set; }
         public uint FallbackPresentationWidth { get; set; }
         public uint FallbackPresentationHeight { get; set; }
@@ -538,6 +540,7 @@ public static class AvPlayerExports
             SeekVideoFramePending = false;
             StartTimeMilliseconds = 0;
             NextAudioFrameIndex = 0;
+            AudioEndedSeconds = -1;
             EndOfStream = false;
             FallbackPresentationPixels = null;
             FallbackPresentationWidth = 0;
@@ -1280,6 +1283,13 @@ public static class AvPlayerExports
             if (player.RawAudioFrame is null ||
                 !ReadExactly(player.AudioDecoderOutput, player.RawAudioFrame))
             {
+                if (player.RawAudioFrame is not null)
+                {
+                    player.AudioEndedSeconds = NoteAudioEnd(
+                        player.AudioEndedSeconds,
+                        player.PlaybackClock.Elapsed.TotalSeconds);
+                }
+
                 return SetReturn(ctx, 0);
             }
             if (player.AudioBufferBase == 0)
@@ -1338,9 +1348,9 @@ public static class AvPlayerExports
             }
 
             var milliseconds = player.AvSyncMode == AvSyncModeDefault && player.HasAudio
-                ? player.StartTimeMilliseconds + checked((ulong)(
-                    player.NextAudioFrameIndex * AudioSamplesPerFrame * 1000L /
-                    AudioSampleRate))
+                ? player.StartTimeMilliseconds + DefaultSyncElapsedMilliseconds(
+                    player.NextAudioFrameIndex,
+                    SecondsSinceAudioEnded(player.AudioEndedSeconds, player.PlaybackClock.Elapsed.TotalSeconds))
                 : player.StartTimeMilliseconds +
                     checked((ulong)player.PlaybackClock.ElapsedMilliseconds);
             ctx[CpuRegister.Rax] = milliseconds;
@@ -1731,11 +1741,7 @@ public static class AvPlayerExports
             $"replacement_file open object=0x{player.FileObject:X16} " +
             $"callback=0x{player.FileOpenCallback:X16} result={unchecked((int)openResult)}");
 
-        var materializedPath = Path.Combine(
-            Path.GetTempPath(),
-            "SharpEmu",
-            "AvPlayer",
-            Path.GetRandomFileName());
+        var materializedPath = Path.Combine(MaterializedSourceFolder.Value, Path.GetRandomFileName());
         var hostBuffer = ArrayPool<byte>.Shared.Rent(ReplacementFileReadBufferSize);
         try
         {
@@ -1839,6 +1845,65 @@ public static class AvPlayerExports
         }
     }
 
+    // A process keeps its copies in a folder named after its id. A copy is deleted when the title
+    // closes its player, which never happens when the process is ended, so the first copy of a
+    // process removes the folders of processes that no longer run.
+    private static readonly Lazy<string> MaterializedSourceFolder = new(() =>
+    {
+        var root = Path.Combine(Path.GetTempPath(), "SharpEmu", "AvPlayer");
+        RemoveCopiesOfEndedProcesses(root);
+        return Path.Combine(root, Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
+    });
+
+    internal static void RemoveCopiesOfEndedProcesses(string root)
+    {
+        string[] folders;
+        try
+        {
+            if (!Directory.Exists(root))
+            {
+                return;
+            }
+
+            folders = Directory.GetDirectories(root);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        foreach (var folder in folders)
+        {
+            if (!int.TryParse(Path.GetFileName(folder), NumberStyles.None, CultureInfo.InvariantCulture, out var processId) ||
+                processId == Environment.ProcessId || IsRunning(processId))
+            {
+                continue;
+            }
+
+            // A copy still open elsewhere (a scanner, say) keeps its folder; the others still go.
+            try
+            {
+                Directory.Delete(folder, recursive: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+
+    private static bool IsRunning(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
     private static void TryDeleteMaterializedSource(string path)
     {
         try
@@ -1919,7 +1984,10 @@ public static class AvPlayerExports
                     player.HasAudio,
                     player.NextAudioFrameIndex,
                     player.PlaybackClock.Elapsed.TotalSeconds,
-                    fps);
+                    fps,
+                    SecondsSinceAudioEnded(
+                        player.AudioEndedSeconds,
+                        player.PlaybackClock.Elapsed.TotalSeconds));
                 if (player.NextFrameIndex > expectedFrame)
                 {
                     player.VideoSyncWait++;
@@ -2904,17 +2972,34 @@ public static class AvPlayerExports
     internal static bool IsValidAvSyncMode(uint mode) =>
         mode is AvSyncModeDefault or AvSyncModeNone;
 
+    // Delivered audio is the video clock while there is audio. Past its last block the clock runs
+    // on at real time: a clip whose video outlasts its audio, even by part of one block, would
+    // otherwise wait on the stopped clock and never read the end of its video.
     internal static long CalculateExpectedDefaultSyncVideoFrame(
         bool hasAudio,
         long deliveredAudioFrameCount,
         double internalClockSeconds,
-        double framesPerSecond)
+        double framesPerSecond,
+        double secondsSinceAudioEnded = 0)
     {
         var clockSeconds = hasAudio
-            ? deliveredAudioFrameCount * AudioSamplesPerFrame / (double)AudioSampleRate
+            ? deliveredAudioFrameCount * AudioSamplesPerFrame / (double)AudioSampleRate +
+              Math.Max(0, secondsSinceAudioEnded)
             : Math.Max(0, internalClockSeconds);
         return Math.Max(0, (long)Math.Floor(clockSeconds * Math.Max(1, framesPerSecond)));
     }
+
+    // The clock value of the first read that found the audio stream at its end.
+    internal static double NoteAudioEnd(double audioEndedSeconds, double clockSeconds) =>
+        audioEndedSeconds < 0 ? Math.Max(0, clockSeconds) : audioEndedSeconds;
+
+    internal static double SecondsSinceAudioEnded(double audioEndedSeconds, double clockSeconds) =>
+        audioEndedSeconds < 0 ? 0 : Math.Max(0, clockSeconds - audioEndedSeconds);
+
+    // The default sync time: the delivered audio, then real time once the audio has ended.
+    internal static ulong DefaultSyncElapsedMilliseconds(long deliveredAudioFrameCount, double secondsSinceAudioEnded) =>
+        checked((ulong)(deliveredAudioFrameCount * AudioSamplesPerFrame * 1000L / AudioSampleRate) +
+            (ulong)(secondsSinceAudioEnded * 1000));
 
     private static int ReadOutputVideoFrameBufferCount(
         CpuContext ctx,

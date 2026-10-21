@@ -217,6 +217,58 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         harness.AssertNoValidationMessages();
     }
 
+    // A minimum LOD past the levels a view keeps on the host clamps to its last level, which the guest levels past
+    // the host chain alias (VK_EXT_image_view_min_lod requires a minimum LOD inside the view).
+    [Fact]
+    public void ClampToHostLevels_KeepsTheMinimumLodInsideTheView()
+    {
+        var view = ImageViewDescription.Default with { LevelCount = 7, MinLod = 6 };
+        var clamped = CachedImage.ClampToHostLevels(view, hostLevels: 5, guestLevels: 7);
+        Assert.Equal(5u, clamped.LevelCount);
+        Assert.Equal(4f, clamped.MinLod);
+        Assert.Equal(2f, CachedImage.ClampToHostLevels(view with { MinLod = 2 }, hostLevels: 5, guestLevels: 7).MinLod);
+        var tail = CachedImage.ClampToHostLevels(view with { BaseLevel = 6, LevelCount = 1 }, hostLevels: 5, guestLevels: 7);
+        Assert.Equal((4u, 1u, 4f), (tail.BaseLevel, tail.LevelCount, tail.MinLod));
+    }
+
+    [Fact]
+    public void MipChainLevels_CountsTheLevelsOfTheLargestDimension()
+    {
+        Assert.Equal(1u, CachedImage.MipChainLevels(ImageType.Type2D, new Extent3D(1, 1, 1)));
+        Assert.Equal(5u, CachedImage.MipChainLevels(ImageType.Type2D, new Extent3D(16, 16, 1)));
+        Assert.Equal(7u, CachedImage.MipChainLevels(ImageType.Type2D, new Extent3D(64, 3, 1)));
+        Assert.Equal(9u, CachedImage.MipChainLevels(ImageType.Type2D, new Extent3D(300, 2, 1)));
+        Assert.Equal(6u, CachedImage.MipChainLevels(ImageType.Type3D, new Extent3D(4, 4, 32)));
+    }
+
+    // An uncompressed view of a block-compressed image measures its extent in blocks but keeps the compressed
+    // image's levels: a 64x64 BC4 texture with seven levels is viewed as 16x16 texels with seven levels. A 16x16
+    // image has five. Created with seven, copies into the last two levels wrote past the image's memory and the
+    // device was lost (Saros, a compute shader writing the blocks of a BC4 texture array).
+    [Fact]
+    public void Constructor_KeepsOnlyTheLevelsOfTheExtentsMipChain()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(16, 16, levels: 7, layers: 2));
+        Assert.Equal(7u, image.Description.Resources.Levels);
+        Assert.Equal(5u, image.Backing.MipLevels);
+
+        // A view of a guest level past the host chain views the last host level.
+        var view = image.GetOrCreateView(ImageViewDescription.Default with { Format = GpuFormat.R8G8B8A8Unorm, BaseLevel = 6 });
+        Assert.NotEqual(0UL, view.Handle);
+        Assert.Equal(view, image.GetOrCreateView(ImageViewDescription.Default with { Format = GpuFormat.R8G8B8A8Unorm, BaseLevel = 4 }));
+        var all = image.GetOrCreateView(ImageViewDescription.Default with
+        {
+            Format = GpuFormat.R8G8B8A8Unorm,
+            Type = GpuImageViewType.Type2DArray,
+            LevelCount = 7,
+            LayerCount = 2,
+        });
+        Assert.NotEqual(0UL, all.Handle);
+        harness.AssertNoValidationMessages();
+    }
+
     [Theory]
     [InlineData(GuestPixelFormat.Bc1UNorm, GpuFormat.BC1RgbaUnormBlock, GpuFormat.R32G32Uint, 8u)]
     [InlineData(GuestPixelFormat.Bc7UNorm, GpuFormat.BC7UnormBlock, GpuFormat.R32G32B32A32Uint, 16u)]

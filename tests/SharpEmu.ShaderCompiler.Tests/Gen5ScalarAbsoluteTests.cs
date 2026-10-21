@@ -190,6 +190,11 @@ public sealed class Gen5ScalarAbsoluteTests
             BufferAccess(24, "BufferStoreDwordx2", 4, dwords: 2, vectorData: 6), EndProgram(32));
     }
 
+    // S_ABSDIFF_I32 is SOP2 opcode 44 (0x2C): s_absdiff_i32 s0, s1, s2.
+    [Fact]
+    public void AbsoluteDifferenceDecodesFromItsSop2Opcode() =>
+        Assert.Equal("SAbsdiffI32", Decode(0x80000000u | (0x2Cu << 23) | (2u << 8) | 1u).Opcode);
+
     private static Gen5ShaderInstruction Decode(params uint[] instructionWords)
     {
         var bytes = new byte[(instructionWords.Length + 1) * sizeof(uint)];

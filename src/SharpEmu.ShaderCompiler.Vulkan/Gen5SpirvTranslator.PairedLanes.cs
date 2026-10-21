@@ -138,7 +138,7 @@ public static partial class Gen5SpirvTranslator
         }
 
         private static bool IsPairedLaneInstruction(Gen5ShaderInstruction instruction) =>
-            instruction.Opcode is not ("VReadlaneB32" or "VReadfirstlaneB32" or "DsAppend" or "DsConsume") &&
+            instruction.Opcode is not ("VReadlaneB32" or "VReadfirstlaneB32" or "DsAppend" or "DsConsume" or "DsOrderedCount") &&
             instruction.Encoding is
                 Gen5ShaderEncoding.Mubuf or
                 Gen5ShaderEncoding.Mtbuf or
@@ -342,6 +342,22 @@ public static partial class Gen5SpirvTranslator
                 _module.AddInstruction(SpirvOp.ULessThan, _boolType, selectedLane, UInt(PairedHalfLaneCount)),
                 SubgroupBroadcast(lowerValue, lane),
                 SubgroupBroadcast(upperValue, lane));
+        }
+
+        // A pair of lanes past the group's thread count has no running invocation to read, but a scalar that V_WRITELANE
+        // spilled to either lane is in every invocation's spill slot.
+        private uint PairedReadLaneOrSpillSlot(Gen5ShaderInstruction instruction, uint selectedLane)
+        {
+            var value = PairedReadLane(instruction, selectedLane);
+            var spilled = ReadLaneSpillSlot(instruction, selectedLane, value);
+            if (spilled == value)
+            {
+                return value;
+            }
+
+            var pairBit = ShiftLeftLogical(UInt(1), BitwiseAnd(selectedLane, UInt(PairedHalfLaneCount - 1)));
+            var pairRuns = IsNotZero(BitwiseAnd(HalfBallot(_module.ConstantBool(true)), pairBit));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, pairRuns, value, spilled);
         }
 
         private uint LogicalOr(uint left, uint right) =>
@@ -584,7 +600,7 @@ public static partial class Gen5SpirvTranslator
                 Gen5ShaderEncoding.Smem or Gen5ShaderEncoding.Smrd)
                 return TryEmitInstruction(instruction, out error);
 
-            if (instruction.Opcode is "DsAppend" or "DsConsume" or "DsSwizzleB32")
+            if (instruction.Opcode is "DsAppend" or "DsConsume" or "DsOrderedCount" or "DsSwizzleB32")
             {
                 error = "This cross-lane operation has no paired mesh implementation.";
                 return false;

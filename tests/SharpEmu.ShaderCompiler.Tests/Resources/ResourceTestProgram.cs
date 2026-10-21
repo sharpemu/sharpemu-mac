@@ -173,7 +173,8 @@ internal static class ResourceTestProgram
 
     // The plan, its default specialization applied, and the layout of one program.
     public static (ShaderResourcePlan Plan, SpecializedResourceInfo Resources, BindingLayout Layout) Prepare(
-        Gen5ShaderProgram program, ShaderStage stage = ShaderStage.Compute, uint userDataBase = 0, uint userDataCount = 64, uint pushDataStartDword = 0)
+        Gen5ShaderProgram program, ShaderStage stage = ShaderStage.Compute, uint userDataBase = 0, uint userDataCount = 64, uint pushDataStartDword = 0,
+        bool usesDispatchThreadLimits = false)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, Hash, userDataBase, userDataCount);
         var resources = ResourceMaterializer.ApplyTo(plan, ResourceSpecialization.Default(plan.Info));
@@ -184,6 +185,7 @@ internal static class ResourceTestProgram
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program),
             pushDataStartDword,
+            usesDispatchThreadLimits,
             usesMeshDrawParameters: stage == ShaderStage.Mesh);
         return (plan, resources, layout);
     }

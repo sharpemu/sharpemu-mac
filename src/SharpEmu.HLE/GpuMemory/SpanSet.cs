@@ -17,6 +17,26 @@ public sealed class SpanSnapshot(ulong[] starts, ulong[] ends)
 
         return index >= 0 && ends[index] >= address + size;
     }
+
+    public bool TryGetContaining(ulong address, out ulong start, out ulong end)
+    {
+        var index = Array.BinarySearch(starts, address);
+        if (index < 0)
+        {
+            index = ~index - 1;
+        }
+
+        if (index >= 0 && ends[index] > address)
+        {
+            start = starts[index];
+            end = ends[index];
+            return true;
+        }
+
+        start = 0;
+        end = 0;
+        return false;
+    }
 }
 
 public sealed class SpanSet

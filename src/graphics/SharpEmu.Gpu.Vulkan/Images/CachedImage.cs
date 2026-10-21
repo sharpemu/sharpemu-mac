@@ -109,7 +109,7 @@ public sealed unsafe partial class CachedImage : IDisposable
         Backing.Extent = Description.Extent.ToVk();
         Backing.GuestPitch = Description.Pitch;
         Backing.Layers = Description.IsVolume ? 1 : Description.Resources.Layers;
-        Backing.MipLevels = Description.Resources.Levels;
+        Backing.MipLevels = Math.Min(Description.Resources.Levels, MipChainLevels(Backing.ImageType, Backing.Extent));
         Backing.Samples = Description.Samples;
         Backing.Flags = CreateFlags(Description);
         Backing.Usage = UsageFlags(device, Description);
@@ -246,6 +246,20 @@ public sealed unsafe partial class CachedImage : IDisposable
 
         configuration = fallbackConfiguration;
         return true;
+    }
+
+    // Vulkan allows only the levels of the extent's full mip chain. An uncompressed view of a block-compressed
+    // image keeps the compressed image's level count but measures its extent in blocks, so its last levels
+    // (smaller than one block) have no host level; copying into them wrote past the image's memory.
+    internal static uint MipChainLevels(ImageType type, in Extent3D extent)
+    {
+        var largest = Math.Max(extent.Width, extent.Height);
+        if (type == ImageType.Type3D)
+        {
+            largest = Math.Max(largest, extent.Depth);
+        }
+
+        return (uint)(32 - System.Numerics.BitOperations.LeadingZeroCount(Math.Max(largest, 1u)));
     }
 
     private static ImageType HostImageType(GuestImageType type) => type switch
@@ -427,8 +441,15 @@ public sealed unsafe partial class CachedImage : IDisposable
     // The write sequence of the mip tail block image last copied into this chain's tail mips.
     public long MergedTailSequence;
 
+    // A raw buffer binding over the image may have written its bytes after the GPU last wrote the image.
+    // The image keeps its contents, but they are no longer known to be newer than the buffer's.
+    public bool RawWriteAfterGpuWrite { get; private set; }
+
+    public void MarkRawWriteAfterGpuWrite() => RawWriteAfterGpuWrite = true;
+
     public void MarkGpuModified()
     {
+        RawWriteAfterGpuWrite = false;
         _gpuModified = true;
         _bufferHoldsGpuContents = false;
         GpuWriteSequence = Interlocked.Increment(ref _gpuWriteCounter);
@@ -527,6 +548,23 @@ public sealed unsafe partial class CachedImage : IDisposable
         return aspect != 0 && (aspect & ~supported.ToVk()) == 0;
     }
 
+    // A view of guest levels past the host mip chain (see MipChainLevels) views the last host level instead.
+    // A range outside the guest's levels stays as it is and is refused.
+    internal static ImageViewDescription ClampToHostLevels(in ImageViewDescription view, uint hostLevels, uint guestLevels)
+    {
+        if (hostLevels == 0 || hostLevels >= guestLevels || view.LevelCount == 0 ||
+            view.BaseLevel >= guestLevels || view.LevelCount > guestLevels - view.BaseLevel)
+        {
+            return view;
+        }
+
+        var clamped = view.BaseLevel >= hostLevels ? view with { BaseLevel = hostLevels - 1, LevelCount = 1 }
+            : view.LevelCount > hostLevels - view.BaseLevel ? view with { LevelCount = hostLevels - view.BaseLevel } : view;
+        // The minimum LOD stays inside the view: past the host chain it reads the last host level, as the guest levels there do.
+        var lastLevel = clamped.BaseLevel + clamped.LevelCount - 1;
+        return clamped.MinLod > lastLevel ? clamped with { MinLod = lastLevel } : clamped;
+    }
+
     // Returns the cached view for the normalized description, creating it on first use.
     public ImageView GetOrCreateView(in ImageViewDescription requested)
     {
@@ -545,6 +583,7 @@ public sealed unsafe partial class CachedImage : IDisposable
         }
 
         normalized = normalized with { Usage = isStorage ? GpuImageUsage.StorageBit : 0 };
+        normalized = ClampToHostLevels(normalized, image.MipLevels, Description.Resources.Levels);
         var formatCompatible = normalized.Format != GpuFormat.Undefined && ViewFormatRules.AreImageViewFormatsCompatible(image.Format.ToNeutral(), normalized.Format, image.Flags.ToNeutral());
         var usageValid = !isStorage || (image.Usage & ImageUsageFlags.StorageBit) != 0;
         var sliceView = image.ImageType == ImageType.Type3D && normalized.Type is GpuImageViewType.Type2D or GpuImageViewType.Type2DArray;

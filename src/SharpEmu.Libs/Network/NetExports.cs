@@ -1098,6 +1098,30 @@ public static partial class NetExports
     }
 
     [SysAbiExport(
+        Nid = "rMyh97BU5pY",
+        ExportName = "sceNetGetMemoryPoolStats",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetGetMemoryPoolStats(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var statsAddress = ctx[CpuRegister.Rsi];
+        if (!_pools.TryGetValue(id, out var pool))
+        {
+            return ctx.SetReturn(NetErrorBadFileDescriptor);
+        }
+
+        if (statsAddress == 0)
+        {
+            return ctx.SetReturn(NetErrorInvalidArgument);
+        }
+
+        return MemoryPoolStats.TryWrite(ctx, statsAddress, unchecked((ulong)pool.Size))
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(NetErrorFault);
+    }
+
+    [SysAbiExport(
         Nid = "9T2pDF2Ryqg",
         ExportName = "sceNetHtonl",
         Target = Generation.Gen4 | Generation.Gen5,

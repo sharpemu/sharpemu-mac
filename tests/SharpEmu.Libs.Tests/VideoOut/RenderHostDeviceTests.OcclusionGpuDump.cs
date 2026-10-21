@@ -32,7 +32,7 @@ public sealed unsafe partial class RenderHostDeviceTests
         var copy = harness.MapBacked(0x10000, ReadWrite);
         harness.Write(vertices, Triangle(-1f, -1f, 3f, -1f, -1f, 3f));
         var banks = Banks(RegisterWords.Color(target, Size, Size));
-        banks.Context.DepthCountControl = 0x100;
+        Assert.Equal(0x1100_0100u, banks.Context.DepthCountControl);
         var executor = new RenderExecutor(presenter.RenderHost,
             new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices));
         presenter.Run(() =>

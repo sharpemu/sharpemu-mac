@@ -4,18 +4,20 @@
 using SharpEmu.Gpu.Vulkan.Presentation;
 using Xunit;
 
+using SharpEmu.Logging;
+
 namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed class VulkanPipelineCacheStorageTests
 {
     [Fact]
-    public void ResolvePathUsesExecutableUserDirectoryAndTitleId()
+    public void ResolvePathUsesUserDataRootAndTitleId()
     {
         var path = VulkanPipelineCacheStorage.ResolvePath("PPSA02929", configuredPath: null);
 
         Assert.Equal(
             Path.GetFullPath(Path.Combine(
-                AppContext.BaseDirectory,
+                SharpEmuPaths.DataRoot,
                 "user",
                 "pipeline_cache",
                 "PPSA02929",

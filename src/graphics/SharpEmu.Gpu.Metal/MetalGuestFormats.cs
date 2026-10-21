@@ -114,10 +114,10 @@ internal readonly record struct MetalRenderTargetFormat(
     public static uint GetBytesPerPixel(MtlPixelFormat format) =>
         format switch
         {
-            MtlPixelFormat.R8Unorm or MtlPixelFormat.R8Uint => 1,
-            MtlPixelFormat.Rg8Unorm => 2,
+            MtlPixelFormat.R8Unorm or MtlPixelFormat.R8Snorm or MtlPixelFormat.R8Uint => 1,
+            MtlPixelFormat.Rg8Unorm or MtlPixelFormat.Rg8Snorm => 2,
             MtlPixelFormat.Rg32Float => 8,
-            MtlPixelFormat.Rgba16Unorm or MtlPixelFormat.Rgba16Uint or
+            MtlPixelFormat.Rgba16Unorm or MtlPixelFormat.Rgba16Snorm or MtlPixelFormat.Rgba16Uint or
                 MtlPixelFormat.Rgba16Sint or MtlPixelFormat.Rgba16Float => 8,
             MtlPixelFormat.Rgba32Float => 16,
             _ => 4,
@@ -411,6 +411,7 @@ internal static class MetalGuestFormats
             (6, 7, _) or (7, 7, _) => MtlPixelFormat.Rg11B10Float,
             (9, _, 1) => MtlPixelFormat.Bgr10A2Unorm,
             (9, _, _) => MtlPixelFormat.Rgb10A2Unorm,
+            (10, 1, _) => MtlPixelFormat.Rgba8Snorm,
             (10, 4, _) => MtlPixelFormat.Rgba8Uint,
             (10, 5, _) => MtlPixelFormat.Rgba8Sint,
             (10, 6 or 9, 1) => MtlPixelFormat.Bgra8UnormSrgb,
@@ -430,7 +431,9 @@ internal static class MetalGuestFormats
             (29, 0, _) or (4, 0, _) => MtlPixelFormat.R32Float,
             (1, 0, _) or (36, 0, _) => MtlPixelFormat.R8Unorm,
             (1, 4, _) or (49, 0, _) => MtlPixelFormat.R8Uint,
+            (1, 1, _) => MtlPixelFormat.R8Snorm,
             (3, 0, _) => MtlPixelFormat.Rg8Unorm,
+            (3, 1, _) => MtlPixelFormat.Rg8Snorm,
             (5, 0, _) => MtlPixelFormat.Rg16Unorm,
             (7, 0, _) => MtlPixelFormat.Rg11B10Float,
             (12, 0, _) => MtlPixelFormat.Rgba16Unorm,

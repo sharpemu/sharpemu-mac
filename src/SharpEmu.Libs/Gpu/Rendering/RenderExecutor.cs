@@ -763,7 +763,8 @@ public sealed partial class RenderExecutor
             (uint)vertexOffset,
             firstInstance,
             arguments.IndirectArgumentsAddress);
-        var disposition = RecordDraw(submitId, banks, in draw, ref state, topology, in emission, default, primitiveRestart: false, setBindDebug: false, setAutoDebug: true);
+        var disposition = RecordDraw(submitId, banks, in draw, ref state, topology, in emission, default, primitiveRestart: false, setBindDebug: false, setAutoDebug: true,
+            packetAddress: arguments.PacketAddress);
         TraceDrawTargets(banks, disposition);
         _host.ResetBindings();
     }
@@ -1191,10 +1192,12 @@ public sealed partial class RenderExecutor
     private static bool RequiresMeshExecution(uint stages) =>
         (stages & 0x20u) != 0 || (stages & 0x0200203Fu) == 0x2000u;
 
+    private const uint TessellationStageBits = 0x7u;
+
     private bool UsesMeshExecution(RegisterBanks banks) =>
         _pipelines.MeshShadersSupported && RequiresMeshExecution(banks.Context.ShaderStages) &&
         banks.Shader.Vertex.ExportAddress != 0 &&
-        banks.Shader.Vertex.HullAddress == 0 && banks.Shader.Vertex.LocalAddress == 0;
+        (banks.Context.ShaderStages & TessellationStageBits) == 0;
 
     private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false)
     {

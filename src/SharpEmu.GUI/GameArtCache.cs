@@ -11,7 +11,7 @@ internal static class GameArtCache
 {
     private const int PhotoWidth = 512;
 
-    private static readonly string Root = Path.Combine(AppContext.BaseDirectory, "user", "game-art");
+    private static readonly string Root = Path.Combine(SharpEmu.Logging.SharpEmuPaths.DataRoot, "user", "game-art");
 
     public static Bitmap? Load(string path, int width)
     {

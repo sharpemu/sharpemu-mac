@@ -25,7 +25,8 @@ internal static class TrophyUi
     // A .zar game keeps its metadata, trophy package included, in its cache folder.
     public static string? GameDirectory(string gamePath) =>
         SharpEmu.HLE.FileSystem.ZArchive.IsArchivePath(gamePath)
-            ? SharpEmu.HLE.FileSystem.ZArchiveCache.GetCacheRoot(gamePath)
+            ? SharpEmu.HLE.FileSystem.ZArchiveCache.GetCacheRoot(gamePath,
+                Path.Combine(SharpEmu.Logging.SharpEmuPaths.DataRoot, "user", "zar-cache"))
             : Path.GetDirectoryName(gamePath);
 
     public static string TrophyLanguage =>

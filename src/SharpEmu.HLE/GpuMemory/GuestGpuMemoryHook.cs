@@ -141,6 +141,17 @@ public static class GuestGpuMemoryHook
         _ = current.MarkCpuWrite(address, size);
     }
 
+    // Notify the stores after a managed write has changed guest memory.
+    public static void MarkCpuWriteLanded(ulong address, ulong size)
+    {
+        if (size == 0 || _current is not { } current)
+        {
+            return;
+        }
+
+        current.MarkCpuWriteLanded(address, size);
+    }
+
     // Shutdown can skip disposal. Report the counts once for each attached session.
     public static bool TryTakeShutdownSummary(out string summary)
     {

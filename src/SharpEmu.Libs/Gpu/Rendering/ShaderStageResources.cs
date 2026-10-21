@@ -224,6 +224,7 @@ public readonly record struct GuestGeometryConfiguration
     public uint ThreadsPerGroup { get; init; }
     public bool InputTriangleStrip { get; init; }
     public bool InputPointList { get; init; }
+    public bool InputLineList { get; init; }
     public uint InputPrimitiveCountPerWorkgroup { get; init; }
     public uint InputVertexCountPerWorkgroup { get; init; }
     public uint OutputVertexCapacity { get; init; }
@@ -257,6 +258,9 @@ public sealed class PixelInputInfo
     private ColorComponentMap[]? _targetExportMappings;
     // SPI_PS_IN_CONTROL.PS_W32_EN (bit 15).
     public bool GuestWave32 { get; set; }
+    // SPI_SHADER_COL_FORMAT of each EXP target.
+    public byte[] TargetExportFormats { get => _targetExportFormats ??= new byte[TargetCount]; init => _targetExportFormats = value; }
+    private byte[]? _targetExportFormats;
     public bool IeeeMode { get; set; }
     public uint FloatMode { get; set; } = SharpEmu.ShaderCompiler.ShaderCompileRequest.DefaultFloatMode;
     public bool Dx10Clamp { get; set; } = true;

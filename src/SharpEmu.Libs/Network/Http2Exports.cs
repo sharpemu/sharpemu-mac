@@ -38,11 +38,12 @@ public static class Http2Exports
         uint ConnectTimeoutMicroseconds,
         uint ReceiveTimeoutMicroseconds,
         uint SendTimeoutMicroseconds,
+        uint ResolveTimeoutMicroseconds,
         bool AuthEnabled,
         ulong SslCallback,
         ulong SslUserArgument)
     {
-        public static readonly Http2Options Default = new(0, 0, 0, 0, true, 0, 0, 0, 0, false, 0, 0);
+        public static readonly Http2Options Default = new(0, 0, 0, 0, true, 0, 0, 0, 0, 0, false, 0, 0);
     }
 
     private sealed record Http2Header(string Name, string Value, uint Mode);
@@ -72,6 +73,7 @@ public static class Http2Exports
         uint ConnectTimeoutMicroseconds,
         uint ReceiveTimeoutMicroseconds,
         uint SendTimeoutMicroseconds,
+        uint ResolveTimeoutMicroseconds,
         bool AuthEnabled,
         ulong SslCallback,
         ulong SslUserArgument);
@@ -140,6 +142,30 @@ public static class Http2Exports
 
         TraceHttp2("term", id, 0, 0, 0, 0);
         return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "otUQuZa-mv0",
+        ExportName = "sceHttp2GetMemoryPoolStats",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2GetMemoryPoolStats(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var statsAddress = ctx[CpuRegister.Rsi];
+        if (!Contexts.TryGetValue(id, out var context))
+        {
+            return ctx.SetReturn(Http2ErrorInvalidId);
+        }
+
+        if (statsAddress == 0)
+        {
+            return ctx.SetReturn(Http2ErrorNullPointer);
+        }
+
+        return MemoryPoolStats.TryWrite(ctx, statsAddress, context.PoolSize)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -333,6 +359,14 @@ public static class Http2Exports
         SetTimeout(ctx, static (options, value) => options with { SendTimeoutMicroseconds = value }, "send");
 
     [SysAbiExport(
+        Nid = "ACjtE27aErY",
+        ExportName = "sceHttp2SetResolveTimeOut",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetResolveTimeOut(CpuContext ctx) =>
+        SetTimeout(ctx, static (options, value) => options with { ResolveTimeoutMicroseconds = value }, "resolve");
+
+    [SysAbiExport(
         Nid = "jjFahkBPCYs",
         ExportName = "sceHttp2SetAuthEnabled",
         Target = Generation.Gen5,
@@ -480,6 +514,25 @@ public static class Http2Exports
         return ctx.SetReturn(Http2ErrorProhibited);
     }
 
+    [SysAbiExport(
+        Nid = "A+NVAFu4eCg",
+        ExportName = "sceHttp2SendRequestAsync",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SendRequestAsync(CpuContext ctx)
+    {
+        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (!Requests.ContainsKey(requestId))
+        {
+            return ctx.SetReturn(Http2ErrorInvalidId);
+        }
+
+        // Blocked like sceHttp2SendRequest. The send fails before it starts, so no
+        // completion event is queued for sceHttp2WaitAsync or the event queue.
+        TraceHttp2("send_async_blocked", requestId, ctx[CpuRegister.Rsi], ctx[CpuRegister.Rdx], ctx[CpuRegister.Rcx], 0);
+        return ctx.SetReturn(Http2ErrorProhibited);
+    }
+
     private static void RemoveTemplateRequests(int templateId)
     {
         foreach (var request in Requests)
@@ -547,6 +600,7 @@ public static class Http2Exports
             options.ConnectTimeoutMicroseconds,
             options.ReceiveTimeoutMicroseconds,
             options.SendTimeoutMicroseconds,
+            options.ResolveTimeoutMicroseconds,
             options.AuthEnabled,
             options.SslCallback,
             options.SslUserArgument);

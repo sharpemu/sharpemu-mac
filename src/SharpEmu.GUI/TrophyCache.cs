@@ -12,7 +12,7 @@ internal static class TrophyCache
 
     private sealed record CachedGame(long PackageSize, Dictionary<string, List<CachedTrophy>> Languages);
 
-    private static readonly string FilePath = Path.Combine(AppContext.BaseDirectory, "user", "trophy_cache.json");
+    private static readonly string FilePath = Path.Combine(SharpEmu.Logging.SharpEmuPaths.DataRoot, "user", "trophy_cache.json");
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
     private static readonly object Gate = new();
     private static Dictionary<string, CachedGame>? _games;

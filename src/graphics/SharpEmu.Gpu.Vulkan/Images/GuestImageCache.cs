@@ -35,9 +35,10 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
     private readonly SlotTable<CachedImage> _slots = new();
     private readonly ImageBackingPool? _backingPool;
     private readonly ImagePageOwnerTable _pageOwners = new();
-    private readonly Dictionary<Format, ResourceSlotIdentifier> _nullImages = new();
+    private readonly Dictionary<(Format Format, GuestImageType Type, uint Samples), ResourceSlotIdentifier> _nullImages = new();
     private RecencyQueue<ResourceSlotIdentifier> _recencyQueue = new();
     private readonly HashSet<ResourceSlotIdentifier> _scheduledReadbacks = new();
+    private readonly ReadbackLandings _readbackLandings = new();
     private readonly SortedList<ulong, SurfaceMetadata> _surfaceMetadata = new();
     private ulong _totalUsedMemory;
     private ulong _collectionStartBytes = 1536 * MiB;
@@ -266,9 +267,15 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                     ? GuestImageType.Color1D : GuestImageType.Color2D;
                 result = GrowImage(replacement, result);
             }
-            else if (request.Role == ImageRole.StorageImage && viewMip < 0 && viewLayer < 0 &&
-                     resolved.Description.IsBlock && !request.Description.IsBlock &&
-                     (resolved.Backing.Usage & ImageUsageFlags.StorageBit) == 0)
+            else if (request.View.Type == GpuImageViewType.Type3D && resolved.Backing.ImageType != ImageType.Type3D)
+            {
+                result = ResourceSlotIdentifier.Invalid;
+                viewMip = -1;
+                viewLayer = -1;
+            }
+            else if (viewMip < 0 && viewLayer < 0 && resolved.Description.IsBlock && !request.Description.IsBlock &&
+                     ((request.Role == ImageRole.StorageImage && (resolved.Backing.Usage & ImageUsageFlags.StorageBit) == 0) ||
+                      request.View.LevelCount > 1 || request.View.LayerCount > 1))
             {
                 result = ReplaceCompressedForStorage(request.Description, result);
             }
@@ -447,7 +454,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             }
             else if (metadata.Kind != SurfaceMetadataKind.Dcc)
             {
-                throw SubmissionScheduler.Fatal($"A color target reuses metadata that is not DCC: address=0x{address:X16} kind={metadata.Kind}.");
+                metadata = ReplaceSurfaceMetadata(address, metadata, new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc });
             }
 
             metadata.Size = Math.Max(metadata.Size, request.Description.DccSliceSize * request.Description.TransferLayers);
@@ -494,14 +501,15 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                 metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile, ClearMask = image.Description.HtileClearMask };
                 _surfaceMetadata.Add(address, metadata);
             }
-            else if (metadata.Invalidated)
+            else if (metadata.Invalidated && metadata.Kind == SurfaceMetadataKind.HTile)
             {
                 metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile };
                 _surfaceMetadata[address] = metadata;
             }
             else if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
             {
-                // A pending DCC fill uses the DCC encoding; it must not become HTile state.
+                // A pending DCC fill uses the DCC encoding; known or not, it must not become HTile state.
+                metadata.Invalidated = false;
                 metadata.Kind = SurfaceMetadataKind.HTile;
                 metadata.ClearMask = image.Description.HtileClearMask;
                 metadata.FillValue = 0xffffffff;
@@ -509,7 +517,8 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             }
             else if (metadata.Kind != SurfaceMetadataKind.HTile)
             {
-                throw SubmissionScheduler.Fatal($"A depth target reuses metadata that is not HTile: address=0x{address:X16} kind={metadata.Kind}.");
+                metadata = ReplaceSurfaceMetadata(address, metadata,
+                    new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile, ClearMask = image.Description.HtileClearMask });
             }
             metadata.RangeSize = Math.Max(metadata.RangeSize, request.Description.Metadata.Range.Size);
             image.MetadataRegistration = metadata;
@@ -517,7 +526,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
         if (request.Description.HasStencil)
         {
-            image.Description.Stencil = request.Description.Stencil;
+            image.Description.Stencil = StencilPlaneOfImage(image.Description, request.Description);
             RefreshStencilPlane(imageIdentifier, image, request.Description.Metadata.StencilCompressed);
         }
 
@@ -588,9 +597,23 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         }
     }
 
+    // A view of the first slices of a layered target names the stencil plane of those layers only. The image keeps
+    // its other layers, so its stencil association covers the plane of each of them, as its depth range does.
+    private static GuestSpan StencilPlaneOfImage(in ImageDescription image, in ImageDescription request)
+    {
+        var requestLayers = request.Resources.Layers;
+        var imageLayers = image.Resources.Layers;
+        if (requestLayers == 0 || imageLayers <= requestLayers || request.Stencil.Size % requestLayers != 0)
+        {
+            return request.Stencil;
+        }
+
+        return new GuestSpan(request.Stencil.Address, request.Stencil.Size / requestLayers * imageLayers);
+    }
+
     private void RefreshStencilPlane(ResourceSlotIdentifier depthIdentifier, CachedImage depth, bool stencilCompressed)
     {
-        var association = AssociateStencilRange(depthIdentifier, depth.Description.Stencil);
+        var association = AssociateStencilRange(depthIdentifier, depth.Description.Stencil, restoreNativeStencil: true);
         if (stencilCompressed || depth.Description.Samples != 1)
         {
             return;
@@ -673,8 +696,12 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
     private ResourceSlotIdentifier GetNullImage(in ImageRequest request)
     {
-        var format = request.Description.PixelFormat;
-        if (_nullImages.TryGetValue(format.ToVk(), out var found))
+        // The placeholder has the type and sample count of the binding: a 1D or 3D view needs an image of that
+        // type, and a multisampled binding a multisampled image.
+        var type = request.Description.Type;
+        var samples = Math.Max(request.Description.Samples, 1u);
+        var key = (request.Description.PixelFormat.ToVk(), type, samples);
+        if (_nullImages.TryGetValue(key, out var found))
         {
             return found;
         }
@@ -682,16 +709,16 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         var description = ImageDescription.Create();
         description.PixelFormat = request.Description.PixelFormat;
         description.GuestFormat = request.Description.GuestFormat;
-        description.Type = GuestImageType.Color2D;
+        description.Type = type;
         description.Extent = new GpuExtent3D(1, 1, 1);
         description.Resources = SubresourceCount.Single;
         description.Pitch = 1;
         description.BytesPerBlock = Math.Max(request.Description.BytesPerBlock, 1);
-        description.Samples = 1;
+        description.Samples = samples;
         description.TileMode = GuestTileMode.Linear;
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = description.BytesPerBlock, Pitch = 1, Height = 1 };
         var imageIdentifier = InsertImage(description);
-        _nullImages.Add(format.ToVk(), imageIdentifier);
+        _nullImages.Add(key, imageIdentifier);
         return imageIdentifier;
     }
 

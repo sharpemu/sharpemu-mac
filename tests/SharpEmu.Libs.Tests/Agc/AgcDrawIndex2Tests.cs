@@ -250,7 +250,12 @@ public sealed class AgcDrawIndex2Tests
     [Theory]
     [InlineData(0x40000000UL)]
     [InlineData(0x80000000UL)]
-    public void AutoDrawRecordsTheDrawForSupportedStageModifiers(ulong modifier)
+    [InlineData(0UL)]
+    [InlineData(0x40000100UL)]
+    [InlineData(0x80000100UL)]
+    [InlineData(0x140000000UL)]
+    [InlineData(0xC0000000UL)]
+    public void AutoDrawRecordsTheDrawForEveryModifier(ulong modifier)
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
         var context = new CpuContext(memory, Generation.Gen5);
@@ -276,24 +281,16 @@ public sealed class AgcDrawIndex2Tests
         Assert.Equal(4u, draw.VertexCount);
     }
 
-    [Theory]
-    [InlineData(0UL)]
-    [InlineData(0x40000100UL)]
-    [InlineData(0x80000100UL)]
-    [InlineData(0x140000000UL)]
-    [InlineData(0xC0000000UL)]
-    public void AutoDrawRejectsOtherModifiersWithoutWritingCommands(ulong modifier)
+    [Fact]
+    public void AutoDrawWithoutCommandBufferWritesNothing()
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
         var context = new CpuContext(memory, Generation.Gen5);
-        var commandBufferAddress = BaseAddress + 0x80;
-        WriteUInt64(memory, commandBufferAddress + 0x10, CommandAddress);
-        WriteUInt64(memory, commandBufferAddress + 0x18, CommandAddress + 28);
         var before = new byte[0x1000];
         Assert.True(memory.TryRead(BaseAddress, before));
-        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rdi] = 0;
         context[CpuRegister.Rsi] = 4;
-        context[CpuRegister.Rdx] = modifier;
+        context[CpuRegister.Rdx] = 0x40000000UL;
 
         AgcExports.DcbDrawIndexAuto(context);
 

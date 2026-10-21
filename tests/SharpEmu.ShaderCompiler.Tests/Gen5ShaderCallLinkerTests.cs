@@ -100,6 +100,16 @@ public sealed class Gen5ShaderCallLinkerTests
         Assert.Throws<InvalidOperationException>(() => Gen5ShaderCallLinker.Link(caller with { IsFusedProgram = true }, [new(0, 14, 16, 14, 4, [target])]));
     }
 
+    // A site whose table holds only null records has no target: the call links to its fault.
+    [Fact]
+    public void Link_SendsACallWithoutTargetsToItsFault()
+    {
+        var caller = Program(Sop1(0, "SSwappcB64", 14, Gen5Operand.Scalar(14)), EndProgram(4));
+        var linked = Gen5ShaderCallLinker.Link(caller, [new(0, 14, 16, 14, 4, [])]);
+        Assert.DoesNotContain(linked.Instructions, instruction => instruction.Opcode == "SSwappcB64");
+        Assert.Equal(0u, Assert.Single(linked.Instructions, instruction => instruction.Control is ShaderCallFaultControl).Pc);
+    }
+
     private static Gen5ShaderProgram Link(Gen5ShaderProgram body)
     {
         var caller = Program(Sop1(0, "SSwappcB64", 14, Gen5Operand.Scalar(14)), EndProgram(4));
