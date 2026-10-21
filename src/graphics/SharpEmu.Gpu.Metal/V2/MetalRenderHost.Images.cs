@@ -396,6 +396,8 @@ internal sealed partial class MetalRenderHost
 
     public bool IsMetadata(ulong address) => _imageCache.IsMetadata(address);
 
+    public bool CoversMetadata(ulong address, ulong size) => _imageCache.CoversMetadata(address, size);
+
     public bool ClearMetadata(ulong address) => _imageCache.ClearMetadata(address);
 
     public bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear)

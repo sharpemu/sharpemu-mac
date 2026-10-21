@@ -322,11 +322,13 @@ public sealed class MslArgumentBufferDeclarationTests
         var (request, _) = SpirvBindingDeclarationTests.IndirectImageAfterPlainImageRequest(loadMip: true);
         var shader = Compile(request);
 
-        // Both candidate cases read with the register mip, never the base level.
+        // Both candidate cases read with the register mip, never the base level. A mip past
+        // the last one moves the read outside the image (where Metal returns zero) and reads
+        // level 0 there instead of an undefined level.
         var reads = shader.Source.Split('\n').Where(line => line.Contains(".read(uint2(", StringComparison.Ordinal)).ToList();
         Assert.Equal(2, reads.Count);
         Assert.All(reads, line => Assert.DoesNotContain(", 0u)", line));
-        Assert.All(reads, line => Assert.Matches(@"\), t\d+\);", line));
+        Assert.All(reads, line => Assert.Matches(@"\), \(t\d+ \? 0u : t\d+\)\);", line));
     }
 
     [Fact]

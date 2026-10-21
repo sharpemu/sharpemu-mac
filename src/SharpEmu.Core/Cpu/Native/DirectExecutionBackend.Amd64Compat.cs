@@ -148,6 +148,7 @@ public sealed partial class DirectExecutionBackend
         }
 
         WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)instruction.Length);
+        NoteHotSiteFault(rip, in instruction);
 
         Interlocked.Increment(ref _sse4aInstructionsEmulated);
         if (Interlocked.Exchange(ref _sse4aSoftwareFallbackAnnounced, 1) == 0)

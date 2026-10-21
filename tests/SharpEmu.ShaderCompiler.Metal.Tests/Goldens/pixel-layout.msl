@@ -3,6 +3,8 @@
 
 using namespace metal;
 
+#pragma clang fp contract(off)
+
 struct Gen5AddressRange
 {
     ulong first_page;

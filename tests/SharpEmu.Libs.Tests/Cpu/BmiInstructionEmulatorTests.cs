@@ -17,6 +17,62 @@ public sealed class BmiInstructionEmulatorTests
     private const uint Overflow = 1u << 11;
     private const uint DirectionFlag = 1u << 10; // Unrelated flag; must be preserved.
 
+    // ADCX/ADOX (ADX): add with the carry in and out on one flag each, every other flag kept.
+    [Fact]
+    public void Adcx_AddsCarryInAndCarriesOutOnlyThroughCf()
+    {
+        uint flags = Carry | Overflow | Zero | DirectionFlag;
+        var result = BmiInstructionEmulator.Adcx(ulong.MaxValue, 0, GprOperandSize.Bits64, ref flags);
+
+        Assert.Equal(0UL, result);
+        Assert.Equal(Carry | Overflow | Zero | DirectionFlag, flags);
+    }
+
+    [Fact]
+    public void Adcx_ClearsCfWhenNothingCarries64()
+    {
+        uint flags = Carry | Sign;
+        var result = BmiInstructionEmulator.Adcx(5, 6, GprOperandSize.Bits64, ref flags);
+
+        Assert.Equal(12UL, result);
+        Assert.Equal(Sign, flags);
+    }
+
+    [Fact]
+    public void Adcx_WrapsAndCarriesAt32Bits()
+    {
+        uint flags = 0;
+        var result = BmiInstructionEmulator.Adcx(0xFFFF_FFF0, 0x20, GprOperandSize.Bits32, ref flags);
+
+        Assert.Equal(0x10UL, result);
+        Assert.Equal(Carry, flags);
+    }
+
+    [Fact]
+    public void Adcx_CarriesFromTheAddendAloneWithoutCarryIn64()
+    {
+        uint flags = 0;
+        var result = BmiInstructionEmulator.Adcx(0x8000_0000_0000_0000, 0x8000_0000_0000_0001, GprOperandSize.Bits64, ref flags);
+
+        Assert.Equal(1UL, result);
+        Assert.Equal(Carry, flags);
+    }
+
+    [Fact]
+    public void Adox_UsesOfAndLeavesCfAlone()
+    {
+        uint flags = Overflow;
+        var result = BmiInstructionEmulator.Adox(0xFFFF_FFFF, 0, GprOperandSize.Bits32, ref flags);
+
+        Assert.Equal(0UL, result);
+        Assert.Equal(Overflow, flags);
+
+        flags = Carry;
+        result = BmiInstructionEmulator.Adox(1, 2, GprOperandSize.Bits32, ref flags);
+        Assert.Equal(3UL, result);
+        Assert.Equal(Carry, flags);
+    }
+
     [Fact]
     public void Andn_ClearsSourceBitsAndFlags()
     {

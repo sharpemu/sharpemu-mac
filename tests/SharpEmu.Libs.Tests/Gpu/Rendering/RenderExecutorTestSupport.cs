@@ -133,6 +133,9 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public HashSet<ulong> MetadataAddresses { get; } = new();
 
+    // The registered size of a metadata surface, where a test gives one.
+    public Dictionary<ulong, ulong> MetadataSizes { get; } = new();
+
     public HashSet<ulong> ClearableMetadata { get; } = new();
 
     public HashSet<ulong> RegisteredDcc { get; } = new();
@@ -467,6 +470,13 @@ internal sealed class RecordingRenderHost : IRenderHost
     {
         Calls.Add($"is_metadata {address:X}");
         return MetadataAddresses.Contains(address);
+    }
+
+    public bool CoversMetadata(ulong address, ulong size)
+    {
+        Calls.Add($"covers_metadata {address:X} {size:X}");
+        return MetadataAddresses.Contains(address) &&
+            (!MetadataSizes.TryGetValue(address, out var surface) || size >= surface);
     }
 
     public bool ClearMetadata(ulong address)

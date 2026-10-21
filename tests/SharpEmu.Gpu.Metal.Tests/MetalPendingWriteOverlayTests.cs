@@ -198,4 +198,35 @@ public sealed class MetalPendingWriteOverlayTests
         Assert.Equal(MetalOverlayCoverage.Partial, overlay.Coverage(0x7000_0000, 0x20_0000, () => 0));
         Assert.Equal(MetalOverlayCoverage.None, overlay.Coverage(0x7020_0000, 0x20_0000, () => 0));
     }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ALongForgetWalksOnlyThePagesWithEntriesAndForgetsWhatItCovers(bool pageFilter)
+    {
+        var overlay = new MetalPendingWriteOverlay(pageFilter);
+        // Many qwords on two pages (as an occlusion dump leaves them), one inside the range and
+        // one past it; a write across the range's end; one already forgotten, still queued.
+        overlay.AddQwords(0x7004_0000, 64, 16, 0x1122_3344_5566_7788, serial: 5);
+        overlay.AddQwords(0x7090_0000, 64, 16, 0x1122_3344_5566_7788, serial: 5);
+        overlay.Add(0x7007_FFFC, [1, 2, 3, 4, 5, 6, 7, 8], serial: 5);
+        overlay.Add(0x7002_0000, [9, 9, 9, 9], serial: 5);
+        overlay.Forget(0x7002_0000, 4);
+
+        // 512 KiB: far more pages than the overlay has entries on.
+        overlay.Forget(0x7000_0000, 0x8_0000);
+
+        Assert.Equal(MetalOverlayCoverage.None, overlay.Coverage(0x7004_0000, 64 * 16, () => 0));
+        Assert.Equal(MetalOverlayCoverage.None, overlay.Coverage(0x7007_FFFC, 4, () => 0));
+        Assert.Equal(MetalOverlayCoverage.Full, overlay.Coverage(0x7008_0000, 4, () => 0));
+        Assert.Equal(MetalOverlayCoverage.Full, overlay.Coverage(0x7090_0000 + 63 * 16, 8, () => 0));
+        Span<byte> bytes = [0, 0, 0, 0];
+        overlay.Apply(0x7008_0000, bytes);
+        Assert.Equal([5, 6, 7, 8], bytes.ToArray());
+
+        // The entries the forget left answer, then go when their submission lands.
+        Assert.Equal(64 + 1, overlay.Count);
+        overlay.Retire(5);
+        Assert.Equal(0, overlay.Count);
+    }
 }

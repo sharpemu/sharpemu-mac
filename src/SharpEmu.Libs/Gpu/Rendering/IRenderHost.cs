@@ -276,6 +276,12 @@ public interface IRenderHost
     bool TakesIndirectAutoRectangleListArguments(VertexInputInfo vertexInput, ulong argumentsAddress, ulong argumentsSize) =>
         TakesIndirectRectangleListArguments;
 
+    // The same for an indexed rectangle list with this vertex input, whose count the bound
+    // index range limits to indexLimit (uint.MaxValue when unbounded).
+    bool TakesIndirectIndexedRectangleListArguments(
+        VertexInputInfo vertexInput, ulong argumentsAddress, ulong argumentsSize, uint indexLimit) =>
+        TakesIndirectRectangleListArguments;
+
     void InsertDrawTraceMarker(string label) { }
 
     void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
@@ -322,6 +328,11 @@ public interface IRenderHost
     void CopyDepthStencilImage(ResourceSlotIdentifier source, ResourceSlotIdentifier destination, in SubresourceRange range, in GpuExtent3D extent, GpuImageAspect aspects);
 
     bool IsMetadata(ulong address);
+
+    // Whether a buffer binding of this size at the address spans the whole metadata surface
+    // registered there, as a clear of it does. A small buffer that merely starts where a
+    // surface's metadata once lived (transient memory reused for counters) does not.
+    bool CoversMetadata(ulong address, ulong size) => IsMetadata(address);
 
     bool ClearMetadata(ulong address);
 

@@ -468,8 +468,10 @@ public static partial class Gen5MslTranslator
         /// <summary>
         /// The V_PK_* 16-bit integer ops. Each result lane reads the source halves its op_sel
         /// (low lane) or op_sel_hi (high lane) bit names, as EmitPackedI16Arithmetic does, and
-        /// the hardware's clamp saturates each lane to the type's range. neg_lo/neg_hi are
-        /// floating-point modifiers with no defined meaning here and are refused.
+        /// the hardware's clamp saturates each lane to the type's range. neg_lo/neg_hi negate
+        /// floating-point inputs only and an integer op ignores them: the PS5 compiler leaves
+        /// them set on v_pk_add_u16 and v_pk_max_i16 in Black Myth: Wukong's FSR3 passes, which
+        /// refusing them dropped every frame.
         /// </summary>
         private bool TryEmitPackedInt16(
             Gen5ShaderInstruction instruction,
@@ -479,12 +481,6 @@ public static partial class Gen5MslTranslator
         {
             value = null;
             error = string.Empty;
-            if (control.NegLoMask != 0 || control.NegHiMask != 0)
-            {
-                error = $"{instruction.Opcode}: neg_lo/neg_hi on a packed integer op are not supported";
-                return false;
-            }
-
             var opcode = instruction.Opcode;
             var ternary = opcode is "VPkMadI16" or "VPkMadU16";
             var sources = new string[ternary ? 3 : 2];

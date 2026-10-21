@@ -95,22 +95,19 @@ public static partial class AgcExports
         var waitForPrevious = (uint)(waitForPreviousRaw & 0xFF);
         var writeConfirm = (uint)(writeConfirmRaw & 0xFF);
         var blockEngine = (uint)(blockEngineRaw & 0xFF);
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 8, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(8, ItNop, RDmaData)) ||
-            !TryWriteUInt32(
+        // One write for the whole packet: each guest write is checked against the GPU caches.
+        if (!TryEmitCommandDwords(
                 ctx,
-                commandAddress + 4,
-                destination |
-                (destinationCachePolicy << 8) |
-                (source << 16) |
-                (sourceCachePolicy << 24)) ||
-            !TryWriteUInt32(
-                ctx,
-                commandAddress + 8,
-                engine | (waitForPrevious << 8) | (writeConfirm << 16) | (blockEngine << 24)) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, byteCount) ||
-            !ctx.TryWriteUInt64(commandAddress + 16, destinationAddress) ||
-            !ctx.TryWriteUInt64(commandAddress + 24, sourceAddress))
+                commandBufferAddress,
+                out var commandAddress,
+                Pm4(8, ItNop, RDmaData),
+                destination | (destinationCachePolicy << 8) | (source << 16) | (sourceCachePolicy << 24),
+                engine | (waitForPrevious << 8) | (writeConfirm << 16) | (blockEngine << 24),
+                byteCount,
+                (uint)destinationAddress,
+                (uint)(destinationAddress >> 32),
+                (uint)sourceAddress,
+                (uint)(sourceAddress >> 32)))
         {
             return ReturnPointer(ctx, 0);
         }

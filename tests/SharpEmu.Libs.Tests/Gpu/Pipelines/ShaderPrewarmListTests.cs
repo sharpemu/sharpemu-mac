@@ -290,6 +290,53 @@ public sealed class ShaderPrewarmListTests : IDisposable
         Assert.Equal(identities[0], ShaderPrewarmList.Identity(reloaded.LoadedComputes()[0].Record));
     }
 
+    // Two descriptors with the same words merge into one binding (DescriptorBindingAliases), so a
+    // program whose descriptors alias has fewer elements in a descriptor field than the same
+    // record without the alias: a translation made for one argument-buffer layout must never be
+    // found under the other's identity, and the prewarm must replay the merge it recorded.
+    [Fact]
+    public void DescriptorAliasesAndSamplerStateSurviveReloadAndKeyTheIdentity()
+    {
+        using (var list = Open())
+        {
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        }
+
+        ComputePrewarmRecord original;
+        using (var list = Open())
+        {
+            var (loaded, code) = Assert.Single(list.LoadedComputes());
+            original = loaded;
+            ComputePrewarmRecord Variant(ResourceSpecialization specialization) => new()
+            {
+                Hash = original.Hash, CodeSize = original.CodeSize, Address = original.Address,
+                ContinuationAddressOffset = original.ContinuationAddressOffset, UserDataBase = original.UserDataBase,
+                UserDataCount = original.UserDataCount, PushDataCursor = original.PushDataCursor,
+                Info = original.Info, SystemRegisters = original.SystemRegisters, Specialization = specialization,
+            };
+
+            var images = original.Specialization.Clone();
+            images.ImageDescriptorGroups.AddRange([0u, 1u, 1u]);
+            list.RecordCompute(code, Variant(images));
+            var samplers = original.Specialization.Clone();
+            samplers.SamplerDescriptorGroups.AddRange([0u, 0u]);
+            samplers.Samplers.Add(new SamplerSpecialization(-3, MirrorOnceBorderAxes: 5, BorderColorType: 2));
+            list.RecordCompute(code, Variant(samplers));
+        }
+
+        using var reloaded = Open();
+        var records = reloaded.LoadedComputes().Select(item => item.Record).ToArray();
+        Assert.Equal(3, records.Length);
+        var aliased = Assert.Single(records, record => record.Specialization.ImageDescriptorGroups.Count != 0);
+        Assert.Equal([0u, 1u, 1u], aliased.Specialization.ImageDescriptorGroups);
+        var sampled = Assert.Single(records, record => record.Specialization.SamplerDescriptorGroups.Count != 0);
+        Assert.Equal([0u, 0u], sampled.Specialization.SamplerDescriptorGroups);
+        Assert.Equal(new SamplerSpecialization(-3, 5, 2), Assert.Single(sampled.Specialization.Samplers));
+        Assert.Equal(3, records.Select(ShaderPrewarmList.Identity).Distinct().Count());
+        Assert.Equal(ShaderPrewarmList.Identity(original),
+            ShaderPrewarmList.Identity(Assert.Single(records, record => record.Specialization.Equals(original.Specialization))));
+    }
+
     [Fact]
     public void RecordedReadsReplayAsMergedRanges()
     {

@@ -72,6 +72,9 @@ public sealed class ImageResource
     public bool Read { get; set; }
     public bool Written { get; set; }
     public bool Atomic { get; set; }
+    // An image atomic on 64-bit texels (DMASK 0x3, or 0xF for a compare-swap pair), such
+    // as a visibility buffer packing depth and an ID into one 32_32_UINT texel.
+    public bool Atomic64 { get; set; }
     public bool DepthCompare { get; set; }
     // Guest compare function (0..7) evaluated in the shader for a depth-compare
     // image whose format has no Vulkan depth equivalent; -1 when not emulated.

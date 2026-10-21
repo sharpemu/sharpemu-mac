@@ -259,7 +259,8 @@ internal sealed partial class MetalRenderHost
         R128: image.R128,
         Multisampled: image.Dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray,
         DepthCompare: image.DepthCompare,
-        Atomic: image.Atomic);
+        Atomic: image.Atomic,
+        Atomic64: image.Atomic64);
 
     public IPreparedBindings PrepareBindings(ShaderStageResources stage)
     {
@@ -575,11 +576,14 @@ internal sealed partial class MetalRenderHost
 
             var request = stage.Requests[index];
             var identifier = stage.Images[index];
-            if (!_imageCache.TryGetImage(identifier, out _))
+            using (var resolveScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingImageResolve))
             {
-                ResolveImageBinding(stage, info.Images[index], snapshot.Images[index], index);
-                request = stage.Requests[index];
-                identifier = stage.Images[index];
+                if (!_imageCache.TryGetImage(identifier, out _))
+                {
+                    ResolveImageBinding(stage, info.Images[index], snapshot.Images[index], index);
+                    request = stage.Requests[index];
+                    identifier = stage.Images[index];
+                }
             }
 
             var role = stage.IsStorage[index] ? ImageRole.StorageImage : ImageRole.Texture;
@@ -589,10 +593,13 @@ internal sealed partial class MetalRenderHost
                 stage.Requests[index] = request;
             }
 
-            stage.Textures[index] = _imageCache.AcquireTextureView(
-                identifier, request with { Role = role }, out stage.TextureIds[index]);
-            NotePendingInputDump(stage.Textures[index], identifier, index, role);
-            BindStorageMipViews(stage, info.Images[index], identifier, request with { Role = role }, index);
+            using (var acquireScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingTextureAcquire))
+            {
+                stage.Textures[index] = _imageCache.AcquireTextureView(
+                    identifier, request with { Role = role }, out stage.TextureIds[index]);
+                NotePendingInputDump(stage.Textures[index], identifier, index, role);
+                BindStorageMipViews(stage, info.Images[index], identifier, request with { Role = role }, index);
+            }
         }
 
         for (var index = 0; index < stage.BufferCount; index++)
@@ -615,7 +622,13 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
-            if (requested > ulong.MaxValue - descriptor.Address || !_memory.CanRead(descriptor.Address, 1))
+            bool readable;
+            using (var checkScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingBufferCheck))
+            {
+                readable = requested <= ulong.MaxValue - descriptor.Address && _memory.CanRead(descriptor.Address, 1);
+            }
+
+            if (!readable)
             {
                 var resource = info.Buffers[index];
                 throw Fatal(
@@ -632,6 +645,7 @@ internal sealed partial class MetalRenderHost
             var range = ResolveStorageBuffer(descriptor.Address, size, written);
             if (written)
             {
+                using var writtenScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenBuffer);
                 // The text is built only when the trace prints it: this runs per written buffer per draw.
                 if (MetalImageCache.TracesDccWriter(descriptor.Address, size))
                 {
@@ -641,10 +655,18 @@ internal sealed partial class MetalRenderHost
                         $"format={descriptor.Format} buffers={stage.BufferCount} user_data=[{string.Join(',', snapshot.UserData.ToArray().Select(word => $"{word:X8}"))}]");
                 }
 
-                _imageCache.InvalidateMemoryFromGpu(descriptor.Address, size);
-                NoteGuestMemoryWrite(descriptor.Address, size, MetalGpuWriteOrigin.StorageBuffer);
+                using (var invalidateScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenInvalidate))
+                {
+                    _imageCache.InvalidateMemoryFromGpu(descriptor.Address, size);
+                }
+
+                using (var noteScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenNote))
+                {
+                    NoteGuestMemoryWrite(descriptor.Address, size, MetalGpuWriteOrigin.StorageBuffer);
+                }
             }
 
+            using var reportScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingReport);
             _slotTrap?.NoteBinding(
                 $"storage[{index}] hash=0x{stage.Program.Hash:X16}{(written ? " written" : string.Empty)}",
                 descriptor.Address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
@@ -653,7 +675,10 @@ internal sealed partial class MetalRenderHost
             ReportBufferBinding(stage, index, in descriptor, requested, size, range);
         }
 
-        BindDeviceAddressRanges(stage, info, snapshot);
+        using (var deviceScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingDeviceAddresses))
+        {
+            BindDeviceAddressRanges(stage, info, snapshot);
+        }
         if (snapshot.BindlessImages.Length != 0 || stage.Program.Bindings!.BindlessImageTableCount != 0)
         {
             BindBindlessImages(stage, info, snapshot);

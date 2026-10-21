@@ -1356,8 +1356,12 @@ public static partial class ResourceMaterializer
             // raw bit pattern (Gen5SpirvTranslator) and legitimately target a
             // 32-bit float-format UAV instead - reject only formats that are
             // neither.
-            if (baseImage.Atomic && format != GuestImageFormat.Format32Uint &&
-                GuestImageFormat.SampledNumericClass(format) != ImageNumericClass.Float)
+            // A 64-bit image atomic works on whole 32_32_UINT texels, and only on those.
+            var atomicFormatSupported = !baseImage.Atomic || (baseImage.Atomic64
+                ? format == GuestImageFormat.Format32x2Uint
+                : format == GuestImageFormat.Format32Uint ||
+                    GuestImageFormat.SampledNumericClass(format) == ImageNumericClass.Float);
+            if (!atomicFormatSupported)
             {
                 return Fail($"atomic image descriptor {index} uses unsupported format {format}");
             }

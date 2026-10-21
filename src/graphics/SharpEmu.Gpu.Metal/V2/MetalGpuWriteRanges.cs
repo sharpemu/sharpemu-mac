@@ -97,6 +97,16 @@ internal sealed class MetalGpuWriteRanges
     // the whole command area, so a bounding range would block reads of unrelated memory.
     private Record[] _labels = new Record[64];
     private int _labelCount;
+
+    // How many live labels lie on each 4 KiB page. Black Myth: Wukong records some 12,000
+    // labels a second and keeps a couple of thousand live while the GPU runs behind, and
+    // every pending-write query scanned all of them: ~8 us a query, 8% of the GPU worker.
+    // A query whose pages hold no label skips the scan.
+    private readonly Dictionary<ulong, int> _labelPages = [];
+    private const int LabelPageShift = 12;
+
+    // A query wider than this many pages scans the labels rather than looking each page up.
+    private const ulong MaxLabelPageLookups = 64;
     // A write whose destination range is not known: every read waits for it.
     private ulong _unboundedSerial;
     private ulong _unboundedSequence;
@@ -216,6 +226,7 @@ internal sealed class MetalGpuWriteRanges
             Sequence = sequence,
             Origin = MetalGpuWriteOrigin.EndOfPipeLabel,
         };
+        CountLabelPages(address, end, 1);
         if (address < _boundsStart)
         {
             _boundsStart = address;
@@ -300,7 +311,8 @@ internal sealed class MetalGpuWriteRanges
             }
         }
 
-        for (var index = 0; index < _labelCount; index++)
+        var labels = LabelPagesMayCover(address, end) ? _labelCount : 0;
+        for (var index = 0; index < labels; index++)
         {
             ref var label = ref _labels[index];
             if (label.Serial > pending && label.End > address && label.Start < end)
@@ -338,7 +350,8 @@ internal sealed class MetalGpuWriteRanges
             }
         }
 
-        for (var index = 0; index < _labelCount; index++)
+        var labels = LabelPagesMayCover(address, end) ? _labelCount : 0;
+        for (var index = 0; index < labels; index++)
         {
             ref var label = ref _labels[index];
             if (label.Sequence > latest && label.End > address && label.Start < end)
@@ -348,6 +361,49 @@ internal sealed class MetalGpuWriteRanges
         }
 
         return latest;
+    }
+
+    private void CountLabelPages(ulong start, ulong end, int delta)
+    {
+        for (var page = start >> LabelPageShift; page <= (end - 1) >> LabelPageShift; page++)
+        {
+            var count = _labelPages.GetValueOrDefault(page) + delta;
+            if (count > 0)
+            {
+                _labelPages[page] = count;
+            }
+            else
+            {
+                _labelPages.Remove(page);
+            }
+        }
+    }
+
+    // Whether a live label may lie in [address, end): a page lookup per page for a narrow
+    // query, true (scan them) for a wide one.
+    private bool LabelPagesMayCover(ulong address, ulong end)
+    {
+        if (_labelCount == 0)
+        {
+            return false;
+        }
+
+        var first = address >> LabelPageShift;
+        var last = (end - 1) >> LabelPageShift;
+        if (last - first >= MaxLabelPageLookups)
+        {
+            return true;
+        }
+
+        for (var page = first; page <= last; page++)
+        {
+            if (_labelPages.ContainsKey(page))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Drops every record the GPU has finished.</summary>
@@ -395,6 +451,7 @@ internal sealed class MetalGpuWriteRanges
             ref var label = ref _labels[index];
             if (label.Serial <= completed)
             {
+                CountLabelPages(label.Start, label.End, -1);
                 continue;
             }
 
@@ -414,6 +471,7 @@ internal sealed class MetalGpuWriteRanges
         Version++;
         _count = 0;
         _labelCount = 0;
+        _labelPages.Clear();
         _unboundedSerial = 0;
         _boundsStart = ulong.MaxValue;
         _boundsEnd = 0;

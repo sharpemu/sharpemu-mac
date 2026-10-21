@@ -28,6 +28,12 @@ internal interface IMetalImageCacheOwner
     // Ends any open encoder and hands over the command buffer being recorded.
     IMetalSubmissionContext BeginTransfer(MetalTransferCause cause);
 
+    // Lands the command-processor copies held for the commit that write these guest bytes, so
+    // a transfer reading them next sees them (MetalRenderHost.LabelsAtCommit).
+    void LandHeldCopies(ulong address, ulong size)
+    {
+    }
+
     // The same, for a transfer that reads or writes only these textures (zero for an
     // unused one). A clear still waiting for its pass has to land before the transfer
     // only when the transfer touches the cleared texture; every other one keeps waiting.
@@ -365,6 +371,16 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     ///
     /// Caller holds the lock.
     /// </summary>
+    // SHARPEMU_METAL_V2_NEWER_WRITER_WINS=0 restores publishing every GPU-modified alias into the
+    // image being acquired, whichever of the two wrote the shared bytes last.
+    private static readonly bool NewerWriterWins =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_NEWER_WRITER_WINS") != "0";
+
+    private long _aliasNewerKept;
+
+    /// <summary>Alias syncs that kept this image's newer contents instead of publishing an older alias.</summary>
+    public long TakeAliasNewerKept() => Interlocked.Exchange(ref _aliasNewerKept, 0);
+
     private void SynchronizeAliases(
         ResourceSlotIdentifier imageIdentifier, bool takesGpuOwnership, bool keepsDepthPlane = false)
     {
@@ -420,6 +436,29 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     // alias and owns only the rest: its texture is stale here, so it has
                     // nothing to publish, and the image that wrote them since - this one,
                     // or one this loop publishes on its own turn - is what holds them.
+                    continue;
+                }
+
+                if (NewerWriterWins && image.IsGpuModified && image.GpuWriteSequence > other.GpuWriteSequence)
+                {
+                    // This image wrote the shared bytes after the other did - typically a DCC
+                    // fast clear this lookup just materialized - so its texture holds what the
+                    // guest last put there. Publishing the other into it would put the older
+                    // contents back over the newer: UE5's shadow mask came out of its clear
+                    // white, then had the lower half of an overlapping transient copied over
+                    // it, and its per-object shadow channel left every character unlit; the
+                    // refraction buffer kept stale offsets the same way (the screen blocks).
+                    // The other gives the run up instead, and takes it back from this image
+                    // through the ordinary path when it is used again.
+                    if (!TryHandOverAliasRun(other, otherStart, otherEnd, out _))
+                    {
+                        WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+                        other.ClearGpuModified();
+                        other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                    }
+
+                    _aliasNewerKept++;
+                    NoteAliasPublication("newer-kept", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     continue;
                 }
 
@@ -576,9 +615,21 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
             if (takesGpuOwnership)
             {
-                // Written back above if it owed anything; both planes reload on its next use.
+                // Written back above if it owed anything. The depth plane its texture holds is
+                // still the newest; only the stencil is this image's from now on, and it is
+                // copied over on the device when the depth image binds next. Reloading both
+                // planes from guest memory instead round-trips the depth plane, and a reload
+                // that does not give back exactly what was written left Black Myth: Wukong's
+                // scene depth as garbage or zeros, every pass that tests or samples it with it.
                 depth.ClearGpuModified();
-                depth.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                if (StencilDeviceHandOver)
+                {
+                    depth.StencilPlaneStale = true;
+                }
+                else
+                {
+                    depth.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                }
             }
         }
 
@@ -587,8 +638,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
-        // A depth image binds: an image that wrote its stencil bytes since publishes them,
-        // and the depth image reloads both planes from guest memory.
+        // A depth image binds: an image that wrote its stencil bytes since hands them over,
+        // on the device when it can (the depth plane stays as the texture holds it), and
+        // otherwise by publishing them while the depth image reloads both planes from guest
+        // memory.
         var stencil = image.Description.Stencil;
         foreach (var otherIdentifier in FindImagesInRange(stencil.Address, stencil.Size, pageOverlap: false))
         {
@@ -599,7 +652,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             NoteForeignStencilShare(image, other);
-            if (other.IsGpuModified)
+            var handedOver = (other.IsGpuModified || image.StencilPlaneStale) && TryCopyStencilOnDevice(image, other);
+            if (!handedOver && other.IsGpuModified)
             {
                 // The depth plane is written out first so the reload keeps it, and the
                 // other image second so its stencil bytes are the ones left in guest memory.
@@ -611,11 +665,61 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
             if (takesGpuOwnership)
             {
-                // Published above if it owed anything, so a whole reload loses nothing.
+                // Published above if it owed anything, or now held by the depth image's
+                // stencil, so a whole reload loses nothing.
                 other.ClearGpuModified();
                 other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
             }
         }
+
+        if (image.StencilPlaneStale)
+        {
+            // The image that took the stencil over is gone (its bytes were published when it
+            // was released): only guest memory has them now.
+            image.StencilPlaneStale = false;
+            image.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+        }
+    }
+
+    // SHARPEMU_METAL_V2_STENCIL_DEVICE=0 hands a stencil plane written through another image
+    // back to its depth image through guest memory again (both planes reloaded).
+    private static readonly bool StencilDeviceHandOver =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STENCIL_DEVICE") != "0";
+
+    private long _stencilDeviceHandOvers;
+
+    // The stencil an 8-bit image over a depth image's stencil bytes holds, copied into the
+    // depth texture's stencil plane. Caller holds the lock.
+    private bool TryCopyStencilOnDevice(MetalCachedImage depth, MetalCachedImage other)
+    {
+        if (!StencilDeviceHandOver || depth.Texture == 0 || other.Texture == 0 ||
+            depth.IsCpuDirty || other.IsCpuDirty ||
+            depth.IsWindowLinearView || other.IsWindowLinearView ||
+            depth.FirstLevel != 0 || other.FirstLevel != 0 ||
+            other.Description.Data.Address != depth.Description.Stencil.Address)
+        {
+            return false;
+        }
+
+        if (depth.HoldsStencilFrom(other))
+        {
+            depth.StencilPlaneStale = false;
+            return true;
+        }
+
+        EnsureSparseBacked(depth);
+        var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, depth.Texture);
+        if (!_transfer.TryEncodeStencilFromColor(
+                context, in other.Description, other.Texture, in depth.Description, depth.Texture))
+        {
+            return false;
+        }
+
+        // The stencil plane changed on the GPU and guest memory does not have it yet.
+        depth.MarkGpuModified(depthPlaneChanged: false);
+        depth.NoteStencilFrom(other);
+        _stencilDeviceHandOvers++;
+        return true;
     }
 
     private long _stencilPlanePublishes;
@@ -648,6 +752,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     /// <summary>Stencil planes handed between a depth image and an image over them.</summary>
     public long TakeStencilPlanePublishes() => Interlocked.Exchange(ref _stencilPlanePublishes, 0);
+
+    public long TakeStencilDeviceHandOvers() => Interlocked.Exchange(ref _stencilDeviceHandOvers, 0);
 
     // A write through an alias takes over the run a GPU-written image shares with it and
     // leaves that image GPU-modified for the rest: the run is published, so guest memory
@@ -1398,6 +1504,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
+        _owner.LandHeldCopies(description.Data.Address + aligned, alignedEnd - aligned);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         _transfer.EncodeTextureToGuest(
@@ -1498,8 +1605,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             requestedExtent.Width == cachedExtent.Width && requestedExtent.Height == cachedExtent.Height &&
             requestedBlock == cachedBlock;
 
-        // Same surface, reinterpreted: a compatible format binds through a view.
+        // Same surface, reinterpreted: a compatible format binds through a view. The block
+        // extent compares pitches, and a padded pitch hides the width: Black Myth: Wukong's
+        // transient heap puts a 30x34 and a 60x34 RGBA16F target (both pitch 128) at one
+        // address, and the 60x34 motion-blur tile target bound the 30x34 texture, so only
+        // the left half of its tiles was ever written.
         if (sameSurface && !exactFormat && requested.Data.Size == cachedInfo.Data.Size &&
+            SameExtent(requested.Extent, cachedInfo.Extent) &&
             requested.Resources == cachedInfo.Resources && requested.TileMode == cachedInfo.TileMode &&
             requested.Type == cachedInfo.Type && requested.IsBlock == cachedInfo.IsBlock &&
             ViewFormatRules.AreCompatible(cachedInfo.PixelFormat, requested.PixelFormat))
@@ -1932,6 +2044,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         PrepareSparseUpload(image, residentStart, residentEnd);
+        _owner.LandHeldCopies(description.Data.Address + residentStart, residentEnd - residentStart);
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         var residentSize = residentEnd - residentStart;
         var whole = residentSize <= MaxTransferPieceBytes
@@ -2001,6 +2114,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         PrepareSparseUpload(image, start, end);
+        _owner.LandHeldCopies(description.Data.Address + start, end - start);
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         _transfer.EncodeGuestToTexture(
             context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,
@@ -2186,6 +2300,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         RefreshBeforeWriteback(image);
         ref readonly var description = ref image.Description;
+        _owner.LandHeldCopies(description.Data.Address, description.Data.Size);
         var destination = description.Data.Size <= MaxTransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
             : default;
@@ -2577,10 +2692,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     private readonly long[] _uploadCauses = new long[5];
     private readonly long[] _writebackCauses = new long[7];
-    private readonly long[] _releaseCauses = new long[10];
+    private readonly long[] _releaseCauses = new long[11];
 
     private static readonly string[] _releaseCauseNames =
-        ["format", "resources", "viewtype", "same_address", "subset", "overlap", "budget", "unmapped", "linear_promoted", "retired"];
+        ["format", "resources", "viewtype", "same_address", "subset", "overlap", "budget", "unmapped", "linear_promoted", "retired", "stale"];
 
     /// <summary>The release reasons since the last read, as "name=count" pairs.</summary>
     public void AppendReleaseCauses(System.Text.StringBuilder target)

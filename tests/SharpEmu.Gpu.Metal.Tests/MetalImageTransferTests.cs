@@ -97,8 +97,11 @@ public sealed partial class MetalImageTransferTests(ITestOutputHelper output)
 
         var compressed = Color2D(GuestPixelFormat.Bc3UNorm, GpuFormat.BC3UnormBlock, 64, 64, 3, 1, GuestTileMode.Standard64KB);
         var compressedShape = transfer.ShapeFor(compressed);
-        Assert.Equal((ulong)MtlTextureUsage.ShaderRead, compressedShape.Usage);
+        // Sampled only, plus the view usage for its sRGB twin (MetalImageTransferTests.SrgbTwinViews).
+        Assert.Equal((ulong)(MtlTextureUsage.ShaderRead | MtlTextureUsage.PixelFormatView), compressedShape.Usage);
         Assert.Equal((ulong)MtlPixelFormat.Bc3Rgba, compressedShape.PixelFormat);
+        var twinless = Color2D(GuestPixelFormat.Bc5UNorm, GpuFormat.BC5UnormBlock, 64, 64, 3, 1, GuestTileMode.Standard64KB);
+        Assert.Equal((ulong)MtlTextureUsage.ShaderRead, transfer.ShapeFor(twinless).Usage);
     }
 
     [Fact]

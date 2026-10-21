@@ -108,6 +108,28 @@ public sealed class MetalImageExecutionTests(ITestOutputHelper output)
         Assert.Equal(new byte[16], result);
     }
 
+    // A mip past the last one is outside the image like a coordinate past the extent: the
+    // guest reads zero there, where Metal leaves the read undefined (UE5 marches volumes off
+    // their last mip).
+    [Theory]
+    [InlineData(9u, 2u, 1u, 2u)]
+    [InlineData(9u, 2u, 1u, 9u)]
+    [InlineData(13u, 3u, 3u, 2u)]
+    public void AMipPastTheLastReadsZero(uint guestType, uint metalType, uint layers, uint mip)
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1") return;
+        Assert.True(MetalNative.IsAvailable);
+        uint[] coords = layers == 1 ? [1, 0, mip] : [1, 0, 1, mip];
+        Assert.True(Gen5ImageFixtures.TryCompile("ImageLoadMip", guestType, out var shader, out var error,
+            addressValues: coords, storeResults: true), error);
+        var mipBytes = Enumerable.Range(0, 2).Select(level => Texels(4, 4, layers, 1, (uint)level)).ToArray();
+        var texture = MetalNative.CreateFloatTexture(metalType, 4, 4, layers, 1, mipBytes);
+        Assert.True(MetalNative.TryCompileLibrary(shader!.Source, out var library, out error), error + shader.Source);
+        Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, new byte[16],
+            new byte[PushData.ByteSize], shader.ArgumentLayout!, 1, out var result, out error, texture), error);
+        Assert.Equal(new byte[16], result);
+    }
+
     [Theory]
     [InlineData(9u, 2u, 1u, 0u)]
     [InlineData(13u, 3u, 3u, 2u)]

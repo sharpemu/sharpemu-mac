@@ -211,6 +211,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         // quietly comes back wrong.
         if (!SameTransferGrid(sourceDescription, targetDescription) ||
             !(IsDepth32ToColorAlias(sourceDescription, source, targetDescription, target) ||
+              (ColorToDepthDeviceCopyEnabled &&
+               IsDepth32ToColorAlias(targetDescription, target, sourceDescription, source)) ||
               (Depth16AliasOnDevice &&
                (IsDepth16ColorAlias(sourceDescription, source, targetDescription, target) ||
                 IsDepth16ColorAlias(targetDescription, target, sourceDescription, source)))) ||
@@ -220,7 +222,10 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             sourceDescription.Pitch != targetDescription.Pitch ||
             sourceDescription.Data.Size != targetDescription.Data.Size ||
             sourceDescription.Resources.Levels != 1 || targetDescription.Resources.Levels != 1 ||
-            targetDescription.HasStencil)
+            // A colour side with a stencil plane is no single-channel alias; a D32S8 depth
+            // side takes only its depth plane (DepthFromDepthStencil below).
+            (targetDescription.HasStencil && !targetDescription.IsDepth) ||
+            (sourceDescription.HasStencil && !sourceDescription.IsDepth))
         {
             return false;
         }
@@ -298,6 +303,59 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         var depth = PlanFor(depthDescription);
         var color = PlanFor(colorDescription);
         return depth.TransferBytes == depthDescription.BytesPerBlock && !color.Swap;
+    }
+
+    // A single 32-bit channel alias handing back to its 32-bit depth plane: UE5's Nanite depth
+    // export writes the scene depth through an R32 view of it, and the round trip through
+    // guest memory left Black Myth: Wukong's base pass without its prepass depth (black
+    // characters). SHARPEMU_METAL_V2_ALIAS_COLOR_TO_DEPTH=0 sends it through guest memory again.
+    internal static bool ColorToDepthDeviceCopyEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_COLOR_TO_DEPTH") != "0";
+
+    // An 8-bit view of a depth image's stencil plane into that image's stencil, through a
+    // staging buffer: a combined depth-stencil texture takes stencil only from a buffer, with
+    // MTLBlitOptionStencilFromDepthStencil. The texels are the stencil values whatever the
+    // guest tiling, because both textures hold them detiled.
+    public bool TryEncodeStencilFromColor(
+        IMetalSubmissionContext context,
+        in ImageDescription colorDescription,
+        nint colorTexture,
+        in ImageDescription depthDescription,
+        nint depthTexture)
+    {
+        if (_disposed || context.CommandBuffer == 0 || colorTexture == 0 || depthTexture == 0 ||
+            colorDescription.IsBlock || colorDescription.BytesPerBlock != 1 ||
+            colorDescription.Extent.Width != depthDescription.Extent.Width ||
+            colorDescription.Extent.Height != depthDescription.Extent.Height ||
+            colorDescription.Resources.Levels != 1 || colorDescription.TransferLayers != 1 ||
+            depthDescription.TransferLayers != 1 ||
+            colorDescription.Samples != 1 || depthDescription.Samples != 1 ||
+            !MetalGuestFormats.TryDecodeHostFormat(depthDescription.PixelFormat, out var depthFormat) ||
+            !MetalGuestFormats.HasStencilPlane(depthFormat))
+        {
+            return false;
+        }
+
+        var width = depthDescription.Extent.Width;
+        var height = depthDescription.Extent.Height;
+        var rowBytes = ((ulong)width + 255) & ~255UL;
+        var sliceBytes = rowBytes * height;
+        var staging = _tiler.Acquire(context, sliceBytes);
+        if (!staging.IsValid)
+        {
+            return false;
+        }
+
+        var blit = _tiler.BeginBlit(context);
+        MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
+            colorTexture, 0, 0, default, new MtlSize { Width = width, Height = height, Depth = 1 },
+            staging.Buffer, (nuint)staging.Offset, (nuint)rowBytes, (nuint)sliceBytes, (nuint)MtlBlitOption.None);
+        MetalNative.SendCopyBufferToTextureOptions(blit, SelCopyBufferToTexture,
+            staging.Buffer, (nuint)staging.Offset, (nuint)rowBytes, (nuint)sliceBytes,
+            new MtlSize { Width = width, Height = height, Depth = 1 },
+            depthTexture, 0, 0, default, (nuint)MtlBlitOption.StencilFromDepthStencil);
+        MetalTiler.EndEncoding(blit);
+        return true;
     }
 
     private static bool IsRawSingleChannel32(MtlPixelFormat format) =>
@@ -553,7 +611,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         return arrayed ? MtlTextureType.Type2DArray : MtlTextureType.Type2D;
     }
 
-    private static MtlTextureUsage UsageOf(in ImageDescription description, MtlPixelFormat format)
+    internal static MtlTextureUsage UsageOf(in ImageDescription description, MtlPixelFormat format)
     {
         if (MetalGuestFormats.IsDepthStencil(format))
         {
@@ -561,11 +619,17 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
 
         // A compressed texture is only ever sampled: Metal rejects a render-target or
-        // writable compressed texture, and a reinterpreting view of one needs the
-        // block-size-compatible view rules the cache does not use.
+        // writable compressed texture. The one reinterpretation the cache makes of it is
+        // the sRGB/linear twin (GetOrCreateView): a guest that reads one block memory
+        // through both an sRGB and a linear descriptor (Unreal's virtual texture pools)
+        // otherwise gets whichever encoding created the image first. On Black Myth: Wukong
+        // that turned the armour's base colour pool linear in about half the runs, which
+        // washed the gold out to silver.
         if (description.IsBlock)
         {
-            return MtlTextureUsage.ShaderRead;
+            return MetalGuestFormats.HasSrgbTwin(format)
+                ? MtlTextureUsage.ShaderRead | MtlTextureUsage.PixelFormatView
+                : MtlTextureUsage.ShaderRead;
         }
 
         var usage = MtlTextureUsage.ShaderRead | MtlTextureUsage.RenderTarget | MtlTextureUsage.PixelFormatView;
@@ -575,11 +639,12 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
             // A shader that runs IMAGE_ATOMIC_* on this image needs the atomic
             // usage bit, and Metal only accepts it on the single-channel 32-bit
-            // integer formats. Those are exactly the formats a guest atomic
+            // integer formats and on RG32Uint, which holds the 64-bit texels of
+            // a 64-bit atomic. Those are exactly the formats a guest atomic
             // image has (BindingLayout gives an atomic binding to a uint image
             // only), so the bit goes on by format rather than by waiting for a
             // shader to be compiled against the texture the cache already made.
-            if (format is MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint)
+            if (format is MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint or MtlPixelFormat.Rg32Uint)
             {
                 usage |= MtlTextureUsage.ShaderAtomic;
             }

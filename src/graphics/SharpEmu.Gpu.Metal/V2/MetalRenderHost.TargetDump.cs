@@ -612,6 +612,16 @@ internal sealed partial class MetalRenderHost
                 var source = DumpSpan(contents, (int)total);
                 var rgba = new byte[(int)(4UL * width * height)];
                 convert(source, rgba);
+                if (label.StartsWith("flip", StringComparison.Ordinal))
+                {
+                    // The presenter's layer is opaque, so the screen never shows a flip's alpha;
+                    // a viewer that composites the guest's (often zero) alpha would show a
+                    // correct frame as white or black.
+                    for (var alpha = 3; alpha < rgba.Length; alpha += 4)
+                    {
+                        rgba[alpha] = 0xFF;
+                    }
+                }
                 _dumpsByTexture[texture] = seen + 1;
                 _targetDumps++;
                 WriteDumpPng(rgba, width, height, label, seen, texture);

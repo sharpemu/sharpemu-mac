@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 
@@ -515,24 +516,35 @@ public static partial class AgcExports
         }
 
         var packetDwords = dwordCount + 4;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItNop, RWriteData)) ||
-            !TryWriteUInt32(
-                ctx,
-                commandAddress + 4,
-                destination | (cachePolicy << 8) | (increment << 16) | (writeConfirm << 24)) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, (uint)destinationAddress) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, (uint)(destinationAddress >> 32)))
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        for (uint index = 0; index < dwordCount; index++)
+        // The packet is assembled here and stored with one write. Every guest-memory write
+        // is checked against the GPU caches over its bytes (images, staged copies, DCC
+        // metadata), under their locks; dword by dword that was most of the RHI thread's
+        // time in Black Myth: Wukong, and held the image cache from the GPU worker.
+        var packetBytes = (int)packetDwords * sizeof(uint);
+        var rented = packetBytes > 1024 ? System.Buffers.ArrayPool<byte>.Shared.Rent(packetBytes) : null;
+        try
         {
-            if (!TryReadUInt32(ctx, dataAddress + ((ulong)index * sizeof(uint)), out var value) ||
-                !TryWriteUInt32(ctx, commandAddress + 16 + ((ulong)index * sizeof(uint)), value))
+            var packet = rented is null ? stackalloc byte[packetBytes] : rented.AsSpan(0, packetBytes);
+            BinaryPrimitives.WriteUInt32LittleEndian(packet, Pm4(packetDwords, ItNop, RWriteData));
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                packet[4..], destination | (cachePolicy << 8) | (increment << 16) | (writeConfirm << 24));
+            BinaryPrimitives.WriteUInt32LittleEndian(packet[8..], (uint)destinationAddress);
+            BinaryPrimitives.WriteUInt32LittleEndian(packet[12..], (uint)(destinationAddress >> 32));
+            if (!ctx.Memory.TryRead(dataAddress, packet[16..]) || !ctx.Memory.TryWrite(commandAddress, packet))
             {
                 return ReturnPointer(ctx, 0);
+            }
+        }
+        finally
+        {
+            if (rented is not null)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(rented);
             }
         }
 
@@ -634,28 +646,20 @@ public static partial class AgcExports
 
         var packetDwords = size == 0 ? 7u : 9u;
         var packetRegister = size == 0 ? RWaitMem32 : RWaitMem64;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItNop, packetRegister)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 4, (uint)address & (size == 0 ? ~0x3u : ~0x7u)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 8, (uint)(address >> 32) & 0x3FFFFu) ||
-                 !TryWriteUInt32(ctx, commandAddress + 12, (uint)mask))
-        {
-            return ReturnPointer(ctx, 0);
-        }
-        else if (size == 0)
-        {
-            if (!TryWriteUInt32(ctx, commandAddress + 16, (uint)reference) ||
-                !TryWriteUInt32(ctx, commandAddress + 20, EncodeWaitRegMem32Control(compareFunction, operation, cachePolicy)) ||
-                !TryWriteUInt32(ctx, commandAddress + 24, EncodeWaitRegMemPoll(pollCycles)))
-            {
-                return ReturnPointer(ctx, 0);
-            }
-        }
-        else if (!TryWriteUInt32(ctx, commandAddress + 16, (uint)(mask >> 32)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 20, (uint)reference) ||
-                 !TryWriteUInt32(ctx, commandAddress + 24, (uint)(reference >> 32)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 28, EncodeWaitRegMem64Control(compareFunction, operation, cachePolicy)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 32, EncodeWaitRegMemPoll(pollCycles)))
+        var header = Pm4(packetDwords, ItNop, packetRegister);
+        var addressLow = (uint)address & (size == 0 ? ~0x3u : ~0x7u);
+        var addressHigh = (uint)(address >> 32) & 0x3FFFFu;
+        // One write for the whole packet: each guest write is checked against the GPU caches.
+        var emitted = size == 0
+            ? TryEmitCommandDwords(
+                ctx, commandBufferAddress, out var commandAddress,
+                header, addressLow, addressHigh, (uint)mask, (uint)reference,
+                EncodeWaitRegMem32Control(compareFunction, operation, cachePolicy), EncodeWaitRegMemPoll(pollCycles))
+            : TryEmitCommandDwords(
+                ctx, commandBufferAddress, out commandAddress,
+                header, addressLow, addressHigh, (uint)mask, (uint)(mask >> 32), (uint)reference, (uint)(reference >> 32),
+                EncodeWaitRegMem64Control(compareFunction, operation, cachePolicy), EncodeWaitRegMemPoll(pollCycles));
+        if (!emitted)
         {
             return ReturnPointer(ctx, 0);
         }

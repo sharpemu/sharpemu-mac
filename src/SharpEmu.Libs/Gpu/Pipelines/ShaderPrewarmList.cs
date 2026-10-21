@@ -160,7 +160,7 @@ public sealed class ShaderPrewarmList : IDisposable
     public static string FirstFrameFileName => Stem + ".first-frame";
 
     private const uint Magic = 0x57504553;
-    private const uint FormatVersion = 5;
+    private const uint FormatVersion = 6;
     private const byte CodeKind = 1;
     private const byte ComputeKind = 2;
     private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);
@@ -798,6 +798,20 @@ public sealed class ShaderPrewarmList : IDisposable
             writer.Write(table.SearchIterations);
         }
 
+        // Which descriptors alias which: ResourceMaterializer merges image and sampler
+        // bindings whose descriptors are identical, so the merged program has fewer elements
+        // in a descriptor field than the same record without them, and a translation made
+        // for one argument-buffer layout must never stand in for the other.
+        WriteWords(writer, specialization.ImageDescriptorGroups);
+        WriteWords(writer, specialization.SamplerDescriptorGroups);
+        writer.Write(specialization.Samplers.Count);
+        foreach (var sampler in specialization.Samplers)
+        {
+            writer.Write(sampler.LodBias);
+            writer.Write(sampler.MirrorOnceBorderAxes);
+            writer.Write(sampler.BorderColorType);
+        }
+
         writer.Flush();
         return stream.ToArray();
     }
@@ -865,6 +879,13 @@ public sealed class ShaderPrewarmList : IDisposable
                 reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadUInt32()));
         }
 
+        ReadWords(reader, payload.Length, specialization.ImageDescriptorGroups);
+        ReadWords(reader, payload.Length, specialization.SamplerDescriptorGroups);
+        for (var count = CheckedCount(reader.ReadInt32(), payload.Length); count > 0; count--)
+        {
+            specialization.Samplers.Add(new SamplerSpecialization(reader.ReadInt32(), reader.ReadUInt32(), reader.ReadUInt32()));
+        }
+
         return new ComputePrewarmRecord
         {
             Hash = hash,
@@ -878,6 +899,23 @@ public sealed class ShaderPrewarmList : IDisposable
             SystemRegisters = registers,
             Specialization = specialization,
         };
+    }
+
+    private static void WriteWords(BinaryWriter writer, List<uint> words)
+    {
+        writer.Write(words.Count);
+        foreach (var word in words)
+        {
+            writer.Write(word);
+        }
+    }
+
+    private static void ReadWords(BinaryReader reader, int payloadLength, List<uint> words)
+    {
+        for (var count = CheckedCount(reader.ReadInt32(), payloadLength); count > 0; count--)
+        {
+            words.Add(reader.ReadUInt32());
+        }
     }
 
     private static void WriteOptional(BinaryWriter writer, uint? value)

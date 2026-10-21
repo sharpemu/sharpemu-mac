@@ -19,6 +19,23 @@ public sealed class Gen5MslStepCapReportTests(ITestOutputHelper output)
     // One pass through straight-line ALU; the cap is never reached.
     private static readonly Gen5ComputeFixture Terminating = Gen5ComputeFixtures.Fmac;
 
+    // 60000 trips around a loop whose exit test and back edge sit in different blocks,
+    // so each trip is two block moves: 120000 of them, but only 60000 iterations.
+    private static readonly Gen5ComputeFixture TwoBlockLoop = new(
+        "two-block-loop",
+        [
+            0xBE8003FF, 0x0000EA60, // s_mov_b32 s0, 60000
+            0x81808100,             // loop: s_sub_i32 s0, s0, 1
+            0xBF068000,             // s_cmp_eq_u32 s0, 0
+            0xBF850001,             // s_cbranch_scc1 done
+            0xBF82FFFC,             // s_branch loop
+            0xBF810000,             // done: s_endpgm
+        ],
+        0,
+        0);
+
+    private static readonly Gen5MslCodegenOptions Dispatcher = new(StructuredControlFlow: false);
+
     [Fact]
     public void TheDispatcherReportsEveryInvocationThatRanOutOfSteps()
     {
@@ -37,9 +54,26 @@ public sealed class Gen5MslStepCapReportTests(ITestOutputHelper output)
         Assert.Equal(0u, Execute(Terminating, threads: 4));
     }
 
-    private uint Execute(Gen5ComputeFixture fixture, uint threads)
+    [Fact]
+    public void TheDispatcherChargesLoopIterationsNotBlocks()
     {
-        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, localSizeX: threads);
+        if (SkipWithoutMetalDevice()) return;
+
+        // Persistent-thread kernels poll for work across many blocks per trip; charging
+        // every block cut them off long before their loops were done.
+        Assert.Equal(0u, Execute(TwoBlockLoop, threads: 4, Dispatcher));
+        Assert.Equal(4u, Execute(SelfBranch, threads: 4, Dispatcher));
+    }
+
+    private uint Execute(Gen5ComputeFixture fixture, uint threads, Gen5MslCodegenOptions? options = null)
+    {
+        var request = Gen5ComputeFixtures.CreateComputeRequest(fixture, localSizeX: threads);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var emitError, options), $"[{fixture.Name}] {emitError}");
+        if (options is { StructuredControlFlow: false })
+        {
+            Assert.Contains("switch (pc)", shader.Source, StringComparison.Ordinal);
+        }
+
         Assert.True(
             MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError),
             $"[{fixture.Name}] {compileError}");

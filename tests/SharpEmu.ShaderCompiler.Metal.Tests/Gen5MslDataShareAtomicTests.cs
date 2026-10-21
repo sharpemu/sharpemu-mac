@@ -414,6 +414,35 @@ public sealed class Gen5MslDataShareAtomicTests(ITestOutputHelper output)
             0xBF810000,                           // s_endpgm
         ], 8, 16);
 
+    // DS_READ_I8 and DS_READ_U8 pick the byte the offset address names out of its word;
+    // the I8 form sign-extends it and the U8 form zero-extends it.
+    [Theory]
+    [InlineData(0u, 0xFFFFFF81u, 0x00000081u)]
+    [InlineData(1u, 0x0000007Fu, 0x0000007Fu)]
+    [InlineData(2u, 0xFFFFFFC3u, 0x000000C3u)]
+    [InlineData(3u, 0x00000012u, 0x00000012u)]
+    public void ByteReadsSelectTheAddressedByteAndExtendIt(uint offset, uint expectedSigned, uint expectedUnsigned)
+    {
+        var fixture = new Gen5ComputeFixture($"ds-read-byte-{offset}",
+        [
+            0x7E000280,                                  // v_mov_b32 v0, 0
+            MovLiteral(2), 0x12C37F81u,                  // v_mov_b32 v2, bytes 81 7F C3 12
+            DsWord0(0x0D), DsWord1(0, 2, 0, 0),          // ds_write_b32 v0, v2
+            0xBF8A0000,                                  // s_barrier
+            DsWord0(0x39, offset), DsWord1(0, 0, 0, 3),  // ds_read_i8 v3, v0 offset:n
+            DsWord0(0x3A, offset), DsWord1(0, 0, 0, 5),  // ds_read_u8 v5, v0 offset:n
+            0xE0700000, 0x80020300,                      // buffer_store_dword v3, off, s[8:11], 0
+            0xE0700004, 0x80020500,                      // buffer_store_dword v5, off, s[8:11], 0 offset:4
+            0xBF810000,                                  // s_endpgm
+        ], 8, 16);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        if (!RequireDevice()) return;
+
+        var result = Execute(fixture, shader, 16);
+        Assert.Equal(expectedSigned, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(0)));
+        Assert.Equal(expectedUnsigned, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4)));
+    }
+
     private static Gen5ComputeFixture PairFixture(
         string name, uint opcode, uint initialLow, uint initialHigh, uint low, uint high) =>
         new($"ds-{name}",

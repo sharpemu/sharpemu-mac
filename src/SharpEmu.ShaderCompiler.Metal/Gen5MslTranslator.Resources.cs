@@ -295,6 +295,22 @@ public static partial class Gen5MslTranslator
                 ImageNumericClass.Sint => "int",
                 _ => "float",
             };
+
+            // 64-bit image atomics need the texture typed ulong (over an RG32Uint
+            // texture), which one array of 32-bit atomic textures cannot share.
+            var wideAtomics = atomic
+                ? binding.Resources.Count(resource => info.Images[(int)resource].Atomic64)
+                : 0;
+            if (wideAtomics != 0)
+            {
+                if (wideAtomics != binding.Resources.Count)
+                {
+                    throw new NotSupportedException(
+                        $"binding kind {binding.Kind} mixes 32-bit and 64-bit image atomics");
+                }
+
+                componentKind = "ulong";
+            }
             string? access = null;
             if (isStorage)
             {
@@ -2280,9 +2296,10 @@ public static partial class Gen5MslTranslator
                 }
 
                 case "DsReadI8":
+                case "DsReadU8":
                 {
                     // The byte the low two bits of the offset address select,
-                    // sign-extended out of the word that holds it.
+                    // sign- or zero-extended out of the word that holds it.
                     var address = Temp("uint", RawSource(instruction, 0));
                     var byteAddress = Temp("uint", $"{address} + {control.SingleOffsetBytes}u");
                     var word = Temp("uint", LoadGlobalDataShareWord(

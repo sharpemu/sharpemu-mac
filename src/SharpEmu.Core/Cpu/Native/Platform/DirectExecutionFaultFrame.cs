@@ -14,6 +14,7 @@ namespace SharpEmu.Core.Cpu.Native.Platform;
 public static unsafe class DirectExecutionFaultFrame
 {
     public const int ContextSize = 0x4D0;
+    public const int EflagsOffset = 68;
     public const int RaxOffset = 120;
     public const int RspOffset = 152;
     public const int RipOffset = 248;

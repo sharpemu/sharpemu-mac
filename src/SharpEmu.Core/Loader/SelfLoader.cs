@@ -2282,7 +2282,7 @@ public sealed class SelfLoader : ISelfLoader
         return AlignUp(candidate, (ulong)PageSize);
     }
 
-    private static bool TryAllocateAdditionalImageAtExact(
+    internal static bool TryAllocateAdditionalImageAtExact(
         PhysicalVirtualMemory physicalVm,
         ulong preferredBase,
         ulong totalImageSize,
@@ -2296,14 +2296,29 @@ public sealed class SelfLoader : ISelfLoader
             preferredBase = searchStart;
         }
 
-        for (var attempt = 0; attempt < 256; attempt++)
-        {
-            var candidate = AlignUp(preferredBase + ((ulong)attempt * ModulePlacementStep), (ulong)PageSize);
-            if (candidate + alignedSize > searchEnd)
-            {
-                break;
-            }
+        // Walk the whole range: from the preferred base to the end, then the gaps below it.
+        // A host mapping can sit right after the guest's last module and run past half a
+        // gigabyte (Wukong's Wwise plugins found room 448 MB on in a good run). Giving up
+        // after a fixed number of steps let the host place the module anywhere, below the
+        // range the return-address checks treat as code.
+        return TryAllocateModuleBetween(physicalVm, preferredBase, searchEnd, searchEnd, alignedSize, out allocatedBase) ||
+            TryAllocateModuleBetween(physicalVm, searchStart, preferredBase, searchEnd, alignedSize, out allocatedBase);
+    }
 
+    // Tries every ModulePlacementStep from start for a module that begins before end and
+    // ends by searchEnd.
+    private static bool TryAllocateModuleBetween(
+        PhysicalVirtualMemory physicalVm,
+        ulong start,
+        ulong end,
+        ulong searchEnd,
+        ulong alignedSize,
+        out ulong allocatedBase)
+    {
+        for (var candidate = AlignUp(start, (ulong)PageSize);
+            candidate < end && candidate + alignedSize <= searchEnd;
+            candidate += ModulePlacementStep)
+        {
             if (physicalVm.TryAllocateAtExact(candidate, alignedSize, executable: true, out allocatedBase))
             {
                 return true;

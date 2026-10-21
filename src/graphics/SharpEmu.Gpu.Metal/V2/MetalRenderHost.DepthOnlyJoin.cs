@@ -104,6 +104,8 @@ internal sealed partial class MetalRenderHost
         // is that boundary; joining skips it, and the draw would read the bytes before the copy.
         if (_deferredLabelCopies.Count != 0 && BindsDeferredCopyDestination())
         {
+            // The pass this begins is the boundary the copies land at, even when they wait for the commit.
+            _landDeferredLabels = true;
             _depthOnlyJoinsDeferredCopies++;
             return false;
         }

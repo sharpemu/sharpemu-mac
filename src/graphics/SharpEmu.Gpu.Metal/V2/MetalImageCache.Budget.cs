@@ -149,6 +149,13 @@ internal sealed partial class MetalImageCache
         return image.LastAccessTick < cutoff;
     }
 
+    /// <summary>Whether an image the GPU never wrote, already behind guest memory and unwatched,
+    /// has been idle long enough to go (see <see cref="MetalImageRetirementSettings.StaleSeconds"/>).
+    /// Caller holds the lock.</summary>
+    internal bool IsStaleLocked(MetalCachedImage image, long now) =>
+        _retirement.StaleSeconds > 0 && !image.IsGpuModified && image.IsCpuDirty && !image.IsWatched &&
+        IsOutsideWorkingSet(image) && image.LastAccessTick < TickIdleFor(now, _retirement.StaleSeconds);
+
     /// <summary>Whether budget eviction may take this image now. Caller holds the lock.</summary>
     internal bool IsBudgetEvictableLocked(MetalCachedImage image, long now)
     {
@@ -204,25 +211,29 @@ internal sealed partial class MetalImageCache
             }
         }
 
-        if (!_retirement.Enabled)
+        if (!_retirement.Enabled && _retirement.StaleSeconds <= 0)
         {
             return;
         }
 
-        List<ResourceSlotIdentifier>? retire = null;
+        List<(ResourceSlotIdentifier Identifier, MetalImageReleaseCause Cause)>? release = null;
         _slots.ForEach((imageIdentifier, image) =>
         {
             if (IsRetirementEligibleLocked(image, now))
             {
-                (retire ??= []).Add(imageIdentifier);
+                (release ??= []).Add((imageIdentifier, MetalImageReleaseCause.Retired));
+            }
+            else if (IsStaleLocked(image, now))
+            {
+                (release ??= []).Add((imageIdentifier, MetalImageReleaseCause.Stale));
             }
         });
-        if (retire is null)
+        if (release is null)
         {
             return;
         }
 
-        foreach (var imageIdentifier in retire)
+        foreach (var (imageIdentifier, cause) in release)
         {
             if (_slots.TryGet(imageIdentifier) is not { } image)
             {
@@ -230,7 +241,7 @@ internal sealed partial class MetalImageCache
             }
 
             var bytes = image.CountedBytes;
-            ReleaseImage(imageIdentifier, MetalImageReleaseCause.Retired);
+            ReleaseImage(imageIdentifier, cause);
             Interlocked.Increment(ref _retiredImages);
             Interlocked.Add(ref _retiredBytes, (long)bytes);
         }
@@ -239,7 +250,7 @@ internal sealed partial class MetalImageCache
     // An image dropped for budget or age; remembered so its recreation counts as a refault.
     private void NoteDroppedLocked(MetalCachedImage image, MetalImageReleaseCause cause)
     {
-        if (cause is MetalImageReleaseCause.Budget or MetalImageReleaseCause.Retired)
+        if (cause is MetalImageReleaseCause.Budget or MetalImageReleaseCause.Retired or MetalImageReleaseCause.Stale)
         {
             _recentlyDropped[(image.Description.Data.Address, image.Description.Data.Size)] = _clock();
         }

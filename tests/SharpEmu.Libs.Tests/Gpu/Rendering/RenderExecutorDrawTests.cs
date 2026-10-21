@@ -1353,6 +1353,48 @@ public sealed class RenderExecutorDrawTests : IDisposable
         AssertOrder("end_rendering", FragmentBarrier, "obtain 100600000 14 written=False", "begin_rendering", "draw_indexed_indirect");
     }
 
+    // A draw whose fragment stage stores to a buffer, its pass end deferred.
+    private void DrawWithPixelBufferStores(ulong address)
+    {
+        _host.OrdersVertexWritesInsidePass = true;
+        _host.DefersFragmentWritePassEnd = true;
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex)),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel, buffers: [written]), buffers: [BufferDescriptor(address, 4, 16)]));
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+        _pipelines.Graphics = Programs(vertexStage: Stage(Program(ShaderStageKind.Vertex)), pixelStage: Stage(Program(ShaderStageKind.Pixel)));
+    }
+
+    // A run of GPU-driven draws whose fragment stages store elsewhere stays in one pass.
+    [Fact]
+    public void DeferredPixelBufferStores_KeepThePassOpenForAnIndirectDrawOfOtherBytes()
+    {
+        DrawWithPixelBufferStores(VertexBase);
+        _host.Calls.Clear();
+        var arguments = Indexed(40, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(7, Banks(), arguments);
+
+        Assert.Contains(_host.Calls, call => call.StartsWith("draw_indexed_indirect", StringComparison.Ordinal));
+        Assert.DoesNotContain(_host.Calls, call => call == "end_rendering" || call == FragmentBarrier);
+
+        // Still pending: the guest's release ends the pass.
+        _host.Calls.Clear();
+        _executor.ReleaseShaderWrites();
+        Assert.Equal(["end_rendering", FragmentBarrier], _host.Calls);
+    }
+
+    [Fact]
+    public void DeferredPixelBufferStores_EndThePassBeforeAnIndirectDrawOfTheBytesTheyMayHaveWritten()
+    {
+        DrawWithPixelBufferStores(IndirectArguments - 0x20);
+        _host.Calls.Clear();
+        var arguments = Indexed(40, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(7, Banks(), arguments);
+
+        AssertOrder("end_rendering", FragmentBarrier, "obtain 100600000 14 written=False", "begin_rendering", "draw_indexed_indirect");
+    }
+
     [Fact]
     public void DeferredPixelStores_NeedNothingOnceTheHostEndedTheirPass()
     {

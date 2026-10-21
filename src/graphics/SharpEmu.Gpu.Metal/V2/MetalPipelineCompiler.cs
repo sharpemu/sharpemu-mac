@@ -74,6 +74,9 @@ internal sealed class MetalPipelineCompiler : IDisposable
         public readonly TaskCompletionSource<Result> Done = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public long StartedTicks;
         public long CompileTicks;
+
+        // What the compile builds, for a stalled queue's report (DescribeInFlight).
+        public string? Label;
         public long FinishedTicks;
 
         // Set by whichever thread builds it: a compiler thread, or a caller that cannot wait
@@ -115,6 +118,21 @@ internal sealed class MetalPipelineCompiler : IDisposable
     /// <summary>Held by tests to keep compiles in flight; null runs them at once.</summary>
     internal ManualResetEventSlim? Gate { get; set; }
 
+    /// <summary>The compiles still unfinished, oldest first, with how long since each was
+    /// queued: what a queue suspended on a pipeline is waiting behind.</summary>
+    public string DescribeInFlight(int max = 4)
+    {
+        var now = Stopwatch.GetTimestamp();
+        var waiting = _pending
+            .Where(pair => !pair.Value.Work.IsCompleted)
+            .OrderBy(pair => pair.Value.StartedTicks)
+            .ToList();
+        var shown = waiting.Take(max).Select(pair =>
+            $"{pair.Value.Label ?? pair.Key.ToString()} queued_ms={(now - pair.Value.StartedTicks) * 1000.0 / Stopwatch.Frequency:F0}" +
+            (pair.Value.CompileTicks == 0 && Volatile.Read(ref pair.Value.Claimed) != 0 ? " building" : string.Empty));
+        return $"n={waiting.Count} " + string.Join("; ", shown);
+    }
+
     /// <summary>How many compiles have been started, finished, and shared.</summary>
     public (long Started, long Finished, long Deduped, double Milliseconds) TakeCounters() =>
         (Interlocked.Exchange(ref _started, 0), Interlocked.Exchange(ref _finished, 0),
@@ -138,7 +156,9 @@ internal sealed class MetalPipelineCompiler : IDisposable
     /// out of order with the requests waits here for its own key, so the order in which
     /// compiles end does not matter.
     /// </summary>
-    public bool TryTake(object key, Func<Result> build, out Result? result)
+    public bool TryTake(object key, Func<Result> build, out Result? result) => TryTake(key, build, out result, null);
+
+    public bool TryTake(object key, Func<Result> build, out Result? result, string? label)
     {
         result = null;
         if (_disposed)
@@ -162,7 +182,7 @@ internal sealed class MetalPipelineCompiler : IDisposable
             }
         }
 
-        var started = new Pending(build) { StartedTicks = Stopwatch.GetTimestamp() };
+        var started = new Pending(build) { StartedTicks = Stopwatch.GetTimestamp(), Label = label };
         if (!_pending.TryAdd(key, started))
         {
             return false;

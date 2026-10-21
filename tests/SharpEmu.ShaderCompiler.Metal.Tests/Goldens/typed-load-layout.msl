@@ -3,6 +3,8 @@
 
 using namespace metal;
 
+#pragma clang fp contract(off)
+
 static constant uint sharpemu_gfx10_formats[128] = {
     0x0u, 0x1u, 0x101u, 0x201u, 0x301u, 0x401u, 0x501u, 0x2u, 0x102u, 0x202u, 0x302u, 0x402u, 0x502u, 0x702u, 0x3u, 0x103u,
     0x203u, 0x303u, 0x403u, 0x503u, 0x404u, 0x504u, 0x704u, 0x5u, 0x105u, 0x205u, 0x305u, 0x405u, 0x505u, 0x705u, 0x0u, 0x0u,
@@ -14,51 +16,24 @@ static constant uint sharpemu_gfx10_formats[128] = {
     0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u,
 };
 
+// Each (component, data format) layout packed as byte offset | bit offset << 8 | bit count << 16,
+// indexed by component * 16 + data format. A table rather than a switch: a kernel inlines this
+// at every formatted access, and one Black Myth: Wukong kernel with 2240 of them took the
+// driver 163 s to build as a switch, 32 s as a table.
+static constant uint sharpemu_format_layouts[64] = {
+    0x0u, 0x80000u, 0x100000u, 0x80000u, 0x200000u, 0x100000u, 0xB0000u, 0xA0000u, 0x20000u, 0xA0000u, 0x80000u, 0x200000u, 0x100000u, 0x200000u, 0x200000u, 0x0u,
+    0x0u, 0x0u, 0x0u, 0x80001u, 0x0u, 0x100002u, 0xB0B00u, 0xB0A00u, 0xA0200u, 0xA0A00u, 0x80001u, 0x200004u, 0x100002u, 0x200004u, 0x200004u, 0x0u,
+    0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0xA1600u, 0xB1500u, 0xA0C00u, 0xA1400u, 0x80002u, 0x0u, 0x100004u, 0x200008u, 0x200008u, 0x0u,
+    0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0xA1600u, 0x21E00u, 0x80003u, 0x0u, 0x100006u, 0x0u, 0x20000Cu, 0x0u,
+};
+
 static inline void sharpemu_format_layout(uint dfmt, uint component, thread uint& byteOff, thread uint& bitOff, thread uint& bits)
 {
-    byteOff = 0u; bitOff = 0u; bits = 0u;
-    switch (component * 16u + dfmt)
-    {
-    case 1u: byteOff = 0u; bitOff = 0u; bits = 8u; break;
-    case 2u: byteOff = 0u; bitOff = 0u; bits = 16u; break;
-    case 3u: byteOff = 0u; bitOff = 0u; bits = 8u; break;
-    case 4u: byteOff = 0u; bitOff = 0u; bits = 32u; break;
-    case 5u: byteOff = 0u; bitOff = 0u; bits = 16u; break;
-    case 6u: byteOff = 0u; bitOff = 0u; bits = 11u; break;
-    case 7u: byteOff = 0u; bitOff = 0u; bits = 10u; break;
-    case 8u: byteOff = 0u; bitOff = 0u; bits = 2u; break;
-    case 9u: byteOff = 0u; bitOff = 0u; bits = 10u; break;
-    case 10u: byteOff = 0u; bitOff = 0u; bits = 8u; break;
-    case 11u: byteOff = 0u; bitOff = 0u; bits = 32u; break;
-    case 12u: byteOff = 0u; bitOff = 0u; bits = 16u; break;
-    case 13u: byteOff = 0u; bitOff = 0u; bits = 32u; break;
-    case 14u: byteOff = 0u; bitOff = 0u; bits = 32u; break;
-    case 19u: byteOff = 1u; bitOff = 0u; bits = 8u; break;
-    case 21u: byteOff = 2u; bitOff = 0u; bits = 16u; break;
-    case 22u: byteOff = 0u; bitOff = 11u; bits = 11u; break;
-    case 23u: byteOff = 0u; bitOff = 10u; bits = 11u; break;
-    case 24u: byteOff = 0u; bitOff = 2u; bits = 10u; break;
-    case 25u: byteOff = 0u; bitOff = 10u; bits = 10u; break;
-    case 26u: byteOff = 1u; bitOff = 0u; bits = 8u; break;
-    case 27u: byteOff = 4u; bitOff = 0u; bits = 32u; break;
-    case 28u: byteOff = 2u; bitOff = 0u; bits = 16u; break;
-    case 29u: byteOff = 4u; bitOff = 0u; bits = 32u; break;
-    case 30u: byteOff = 4u; bitOff = 0u; bits = 32u; break;
-    case 38u: byteOff = 0u; bitOff = 22u; bits = 10u; break;
-    case 39u: byteOff = 0u; bitOff = 21u; bits = 11u; break;
-    case 40u: byteOff = 0u; bitOff = 12u; bits = 10u; break;
-    case 41u: byteOff = 0u; bitOff = 20u; bits = 10u; break;
-    case 42u: byteOff = 2u; bitOff = 0u; bits = 8u; break;
-    case 44u: byteOff = 4u; bitOff = 0u; bits = 16u; break;
-    case 45u: byteOff = 8u; bitOff = 0u; bits = 32u; break;
-    case 46u: byteOff = 8u; bitOff = 0u; bits = 32u; break;
-    case 56u: byteOff = 0u; bitOff = 22u; bits = 10u; break;
-    case 57u: byteOff = 0u; bitOff = 30u; bits = 2u; break;
-    case 58u: byteOff = 3u; bitOff = 0u; bits = 8u; break;
-    case 60u: byteOff = 6u; bitOff = 0u; bits = 16u; break;
-    case 62u: byteOff = 12u; bitOff = 0u; bits = 32u; break;
-    default: break;
-    }
+    uint key = component * 16u + dfmt;
+    uint packed = key < 64u ? sharpemu_format_layouts[key] : 0u;
+    byteOff = packed & 0xFFu;
+    bitOff = (packed >> 8) & 0xFFu;
+    bits = packed >> 16;
 }
 
 static inline uint sharpemu_minifloat(uint raw, uint bits)

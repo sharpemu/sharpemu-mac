@@ -3,6 +3,8 @@
 
 using namespace metal;
 
+#pragma clang fp contract(off)
+
 struct Gen5AddressRange
 {
     ulong first_page;
@@ -548,7 +550,7 @@ static inline void sharpemu_note_step_cap(device atomic_uint* report)
 
 struct Gen5VsOut
 {
-    float4 sharpemu_position [[position]];
+    float4 sharpemu_position [[position, invariant]];
     float sharpemu_clip_distance [[clip_distance]] [1];
     float4 param0 [[user(locn0)]];
 };

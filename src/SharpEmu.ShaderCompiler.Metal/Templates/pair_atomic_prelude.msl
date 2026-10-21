@@ -148,6 +148,38 @@ static inline uint2 sharpemu_load_pair_coherent(device uint* b, uint bytes, uint
     return uint2(sharpemu_load_dword_coherent(b, bytes, first), sharpemu_load_dword_coherent(b, bytes, second));
 }
 
+// Three or four contiguous dwords of a record, read coherently as one snapshot under the
+// first dword's lock: a persistent-thread kernel's GLC LOAD_DWORDX3/X4, whose record another
+// workgroup writes with a store that takes the same lock (EmitPairLocked). A dword
+// past the end reads zero, as sharpemu_load_dword_coherent does.
+static inline uint4 sharpemu_load_record_coherent(device uint* b, uint bytes, uint first, uint count, device atomic_uint* locks, device atomic_uint* report)
+{
+    uint low = first >> 2;
+    uint words = bytes >> 2;
+    device atomic_uint* lock = sharpemu_pair_lock(locks, b + low);
+    for (uint tries = 0u; ; tries++)
+    {
+        uint before = atomic_load_explicit(lock, memory_order_relaxed);
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+        uint4 value = uint4(0u);
+        for (uint word = 0u; word < count; word++)
+        {
+            value[word] = low + word < words ? atomic_load_explicit((device atomic_uint*)(b + low + word), memory_order_relaxed) : 0u;
+        }
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+        uint after = atomic_load_explicit(lock, memory_order_relaxed);
+        if ((before & 1u) == 0u && before == after)
+        {
+            return value;
+        }
+        if (tries >= sharpemu_pair_lock_tries)
+        {
+            sharpemu_note_step_cap(report);
+            return value;
+        }
+    }
+}
+
 // The device-address form: each dword is read only when the access keeps it in range
 // (first_in_range / second_in_range) and the page table maps it, zero otherwise.
 static inline uint2 sharpemu_load_device_pair_coherent(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong first, bool first_in_range, ulong second, bool second_in_range, device atomic_uint* locks, device atomic_uint* report)

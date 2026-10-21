@@ -719,47 +719,43 @@ public sealed partial class ResourceTracker
         }
     }
 
-    private static bool HasRuntimeRead(ScalarValue value) => HasRuntimeRead(value, []);
+    // Whether a guest-memory read (a scalar address or buffer word) is reachable from the value
+    // through its operands. That is reachability, which a walk with one visited set answers in
+    // time linear in the graph: every reachable node is reachable along a simple path, so the
+    // path-scoped set the walk used before (entries removed on the way out) gave the same answer -
+    // but re-walked every shared sub-expression once per path to it, which on a large descriptor
+    // graph is exponential. It was 42% of Black Myth: Wukong's GPU worker time, every new compute
+    // program planned on the frame's critical path.
+    private static bool HasRuntimeRead(ScalarValue value) =>
+        Reaches(value, static candidate => candidate.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord);
 
-    private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind) => HasRuntimeReadKind(value, kind, []);
+    private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind) =>
+        Reaches(value, candidate => candidate.Kind == kind);
 
-    private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind, HashSet<ScalarValue> visiting)
+    private static bool Reaches(ScalarValue start, Func<ScalarValue, bool> matches)
     {
-        if (!visiting.Add(value))
+        var visited = new HashSet<ScalarValue>(ReferenceEqualityComparer.Instance);
+        var pending = new Stack<ScalarValue>();
+        visited.Add(start);
+        pending.Push(start);
+        while (pending.Count != 0)
         {
-            return false;
-        }
-
-        try
-        {
-            return value.Kind == kind || value.Operands.Any(operand => HasRuntimeReadKind(operand, kind, visiting));
-        }
-        finally
-        {
-            visiting.Remove(value);
-        }
-    }
-
-    private static bool HasRuntimeRead(ScalarValue value, HashSet<ScalarValue> visiting)
-    {
-        if (!visiting.Add(value))
-        {
-            return false;
-        }
-
-        try
-        {
-            if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord)
+            var value = pending.Pop();
+            if (matches(value))
             {
                 return true;
             }
 
-            return value.Operands.Any(operand => HasRuntimeRead(operand, visiting));
+            foreach (var operand in value.Operands)
+            {
+                if (visited.Add(operand))
+                {
+                    pending.Push(operand);
+                }
+            }
         }
-        finally
-        {
-            visiting.Remove(value);
-        }
+
+        return false;
     }
 
     // ---- dense tables ----
@@ -849,7 +845,13 @@ public sealed partial class ResourceTracker
         image.Atomic |= atomic;
         image.Packed |= memory.ImagePacked;
         image.CubeAccess &= memory.ImageCube;
+        image.Atomic64 |= atomic && Is64BitImageAtomic(memory.Opcode, memory.Dmask);
     }
+
+    // An image atomic's DMASK gives its data width: one dword, or two for the 64-bit
+    // form. Compare-swap carries a comparator too, so its 64-bit form sets all four.
+    public static bool Is64BitImageAtomic(string opcode, uint dmask) =>
+        opcode is "ImageAtomicCmpswap" or "ImageAtomicFcmpswap" ? dmask == 0xF : dmask == 0x3;
 
     private uint AddSampler(uint source, uint pc)
     {

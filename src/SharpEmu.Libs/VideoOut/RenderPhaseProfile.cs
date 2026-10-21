@@ -211,6 +211,18 @@ public static class RenderPhaseProfile
         CommandFlush,
         CommandLabelEncode,
         CommandCpBookkeeping,
+        // Parts of MetalRenderHost.BindResources (ResourceBinding keeps what is left).
+        BindingImageResolve,
+        BindingTextureAcquire,
+        BindingBufferCheck,
+        BindingWrittenBuffer,
+        BindingWrittenInvalidate,
+        BindingWrittenNote,
+        WriteNoteOverlays,
+        WriteNoteStaged,
+        WriteNoteRanges,
+        BindingReport,
+        BindingDeviceAddresses,
         Count,
     }
 

@@ -80,11 +80,12 @@ public sealed unsafe partial class MetalDccMaterializationTests
         rig.Harness.Submit();
     }
 
-    // A shader that writes the plane through the R8 image takes it from the depth target,
-    // which reloads both planes when it binds again, after the R8 image wrote its bytes
-    // back.
+    // A shader that writes the plane through the R8 image takes it from the depth target.
+    // When the depth target binds again its stencil plane is copied from the R8 texture on
+    // the device: the depth plane its texture holds is the newest and must not round-trip
+    // through guest memory, which is what a reload of both planes did.
     [Fact]
-    public void AStencilPlaneWrittenAsR8IsReloadedByTheDepthTarget()
+    public void AStencilPlaneWrittenAsR8IsHandedToTheDepthTargetOnTheDevice()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
@@ -97,14 +98,22 @@ public sealed unsafe partial class MetalDccMaterializationTests
         rig.Cache.AcquireTextureView(plane, in storageRequest);
         Assert.Equal(1, rig.Cache.TakeStencilPlanePublishes());
         Assert.False(rig.Cache.GetImage(depth).IsGpuModified);
-        Assert.True(rig.Cache.GetImage(depth).IsCpuDirty);
+        Assert.False(rig.Cache.GetImage(depth).IsCpuDirty);
+        Assert.True(rig.Cache.GetImage(depth).StencilPlaneStale);
         Assert.True(rig.Cache.GetImage(plane).IsGpuModified);
 
         rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
-        Assert.Equal(1, rig.Cache.TakeStencilPlanePublishes());
+        Assert.Equal(1, rig.Cache.TakeStencilDeviceHandOvers());
+        Assert.Equal(0, rig.Cache.TakeStencilPlanePublishes());
+        Assert.False(rig.Cache.GetImage(depth).StencilPlaneStale);
+        Assert.False(rig.Cache.GetImage(depth).IsCpuDirty);
+        Assert.True(rig.Cache.GetImage(depth).IsGpuModified);
         Assert.False(rig.Cache.GetImage(plane).IsGpuModified);
         Assert.True(rig.Cache.GetImage(plane).IsCpuDirty);
-        Assert.True(rig.Cache.GetImage(depth).IsGpuModified);
+
+        // The R8 image did not change since: binding the depth target again copies nothing.
+        rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
+        Assert.Equal(0, rig.Cache.TakeStencilDeviceHandOvers());
         rig.Harness.Submit();
     }
 }

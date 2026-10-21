@@ -388,55 +388,76 @@ internal sealed class MetalPendingWriteOverlay
         var end = address + size;
         var firstPage = address >> PageShift;
         var lastPage = (end - 1) >> PageShift;
-        if (lastPage - firstPage > 64)
+        Entry? previous = null;
+        HashSet<Entry>? seen = null;
+        if (lastPage - firstPage >= (ulong)_pages.Count)
         {
-            // A long range: walking the entries is cheaper than walking its pages.
-            foreach (var entry in _order)
+            // A range longer than the pages entries are on: only those pages are walked. The
+            // order queue was walked here before, and it holds every entry until its submission
+            // retires, forgotten ones too: GTA V's thousands of occlusion-dump qwords made each
+            // fill, copy and written binding over 256 KiB scan them all (15% of its GPU worker).
+            // A visit may drop a page's list, so the pages are taken first.
+            _longRangePages.Clear();
+            foreach (var page in _pages.Keys)
             {
-                if (!entry.Removed && entry.Address < end && address < entry.End)
+                if (page >= firstPage && page <= lastPage)
                 {
-                    visit.Visit(entry);
+                    _longRangePages.Add(page);
+                }
+            }
+
+            foreach (var page in _longRangePages)
+            {
+                if (_pages.TryGetValue(page, out var list))
+                {
+                    VisitPage(list, address, end, ref previous, ref seen, ref visit);
                 }
             }
 
             return;
         }
 
-        Entry? previous = null;
-        HashSet<Entry>? seen = null;
         for (var page = firstPage; page <= lastPage; page++)
         {
-            if (!_pages.TryGetValue(page, out var list))
+            if (_pages.TryGetValue(page, out var list))
+            {
+                VisitPage(list, address, end, ref previous, ref seen, ref visit);
+            }
+        }
+    }
+
+    // The long-range walk's pages; under the gate.
+    private readonly List<ulong> _longRangePages = new();
+
+    private static void VisitPage<TVisitor>(
+        List<Entry> list, ulong address, ulong end, ref Entry? previous, ref HashSet<Entry>? seen, ref TVisitor visit)
+        where TVisitor : struct, IEntryVisitor
+    {
+        // Backwards, so a visit that removes the entry it was given keeps the walk valid.
+        for (var index = list.Count - 1; index >= 0; index--)
+        {
+            if (index >= list.Count)
             {
                 continue;
             }
 
-            // Backwards, so a visit that removes the entry it was given keeps the walk valid.
-            for (var index = list.Count - 1; index >= 0; index--)
+            var entry = list[index];
+            if (entry.Removed || entry.Address >= end || address >= entry.End)
             {
-                if (index >= list.Count)
-                {
-                    continue;
-                }
-
-                var entry = list[index];
-                if (entry.Removed || entry.Address >= end || address >= entry.End)
-                {
-                    continue;
-                }
-
-                // An entry spanning pages is listed on each; visit it once.
-                if (entry.End - 1 >> PageShift != entry.Address >> PageShift)
-                {
-                    if (entry == previous || !(seen ??= new HashSet<Entry>()).Add(entry))
-                    {
-                        continue;
-                    }
-                }
-
-                previous = entry;
-                visit.Visit(entry);
+                continue;
             }
+
+            // An entry spanning pages is listed on each; visit it once.
+            if (entry.End - 1 >> PageShift != entry.Address >> PageShift)
+            {
+                if (entry == previous || !(seen ??= new HashSet<Entry>()).Add(entry))
+                {
+                    continue;
+                }
+            }
+
+            previous = entry;
+            visit.Visit(entry);
         }
     }
 
@@ -539,7 +560,17 @@ internal sealed class MetalPendingWriteOverlay
         {
             if (_pages.TryGetValue(page, out var list))
             {
-                list.Remove(entry);
+                // A forget walks a page's list from its end, so the entry it drops is usually
+                // the last one; a retire drops the oldest, which List.Remove finds first.
+                if (list.Count != 0 && list[^1] == entry)
+                {
+                    list.RemoveAt(list.Count - 1);
+                }
+                else
+                {
+                    list.Remove(entry);
+                }
+
                 if (list.Count == 0)
                 {
                     _pages.Remove(page);

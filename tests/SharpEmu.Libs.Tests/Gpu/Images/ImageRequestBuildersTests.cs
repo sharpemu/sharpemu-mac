@@ -67,6 +67,28 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
     private static readonly ShaderImageShape Sampled2D = new(false, false, false, false, TextureNumericClass.Float);
 
+    [Fact]
+    public void SixtyFourBitAtomicStorageKeepsWholeTexelsOnAnImageOfItsOwn()
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits32_32UInt, 64, 32);
+        var storage = new ShaderImageShape(false, false, true, false, TextureNumericClass.Uint);
+        var narrow = ImageRequestBuilders.Texture(words, storage with { Atomic = true });
+        var wide = ImageRequestBuilders.Texture(words, storage with { Atomic = true, Atomic64 = true });
+
+        // A 32-bit atomic narrows the view to R32Uint; a 64-bit one keeps RG32Uint and
+        // needs that exact format on the image itself, as Metal will not run a texture
+        // atomic through a view of another format.
+        Assert.Equal(GpuFormat.R32Uint, narrow.Request.View.Format);
+        Assert.Equal(GpuFormat.R32G32Uint, wide.Request.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R32G32Uint, wide.Request.View.Format);
+        Assert.True(wide.ExactFormat);
+
+        var placeholder = ImageRequestBuilders.NullTexture(storage with { Atomic = true, Atomic64 = true });
+        Assert.Equal(GpuFormat.R32G32Uint, placeholder.Description.PixelFormat);
+        Assert.Equal(GpuFormat.R32G32Uint, placeholder.View.Format);
+        Assert.Equal(8u, placeholder.Description.BytesPerBlock);
+    }
+
     [Theory]
     [InlineData(GuestPixelFormat.Bits16UNorm, GpuFormat.D16Unorm, GpuFormat.R16Unorm)]
     [InlineData(GuestPixelFormat.Bits32Float, GpuFormat.D32Sfloat, GpuFormat.R32Sfloat)]

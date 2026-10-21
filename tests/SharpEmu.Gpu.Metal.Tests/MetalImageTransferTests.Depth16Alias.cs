@@ -132,11 +132,11 @@ public sealed partial class MetalImageTransferTests
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, dcc, r16Texture, z16, z16Texture));
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, linearDepth, linearDepthTexture, linearAlias, linearAliasTexture));
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, linearAlias, linearAliasTexture, linearDepth, linearDepthTexture));
-        // Each width only with its own, and a 32-bit plane still only as the source.
+        // Each width only with its own (the 32-bit pair both ways: MetalImageTransferTests.DepthAlias).
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, z16, z16Texture, r32, r32Texture));
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, z32, z32Texture, r16, r16Texture));
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, r16, r16Texture, z32, z32Texture));
-        Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, r32, r32Texture, z32, z32Texture));
+        Assert.True(harness.Transfer.TryEncodeTextureToTexture(harness, r32, r32Texture, z32, z32Texture));
         Assert.True(harness.Transfer.TryEncodeTextureToTexture(harness, z16, z16Texture, r16, r16Texture));
         Assert.True(harness.Transfer.TryEncodeTextureToTexture(harness, r16, r16Texture, z16, z16Texture));
 

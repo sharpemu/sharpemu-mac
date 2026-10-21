@@ -83,24 +83,24 @@ public sealed unsafe class MetalStagingPoolTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void IdleSlabsAreReleasedBySerialsOrTimeKeepingOnlyASmallWarmSet()
+    public void IdleSlabsAreReleasedByTimeOrSerialsPastAFloorKeepingOnlyASmallWarmSet()
     {
         if (!RequireDevice()) return;
         using var pool = new MetalStagingPool(Device.Value);
         long now = 0;
         pool.Clock = () => now;
 
-        // A load burst: forty 24 MiB slabs and a small one, all in flight in serial 1.
-        for (var index = 0; index < 40; index++)
+        // A load burst: fifty 24 MiB slabs and a small one, all in flight in serial 1.
+        for (var index = 0; index < 50; index++)
         {
             _ = pool.Acquire(1, 0, 24 * MiB);
         }
 
         _ = pool.Acquire(1, 0, 1 * MiB);
-        Assert.True(pool.TotalBytes >= 960 * MiB);
-        Assert.Equal(960 * MiB + 1 * MiB, pool.PeakBytes);
+        Assert.True(pool.TotalBytes >= 1200 * MiB);
+        Assert.Equal(1200 * MiB + 1 * MiB, pool.PeakBytes);
 
-        // Completed but recent: the cap holds the free slabs to 256 MiB at once.
+        // Completed but recent: the cap holds the free slabs to IdleCapBytes at once.
         now = 10;
         pool.Trim(1);
         Assert.True(pool.IdleBytes <= MetalStagingPool.IdleCapBytes, $"idle={pool.IdleBytes}");
@@ -112,9 +112,14 @@ public sealed unsafe class MetalStagingPoolTests(ITestOutputHelper output)
         Assert.Equal(1 * MiB, pool.TotalBytes);
         Assert.Equal(1u, pool.SlabCount);
 
-        // The same by serials alone, with the clock standing still.
+        // By serials: not while it has been idle less than the serial floor (a slow frame
+        // commits many command buffers and stages through the same slabs each frame), then yes.
         _ = pool.Acquire(2, 1, 24 * MiB);
+        pool.Trim(2);
         pool.Trim(2 + MetalStagingPool.IdleSerials);
+        Assert.Equal(25 * MiB, pool.TotalBytes);
+        now += MetalStagingPool.SerialExpiryMilliseconds;
+        pool.Trim(3 + MetalStagingPool.IdleSerials);
         Assert.Equal(1 * MiB, pool.TotalBytes);
         output.WriteLine($"created={pool.SlabsCreated} released={pool.SlabsReleased} peak={pool.PeakBytes / MiB} MiB");
     }

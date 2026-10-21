@@ -20,8 +20,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// <list type="bullet">
 /// <item>a slab is the request rounded up to an eighth of its power of two (64 KiB at
 /// least), so it wastes at most 12.5%, and a free slab up to one step larger is reused;</item>
-/// <item>a free slab is released once it has been idle for <see cref="IdleSerials"/> serials
-/// or <see cref="IdleMilliseconds"/>, keeping only a small warm set of small slabs;</item>
+/// <item>a free slab is released once it has been idle for <see cref="IdleMilliseconds"/>, or
+/// for <see cref="IdleSerials"/> serials and at least <see cref="SerialExpiryMilliseconds"/>,
+/// keeping only a small warm set of small slabs;</item>
 /// <item>free slabs never hold more than <see cref="IdleCapBytes"/>: past it the least
 /// recently used are released at once;</item>
 /// <item>a free slab idle for a moment is made purgeable (volatile), so the OS can take its
@@ -37,6 +38,12 @@ internal sealed class MetalStagingPool : IDisposable
     internal const ulong IdleSerials = 64;
     internal const long IdleMilliseconds = 1000;
 
+    // The serial count releases a slab only once it has also been idle this long. A slow
+    // frame commits many command buffers: Black Myth: Wukong's ~50 a frame at 4 fps passed 64
+    // serials in about a frame, so the slabs each frame stages through were released and made
+    // again every frame or two (~5 a second), each release a trip into the driver.
+    internal const long SerialExpiryMilliseconds = 500;
+
     // A free slab is made purgeable after this many completed serials or milliseconds idle.
     internal const ulong VolatileAfterSerials = 8;
     internal const long VolatileAfterMilliseconds = 100;
@@ -45,8 +52,10 @@ internal sealed class MetalStagingPool : IDisposable
     internal const ulong WarmSlabBytes = 4UL * 1024 * 1024;
     internal const ulong WarmBytes = 16UL * 1024 * 1024;
 
-    // Free (completed, not lent) slabs never hold more than this.
-    internal const ulong IdleCapBytes = 256UL * 1024 * 1024;
+    // Free (completed, not lent) slabs never hold more than this. A frame of Black Myth: Wukong's
+    // cinematic stages through some 500-1000 MB of slabs; with 256 MB kept, the rest were released
+    // and made again every frame. Idle slabs are purgeable, so the OS can still take the pages.
+    internal const ulong IdleCapBytes = 1024UL * 1024 * 1024;
 
     // A trim with no newly completed serial runs at most this often.
     private const long TrimIntervalMilliseconds = 50;
@@ -230,7 +239,8 @@ internal sealed class MetalStagingPool : IDisposable
         {
             var idleSerials = completed - slab.Serial;
             var idleMilliseconds = now - slab.FreeAt;
-            var expired = idleSerials >= IdleSerials || idleMilliseconds >= IdleMilliseconds;
+            var expired = idleMilliseconds >= IdleMilliseconds ||
+                (idleSerials >= IdleSerials && idleMilliseconds >= SerialExpiryMilliseconds);
             var keep = expired
                 ? slab.Size <= WarmSlabBytes && warm + slab.Size <= WarmBytes && kept + slab.Size <= IdleCapBytes
                 : kept + slab.Size <= IdleCapBytes;

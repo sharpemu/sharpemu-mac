@@ -415,6 +415,71 @@ internal static partial class MetalNative
         return texture;
     }
 
+    /// <summary>
+    /// A single-level RG32Uint 2D texture for 64-bit texture atomics, which Metal runs on
+    /// RG32Uint textures created with MTLTextureUsageShaderAtomic. Each texel is one ulong.
+    /// </summary>
+    public static nint CreateAtomicUlongTexture(
+        uint width, uint height, IReadOnlyList<ulong> texels, nuint usage = 1 | 2 | 32)
+    {
+        const nuint RG32Uint = 103;
+        var descriptor = Send(Send(objc_getClass("MTLTextureDescriptor"), Selector("alloc")), Selector("init"));
+        SendInteger(descriptor, Selector("setPixelFormat:"), RG32Uint);
+        SendInteger(descriptor, Selector("setTextureType:"), 2); // MTLTextureType2D
+        SendInteger(descriptor, Selector("setWidth:"), width);
+        SendInteger(descriptor, Selector("setHeight:"), height);
+        SendInteger(descriptor, Selector("setDepth:"), 1);
+        SendInteger(descriptor, Selector("setArrayLength:"), 1);
+        SendInteger(descriptor, Selector("setMipmapLevelCount:"), 1);
+        SendInteger(descriptor, Selector("setStorageMode:"), 0);
+        SendInteger(descriptor, Selector("setUsage:"), usage);
+        var texture = Send(Device.Value, Selector("newTextureWithDescriptor:"), descriptor);
+        if (texture == 0)
+        {
+            throw new InvalidOperationException("Failed to create an atomic RG32Uint fixture texture.");
+        }
+
+        var bytes = new byte[width * height * sizeof(ulong)];
+        for (var index = 0; index < texels.Count; index++)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(index * sizeof(ulong)), texels[index]);
+        }
+
+        unsafe
+        {
+            fixed (byte* raw = bytes)
+            {
+                SendReplace(texture, Selector("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:"),
+                    new MtlRegion { Width = width, Height = height, Depth = 1 }, 0, 0,
+                    (nint)raw, width * sizeof(ulong), 0);
+            }
+        }
+
+        return texture;
+    }
+
+    public static ulong[] ReadAtomicUlongTexture(nint texture, uint width, uint height)
+    {
+        var bytes = new byte[width * height * sizeof(ulong)];
+        unsafe
+        {
+            fixed (byte* raw = bytes)
+            {
+                SendReadTexture(texture, Selector("getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:"),
+                    (nint)raw, width * sizeof(ulong), 0,
+                    new MtlRegion { Width = width, Height = height, Depth = 1 }, 0, 0);
+            }
+        }
+
+        var texels = new ulong[width * height];
+        for (var index = 0; index < texels.Length; index++)
+        {
+            texels[index] = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(index * sizeof(ulong)));
+        }
+
+        return texels;
+    }
+
     public static uint[] ReadAtomicUintTexture(nint texture, uint width, uint height)
     {
         var bytes = new byte[width * height * sizeof(uint)];

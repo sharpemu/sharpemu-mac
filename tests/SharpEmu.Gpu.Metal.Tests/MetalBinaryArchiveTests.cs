@@ -251,7 +251,39 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
     }
 
     [Fact]
-    public void AnArchiveOfAnotherTranslatorOrDeviceIsDiscarded()
+    public void ASegmentOfAnotherTranslatorStillServesAPairWhoseShadersItDidNotChange()
+    {
+        if (!RequireDevice()) return;
+        var device = Device.Value;
+        var vertexKey = MetalBinaryArchive.LibraryKey(VertexSource, usesPerVertexInputs: false);
+        var pixelKey = MetalBinaryArchive.LibraryKey(PixelSource, usesPerVertexInputs: false);
+        var vertexLibrary = Compile(VertexSource);
+        var pixelLibrary = Compile(PixelSource);
+        var descriptor = RenderDescriptor(Function(vertexLibrary, "gen5_vs"), Function(pixelLibrary, "gen5_ps"));
+        var compiled = NewRender(descriptor, 0, 0);
+        Assert.NotEqual(0, compiled);
+        using (var writing = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
+        {
+            Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
+            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, vertexKey, pixelKey, missed: true);
+            writing.Flush(wait: true);
+        }
+
+        // The pair is keyed by both shaders' MSL, so the new translator, which made the same
+        // MSL for them, finds the old build's pipeline instead of compiling it again.
+        using var reading = MetalBinaryArchive.Open(_root, device, "translator-b", Budget);
+        Assert.True(reading.WaitLoaded(TimeSpan.FromSeconds(10)));
+        Assert.Equal(1, reading.Counters.LoadedSegments);
+        var archives = reading.AcquirePipelineArchives(vertexKey, pixelKey);
+        Assert.NotEqual(0, archives);
+        var stored = NewRender(descriptor, archives, MetalBinaryArchive.FailOnBinaryArchiveMiss);
+        Assert.NotEqual(0, stored);
+        Assert.Equal(Draw(compiled), Draw(stored));
+        Release(stored, archives, compiled, descriptor, pixelLibrary, vertexLibrary);
+    }
+
+    [Fact]
+    public void AnArchiveOfAnotherDeviceIsDiscardedAndAnotherTranslatorsSegmentKept()
     {
         if (!RequireDevice()) return;
         var device = Device.Value;
@@ -276,9 +308,9 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
 
         using var reading = MetalBinaryArchive.Open(_root, device, "translator-b", Budget);
         Assert.True(reading.WaitLoaded(TimeSpan.FromSeconds(10)));
-        Assert.Equal(0, reading.Counters.LoadedSegments);
-        Assert.Equal(0, reading.AcquirePipelineArchives(default, default));
-        Assert.False(File.Exists(segments[0]));
+        // Listed for the pairs it holds; the budget, not the stamp, decides when it goes.
+        Assert.Equal(1, reading.Counters.LoadedSegments);
+        Assert.True(File.Exists(segments[0]));
         Assert.False(System.IO.Directory.Exists(other));
         Release(descriptor, pixelLibrary, vertexLibrary);
     }

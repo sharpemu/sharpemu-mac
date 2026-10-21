@@ -97,6 +97,69 @@ public sealed class MetalImageAtomicExecutionTests(ITestOutputHelper output)
         Assert.Equal(expected, MetalNative.ReadAtomicUintTexture(texture, Width, Height));
     }
 
+    // A 64-bit image atomic (DMASK 0x3) on a 32_32_UINT image works on whole texels,
+    // VDATA holding the low dword and VDATA+1 the high one: a visibility buffer keeps
+    // depth in the high half, so the maximum must compare the halves together.
+    [Theory]
+    [InlineData("ImageAtomicUmax", 0x00000005_00001234UL, 0x00000006_00000001UL, 0x00000006_00000001UL)]
+    [InlineData("ImageAtomicUmax", 0x00000005_00001234UL, 0x00000004_FFFFFFFFUL, 0x00000005_00001234UL)]
+    [InlineData("ImageAtomicUmax", 0x00000005_00001234UL, 0x00000005_00001235UL, 0x00000005_00001235UL)]
+    [InlineData("ImageAtomicUmin", 0x00000005_00001234UL, 0x00000004_FFFFFFFFUL, 0x00000004_FFFFFFFFUL)]
+    [InlineData("ImageAtomicUmin", 0x00000005_00001234UL, 0x00000006_00000001UL, 0x00000005_00001234UL)]
+    public void A64BitAtomicComparesWholeTexels(string opcode, ulong initial, ulong data, ulong expectedTexel)
+    {
+        Assert.True(
+            Gen5ImageFixtures.TryCompile(
+                opcode,
+                Gen5ImageFixtures.ImageType2D,
+                out var shader,
+                out var error,
+                dmask: 3,
+                unifiedFormat: 62u,
+                addressValues: [1, 0],
+                storeResults: true,
+                storeValues: [(uint)data, (uint)(data >> 32)],
+                glc: false),
+            error);
+        Assert.Contains("texture2d<ulong, access::read_write>", shader!.Source, StringComparison.Ordinal);
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        const ulong Untouched = 0xFEEDFACE_DEADBEEF;
+        ulong[] seed = [Untouched, initial, Untouched, Untouched];
+        var texture = MetalNative.CreateAtomicUlongTexture(Width, Height, seed);
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out error), $"{error}\n{shader.Source}");
+        Assert.True(
+            MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, new byte[16],
+                new byte[PushData.ByteSize], shader.ArgumentLayout!, 1, out _, out error, texture),
+            error);
+
+        ulong[] expected = [Untouched, expectedTexel, Untouched, Untouched];
+        Assert.Equal(expected, MetalNative.ReadAtomicUlongTexture(texture, Width, Height));
+    }
+
+    [Theory]
+    [InlineData("ImageAtomicAdd", false)]
+    [InlineData("ImageAtomicUmax", true)]
+    public void A64BitAtomicMetalCannotRunIsRefused(string opcode, bool glc)
+    {
+        Assert.False(
+            Gen5ImageFixtures.TryCompile(
+                opcode,
+                Gen5ImageFixtures.ImageType2D,
+                out _,
+                out var error,
+                dmask: 3,
+                unifiedFormat: 62u,
+                addressValues: [1, 0],
+                storeResults: true,
+                storeValues: [1, 0],
+                glc: glc));
+        Assert.Contains("64-bit", error, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AnAtomicWithoutGlcLeavesVdataAlone()
     {
@@ -184,6 +247,11 @@ public sealed class MetalImageAtomicExecutionTests(ITestOutputHelper output)
         var texture = MetalNative.CreateAtomicUintTexture(Width, Height, [1, 2, 3, 4], CacheUsage);
         Assert.NotEqual(0, texture);
         Assert.Equal<uint[]>([1, 2, 3, 4], MetalNative.ReadAtomicUintTexture(texture, Width, Height));
+
+        // RG32Uint, the 64-bit atomic texel, gets the same mask.
+        var wide = MetalNative.CreateAtomicUlongTexture(Width, Height, [1, 2, 3, ulong.MaxValue], CacheUsage);
+        Assert.NotEqual(0, wide);
+        Assert.Equal<ulong[]>([1, 2, 3, ulong.MaxValue], MetalNative.ReadAtomicUlongTexture(wide, Width, Height));
     }
 
     private bool RequireDevice()

@@ -99,6 +99,7 @@ internal sealed partial class MetalRenderHost
     private long _renderPassSerial;
 
     private long _indirectGpuDraws;
+    private long _indirectRectangleDraws;
     private long _indirectCpuReads;
     private long _indirectCpuWaits;
     private long _indirectLaunchBatches;
@@ -112,6 +113,7 @@ internal sealed partial class MetalRenderHost
     /// <summary>The indirect-draw counters of the PERF line; reported and reset.</summary>
     internal string TakeIndirectCounters() =>
         $"indirect_gpu={Interlocked.Exchange(ref _indirectGpuDraws, 0)} " +
+        $"indirect_rect_gpu={Interlocked.Exchange(ref _indirectRectangleDraws, 0)} " +
         $"indirect_cpu={Interlocked.Exchange(ref _indirectCpuReads, 0)} " +
         $"indirect_cpu_waits={Interlocked.Exchange(ref _indirectCpuWaits, 0)} " +
         $"indirect_batches={Interlocked.Exchange(ref _indirectLaunchBatches, 0)} " +
@@ -204,6 +206,13 @@ internal sealed partial class MetalRenderHost
     {
         _requestedLaunch = null;
         var entry = RequirePipelineEntry(in pipeline);
+        if (entry.RectangleStates is not null && indexed)
+        {
+            // Built in the pass from the record; only the bound index count is needed.
+            _rectangleRebaseLimit = indexLimit;
+            return;
+        }
+
         var rectangles = entry.RectangleStates is not null && !indexed;
         if (entry.Mesh is null && !rectangles)
         {

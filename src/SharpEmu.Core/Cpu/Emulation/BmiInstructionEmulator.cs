@@ -51,6 +51,40 @@ public static class BmiInstructionEmulator
         return eflags;
     }
 
+    /// <summary>ADCX: <c>dest = dest + src + CF</c>, with the carry out written to CF and
+    /// every other flag left alone. Part of ADX, which the PS5's Zen 2 implements and
+    /// Rosetta 2 does not, so Black Myth: Wukong's big-integer code faults on it.</summary>
+    public static ulong Adcx(ulong dest, ulong src, GprOperandSize size, ref uint eflags) =>
+        AddWithFlag(dest, src, size, ref eflags, FlagCarry);
+
+    /// <summary>ADOX: ADCX's twin on the overflow flag, <c>dest = dest + src + OF</c>,
+    /// with the carry out written to OF and every other flag left alone.</summary>
+    public static ulong Adox(ulong dest, ulong src, GprOperandSize size, ref uint eflags) =>
+        AddWithFlag(dest, src, size, ref eflags, FlagOverflow);
+
+    private static ulong AddWithFlag(ulong dest, ulong src, GprOperandSize size, ref uint eflags, uint flag)
+    {
+        var carryIn = (eflags & flag) != 0 ? 1UL : 0UL;
+        var mask = WidthMask(size);
+        bool carryOut;
+        ulong result;
+        if (size == GprOperandSize.Bits64)
+        {
+            var partial = dest + src;
+            result = partial + carryIn;
+            carryOut = partial < dest || result < partial;
+        }
+        else
+        {
+            var total = (dest & mask) + (src & mask) + carryIn;
+            result = total & mask;
+            carryOut = total > mask;
+        }
+
+        eflags = WithFlag(eflags, flag, carryOut);
+        return result;
+    }
+
     /// <summary>ANDN: <c>dest = (~src1) &amp; src2</c>. CF and OF are cleared.</summary>
     public static ulong Andn(ulong src1, ulong src2, GprOperandSize size, ref uint eflags)
     {

@@ -931,6 +931,40 @@ public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
         Assert.Equal(1, rig.Cache.ImageCount);
     }
 
+    // Two targets of one format at one address whose rows pad to the same pitch are still
+    // different surfaces when their widths differ: the wider one must not bind the narrower
+    // one's texture through a view, or a draw into it renders only the narrow part.
+    [Fact]
+    public void AWiderTargetOverTheSamePaddedPitchGetsItsOwnTexture()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var narrow = PaddedRequest(ImageAddress, 30, 34);
+        var narrowImage = rig.Cache.FindImage(ref narrow);
+        rig.Cache.AcquireColorTargetView(narrowImage, narrow);
+
+        var wide = PaddedRequest(ImageAddress, 60, 34);
+        var wideImage = rig.Cache.FindImage(ref wide);
+
+        Assert.NotEqual(narrowImage, wideImage);
+        Assert.Equal(60u, rig.Cache.GetImage(wideImage).Description.Extent.Width);
+        Assert.Equal(60u, rig.Cache.GetImage(wideImage).Shape.Width);
+        Assert.Equal(0u, wide.View.BaseLevel);
+    }
+
+    // A linear RGBA8 target of the given width with rows padded to 64 texels.
+    private static ImageRequest PaddedRequest(ulong address, uint width, uint height)
+    {
+        const uint pitch = 64;
+        var request = Rig.Request(address, width, height, ImageRole.ColorTarget);
+        var description = request.Description;
+        var size = (ulong)pitch * height * 4;
+        description.Data = new GuestSpan(address, size);
+        description.Pitch = pitch;
+        description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = pitch, Height = height };
+        return new ImageRequest(description, request.View, ImageRole.ColorTarget);
+    }
+
     private bool RequireDevice()
     {
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")

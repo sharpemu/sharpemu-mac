@@ -383,6 +383,20 @@ internal static partial class MetalV2Native
         nint indirectBuffer,
         nuint indirectBufferOffset);
 
+    // -drawIndexedPatches:patchIndexBuffer:patchIndexBufferOffset:controlPointIndexBuffer:
+    //  controlPointIndexBufferOffset:indirectBuffer:indirectBufferOffset:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDrawIndexedPatchesIndirect(
+        nint receiver,
+        nint selector,
+        nuint numberOfPatchControlPoints,
+        nint patchIndexBuffer,
+        nuint patchIndexBufferOffset,
+        nint controlPointIndexBuffer,
+        nuint controlPointIndexBufferOffset,
+        nint indirectBuffer,
+        nuint indirectBufferOffset);
+
     // -waitForFence:beforeStages:
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendWaitForFence(nint receiver, nint selector, nint fence, nuint stages);

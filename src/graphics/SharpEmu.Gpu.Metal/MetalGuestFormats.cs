@@ -362,6 +362,19 @@ internal static class MetalGuestFormats
     public static MtlPixelFormat LinearOf(MtlPixelFormat format) =>
         IsSrgb(format) ? (MtlPixelFormat)((uint)format - 1) : format;
 
+    /// <summary>
+    /// True for the block formats that come in an sRGB and a linear flavour. A guest samples
+    /// one memory through both (Unreal's virtual texture physical pools have an sRGB and a
+    /// linear SRV), and Metal allows exactly this reinterpretation of a compressed texture.
+    /// </summary>
+    public static bool HasSrgbTwin(MtlPixelFormat format) => format is
+        MtlPixelFormat.Bc1Rgba or MtlPixelFormat.Bc1RgbaSrgb or MtlPixelFormat.Bc2Rgba or MtlPixelFormat.Bc2RgbaSrgb or
+        MtlPixelFormat.Bc3Rgba or MtlPixelFormat.Bc3RgbaSrgb or MtlPixelFormat.Bc7RgbaUnorm or MtlPixelFormat.Bc7RgbaUnormSrgb;
+
+    /// <summary>True when the two block formats differ only in sRGB encoding (BC1, BC2, BC3, BC7).</summary>
+    public static bool AreSrgbTwins(MtlPixelFormat a, MtlPixelFormat b) =>
+        a != b && HasSrgbTwin(a) && HasSrgbTwin(b) && ((uint)a & ~1u) == ((uint)b & ~1u);
+
     public static bool TryDecodeRenderTargetFormat(
         uint dataFormat,
         uint numberType,

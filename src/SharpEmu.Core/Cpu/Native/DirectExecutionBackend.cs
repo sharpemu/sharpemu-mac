@@ -2990,15 +2990,77 @@ public sealed unsafe partial class DirectExecutionBackend :
 		_importHandlerTrampolineByIndex.Clear();
 	}
 
+	// TLS stub regions. A patched TLS access is a rel32 call, so its handler, the per-register
+	// load helpers and the store and canary stubs must sit within 2 GB of the code that calls
+	// them. One region near the entry point serves an image whose modules sit next to it; a
+	// module the loader had to place far away (Wukong's libc.prx 3.7 GB above the eboot when the
+	// host had already taken the space after it) gets a region of its own, chosen per executable
+	// range before that range is patched.
+	private sealed class TlsStubRegion(nint baseAddress)
+	{
+		public nint Base { get; } = baseAddress;
+		public int Offset;
+		public readonly nint[] RegisterHelpers = new nint[16];
+	}
+
+	private readonly List<TlsStubRegion> _tlsStubRegions = new();
+	private TlsStubRegion? _activeTlsStubRegion;
+
 	private unsafe void CreateTlsHandler()
 	{
-		Array.Clear(_tlsRegisterLoadHelpers);
-		_tlsHandlerAddress = (nint)TryAllocateNearEntry(TlsHandlerRegionSize);
-		if (_tlsHandlerAddress == 0)
+		_tlsStubRegions.Clear();
+		_activeTlsStubRegion = null;
+		ActivateTlsStubRegion(CreateTlsStubRegion(_entryPoint));
+	}
+
+	private void ActivateTlsStubRegion(TlsStubRegion region)
+	{
+		if (_activeTlsStubRegion is { } current)
 		{
-			_tlsHandlerAddress = (nint)VirtualAlloc(null, TlsHandlerRegionSize, 12288u, 64u);
+			current.Offset = _tlsPatchStubOffset;
 		}
-		if (_tlsHandlerAddress == 0)
+
+		_activeTlsStubRegion = region;
+		_tlsHandlerAddress = region.Base;
+		_tlsPatchStubOffset = region.Offset;
+		_tlsRegisterLoadHelpers = region.RegisterHelpers;
+	}
+
+	private static bool WithinTlsReach(nint stubBase, ulong address)
+	{
+		var stub = (ulong)stubBase;
+		return (stub > address ? stub - address : address - stub) <= NearEntryReach;
+	}
+
+	/// <summary>Makes a region that every rel32 call from [start, end) can reach the active one,
+	/// creating one near the range when none does.</summary>
+	private void SelectTlsStubRegion(ulong start, ulong end)
+	{
+		if (_activeTlsStubRegion is null || end <= start)
+		{
+			return;
+		}
+
+		foreach (var region in _tlsStubRegions)
+		{
+			if (WithinTlsReach(region.Base, start) && WithinTlsReach(region.Base, end - 1))
+			{
+				ActivateTlsStubRegion(region);
+				return;
+			}
+		}
+
+		ActivateTlsStubRegion(CreateTlsStubRegion(start + ((end - start) / 2)));
+	}
+
+	private unsafe TlsStubRegion CreateTlsStubRegion(ulong near)
+	{
+		var regionBase = (nint)TryAllocateNear(near, TlsHandlerRegionSize);
+		if (regionBase == 0)
+		{
+			regionBase = (nint)VirtualAlloc(null, TlsHandlerRegionSize, 12288u, 64u);
+		}
+		if (regionBase == 0)
 		{
 			throw new OutOfMemoryException("Failed to allocate TLS handler");
 		}
@@ -3008,7 +3070,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 		// flags, so save them all: guest code legitimately keeps live values
 		// and comparison results across TLS reads, and losing them corrupted
 		// deterministic computations (e.g. procedural texture generation).
-		byte* tlsHandlerAddress = (byte*)_tlsHandlerAddress;
+		byte* tlsHandlerAddress = (byte*)regionBase;
 		int num = 0;
 		tlsHandlerAddress[num++] = 0x9C;                    // pushfq
 		tlsHandlerAddress[num++] = 0x51;                    // push rcx
@@ -3050,11 +3112,13 @@ public sealed unsafe partial class DirectExecutionBackend :
 		tlsHandlerAddress[num++] = 0x59;                    // pop rcx
 		tlsHandlerAddress[num++] = 0x9D;                    // popfq
 		tlsHandlerAddress[num++] = 0xC3;                    // ret
-		_tlsPatchStubOffset = (num + 15) & ~15;
+		var region = new TlsStubRegion(regionBase) { Offset = (num + 15) & ~15 };
 		uint num2 = default(uint);
-		VirtualProtect((void*)_tlsHandlerAddress, TlsHandlerRegionSize, 32u, &num2);
-		FlushInstructionCache(GetCurrentProcess(), (void*)_tlsHandlerAddress, TlsHandlerRegionSize);
-		Console.Error.WriteLine($"[LOADER][INFO] TLS handler at 0x{_tlsHandlerAddress:X16}");
+		VirtualProtect((void*)regionBase, TlsHandlerRegionSize, 32u, &num2);
+		FlushInstructionCache(GetCurrentProcess(), (void*)regionBase, TlsHandlerRegionSize);
+		Console.Error.WriteLine($"[LOADER][INFO] TLS handler at 0x{regionBase:X16} (for code near 0x{near:X16})");
+		_tlsStubRegions.Add(region);
+		return region;
 	}
 
 	private unsafe static nint CreateUnresolvedReturnStub()
@@ -3264,11 +3328,16 @@ public sealed unsafe partial class DirectExecutionBackend :
 		return (nint)ptr;
 	}
 
-	private unsafe void* TryAllocateNearEntry(nuint size)
+	// The farthest a near-entry block may sit from the entry point: the probes' own range,
+	// leaving rel32 calls from the rest of the image a quarter gigabyte of margin.
+	private const ulong NearEntryReach = 1879048192UL;
+
+	private unsafe void* TryAllocateNearEntry(nuint size) => TryAllocateNear(_entryPoint, size);
+
+	private unsafe void* TryAllocateNear(ulong near, nuint size)
 	{
-		ulong entryPoint = _entryPoint;
-		ulong baseAddress = entryPoint & 0xFFFFFFFFFFFF0000uL;
-		for (long num = 0L; num <= 1879048192; num += 16777216)
+		ulong baseAddress = near & 0xFFFFFFFFFFFF0000uL;
+		for (long num = 0L; num <= (long)NearEntryReach; num += 16777216)
 		{
 			if (TryAllocAt(baseAddress, num, size, out var memory))
 			{
@@ -3306,6 +3375,17 @@ public sealed unsafe partial class DirectExecutionBackend :
 		void* ptr = VirtualAlloc((void*)num, size, 12288u, 64u);
 		if (ptr == null)
 		{
+			return false;
+		}
+		// The address is only a hint to the host: on macOS a taken range comes back mapped at
+		// the next free hole, which can be anywhere. Accepting any result ended the near search
+		// at its first probe and once put Wukong's TLS handler 3.7 GB from the code whose rel32
+		// calls must reach it, so no TLS load was patched and the first one faulted. A relocated
+		// block still serves when it stays within reach of the base; otherwise keep probing.
+		var distance = (ulong)ptr > baseAddress ? (ulong)ptr - baseAddress : baseAddress - (ulong)ptr;
+		if (distance > NearEntryReach)
+		{
+			VirtualFree(ptr, 0u, 32768u);
 			return false;
 		}
 		memory = ptr;
@@ -3393,6 +3473,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 					continue;
 				}
 
+				SelectTlsStubRegion(range.Start, range.End);
 				counts += PatchTlsPatternsInRange(range.Start, range.End);
 				scannedRanges++;
 				scannedBytes += range.End - range.Start;
@@ -3403,6 +3484,12 @@ public sealed unsafe partial class DirectExecutionBackend :
 			$"[LOADER][INFO] Patched {counts.Loads} TLS loads, {counts.Stores} TLS stores, " +
 			$"{counts.StackCanaries} stack-canary accesses " +
 			$"across {scannedRanges} executable range(s), bytes=0x{scannedBytes:X}, reused={reusedRanges}");
+		if (_tlsLoadsOutOfReach != 0)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][ERROR] {_tlsLoadsOutOfReach} TLS loads are out of rel32 reach of the TLS handler at " +
+				$"0x{_tlsHandlerAddress:X16} and stay unpatched; each faults on first use.");
+		}
 	}
 
 	private unsafe TlsPatchCounts PatchTlsPatternsInRange(ulong rangeStart, ulong rangeEnd)
@@ -3571,7 +3658,10 @@ public sealed unsafe partial class DirectExecutionBackend :
         }
         var displacement = (long)handler - ((long)address + 6);
         if (displacement < int.MinValue || displacement > int.MaxValue)
+        {
+            _tlsLoadsOutOfReach++;
             return false;
+        }
         // REX.W keeps retained operand-size prefixes from changing the call width.
         Span<byte> patch = stackalloc byte[instructionLength];
         patch.Fill(0x90);
@@ -3581,7 +3671,11 @@ public sealed unsafe partial class DirectExecutionBackend :
         return WriteTlsInstruction(address, patch);
     }
 
-    private readonly nint[] _tlsRegisterLoadHelpers = new nint[16];
+    private nint[] _tlsRegisterLoadHelpers = new nint[16];
+
+    // TLS loads left unpatched because the handler is beyond a rel32 call from them; each
+    // faults on first use, so any at all is reported with the patch summary.
+    private int _tlsLoadsOutOfReach;
 
     private unsafe nint CreateTlsRegisterLoadHelper(int destinationRegister)
     {
@@ -6782,6 +6876,12 @@ public sealed unsafe partial class DirectExecutionBackend :
 		}
 	}
 
+	// Guest threads a stall snapshot lists; SHARPEMU_SNAPSHOT_MAX_THREADS=<n> raises it.
+	private static readonly int SnapshotMaxThreads =
+		int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_SNAPSHOT_MAX_THREADS"), out var snapshotThreads) && snapshotThreads > 0
+			? snapshotThreads
+			: 48;
+
 	// The continuation trampoline is rebuilt on every blocked-thread resume.
 	// Keep its tiny writer on the stack: capturing local emit functions create a
 	// managed display-class allocation on this extremely hot path.
@@ -7661,7 +7761,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 						$"rdi=0x{Volatile.Read(ref thread.LastImportRdi):X16} rsi=0x{Volatile.Read(ref thread.LastImportRsi):X16} " +
 						$"rdx=0x{Volatile.Read(ref thread.LastImportRdx):X16} block={thread.BlockReason ?? "none"}{hostContextText}");
 					logged++;
-					if (logged >= 48 && threads.Length > logged)
+					if (logged >= SnapshotMaxThreads && threads.Length > logged)
 					{
 						Console.Error.WriteLine($"[LOADER][ERROR] Stall guest-thread: ... {threads.Length - logged} more");
 						break;
@@ -7803,6 +7903,15 @@ public sealed unsafe partial class DirectExecutionBackend :
 			}
 			_tlsModuleBases.Clear();
 		}
+		foreach (var region in _tlsStubRegions)
+		{
+			if (region.Base != _tlsHandlerAddress)
+			{
+				VirtualFree((void*)region.Base, 0u, 32768u);
+			}
+		}
+		_tlsStubRegions.Clear();
+		_activeTlsStubRegion = null;
 		if (_tlsHandlerAddress != 0)
 		{
 			VirtualFree((void*)_tlsHandlerAddress, 0u, 32768u);

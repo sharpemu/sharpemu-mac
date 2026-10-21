@@ -231,6 +231,33 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         Assert.False(rig.Cache.TryGetImage(idle, out _));
     }
 
+    // An image the GPU never wrote that guest stores have already made stale holds nothing a
+    // read could use without uploading it again; it goes once idle for the stale time, long
+    // before the frame count retirement waits for, while a current image waits for that.
+    [Fact]
+    public void AStaleImageGoesBeforeTheAgePolicyAndACurrentOneDoesNot()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Configure(retireFrames: 1000, retireSeconds: 1000);
+        var stale = rig.Acquire(GuestBase, ImageRole.Texture);
+        var current = rig.Acquire(GuestBase + 0x10000, ImageRole.Texture);
+        rig.Frame(seconds: 0.1);
+
+        // A store the page watch catches: the image is behind guest memory now and unwatched.
+        Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase + 64, 4));
+        Assert.True(rig.Cache.GetImage(stale).IsCpuDirty);
+        Assert.False(rig.Cache.GetImage(stale).IsWatched);
+
+        for (var frame = 0; frame < 3; frame++)
+        {
+            rig.Frame(seconds: 1);
+        }
+
+        Assert.False(rig.Cache.TryGetImage(stale, out _));
+        Assert.True(rig.Cache.TryGetImage(current, out _));
+    }
+
     // A GPU-written image is published into guest memory before it goes, and its texture lives
     // until the submission that carries the writeback completes.
     [Fact]

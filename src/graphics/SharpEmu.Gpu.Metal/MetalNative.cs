@@ -289,12 +289,15 @@ internal static partial class MetalNative
 
     /// <summary>
     /// The compile options every translated-guest MSL library is built with: fast
-    /// math off, because the translated GCN float semantics do not survive it, and
-    /// an explicit language version so MSL 3.1+ features are available.
+    /// math off, because the translated GCN float semantics do not survive it, an
+    /// explicit language version so MSL 3.1+ features are available, and invariance
+    /// preserved, so a [[position, invariant]] output is computed the same way in every
+    /// program (a depth-EQUAL pass against a prepass depends on it).
     /// </summary>
     public static void ApplyMslCompileOptions(nint options)
     {
         SendVoidBool(options, Selector("setFastMathEnabled:"), false);
+        SendVoidBool(options, Selector("setPreserveInvariance:"), true);
         SetMslLanguageVersion(options);
     }
 

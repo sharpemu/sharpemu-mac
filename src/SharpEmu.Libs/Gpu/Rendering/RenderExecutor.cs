@@ -87,6 +87,11 @@ public sealed partial class RenderExecutor
     private bool _fragmentWritesPending;
     private long _fragmentWritesPass;
 
+    // The buffer ranges those deferred stores may have written, or untracked when one of the
+    // storing draws wrote through a device address or a storage image.
+    private readonly List<(ulong Start, ulong End)> _fragmentWriteRanges = new();
+    private bool _fragmentWritesUntracked;
+
     /// <summary>
     /// A consumer of earlier shader stores can follow: the guest flushed or invalidated its
     /// caches. Ends the render pass that holds deferred fragment-stage stores, if any.
@@ -112,6 +117,72 @@ public sealed partial class RenderExecutor
         _host.EndRendering("release");
         _host.ShaderWriteBarrier(GpuPipelineStage.FragmentShaderBit);
     }
+
+    // Whether a deferred fragment store may have written the range: always when a storing
+    // draw wrote memory no buffer range names.
+    private bool FragmentWritesMayCover(ulong address, ulong size)
+    {
+        if (!_fragmentWritesPending)
+        {
+            return false;
+        }
+
+        if (_fragmentWritesUntracked || _host.RenderPassSerial != _fragmentWritesPass)
+        {
+            return true;
+        }
+
+        var end = address + size;
+        foreach (var (start, stop) in _fragmentWriteRanges)
+        {
+            if (start < end && address < stop)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Notes what a draw whose fragment stores are deferred may write.
+    private void NoteFragmentWrites(ShaderStageResources stage)
+    {
+        if (!_fragmentWritesPending || _host.RenderPassSerial != _fragmentWritesPass)
+        {
+            _fragmentWriteRanges.Clear();
+            _fragmentWritesUntracked = false;
+        }
+
+        var program = stage.Program!;
+        if (program.WritesDeviceAddresses || WritesStorageImage(program) || _fragmentWriteRanges.Count >= MaxFragmentWriteRanges)
+        {
+            _fragmentWritesUntracked = true;
+            return;
+        }
+
+        var descriptors = stage.Resources.Buffers;
+        for (var i = 0; i < program.Buffers.Length; i++)
+        {
+            if (!program.Buffers[i].Written || descriptors[i].Length < 4)
+            {
+                continue;
+            }
+
+            var descriptor = BufferDescriptorWords.From(descriptors[i]);
+            if (descriptor.Footprint() is not { } footprint || descriptor.Address > ulong.MaxValue - footprint)
+            {
+                _fragmentWritesUntracked = true;
+                return;
+            }
+
+            if (descriptor.Address != 0 && footprint != 0)
+            {
+                _fragmentWriteRanges.Add((descriptor.Address, descriptor.Address + footprint));
+            }
+        }
+    }
+
+    private const int MaxFragmentWriteRanges = 64;
 
     private struct DrawState
     {
@@ -415,7 +486,11 @@ public sealed partial class RenderExecutor
             (!_host.TakesIndirectDrawArguments(
                     state.Programs.Vertex, arguments.IndirectArgumentsAddress, IndexedIndirectArgumentsSize) ||
                 (IsRectangleList(banks.UserConfig.PrimitiveType) &&
-                    !_host.TakesIndirectRectangleListArguments)))
+                    !_host.TakesIndirectIndexedRectangleListArguments(
+                        state.Programs.VertexInput,
+                        arguments.IndirectArgumentsAddress,
+                        IndexedIndirectArgumentsSize,
+                        arguments.UnboundedIndexBuffer ? uint.MaxValue : arguments.IndexCount))))
         {
             // The backend runs this program as a mesh pipeline, or this rectangle list as
             // patches, whose launch is sized from the very counts the GPU would have read;

@@ -2,14 +2,21 @@ static constant uint sharpemu_gfx10_formats[128] = {
 {{format_table}}
 };
 
+// Each (component, data format) layout packed as byte offset | bit offset << 8 | bit count << 16,
+// indexed by component * 16 + data format. A table rather than a switch: a kernel inlines this
+// at every formatted access, and one Black Myth: Wukong kernel with 2240 of them took the
+// driver 163 s to build as a switch, 32 s as a table.
+static constant uint sharpemu_format_layouts[64] = {
+{{layout_table}}
+};
+
 static inline void sharpemu_format_layout(uint dfmt, uint component, thread uint& byteOff, thread uint& bitOff, thread uint& bits)
 {
-    byteOff = 0u; bitOff = 0u; bits = 0u;
-    switch (component * 16u + dfmt)
-    {
-{{layout_cases}}
-    default: break;
-    }
+    uint key = component * 16u + dfmt;
+    uint packed = key < 64u ? sharpemu_format_layouts[key] : 0u;
+    byteOff = packed & 0xFFu;
+    bitOff = (packed >> 8) & 0xFFu;
+    bits = packed >> 16;
 }
 
 static inline uint sharpemu_minifloat(uint raw, uint bits)

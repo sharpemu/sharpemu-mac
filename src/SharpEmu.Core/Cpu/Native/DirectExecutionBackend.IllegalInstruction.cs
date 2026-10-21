@@ -66,6 +66,10 @@ public sealed partial class DirectExecutionBackend
         }
 
         WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)instruction.Length);
+        if (instruction.Mnemonic is Mnemonic.Adcx or Mnemonic.Adox)
+        {
+            NoteHotSiteFault(rip, in instruction);
+        }
 
         Interlocked.Increment(ref _bmiInstructionsEmulated);
         if (Interlocked.Exchange(ref _bmiSoftwareFallbackAnnounced, 1) == 0)
@@ -180,6 +184,20 @@ public sealed partial class DirectExecutionBackend
                     Mnemonic.Shlx => BmiInstructionEmulator.Shlx(shiftSrc, (int)shiftCount, size),
                     _ => BmiInstructionEmulator.Shrx(shiftSrc, (int)shiftCount, size),
                 };
+                return true;
+
+            case Mnemonic.Adcx:
+            case Mnemonic.Adox:
+                if (!TryReadOperand(contextRecord, in instruction, 0, size, out var addDest) ||
+                    !TryReadOperand(contextRecord, in instruction, 1, size, out var addSrc))
+                {
+                    return false;
+                }
+
+                result = instruction.Mnemonic == Mnemonic.Adcx
+                    ? BmiInstructionEmulator.Adcx(addDest, addSrc, size, ref eflags)
+                    : BmiInstructionEmulator.Adox(addDest, addSrc, size, ref eflags);
+                flagsChanged = true;
                 return true;
 
             case Mnemonic.Pdep:

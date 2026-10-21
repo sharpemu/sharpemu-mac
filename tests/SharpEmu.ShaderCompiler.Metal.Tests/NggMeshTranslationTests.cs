@@ -86,7 +86,7 @@ public sealed class NggMeshTranslationTests
             Assert.Contains(field, vertex.Source, StringComparison.Ordinal);
         }
 
-        Assert.Contains("float4 sharpemu_position [[position]];", mesh.Source, StringComparison.Ordinal);
+        Assert.Contains("float4 sharpemu_position [[position, invariant]];", mesh.Source, StringComparison.Ordinal);
         Assert.Equal(3u, mesh.AttributeCount);
     }
 

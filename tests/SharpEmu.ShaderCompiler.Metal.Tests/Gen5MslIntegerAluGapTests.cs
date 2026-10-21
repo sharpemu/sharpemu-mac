@@ -910,7 +910,6 @@ public sealed class Gen5MslIntegerAluGapTests(ITestOutputHelper output)
     [InlineData("v_dot4_i32_i8 op_sel", new uint[] { 0xCC164808, 0x1C0A0300 }, "VDot4I32I8: op_sel/op_sel_hi other than the default")]
     [InlineData("v_dot2_i32_i16 neg_lo", new uint[] { 0xCC144008, 0x3C0A0300 }, "VDot2I32I16: neg_lo/neg_hi on an integer dot product")]
     [InlineData("v_dot2_f32_f16 neg acc", new uint[] { 0xCC134008, 0x9C0A0300 }, "VDot2F32F16: op_sel/op_sel_hi/neg on the 32-bit accumulator")]
-    [InlineData("v_pk_add_u16 neg_lo", new uint[] { 0xCC0A4008, 0x38020300 }, "VPkAddU16: neg_lo/neg_hi on a packed integer op")]
     [InlineData("v_msad_u8 clamp", new uint[] { 0xD5718008, 0x040A0300 }, "VMsadU8: clamped integer results are not supported")]
     [InlineData("v_mad_i64_i32 clamp", new uint[] { 0xD5779408, 0x040A0300 }, "VMadI64I32: clamped integer results are not supported")]
     [InlineData("v_mqsad_u32_u8 constant acc", new uint[] { 0xD5750008, 0x02020500 }, "VMqsadU32U8: a constant 128-bit accumulator (src2)")]
@@ -922,6 +921,20 @@ public sealed class Gen5MslIntegerAluGapTests(ITestOutputHelper output)
         var request = Gen5ComputeFixtures.CreateComputeRequest(new Gen5ComputeFixture(name, [.. op, EndProgram], 0, 0));
         Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
         Assert.Contains(expectedError, error);
+    }
+
+    // neg_lo/neg_hi only negate floating-point inputs: a packed integer op with them set
+    // translates exactly as without them.
+    [Fact]
+    public void PackedIntegerOpsIgnoreNegateModifiers()
+    {
+        var plain = Gen5ComputeFixtures.CreateComputeRequest(
+            new Gen5ComputeFixture("v_pk_add_u16", [0xCC0A4008, 0x18020300, EndProgram], 0, 0));
+        var negated = Gen5ComputeFixtures.CreateComputeRequest(
+            new Gen5ComputeFixture("v_pk_add_u16", [0xCC0A4008, 0x38020300, EndProgram], 0, 0));
+        Assert.True(Gen5MslTranslator.TryCompileProgram(plain, out var expected, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(negated, out var actual, out error), error);
+        Assert.Equal(expected.Source, actual.Source);
     }
 
     // ---- harness ----

@@ -133,6 +133,13 @@ internal interface IMetalImageTransfer
     // keeps the two as separate textures.
     bool SamplesAsDepthTwin(in ImageDescription depthDescription, in ImageDescription colorDescription) => false;
 
+    // Copies an 8-bit image over a depth image's stencil bytes into that depth texture's
+    // stencil plane, on the device; the depth plane is left as it is. False when the pair is
+    // not one the transfer can carry.
+    bool TryEncodeStencilFromColor(IMetalSubmissionContext context,
+        in ImageDescription colorDescription, nint colorTexture,
+        in ImageDescription depthDescription, nint depthTexture) => false;
+
     // Copies every slice and level of one texture into another of the same shape, on the
     // device. The two may differ in usage only.
     void EncodeWholeTextureCopy(IMetalSubmissionContext context, nint sourceTexture, nint targetTexture);

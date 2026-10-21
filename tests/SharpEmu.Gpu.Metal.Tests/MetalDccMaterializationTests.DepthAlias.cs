@@ -96,10 +96,14 @@ public sealed unsafe partial class MetalDccMaterializationTests
         Assert.True(rig.Cache.GetImage(depth).IsCpuDirty);
         Assert.True(rig.Cache.GetImage(alias).IsGpuModified);
 
-        // The way back is a converting upload into a depth texture, which stays on the
-        // guest-memory path.
+        // The way back is on the device too: the depth plane takes what was written through
+        // the alias without a round trip through guest memory (the leg that left Black Myth:
+        // Wukong's base pass testing against a frame-old depth buffer), so the depth target
+        // comes back current rather than owing an upload.
         rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
-        Assert.Equal(0, rig.Cache.TakeDeviceAliasPublishes());
+        Assert.Equal(1, rig.Cache.TakeDeviceAliasPublishes());
+        Assert.False(rig.Cache.GetImage(depth).IsCpuDirty);
+        Assert.True(rig.Cache.GetImage(depth).IsGpuModified);
         rig.Harness.Submit();
     }
 

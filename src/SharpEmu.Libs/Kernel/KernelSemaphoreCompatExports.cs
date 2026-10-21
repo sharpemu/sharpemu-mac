@@ -238,6 +238,28 @@ public static class KernelSemaphoreCompatExports
                 _ = ctx.TryWriteUInt32(timeoutAddress, (uint)Math.Min(completed.RemainingMicroseconds, uint.MaxValue));
             }
 
+            // FreeBSD libc's sem_timedwait (sem_new.c) re-checks the count after the kernel wait
+            // times out and takes a unit posted meanwhile instead of failing. The timed-out guest
+            // thread can resume well after its deadline here, and Mono retires a thread-pool worker
+            // whose park times out: a post made to wake it in that gap was left in the count while
+            // the worker exited, so the queued work had no thread and the level load never finished.
+            if (convention == SemaphoreResultConvention.Libc && completed.Status == GuestWaitStatus.TimedOut)
+            {
+                lock (queue.Gate)
+                {
+                    if (!queue.Deleted && queue.Count == 0 && semaphore.Count >= needCount)
+                    {
+                        semaphore.Count -= needCount;
+                        if (_traceSema)
+                        {
+                            TraceSemaphore($"wait-late-take handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
+                        }
+
+                        return Finish(ctx, convention, 0);
+                    }
+                }
+            }
+
             if (_traceSema)
             {
                 TraceSemaphore($"wait-done handle=0x{handle:X8} name='{semaphore.Name}' status={completed.Status}");

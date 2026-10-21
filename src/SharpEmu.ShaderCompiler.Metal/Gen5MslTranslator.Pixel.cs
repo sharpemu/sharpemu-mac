@@ -197,32 +197,62 @@ public static partial class Gen5MslTranslator
             {
                 // A storage element is its own mip view; multisampled textures
                 // carry a sample operand rather than a mip level.
+                // The guest reads a zero texel, through the view's swizzle, anywhere outside
+                // the image. Metal does the same for a coordinate past the extent, but a mip,
+                // layer or sample past the last one is undefined - garbage, or a GPU fault, for
+                // UE5's passes that march off a volume. So those are clamped, and a read they
+                // would have taken out of range goes past the extent instead, where Metal
+                // returns the swizzled zero the guest gets (an edge texel is not).
+                var readsMip = !isStorage && imageClass.SupportsMipLevels && !imageClass.Multisampled;
+                var outside = new List<string>();
+                var mip = readsMip ? Temp("uint", mipLevel) : null;
+                if (mip is not null)
+                {
+                    outside.Add($"{mip} >= {texture}.get_num_mip_levels()");
+                }
+
+                var layer = imageClass.Arrayed
+                    ? Temp("uint", BuildIntegerLayer(image, imageClass.SpatialComponents, texture))
+                    : null;
+                if (layer is not null)
+                {
+                    outside.Add($"{layer} >= {texture}.get_array_size()");
+                }
+
+                // 2DMsaa/2DMsaaArray take a sample index where a mip level would go; it is
+                // the address component right after the coordinates, like the mip operand.
+                var sampleIndex = imageClass.Multisampled
+                    ? Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents))
+                    : null;
+                if (sampleIndex is not null)
+                {
+                    outside.Add($"{sampleIndex} >= {texture}.get_num_samples()");
+                }
+
+                var away = outside.Count == 0 ? null : Temp("bool", string.Join(" || ", outside));
                 var spatial = new string[imageClass.SpatialComponents];
                 for (var component = 0; component < spatial.Length; component++)
                 {
-                    // Metal read returns zero outside the image. Clamping would
-                    // incorrectly replace an invalid guest read with an edge texel.
-                    spatial[component] = Temp("uint", ImageIntegerAddress(image, component));
+                    var address = ImageIntegerAddress(image, component);
+                    spatial[component] = Temp("uint", away is null ? address : $"{away} ? 0xFFFFFFFFu : ({address})");
                 }
 
                 var coordinate = spatial.Length == 1
                     ? $"uint2({spatial[0]}, 0u)"
                     : $"{imageClass.IntegerCoordinateType}({string.Join(", ", spatial)})";
                 var arguments = coordinate;
-                if (imageClass.Arrayed)
+                if (layer is not null)
                 {
-                    arguments += $", {BuildIntegerLayer(image, imageClass.SpatialComponents, texture)}";
+                    arguments += $", ({away} ? 0u : {layer})";
                 }
 
-                // 2DMsaa/2DMsaaArray take a sample index where a mip level would go; it is
-                // the address component right after the coordinates, like the mip operand.
-                if (imageClass.Multisampled)
+                if (sampleIndex is not null)
                 {
-                    arguments += $", {Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents))}";
+                    arguments += $", ({away} ? 0u : {sampleIndex})";
                 }
-                else if (!isStorage && imageClass.SupportsMipLevels)
+                else if (mip is not null)
                 {
-                    arguments += $", {mipLevel}";
+                    arguments += $", ({away} ? 0u : {mip})";
                 }
 
                 sampled = Temp($"vec<{kind}, 4>", $"{texture}.read({arguments})");
@@ -396,8 +426,10 @@ public static partial class Gen5MslTranslator
             }
 
             // BindingLayout only gives an atomic binding to a uint image, so this
-            // is the one component kind the texel vector can have.
-            if (imageClass.ComponentKind != "uint")
+            // is the one component kind the texel vector can have, or ulong for
+            // a 64-bit atomic.
+            var wide = ResourceTracker.Is64BitImageAtomic(opcode, image.Dmask);
+            if (imageClass.ComponentKind != (wide ? "ulong" : "uint"))
             {
                 error = $"{opcode} on a {imageClass.ComponentKind} image has no Metal texture atomic";
                 return false;
@@ -434,11 +466,36 @@ public static partial class Gen5MslTranslator
                 "uint",
                 image.VectorData + 1 < VectorRegisterFileCount ? $"v[{image.VectorData + 1}]" : "0u");
             var access = $"{coordinate}{layerArgument}";
+            var suffix = opcode["ImageAtomic".Length..];
+            if (wide)
+            {
+                // Metal's 64-bit texture atomics (MSL 3.1, RG32Uint textures) are only
+                // the unsigned minimum and maximum, and neither returns the old texel.
+                // That covers a visibility buffer's depth-and-ID maximum.
+                var method = suffix switch { "Umax" => "atomic_max", "Umin" => "atomic_min", _ => null };
+                if (method is null || image.Glc)
+                {
+                    error = $"{opcode} on 64-bit texels{(image.Glc ? " returning the old value" : string.Empty)} has no Metal texture atomic";
+                    return false;
+                }
+
+                var wideData = Temp(
+                    "ulong",
+                    image.VectorData + 1 < VectorRegisterFileCount
+                        ? $"as_type<ulong>(uint2(v[{image.VectorData}], v[{image.VectorData + 1}]))"
+                        : $"(ulong)v[{image.VectorData}]");
+                Line($"if ({ExecCondition(string.Join(" && ", guards))})");
+                Line("{");
+                _indent++;
+                Line($"{texture}.{method}({access}, ulong4({wideData}));");
+                _indent--;
+                Line("}");
+                return true;
+            }
 
             Line($"if ({ExecCondition(string.Join(" && ", guards))})");
             Line("{");
             _indent++;
-            var suffix = opcode["ImageAtomic".Length..];
             var direct = suffix switch
             {
                 "Swap" => $"{texture}.atomic_exchange({access}, uint4({data}))",

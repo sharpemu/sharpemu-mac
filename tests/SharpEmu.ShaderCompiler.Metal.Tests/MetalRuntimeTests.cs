@@ -74,6 +74,66 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void ALoopContinuingThroughASharedLatchIsStructuredAndRunsCorrectly()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.SharedLatchLoop);
+        Assert.DoesNotContain("switch (pc)", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.SharedLatchLoop, new byte[16]);
+        Assert.Equal(0x00080167u, ReadDword(result, 0));
+    }
+
+    [Fact]
+    public void ATailSharedByBothArmsOfABranchInALoopIsStructuredAndRunsCorrectly()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.SharedTailLoop);
+        Assert.DoesNotContain("switch (pc)", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.SharedTailLoop, new byte[16]);
+        Assert.Equal(0x00060804u, ReadDword(result, 0));
+    }
+
+    // A loop with two exits used to send the whole shader to the dispatcher. Each exit now
+    // records its number and breaks, and the code after the loop runs that exit's region.
+    [Theory]
+    [InlineData(true, 0x00000A02u)]
+    [InlineData(false, 0x00000B04u)]
+    public void ALoopWithTwoExitsIsStructuredAndRunsTheExitItLeftThrough(bool first, uint expected)
+    {
+        var fixture = first ? Gen5ComputeFixtures.MultiExitLoopFirst : Gen5ComputeFixtures.MultiExitLoopSecond;
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        Assert.DoesNotContain("switch (pc)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_loop_exit_", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(fixture, new byte[16]);
+        Assert.Equal(expected, ReadDword(result, 0));
+    }
+
+    // A branch whose arm can end the program has no post-dominator; the arms that go on
+    // now rejoin where they meet instead of sending the shader to the dispatcher.
+    [Theory]
+    [InlineData(3u, 1u)]
+    [InlineData(5u, 9u)]
+    [InlineData(7u, 3u)]
+    public void ABranchWithAnExitingArmIsStructuredAndRunsEachPath(uint selector, uint expected)
+    {
+        var fixture = Gen5ComputeFixtures.ExitArmJoin(selector);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        Assert.DoesNotContain("switch (pc)", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(fixture, new byte[16]);
+        Assert.Equal(expected, ReadDword(result, 0));
+    }
+
+    [Fact]
     public void PixelShaderCompilesWithTheRuntimeMetalCompiler()
     {
         if (SkipWithoutMetalDevice("compile validation")) return;
@@ -207,6 +267,63 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Wave64SpillReloadsReadACopyInsteadOfTheExchange()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64LaneSpill, waveLaneCount: 64, localSizeX: 64);
+        Assert.Contains("sharpemu_spill1", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("threadgroup_barrier", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64LaneSpill, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(0x1234u, ReadDword(result, lane * 8));
+            Assert.Equal(77u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
+    [Fact]
+    public void Wave64SpillParkedOnOneArmIsStillReloadedFromTheCopy()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64LaneSpillOneArm, waveLaneCount: 64, localSizeX: 64);
+        Assert.Contains("sharpemu_spill0", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("threadgroup_barrier", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64LaneSpillOneArm, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(0x1234u, ReadDword(result, lane * 8));
+            Assert.Equal(0x1234u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
+    [Fact]
+    public void Wave64SpillReloadAfterTheVgprChangedReadsTheLane()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64LaneSpillOverwritten, waveLaneCount: 64, localSizeX: 64);
+        Assert.DoesNotContain("sharpemu_spill", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("threadgroup_barrier", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64LaneSpillOverwritten, new byte[512],
+            waveLaneCount: 64, localSizeX: 64, threadsPerThreadgroup: 64);
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(0x1235u, ReadDword(result, lane * 8));
+            Assert.Equal(78u, ReadDword(result, lane * 8 + 4));
+        }
+    }
+
+    [Fact]
     public void Wave64ReadFirstLaneTakesTheFirstActiveLaneOfEitherHalf()
     {
         if (SkipWithoutMetalDevice("the execution test")) return;
@@ -336,6 +453,35 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
             Assert.Equal(wave64 ? 0x11111111u : 0xA5A5A5A5u, ReadDword(result, offset + 12)); // s5
             Assert.Equal(0x0F0F0F0Fu, ReadDword(result, offset + 16));           // vcc_lo
             Assert.Equal(hit, ReadDword(result, offset + 20));                    // saveexec
+        }
+    }
+
+    // A queue-draining loop over the whole program is a persistent-threads kernel; a loop that
+    // does not poll, and a program with no loop, are not.
+    [Fact]
+    public void OnlyAQueueDrainingLoopIsMarkedPersistentThreads()
+    {
+        Assert.True(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.PersistentQueueLoop).PersistentThreads);
+        Assert.False(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.PollingLoop).PersistentThreads);
+        Assert.False(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.CoherentBufferCopy).PersistentThreads);
+        Assert.False(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Loop).PersistentThreads);
+    }
+
+    // V_MAD_F32 rounds its product like a separate multiply and add; V_FMA_F32 does not.
+    [Fact]
+    public void LegacyMadRoundsTheProductAndFmaDoesNot()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.MadVersusFma);
+        Assert.Contains("#pragma clang fp contract(off)", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.MadVersusFma, new byte[256],
+            waveLaneCount: 32, localSizeX: 32, threadsPerThreadgroup: 32);
+        for (var lane = 0; lane < 32; lane++)
+        {
+            Assert.Equal(0u, ReadDword(result, lane * 8));
+            Assert.Equal(0x33800000u, ReadDword(result, lane * 8 + 4));
         }
     }
 

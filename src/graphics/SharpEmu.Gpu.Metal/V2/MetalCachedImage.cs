@@ -38,6 +38,9 @@ internal enum MetalImageReleaseCause : byte
     LinearViewPromoted,
     // Not used for the retirement age (frames and seconds), whatever the budget.
     Retired,
+    // Never written by the GPU, behind guest memory already and unwatched: nothing a read could
+    // use without uploading it again, only the cache lock on every CPU store into its pages.
+    Stale,
 }
 
 // Why a GPU-written image had to be published into guest memory.
@@ -178,6 +181,35 @@ internal sealed class MetalCachedImage : IDisposable
         _publishedSourceTexture == source.Texture &&
         _publishedSourceVersion == source.DepthPlaneVersion &&
         _publishedOwnVersion == ContentVersion;
+
+    // The stencil plane a device copy last brought into this depth texture from an image
+    // over the plane's bytes (MetalImageCache.SynchronizeStencilPlanes): that image's
+    // texture and content version.
+    private nint _stencilSourceTexture;
+    private long _stencilSourceVersion;
+
+    /// <summary>
+    /// Set when an image that writes this depth image's stencil bytes takes them over: the
+    /// next time this image binds, its stencil plane is copied from that image on the
+    /// device, and the depth plane its texture holds stays as it is.
+    /// </summary>
+    public bool StencilPlaneStale { get; set; }
+
+    /// <summary>Records that this texture's stencil plane is a device copy of the source as it is.</summary>
+    public void NoteStencilFrom(MetalCachedImage source)
+    {
+        _stencilSourceTexture = source.Texture;
+        _stencilSourceVersion = source.ContentVersion;
+        StencilPlaneStale = false;
+    }
+
+    /// <summary>
+    /// True while the last stencil copy into this texture came from the source and the
+    /// source has not changed since: a copy now would write the same stencil.
+    /// </summary>
+    public bool HoldsStencilFrom(MetalCachedImage source) =>
+        Texture != 0 && source.Texture != 0 &&
+        _stencilSourceTexture == source.Texture && _stencilSourceVersion == source.ContentVersion;
 
     public ImageDescription Description;
 
@@ -787,6 +819,16 @@ internal sealed class MetalCachedImage : IDisposable
         // cache creates without that usage -- can still have the subresource view
         // a mipped or layered attachment binds.
         var viewable = (Shape.Usage & Mtl.TextureUsagePixelFormatView) != 0;
+        if (viewable && MetalGuestFormats.HasSrgbTwin((MtlPixelFormat)Shape.PixelFormat))
+        {
+            // A compressed texture has the view usage only for its sRGB/linear twin (see
+            // MetalImageTransfer.UsageOf); any other format or a swizzle stays unviewed, as
+            // before, since Metal raises on a reinterpretation it does not allow.
+            identitySwizzle = true;
+            viewable = viewFormat == Shape.PixelFormat ||
+                MetalGuestFormats.AreSrgbTwins((MtlPixelFormat)Shape.PixelFormat, (MtlPixelFormat)viewFormat);
+        }
+
         if (!viewable && !identitySwizzle && !(sameFormatSwizzle && viewFormat == Shape.PixelFormat))
         {
             // Metal raises on a swizzled view of a texture without the usage, so the view

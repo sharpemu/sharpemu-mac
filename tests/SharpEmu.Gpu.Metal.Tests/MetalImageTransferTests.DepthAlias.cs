@@ -74,9 +74,76 @@ public sealed partial class MetalImageTransferTests
                          $"0x{(ulong)actual.Length:x} texel bytes matched the guest round trip");
     }
 
-    // Only the pair whose bits survive unchanged is claimed; everything else is left to
-    // the round trip, including the reverse direction, which has a converting upload
-    // into a depth texture and is not what anything was measured spending time on.
+    // The reverse hand-over: what a compute wrote through the R32 alias goes back into the
+    // depth plane on the device. It has to land exactly as the round trip through guest
+    // memory would put it there, and leave the stencil plane the target already had.
+    [Theory]
+    [InlineData(1280u, 720u, false, 1u, GuestPixelFormat.Bits32Float, GpuFormat.R32Sfloat)]
+    [InlineData(960u, 540u, true, 1u, GuestPixelFormat.Bits32Float, GpuFormat.R32Sfloat)]
+    [InlineData(97u, 33u, true, 3u, GuestPixelFormat.Bits32UInt, GpuFormat.R32Uint)]
+    public void AnR32AliasHandedBackToItsDepthPlaneOnTheDeviceMatchesTheGuestRoundTrip(
+        uint width, uint height, bool stencil, uint layers, GuestPixelFormat aliasGuest, GpuFormat aliasHost)
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var depth = Depth(GuestDepthFormat.Z32Float, stencil, width, height, layers);
+        var alias = Color2D(aliasGuest, aliasHost, width, height, 1, layers, GuestTileMode.Depth);
+        Assert.Equal(depth.Data.Size, alias.Data.Size);
+        Assert.Equal(depth.Pitch, alias.Pitch);
+
+        var size = depth.Data.Size;
+        // Depth values a depth texture holds as they are: the alias is loaded with the
+        // same guest plane the depth target would be.
+        var aliasGuestBytes = BuildGuest(depth, 93);
+        var oldDepthBytes = BuildGuest(depth, 94);
+        var stencilBytes = stencil ? MetalTileOracle.Pattern((int)depth.Stencil.Size, 95) : [];
+        var range = new SubresourceRange(0, 1, 0, layers);
+        var aliasTexture = harness.Texture(harness.Transfer.ShapeFor(alias));
+        var stencilIn = stencil ? new MetalGuestRange(harness.Buffer(stencilBytes), 0, depth.Stencil.Size, 0) : default;
+        nint LoadedDepth()
+        {
+            var texture = harness.Texture(harness.Transfer.ShapeFor(depth));
+            harness.Begin();
+            harness.Transfer.EncodeGuestToTexture(harness, depth, range,
+                new MetalGuestRange(harness.Buffer(oldDepthBytes), 0, size, 0), stencilIn, texture, 0, size);
+            harness.Submit();
+            return texture;
+        }
+
+        harness.Begin();
+        harness.Transfer.EncodeGuestToTexture(harness, alias, range,
+            new MetalGuestRange(harness.Buffer(aliasGuestBytes), 0, size, 0), default, aliasTexture, 0, size);
+        harness.Submit();
+
+        // The round trip: the alias out to guest memory, then into a depth target that
+        // keeps its stencil.
+        var roundTripDepth = LoadedDepth();
+        var stencilBefore = stencil ? ReadStencil(harness, depth, roundTripDepth) : [];
+        var published = harness.Buffer(size);
+        harness.Begin();
+        harness.Transfer.EncodeTextureToGuest(harness, alias, range, aliasTexture,
+            new MetalGuestRange(published, 0, size, 0), default, 0, size);
+        harness.Submit();
+        harness.Begin();
+        harness.Transfer.EncodeGuestToTexture(harness, depth, range,
+            new MetalGuestRange(published, 0, size, 0), stencilIn, roundTripDepth, 0, size);
+        harness.Submit();
+
+        var deviceDepth = LoadedDepth();
+        harness.Begin();
+        Assert.True(harness.Transfer.TryEncodeTextureToTexture(harness, alias, aliasTexture, depth, deviceDepth));
+        harness.Submit();
+
+        Assert.Equal(ReadDepthTexels(harness, depth, roundTripDepth), ReadDepthTexels(harness, depth, deviceDepth));
+        Assert.Equal(aliasGuestBytes, WriteBack(harness, depth, deviceDepth));
+        if (stencil)
+        {
+            Assert.Equal(stencilBefore, ReadStencil(harness, depth, deviceDepth));
+        }
+    }
+
+    // Only the pair whose bits survive unchanged is claimed, in either direction;
+    // everything else is left to the round trip.
     [Fact]
     public void ADeviceAliasHandOffRefusesEveryPairItCannotCopyBitForBit()
     {
@@ -98,15 +165,41 @@ public sealed partial class MetalImageTransferTests
         otherPitch.Pitch += 128;
 
         harness.Begin();
-        Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, alias, aliasTexture, depth, depthTexture));
         // The 16-bit pair has its own switch (MetalImageTransferTests.Depth16Alias).
         harness.Transfer.Depth16AliasOnDevice = false;
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, z16, z16Texture, r16, r16Texture));
+        Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, r16, r16Texture, z16, z16Texture));
+        Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, rgba8, rgba8Texture, depth, depthTexture));
+        Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, otherTile, aliasTexture, depth, depthTexture));
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, depth, depthTexture, rgba8, rgba8Texture));
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, depth, depthTexture, otherTile, aliasTexture));
         Assert.False(harness.Transfer.TryEncodeTextureToTexture(harness, depth, depthTexture, otherPitch, aliasTexture));
         Assert.True(harness.Transfer.TryEncodeTextureToTexture(harness, depth, depthTexture, alias, aliasTexture));
+        Assert.True(harness.Transfer.TryEncodeTextureToTexture(harness, alias, aliasTexture, depth, depthTexture));
         harness.Submit();
+    }
+
+    // The depth plane alone, straight off a depth or depth-stencil texture.
+    private static byte[] ReadDepthTexels(MetalTransferHarness harness, in ImageDescription description, nint texture)
+    {
+        var rowBytes = (ulong)description.Extent.Width * sizeof(float);
+        var sliceBytes = rowBytes * description.Extent.Height;
+        var layers = description.TransferLayers;
+        var buffer = harness.Buffer(sliceBytes * layers);
+        var option = description.HasStencil ? MtlBlitOption.DepthFromDepthStencil : MtlBlitOption.None;
+        harness.Begin();
+        var blit = harness.Tiler.BeginBlit(harness);
+        for (uint layer = 0; layer < layers; layer++)
+        {
+            MetalNative.SendCopyTextureToBufferOptions(blit, SelCopyTextureToBuffer,
+                texture, layer, 0, default,
+                new MtlSize { Width = description.Extent.Width, Height = description.Extent.Height, Depth = 1 },
+                buffer, (nuint)(sliceBytes * layer), (nuint)rowBytes, (nuint)sliceBytes, (nuint)option);
+        }
+
+        MetalTiler.EndEncoding(blit);
+        harness.Submit();
+        return harness.Read(buffer, 0, sliceBytes * layers);
     }
 
     // Every texel of every layer, straight off the texture with no tiling in between.

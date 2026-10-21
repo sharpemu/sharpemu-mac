@@ -187,4 +187,9 @@ public sealed record Gen5MslShader(
     /// <summary>The [[color(n)]] attachments a pixel program returns a value for, one bit
     /// per n.</summary>
     public uint ColorOutputMask { get; init; }
+
+    /// <summary>A compute kernel whose groups drain a shared queue and never read their own
+    /// workgroup ID (see <see cref="Ir.Gen5PersistentThreadsAnalysis"/>): any number of groups
+    /// computes the same result, so a host may launch only as many as it keeps resident.</summary>
+    public bool PersistentThreads { get; init; }
 }

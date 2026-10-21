@@ -176,6 +176,31 @@ public static partial class Gen5MslTranslator
                 ? maxSteps
                 : 100_000;
 
+        // A program that reads memory coherently (a GLC load, or an atomic returning its
+        // pre-op value) can be polling for another workgroup's writes: a persistent-thread
+        // kernel spins until a shared queue drains, so its trip count follows the whole
+        // dispatch's work rather than its own, and the faster each iteration runs the more
+        // of them one wait takes: UE5's Nanite culling needs up to ~370k iterations on an
+        // M5 Pro once structured, more on a smaller GPU, and cutting it off leaves its
+        // never-reset queues corrupt for every later frame. Such programs get a budget
+        // well past that; a genuinely stuck one still ends, just later. Only a persistent-thread
+        // kernel waits that long by design: any other program that polls (GTA V runs one whose
+        // wait never ends here) keeps the plain cap, since each of its capped dispatches holds
+        // the queue 64 times as long and stalled GTA's prologue load.
+        private const int PollingStepMultiplier = 64;
+
+        private int MaxDispatcherSteps =>
+            _maxDispatcherSteps > 0 && PollsCoherentMemory && IsPersistentThreadsKernel()
+                ? (int)Math.Min((long)_maxDispatcherSteps * PollingStepMultiplier, int.MaxValue)
+                : _maxDispatcherSteps;
+
+        private bool? _pollsCoherentMemory;
+
+        private bool PollsCoherentMemory => _pollsCoherentMemory ??= _request.Program.Instructions.Any(
+            static instruction =>
+                instruction.Control is Gen5BufferMemoryControl { Glc: true } or Gen5GlobalMemoryControl { Glc: true } &&
+                !instruction.Opcode.Contains("Store", StringComparison.Ordinal));
+
         // The call the dispatcher makes when it runs out of steps. The step-report word
         // is the last field of every stage argument buffer, so it is always in scope.
         private const string StepCapReportCall =
@@ -415,6 +440,8 @@ public static partial class Gen5MslTranslator
                     }
                 }
 
+                AssignLaneSlotLds(blocks);
+
                 if (_stage is Gen5MslStage.Vertex or Gen5MslStage.Mesh)
                 {
                     DeclareAuxPositionOutputs();
@@ -508,6 +535,7 @@ public static partial class Gen5MslTranslator
                         : null,
                     CannotDiscard = _stage == Gen5MslStage.Pixel && _usesPixelValidMask && !_validMaskFromExec,
                     ColorOutputMask = _stage == Gen5MslStage.Pixel ? ColorOutputLocations(_pixelOutputBindings) : 0,
+                    PersistentThreads = IsPersistentThreadsKernel(),
                 };
                 return true;
             }
@@ -596,6 +624,13 @@ public static partial class Gen5MslTranslator
             source.AppendLine();
             source.AppendLine("using namespace metal;");
             source.AppendLine();
+            // Every guest float op rounds on its own: GCN fuses a multiply and an add only
+            // where the program says V_FMA, and its legacy V_MAD/V_MAC round the product
+            // first. Letting the compiler contract a*b+c makes one program compute a value a
+            // different way than another program that spells it the same, which a depth
+            // EQUAL pass against a prepass cannot survive.
+            source.AppendLine("#pragma clang fp contract(off)");
+            source.AppendLine();
 
             // Uniforms: dispatch bounds plus per-buffer byte lengths. Metal has
             // no OpArrayLength equivalent, so buffer extents travel with the
@@ -659,7 +694,12 @@ public static partial class Gen5MslTranslator
 
                 source.AppendLine("struct Gen5VsOut");
                 source.AppendLine("{");
-                source.AppendLine("    float4 sharpemu_position [[position]];");
+                // Invariant, so two programs that compute a position the same way get the same
+                // bits: UE's base pass draws with depth EQUAL against its depth prepass, and a
+                // position the compiler fused or scheduled differently in one of them fails
+                // the test on almost every pixel (the mesh never shows). Takes effect with
+                // MTLCompileOptions.preserveInvariance, which the host sets.
+                source.AppendLine("    float4 sharpemu_position [[position, invariant]];");
                 EmitAuxPositionFields(source, perVertexLayer: true);
                 foreach (var location in _vertexOutputs)
                 {
@@ -780,6 +820,15 @@ public static partial class Gen5MslTranslator
                 {
                     source.AppendLine("    uint sharpemu_wave_set = 0u;");
                 }
+
+                if (LaneSpillPlan() is { } spills)
+                {
+                    // The per-thread copies of spilled SGPRs (see Ir.Gen5LaneSpillAnalysis).
+                    for (var copy = 0; copy < spills.CopyCount; copy++)
+                    {
+                        source.AppendLine($"    uint sharpemu_spill{copy} = 0u;");
+                    }
+                }
             }
             if (!HasRealWaveLanes)
             {
@@ -819,7 +868,9 @@ public static partial class Gen5MslTranslator
                     // reading LDS it never wrote sees a previous wave's leftovers
                     // on hardware, and zero-filling 8 KB per fragment or vertex
                     // costs more than the shader that uses it.
-                    source.AppendLine($"    thread uint sharpemu_lds[{PrivateLdsDwordCount}];");
+                    source.AppendLine(_ldsLaneSlots is not null
+                        ? $"    thread uint sharpemu_lds[{_ldsLaneSlotCount}];"
+                        : $"    thread uint sharpemu_lds[{PrivateLdsDwordCount}];");
                 }
             }
 
@@ -900,6 +951,11 @@ public static partial class Gen5MslTranslator
             {
                 body.AppendLine("    while (active)");
                 body.AppendLine("    {");
+                if (MaxDispatcherSteps > 0)
+                {
+                    body.AppendLine("        uint from_pc = pc;");
+                }
+
                 body.AppendLine("        switch (pc)");
                 body.AppendLine("        {");
                 body.Append(BuildDispatcherSwitchBody(blocks, baseIndent: 2));
@@ -907,9 +963,16 @@ public static partial class Gen5MslTranslator
                 body.AppendLine("            active = false;");
                 body.AppendLine("            break;");
                 body.AppendLine("        }");
-                if (_maxDispatcherSteps > 0)
+                if (MaxDispatcherSteps > 0)
                 {
-                    body.AppendLine($"        if (++steps >= {_maxDispatcherSteps}u)");
+                    // Blocks are numbered in address order, so every trip around a guest
+                    // loop moves pc to the block it left or an earlier one. Charging only
+                    // those moves gives the cap the structured form's meaning, one step
+                    // per loop iteration. Charging every block made a loop's budget
+                    // shrink with its block count, and cut off persistent-thread kernels
+                    // (UE5's Nanite culling needs over a million block moves) that wait
+                    // on other workgroups for longer than a single loop takes.
+                    body.AppendLine($"        if (pc <= from_pc && ++steps >= {MaxDispatcherSteps}u)");
                     body.AppendLine("        {");
                     body.AppendLine("            active = false;");
                     body.AppendLine($"            {StepCapReportCode}");
@@ -1154,24 +1217,31 @@ public static partial class Gen5MslTranslator
                 table.Append($" 0x{dataFormat | (numberFormat << 8):X}u,");
             }
 
-            var layoutCases = new StringBuilder();
-            var first = true;
+            // Component layouts, keyed component * 16 + data format (format_prelude.msl).
+            var layouts = new uint[64];
             foreach (var (component, format, bytes, bitOffset, bitCount) in Gfx10UnifiedFormat.ComponentLayouts)
             {
-                if (!first)
+                var key = component * 16 + format;
+                if (key >= layouts.Length || bytes > 0xFF || bitOffset > 0xFF || bitCount > 32)
                 {
-                    layoutCases.AppendLine();
+                    throw new InvalidOperationException(
+                        $"A GFX10 component layout does not fit the packed table: component={component} format={format}.");
                 }
 
-                first = false;
-                layoutCases.Append(
-                    $"    case {component * 16 + format}u: byteOff = {bytes}u; bitOff = {bitOffset}u; bits = {bitCount}u; break;");
+                layouts[key] = bytes | (bitOffset << 8) | (bitCount << 16);
+            }
+
+            var layoutTable = new StringBuilder();
+            for (var key = 0; key < layouts.Length; key++)
+            {
+                layoutTable.Append(key % 16 == 0 ? (key == 0 ? "   " : Environment.NewLine + "   ") : string.Empty);
+                layoutTable.Append($" 0x{layouts[key]:X}u,");
             }
 
             source.AppendLine(MslTemplates.Render(
                 "format_prelude",
                 ("format_table", table.ToString()),
-                ("layout_cases", layoutCases.ToString())));
+                ("layout_table", layoutTable.ToString())));
         }
 
         private void EmitRegisterFile(StringBuilder source)
@@ -1325,6 +1395,39 @@ public static partial class Gen5MslTranslator
             }
 
             return _ldsBarriersBefore;
+        }
+
+        /// <summary>A compute kernel that drains a shared queue and never reads its workgroup
+        /// ID, so its groups are interchangeable.</summary>
+        private bool LocksPersistentRecords => _options.PersistentRecordLocks && IsPersistentThreadsKernel();
+
+        private bool? _persistentThreads;
+
+        private bool IsPersistentThreadsKernel() => _persistentThreads ??=
+            _stage == Gen5MslStage.Compute &&
+            _request.ComputeSystemRegisters is not { WorkGroupXRegister: not null } &&
+            _request.ComputeSystemRegisters is not { WorkGroupYRegister: not null } &&
+            _request.ComputeSystemRegisters is not { WorkGroupZRegister: not null } &&
+            Ir.Gen5PersistentThreadsAnalysis.IsPersistent(_request.Program);
+
+        private bool _laneSpillPlanBuilt;
+        private Ir.Gen5LaneSpillPlan? _laneSpillPlan;
+
+        /// <summary>The wave64 lane spills whose reloads read a per-thread copy instead of
+        /// the exchange; null when there are none or the option is off.</summary>
+        private Ir.Gen5LaneSpillPlan? LaneSpillPlan()
+        {
+            if (!_laneSpillPlanBuilt)
+            {
+                _laneSpillPlanBuilt = true;
+                if (_options.LaneSpillCopies && _stage == Gen5MslStage.Compute && IsWave64)
+                {
+                    // A compute launch loads the thread IDs into v0..v2.
+                    _laneSpillPlan = Ir.Gen5LaneSpillAnalysis.Analyze(_request.Program, firstUndefinedVector: 3);
+                }
+            }
+
+            return _laneSpillPlan;
         }
 
         private bool ProgramHasBarrier()
@@ -1675,6 +1778,12 @@ public static partial class Gen5MslTranslator
                 case "SSubvectorLoopEnd":
                     error = $"{instruction.Opcode} is subroutine/subvector control flow the translator does not follow";
                     return false;
+                // The emitted MSL has no counters to wait on, but a persistent-thread kernel's
+                // waits are where its stores become visible to other workgroups
+                // (Gen5MslCodegenOptions.PersistentWaitFences).
+                case "SWaitcnt" when _options.PersistentWaitFences && IsPersistentThreadsKernel():
+                    Line("atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);");
+                    return true;
                 case "SNop":
                 case "SWaitcnt":
                 // A dependency-counter wait: the emitted MSL has no hardware
@@ -2810,6 +2919,12 @@ public static partial class Gen5MslTranslator
                 case "DsWriteB32":
                 case "DsWriteAddtidB32":
                 {
+                    if (LaneSlotLdsElement(instruction) is { } slot)
+                    {
+                        Line(ExecGuarded($"{slot} = {RawSource(instruction, 1)};"));
+                        return true;
+                    }
+
                     var address = Temp("uint", RawSource(instruction, 0));
                     if (instruction.Opcode == "DsWriteAddtidB32")
                     {
@@ -2860,6 +2975,12 @@ public static partial class Gen5MslTranslator
                 case "DsReadB32":
                 case "DsReadAddtidB32":
                 {
+                    if (LaneSlotLdsElement(instruction) is { } slot)
+                    {
+                        StoreVector(instruction.Destinations[0].Value, slot);
+                        return true;
+                    }
+
                     var address = Temp("uint", RawSource(instruction, 0));
                     if (instruction.Opcode == "DsReadAddtidB32")
                     {
@@ -3652,6 +3773,17 @@ public static partial class Gen5MslTranslator
                         : $"(v[{sourceVectorRegister}] >> {sourceShift})";
                     Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress.At(0)}, {source}, {storeBytes}u);");
                 }
+                else if (dwordCount >= 2 && byteAddress.Contiguous && LocksPersistentRecords)
+                {
+                    // One record to other workgroups (Gen5MslCodegenOptions.PersistentRecordLocks).
+                    EmitPairLocked($"b{bindingIndex} + (({byteAddress.Base}) >> 2)", () =>
+                    {
+                        for (uint index = 0; index < dwordCount; index++)
+                        {
+                            Line(StoreDwordStatement(bindingIndex, $"{byteAddress.Base} + {index * 4}u", $"v[{sourceVectorRegister + index}]"));
+                        }
+                    });
+                }
                 else
                 {
                     for (uint index = 0; index < dwordCount; index++)
@@ -3701,6 +3833,21 @@ public static partial class Gen5MslTranslator
                     StorePairLoad(
                         destinationVectorRegister,
                         $"sharpemu_load_pair_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {DwordAddress(0)}, {DwordAddress(1)}, {PairLockArguments})");
+                    return true;
+                }
+
+                if (glc && dwordCount is 3 or 4 && byteAddress.Contiguous && LocksPersistentRecords)
+                {
+                    // One snapshot of the record (Gen5MslCodegenOptions.PersistentRecordLocks).
+                    _usesPairLocks = true;
+                    var record = Temp("uint4", "uint4(0u)");
+                    var load = $"sharpemu_load_record_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {DwordAddress(0)}, {dwordCount}u, {PairLockArguments})";
+                    Line(!_execKnownFull ? $"if (exec) {{ {record} = {load}; }}" : $"{record} = {load};");
+                    for (uint index = 0; index < dwordCount; index++)
+                    {
+                        StoreVector(destinationVectorRegister + index, $"{record}[{index}]");
+                    }
+
                     return true;
                 }
 

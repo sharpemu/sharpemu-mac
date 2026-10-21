@@ -1173,9 +1173,14 @@ internal sealed partial class MetalRenderHost
     // Only remember: a dump reads back through its own command buffer and waits, and
     // EndRendering runs inside EndEncoders, which runs inside the flush. Dumping here
     // would nest a flush inside a flush. They are drained at the next flip instead.
+    // SHARPEMU_METAL_V2_DUMP_FLIPS_ONLY=1: a sampled frame writes only what it presents, not every
+    // pass target, so a long run can be followed picture by picture at the cost of one readback.
+    private static readonly bool DumpFlipsOnly =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_FLIPS_ONLY") == "1";
+
     private void DumpPassTargets(in RenderingState ending)
     {
-        if (!DumpTargetsEnabled)
+        if (!DumpTargetsEnabled || DumpFlipsOnly)
         {
             return;
         }
@@ -1779,11 +1784,12 @@ internal sealed partial class MetalRenderHost
 
         if (entry.RectangleStates is not null)
         {
-            // TakesIndirectRectangleListArguments answers false, so the executor reads
-            // the counts first; a patch draw sizes its patch count from them.
-            throw Fatal(
-                "An indexed indirect draw reached a rectangle-list pipeline with its counts still in guest memory: " +
-                $"pipeline={entry.Id} {entry.Profile}.");
+            // TakesIndirectIndexedRectangleListArguments let it through: the pass builds its
+            // patch draw from the record (MetalRenderHost.RectangleRebase.cs).
+            DrawRectanglesIndexedIndirect(entry, arguments);
+            CountDraw(started);
+            ProfileWork(entry, "draw-indexed-rect-indirect", "indirect");
+            return;
         }
 
         var passes = FacePassCount(entry);
@@ -1811,11 +1817,47 @@ internal sealed partial class MetalRenderHost
         ProfileWork(entry, "draw-indexed-indirect", "indirect");
     }
 
+    // A persistent-threads kernel (Gen5MslShader.PersistentThreads) launches at most this many
+    // workgroups, few enough that all of them stay resident on any Apple GPU, so none waits on
+    // queue work held by a group that cannot start. SHARPEMU_METAL_V2_PERSISTENT_GROUPS=<n>
+    // changes it; 0 launches the guest's count.
+    private static readonly uint PersistentThreadGroups =
+        uint.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PERSISTENT_GROUPS"), out var persistentGroups)
+            ? persistentGroups
+            : 64;
+
+    private readonly HashSet<ulong> _clampAnnounced = [];
+
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        // A persistent-thread kernel spins on memory other work publishes, which can be what a
+        // label copy held for the commit writes: the copy would land only after the kernel had
+        // waited out its budget for it (UE5's Nanite culling took twice as long per dispatch).
+        // Everything held lands ahead of such a dispatch instead.
+        if (LabelsAtCommit && _deferredLabelCopies.Count != 0 && _pendingComputePipeline is { PersistentThreads: true })
+        {
+            OrderAfterDeferredCopies(0, ulong.MaxValue);
+        }
+
         var encoder = EnsureComputeEncoder();
         var entry = _pendingComputePipeline ?? throw Fatal("A dispatch has no bound Metal compute pipeline state.");
+        if (entry.PersistentThreads && PersistentThreadGroups != 0 && groupsY <= 1 && groupsZ <= 1 &&
+            groupsX > PersistentThreadGroups)
+        {
+            // UE5's Nanite culling sizes its dispatch to the groups the console GPU keeps
+            // resident (1440) and shares the work through a queue every group drains, so
+            // fewer groups compute the same thing, while groups the host cannot keep resident
+            // only wait behind the spinning ones.
+            if (_clampAnnounced.Add(entry.VertexHash))
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][CLAMP] hash=0x{entry.VertexHash:X16} groups {groupsX} -> {PersistentThreadGroups} (persistent threads)");
+            }
+
+            groupsX = PersistentThreadGroups;
+        }
+
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
         MetalNative.SendDispatch(

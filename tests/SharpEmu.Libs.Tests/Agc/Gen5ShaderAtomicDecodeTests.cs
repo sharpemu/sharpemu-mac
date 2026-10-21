@@ -233,6 +233,51 @@ public sealed class Gen5ShaderAtomicDecodeTests
         Assert.Equal(3u, control.SingleOffsetBytes);
     }
 
+    // v_pk_* integer ops: VOP3P opcode in [22:16], op_sel_hi[2] at bit 14.
+    [Theory]
+    [InlineData(0xCC084001u, "VPkMinI16")]
+    [InlineData(0xCC0A4001u, "VPkAddU16")]
+    [InlineData(0xCC004001u, "VPkMadI16")]
+    [InlineData(0xCC0D4001u, "VPkMinU16")]
+    public void PackedInt16Ops_DecodeByName(uint word, string opcode)
+    {
+        // v[1] = op(v[2], v[3]) with op_sel_hi = 3.
+        var instruction = DecodeSingle(word, 0x18020702);
+        Assert.Equal(opcode, instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Destinations);
+    }
+
+    [Fact]
+    public void PackB32F16_Decodes()
+    {
+        // v_pack_b32_f16 v1, v2, v3
+        var instruction = DecodeSingle(0xD7110001, 0x00020702);
+        Assert.Equal("VPackB32F16", instruction.Opcode);
+    }
+
+    // VOP3 encodes VOP2 ops at 0x100 + opcode: v_lshlrev_b32_e64 v1, s2, v3.
+    [Fact]
+    public void Vop3EncodedVop2Op_UsesTheVop2Name()
+    {
+        var instruction = DecodeSingle(0xD51A0001, 0x00020602);
+        Assert.Equal("VLshlrevB32", instruction.Opcode);
+        Assert.Equal(Gen5Operand.Scalar(2), instruction.Sources[0]);
+        Assert.Equal(Gen5Operand.Vector(3), instruction.Sources[1]);
+    }
+
+    [Fact]
+    public void DsReadU8_DecodesAddressAndDestination()
+    {
+        // DS_READ_U8 v5, v7 offset:3
+        var instruction = DecodeSingle(0xD8E80003, 0x05000007);
+
+        Assert.Equal("DsReadU8", instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(7) }, instruction.Sources);
+        Assert.Equal(new[] { Gen5Operand.Vector(5) }, instruction.Destinations);
+        var control = Assert.IsType<Gen5DataShareControl>(instruction.Control);
+        Assert.Equal(3u, control.SingleOffsetBytes);
+    }
+
     [Theory]
     [InlineData(0xD8F83412u, "DsAppend", false)]
     [InlineData(0xD8FA3412u, "DsAppend", true)]

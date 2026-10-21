@@ -62,7 +62,15 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     internal const uint FormatVersion = 1;
     internal const string Extension = ".mtla";
     internal const string SegmentPrefix = "pipelines-";
-    internal const long DiskBudgetBytes = 1L << 30;
+    // A title's working set: Black Myth: Wukong's opening alone builds over a thousand render
+    // pipelines (about a gigabyte of GPU binaries) and three thousand libraries, so a 1 GiB
+    // bound evicted every run's pipelines before the next run could open them, and each boot
+    // compiled them all again (minutes of loading, seconds-long stalls in play).
+    // SHARPEMU_METAL_V2_BINARY_ARCHIVE_BUDGET_MB=<n> sets it.
+    internal static readonly long DiskBudgetBytes =
+        long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINARY_ARCHIVE_BUDGET_MB"), out var budgetMb) && budgetMb > 0
+            ? budgetMb << 20
+            : 8L << 30;
     internal const long SegmentBytes = 8L << 20;
     internal const long ResidentSegmentBytes = 32L << 20;
     internal const int TrailerBytes = 24;
@@ -136,6 +144,11 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     // The segments on disk by shader pair, newest first, and the ones open now; under
     // _archivesLock.
     private readonly Dictionary<ulong, List<int>> _segmentsByPair = new();
+
+    // Segments another translator build wrote, by the negative id they are listed under. Their
+    // pairs are keyed by the MSL of both shaders, so a pair this build still makes is the same
+    // pipeline; a translator change then recompiles only the pipelines whose MSL it changed.
+    private readonly Dictionary<int, string> _foreignSegments = new();
     private readonly Dictionary<int, ResidentSegment> _resident = new();
     private long _residentBytes;
     private long _residentTick;
@@ -622,6 +635,10 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private string SegmentPath(int sequence) =>
         Path.Combine(_directory, $"{SegmentPrefix}{_translatorStamp}-{sequence.ToString("D5", CultureInfo.InvariantCulture)}{Extension}");
 
+    // Where a listed segment lives: this build's own by sequence, another build's by its file.
+    private string SegmentFile(int sequence) =>
+        sequence < 0 && _foreignSegments.TryGetValue(sequence, out var path) ? path : SegmentPath(sequence);
+
     private void Reject(UInt128 key, string path)
     {
         Interlocked.Increment(ref _rejected);
@@ -1077,15 +1094,22 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private void LoadSegments()
     {
         var segments = new List<(int Sequence, string Path)>();
+        var foreign = new List<FileInfo>();
         foreach (var path in System.IO.Directory.EnumerateFiles(_directory, SegmentPrefix + "*" + Extension))
         {
             var name = Path.GetFileNameWithoutExtension(path).AsSpan(SegmentPrefix.Length);
             var dash = name.IndexOf('-');
-            if (dash < 0 || !name[..dash].SequenceEqual(_translatorStamp.AsSpan()) ||
-                !int.TryParse(name[(dash + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out var sequence))
+            if (dash < 0 || !int.TryParse(name[(dash + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out var sequence))
             {
-                // Another translator's pipelines: functions this build does not make.
                 TryDelete(path);
+                continue;
+            }
+
+            if (!name[..dash].SequenceEqual(_translatorStamp.AsSpan()))
+            {
+                // Another translator's pipelines. The ones whose shaders it changed are never
+                // asked for again and age out under the budget like any unused file.
+                foreign.Add(new FileInfo(path));
                 continue;
             }
 
@@ -1094,6 +1118,21 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
         segments.Sort(static (left, right) => right.Sequence.CompareTo(left.Sequence));
         _segmentSequence = segments.Count == 0 ? 0 : segments[0].Sequence + 1;
+
+        // After this build's own, newest first: a pair asks its segments in list order.
+        foreign.Sort(static (left, right) => right.LastWriteTimeUtc.CompareTo(left.LastWriteTimeUtc));
+        foreach (var file in foreign)
+        {
+            int id;
+            lock (_archivesLock)
+            {
+                id = -1 - _foreignSegments.Count;
+                _foreignSegments[id] = file.FullName;
+            }
+
+            segments.Add((id, file.FullName));
+        }
+
         long listedBytes = 0;
         var listed = 0;
         foreach (var (sequence, path) in segments)
@@ -1129,7 +1168,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         _loadedSegmentBytes = listedBytes;
         Console.Error.WriteLine(
             $"[METAL-V2][ARCHIVE] opened {_directory} libraries={_known.Count} segments={listed} " +
-            $"segment_mb={listedBytes / 1048576.0:F1}");
+            $"segment_mb={listedBytes / 1048576.0:F1} other_translator_segments={foreign.Count}");
     }
 
     // Under _archivesLock. Opens a segment for a lookup, closing the least recently used
@@ -1143,7 +1182,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             return open.Archive;
         }
 
-        var path = SegmentPath(sequence);
+        var path = SegmentFile(sequence);
         if (!TryVerify(path, out var length))
         {
             Interlocked.Increment(ref _rejected);
@@ -1430,36 +1469,59 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     }
 
     /// <summary>Whether a file is a whole archive this format wrote; its length when it is.</summary>
+    // The segment is hashed through a pooled buffer rather than read whole: segments run to
+    // tens of megabytes, and one array per segment opened during play was a large object each
+    // (Black Myth: Wukong's full collections).
     internal static bool TryVerify(string path, out long length)
     {
         length = 0;
-        byte[] bytes;
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(1 << 20);
         try
         {
-            bytes = File.ReadAllBytes(path);
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1);
+            var total = stream.Length;
+            if (total <= TrailerBytes)
+            {
+                return false;
+            }
+
+            Span<byte> trailer = stackalloc byte[TrailerBytes];
+            stream.Seek(total - TrailerBytes, SeekOrigin.Begin);
+            stream.ReadExactly(trailer);
+            var payloadLength = total - TrailerBytes;
+            if (BinaryPrimitives.ReadUInt32LittleEndian(trailer) != TrailerMagic ||
+                BinaryPrimitives.ReadUInt32LittleEndian(trailer[4..]) != FormatVersion ||
+                BinaryPrimitives.ReadInt64LittleEndian(trailer[8..]) != payloadLength)
+            {
+                return false;
+            }
+
+            stream.Seek(0, SeekOrigin.Begin);
+            var hash = new XxHash64();
+            for (var remaining = payloadLength; remaining > 0;)
+            {
+                var chunk = buffer.AsSpan(0, (int)Math.Min(remaining, buffer.Length));
+                stream.ReadExactly(chunk);
+                hash.Append(chunk);
+                remaining -= chunk.Length;
+            }
+
+            if (BinaryPrimitives.ReadUInt64LittleEndian(trailer[16..]) != hash.GetCurrentHashAsUInt64())
+            {
+                return false;
+            }
+
+            length = total;
+            return true;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return false;
         }
-
-        if (bytes.Length <= TrailerBytes)
+        finally
         {
-            return false;
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
         }
-
-        var payload = bytes.AsSpan(0, bytes.Length - TrailerBytes);
-        var trailer = bytes.AsSpan(bytes.Length - TrailerBytes);
-        if (BinaryPrimitives.ReadUInt32LittleEndian(trailer) != TrailerMagic ||
-            BinaryPrimitives.ReadUInt32LittleEndian(trailer[4..]) != FormatVersion ||
-            BinaryPrimitives.ReadInt64LittleEndian(trailer[8..]) != payload.Length ||
-            BinaryPrimitives.ReadUInt64LittleEndian(trailer[16..]) != XxHash64.HashToUInt64(payload))
-        {
-            return false;
-        }
-
-        length = bytes.Length;
-        return true;
     }
 
     // Autoreleased.

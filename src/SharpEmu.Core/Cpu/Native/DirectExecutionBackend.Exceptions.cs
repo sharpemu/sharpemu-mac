@@ -117,6 +117,11 @@ public sealed partial class DirectExecutionBackend
 				return -1;
 			}
 			if (exceptionCode == StatusIllegalInstruction &&
+				TryRedirectPatchedHotSite(contextRecord, rip))
+			{
+				return -1;
+			}
+			if (exceptionCode == StatusIllegalInstruction &&
 				TryRecoverIllegalInstruction(contextRecord, rip))
 			{
 				return -1;

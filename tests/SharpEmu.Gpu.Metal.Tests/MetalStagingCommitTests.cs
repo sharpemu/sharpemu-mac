@@ -76,13 +76,35 @@ public sealed unsafe class MetalStagingCommitTests(ITestOutputHelper output)
         Assert.Equal(serial + 1, host.SubmissionSerial);
         Assert.Equal(1L, host.TakeTransientCommits());
         Assert.Equal(0UL, host.RecordingTransientBytes);
+    }
 
-        // A ring with room left serves the next buffer too, and that buffer counts the
-        // whole ring again: the pool holds it until both have completed.
-        var rings = host.GuestMemory.RingBytes;
-        _ = host.GuestMemory.Allocate(4096, 16, out _);
-        Assert.Equal(rings, host.GuestMemory.RingBytes);
-        Assert.Equal(rings, host.RecordingTransientBytes);
+    // A ring an earlier, unfinished buffer still holds stays in the pool whatever the next
+    // buffer does, so that buffer counts only what it reserves there; once the earlier one
+    // has completed the ring is free again and the buffer that takes it counts it whole.
+    // Counting a held ring whole again made every buffer pass the budget after a few small
+    // uploads once the pool had a couple of large rings.
+    [Fact]
+    public void ARingAnUnfinishedBufferStillHoldsCountsOnlyWhatTheNextBufferReserves()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var memory = rig.Host.GuestMemory;
+
+        memory.BeginSubmission(10, 0);
+        _ = memory.Allocate(4096, 16, out _);
+        var ring = memory.RingBytes;
+        Assert.Equal(ring, memory.RecordingBytes);
+
+        memory.BeginSubmission(11, 0);
+        _ = memory.Allocate(4096, 16, out _);
+        _ = memory.Allocate(4096, 16, out _);
+        Assert.Equal(ring, memory.RingBytes);
+        Assert.Equal(2 * 4096UL, memory.RecordingBytes);
+
+        memory.BeginSubmission(12, 11);
+        _ = memory.Allocate(4096, 16, out _);
+        Assert.Equal(ring, memory.RingBytes);
+        Assert.Equal(ring, memory.RecordingBytes);
     }
 
     [Fact]

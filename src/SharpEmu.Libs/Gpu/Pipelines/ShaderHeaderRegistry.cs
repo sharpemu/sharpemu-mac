@@ -4,6 +4,8 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Scheduling;
 
+using System.Buffers.Binary;
+
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
 // The header data of one registered shader, and its continuation when two objects were joined.
@@ -56,6 +58,9 @@ public sealed class ShaderHeaderRegistry
     private const ulong InputSemanticsCountOffset = 0x50;
     private const ulong ScratchDwordsPerThreadOffset = 0x54;
 
+    // Through the scratch size, the last field Require reads.
+    private const int HeaderReadBytes = (int)ScratchDwordsPerThreadOffset + sizeof(ushort);
+
     private readonly CpuContext _context;
     private readonly Func<ulong, ulong> _headerOf;
     private readonly Func<ulong, FusedProgramParts?> _fusedPartsOf;
@@ -98,13 +103,34 @@ public sealed class ShaderHeaderRegistry
             throw GpuFatal.Fatal($"The shader has no registered header: label={label} shader=0x{codeAddress:X16}.");
         }
 
-        var codeSize = RequireCodeSize(headerAddress, codeAddress, label);
-        if (!_context.TryReadUInt16(headerAddress + ScratchDwordsPerThreadOffset, out var scratchDwords) ||
-            !_context.TryReadUInt64(headerAddress + UserDataOffset, out var userDataAddress) ||
-            !_context.TryReadUInt64(headerAddress + InputSemanticsOffset, out var inputSemanticsAddress) ||
-            !_context.TryReadUInt32(headerAddress + InputSemanticsCountOffset, out var inputSemanticsCount))
+        // The fields the record needs, read as one block: every draw resolves its shaders again,
+        // and each guest read takes the memory read lock that guest threads mapping and
+        // protecting memory hold for writing, so five reads per stage were five waits for it
+        // (10% of GTA V's GPU worker). A header the block cannot cover is read field by field.
+        Span<byte> header = stackalloc byte[HeaderReadBytes];
+        uint codeSize;
+        ushort scratchDwords;
+        ulong userDataAddress;
+        ulong inputSemanticsAddress;
+        uint inputSemanticsCount;
+        if (_context.Memory.TryRead(headerAddress, header))
         {
-            throw GpuFatal.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
+            codeSize = ValidCodeSize(BinaryPrimitives.ReadUInt32LittleEndian(header[(int)ShaderSizeOffset..]), codeAddress, label);
+            scratchDwords = BinaryPrimitives.ReadUInt16LittleEndian(header[(int)ScratchDwordsPerThreadOffset..]);
+            userDataAddress = BinaryPrimitives.ReadUInt64LittleEndian(header[(int)UserDataOffset..]);
+            inputSemanticsAddress = BinaryPrimitives.ReadUInt64LittleEndian(header[(int)InputSemanticsOffset..]);
+            inputSemanticsCount = BinaryPrimitives.ReadUInt32LittleEndian(header[(int)InputSemanticsCountOffset..]);
+        }
+        else
+        {
+            codeSize = RequireCodeSize(headerAddress, codeAddress, label);
+            if (!_context.TryReadUInt16(headerAddress + ScratchDwordsPerThreadOffset, out scratchDwords) ||
+                !_context.TryReadUInt64(headerAddress + UserDataOffset, out userDataAddress) ||
+                !_context.TryReadUInt64(headerAddress + InputSemanticsOffset, out inputSemanticsAddress) ||
+                !_context.TryReadUInt32(headerAddress + InputSemanticsCountOffset, out inputSemanticsCount))
+            {
+                throw GpuFatal.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
+            }
         }
 
         var continuationAddress = 0ul;
@@ -194,6 +220,11 @@ public sealed class ShaderHeaderRegistry
             throw GpuFatal.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
         }
 
+        return ValidCodeSize(codeSize, codeAddress, label);
+    }
+
+    private static uint ValidCodeSize(uint codeSize, ulong codeAddress, string label)
+    {
         if (codeSize == 0 || codeSize % sizeof(uint) != 0)
         {
             throw GpuFatal.Fatal($"The shader header carries an invalid code size: label={label} shader=0x{codeAddress:X16} size=0x{codeSize:X8}.");

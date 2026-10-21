@@ -172,6 +172,9 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         public ulong Cursor;
         public ulong LastUsedSerial;
         public long LastUsedAt;
+
+        // The submission that last used it took it while an earlier one still held it.
+        public bool Inherited;
     }
 
     private readonly nint _device;
@@ -377,7 +380,15 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     /// Shared memory the rings handed to the submission being recorded hold. A ring
     /// returns to the pool only when the submission that last used it completes, so a
     /// submission that keeps allocating holds every ring it touched and grows the pool
-    /// by a ring at a time; the host commits it at a budget.
+    /// by a ring at a time; the host commits it at a budget. A ring the submission takes
+    /// from the pool (new, or free again) counts whole; one an earlier submission still
+    /// holds counts only what this one reserves in it, since the pool keeps that ring
+    /// whatever this one does. Counting such a ring whole again was a commit storm: once
+    /// bursts had left the pool a few 128 MB rings, a submission's first small uploads
+    /// landed in two the previous one still held and passed the 256 MB budget, so every
+    /// command buffer was committed after a handful of uploads (Black Myth: Wukong, in a
+    /// run of five: ~4000 commits a 2 s window instead of ~40, each ending the render pass,
+    /// every other one waiting for the GPU, and 4.5 fps falling to 2).
     /// </summary>
     public ulong RecordingBytes { get; private set; }
 
@@ -1222,9 +1233,14 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         var ring = Reserve(size, Math.Max(alignment, 16), out var offset);
         if (ring.LastUsedSerial != _submissionSerial)
         {
-            // The whole ring is this submission's until it completes, however little
-            // of it the reservation took.
-            RecordingBytes += ring.Size;
+            // The whole ring is this submission's until it completes, however little of
+            // it the reservation took, unless an earlier submission still holds it.
+            ring.Inherited = ring.LastUsedSerial > _completedSerial;
+            RecordingBytes += ring.Inherited ? size : ring.Size;
+        }
+        else if (ring.Inherited)
+        {
+            RecordingBytes += size;
         }
 
         ring.LastUsedSerial = _submissionSerial;

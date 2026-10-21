@@ -57,6 +57,9 @@ internal static unsafe class PosixSignalLayout
     internal static ReadOnlySpan<int> RegisterOffsets =>
         [16, 32, 40, 24, 72, 64, 56, 48, 80, 88, 96, 104, 112, 120, 128, 136, 144];
 
+    /// <summary>__ss.__rflags, right after __rip.</summary>
+    internal const int RflagsOffset = 152;
+
     internal static byte* GetRegisterBase(nint ucontext) =>
         ucontext == 0 ? null : *(byte**)((byte*)ucontext + UcontextMcontextOffset);
 

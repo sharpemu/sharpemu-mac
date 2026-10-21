@@ -181,12 +181,23 @@ internal sealed record MetalImageRetirementSettings
 
     public uint InUseFrames { get; init; } = 30;
 
+    /// <summary>
+    /// How long an image the GPU never wrote, already behind guest memory and no longer
+    /// watched, stays once nothing uses it (0 keeps it until the age policy takes it). Such an
+    /// image is uploaded again whatever a later use does, and in the meantime every CPU store
+    /// into its pages takes the cache lock to mark it stale once more: a title that builds its
+    /// command and constant buffers in memory a transient render target held earlier puts every
+    /// store of its render threads behind the GPU worker. Frames are no measure here: at one
+    /// frame a second the age policy's 600 frames are ten minutes.
+    /// </summary>
+    public double StaleSeconds { get; init; } = 2;
+
     public bool Enabled => Frames != 0 && Seconds > 0;
 
     /// <summary>
     /// SHARPEMU_METAL_V2_IMAGE_RETIRE_FRAMES and SHARPEMU_METAL_V2_IMAGE_RETIRE_SECONDS (either 0
     /// turns retirement off), SHARPEMU_METAL_V2_IMAGE_EVICT_MIN_IDLE_SECONDS,
-    /// SHARPEMU_METAL_V2_IMAGE_INUSE_FRAMES.
+    /// SHARPEMU_METAL_V2_IMAGE_INUSE_FRAMES, SHARPEMU_METAL_V2_IMAGE_STALE_SECONDS.
     /// </summary>
     public static MetalImageRetirementSettings FromEnvironment()
     {
@@ -213,6 +224,13 @@ internal sealed record MetalImageRetirementSettings
         if (uint.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IMAGE_INUSE_FRAMES"), out var inUseFrames))
         {
             settings = settings with { InUseFrames = inUseFrames };
+        }
+
+        if (double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IMAGE_STALE_SECONDS"),
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var staleSeconds) &&
+            staleSeconds >= 0)
+        {
+            settings = settings with { StaleSeconds = staleSeconds };
         }
 
         return settings;

@@ -216,6 +216,34 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
         Assert.Equal(expected, Execute(shader));
     }
 
+    // A 16-bit result under SDWA is the low word of a DWORD selection, and DST_UNUSED decides
+    // the high word; a plain VOP1 write keeps it (GFX10). Black Myth: Wukong's BC6H encoder
+    // takes V_CVT_F16_F32 into a register with UNUSED_PAD and reads it whole as an integer
+    // next: keeping the high word made every block of a black card the same red garbage.
+    [Theory]
+    [InlineData(true, 6u, 0u, 0x00003E00u)] // DWORD, unused padded: the high word is zero
+    [InlineData(true, 6u, 2u, 0xABCD3E00u)] // DWORD, unused preserved
+    [InlineData(true, 4u, 2u, 0xABCD3E00u)] // word 0 written, word 1 preserved
+    [InlineData(true, 5u, 2u, 0x3E001234u)] // word 1 written, word 0 preserved
+    [InlineData(true, 5u, 0u, 0x3E000000u)] // word 1 written, the rest zeroed
+    [InlineData(false, 0u, 0u, 0xABCD3E00u)] // plain VOP1: the high word is kept
+    public void HalfConversionHonoursTheSdwaDestination(bool sdwa, uint destinationSelect, uint unused, uint expected)
+    {
+        // v1 = 1.5f; v3 starts as 0xABCD1234 and takes the converted half (0x3E00).
+        var fixture = new Gen5ComputeFixture("VCvtF16F32", [
+            0x7E0002FF, 0u, 0x7E0202FF, 0x3FC00000u, 0x7E0402FF, 0u, 0x7E0602FF, 0xABCD1234u,
+            0xE0700000, 0x80020300, 0xBF810000], 8, 16);
+        var program = Gen5ComputeFixtures.DecodeOrThrow(fixture);
+        var instructions = program.Instructions.ToList();
+        instructions.Insert(4, new Gen5ShaderInstruction(28, Gen5ShaderEncoding.Vop1, "VCvtF16F32",
+            [], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(3)],
+            sdwa ? new Gen5SdwaControl(destinationSelect, unused, 6, 6, false, false, 0, 0, 0, false, null) : null));
+        var request = Gen5ComputeFixtures.RequestOrThrow(program with { Instructions = instructions }, ShaderStage.Compute);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        if (!RequireDevice()) return;
+        Assert.Equal(expected, Execute(shader));
+    }
+
     [Theory]
     [InlineData(0x40001234u, 1u, 0u, 0x40000000u)] // op_sel picks the high half: 2.0
     [InlineData(0x12344000u, 0u, 1u, 0xC0000000u)] // VOP3 negate: -2.0

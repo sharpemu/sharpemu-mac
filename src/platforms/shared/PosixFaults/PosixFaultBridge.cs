@@ -467,6 +467,11 @@ internal static unsafe class PosixFaultBridge
             DirectExecutionFaultFrame.WriteRegister(contextRecord, DirectExecutionFaultFrame.RaxOffset + i * 8, *(ulong*)(registers + offsets[i]));
         }
 
+        // EFLAGS too: instruction recovery reads CF/OF as inputs (ADCX/ADOX carry in
+        // through them) and writes the flags its instruction defines.
+        *(uint*)(contextRecord + DirectExecutionFaultFrame.EflagsOffset) =
+            (uint)*(ulong*)(registers + PosixSignalLayout.RflagsOffset);
+
         // Copy the vector registers that instruction recovery can change.
         // Keep all other floating-point state unchanged.
         byte* vectorRegisters = PosixSignalLayout.GetVectorRegisterAddress(ucontext, registers);
@@ -559,6 +564,10 @@ internal static unsafe class PosixFaultBridge
         {
             *(ulong*)(registers + offsets[i]) = DirectExecutionFaultFrame.ReadRegister(contextRecord, DirectExecutionFaultFrame.RaxOffset + i * 8);
         }
+
+        var rflags = (ulong*)(registers + PosixSignalLayout.RflagsOffset);
+        *rflags = (*rflags & 0xFFFF_FFFF_0000_0000UL) |
+            *(uint*)(contextRecord + DirectExecutionFaultFrame.EflagsOffset);
         if (vectorRegisters != null)
         {
             Buffer.MemoryCopy(

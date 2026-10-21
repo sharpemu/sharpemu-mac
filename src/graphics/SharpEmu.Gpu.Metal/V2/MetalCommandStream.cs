@@ -618,9 +618,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // pixel or compute shader appends to) cannot wait for the boundary: it would copy
         // what that later work left there.
         if (sourceIsFinal &&
-            ((MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
+            (LabelsAtCommit ||
+             (MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
              (DefersCopiesInCompute && _computeEncoder != 0)))
         {
+            // Held to the commit, the copies need a command buffer to land in.
+            if (LabelsAtCommit)
+            {
+                EnsureCommandBuffer();
+            }
+
             // Four bytes are not worth a framebuffer. Ending the open pass to copy them
             // stores and reloads every attachment, which at 3840x2160 is tens of
             // megabytes for a label the guest polls, so the copy waits for the next
@@ -629,7 +636,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // still only ever says that the work before it has finished. A compute
             // encoder is held open the same way: ending it per copy split each frame
             // into ~114 encoders, and the gaps between them outcost the dispatches.
-            _deferredLabelCopies.AddRange(copies);
+            HoldLabelCopies(copies);
             Interlocked.Add(ref _deferredLabelWrites, copies.Length);
             NoteRecordedWork();
             serial = SubmissionSerial;
@@ -640,6 +647,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
         else
         {
+            // A copy that cannot wait lands after the held ones: copies land in stream order.
+            if (LabelsAtCommit && _deferredLabelCopies.Count != 0)
+            {
+                OrderAfterDeferredCopies(0, ulong.MaxValue);
+            }
+
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.EndOfPipeLabel);
             EncodeLabelCopies(context.CommandBuffer, copies);
 
@@ -1079,6 +1092,58 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     private readonly List<DeferredLabelCopy> _deferredLabelCopies = [];
     private bool _encodingDeferredLabels;
+
+    // The span of guest bytes, and of destination bytes when they all go to one buffer
+    // (_deferredLabelBuffer, -1 for several), the held copies land in: every storage binding
+    // asks DeferredLabelCopiesTouch, and with copies held to the commit a scan of all of them
+    // per binding grew with the command buffer. Bindings outside the span need no scan.
+    private ulong _deferredLabelLow = ulong.MaxValue;
+    private ulong _deferredLabelHigh;
+    private nint _deferredLabelBuffer;
+    private ulong _deferredLabelDestinationLow = ulong.MaxValue;
+    private ulong _deferredLabelDestinationHigh;
+
+    private void HoldLabelCopies(ReadOnlySpan<DeferredLabelCopy> copies)
+    {
+        foreach (ref readonly var copy in copies)
+        {
+            _deferredLabelLow = Math.Min(_deferredLabelLow, copy.GuestAddress);
+            _deferredLabelHigh = Math.Max(_deferredLabelHigh, copy.GuestAddress + (ulong)copy.Bytes);
+            _deferredLabelBuffer = _deferredLabelCopies.Count == 0 && _deferredLabelBuffer == 0
+                ? copy.DestinationBuffer
+                : _deferredLabelBuffer == copy.DestinationBuffer ? _deferredLabelBuffer : -1;
+            _deferredLabelDestinationLow = Math.Min(_deferredLabelDestinationLow, copy.DestinationOffset);
+            _deferredLabelDestinationHigh = Math.Max(_deferredLabelDestinationHigh, copy.DestinationOffset + (ulong)copy.Bytes);
+            _deferredLabelCopies.Add(copy);
+        }
+    }
+
+    private void ClearHeldLabelCopies()
+    {
+        _deferredLabelCopies.Clear();
+        _deferredLabelLow = ulong.MaxValue;
+        _deferredLabelHigh = 0;
+        _deferredLabelBuffer = 0;
+        _deferredLabelDestinationLow = ulong.MaxValue;
+        _deferredLabelDestinationHigh = 0;
+    }
+
+    // Label copies wait for the command buffer's commit instead of the next encoder boundary,
+    // and land there behind one barrier. The barrier is a shared event (EncodeLabelBarrier),
+    // which publishes the earlier stores before the label but costs far more than the encoder
+    // boundary it sits at: GTA V's prologue wrote about 170 labels a frame, each behind its own
+    // barrier, and ran at 16 fps against 22.5 with no barrier at all. Work that binds a held
+    // copy's bytes lands it first (OrderAfterDeferredCopies), as does a depth-only join or a
+    // transfer sharing the compute encoder over them, and a commit lands whatever is left. A
+    // label that lands later still only says that the work before it has finished.
+    // SHARPEMU_METAL_V2_LABELS_AT_COMMIT=0 lands them at each encoder boundary again.
+    internal static readonly bool DefaultLabelsAtCommit =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABELS_AT_COMMIT") != "0";
+
+    internal bool LabelsAtCommit { get; set; } = DefaultLabelsAtCommit;
+
+    // Set by whatever needs the held copies in the stream now; the next encode lands them.
+    private bool _landDeferredLabels;
     private long _deferredLabelWrites;
 
     /// <summary>Labels whose bytes waited for a boundary instead of ending a pass.</summary>
@@ -1100,6 +1165,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private nint _labelBarrierEvent;
     private ulong _labelBarrierValue;
     private long _labelBarriers;
+
+    // The command buffer the current event belongs to, its serial, and the events of earlier
+    // command buffers, released once those are done.
+    private nint _labelBarrierCommandBuffer;
+    private ulong _labelBarrierSerial;
+    private readonly List<(nint Event, ulong Serial)> _retiredLabelBarrierEvents = [];
+    private static readonly nint SelReleaseLabelEvent = MetalNative.Selector("release");
 
     /// <summary>Barriers encoded ahead of label copies since the last call.</summary>
     internal long TakeLabelBarriers() => Interlocked.Exchange(ref _labelBarriers, 0);
@@ -1133,19 +1205,54 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
-        if (_labelBarrierEvent == 0)
+        // One event per command buffer. Command buffers overlap on the GPU, and with one event
+        // across all of them a later buffer's signal of a lower value could land between an
+        // earlier one's signal and its wait, which then waited for a value no one signals
+        // again: Black Myth: Wukong's save load stopped with every guest thread waiting on a
+        // label and the GPU idle. Within one command buffer the barriers run in order.
+        if (_labelBarrierEvent == 0 || commandBuffer != _labelBarrierCommandBuffer)
         {
+            ReleaseCompletedLabelBarrierEvents();
+            if (_labelBarrierEvent != 0)
+            {
+                _retiredLabelBarrierEvents.Add((_labelBarrierEvent, _labelBarrierSerial));
+            }
+
             _labelBarrierEvent = MetalNative.Send(_device, LabelBarrierShared ? SelNewSharedEvent : SelNewEvent);
             if (_labelBarrierEvent == 0)
             {
                 throw GpuFatal.Fatal("Metal v2 needs an MTLEvent to order label copies after their work.");
             }
+
+            _labelBarrierCommandBuffer = commandBuffer;
+            _labelBarrierSerial = SubmissionSerial;
+            _labelBarrierValue = 0;
         }
 
         var value = ++_labelBarrierValue;
         MetalV2Native.SendEventValue(commandBuffer, SelEncodeSignalEvent, _labelBarrierEvent, value);
         MetalV2Native.SendEventValue(commandBuffer, SelEncodeWaitForEvent, _labelBarrierEvent, value);
         Interlocked.Increment(ref _labelBarriers);
+    }
+
+    private void ReleaseCompletedLabelBarrierEvents()
+    {
+        if (_retiredLabelBarrierEvents.Count == 0)
+        {
+            return;
+        }
+
+        var completed = CompletedSerial;
+        _retiredLabelBarrierEvents.RemoveAll(retired =>
+        {
+            if (retired.Serial > completed)
+            {
+                return false;
+            }
+
+            MetalNative.SendVoid(retired.Event, SelReleaseLabelEvent);
+            return true;
+        });
     }
 
     private void EncodeLabelCopies(nint commandBuffer, ReadOnlySpan<DeferredLabelCopy> copies)
@@ -1188,6 +1295,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // Whether a copy waiting for the end of the open encoder lands in these guest bytes.
     private bool DeferredLabelCopiesTouch(ulong address, ulong size)
     {
+        if (address >= _deferredLabelHigh || address + size <= _deferredLabelLow)
+        {
+            return false;
+        }
+
         foreach (ref readonly var copy in
             System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies))
         {
@@ -1204,6 +1316,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // for the open encoder to end lands in the window bytes the range names.
     private bool DeferredLabelCopiesTouch(in MetalGuestRange range)
     {
+        if (_deferredLabelBuffer != -1 &&
+            (range.Buffer != _deferredLabelBuffer ||
+             range.Offset >= _deferredLabelDestinationHigh || range.Offset + range.Size <= _deferredLabelDestinationLow))
+        {
+            return false;
+        }
+
         foreach (ref readonly var copy in
             System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies))
         {
@@ -1226,11 +1345,21 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     internal void OrderAfterDeferredCopies(ulong address, ulong size)
     {
-        if (_computeEncoder != 0 && _deferredLabelCopies.Count != 0 &&
-            (size == ulong.MaxValue || DeferredLabelCopiesTouch(address, size)))
+        if (_deferredLabelCopies.Count == 0 || (_computeEncoder == 0 && !LabelsAtCommit) ||
+            (size != ulong.MaxValue && !DeferredLabelCopiesTouch(address, size)))
+        {
+            return;
+        }
+
+        // Held to the commit, a copy whose bytes this work binds lands here instead: the work
+        // reads or writes them, and must see the copy, or overwrite it, in stream order.
+        _landDeferredLabels = true;
+        if (_computeEncoder != 0 || _renderEncoder != 0)
         {
             EndEncoders(PassEndCause.Other);
         }
+
+        EncodeDeferredLabelCopies();
     }
 
     private void EncodeDeferredLabelCopies()
@@ -1240,6 +1369,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
+        if (LabelsAtCommit && !_landDeferredLabels)
+        {
+            return;
+        }
+
+        _landDeferredLabels = false;
+
         _encodingDeferredLabels = true;
         try
         {
@@ -1247,7 +1383,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             EncodeLabelCopies(
                 EnsureCommandBuffer(),
                 System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies));
-            _deferredLabelCopies.Clear();
+            ClearHeldLabelCopies();
             // The barrier and the blit encoder are gap the pass profile cannot sample.
             if (PassProfileEnabled)
             {

@@ -22,6 +22,9 @@ internal sealed partial class MetalRenderHost
         public ulong Id;
         public nint State;
         public bool Graphics;
+
+        /// <summary>See <see cref="Gen5MslShader.PersistentThreads"/>.</summary>
+        public bool PersistentThreads;
         public nuint PrimitiveType;
         public nint CullMode;
         public nint Winding;
@@ -587,7 +590,8 @@ internal sealed partial class MetalRenderHost
     }
 
     /// <summary>A rectangle list draws one patch per rectangle, so its count is needed up
-    /// front; see <see cref="DrawRectangles"/>.</summary>
+    /// front; see <see cref="DrawRectangles"/>. An indexed one whose counts the GPU writes
+    /// is built in the pass instead (<see cref="TakesIndirectIndexedRectangleListArguments"/>).</summary>
     public bool TakesIndirectRectangleListArguments => false;
 
     /// <summary>Metal has no fan primitive; the executor hands fans over as triangle lists.</summary>
@@ -664,10 +668,10 @@ internal sealed partial class MetalRenderHost
     private void RequireDrawableDescription(GraphicsPipelineDescription description)
     {
         var rectangleList = IsRectangleList(description, MeshOf(LookupModule(description.VertexProgram)));
-        if (rectangleList && description.VertexInput.BindingCount > Gen5MslRectangleList.IndexBufferIndex - VertexBufferSlotBase)
+        if (rectangleList && description.VertexInput.BindingCount > RectangleRebaseFirstSlot - VertexBufferSlotBase)
         {
             throw Fatal(
-                $"A rectangle list binds vertex buffers into the slots its draw block and index buffer use: " +
+                $"A rectangle list binds vertex buffers into the slots its draw block, index buffer and rebase draw use: " +
                 $"buffers={description.VertexInput.BindingCount} vertex=0x{description.VertexStage.Hash:X16}.");
         }
     }
@@ -1311,7 +1315,8 @@ internal sealed partial class MetalRenderHost
                     var module = RequireModule(program, onWorker: false);
                     return new MetalPipelineCompiler.Result(BuildComputePipelineState(module.Function, hash, module.ArchiveKey));
                 },
-                out var compiled))
+                out var compiled,
+                $"cs=0x{hash:X16}"))
         {
             return false;
         }
@@ -1449,6 +1454,7 @@ internal sealed partial class MetalRenderHost
             Id = ++_nextPipelineId,
             State = state,
             Graphics = false,
+            PersistentThreads = module.Shader.PersistentThreads,
             ThreadsPerThreadgroup = threads,
             Profile = ProfileLabelFor(module, null, null),
             VertexHash = module.Hash,

@@ -694,4 +694,85 @@ public sealed class RenderExecutorComputeTests : IDisposable
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("fill_dcc", StringComparison.Ordinal));
         AssertDispatched(16, 1, 1);
     }
+
+    private void ConfigureMetadataStore(ImageResourceInfo[]? images = null, bool alsoWritesOtherBuffer = false)
+    {
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        _host.MetadataAddresses.Add(MetadataAddress);
+        _host.ClearableMetadata.Add(MetadataAddress);
+        var buffers = alsoWritesOtherBuffer ? new[] { written, written } : new[] { written };
+        var descriptors = alsoWritesOtherBuffer
+            ? new[] { BufferDescriptor(MetadataAddress, 4, 256), BufferDescriptor(VertexBase, 4, 256) }
+            : new[] { BufferDescriptor(MetadataAddress, 4, 256) };
+        _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: buffers, images: images), buffers: descriptors));
+    }
+
+    [Fact]
+    public void MetadataOnlyStores_AreConsumedAsAMetadataClear()
+    {
+        ConfigureMetadataStore();
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.Contains($"clear_metadata {MetadataAddress:X}", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    // UE5's Nanite depth export writes the depth surface and its HTILE in one dispatch: dropping
+    // it as a clear lost the depth and made the next pass clear the surface again.
+    [Fact]
+    public void MetadataStoresBesideAnImageStore_StillDispatch()
+    {
+        ConfigureMetadataStore(images: [new ImageResourceInfo(ImageResourceClass.Storage, true)]);
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.DoesNotContain($"clear_metadata {MetadataAddress:X}", _host.Calls);
+        AssertDispatched(4, 1, 1);
+    }
+
+    // A one-group kernel's counter buffer can start where a transient surface's HTILE was
+    // registered. Taken for a clear, the kernel never ran and the counters it resets kept
+    // their old values; only a binding that spans the whole surface is a clear.
+    [Fact]
+    public void ASmallBufferAtAMetadataAddress_StillDispatches()
+    {
+        ConfigureMetadataStore();
+        _host.MetadataSizes[MetadataAddress] = 0x10000;
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+
+        Assert.DoesNotContain($"clear_metadata {MetadataAddress:X}", _host.Calls);
+        AssertDispatched(1, 1, 1);
+    }
+
+    // A one-group kernel is a counter reset or an argument write, not a clear, even where
+    // its buffer spans everything registered at that address.
+    [Fact]
+    public void AOneGroupStoreToMetadata_StillDispatches()
+    {
+        ConfigureMetadataStore();
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+
+        Assert.DoesNotContain($"clear_metadata {MetadataAddress:X}", _host.Calls);
+        AssertDispatched(1, 1, 1);
+    }
+
+    [Fact]
+    public void ABufferSpanningTheWholeMetadataSurface_IsStillAClear()
+    {
+        ConfigureMetadataStore();
+        _host.MetadataSizes[MetadataAddress] = 1024;
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.Contains($"clear_metadata {MetadataAddress:X}", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    [Fact]
+    public void MetadataStoresBesideAnotherBufferStore_StillDispatch()
+    {
+        ConfigureMetadataStore(alsoWritesOtherBuffer: true);
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.DoesNotContain($"clear_metadata {MetadataAddress:X}", _host.Calls);
+        AssertDispatched(4, 1, 1);
+    }
 }

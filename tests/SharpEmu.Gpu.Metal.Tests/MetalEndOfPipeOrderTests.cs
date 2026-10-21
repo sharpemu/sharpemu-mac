@@ -142,6 +142,8 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        // The encoder-boundary mode, where copies land at the next boundary rather than the commit.
+        host.LabelsAtCommit = false;
         Assert.True(host.DefersCopiesInCompute);
         const ulong filled = GuestBase + 0x10000;
 
@@ -166,6 +168,48 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(0, host.DeferredLabelCopyCount);
 
         host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(3UL, rig.Backing.Read64(WindowedLabel));
+        Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
+        Assert.Equal(0x77u, rig.Backing.Read32(filled));
+    }
+
+    // Held to the commit, label copies inside and outside an open encoder wait for it and land
+    // behind one barrier, in stream order. A transfer over other bytes leaves them held; one
+    // over their bytes lands them first (MetalClearFoldingTests.AGpuWriteRecordedAfterTheOwedBytes...).
+    [Fact]
+    public void LabelCopiesWaitForTheCommitAndLandBehindOneBarrierInOrder()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.LabelsAtCommit = true;
+        const ulong filled = GuestBase + 0x10000;
+        _ = host.TakeLabelBarriers();
+
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 1));
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x11UL), "WRITE_DATA");
+        var heldOutside = host.DeferredLabelCopyCount;
+        Assert.True(heldOutside >= 2);
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 2));
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
+        var held = host.DeferredLabelCopyCount;
+        Assert.True(held > heldOutside);
+
+        host.FillBufferInOrder(filled, 0x2000, 0x77);
+        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(held, host.DeferredLabelCopyCount);
+
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 3));
+        Assert.True(host.DeferredLabelCopyCount > held);
+        Assert.Equal(0L, host.TakeLabelBarriers());
+
+        host.FlushCommandBuffer();
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+        Assert.Equal(1L, host.TakeLabelBarriers());
         WaitForGpu(host, host.LastWorkSerial);
         WaitForCompletions(host);
         Assert.Equal(3UL, rig.Backing.Read64(WindowedLabel));
@@ -203,12 +247,51 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
     }
 
+    // The held copies' span only spares the scan: a binding between two of them that touches
+    // neither keeps the encoder open, and once they land the span starts over, so bytes only
+    // an earlier copy covered no longer count.
+    [Fact]
+    public void ABindingBetweenTwoHeldCopiesTouchesNeitherAndTheSpanStartsOverWhenTheyLand()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        Assert.True(host.DefersCopiesInCompute);
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
+        host.RecordCommandProcessorWrite(LaterLabel + 0x1000, BitConverter.GetBytes(0x66UL), "WRITE_DATA");
+        Assert.Equal(2, host.DeferredLabelCopyCount);
+
+        host.OrderAfterDeferredCopies(LaterLabel + 0x800, 0x40);
+        Assert.True(host.ComputeEncoderOpen);
+        Assert.Equal(2, host.DeferredLabelCopyCount);
+
+        host.OrderAfterDeferredCopies(LaterLabel + 0x1000, 8);
+        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordCommandProcessorWrite(LaterLabel + 0x1000, BitConverter.GetBytes(0x77UL), "WRITE_DATA");
+        host.OrderAfterDeferredCopies(LaterLabel, 8);
+        Assert.True(host.ComputeEncoderOpen);
+        Assert.Equal(1, host.DeferredLabelCopyCount);
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
+        Assert.Equal(0x77UL, rig.Backing.Read64(LaterLabel + 0x1000));
+    }
+
     [Fact]
     public void TheComputeCopyOptOutEndsTheComputeEncoderForTheCopy()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        // The encoder-boundary mode, where copies land at the next boundary rather than the commit.
+        host.LabelsAtCommit = false;
         host.DefersCopiesInCompute = false;
 
         _ = host.EnsureComputeEncoder();
@@ -328,6 +411,8 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        // The encoder-boundary mode, where copies land at the next boundary rather than the commit.
+        host.LabelsAtCommit = false;
         const ulong filled = GuestBase + 0x10000;
         _ = host.TakeLabelBarriers();
 
@@ -360,6 +445,8 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        // The encoder-boundary mode, where copies land at the next boundary rather than the commit.
+        host.LabelsAtCommit = false;
 
         host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 3));
         Assert.Equal(1L, host.TakeLabelBarriers());
@@ -991,6 +1078,8 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        // The encoder-boundary mode, where copies land at the next boundary rather than the commit.
+        host.LabelsAtCommit = false;
         const ulong dump = WindowedLabel + 0x1000;
         const ulong filled = GuestBase + 0x10000;
 

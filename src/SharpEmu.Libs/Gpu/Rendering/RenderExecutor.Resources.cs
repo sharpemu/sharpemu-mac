@@ -361,9 +361,15 @@ public sealed partial class RenderExecutor
         ulong packetAddress = 0)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResourcePreparation);
-        if (emission.IndirectArgumentsAddress != 0)
+        if (emission.IndirectArgumentsAddress != 0 &&
+            FragmentWritesMayCover(
+                emission.IndirectArgumentsAddress,
+                emission.Indexed ? IndexedIndirectArgumentsSize : AutoIndirectArgumentsSize))
         {
             // The GPU reads the arguments, which a deferred fragment store may have written.
+            // Only then: ending the pass stores and reloads every attachment, and a run of
+            // GPU-driven draws whose fragment stages store (a material or tile pass) would
+            // otherwise end one pass per draw.
             ReleaseFragmentWrites();
         }
 
@@ -669,6 +675,7 @@ public sealed partial class RenderExecutor
             // in this pass reads them before the guest says so; the pass end and the barrier
             // wait for the first consumer (ReleaseFragmentWrites).
             writeStages &= ~GpuPipelineStage.FragmentShaderBit;
+            NoteFragmentWrites(pixelInput.Stage);
             _fragmentWritesPending = true;
             _fragmentWritesPass = _host.RenderPassSerial;
         }

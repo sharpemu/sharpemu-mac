@@ -22,6 +22,28 @@ public sealed class MetalGpuWriteRangesTests
         Assert.Equal(0UL, ranges.PendingSerial(0x1_1000, 0x1000, completed: 0));
     }
 
+    // Labels are looked up by page: a narrow read finds one on its page, including one that
+    // straddles a page boundary, and finds none once it retires; a wide read scans them all.
+    [Fact]
+    public void ALabelIsFoundThroughItsPagesUntilItRetires()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        ranges.Note(0x10_0FFC, 8, serial: 3, MetalGpuWriteOrigin.EndOfPipeLabel);
+        ranges.Note(0x50_0000, 4, serial: 7, MetalGpuWriteOrigin.EndOfPipeLabel);
+        Assert.Equal(3UL, ranges.PendingSerial(0x10_0FF0, 0x10, completed: 0));
+        Assert.Equal(3UL, ranges.PendingSerial(0x10_1000, 4, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_2000, 0x10, completed: 0));
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0000, 0x10, completed: 0));
+        Assert.Equal(7UL, ranges.PendingSerial(0x50_0000, 4, completed: 0));
+        // 0x100 pages: past the page look-ups, so the labels are scanned.
+        Assert.Equal(7UL, ranges.PendingSerial(0x4F_0000, 0x10_0000 + 0x1000, completed: 0));
+
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_0FF0, 0x10, completed: 3));
+        Assert.Equal(0UL, ranges.PendingSerial(0x10_1000, 4, completed: 3));
+        Assert.Equal(7UL, ranges.PendingSerial(0x50_0000, 4, completed: 3));
+        Assert.Equal(0UL, ranges.PendingSerial(0x50_0000, 4, completed: 7));
+    }
+
     [Fact]
     public void AReadInsideARecordedRangeWaitsForThatSubmissionOnly()
     {

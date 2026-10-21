@@ -111,7 +111,9 @@ public sealed partial class RenderExecutor
                 $"buffers={program.Buffers.Length} images={program.Images.Length} samplers={program.SamplerCount}");
         }
 
-        if (!retried && indirectArgumentsAddress == 0 && TryConsumeMetadataClear(input))
+        if (!retried && indirectArgumentsAddress == 0 &&
+            (ulong)groupsX * groupsY * groupsZ >= MetadataClearMinimumGroups &&
+            TryConsumeMetadataClear(input))
         {
             _host.ResetBindings();
             return;
@@ -322,6 +324,11 @@ public sealed partial class RenderExecutor
     }
 
     // A full overwrite of registered metadata by a compute shader becomes a tracked clear.
+    // A clear of a metadata surface is a spread of workgroups over it; a one-group kernel
+    // is a counter reset or an argument write whose buffer only happens to start where a
+    // transient surface's HTILE was registered, and taken for a clear it never ran.
+    private const ulong MetadataClearMinimumGroups = 2;
+
     private bool TryConsumeMetadataClear(ComputeInputInfo input)
     {
         var program = input.Stage.Program!;
@@ -342,9 +349,34 @@ public sealed partial class RenderExecutor
             }
         }
 
-        if (program.HasBitwiseExclusiveOr)
+        // A metadata clear is buffer stores and nothing else. A dispatch that also reads or
+        // stores images, or writes through device addresses, does real work beside the
+        // metadata - UE5's Nanite depth export writes the depth surface and the HTILE that
+        // describes it in one dispatch - and dropping it loses that work and leaves the
+        // surface marked cleared, so the next pass clears it again (Black Myth: Wukong's
+        // characters and army failed every depth-equal base pass draw).
+        if (program.HasBitwiseExclusiveOr || program.Images.Length != 0 || program.SamplerCount != 0 ||
+            program.WritesDeviceAddresses)
         {
             return false;
+        }
+
+        // Every buffer it writes has to be a whole metadata surface: a store anywhere else is
+        // not a clear, and neither is a small buffer that only starts where a surface's
+        // metadata was registered.
+        for (var i = 0; i < program.Buffers.Length; i++)
+        {
+            if (!program.Buffers[i].Written)
+            {
+                continue;
+            }
+
+            var written = DecodeBufferDescriptor(resources, i);
+            var bytes = written.Stride == 0 ? written.RecordCount : (ulong)written.RecordCount * written.Stride;
+            if (!_host.CoversMetadata(written.Address, bytes))
+            {
+                return false;
+            }
         }
 
         for (var i = 0; i < program.Buffers.Length; i++)

@@ -41,7 +41,19 @@ public static partial class Gen5MslTranslator
         /// (it has at least one back edge and the cap is enabled).</summary>
         private bool _structuredUsesSteps;
 
-        private sealed record LoopInfo(int Header, bool[] Body, int Follow);
+        // A loop with several ways out keeps one Follow no block can match; the edges out are
+        // in Exits, and control resumes at Continuation (the exits' nearest common
+        // post-dominator) after the loop dispatches to the exit it left through.
+        private sealed record LoopInfo(int Header, bool[] Body, int Follow, int[]? Exits = null, int Continuation = NoFollow)
+        {
+            public bool MultiExit => Exits is { Length: > 1 };
+        }
+
+        private const int MultiExitFollow = int.MinValue + 1;
+
+        // SHARPEMU_MSL_MULTI_EXIT_LOOPS=0 sends a loop with several exits to the dispatcher again.
+        private static readonly bool MultiExitLoops =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_MULTI_EXIT_LOOPS") != "0";
 
         /// <summary>The loops enclosing the region being emitted, innermost last.</summary>
         private readonly List<LoopInfo> _openLoops = [];
@@ -53,6 +65,39 @@ public static partial class Gen5MslTranslator
         private bool[] _structureEmitted = [];
         private bool _structureFailed;
 
+        // Why the last structuring attempt gave up, for SHARPEMU_MSL_STRUCTURE_REPORT: which
+        // shape sends a program to the dispatcher.
+        private string? _structureFailure;
+
+        private void FailStructure(string reason)
+        {
+            _structureFailed = true;
+            _structureFailure ??= reason;
+        }
+
+        /// <summary>Set for the second assembly attempt, which also duplicates short loop
+        /// latches and picks a loop body's joins by reachability (see
+        /// <see cref="TryBuildStructuredBody"/>).</summary>
+        private bool _relaxedStructure;
+
+        /// <summary>The most block text a latch may carry and still be copied to every
+        /// place that jumps to it.</summary>
+        private const int MaxDuplicatedLatchChars = 2048;
+
+        /// <summary>Assembles the structured body, first exactly as before and then, if
+        /// that fails, once more with two relaxations for loop bodies that continue from
+        /// several places. Persistent-thread kernels (UE5's Nanite culling) have that
+        /// shape: one big loop whose short latch block is reached from several nested
+        /// arms, and arms that skip ahead by continuing. The retry copies such a latch to
+        /// each arrival as "latch; continue;", and when one arm of a branch can only leave
+        /// the iteration, joins at the other arm instead of at the post-dominator (which a
+        /// continue arm pushes past the loop). A shader the first attempt already
+        /// structures keeps byte-identical output.</summary>
+        // SHARPEMU_MSL_RELAXED_STRUCTURE=0 skips the retry, so a program only it structures
+        // runs from the dispatcher instead.
+        private static readonly bool RelaxedStructureRetry =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_RELAXED_STRUCTURE") != "0";
+
         private bool TryBuildStructuredBody(IReadOnlyList<ShaderBlock> blocks, out string body)
         {
             var built = TryBuildStructuredBody(blocks, out StringBuilder? text);
@@ -60,7 +105,61 @@ public static partial class Gen5MslTranslator
             return built;
         }
 
+        private static readonly bool StructureReport =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURE_REPORT") == "1";
+
         private bool TryBuildStructuredBody(
+            IReadOnlyList<ShaderBlock> blocks,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out StringBuilder? body)
+        {
+            var built = TryBuildStructuredBodyCore(blocks, out body);
+            if (!built && StructureReport)
+            {
+                Console.Error.WriteLine(
+                    $"[MSL][STRUCTURE] 0x{_request.Hash:X16} stage={_stage} blocks={blocks.Count} keeps the dispatcher: " +
+                    $"{_structureFailure ?? "unrecorded shape"}");
+            }
+
+            return built;
+        }
+
+        private bool TryBuildStructuredBodyCore(
+            IReadOnlyList<ShaderBlock> blocks,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out StringBuilder? body)
+        {
+            _structureFailure = null;
+            _relaxedStructure = false;
+            if (TryAssembleStructuredBody(blocks, out body))
+            {
+                return true;
+            }
+
+            if (!RelaxedStructureRetry)
+            {
+                return false;
+            }
+
+            // The retry's reason is the one that decides; the first attempt's goes with it.
+            var strictFailure = _structureFailure;
+            _structureFailure = null;
+            _relaxedStructure = true;
+            try
+            {
+                var built = TryAssembleStructuredBody(blocks, out body);
+                if (!built)
+                {
+                    _structureFailure = $"{_structureFailure ?? "unrecorded shape"} (first attempt: {strictFailure ?? "unrecorded shape"})";
+                }
+
+                return built;
+            }
+            finally
+            {
+                _relaxedStructure = false;
+            }
+        }
+
+        private bool TryAssembleStructuredBody(
             IReadOnlyList<ShaderBlock> blocks,
             [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out StringBuilder? body)
         {
@@ -138,7 +237,7 @@ public static partial class Gen5MslTranslator
             // dispatcher rather than the stack.
             if (++_regionDepth > MaxRegionDepth)
             {
-                _structureFailed = true;
+                FailStructure($"region depth over {MaxRegionDepth}");
                 _regionDepth--;
                 return false;
             }
@@ -185,6 +284,20 @@ public static partial class Gen5MslTranslator
 
                 var atHeader = first && allowLoopHeader;
                 first = false;
+                if (!atHeader && _structureEmitted[node] && IsDuplicableTail(node, follow))
+                {
+                    // Each copy is a scope of its own, so the block's temporaries do not
+                    // collide with another copy's.
+                    AppendIndented(
+                        text,
+                        Gen5MslDump.Enabled ? $"{{ // tail {node}" : "{",
+                        indent);
+                    AppendBlockText(text, _blockText[node], indent + 1);
+                    AppendIndented(text, "}", indent);
+                    node = _blockTerminators[node].TrueTarget;
+                    continue;
+                }
+
                 if (!atHeader && !TryEnterBlock(text, node, indent))
                 {
                     return false;
@@ -197,12 +310,13 @@ public static partial class Gen5MslTranslator
                         return false;
                     }
 
-                    if (loop.Follow == ExitTarget || loop.Follow == NoFollow)
+                    var next = loop.MultiExit ? loop.Continuation : loop.Follow;
+                    if (next == ExitTarget || next == NoFollow)
                     {
                         return false;
                     }
 
-                    node = loop.Follow;
+                    node = next;
                     continue;
                 }
 
@@ -233,6 +347,12 @@ public static partial class Gen5MslTranslator
                 // when that block belongs to this region, and otherwise both arms leave
                 // the region on their own.
                 var join = _ipdom[node];
+                if (_relaxedStructure &&
+                    TryFindLoopBodyJoin(node, terminator.TrueTarget, terminator.FalseTarget, follow, out var bodyJoin))
+                {
+                    join = bodyJoin;
+                }
+
                 if (join < 0 || join == follow || _structureEmitted[join] ||
                     EnclosesLoopBoundary(join))
                 {
@@ -314,6 +434,13 @@ public static partial class Gen5MslTranslator
 
         private bool EmitLoop(StringBuilder text, LoopInfo loop, int indent)
         {
+            if (loop.MultiExit)
+            {
+                // Which way out the loop took: each exit edge records its number and
+                // breaks, and the dispatch after the loop runs that exit's region.
+                AppendIndented(text, $"uint {LoopExitVariable(loop)} = 0u;", indent);
+            }
+
             AppendIndented(text, "while (true)", indent);
             AppendIndented(text, "{", indent);
             _openLoops.Add(loop);
@@ -332,6 +459,39 @@ public static partial class Gen5MslTranslator
             }
 
             AppendIndented(text, "}", indent);
+            return !loop.MultiExit || EmitLoopExits(text, loop, indent);
+        }
+
+        private static string LoopExitVariable(LoopInfo loop) => $"sharpemu_loop_exit_{loop.Header}";
+
+        // Each exit's region runs up to the continuation, where every way out rejoins. An exit
+        // that is the continuation itself needs nothing; two regions that share a block before
+        // it fail back to the dispatcher (the second meets an emitted block), as before.
+        private bool EmitLoopExits(StringBuilder text, LoopInfo loop, int indent)
+        {
+            var first = true;
+            for (var index = 0; index < loop.Exits!.Length; index++)
+            {
+                var exit = loop.Exits[index];
+                if (exit == loop.Continuation)
+                {
+                    continue;
+                }
+
+                var region = new StringBuilder();
+                EmitRegion(region, exit, loop.Continuation, indent + 1);
+                if (_structureFailed)
+                {
+                    return false;
+                }
+
+                AppendIndented(text, $"{(first ? "if" : "else if")} ({LoopExitVariable(loop)} == {index + 1}u)", indent);
+                AppendIndented(text, "{", indent);
+                text.Append(region);
+                AppendIndented(text, "}", indent);
+                first = false;
+            }
+
             return true;
         }
 
@@ -352,24 +512,46 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            if (innermost is not null && innermost.MultiExit && Array.IndexOf(innermost.Exits!, node) is var exitIndex and >= 0)
+            {
+                AppendIndented(text, $"{LoopExitVariable(innermost)} = {exitIndex + 1}u;", indent);
+                AppendIndented(text, "break;", indent);
+                return false;
+            }
+
             if (innermost is not null && node == innermost.Follow)
             {
                 AppendIndented(text, "break;", indent);
                 return false;
             }
 
+            if (innermost is not null && IsDuplicableLatch(node, innermost))
+            {
+                // Each copy is a scope of its own, so the block's temporaries do not
+                // collide with another copy's.
+                AppendIndented(
+                    text,
+                    Gen5MslDump.Enabled ? $"{{ // latch {node}" : "{",
+                    indent);
+                AppendBlockText(text, _blockText[node], indent + 1);
+                AppendIndented(text, "}", indent);
+                AppendBackEdge(text, indent);
+                AppendIndented(text, "continue;", indent);
+                return false;
+            }
+
             foreach (var loop in _openLoops)
             {
-                if (node == loop.Header || node == loop.Follow)
+                if (node == loop.Header || node == loop.Follow || (loop.MultiExit && Array.IndexOf(loop.Exits!, node) >= 0))
                 {
-                    _structureFailed = true;
+                    FailStructure($"edge to an outer loop's {(node == loop.Header ? "header" : "exit")}: block {node} (loop at {loop.Header})");
                     return false;
                 }
             }
 
             if (_structureEmitted[node])
             {
-                _structureFailed = true;
+                FailStructure($"edge back into an emitted region: block {node}");
                 return false;
             }
 
@@ -383,14 +565,14 @@ public static partial class Gen5MslTranslator
         /// (<see cref="Gen5MslCodegenOptions.GraphicsLoopStepCap"/>).</summary>
         private void AppendBackEdge(StringBuilder text, int indent)
         {
-            if (_maxDispatcherSteps <= 0 ||
+            if (MaxDispatcherSteps <= 0 ||
                 (_stage is Gen5MslStage.Vertex or Gen5MslStage.Pixel && !_options.GraphicsLoopStepCap))
             {
                 return;
             }
 
             _structuredUsesSteps = true;
-            AppendIndented(text, $"if (++steps >= {_maxDispatcherSteps}u)", indent);
+            AppendIndented(text, $"if (++steps >= {MaxDispatcherSteps}u)", indent);
             AppendIndented(text, "{", indent);
             AppendIndented(text, StepCapReportCode, indent + 1);
             AppendExit(text, indent + 1);
@@ -427,7 +609,7 @@ public static partial class Gen5MslTranslator
                     // the barrier to a part of the group, so that shape stays dispatched.
                     if (indent > 1)
                     {
-                        _structureFailed = true;
+                        FailStructure("mesh exit inside a conditional");
                     }
 
                     return;
@@ -437,11 +619,197 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        /// <summary>Whether arriving at <paramref name="node"/> inside
+        /// <paramref name="loop"/> may be written as a copy of the block followed by a
+        /// continue: the retry only, a short block of the loop's body that goes straight
+        /// back to its header.</summary>
+        private bool IsDuplicableLatch(int node, LoopInfo loop)
+        {
+            if (!_relaxedStructure || node == loop.Header || node < 0 || !loop.Body[node])
+            {
+                return false;
+            }
+
+            var terminator = _blockTerminators[node];
+            var target = terminator.Kind == TerminatorKind.Jump || terminator.TrueTarget == terminator.FalseTarget
+                ? terminator.TrueTarget
+                : ExitTarget;
+            return target == loop.Header && _blockText[node].Length <= MaxDuplicatedLatchChars;
+        }
+
+        /// <summary>Whether a block already emitted may be emitted again where a second
+        /// region reaches it: the retry only, a short block that is not a loop boundary
+        /// and goes straight on to the end of the region. Two arms of a branch that each
+        /// either run a shared tail or skip past it to the join (the shape EXEC-skip
+        /// branches leave) both reach that tail before the join.</summary>
+        private bool IsDuplicableTail(int node, int follow)
+        {
+            if (!_relaxedStructure || node < 0 || _loopsByHeader.ContainsKey(node) ||
+                EnclosesLoopBoundary(node) || _blockText[node].Length > MaxDuplicatedLatchChars ||
+                _meshBarrierBlocks is { } barrierBlocks && barrierBlocks[node])
+            {
+                return false;
+            }
+
+            var terminator = _blockTerminators[node];
+            return (terminator.Kind == TerminatorKind.Jump || terminator.TrueTarget == terminator.FalseTarget) &&
+                terminator.TrueTarget == follow;
+        }
+
+        /// <summary>The blocks of the innermost open loop's body that <paramref name="start"/>
+        /// reaches without leaving the iteration: the walk stops at the header, at a
+        /// duplicable latch (both continue), at the loop's exit (a break) and at the
+        /// program's end.</summary>
+        private HashSet<int> IterationReach(int start, LoopInfo loop)
+        {
+            var reached = new HashSet<int>();
+            var pending = new Stack<int>();
+            pending.Push(start);
+            while (pending.Count != 0)
+            {
+                var node = pending.Pop();
+                if (node < 0 || node == loop.Header || node == loop.Follow || !loop.Body[node] ||
+                    IsDuplicableLatch(node, loop) || !reached.Add(node))
+                {
+                    continue;
+                }
+
+                foreach (var successor in _successors[node])
+                {
+                    pending.Push(successor);
+                }
+            }
+
+            return reached;
+        }
+
+        /// <summary>The retry's join for a branch inside a loop body. When one arm can
+        /// only leave the iteration (continue, break or return), the branch is an
+        /// if-without-else and the other arm's target is where the code goes on. When
+        /// both arms go on, they join at the first block both reach that neither can get
+        /// past without passing through: a path that skips a candidate and leaves the
+        /// iteration is fine, one that skips it and runs on below it is not. Either
+        /// answer is only a proposal: the region emitter still rejects a block reached
+        /// twice.</summary>
+        private bool TryFindLoopBodyJoin(int node, int taken, int fallen, int follow, out int join)
+        {
+            join = -1;
+            LoopInfo loop;
+            if (_openLoops.Count != 0)
+            {
+                loop = _openLoops[^1];
+            }
+            else if (_ipdom[node] < 0 && ExitArmJoins)
+            {
+                // Outside any loop a branch whose arm can end the program (a discard, an
+                // early S_ENDPGM) has no post-dominator, and the arms used to be emitted
+                // separately until they met the same block twice. The same search finds
+                // where the arms that go on rejoin, with the region's end as the only
+                // way out besides the program's end.
+                loop = new LoopInfo(NoFollow, WholeProgramBody(), follow);
+            }
+            else
+            {
+                return false;
+            }
+
+            var takenReach = IterationReach(taken, loop);
+            var fallenReach = IterationReach(fallen, loop);
+            if (takenReach.Count == 0 && fallenReach.Count != 0)
+            {
+                join = fallen;
+                return true;
+            }
+
+            if (fallenReach.Count == 0 && takenReach.Count != 0)
+            {
+                join = taken;
+                return true;
+            }
+
+            var candidates = new List<int>();
+            foreach (var candidate in takenReach)
+            {
+                if (candidate > node && fallenReach.Contains(candidate))
+                {
+                    candidates.Add(candidate);
+                }
+            }
+
+            candidates.Sort();
+            foreach (var candidate in candidates)
+            {
+                if (IsLoopBodyJoin(candidate, taken, fallen, loop))
+                {
+                    join = candidate;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // SHARPEMU_MSL_EXIT_ARM_JOINS=0 leaves a branch with an exiting arm outside loops to
+        // the post-dominator alone again.
+        private static readonly bool ExitArmJoins =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXIT_ARM_JOINS") != "0";
+
+        private bool[]? _wholeProgramBody;
+
+        private bool[] WholeProgramBody()
+        {
+            if (_wholeProgramBody is null || _wholeProgramBody.Length != _successors.Length)
+            {
+                _wholeProgramBody = new bool[_successors.Length];
+                Array.Fill(_wholeProgramBody, true);
+            }
+
+            return _wholeProgramBody;
+        }
+
+        /// <summary>Whether the arms starting at <paramref name="taken"/> and
+        /// <paramref name="fallen"/> reach nothing beyond <paramref name="candidate"/>
+        /// except through it, within the current iteration.</summary>
+        private bool IsLoopBodyJoin(int candidate, int taken, int fallen, LoopInfo loop)
+        {
+            var beyond = new HashSet<int>();
+            foreach (var successor in _successors[candidate])
+            {
+                beyond.UnionWith(IterationReach(successor, loop));
+            }
+
+            var reached = new HashSet<int>();
+            var pending = new Stack<int>();
+            pending.Push(taken);
+            pending.Push(fallen);
+            while (pending.Count != 0)
+            {
+                var node = pending.Pop();
+                if (node < 0 || node == candidate || node == loop.Header || node == loop.Follow ||
+                    !loop.Body[node] || IsDuplicableLatch(node, loop) || !reached.Add(node))
+                {
+                    continue;
+                }
+
+                if (beyond.Contains(node))
+                {
+                    return false;
+                }
+
+                foreach (var successor in _successors[node])
+                {
+                    pending.Push(successor);
+                }
+            }
+
+            return true;
+        }
+
         private bool EnclosesLoopBoundary(int node)
         {
             foreach (var loop in _openLoops)
             {
-                if (node == loop.Header || node == loop.Follow)
+                if (node == loop.Header || node == loop.Follow || (loop.MultiExit && Array.IndexOf(loop.Exits!, node) >= 0))
                 {
                     return true;
                 }
@@ -506,7 +874,7 @@ public static partial class Gen5MslTranslator
 
             foreach (var (header, body) in bodies)
             {
-                var follow = NoFollow;
+                var exits = new List<int>();
                 for (var index = 0; index < count; index++)
                 {
                     if (!body[index])
@@ -516,22 +884,31 @@ public static partial class Gen5MslTranslator
 
                     foreach (var successor in _successors[index])
                     {
-                        if (successor == ExitTarget || body[successor])
+                        if (successor == ExitTarget || body[successor] || exits.Contains(successor))
                         {
                             continue;
                         }
 
-                        if (follow != NoFollow && follow != successor)
-                        {
-                            // Several distinct exits; only one can be the break target.
-                            return false;
-                        }
-
-                        follow = successor;
+                        exits.Add(successor);
                     }
                 }
 
-                loops[header] = new LoopInfo(header, body, follow);
+                if (exits.Count <= 1)
+                {
+                    loops[header] = new LoopInfo(header, body, exits.Count == 1 ? exits[0] : NoFollow);
+                    continue;
+                }
+
+                // Several distinct exits: only one can be a plain break target, so each
+                // records which it was and the loop dispatches after it (EmitLoopExits).
+                var continuation = CommonPostDominator(exits);
+                if (!MultiExitLoops || (continuation >= 0 && body[continuation]))
+                {
+                    _structureFailure ??= $"loop with several exits: {exits[0]} and {exits[1]}";
+                    return false;
+                }
+
+                loops[header] = new LoopInfo(header, body, MultiExitFollow, [.. exits], continuation);
             }
 
             // Loops must nest: one body contains the other or they are disjoint.
@@ -556,12 +933,51 @@ public static partial class Gen5MslTranslator
 
                     if (overlap && !innerInOuter && !outerInInner)
                     {
+                        _structureFailure ??= "partially overlapping loops";
                         return false;
                     }
                 }
             }
 
             return true;
+        }
+
+        // The nearest block that post-dominates every node given, or ExitTarget when only the
+        // program's end does.
+        private int CommonPostDominator(List<int> nodes)
+        {
+            var chain = new List<int>();
+            for (var cursor = nodes[0]; cursor >= 0 && chain.Count <= _ipdom.Length; cursor = _ipdom[cursor])
+            {
+                chain.Add(cursor);
+            }
+
+            foreach (var candidate in chain)
+            {
+                var common = true;
+                for (var index = 1; index < nodes.Count && common; index++)
+                {
+                    var reached = false;
+                    var steps = 0;
+                    for (var cursor = nodes[index]; cursor >= 0 && steps <= _ipdom.Length; cursor = _ipdom[cursor], steps++)
+                    {
+                        if (cursor == candidate)
+                        {
+                            reached = true;
+                            break;
+                        }
+                    }
+
+                    common = reached;
+                }
+
+                if (common)
+                {
+                    return candidate;
+                }
+            }
+
+            return ExitTarget;
         }
 
         private static void CollectLoopBody(

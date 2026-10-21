@@ -249,7 +249,8 @@ public static partial class Gen5MslTranslator
             var mesh = Mesh;
             source.AppendLine($"struct {MeshVertexStructName}");
             source.AppendLine("{");
-            source.AppendLine("    float4 sharpemu_position [[position]];");
+            // Invariant like the vertex stage's (see Gen5MslTranslator.EmitModule).
+            source.AppendLine("    float4 sharpemu_position [[position, invariant]];");
             EmitAuxPositionFields(source, perVertexLayer: false);
             foreach (var location in _vertexOutputs)
             {
@@ -754,9 +755,9 @@ public static partial class Gen5MslTranslator
             source.AppendLine("                active = false;");
             source.AppendLine("                break;");
             source.AppendLine("            }");
-            if (_maxDispatcherSteps > 0)
+            if (MaxDispatcherSteps > 0)
             {
-                source.AppendLine($"            if (++steps >= {_maxDispatcherSteps}u)");
+                source.AppendLine($"            if (++steps >= {MaxDispatcherSteps}u)");
                 source.AppendLine("            {");
                 source.AppendLine("                active = false;");
                 source.AppendLine($"                {StepCapReportCode}");

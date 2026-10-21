@@ -25,6 +25,11 @@ public static partial class ImageRequestBuilders
             TextureNumericClass.Sint => (GpuFormat.R32Sint, GuestPixelFormat.Bits32SInt),
             _ => throw GpuFatal.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
         };
+        // A 64-bit atomic binding is typed over RG32Uint texels, so its placeholder is too.
+        if (shape.Atomic64)
+        {
+            (format, guestFormat) = (GpuFormat.R32G32Uint, GuestPixelFormat.Bits32_32UInt);
+        }
         // Depth-reference sampling needs a depth view even for the placeholder.
         var depthCompare = shape.DepthCompare && numericClass == TextureNumericClass.Float && !storage;
         if (depthCompare)
@@ -40,7 +45,7 @@ public static partial class ImageRequestBuilders
             : shape.OneDimensional ? GuestImageType.Color1D : GuestImageType.Color2D;
         description.Extent = new GpuExtent3D(1, 1, 1);
         description.Resources = SubresourceCount.Single;
-        description.BytesPerBlock = 4;
+        description.BytesPerBlock = shape.Atomic64 ? 8u : 4u;
         description.Samples = shape.Multisampled ? 4u : 1u;
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 0, Pitch = 1, Height = 1 };
         var view = ImageViewDescription.Default with
@@ -294,7 +299,10 @@ public static partial class ImageRequestBuilders
             pixelFormat = depthFormat.DepthAttachmentFormat;
         }
         // Atomic storage images are declared as UINT in SPIR-V, including float atomics.
-        var storageViewFormat = storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? GpuFormat.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
+        // A 64-bit atomic keeps its 32_32_UINT texels whole: MSL types it ulong over RG32Uint.
+        var storageViewFormat = storage && shape.Atomic64
+            ? GpuFormat.R32G32Uint
+            : storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? GpuFormat.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
         var viewFormat = storage && storageViewFormat != GpuFormat.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);
         var description = ImageDescription.Create();
@@ -356,7 +364,9 @@ public static partial class ImageRequestBuilders
             request.TraceWriteCompress = descriptor.WriteCompress;
             request.TraceTextureDescriptor = string.Join(",", ((ReadOnlySpan<uint>)descriptor.Fields).ToArray().Select(word => word.ToString("X8")));
         }
-        return new TextureRequestResolution(request, shaderConversion, pixelFormat, DestinationSwizzle(descriptor));
+        // Metal runs a texture atomic only on a texture created for it, never on a view of
+        // another format, so a 64-bit atomic asks for an RG32Uint image of its own.
+        return new TextureRequestResolution(request, shaderConversion || shape.Atomic64, pixelFormat, DestinationSwizzle(descriptor));
     }
 
     // After the lookup: a stencil association redirects to its depth owner; the view rules run

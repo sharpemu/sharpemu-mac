@@ -93,6 +93,41 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
         AssertHalf(both, 1, true);
     }
 
+    // An indexed indirect draw whose counts stay on the GPU: the pass rebases the record's
+    // indices into control points and patch arguments (MetalRenderHost.RectangleRebase.cs).
+    // Only whole rectangles inside the record's count, bounded by the bound index count, are
+    // drawn, from its first index and vertex offset, with or without a vertex buffer.
+    [Theory]
+    [InlineData(false, 6u, 1u, 0u, 0, 9u, true, true)]
+    [InlineData(false, 3u, 1u, 3u, 0, 9u, false, true)]
+    [InlineData(false, 5u, 1u, 0u, 0, 9u, true, false)]
+    [InlineData(false, 6u, 1u, 0u, 0, 3u, true, false)]
+    [InlineData(false, 3u, 1u, 6u, 3, 9u, false, true)]
+    [InlineData(false, 0u, 1u, 0u, 0, 9u, false, false)]
+    [InlineData(false, 6u, 0u, 0u, 0, 9u, false, false)]
+    [InlineData(true, 6u, 1u, 0u, 0, 9u, true, true)]
+    [InlineData(true, 3u, 1u, 3u, 0, 9u, false, true)]
+    [InlineData(true, 3u, 1u, 6u, 3, 9u, false, true)]
+    [InlineData(true, 6u, 2u, 0u, 0, 3u, true, false)]
+    public void AnIndirectDrawWhoseCountsStayOnTheGpuFillsTheRecordsRectangles(
+        bool fetched, uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint indexLimit,
+        bool left, bool right)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value, fetched);
+        var pixels = rig.Render(host =>
+        {
+            // Indices 6..8 name the first rectangle's vertices, right-angle corner last.
+            rig.BindIndices(host, [0, 1, 2, 3, 4, 5, 1, 2, 0]);
+            var record = new BufferBinding((ulong)rig.Record([indexCount, instanceCount, firstIndex, unchecked((uint)vertexOffset), 0]), 0);
+            var pipeline = rig.Pipeline;
+            host.PrepareIndirectDraw(in pipeline, 0x1000, record, indexed: true, indexLimit);
+            ((IRenderHost)host).DrawIndexedIndirect(record);
+        });
+        AssertHalf(pixels, 0, left);
+        AssertHalf(pixels, 1, right);
+    }
+
     // A pipeline of any other topology, through the same program, is an ordinary vertex
     // pipeline: it builds without a mesh and draws the guest's three vertices as one triangle.
     [Theory]
@@ -378,6 +413,10 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
             Assert.True(Host.TryReadGuest(TargetAddress, bytes));
             return bytes;
         }
+
+        public PipelineHandle Pipeline => _pipeline ??= CreatePipeline();
+
+        public nint Record(uint[] words) => Buffer(MemoryMarshal.AsBytes(words.AsSpan()));
 
         public void BindIndices(MetalRenderHost host, ushort[] indices)
         {

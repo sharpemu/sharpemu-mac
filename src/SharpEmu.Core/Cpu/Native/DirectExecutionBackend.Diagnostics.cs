@@ -633,11 +633,20 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
+	// A module the loader could not place in the PS5 module range is mapped wherever the
+	// host puts it, which on macOS is often below the plausible window (Wukong's libc.prx
+	// at 0x1E2EEC000, its Wwise plugins at 0x230C43000). Calls out of such a module still
+	// return into code, so below the window an executable page is enough.
+	private const ulong LowestLowModuleAddress = 0x10000UL;
+
 	private static bool IsLikelyReturnAddress(ulong address)
 	{
 		if (!IsPlausibleReturnAddress(address))
 		{
-			return false;
+			return address >= LowestLowModuleAddress &&
+				address < 12884901888L &&
+				!IsUnresolvedSentinel(address) &&
+				IsExecutableAddress(address);
 		}
 		return IsExecutableAddress(address);
 	}

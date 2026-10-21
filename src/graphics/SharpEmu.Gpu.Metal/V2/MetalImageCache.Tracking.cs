@@ -889,6 +889,10 @@ internal sealed partial class MetalImageCache
     // page guard, so a store that faults on a metadata page always finds it here.
     private MetadataWatchSpan[] _metadataWatchSnapshot = [];
 
+    // Reused under the lock by the watch scans and the snapshot build.
+    private readonly List<(ulong Begin, ulong Size)> _metadataWatchScratch = [];
+    private readonly List<MetadataWatchSpan> _metadataWatchSorted = [];
+
     internal readonly record struct MetadataWatchSpan(ulong Begin, ulong End);
 
     // CPU writes that took the cache lock in this window: because an image may own the
@@ -983,14 +987,33 @@ internal sealed partial class MetalImageCache
             return;
         }
 
-        var spans = new MetadataWatchSpan[_metadataWatches.Count];
-        var index = 0;
+        // Adjacent watches are published as one span: the snapshot answers whether a range meets
+        // any watch, which their union answers alike, and an image's consecutive DCC slices are
+        // separate watches. Published whole per change, Black Myth: Wukong's thousands of
+        // watches made a large object each time, and those were its full collections.
+        var sorted = _metadataWatchSorted;
+        sorted.Clear();
         foreach (var (watchBegin, watchSize) in _metadataWatches)
         {
-            spans[index++] = new MetadataWatchSpan(watchBegin, watchBegin + watchSize);
+            sorted.Add(new MetadataWatchSpan(watchBegin, watchBegin + watchSize));
         }
 
-        Array.Sort(spans, static (left, right) => left.Begin.CompareTo(right.Begin));
+        sorted.Sort(static (left, right) => left.Begin.CompareTo(right.Begin));
+        var merged = 0;
+        for (var index = 0; index < sorted.Count; index++)
+        {
+            if (merged != 0 && sorted[merged - 1].End >= sorted[index].Begin)
+            {
+                sorted[merged - 1] = sorted[merged - 1] with { End = Math.Max(sorted[merged - 1].End, sorted[index].End) };
+            }
+            else
+            {
+                sorted[merged++] = sorted[index];
+            }
+        }
+
+        var spans = new MetadataWatchSpan[merged];
+        sorted.CopyTo(0, spans, 0, merged);
         Volatile.Write(ref _metadataWatchSnapshot, spans);
     }
 
@@ -1235,19 +1258,32 @@ internal sealed partial class MetalImageCache
 
         var begin = address & ~(Page - 1);
         var end = (address + size + Page - 1) & ~(Page - 1);
-        foreach (var (watchBegin, watchSize) in _metadataWatches)
+        // The snapshot is the union of the watches, republished under the lock at every change:
+        // a range it misses meets no watch, and the dictionary is scanned only when it does.
+        // The scans collect into a reused list instead of copying the dictionary: a copy per
+        // call was a large object, and with OnMetadataCpuWriteLocked's Black Myth: Wukong
+        // collected garbage twice as often.
+        if (AnySpanOverlaps(_metadataWatchSnapshot, begin, end - begin))
         {
-            if (watchBegin <= begin && end <= watchBegin + watchSize)
+            var scratch = _metadataWatchScratch;
+            scratch.Clear();
+            foreach (var (watchBegin, watchSize) in _metadataWatches)
             {
-                return;
-            }
-        }
+                if (watchBegin <= begin && end <= watchBegin + watchSize)
+                {
+                    return;
+                }
 
-        // A watch the new range partly overlaps is replaced by the union, so each page
-        // carries at most one count from here.
-        foreach (var (watchBegin, watchSize) in _metadataWatches.ToArray())
-        {
-            if (watchBegin < end && begin < watchBegin + watchSize)
+                if (watchBegin < end && begin < watchBegin + watchSize)
+                {
+                    scratch.Add((watchBegin, watchSize));
+                }
+            }
+
+            // A watch the new range partly overlaps is replaced by the union, so each page
+            // carries at most one count from here. Watches are disjoint, so only those that
+            // meet the new range can meet the union.
+            foreach (var (watchBegin, watchSize) in scratch)
             {
                 _pages.RemoveWatch(watchBegin, watchSize, blockReads: false);
                 _metadataWatches.Remove(watchBegin);
@@ -1276,16 +1312,30 @@ internal sealed partial class MetalImageCache
         var begin = address & ~(Page - 1);
         var end = (address + size + Page - 1) & ~(Page - 1);
         var hit = false;
-        foreach (var (watchBegin, watchSize) in _metadataWatches.ToArray())
+        // The union snapshot answers a store that meets no watch; the rest scan the dictionary
+        // into the reused list (see WatchMetadataLocked).
+        if (!AnySpanOverlaps(_metadataWatchSnapshot, begin, end - begin))
+        {
+            return false;
+        }
+
+        var scratch = _metadataWatchScratch;
+        scratch.Clear();
+        foreach (var (watchBegin, watchSize) in _metadataWatches)
         {
             if (watchBegin < end && begin < watchBegin + watchSize)
             {
-                ReArmMaterializedDccLocked(watchBegin, watchSize);
-                ForgetRecordedDccFillsLocked(watchBegin, watchSize);
-                _pages.RemoveWatch(watchBegin, watchSize, blockReads: false);
-                _metadataWatches.Remove(watchBegin);
-                hit = true;
+                scratch.Add((watchBegin, watchSize));
             }
+        }
+
+        foreach (var (watchBegin, watchSize) in scratch)
+        {
+            ReArmMaterializedDccLocked(watchBegin, watchSize);
+            ForgetRecordedDccFillsLocked(watchBegin, watchSize);
+            _pages.RemoveWatch(watchBegin, watchSize, blockReads: false);
+            _metadataWatches.Remove(watchBegin);
+            hit = true;
         }
 
         if (hit)
@@ -1326,6 +1376,7 @@ internal sealed partial class MetalImageCache
             {
                 Kind = SurfaceMetadataKind.HTile,
                 ClearMask = description.HtileClearMask,
+                Size = description.Metadata.Range.Size,
             });
             return;
         }
@@ -1337,12 +1388,29 @@ internal sealed partial class MetalImageCache
             metadata.FillValue = 0xffffffff;
             metadata.FillSize = 0;
         }
+
+        if (metadata.Kind == SurfaceMetadataKind.HTile)
+        {
+            metadata.Size = description.Metadata.Range.Size;
+        }
     }
 
     public bool IsMetadata(ulong address)
     {
         using var held = _lock.Hold();
         return _surfaceMetadata.TryGetValue(address, out var found) && found.Kind != SurfaceMetadataKind.PendingDcc;
+    }
+
+    /// <summary>
+    /// Whether a binding of <paramref name="size"/> bytes at the address spans the metadata
+    /// surface registered there. A surface whose size is not known is answered by its
+    /// address alone, as <see cref="IsMetadata"/> does.
+    /// </summary>
+    public bool CoversMetadata(ulong address, ulong size)
+    {
+        using var held = _lock.Hold();
+        return _surfaceMetadata.TryGetValue(address, out var found) && found.Kind != SurfaceMetadataKind.PendingDcc &&
+            (found.Size == 0 || size >= found.Size);
     }
 
     public bool IsMetadataCleared(ulong address, uint slice, out uint fillValue)
