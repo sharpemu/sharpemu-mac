@@ -57,13 +57,24 @@ public sealed partial class MappedPublicationTests
         using var state = new State(); var original = state.Capture();
         using var publication = state.Prepare(original, State.Address, [7]);
         using var reservation = Busy(state);
-        var cancel = Task.Run(() => publication.Dispose());
+        using var peerReady = new ManualResetEventSlim();
+        using var cancelRequested = new ManualResetEventSlim();
+        // Acquisition has a production-enforced 500 ms bound. Start a dedicated
+        // peer before that window so a busy test thread pool cannot delay it.
+        var cancel = Task.Factory.StartNew(() =>
+        {
+            peerReady.Set();
+            Assert.True(cancelRequested.Wait(TimeSpan.FromSeconds(10)));
+            publication.Dispose();
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         try
         {
+            Assert.True(peerReady.Wait(TimeSpan.FromSeconds(10)));
+            cancelRequested.Set();
             Assert.Equal(OrdinaryBackingWriteAdmission.Admitted, reservation.TryAcquire(TimeSpan.FromMilliseconds(500)));
             Assert.True(cancel.Wait(TimeSpan.FromSeconds(10))); cancel.GetAwaiter().GetResult();
         }
-        finally { publication.Dispose(); Assert.True(cancel.Wait(TimeSpan.FromSeconds(10))); }
+        finally { cancelRequested.Set(); publication.Dispose(); Assert.True(cancel.Wait(TimeSpan.FromSeconds(10))); }
     }
 
     [Fact]
