@@ -72,14 +72,20 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         Assert.Equal(0.0f, Green(pixels, TargetSize - 2, 1), 3);
     }
 
-    [Fact]
-    public void APassthroughProgramThatHandsVertexValuesIsAMeshFunction()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void APassthroughProgramThatHandsVertexValuesIsAMeshFunction(bool reciprocalW)
     {
         var plain = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.Passthrough());
         Assert.Equal(Gen5MslStage.Vertex, plain.Stage);
 
-        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.Passthrough(), meshPerVertexParameterMask: 1);
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.Passthrough(), meshPerVertexParameterMask: 1,
+            clipSpace: new ShaderClipSpaceTransform { WReciprocal = reciprocalW });
         Assert.Equal(Gen5MslStage.Mesh, shader.Stage);
+        Assert.Contains("float3 sharpemu_vertex_w [[user(sharpemu_vertex_w)]];", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_mesh_vertex_w[sharpemu_tg_index] = " +
+            (reciprocalW ? "1.0f / " : string.Empty) + "sharpemu_out.sharpemu_position.w;", shader.Source, StringComparison.Ordinal);
         for (var vertex = 0; vertex < 3; vertex++)
         {
             Assert.Contains($"float4 param0_v{vertex} [[user(locn0_v{vertex})]];", shader.Source, StringComparison.Ordinal);
@@ -109,7 +115,7 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
             Gen5NggFixtures.Passthrough(), stageInfo, requiredVertexOutputCount: 8, meshPerVertexParameterMask: 0b111);
         var mesh = shader.MeshInfo!;
         const uint vertexBytes = 16 + (8 * 16) + 48;
-        const uint primitiveBytes = (3 * 48) + 16;
+        const uint primitiveBytes = (3 * 48) + 16 + 16;
         Assert.True((mesh.MaxVertices * vertexBytes) + (mesh.MaxPrimitives * primitiveBytes) <= 32768,
             $"max_v={mesh.MaxVertices} max_p={mesh.MaxPrimitives}");
         Assert.True(mesh.MaxVertices >= 3);
@@ -660,13 +666,14 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
             float4 param0_v0 [[user(locn0_v0)]];
             float4 param0_v1 [[user(locn0_v1)]];
             float4 param0_v2 [[user(locn0_v2)]];
+            float3 vertex_w [[user(sharpemu_vertex_w), flat]];
             float3 bary [[barycentric_coord, center_perspective]];
         };
 
         fragment float4 gen5_mesh_per_vertex_fs(Gen5MeshPerVertexIn in [[stage_in]])
         {
             const float3 values = float3(in.param0_v0.x, in.param0_v1.x, in.param0_v2.x);
-            return float4(values, dot(in.bary, values) - in.param0.x);
+            return float4(values, dot(in.bary, values) - in.param0.x + length(in.vertex_w - float3(1.0)));
         }
         """;
 

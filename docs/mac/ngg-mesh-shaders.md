@@ -55,6 +55,28 @@ express.
 The compiled result then has `Stage == Gen5MslStage.Mesh`, `EntryPoint == "gen5_ms"`, and a
 non-null `MeshInfo`.
 
+## Fragment barycentrics and per-primitive vertex values
+
+The pixel shader's `V_INTERP_MOV` path receives three copies of each requested parameter
+as per-primitive data. The mesh also hands over `float3 sharpemu_vertex_w`, containing the
+three vertices' clip W values in primitive index order. Reciprocal-W guest exports are
+converted to clip W before this metadata is stored. The output-size bound includes its
+16-byte aligned storage.
+
+Apple's [Metal Shading Language specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf),
+sections 5.2.3.4 and 5.4, restricts `barycentric_coord` to `center_perspective` or
+`center_no_perspective`. Ordinary user interpolants can still use sample and centroid
+qualifiers. MSL 3.2 also rejects two barycentric inputs, even with different perspective
+qualifiers; the native compiler tests cover this separately from the MSL 4.0
+`vertex_value` path.
+
+When a per-primitive pixel shader needs both modes, it receives one linear barycentric
+input and reconstructs perspective weights as `p_i = (l_i / w_i) / sum(l_j / w_j)`.
+Sample-only, centroid-only and mixed guest barycentric VGPRs use pixel-center weights.
+This avoids invalid MSL but remains an approximation for multisampled edges; it does not
+implement exact sample/centroid evaluation. The native tests compile both shader paths
+and read back perspective and linear weights with unequal clip W values.
+
 ## What the host needs: `Gen5MslMeshInfo`
 
 Everything needed to build the pipeline and launch the draw is on the compiled shader:

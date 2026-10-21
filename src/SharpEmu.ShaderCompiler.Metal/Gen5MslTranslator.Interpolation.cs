@@ -27,12 +27,18 @@ public static partial class Gen5MslTranslator
         private readonly Dictionary<uint, uint> _sharedPixelInputs = [];
 
         // The [[barycentric_coord]] qualifiers, or null when the input is not declared.
-        // Metal allows one perspective and one linear barycentric per fragment function.
+        // MSL 3.2 allows only one barycentric input; the MSL 4.0 path accepts both.
         private string? _perspectiveBarycentric;
         private string? _linearBarycentric;
 
-        private const string PerspectiveBarycentricField = "sharpemu_in.sharpemu_bary_persp";
+        private bool ReconstructPerspectiveBarycentrics => PerVertexInputsFromPrimitive &&
+            _perspectiveBarycentric is not null && _linearBarycentric is not null;
+
+        private string PerspectiveBarycentricField => ReconstructPerspectiveBarycentrics
+            ? "sharpemu_bary_persp"
+            : "sharpemu_in.sharpemu_bary_persp";
         private const string LinearBarycentricField = "sharpemu_in.sharpemu_bary_linear";
+        private const string VertexWInputName = "sharpemu_vertex_w";
 
         private static readonly string[] VertexIndexNames = ["first", "second", "third"];
 
@@ -143,29 +149,22 @@ public static partial class Gen5MslTranslator
             }
 
             // A V_INTERP_P1/P2 over a per-vertex slot reads the I/J barycentrics from the
-            // input VGPRs, so those are seeded from [[barycentric_coord]]. Metal declares
-            // one barycentric per perspective mode at one location, so when a program
-            // enables several locations of a mode the pixel center wins; they differ only
-            // on a multisampled target.
+            // input VGPRs, so those are seeded from [[barycentric_coord]]. MSL 3.2 only
+            // accepts center_perspective/center_no_perspective on these built-ins, even
+            // when SAMPLE or CENTROID is the only enabled guest location. Use the same
+            // center approximation as mixed locations; exact multisample locations need
+            // a separate implementation. Ordinary user interpolants keep their qualifiers.
             var enabled = EnabledPixelInputs;
             if ((enabled & 0xFu) != 0 || _perVertexSourcedAttributes.ContainsValue(false))
             {
-                // PERSP_PULL_MODEL (bit 3) and a rebuilt smooth slot are pixel-center values.
-                _perspectiveBarycentric = BarycentricLocation(enabled | ((enabled & 0x8u) >> 2), 0) + "perspective";
+                _perspectiveBarycentric = "center_perspective";
             }
 
             if ((enabled & 0x70u) != 0)
             {
-                _linearBarycentric = BarycentricLocation(enabled, 4) + "no_perspective";
+                _linearBarycentric = "center_no_perspective";
             }
         }
-
-        // The location of one perspective mode's SAMPLE/CENTER/CENTROID inputs
-        // (bits first, first + 1, first + 2): the center unless only others are enabled.
-        private static string BarycentricLocation(uint enabled, int first) =>
-            (enabled & (2u << first)) != 0 || (enabled & (5u << first)) == 0
-                ? "center_"
-                : (enabled & (4u << first)) != 0 ? "centroid_" : "sample_";
 
         /// <summary>The Gen5PsIn members for the V_INTERP slots and the pixel system inputs.</summary>
         private void EmitPixelInputMembers(StringBuilder source)
@@ -211,7 +210,11 @@ public static partial class Gen5MslTranslator
                     $"[[user({InterpolantName(interpolant.Location, interpolant.Kind)}){mode}]];");
             }
 
-            if (_perspectiveBarycentric is not null)
+            if (ReconstructPerspectiveBarycentrics)
+            {
+                source.AppendLine($"    float3 sharpemu_vertex_w [[user({VertexWInputName}), flat]];");
+            }
+            else if (_perspectiveBarycentric is not null)
             {
                 source.AppendLine($"    float3 sharpemu_bary_persp [[barycentric_coord, {_perspectiveBarycentric}]];");
             }
@@ -238,6 +241,17 @@ public static partial class Gen5MslTranslator
             {
                 source.AppendLine("    uint sharpemu_sample_mask [[sample_mask]];");
             }
+        }
+
+        private void EmitBarycentricReconstruction(StringBuilder source)
+        {
+            if (!ReconstructPerspectiveBarycentrics) return;
+
+            // Perspective weights are (linear_i / clip_w_i) / sum(linear_j / clip_w_j).
+            // The mesh hands clip W in primitive vertex order, so the 3.2 fragment needs
+            // only one built-in instead of the illegal pair of barycentric declarations.
+            source.AppendLine($"    float3 sharpemu_bary_persp = {LinearBarycentricField} / sharpemu_in.sharpemu_vertex_w;");
+            source.AppendLine("    sharpemu_bary_persp /= dot(sharpemu_bary_persp, float3(1.0f));");
         }
 
         private string PixelInputField(uint attribute) =>
