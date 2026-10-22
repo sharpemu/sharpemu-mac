@@ -2111,6 +2111,11 @@ internal sealed partial class MetalRenderHost
                 SelectFacePass(pass);
             }
 
+            if (DiagSkipMesh(entry, mesh))
+            {
+                continue;
+            }
+
             MetalNative.SendDrawMesh(
                 _renderEncoder,
                 SelDrawMeshThreadgroups,
@@ -2120,6 +2125,47 @@ internal sealed partial class MetalRenderHost
         }
 
         EndFacePasses(entry, passes);
+    }
+
+    // DIAG (speckle bisect): SHARPEMU_DIAG_MESH_SKIP is a comma list of vertex-stage hashes (hex) and the
+    // words narrow / wide / gs / all; a mesh draw whose pipeline matches is not launched.
+    private static readonly string[] DiagMeshSkip =
+        (Environment.GetEnvironmentVariable("SHARPEMU_DIAG_MESH_SKIP") ?? "")
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, int> DiagMeshSkipCounts = new();
+
+    private static bool DiagSkipMesh(MetalPipelineEntry entry, Gen5MslMeshInfo mesh)
+    {
+        if (DiagMeshSkip.Length == 0)
+        {
+            return false;
+        }
+
+        var hash = entry.MeshHash;
+        foreach (var token in DiagMeshSkip)
+        {
+            var hit = token switch
+            {
+                "all" => true,
+                "narrow" => mesh.NarrowWave64,
+                "wide" => !mesh.NarrowWave64 && !mesh.HasGeometryHalf,
+                "gs" => mesh.HasGeometryHalf,
+                _ => ulong.TryParse(token.Replace("0x", ""), System.Globalization.NumberStyles.HexNumber, null, out var value) && value == hash,
+            };
+            if (hit)
+            {
+                var n = DiagMeshSkipCounts.AddOrUpdate(hash, 1, (_, c) => c + 1);
+                if ((n & (n - 1)) == 0)
+                {
+                    Console.Error.WriteLine($"[DIAG][MESH-SKIP] vs=0x{hash:X16} narrow={(mesh.NarrowWave64 ? 1 : 0)} count={n}");
+                }
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private MetalMeshletCache? _meshletCache;

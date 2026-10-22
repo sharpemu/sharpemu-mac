@@ -469,6 +469,11 @@ internal sealed partial class MetalRenderHost
                 SelectFacePass(pass);
             }
 
+            if (DiagSkipMesh(entry, mesh))
+            {
+                continue;
+            }
+
             MetalV2Native.SendDrawMeshIndirect(
                 _renderEncoder,
                 SelDrawMeshIndirect,

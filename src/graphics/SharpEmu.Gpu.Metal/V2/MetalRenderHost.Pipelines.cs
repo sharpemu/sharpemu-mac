@@ -39,6 +39,7 @@ internal sealed partial class MetalRenderHost
         // Set when the vertex program is an NGG primitive shader compiled as a Metal
         // mesh function; the draw then launches threadgroups instead of vertices.
         public Gen5MslMeshInfo? Mesh;
+        public ulong MeshHash;
 
         // Set for a rectangle list: the pipeline state per control-point index type
         // (none, 16-bit, 32-bit; the indexed ones are built when a draw first uses them,
@@ -733,6 +734,7 @@ internal sealed partial class MetalRenderHost
             HasDepth = depthFormatOf(description) != MtlFormat.Invalid,
             HasStencil = description.Rendering.StencilFormat != GpuFormat.Undefined,
             Mesh = mesh,
+            MeshHash = mesh is null ? 0 : vertexModule.Hash,
             RectangleStates = compiled.RectangleStates,
             RectangleVertexStrides = rectangleList ? RectangleVertexStrides(description.VertexInput) : null,
             WritesViewportIndex = vertexModule.Shader.WritesViewportIndex,
