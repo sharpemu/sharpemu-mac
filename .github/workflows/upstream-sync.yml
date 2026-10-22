@@ -41,7 +41,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Full history: the fast-forward and merge-base checks below need it,
           # and a shallow clone cannot merge an unrelated upstream history.
