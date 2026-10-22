@@ -435,6 +435,9 @@ internal sealed partial class MetalRenderHost
                 if (TryDescribeDumpFormat(format, out var sourceBytes, out var convert))
                 {
                     var source = DumpSpan(contents, (int)((ulong)sourceBytes * width * height));
+                    Directory.CreateDirectory(_dumpTargetsDirectory!);
+                    var rawLabel = new string(label.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '-').ToArray());
+                    File.WriteAllBytes(Path.Combine(_dumpTargetsDirectory!, $"{rawLabel}-{width}x{height}-fmt{format}.raw"), source.ToArray());
                     var rgba = new byte[(int)(4UL * width * height)];
                     convert(source, rgba);
                     _dumpsByTexture.TryGetValue(texture, out var seen);
@@ -735,6 +738,20 @@ internal sealed partial class MetalRenderHost
                         target[i + 1] = c1;
                         target[i + 2] = blueFirst ? c0 : c2;
                         target[i + 3] = (byte)(((packed >> 30) & 3) * 85);
+                    }
+                };
+                return true;
+            case MtlFormat.Rgba32Float:
+                sourceBytes = 16;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0, o = 0; i + 15 < source.Length; i += 16, o += 4)
+                    {
+                        for (var c = 0; c < 4; c++)
+                        {
+                            var value = BitConverter.UInt32BitsToSingle(BinaryPrimitives.ReadUInt32LittleEndian(source[(i + c * 4)..]));
+                            target[o + c] = (byte)Math.Clamp(value * 255f, 0f, 255f);
+                        }
                     }
                 };
                 return true;

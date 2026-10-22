@@ -348,6 +348,7 @@ internal sealed partial class MetalRenderHost
     private nint CompileLibrary(
         string source, ulong hash, bool usesPerVertexInputs, bool prewarmable, out UInt128 archiveKey, out UInt128 sourceKey)
     {
+        source = ProbeSource(source, hash);
         if (!PipelineDedupe)
         {
             sourceKey = default;

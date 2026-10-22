@@ -1350,6 +1350,7 @@ internal sealed partial class MetalRenderHost
                 : Mtl.RenderStageVertex | Mtl.RenderStageFragment;
             BindStageBuffers(_renderEncoder, StageVertex, meshStage ? SelSetMeshBuffer : SelSetVertexBuffer);
             BindStageBuffers(_renderEncoder, StageFragment, SelSetFragmentBuffer);
+            BindProbe();
             NameResidentBuffers(_renderEncoder, _guestMemory.ResidentBuffers, stages);
 
             for (var index = 0; index < _usedResourceCount; index++)

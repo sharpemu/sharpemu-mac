@@ -62,6 +62,7 @@ internal sealed partial class MetalRenderHost
         }
 
         ProfileCommandBuffer(kind, entry.Profile ?? "stage=?", shape);
+        DrainProbe(kind);
     }
 
     // What a draw or dispatch looked like, formatted only when a profiler or the target dump
