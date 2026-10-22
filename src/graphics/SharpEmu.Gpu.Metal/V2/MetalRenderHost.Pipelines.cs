@@ -1483,6 +1483,8 @@ internal sealed partial class MetalRenderHost
     // The depth/stencil state object: Metal keeps the compare functions, the write
     // enable and the stencil masks in one immutable object, while the executor hands
     // the masks over as dynamic state, so the object is cached on the pair.
+    private static readonly string? _diagDepthEqual = Environment.GetEnvironmentVariable("SHARPEMU_DIAG_DEPTH_EQUAL");
+
     private nint GetDepthStencilState(MetalPipelineEntry entry, in DynamicDrawState state)
     {
         var parameters = entry.StaticParameters;
@@ -1504,8 +1506,25 @@ internal sealed partial class MetalRenderHost
 
         try
         {
+            var requestedCompare = state.DepthCompare;
+            if (requestedCompare == GpuCompareOp.Equal && entry.HasDepth && state.DepthTestEnabled &&
+                _diagDepthEqual is { Length: > 0 })
+            {
+                // SHARPEMU_DIAG_DEPTH_EQUAL=log reports each pipeline that tests depth for equality;
+                // =gequal / =lequal test for "at or in front of" instead (reversed-Z / forward-Z), which a
+                // prepass duplicate passes even when its depth differs from the prepass by an ulp.
+                Console.Error.WriteLine(
+                    $"[DIAG][DEPTHEQ] {entry.Profile} mode={_diagDepthEqual}");
+                requestedCompare = _diagDepthEqual switch
+                {
+                    "gequal" => GpuCompareOp.GreaterOrEqual,
+                    "lequal" => GpuCompareOp.LessOrEqual,
+                    _ => GpuCompareOp.Equal,
+                };
+            }
+
             var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreFragmentTests
-                ? MetalV2Formats.CompareFunction(state.DepthCompare)
+                ? MetalV2Formats.CompareFunction(requestedCompare)
                 : MetalV2Formats.CompareFunction(GpuCompareOp.Always);
             MetalV2Native.SendVoidValue(descriptor, MetalNative.Selector("setDepthCompareFunction:"), depthCompare);
             MetalNative.SendVoidBool(
