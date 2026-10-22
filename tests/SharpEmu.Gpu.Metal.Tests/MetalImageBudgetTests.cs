@@ -487,6 +487,11 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         public bool WaitForSubmissionOffWorker(ulong serial, int timeoutMilliseconds) =>
             WaitOffWorker?.Invoke(serial, timeoutMilliseconds) ?? CompletedSerial >= serial;
+
+        // What the GPU worker does with work a guest thread hands it; a test supplies it.
+        public Func<Action, bool>? RunOnWorker { get; set; }
+
+        public bool TryRunOnWorker(Action work) => RunOnWorker?.Invoke(work) ?? false;
     }
 
     private sealed class Rig : IDisposable

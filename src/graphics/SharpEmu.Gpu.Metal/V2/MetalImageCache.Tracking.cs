@@ -331,6 +331,13 @@ internal sealed partial class MetalImageCache
         }
 
         CountLockedCpuWrite(mayOwn);
+        if (mayOwn)
+        {
+            // A GPU-written image's bytes reach guest memory before the store lands over them
+            // (MetalImageCache.CpuStores.cs).
+            PublishBeforeCpuStore(address, size);
+        }
+
         using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
         var imageHit = mayOwn && InvalidateAliases(address, size);

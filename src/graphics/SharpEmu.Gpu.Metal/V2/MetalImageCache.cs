@@ -59,6 +59,10 @@ internal interface IMetalImageCacheOwner
     // did not complete in time, or when called on the worker, which would wait for itself.
     bool WaitForSubmissionOffWorker(ulong serial, int timeoutMilliseconds) => CompletedSerial >= serial;
 
+    // Hands work to the GPU worker from another thread without waiting for it. False when it
+    // was not handed over: on the worker itself, or with the worker gone.
+    bool TryRunOnWorker(Action work) => false;
+
     void ClearTextureColor(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height, in GpuClearColor color);
 
     void ClearTextureDepthStencil(
