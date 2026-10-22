@@ -736,6 +736,12 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         return (linear.Offset + copy.BufferOffset, RowBytes(plan, rowTexels), rows);
     }
 
+    public MetalGuestRange AcquireTrackedScratch(IMetalSubmissionContext context, ulong size)
+    {
+        var staging = _tiler.Acquire(context, size);
+        return new MetalGuestRange(staging.Buffer, staging.Offset, size, 0);
+    }
+
     public void EncodeBufferCopies(
         IMetalSubmissionContext context, ReadOnlySpan<(MetalGuestRange From, MetalGuestRange To)> copies)
     {

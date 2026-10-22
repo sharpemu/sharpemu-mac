@@ -68,10 +68,13 @@ internal sealed partial class MetalImageCache
         Full,
         // The writeback could not be recorded.
         Failed,
-        // The writeback left some bytes behind: no run could carry them.
+        // A writeback left some bytes behind: no run could carry them. The rounds go on, and a
+        // store counts this once however many of its images fell short.
         Partial,
         // The GPU kept writing the range for every round.
         Rounds,
+        // The host is shutting down. Counted, but not as a loss: nothing reads the image again.
+        Shutdown,
     }
 
     private static class StoreRequestState
@@ -89,14 +92,21 @@ internal sealed partial class MetalImageCache
         public ulong Serial;
         public int Count;
         public int TakeTimeoutMilliseconds;
-        // A failed request: why, and the image whose writeback fell short.
-        public StorePublishFallback Shortfall;
+        // A failed request's image, whose writeback recorded nothing.
         public ImageDescription Unwritten;
+        // The images whose writebacks left bytes behind.
+        public int PartialCount;
+        public readonly ImageDescription[] Partials = new ImageDescription[MaxImagesPerStoreRequest];
         public readonly ResourceSlotIdentifier[] Images = new ResourceSlotIdentifier[MaxImagesPerStoreRequest];
     }
 
-    /// <summary>A store that took the old path, reported once the cache lock is let go.</summary>
-    internal readonly record struct StoreFallback(StorePublishFallback Reason, ulong Address, ImageDescription? Unwritten);
+    /// <summary>
+    /// A store that lost some of what the GPU wrote, reported once the cache lock is let go:
+    /// the reason it took the old path, if it did, the image that recorded nothing, and the
+    /// images whose writebacks left bytes behind.
+    /// </summary>
+    internal readonly record struct StoreFallback(
+        StorePublishFallback? Reason, ulong Address, ImageDescription? Unwritten, List<ImageDescription>? Partials);
 
     private readonly StoreRequest[] _storeRequests = CreateStoreRequests();
     private readonly object _storeRequestGate = new();
@@ -131,11 +141,14 @@ internal sealed partial class MetalImageCache
         Interlocked.Read(ref _storeFallbacks[(int)StorePublishFallback.Failed]),
         Interlocked.Read(ref _storeFallbacks[(int)StorePublishFallback.Partial]),
         Interlocked.Read(ref _storeFallbacks[(int)StorePublishFallback.Rounds]),
+        Interlocked.Read(ref _storeFallbacks[(int)StorePublishFallback.Shutdown]),
         Interlocked.Read(ref _storeCompletionStalls));
 
     internal readonly record struct StorePublishCounters(
-        long Writebacks, long Worker, long Hung, long Full, long Failed, long Partial, long Rounds, long CompletionStalls)
+        long Writebacks, long Worker, long Hung, long Full, long Failed, long Partial, long Rounds, long Shutdown,
+        long CompletionStalls)
     {
+        // Shutdown is left out: a store cut short by teardown loses nothing anyone reads.
         public long Fallbacks => Worker + Hung + Full + Failed + Partial + Rounds;
     }
 
@@ -144,7 +157,7 @@ internal sealed partial class MetalImageCache
         var counts = StorePublishCounts;
         return $" wb_before_store_total={counts.Writebacks} wb_before_store_fallbacks_total={counts.Fallbacks} " +
             $"(worker={counts.Worker} hung={counts.Hung} full={counts.Full} failed={counts.Failed} " +
-            $"partial={counts.Partial} rounds={counts.Rounds}) " +
+            $"partial={counts.Partial} rounds={counts.Rounds}) wb_before_store_shutdown_total={counts.Shutdown} " +
             $"wb_before_store_stalls_total={counts.CompletionStalls} " +
             $"wb_before_store_take_max_ms={Milliseconds(Interlocked.Read(ref _storeTakeMaxTicks)):F1} " +
             $"wb_before_store_blocked_ms_total={Milliseconds(Interlocked.Read(ref _storeBlockedTicks)):F1} " +
@@ -190,30 +203,31 @@ internal sealed partial class MetalImageCache
 
     private StoreFallback? PublishRoundsLocked(ulong address, ulong size, bool managedWrite, bool exact)
     {
+        List<ImageDescription>? partials = null;
         for (var round = 0; !_watchingStopped; round++)
         {
             if (!HasGpuWrittenImageLocked(address, size, exact))
             {
-                return null;
+                break;
             }
 
             if (round == MaxStorePublishRounds)
             {
-                return NoteStoreFallback(StorePublishFallback.Rounds, address);
+                return NoteStoreFallback(StorePublishFallback.Rounds, address, null, partials);
             }
 
             if (RequestStorePublishLocked(address, size, exact) is not { } request)
             {
-                return NoteStoreFallback(StorePublishFallback.Full, address);
+                return NoteStoreFallback(StorePublishFallback.Full, address, null, partials);
             }
 
             var completed = false;
-            var handedOver = false;
+            var withdrawn = StorePublishFallback.Worker;
             var returned = false;
             _lock.Exit();
             try
             {
-                completed = AwaitStoreRequest(request, managedWrite, out handedOver);
+                completed = AwaitStoreRequest(request, managedWrite, out withdrawn);
                 returned = true;
             }
             finally
@@ -231,33 +245,43 @@ internal sealed partial class MetalImageCache
             {
                 // Withdrawn under the lock: the worker can no longer write it back after the store.
                 FreeStoreRequestLocked(request);
-                return NoteStoreFallback(handedOver ? StorePublishFallback.Hung : StorePublishFallback.Worker, address);
+                return NoteStoreFallback(withdrawn, address, null, partials);
             }
 
             if (!completed)
             {
                 // Taken after the wait gave up on it: its writeback is recorded, and lands first.
+                var waited = false;
                 _lock.Exit();
                 try
                 {
                     WaitForStoreWriteback(request.Serial);
+                    waited = true;
                 }
                 finally
                 {
                     _lock.Enter();
+                    if (!waited)
+                    {
+                        FreeStoreRequestLocked(request);
+                    }
                 }
             }
 
-            var shortfall = request.Shortfall;
+            for (var index = 0; index < request.PartialCount; index++)
+            {
+                (partials ??= []).Add(request.Partials[index]);
+            }
+
             var unwritten = request.Unwritten;
             FreeStoreRequestLocked(request);
             if (state == StoreRequestState.Failed)
             {
-                return NoteStoreFallback(shortfall, address, unwritten);
+                return NoteStoreFallback(StorePublishFallback.Failed, address, unwritten, partials);
             }
         }
 
-        return null;
+        return NoteStoreFallback(null, address, null, partials);
     }
 
     private bool HasGpuWrittenImageLocked(ulong address, ulong size, bool exact)
@@ -318,14 +342,16 @@ internal sealed partial class MetalImageCache
 
         request.Count = 0;
         request.Unwritten = default;
+        request.PartialCount = 0;
         Volatile.Write(ref request.State, StoreRequestState.Free);
     }
 
     // Outside the lock. True when the request was taken and its writeback has completed; false
     // when it is still pending (withdrawn by the caller) or was taken too late to be waited for here.
-    private bool AwaitStoreRequest(StoreRequest request, bool managedWrite, out bool handedOver)
+    private bool AwaitStoreRequest(StoreRequest request, bool managedWrite, out StorePublishFallback withdrawn)
     {
-        handedOver = false;
+        // Why the store takes the old path if the request is still pending on return.
+        withdrawn = StorePublishFallback.Worker;
         if (_owner.IsWorkerThread)
         {
             // A managed write the worker makes itself, between packets: it can record the
@@ -336,7 +362,7 @@ internal sealed partial class MetalImageCache
                 return false;
             }
 
-            handedOver = true;
+            withdrawn = StorePublishFallback.Hung;
             ServiceStoreRequests();
             if (Volatile.Read(ref request.State) != StoreRequestState.Pending)
             {
@@ -353,7 +379,7 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
-        handedOver = true;
+        withdrawn = StorePublishFallback.Hung;
         var deadline = Environment.TickCount64 + request.TakeTimeoutMilliseconds;
         lock (_storeRequestGate)
         {
@@ -362,7 +388,7 @@ internal sealed partial class MetalImageCache
                 if (_watchingStopped || HostSessionControl.IsShutdownRequested)
                 {
                     // The worker is going away, not hung.
-                    handedOver = false;
+                    withdrawn = StorePublishFallback.Shutdown;
                     return false;
                 }
 
@@ -440,12 +466,17 @@ internal sealed partial class MetalImageCache
                         continue;
                     }
 
-                    // Recorded nothing (the image stays GPU-written), or left bytes behind.
-                    if (!failed || outcome == MetalWritebackOutcome.Failed)
+                    if (outcome == MetalWritebackOutcome.Partial)
                     {
-                        request.Shortfall = outcome == MetalWritebackOutcome.Failed
-                            ? StorePublishFallback.Failed
-                            : StorePublishFallback.Partial;
+                        // Recorded, with bytes left behind: counted, and the rounds go on.
+                        Interlocked.Increment(ref _storePublishWritebacks);
+                        request.Partials[request.PartialCount++] = image.Description;
+                        continue;
+                    }
+
+                    // Recorded nothing: the image stays GPU-written.
+                    if (!failed)
+                    {
                         request.Unwritten = image.Description;
                     }
 
@@ -468,6 +499,8 @@ internal sealed partial class MetalImageCache
         {
             Monitor.PulseAll(_storeRequestGate);
         }
+
+        FlushUnwrittenWritebackReports();
     }
 
     private void NoteStoreTakeLatency(long ticks)
@@ -502,26 +535,51 @@ internal sealed partial class MetalImageCache
     }
 
     // Counted where it happens, under the lock; the report waits for the lock to be let go.
-    private StoreFallback NoteStoreFallback(
-        StorePublishFallback reason, ulong address, ImageDescription? unwritten = null)
+    // Null when the store lost nothing.
+    private StoreFallback? NoteStoreFallback(
+        StorePublishFallback? reason, ulong address, ImageDescription? unwritten, List<ImageDescription>? partials)
     {
-        Interlocked.Increment(ref _storeFallbacks[(int)reason]);
-        return new StoreFallback(reason, address, unwritten);
+        if (reason is { } why)
+        {
+            Interlocked.Increment(ref _storeFallbacks[(int)why]);
+        }
+
+        if (partials != null)
+        {
+            Interlocked.Increment(ref _storeFallbacks[(int)StorePublishFallback.Partial]);
+        }
+
+        return reason is null && partials is null ? null : new StoreFallback(reason, address, unwritten, partials);
     }
 
     // Without the cache lock: it formats and writes to the console.
     private void ReportStoreFallback(in StoreFallback? fallback)
     {
+        FlushUnwrittenWritebackReports();
         if (fallback is not { } report)
         {
             return;
         }
 
         var unwritten = report.Unwritten is { } image ? $" unwritten={ProfileLabel("writeback", in image)}" : "";
-        ReportStorePublish(
-            $"A guest store into a GPU-written image took the old path ({report.Reason}): " +
-            $"address=0x{report.Address:X16}{unwritten}. " +
-            "The image reloads from guest memory, which does not hold what the GPU wrote.");
+        var partial = "";
+        if (report.Partials is { } partials)
+        {
+            var labels = new string[partials.Count];
+            for (var index = 0; index < labels.Length; index++)
+            {
+                labels[index] = ProfileLabel("writeback", partials[index]);
+            }
+
+            partial = $" partial=[{string.Join("; ", labels)}]";
+        }
+
+        ReportStorePublish(report.Reason is { } reason
+            ? $"A guest store into a GPU-written image took the old path ({reason}): " +
+              $"address=0x{report.Address:X16}{unwritten}{partial}. " +
+              "The image reloads from guest memory, which does not hold what the GPU wrote."
+            : $"A guest store landed over GPU-written images whose writebacks left bytes behind (Partial): " +
+              $"address=0x{report.Address:X16}{partial}. Those bytes reload from guest memory.");
     }
 
     private void ReportStorePublish(string message)

@@ -106,11 +106,21 @@ public sealed partial class MetalImageBudgetTests
         var other = AGpuWrittenImageOverStaleMemory(rig, OtherImage, 0x6B, out _);
         var stale = rig.ReadGuest(GuestBase, ImageSize);
         var posted = new List<Action>();
+        using var release = new ManualResetEventSlim();
         rig.CacheOwner.RunOnWorker = work =>
         {
+            int count;
             lock (posted)
             {
                 posted.Add(work);
+                count = posted.Count;
+            }
+
+            // The other store is held here, its request made, until this one has given up: its
+            // wait for the worker begins after the timeout is lowered and keeps its request's own.
+            if (count == 1)
+            {
+                Assert.True(release.Wait(10_000));
             }
 
             return true;
@@ -137,6 +147,9 @@ public sealed partial class MetalImageBudgetTests
         Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase + StoreOffset, 8));
         Assert.Equal(1L, rig.Cache.StorePublishCounts.Hung);
         Assert.False(rig.Cache.GetImage(first).IsGpuModified);
+        release.Set();
+        // Far past the lowered timeout, which the other store's wait must not use.
+        Thread.Sleep(200);
 
         // The worker taking the first request still publishes the other store's image, and only that.
         posted[0]();
@@ -305,8 +318,6 @@ public sealed partial class MetalImageBudgetTests
         // Its one slice is in 64 KB pieces no window holds together: staged, and carried whole.
         Assert.Equal((1L, 0L), (counts.Writebacks, counts.Fallbacks));
         Assert.True(carry.StagedRuns > 0);
-        Assert.Equal((0L, 0L), (carry.Partial, carry.Unrecorded));
-        Assert.Equal(whole, scattered);
     }
 
     [Fact]
@@ -329,14 +340,136 @@ public sealed partial class MetalImageBudgetTests
         rig.CacheOwner.WaitOffWorker = SubmitAndComplete(rig);
 
         Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase + StoreOffset, 8));
-        Assert.Equal((0L, 1L), (rig.Cache.StorePublishCounts.Writebacks, rig.Cache.StorePublishCounts.Partial));
-        Assert.Equal(1L, rig.Cache.WritebackCarryCounts.Partial);
+        Assert.Equal((1L, 1L), (rig.Cache.StorePublishCounts.Writebacks, rig.Cache.StorePublishCounts.Partial));
+        Assert.Equal((1L, 1L), (rig.Cache.StorePublishCounts.Fallbacks, rig.Cache.WritebackCarryCounts.Partial));
         Assert.False(rig.Cache.GetImage(identifier).IsGpuModified);
 
         // Every byte a window holds is the GPU's; the page no window holds keeps the old ones.
         var expected = (byte[])gpu.Clone();
         Array.Copy(stale, (int)hole, expected, (int)hole, 0x1000);
         Assert.Equal(expected, rig.ReadGuest(GuestBase, ImageSize));
+    }
+
+    [Fact]
+    public void APartialWritebackLetsTheRoundsGoOnForWhatTheGpuWritesMeanwhile()
+    {
+        if (!RequireDevice()) return;
+        const ulong hole = 0x2000;
+        using var rig = new Rig(Device.Value, layout: backing =>
+        {
+            backing.HoleStart = GuestBase + hole;
+            backing.HoleBytes = 0x1000;
+        });
+        _ = AGpuWrittenImageOverStaleMemory(rig, GuestBase, 0x5A, out var identifier);
+        var stale = rig.ReadGuest(GuestBase, ImageSize);
+        var rewritten = MetalTileOracle.Pattern((int)ImageSize, 0x2B);
+        var takes = 0;
+        rig.CacheOwner.RunOnWorker = work =>
+        {
+            work();
+            if (takes++ == 0)
+            {
+                // Written again by the GPU while the store waits for the first, partial writeback.
+                rig.Harness.Submit();
+                rig.Harness.Begin();
+                rig.WriteGuest(GuestBase, rewritten);
+                rig.Cache.InvalidateMemory(GuestBase, ImageSize);
+                Assert.Equal(identifier, rig.Acquire(GuestBase, ImageRole.ColorTarget));
+                rig.Harness.Submit();
+                rig.Harness.Begin();
+                rig.WriteGuest(GuestBase, stale);
+            }
+
+            return true;
+        };
+        rig.CacheOwner.WaitOffWorker = SubmitAndComplete(rig);
+
+        Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase + StoreOffset, 8));
+        Assert.Equal(2, takes);
+        Assert.Equal((2L, 1L), (rig.Cache.StorePublishCounts.Writebacks, rig.Cache.StorePublishCounts.Partial));
+        Assert.Equal((1L, 2L), (rig.Cache.StorePublishCounts.Fallbacks, rig.Cache.WritebackCarryCounts.Partial));
+        Assert.False(rig.Cache.GetImage(identifier).IsGpuModified);
+        var expected = (byte[])rewritten.Clone();
+        Array.Copy(stale, (int)hole, expected, (int)hole, 0x1000);
+        Assert.Equal(expected, rig.ReadGuest(GuestBase, ImageSize));
+    }
+
+    [Fact]
+    public void AStagedWritebackKeepsTheGuestBytesTheRetileDoesNotWrite()
+    {
+        if (!RequireDevice()) return;
+        var description = Request(MipChain, 0).Description;
+        var whole = MipChainAfterAStore(layout: null, out var stale, out _);
+        var scattered = MipChainAfterAStore(
+            backing =>
+            {
+                backing.ScatterStart = MipChain;
+                backing.ScatterBytes = description.Data.Size;
+                backing.ScatterChunk = 0x1000;
+            },
+            out _, out var carry);
+
+        // No 64 KB block fits a 4 KB piece, so every run is staged; the slack in the mip
+        // tail is no texel's, and keeps what guest memory held.
+        Assert.True(carry.StagedRuns > 0);
+        Assert.Equal((0L, 0L), (carry.Partial, carry.Unrecorded));
+        Assert.Equal(whole, scattered);
+        var covered = MetalImageTransferTests.FidelityCoverage(in description, 0).Data;
+        var slack = Enumerable.Range(0, covered.Length).Where(i => !covered[i]).ToArray();
+        Assert.NotEmpty(slack);
+        Assert.True(slack.All(i => scattered[i] == stale[i]));
+        Assert.NotEqual(stale, scattered);
+    }
+
+    [Fact]
+    public void ABackedManagedWritePublishesOnlyTheImagesOverItsBytes()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        // Two images sharing the page 0x4000-0x5000 without sharing a byte.
+        var written = AGpuWrittenImageOverStaleMemory(rig, GuestBase + 0x800, 0x5A, out var first);
+        _ = AGpuWrittenImageOverStaleMemory(rig, GuestBase + 0x4800, 0x6B, out var second);
+        rig.CacheOwner.RunOnWorker = work =>
+        {
+            work();
+            return true;
+        };
+        rig.CacheOwner.WaitOffWorker = SubmitAndComplete(rig);
+
+        Assert.True(((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(GuestBase + 0x4700, 8));
+        Assert.Equal((1L, 0L), (rig.Cache.StorePublishCounts.Writebacks, rig.Cache.StorePublishCounts.Fallbacks));
+        Assert.Equal(written, rig.ReadGuest(GuestBase + 0x800, ImageSize));
+        Assert.False(rig.Cache.GetImage(first).IsGpuModified);
+        Assert.True(rig.Cache.GetImage(second).IsGpuModified);
+    }
+
+    private const ulong MipChain = GuestBase + 0x100000;
+
+    // The guest bytes under a GPU-written 256² RGBA8 nine-level chain in 64 KB tiles once a
+    // store into it has landed, its backing laid out as given; and what guest memory held
+    // before the writeback.
+    private byte[] MipChainAfterAStore(
+        Action<Backing>? layout, out byte[] stale, out (long StagedRuns, long Partial, long Unrecorded) carry)
+    {
+        using var rig = new Rig(Device.Value, layout: layout);
+        var (identifier, _) = AcquireMipped(rig, MipChain, 0, 0x3D);
+        rig.Cache.MarkGpuWritten(identifier);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        var size = (int)rig.Cache.GetImage(identifier).Description.Data.Size;
+        stale = MetalTileOracle.Pattern(size, 0xC2);
+        rig.WriteGuest(MipChain, stale);
+        rig.CacheOwner.RunOnWorker = work =>
+        {
+            work();
+            return true;
+        };
+        rig.CacheOwner.WaitOffWorker = SubmitAndComplete(rig);
+
+        Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(MipChain + StoreOffset, 8));
+        Assert.Equal((1L, 0L), (rig.Cache.StorePublishCounts.Writebacks, rig.Cache.StorePublishCounts.Fallbacks));
+        carry = rig.Cache.WritebackCarryCounts;
+        return rig.ReadGuest(MipChain, (ulong)size);
     }
 
     private const ulong ShadowMap = GuestBase + 0x100000;

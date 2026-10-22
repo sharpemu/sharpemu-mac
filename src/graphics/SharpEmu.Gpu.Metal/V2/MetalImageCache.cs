@@ -2418,7 +2418,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         ref readonly var description = ref image.Description;
         var address = description.Data.Address;
         var runs = new List<UploadRun>();
-        var uncovered = PlanUploadRuns(
+        // What no run is planned for shows as written falling short of the range below.
+        _ = PlanUploadRuns(
             _transfer, in description, from, to, MaxTransferPieceBytes,
             (offset, size) => _guestMemory.ResolveWritablePrefix(address + offset, size).Size, runs);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
@@ -2454,34 +2455,79 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 carried = WriteBackStaged(context, image, range, run.Offset, run.Size, stencil);
             }
 
+            if (carried < run.Size)
+            {
+                trace ??= Opened(from, written);
+            }
+
+            if (trace != null)
+            {
+                Trace(trace, carried == run.Size ? (run.Staged ? "staged" : "run") : "lost", run.Offset, run.Size);
+            }
+
             written += carried;
-            uncovered += run.Size - carried;
-            trace ??= new StringBuilder();
-            Trace(trace, carried == run.Size ? (run.Staged ? "staged" : "run") : "lost", run.Offset, run.Size);
         }
 
         var size = Math.Min(to, description.Data.Size);
-        if (written < size - from && Interlocked.Increment(ref _unwrittenWritebackReports) <= MaxUnwrittenWritebackReports)
+        if (written < size - from && TryTakeUnwrittenWritebackReport(out var suppressed))
         {
             // Counted from what the runs carried rather than from the steps over holes:
             // a block row the boundary falls inside is not carried either, and saying so
-            // is how a surface that comes out part stale is recognised.
-            Console.Error.WriteLine(
-                $"[METAL-V2][WARN] A GPU-written image has guest bytes no run covers, so those stay in the texture: " +
-                $"address=0x{address + from:X16} size=0x{size - from:X} " +
-                $"unwritten=0x{size - from - written:X} " +
-                $"{ProfileLabel("writeback", in description)} runs=[{trace}] " +
-                $"({_guestMemory.DescribeResolve(address, description.Data.Size)}).");
+            // is how a surface that comes out part stale is recognised. Written once the
+            // cache lock is let go (FlushUnwrittenWritebackReports).
+            _unwrittenWritebackReports.Enqueue(new UnwrittenWritebackReport(
+                address + from, size - from, size - from - written, description, trace?.ToString() ?? "", suppressed));
         }
 
         return written;
     }
 
-    // A writeback run no window holds whole: the texture is retiled into ring scratch and
-    // the scratch copied into each backed piece of the run, all on the GPU in this command
+    private readonly record struct UnwrittenWritebackReport(
+        ulong Address, ulong Size, ulong Unwritten, ImageDescription Description, string Runs, long Suppressed);
+
+    private readonly System.Collections.Concurrent.ConcurrentQueue<UnwrittenWritebackReport> _unwrittenWritebackReports = new();
+    private long _lastUnwrittenWritebackReport;
+    private long _suppressedUnwrittenWritebackReports;
+
+    // At most one report a second; the next one says how many it stands for.
+    private bool TryTakeUnwrittenWritebackReport(out long suppressed)
+    {
+        suppressed = 0;
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var last = Interlocked.Read(ref _lastUnwrittenWritebackReport);
+        if ((last != 0 && now - last < System.Diagnostics.Stopwatch.Frequency) ||
+            Interlocked.CompareExchange(ref _lastUnwrittenWritebackReport, now, last) != last)
+        {
+            Interlocked.Increment(ref _suppressedUnwrittenWritebackReports);
+            return false;
+        }
+
+        suppressed = Interlocked.Exchange(ref _suppressedUnwrittenWritebackReports, 0);
+        return true;
+    }
+
+    // Without the cache lock: formats and writes the reports writebacks queued under it.
+    private void FlushUnwrittenWritebackReports()
+    {
+        while (_unwrittenWritebackReports.TryDequeue(out var report))
+        {
+            var description = report.Description;
+            Console.Error.WriteLine(
+                $"[METAL-V2][WARN] A GPU-written image has guest bytes no run covers, so those stay in the texture: " +
+                $"address=0x{report.Address:X16} size=0x{report.Size:X} unwritten=0x{report.Unwritten:X} " +
+                $"{ProfileLabel("writeback", in description)} runs=[{report.Runs}] " +
+                $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)})" +
+                (report.Suppressed != 0 ? $"; {report.Suppressed} more since the last report." : "."));
+        }
+    }
+
+    // A writeback run no window holds whole: the texture is retiled into scratch and the
+    // scratch copied into each backed piece of the run, all on the GPU in this command
     // buffer, and the caller notes and fences the image's range as for any writeback. The
     // scratch first takes the guest's bytes, so a byte of the run the retile does not write
-    // keeps its value, as it does in place. Returns the run bytes carried: every backed one.
+    // keeps its value, as it does in place. The scratch is a hazard-tracked staging buffer,
+    // so Metal orders the three passes through it (each reads or writes it); the guest ring
+    // and windows are untracked. Returns the run bytes carried: every backed one.
     private ulong WriteBackStaged(
         IMetalSubmissionContext context, MetalCachedImage image, SubresourceRange range, ulong offset, ulong size,
         MetalGuestRange stencil)
@@ -2508,7 +2554,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return 0;
         }
 
-        var scratch = _guestMemory.Allocate(size, StagedWritebackAlignment, out _);
+        var scratch = _transfer.AcquireTrackedScratch(context, size);
         var copies = new (MetalGuestRange From, MetalGuestRange To)[pieces.Count];
         var carried = 0UL;
         for (var index = 0; index < pieces.Count; index++)
@@ -2655,6 +2701,20 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return uncovered;
     }
 
+    // The trace is opened at the first run that falls short, so the runs before it are not
+    // in it; what they carried goes in as one entry, and the entries then account for every
+    // byte. A walk that carries everything allocates no trace.
+    private static StringBuilder Opened(ulong from, ulong carried)
+    {
+        var trace = new StringBuilder();
+        if (carried != 0)
+        {
+            Trace(trace, "run", from, carried);
+        }
+
+        return trace;
+    }
+
     // What a run walk did, for the warning that follows a walk which left bytes behind:
     // which offsets carried and which were stepped over says whether the loss is a gap
     // in the guest mapping or a cut the transfer cannot make.
@@ -2740,12 +2800,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     private readonly long[] _uploadCauses = new long[5];
     private readonly long[] _writebackCauses = new long[7];
-    private const ulong StagedWritebackAlignment = 256;
-    private const int MaxUnwrittenWritebackReports = 32;
     private long _stagedWritebackRuns;
     private long _shortWritebacks;
     private long _unrecordedWritebacks;
-    private int _unwrittenWritebackReports;
     private readonly long[] _releaseCauses = new long[11];
 
     private static readonly string[] _releaseCauseNames =

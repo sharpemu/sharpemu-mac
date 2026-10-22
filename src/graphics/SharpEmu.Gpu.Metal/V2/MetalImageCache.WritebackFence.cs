@@ -83,6 +83,7 @@ internal sealed partial class MetalImageCache
     /// <summary>The CHURN line's fence counters since the last call.</summary>
     public string TakeWritebackFenceCounters()
     {
+        FlushUnwrittenWritebackReports();
         var added = Interlocked.Exchange(ref _fencedWritebacksAdded, 0);
         var waits = Interlocked.Exchange(ref _fenceWaits, 0);
         var ticks = Interlocked.Exchange(ref _fenceWaitTicks, 0);

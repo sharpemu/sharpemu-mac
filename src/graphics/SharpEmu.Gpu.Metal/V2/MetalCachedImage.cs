@@ -43,7 +43,6 @@ internal enum MetalImageReleaseCause : byte
     Stale,
 }
 
-// Why a GPU-written image had to be published into guest memory.
 /// <summary>What a writeback carried to guest memory.</summary>
 internal enum MetalWritebackOutcome
 {
@@ -55,6 +54,7 @@ internal enum MetalWritebackOutcome
     Failed,
 }
 
+// Why a GPU-written image had to be published into guest memory.
 internal enum MetalWritebackCause : byte
 {
     BufferBinding,
