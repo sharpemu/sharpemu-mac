@@ -779,6 +779,8 @@ internal sealed partial class MetalRenderHost
             writeMasks);
     }
 
+    private static readonly string? _diagAlphaToCoverage = Environment.GetEnvironmentVariable("SHARPEMU_DIAG_A2C");
+
     private nint CreateRenderPipelineState(
         GraphicsPipelineDescription description,
         MetalShaderModule vertexModule,
@@ -854,7 +856,19 @@ internal sealed partial class MetalRenderHost
 
             if (parameters.AlphaToCoverageEnable)
             {
-                MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setAlphaToCoverageEnabled:"), true);
+                // SHARPEMU_DIAG_A2C=log reports every pipeline that enables alpha to coverage; =off leaves it
+                // disabled so a stippled masked card can be compared with the same card drawn without it.
+                if (_diagAlphaToCoverage is { Length: > 0 })
+                {
+                    Console.Error.WriteLine(
+                        $"[DIAG][A2C] samples={parameters.Samples} colors={description.Rendering.ColorCount} " +
+                        $"{ProfileLabelFor(vertexModule, pixelModule, mesh)} mode={_diagAlphaToCoverage}");
+                }
+
+                if (!string.Equals(_diagAlphaToCoverage, "off", StringComparison.Ordinal))
+                {
+                    MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setAlphaToCoverageEnabled:"), true);
+                }
             }
 
             var colorAttachments = MetalNative.Send(descriptor, SelColorAttachments);
