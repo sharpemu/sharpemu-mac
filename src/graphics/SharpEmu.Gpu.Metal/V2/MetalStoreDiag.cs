@@ -16,6 +16,8 @@ internal static class MetalStoreDiag
     {
         Recording,
         LibraryWait,
+        LibraryWaitInGraphics,
+        LibraryWaitInCompute,
         GraphicsPipelineBuild,
         ComputePipelineBuild,
         GpuWait,
@@ -59,6 +61,17 @@ internal static class MetalStoreDiag
         }
 
         var previous = _current;
+        if (activity == Activity.LibraryWait)
+        {
+            // Told apart by the build that asks, which is what could do without the wait.
+            activity = (Activity)previous switch
+            {
+                Activity.GraphicsPipelineBuild => Activity.LibraryWaitInGraphics,
+                Activity.ComputePipelineBuild => Activity.LibraryWaitInCompute,
+                _ => Activity.LibraryWait,
+            };
+        }
+
         Switch((int)activity);
         return new Scope(previous);
     }

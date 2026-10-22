@@ -504,7 +504,8 @@ internal sealed partial class MetalImageCache
 
                     if (MetalStoreDiag.On)
                     {
-                        request.DiagImages += $"[{ProfileLabel("writeback", image.Description)}]";
+                        request.DiagImages += $"[writer_serial={image.GpuWriteSerial} writer_done={image.GpuWriteSerial <= _owner.CompletedSerial} " +
+                            $"mb={image.Description.Data.Size / 1048576.0:F1} {ProfileLabel("writeback", image.Description)}]";
                     }
 
                     var outcome = WriteBackToGuest(image, MetalWritebackCause.HostRead);
