@@ -17,6 +17,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 //                       range holds one of these addresses, and every guest copy or fill that touches
 //                       one, is logged with the program that did it; "*" logs every colour attachment.
 //   SHARPEMU_DIAG_BIND_FLIPS=<from>-<to>        flip window (default: all).
+//   SHARPEMU_DIAG_ZERO_IMAGE=<hash prefix>:<slot>  proof toggle: that stage's sampled image <slot>
+//                       (when it is a 16-bit-per-channel one) is replaced by a zeroed 1920x1080 RGBA16
+//                       texture; the TAA resolve then sees "no velocity" and reprojects with the camera.
 internal sealed partial class MetalRenderHost
 {
     private static readonly string[] _diagBindHashes = ParseDiagList("SHARPEMU_DIAG_BIND_HASHES");
@@ -45,6 +48,53 @@ internal sealed partial class MetalRenderHost
         }
 
         return (0, long.MaxValue);
+    }
+
+    private static readonly (string Prefix, int Slot)? _diagZeroImage = ParseDiagZeroImage();
+    private nint _diagZeroTexture;
+
+    private static (string, int)? ParseDiagZeroImage()
+    {
+        var text = Environment.GetEnvironmentVariable("SHARPEMU_DIAG_ZERO_IMAGE");
+        return text is { Length: > 0 } && text.Split(':') is [var prefix, var slot] && int.TryParse(slot, out var index)
+            ? (prefix, index)
+            : null;
+    }
+
+    private unsafe void DiagZeroImage(MetalStageBindings stage)
+    {
+        if (_diagZeroImage is not var (prefix, slot) || slot >= stage.ImageCount ||
+            !stage.Program.Hash.ToString("X16", CultureInfo.InvariantCulture).StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+            stage.IsStorage[slot] || !_imageCache.TryGetImage(stage.Images[slot], out var image) ||
+            !image.Description.PixelFormat.ToString().Contains("16", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (_diagZeroTexture == 0)
+        {
+            const uint width = 1920;
+            const uint height = 1080;
+            var descriptor = MetalNative.SendTextureDescriptor(
+                MetalNative.Class("MTLTextureDescriptor"), SelTexture2DDescriptor,
+                (nuint)MtlFormat.Rgba16Unorm, width, height, mipmapped: false);
+            MetalV2Native.SendVoidValue(
+                descriptor, SelMovieSetUsage, (nuint)(Mtl.TextureUsageShaderRead | Mtl.TextureUsagePixelFormatView));
+            _diagZeroTexture = MetalNative.Send(_device, SelMovieNewTexture, descriptor);
+            var zeros = new byte[width * height * 8];
+            fixed (byte* source = zeros)
+            {
+                MetalNative.SendReplaceRegion(
+                    _diagZeroTexture, SelReplaceRegion,
+                    new MtlRegion { Width = width, Height = height, Depth = 1 }, 0, (nint)source, width * 8);
+            }
+
+            Console.Error.WriteLine(
+                $"[DIAG][ZERO] zero texture replaces {image.Description.PixelFormat} slot {slot} of {stage.Program.Hash:X16}");
+        }
+
+        stage.Textures[slot] = _diagZeroTexture;
+        stage.TextureIds[slot] = MetalNative.SendGpuResourceId(_diagZeroTexture, SelGpuResourceId);
     }
 
     private long _diagBindSeenFlip = -1;
