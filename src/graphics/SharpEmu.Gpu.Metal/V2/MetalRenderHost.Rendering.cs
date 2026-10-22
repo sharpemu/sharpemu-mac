@@ -2044,12 +2044,15 @@ internal sealed partial class MetalRenderHost
         // threadgroup then holds the unique vertices of up to MaxPrimitives triangles, as the
         // geometry engine packs a subgroup, instead of three own vertices per triangle.
         MetalMeshletCache.Meshlets meshlets = default;
-        var useMeshlets = !mesh.HasGeometryHalf && indexed &&
+        var diagMeshletOff = DiagMeshletOff.Contains(_boundGraphicsPipeline!.MeshHash) || DiagMeshletOff.Contains(ulong.MaxValue);
+        var useMeshlets = !diagMeshletOff && !mesh.HasGeometryHalf && indexed &&
             TryGetMeshlets(mesh, count, firstIndexOrVertex, out meshlets);
         if (useMeshlets)
         {
             subgroups = meshlets.Count;
         }
+
+        DiagMeshCensus(_boundGraphicsPipeline!, mesh, indexed, useMeshlets, count, instanceCount, subgroups);
 
         var drawInfo = _guestMemory.Allocate(Gen5MslMeshInfo.DrawInfoByteSize, 256, out var span);
         span.Clear();
@@ -2166,6 +2169,59 @@ internal sealed partial class MetalRenderHost
         }
 
         return false;
+    }
+
+    // DIAG: SHARPEMU_DIAG_MESHLET_OFF=<vs hashes | all>: those mesh pipelines run whole-triangle subgroups.
+    private static readonly HashSet<ulong> DiagMeshletOff = ParseDiagHashes(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_MESHLET_OFF"));
+
+    private static HashSet<ulong> ParseDiagHashes(string? text)
+    {
+        var set = new HashSet<ulong>();
+        foreach (var token in (text ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (token == "all")
+            {
+                set.Add(ulong.MaxValue);
+            }
+            else if (ulong.TryParse(token.Replace("0x", ""), System.Globalization.NumberStyles.HexNumber, null, out var value))
+            {
+                set.Add(value);
+            }
+        }
+
+        return set;
+    }
+
+    // DIAG: SHARPEMU_DIAG_MESH_CENSUS=<n>: every n mesh draws, one line per (vs, ps, indexed, meshlets) with the
+    // draws, instance, index and subgroup totals since the last report.
+    private static readonly int DiagCensusEvery = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_MESH_CENSUS"), out var censusEvery) ? censusEvery : 0;
+    private readonly Dictionary<(string, bool, bool), (long Draws, long Instances, long Indices, long Groups)> _diagCensus = new();
+    private int _diagCensusDraws;
+
+    private void DiagMeshCensus(MetalPipelineEntry entry, Gen5MslMeshInfo mesh, bool indexed, bool meshlets, uint count, uint instances, uint groups)
+    {
+        if (DiagCensusEvery <= 0)
+        {
+            return;
+        }
+
+        var key = (entry.Profile ?? "?", indexed, meshlets);
+        _diagCensus.TryGetValue(key, out var total);
+        _diagCensus[key] = (total.Draws + 1, total.Instances + instances, total.Indices + count, total.Groups + groups);
+        if (++_diagCensusDraws < DiagCensusEvery)
+        {
+            return;
+        }
+
+        foreach (var ((profile, isIndexed, isMeshlets), value) in _diagCensus)
+        {
+            Console.Error.WriteLine(
+                $"[DIAG][MESH-CENSUS] {profile} narrow={(mesh.NarrowWave64 ? 1 : 0)} indexed={(isIndexed ? 1 : 0)} meshlets={(isMeshlets ? 1 : 0)} " +
+                $"draws={value.Draws} instances={value.Instances} indices={value.Indices} groups={value.Groups}");
+        }
+
+        _diagCensus.Clear();
+        _diagCensusDraws = 0;
     }
 
     private MetalMeshletCache? _meshletCache;

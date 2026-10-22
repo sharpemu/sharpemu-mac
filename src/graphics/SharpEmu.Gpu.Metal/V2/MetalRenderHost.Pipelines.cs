@@ -709,6 +709,12 @@ internal sealed partial class MetalRenderHost
         {
             // One line per mesh pipeline: what the launch was sized from, for reading a
             // title's primitive shaders off its log.
+            if (DiagDumpArmHash != 0 && vertexModule.Hash == DiagDumpArmHash)
+            {
+                DiagDumpArmed = true;
+                Console.Error.WriteLine("[DIAG] target dumps armed");
+            }
+
             Console.Error.WriteLine(
                 $"[METAL-V2][MESH-PIPE] vs=0x{vertexModule.Hash:X16} wave64={(mesh.Wave64 ? 1 : 0)} " +
                 $"narrow={(mesh.NarrowWave64 ? 1 : 0)} gs={(mesh.HasGeometryHalf ? 1 : 0)} " +

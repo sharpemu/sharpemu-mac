@@ -52,8 +52,16 @@ internal sealed partial class MetalRenderHost
             ? afterFlips
             : 0;
 
+    // DIAG: SHARPEMU_DIAG_DUMP_ARM_HASH=<vs hash> keeps dumps closed until a mesh pipeline with that
+    // vertex-stage hash has been created, so the budget lands on the scene that creates it.
+    internal static readonly ulong DiagDumpArmHash =
+        ulong.TryParse((Environment.GetEnvironmentVariable("SHARPEMU_DIAG_DUMP_ARM_HASH") ?? "").Replace("0x", ""),
+            System.Globalization.NumberStyles.HexNumber, null, out var armHash) ? armHash : 0;
+
+    internal static volatile bool DiagDumpArmed;
+
     private static bool DumpWindowOpen =>
-        (_dumpAfterSeconds <= 0 ||
+        (DiagDumpArmHash == 0 || DiagDumpArmed) && (_dumpAfterSeconds <= 0 ||
             (System.Diagnostics.Stopwatch.GetTimestamp() - _dumpStartTimestamp) /
             (double)System.Diagnostics.Stopwatch.Frequency >= _dumpAfterSeconds);
 
