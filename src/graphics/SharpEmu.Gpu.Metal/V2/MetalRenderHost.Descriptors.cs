@@ -683,6 +683,8 @@ internal sealed partial class MetalRenderHost
         {
             BindBindlessImages(stage, info, snapshot);
         }
+
+        DiagBindResources(stage);
     }
 
     /// <summary>

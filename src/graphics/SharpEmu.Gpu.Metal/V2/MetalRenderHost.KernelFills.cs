@@ -63,6 +63,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public bool TryCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words)
     {
+        DiagBindCopy("copy-words", destination, source, words * 4);
         if (TryCopyWordsOnHostCore(destination, source, sourceWords, words))
         {
             return true;

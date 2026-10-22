@@ -43,6 +43,7 @@ internal sealed partial class MetalRenderHost
         var texture = _imageCache.AcquireColorTargetView(
             imageIdentifier, request with { Role = ImageRole.ColorTarget }, deferRefresh: true);
         var image = _imageCache.GetImage(imageIdentifier);
+        DiagBindAttachment(in image.Description);
         if (_dumpSnapshots)
         {
             NoteTargetDescription(texture, in image.Description, request.View.BaseLayer, request.View.BaseLevel,

@@ -1368,6 +1368,8 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
+        DiagBindCopy("fill", address, 0, size);
+
         if (allowHost && TryFillGuestMemoryOnHost(address, size, value))
         {
             return;
@@ -1503,6 +1505,8 @@ internal sealed partial class MetalRenderHost :
         {
             return;
         }
+
+        DiagBindCopy("copy", destination, source, size);
 
         var target = _guestMemory.ResolveWritable(destination, size);
         var origin = _guestMemory.Resolve(source, size);
