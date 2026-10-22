@@ -245,7 +245,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private void NotePendingDump(nint texture, string label)
     {
-        if (texture == 0 || !_dumpThisFlip || _pendingDumps.Count >= 512)
+        if (texture == 0 || !_dumpThisFlip || _pendingDumps.Count >= 512 || DiagFlipOnly)
         {
             return;
         }
@@ -303,7 +303,7 @@ internal sealed partial class MetalRenderHost
     private void NoteTargetDescription(
         nint texture, in ImageDescription description, uint layer, uint level, string extra = "")
     {
-        if (!_dumpSnapshots || !_dumpThisFlip || texture == 0)
+        if (!_dumpSnapshots || !_dumpThisFlip || texture == 0 || DiagFlipOnly)
         {
             return;
         }
@@ -471,7 +471,7 @@ internal sealed partial class MetalRenderHost
     private void NotePendingInputDump(
         nint texture, SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier identifier, int index, ImageRole role)
     {
-        if (!DumpTargetsEnabled || !_dumpThisFlip || !_dumpInputs || texture == 0)
+        if (!DumpTargetsEnabled || !_dumpThisFlip || !_dumpInputs || texture == 0 || DiagFlipOnly)
         {
             return;
         }
@@ -533,6 +533,10 @@ internal sealed partial class MetalRenderHost
         var flip = _dumpFlipIndex++;
         _dumpThisFlip = flip >= _dumpAfterFlips && DumpWindowOpen &&
             (flip - _dumpAfterFlips) % _dumpEveryFlips == 0;
+        if (DiagScheduleSteps.Length > 0)
+        {
+            _dumpThisFlip = DiagAdvanceSchedule(flip);
+        }
         if (_pendingDumps.Count == 0)
         {
             return;

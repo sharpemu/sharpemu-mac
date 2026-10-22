@@ -2044,6 +2044,7 @@ internal sealed partial class MetalRenderHost
         // threadgroup then holds the unique vertices of up to MaxPrimitives triangles, as the
         // geometry engine packs a subgroup, instead of three own vertices per triangle.
         MetalMeshletCache.Meshlets meshlets = default;
+        DiagStartSchedule(_boundGraphicsPipeline!.MeshHash);
         var diagMeshletOff = DiagMeshletOff.Contains(_boundGraphicsPipeline!.MeshHash) || DiagMeshletOff.Contains(ulong.MaxValue);
         var useMeshlets = !diagMeshletOff && !mesh.HasGeometryHalf && indexed &&
             TryGetMeshlets(mesh, count, firstIndexOrVertex, out meshlets);
@@ -2132,7 +2133,7 @@ internal sealed partial class MetalRenderHost
 
     // DIAG (speckle bisect): SHARPEMU_DIAG_MESH_SKIP is a comma list of vertex-stage hashes (hex) and the
     // words narrow / wide / gs / all; a mesh draw whose pipeline matches is not launched.
-    private static readonly string[] DiagMeshSkip =
+    private static string[] DiagMeshSkip =
         (Environment.GetEnvironmentVariable("SHARPEMU_DIAG_MESH_SKIP") ?? "")
         .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
@@ -2172,7 +2173,7 @@ internal sealed partial class MetalRenderHost
     }
 
     // DIAG: SHARPEMU_DIAG_MESHLET_OFF=<vs hashes | all>: those mesh pipelines run whole-triangle subgroups.
-    private static readonly HashSet<ulong> DiagMeshletOff = ParseDiagHashes(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_MESHLET_OFF"));
+    private static HashSet<ulong> DiagMeshletOff = ParseDiagHashes(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_MESHLET_OFF"));
 
     private static HashSet<ulong> ParseDiagHashes(string? text)
     {
@@ -2222,6 +2223,113 @@ internal sealed partial class MetalRenderHost
 
         _diagCensus.Clear();
         _diagCensusDraws = 0;
+    }
+
+    // DIAG schedule: SHARPEMU_DIAG_SCHEDULE="label|ml=h+h|skip=h+narrow|flips=6;label|..." starts at the first mesh
+    // draw of SHARPEMU_DIAG_DUMP_ARM_HASH and runs each step for `flips` flips, setting the meshlet-off and skip
+    // lists; the presented frame of each step's last two flips is dumped (SHARPEMU_DIAG_FLIP_ONLY needs
+    // SHARPEMU_METAL_V2_DUMP_TARGETS). Steps log "[DIAG][STEP]" with the flip index and the dump counter.
+    private sealed record DiagStep(string Label, string[] MeshletOff, string[] Skip, int Flips);
+
+    private static readonly DiagStep[] DiagScheduleSteps = ParseDiagSchedule(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_SCHEDULE"));
+    private static readonly bool DiagFlipOnly = DiagScheduleSteps.Length > 0;
+    private static long _diagScheduleStartFlip = -1;
+    private static bool _diagScheduleStarted;
+    private static int _diagLastStep = -1;
+
+    private static DiagStep[] ParseDiagSchedule(string? text)
+    {
+        var steps = new List<DiagStep>();
+        foreach (var entry in (text ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = entry.Split('|', StringSplitOptions.TrimEntries);
+            string[] ml = [], skip = [];
+            var flips = 6;
+            foreach (var part in parts.Skip(1))
+            {
+                var kv = part.Split('=', 2);
+                var list = kv.Length > 1 ? kv[1].Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) : [];
+                switch (kv[0])
+                {
+                    case "ml": ml = list; break;
+                    case "skip": skip = list; break;
+                    case "flips": flips = int.Parse(kv[1]); break;
+                }
+            }
+
+            steps.Add(new DiagStep(parts[0], ml, skip, flips));
+        }
+
+        return [.. steps];
+    }
+
+    private static void DiagStartSchedule(ulong meshHash)
+    {
+        if (!_diagScheduleStarted && DiagScheduleSteps.Length > 0 && DiagDumpArmHash != 0 && meshHash == DiagDumpArmHash)
+        {
+            _diagScheduleStarted = true;
+            _diagScheduleStartFlip = long.MaxValue; // set by the next flip drain
+        }
+    }
+
+    // Called at each flip drain (render worker): returns whether the frame about to be recorded should be dumped.
+    private bool DiagAdvanceSchedule(long flip)
+    {
+        if (!_diagScheduleStarted)
+        {
+            return false;
+        }
+
+        if (_diagScheduleStartFlip == long.MaxValue)
+        {
+            _diagScheduleStartFlip = flip;
+        }
+
+        var offset = (int)(flip - _diagScheduleStartFlip);
+        var total = DiagScheduleSteps.Sum(step => step.Flips);
+        var index = -1;
+        var inStep = 0;
+        if (offset < total)
+        {
+            var cursor = 0;
+            for (var i = 0; i < DiagScheduleSteps.Length; i++)
+            {
+                if (offset < cursor + DiagScheduleSteps[i].Flips)
+                {
+                    index = i;
+                    inStep = offset - cursor;
+                    break;
+                }
+
+                cursor += DiagScheduleSteps[i].Flips;
+            }
+        }
+
+        if (index != _diagLastStep)
+        {
+            _diagLastStep = index;
+            var step = index >= 0 ? DiagScheduleSteps[index] : null;
+            var off = new HashSet<ulong>();
+            foreach (var token in step?.MeshletOff ?? [])
+            {
+                if (token == "all")
+                {
+                    off.Add(ulong.MaxValue);
+                }
+                else if (ulong.TryParse(token.Replace("0x", ""), System.Globalization.NumberStyles.HexNumber, null, out var value))
+                {
+                    off.Add(value);
+                }
+            }
+
+            DiagMeshletOff = off;
+            DiagMeshSkip = step?.Skip ?? [];
+            Console.Error.WriteLine(
+                $"[DIAG][STEP] index={index} label={step?.Label ?? "end"} flip={flip} dumps_so_far={_targetDumps} " +
+                $"ml={string.Join('+', step?.MeshletOff ?? [])} skip={string.Join('+', step?.Skip ?? [])}");
+        }
+
+        return index >= 0 && inStep >= DiagScheduleSteps[index].Flips - 2;
     }
 
     private MetalMeshletCache? _meshletCache;
