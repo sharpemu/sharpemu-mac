@@ -473,17 +473,28 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
 
         host.FillBufferInOrder(GuestBase + 0x10000, 0x2000, 0x77);
         var serial = host.LastWorkSerial;
-        Assert.True(host.CompletedSerial < serial);
-        Assert.False(owner.WaitForSubmissionOffWorker(serial, 10_000));
+        Assert.True(host.CompletedSerial < serial, $"A: completed={host.CompletedSerial} serial={serial}");
+        Assert.False(owner.WaitForSubmissionOffWorker(serial, 10_000), "B");
 
-        Assert.False(Task.Run(() => owner.WaitForSubmissionOffWorker(serial, 50)).Result);
-        Assert.True(host.Relay.HasPendingCommands);
+        var testThread = Environment.CurrentManagedThreadId;
+        var testIsPool = Thread.CurrentThread.IsThreadPoolThread;
+        var taskThread = -1;
+        var taskBound = false;
+        var shortWait = Task.Run(() =>
+        {
+            taskThread = Environment.CurrentManagedThreadId;
+            taskBound = host.Relay.IsGpuQueueThread;
+            return owner.WaitForSubmissionOffWorker(serial, 50);
+        }).Result;
+        output.WriteLine($"DIAG testThread={testThread} testIsPool={testIsPool} taskThread={taskThread} taskBound={taskBound} inlined={testThread == taskThread}");
+        Assert.False(shortWait, $"C: completed={host.CompletedSerial} serial={serial} pending={host.Relay.HasPendingCommands}");
+        Assert.True(host.Relay.HasPendingCommands, $"D: testThread={testThread} testIsPool={testIsPool} taskThread={taskThread} taskBound={taskBound} completed={host.CompletedSerial} serial={serial}");
 
         var waiter = Task.Run(() => owner.WaitForSubmissionOffWorker(serial, 10_000));
         host.RunPendingOperations();
-        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
-        Assert.True(waiter.Result);
-        Assert.True(host.CompletedSerial >= serial);
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)), "E");
+        Assert.True(waiter.Result, $"F: completed={host.CompletedSerial} serial={serial}");
+        Assert.True(host.CompletedSerial >= serial, "G");
         WaitForCompletions(host);
         Assert.Equal(0x77u, rig.Backing.Read32(GuestBase + 0x10000));
     }
