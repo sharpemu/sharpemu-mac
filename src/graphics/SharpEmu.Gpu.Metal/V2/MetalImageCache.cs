@@ -2301,13 +2301,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     // Retiles a GPU-written image back into guest memory; afterwards guest memory and
     // the texture agree, so the image stays cached and clean.
-    private void WriteBackToGuest(MetalCachedImage image, MetalWritebackCause cause)
+    private MetalWritebackOutcome WriteBackToGuest(MetalCachedImage image, MetalWritebackCause cause)
     {
         using var censusScope = MetalGpuReferenceCensus.Scope(MetalRefKind.ImageWriteback);
         if (!image.IsGpuModified || image.Texture == 0 || ImageDescription.IsEmptyRange(image.Description.Data))
         {
             image.ClearGpuModified();
-            return;
+            return MetalWritebackOutcome.Complete;
         }
 
         RefreshBeforeWriteback(image);
@@ -2317,6 +2317,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
             : default;
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
+        ulong written;
         if (destination.IsValid && destination.Size >= description.Data.Size)
         {
             var stencil = description.HasStencil
@@ -2325,10 +2326,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
             _transfer.EncodeTextureToGuest(
                 context, in description, range, image.Texture, destination, stencil, 0, description.Data.Size);
+            written = description.Data.Size;
         }
-        else if (!WriteBackInPieces(context, image))
+        else if ((written = WriteBackInPieces(context, image)) == 0)
         {
-            return;
+            // Nothing recorded: the texture alone still holds the image.
+            Interlocked.Increment(ref _unrecordedWritebacks);
+            return MetalWritebackOutcome.Failed;
         }
 
         if (context.WantsEncodedLabels)
@@ -2351,13 +2355,21 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         _writebackCauses[(int)cause]++;
         Interlocked.Increment(ref _writebacks);
+        if (written < description.Data.Size)
+        {
+            // Some bytes no run could carry: guest memory holds the old ones there.
+            Interlocked.Increment(ref _shortWritebacks);
+            return MetalWritebackOutcome.Partial;
+        }
+
+        return MetalWritebackOutcome.Complete;
     }
 
     // The writeback counterpart of UploadInPieces: a run of layers at a time, writing
     // only through windows, because a retile stores into guest memory and the upload ring
     // is nobody's guest memory. A run with no writable window keeps the texture
-    // authoritative for those layers and says so.
-    private bool WriteBackInPieces(IMetalSubmissionContext context, MetalCachedImage image)
+    // authoritative for those layers and says so. Returns the image bytes carried.
+    private ulong WriteBackInPieces(IMetalSubmissionContext context, MetalCachedImage image)
     {
         ref readonly var description = ref image.Description;
         if (!TrySplitLayers(in description, out var layers, out var layerBytes))
@@ -2367,7 +2379,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         var batch = (uint)Math.Clamp(MaxTransferPieceBytes / layerBytes, 1, layers);
         var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
-        var moved = false;
+        var written = 0UL;
         for (uint first = 0; first < layers; first += batch)
         {
             var count = Math.Min(batch, layers - first);
@@ -2378,7 +2390,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             {
                 // These layers are not one backed span; cut them into the runs that are
                 // rather than leaving the whole piece in the texture.
-                moved |= WriteBackInRuns(context, image, pieceBase, pieceBase + pieceSize);
+                written += WriteBackInRuns(context, image, pieceBase, pieceBase + pieceSize);
                 continue;
             }
 
@@ -2389,22 +2401,27 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var range = new SubresourceRange(0, description.Resources.Levels, first, count);
             _transfer.EncodeTextureToGuest(
                 context, in description, range, image.Texture, piece, stencilPiece, pieceBase, pieceSize);
-            moved = true;
+            written += pieceSize;
         }
 
-        return moved;
+        return written;
     }
 
     // The last resort of a writeback: a range of an image whose guest bytes are not one
-    // backed span at all. Each run is the longest prefix one window covers, pulled back
-    // to a boundary no subresource straddles, and the transfer is restricted to it. A run
-    // that resolves to nothing is a hole in the guest mapping: those bytes stay in the
-    // texture, and the next run starts after them.
-    private bool WriteBackInRuns(IMetalSubmissionContext context, MetalCachedImage image, ulong from, ulong to)
+    // backed span at all, cut into runs the way an upload is (PlanUploadRuns). A run one
+    // window holds whole is written in place. A run none does - a depth slice, which the
+    // depth kernels write only whole, scattered over the backing in 64 KB pieces; a band
+    // that crosses a window edge - is staged (WriteBackStaged). Only bytes no window holds at
+    // all, a hole in the guest mapping, stay in the texture. Returns the image bytes carried.
+    private ulong WriteBackInRuns(IMetalSubmissionContext context, MetalCachedImage image, ulong from, ulong to)
     {
         ref readonly var description = ref image.Description;
+        var address = description.Data.Address;
+        var runs = new List<UploadRun>();
+        var uncovered = PlanUploadRuns(
+            _transfer, in description, from, to, MaxTransferPieceBytes,
+            (offset, size) => _guestMemory.ResolveWritablePrefix(address + offset, size).Size, runs);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
-        var size = Math.Min(to, description.Data.Size);
         // The stencil plane is named by layers, not by the depth plane's bytes: one
         // layer of stencil is a byte per texel where one layer of depth is four, so a
         // run's stencil bytes are its layers' stencil bytes.
@@ -2412,73 +2429,105 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var layerBytes = layers != 0 ? description.Data.Size / layers : 0;
         var stencilLayerBytes = description.HasStencil && layers != 0 ? description.Stencil.Size / layers : 0;
         var written = 0UL;
-        // What the walk did, kept only once something is left behind: a walk that covers
-        // the image says nothing and allocates nothing.
         StringBuilder? trace = null;
-        for (var offset = from; offset < size;)
+        foreach (var run in runs)
         {
-            var start = _transfer.AlignRunStart(in description, offset);
-            if (start > offset)
-            {
-                // The step over a hole landed inside a transfer whose other half it
-                // stepped past; that half carries nothing either.
-                trace ??= Opened(from, written);
-                Trace(trace, "skip", offset, Math.Min(size, start) - offset);
-                offset = start;
-                continue;
-            }
-
-            var remaining = Math.Min(size - offset, MaxTransferPieceBytes);
-            var run = _guestMemory.ResolveWritablePrefix(description.Data.Address + offset, remaining);
-            var end = run.IsValid
-                ? _transfer.AlignRunEnd(in description, offset, offset + run.Size)
-                : offset;
-            if (end <= offset)
-            {
-                // Nothing of the image both starts here and fits in what one window
-                // covers. Step over everything that window reached - no subresource can
-                // start inside it either - and at least one page, so a range no window
-                // covers at all still advances.
-                var step = Math.Min(size - offset, Math.Max(run.Size, HoleStepBytes));
-                trace ??= Opened(from, written);
-                Trace(trace, "skip", offset, step);
-                offset += step;
-                continue;
-            }
-
-            var pieceSize = end - offset;
             var stencil = stencilLayerBytes != 0 && layerBytes != 0
                 ? _guestMemory.ResolveWritable(
-                    description.Stencil.Address + (stencilLayerBytes * (offset / layerBytes)),
-                    stencilLayerBytes * Math.Max(1UL, pieceSize / layerBytes))
+                    description.Stencil.Address + (stencilLayerBytes * (run.Offset / layerBytes)),
+                    stencilLayerBytes * Math.Max(1UL, run.Size / layerBytes))
                 : default;
-            _transfer.EncodeTextureToGuest(
-                context, in description, range, image.Texture,
-                run with { Size = pieceSize }, stencil, offset, pieceSize);
-            written += pieceSize;
-            if (trace != null)
+            var carried = 0UL;
+            if (!run.Staged)
             {
-                Trace(trace, "run", offset, pieceSize);
+                var destination = _guestMemory.ResolveWritable(address + run.Offset, run.Size);
+                if (destination.IsValid && destination.Size >= run.Size)
+                {
+                    _transfer.EncodeTextureToGuest(
+                        context, in description, range, image.Texture,
+                        destination with { Size = run.Size }, stencil, run.Offset, run.Size);
+                    carried = run.Size;
+                }
+            }
+            else
+            {
+                carried = WriteBackStaged(context, image, range, run.Offset, run.Size, stencil);
             }
 
-            offset = end;
+            written += carried;
+            uncovered += run.Size - carried;
+            trace ??= new StringBuilder();
+            Trace(trace, carried == run.Size ? (run.Staged ? "staged" : "run") : "lost", run.Offset, run.Size);
         }
 
-        if (written < size - from)
+        var size = Math.Min(to, description.Data.Size);
+        if (written < size - from && Interlocked.Increment(ref _unwrittenWritebackReports) <= MaxUnwrittenWritebackReports)
         {
             // Counted from what the runs carried rather than from the steps over holes:
             // a block row the boundary falls inside is not carried either, and saying so
             // is how a surface that comes out part stale is recognised.
-            MetalV2Diagnostics.WarnOnce(
-                "writeback-unresolved",
-                $"A GPU-written image has guest bytes no run covers, so those stay in the texture: " +
-                $"address=0x{description.Data.Address + from:X16} size=0x{size - from:X} " +
+            Console.Error.WriteLine(
+                $"[METAL-V2][WARN] A GPU-written image has guest bytes no run covers, so those stay in the texture: " +
+                $"address=0x{address + from:X16} size=0x{size - from:X} " +
                 $"unwritten=0x{size - from - written:X} " +
                 $"{ProfileLabel("writeback", in description)} runs=[{trace}] " +
-                $"({_guestMemory.DescribeResolve(description.Data.Address, description.Data.Size)}).");
+                $"({_guestMemory.DescribeResolve(address, description.Data.Size)}).");
         }
 
-        return written != 0;
+        return written;
+    }
+
+    // A writeback run no window holds whole: the texture is retiled into ring scratch and
+    // the scratch copied into each backed piece of the run, all on the GPU in this command
+    // buffer, and the caller notes and fences the image's range as for any writeback. The
+    // scratch first takes the guest's bytes, so a byte of the run the retile does not write
+    // keeps its value, as it does in place. Returns the run bytes carried: every backed one.
+    private ulong WriteBackStaged(
+        IMetalSubmissionContext context, MetalCachedImage image, SubresourceRange range, ulong offset, ulong size,
+        MetalGuestRange stencil)
+    {
+        ref readonly var description = ref image.Description;
+        var address = description.Data.Address + offset;
+        var pieces = new List<(ulong At, MetalGuestRange Guest)>();
+        for (var at = 0UL; at < size;)
+        {
+            var piece = _guestMemory.ResolveWritablePrefix(address + at, size - at);
+            if (!piece.IsValid || piece.Size == 0)
+            {
+                at += Math.Min(size - at, HoleStepBytes - ((address + at) & (HoleStepBytes - 1)));
+                continue;
+            }
+
+            var length = Math.Min(piece.Size, size - at);
+            pieces.Add((at, piece with { Size = length }));
+            at += length;
+        }
+
+        if (pieces.Count == 0)
+        {
+            return 0;
+        }
+
+        var scratch = _guestMemory.Allocate(size, StagedWritebackAlignment, out _);
+        var copies = new (MetalGuestRange From, MetalGuestRange To)[pieces.Count];
+        var carried = 0UL;
+        for (var index = 0; index < pieces.Count; index++)
+        {
+            var (at, guest) = pieces[index];
+            copies[index] = (guest, scratch with { Offset = scratch.Offset + at, Size = guest.Size, GpuAddress = scratch.GpuAddress + at });
+            carried += guest.Size;
+        }
+
+        _transfer.EncodeBufferCopies(context, copies);
+        _transfer.EncodeTextureToGuest(context, in description, range, image.Texture, scratch, stencil, offset, size);
+        for (var index = 0; index < copies.Length; index++)
+        {
+            copies[index] = (copies[index].To, copies[index].From);
+        }
+
+        _transfer.EncodeBufferCopies(context, copies);
+        Interlocked.Increment(ref _stagedWritebackRuns);
+        return carried;
     }
 
     /// <summary>One run of an upload walk: image bytes, and whether the ring stages them.</summary>
@@ -2606,19 +2655,6 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return uncovered;
     }
 
-    // The trace is opened at the first hole, so the runs before it are not in it; what
-    // they carried goes in as one entry, and the entries then account for every byte.
-    private static StringBuilder Opened(ulong from, ulong carried)
-    {
-        var trace = new StringBuilder();
-        if (carried != 0)
-        {
-            Trace(trace, "run", from, carried);
-        }
-
-        return trace;
-    }
-
     // What a run walk did, for the warning that follows a walk which left bytes behind:
     // which offsets carried and which were stepped over says whether the loss is a gap
     // in the guest mapping or a cut the transfer cannot make.
@@ -2704,6 +2740,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     private readonly long[] _uploadCauses = new long[5];
     private readonly long[] _writebackCauses = new long[7];
+    private const ulong StagedWritebackAlignment = 256;
+    private const int MaxUnwrittenWritebackReports = 32;
+    private long _stagedWritebackRuns;
+    private long _shortWritebacks;
+    private long _unrecordedWritebacks;
+    private int _unwrittenWritebackReports;
     private readonly long[] _releaseCauses = new long[11];
 
     private static readonly string[] _releaseCauseNames =

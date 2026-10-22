@@ -424,6 +424,41 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         // Guest memory the GPU has no window onto: nothing can be written back into it.
         public bool NoWindows { get; set; }
 
+        // Guest bytes [ScatterStart, ScatterStart + ScatterBytes) lie in the backing in
+        // ScatterChunk pieces in reverse order, so no two neighbours are one span of it.
+        public ulong ScatterStart { get; set; }
+        public ulong ScatterBytes { get; set; }
+        public ulong ScatterChunk { get; set; } = 64 * 1024;
+
+        // Guest bytes [HoleStart, HoleStart + HoleBytes) no window covers.
+        public ulong HoleStart { get; set; }
+        public ulong HoleBytes { get; set; }
+
+        private bool InScatter(ulong address) => address >= ScatterStart && address - ScatterStart < ScatterBytes;
+
+        private ulong Offset(ulong address)
+        {
+            if (!InScatter(address))
+            {
+                return address - GuestBase;
+            }
+
+            var relative = address - ScatterStart;
+            var chunks = ScatterBytes / ScatterChunk;
+            return ScatterStart - GuestBase + ((chunks - 1 - (relative / ScatterChunk)) * ScatterChunk) + (relative % ScatterChunk);
+        }
+
+        // How many bytes from the address are one span of the backing.
+        private ulong SpanAt(ulong address)
+        {
+            if (InScatter(address))
+            {
+                return ScatterChunk - ((address - ScatterStart) % ScatterChunk);
+            }
+
+            return ScatterBytes != 0 && address < ScatterStart ? ScatterStart - address : ulong.MaxValue;
+        }
+
         public bool TryHoldRange(ulong address, ulong size) => false;
         public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address) { address = 0; return false; }
         public bool TryMapBacked(ulong address, ulong size, ulong backingOffset, GuestPageProtection protection, out HostViewFailure failure) { failure = HostViewFailure.None; return false; }
@@ -435,7 +470,10 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         public bool TryResolveBackingAlias(ulong address, ulong size, out ulong alias)
         {
-            alias = !NoWindows && Contains(address, size) ? (ulong)_block + (address - GuestBase) : 0;
+            var hole = HoleBytes != 0 && address < HoleStart + HoleBytes && HoleStart < address + size;
+            alias = !NoWindows && !hole && Contains(address, size) && size <= SpanAt(address)
+                ? (ulong)_block + Offset(address)
+                : 0;
             return alias != 0;
         }
 
@@ -445,16 +483,36 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
         {
             if (!Contains(address, (ulong)data.Length)) return false;
-            data.CopyTo(new Span<byte>((byte*)_block + (address - GuestBase), data.Length));
+            for (var done = 0; done < data.Length;)
+            {
+                var length = (int)Math.Min((ulong)(data.Length - done), SpanAt(address + (ulong)done));
+                data.Slice(done, length).CopyTo(new Span<byte>((byte*)_block + Offset(address + (ulong)done), length));
+                done += length;
+            }
+
             return true;
         }
 
         public bool TryReadBacking(ulong address, Span<byte> data)
         {
             if (!Contains(address, (ulong)data.Length)) return false;
-            new ReadOnlySpan<byte>((byte*)_block + (address - GuestBase), data.Length).CopyTo(data);
+            for (var done = 0; done < data.Length;)
+            {
+                var length = (int)Math.Min((ulong)(data.Length - done), SpanAt(address + (ulong)done));
+                new ReadOnlySpan<byte>((byte*)_block + Offset(address + (ulong)done), length).CopyTo(data.Slice(done, length));
+                done += length;
+            }
+
             return true;
         }
+    }
+
+    // The guest's CPU view of the backing, for a rig whose staged uploads read guest bytes.
+    private sealed class BackingMemory(Backing backing) : ICpuMemory
+    {
+        public bool TryRead(ulong virtualAddress, Span<byte> destination) => backing.TryReadBacking(virtualAddress, destination);
+        public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source) => backing.TryWriteBacking(virtualAddress, source);
+        public bool CanRead(ulong address, ulong size) => backing.IsBackedRange(address, size);
     }
 
     private sealed class NoMemory : ICpuMemory
@@ -473,7 +531,14 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         // A GPU running behind: submissions past this serial have not completed yet.
         public ulong? CompletedOverride { get; set; }
 
-        public IMetalSubmissionContext BeginTransfer(MetalTransferCause cause) => harness;
+        // What runs when the cache records a transfer; a test supplies it.
+        public Action? OnBeginTransfer { get; set; }
+
+        public IMetalSubmissionContext BeginTransfer(MetalTransferCause cause)
+        {
+            OnBeginTransfer?.Invoke();
+            return harness;
+        }
         public bool HasPendingGpuWrite(ulong address, ulong size) => false;
         public void FillGuestRange(ulong address, ulong size, uint value) { }
         public void NoteGuestWrite(ulong address, ulong size) { }
@@ -512,13 +577,15 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         private readonly bool _savedLinearViews = MetalLinearWindowView.Enabled;
         private long _now = 1000 * Stopwatch.Frequency;
 
-        public Rig(nint device, int writeWatchLimit = PageGuard.MaxWriteWatchesPerPage)
+        public Rig(nint device, int writeWatchLimit = PageGuard.MaxWriteWatchesPerPage, Action<Backing>? layout = null)
         {
             MetalLinearWindowView.Enabled = false;
             Harness = new MetalTransferHarness(device);
             Harness.Begin();
             _pages = NewPageGuard(_space, writeWatchLimit);
-            _memory = new MetalGuestMemory(device, _backing, new NoMemory());
+            // A laid-out backing is read by the CPU too: what a staged upload copies.
+            layout?.Invoke(_backing);
+            _memory = new MetalGuestMemory(device, _backing, layout is null ? new NoMemory() : new BackingMemory(_backing));
             CacheOwner = new Owner(Harness);
             Cache = new MetalImageCache(CacheOwner, Harness.Transfer, _memory, _pages, _backing);
             // Exact textures: lossy compression is not this suite's subject.

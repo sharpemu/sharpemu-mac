@@ -44,6 +44,17 @@ internal enum MetalImageReleaseCause : byte
 }
 
 // Why a GPU-written image had to be published into guest memory.
+/// <summary>What a writeback carried to guest memory.</summary>
+internal enum MetalWritebackOutcome
+{
+    // Every byte of the image, or there was nothing to carry.
+    Complete,
+    // Some bytes no run could carry; guest memory holds the old ones there.
+    Partial,
+    // Nothing: the texture alone still holds the image, which stays GPU-written.
+    Failed,
+}
+
 internal enum MetalWritebackCause : byte
 {
     BufferBinding,

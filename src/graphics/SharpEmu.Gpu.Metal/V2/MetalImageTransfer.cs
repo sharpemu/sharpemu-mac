@@ -71,6 +71,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         "toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:options:");
 
     private static readonly nint SelCopyWholeTexture = MetalNative.Selector("copyFromTexture:toTexture:");
+    private static readonly nint SelCopyBufferToBuffer =
+        MetalNative.Selector("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:");
 
     // Everything about one description that changes the staged bytes. Two images that
     // agree on all of it share a plan, so a steady-state frame builds none.
@@ -732,6 +734,29 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         var rowTexels = copy.BufferRowLength != 0 ? copy.BufferRowLength : copy.Width;
         var rows = BlockRows(plan, copy.BufferImageHeight != 0 ? copy.BufferImageHeight : copy.Height);
         return (linear.Offset + copy.BufferOffset, RowBytes(plan, rowTexels), rows);
+    }
+
+    public void EncodeBufferCopies(
+        IMetalSubmissionContext context, ReadOnlySpan<(MetalGuestRange From, MetalGuestRange To)> copies)
+    {
+        if (_disposed || context.CommandBuffer == 0 || copies.IsEmpty)
+        {
+            return;
+        }
+
+        var blit = _tiler.BeginBlit(context);
+        try
+        {
+            foreach (var (from, to) in copies)
+            {
+                MetalNative.SendCopyBuffer(blit, SelCopyBufferToBuffer,
+                    from.Buffer, (nuint)from.Offset, to.Buffer, (nuint)to.Offset, (nuint)Math.Min(from.Size, to.Size));
+            }
+        }
+        finally
+        {
+            MetalTiler.EndEncoding(blit);
+        }
     }
 
     public void EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,

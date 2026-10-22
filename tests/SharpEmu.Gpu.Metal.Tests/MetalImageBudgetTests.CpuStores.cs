@@ -4,6 +4,7 @@
 using SharpEmu.Gpu.Metal.V2;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using Xunit;
@@ -253,6 +254,150 @@ public sealed partial class MetalImageBudgetTests
         Assert.Equal((0L, 1L), (rig.Cache.StorePublishCounts.Writebacks, rig.Cache.StorePublishCounts.Failed));
         Assert.Equal(0, rig.Cache.PendingStoreRequests);
         Assert.False(rig.Cache.GetImage(identifier).IsGpuModified);
+    }
+
+    [Fact]
+    public void AStoreWhoseRequestIsTakenJustAfterItsWaitGaveUpStillWaitsForTheWriteback()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var gpu = AGpuWrittenImageOverStaleMemory(rig, GuestBase, 0x5A, out _);
+        Thread? worker = null;
+        using var recording = new ManualResetEventSlim();
+        rig.CacheOwner.RunOnWorker = work =>
+        {
+            worker = new Thread(() => work());
+            worker.Start();
+            Assert.True(recording.Wait(10_000));
+            return true;
+        };
+        rig.CacheOwner.OnBeginTransfer = () =>
+        {
+            // The worker has taken the request and records its writeback, under the cache
+            // lock, while the store's wait for it gives up.
+            recording.Set();
+            Thread.Sleep(200);
+        };
+        rig.CacheOwner.WaitOffWorker = SubmitAndComplete(rig);
+        rig.Cache.StorePublishTakeTimeoutMilliseconds = 0;
+
+        Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase + StoreOffset, 8));
+        Assert.True(worker!.Join(10_000));
+        Assert.Equal((1L, 0L), (rig.Cache.StorePublishCounts.Writebacks, rig.Cache.StorePublishCounts.Fallbacks));
+        Assert.Equal(gpu, rig.ReadGuest(GuestBase, ImageSize));
+    }
+
+    [Fact]
+    public void AShadowMapScatteredOverTheBackingIsWrittenBackBeforeAStore()
+    {
+        if (!RequireDevice()) return;
+        var size = D16TargetRequest().Description.Data.Size;
+        var whole = ShadowMapAfterAStore(layout: null, out _, out _);
+        Assert.NotEqual(MetalTileOracle.Pattern((int)size, 0xB2), whole);
+        var scattered = ShadowMapAfterAStore(
+            backing =>
+            {
+                backing.ScatterStart = ShadowMap;
+                backing.ScatterBytes = size;
+            },
+            out var carry, out var counts);
+
+        // Its one slice is in 64 KB pieces no window holds together: staged, and carried whole.
+        Assert.Equal((1L, 0L), (counts.Writebacks, counts.Fallbacks));
+        Assert.True(carry.StagedRuns > 0);
+        Assert.Equal((0L, 0L), (carry.Partial, carry.Unrecorded));
+        Assert.Equal(whole, scattered);
+    }
+
+    [Fact]
+    public void AWritebackThatLeavesBytesBehindIsAPartialFallback()
+    {
+        if (!RequireDevice()) return;
+        const ulong hole = 0x2000;
+        using var rig = new Rig(Device.Value, layout: backing =>
+        {
+            backing.HoleStart = GuestBase + hole;
+            backing.HoleBytes = 0x1000;
+        });
+        var gpu = AGpuWrittenImageOverStaleMemory(rig, GuestBase, 0x5A, out var identifier);
+        var stale = rig.ReadGuest(GuestBase, ImageSize);
+        rig.CacheOwner.RunOnWorker = work =>
+        {
+            work();
+            return true;
+        };
+        rig.CacheOwner.WaitOffWorker = SubmitAndComplete(rig);
+
+        Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase + StoreOffset, 8));
+        Assert.Equal((0L, 1L), (rig.Cache.StorePublishCounts.Writebacks, rig.Cache.StorePublishCounts.Partial));
+        Assert.Equal(1L, rig.Cache.WritebackCarryCounts.Partial);
+        Assert.False(rig.Cache.GetImage(identifier).IsGpuModified);
+
+        // Every byte a window holds is the GPU's; the page no window holds keeps the old ones.
+        var expected = (byte[])gpu.Clone();
+        Array.Copy(stale, (int)hole, expected, (int)hole, 0x1000);
+        Assert.Equal(expected, rig.ReadGuest(GuestBase, ImageSize));
+    }
+
+    private const ulong ShadowMap = GuestBase + 0x100000;
+    private const uint ShadowMapSide = 1024;
+
+    // The guest bytes under a GPU-written 1024² D16 shadow map once a store into it has
+    // landed, its backing laid out as given.
+    private byte[] ShadowMapAfterAStore(
+        Action<Backing>? layout, out (long StagedRuns, long Partial, long Unrecorded) carry,
+        out MetalImageCache.StorePublishCounters counts)
+    {
+        using var rig = new Rig(Device.Value, layout: layout);
+        var request = D16TargetRequest();
+        var size = request.Description.Data.Size;
+        rig.WriteGuest(ShadowMap, MetalTileOracle.Pattern((int)size, 0x4D));
+        var identifier = rig.Cache.FindImage(ref request);
+        rig.Cache.AcquireDepthTargetView(identifier, in request);
+        Assert.True(rig.Cache.GetImage(identifier).IsGpuModified);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        rig.WriteGuest(ShadowMap, MetalTileOracle.Pattern((int)size, 0xB2));
+        rig.CacheOwner.RunOnWorker = work =>
+        {
+            work();
+            return true;
+        };
+        rig.CacheOwner.WaitOffWorker = SubmitAndComplete(rig);
+
+        Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(ShadowMap + StoreOffset, 8));
+        carry = rig.Cache.WritebackCarryCounts;
+        counts = rig.Cache.StorePublishCounts;
+        return rig.ReadGuest(ShadowMap, size);
+    }
+
+    private static ImageRequest D16TargetRequest()
+    {
+        Assert.True(TileGeometry.TryGetDepthSize(ShadowMapSide, ShadowMapSide, 0, GuestDepthFormat.Z16,
+            GuestStencilFormat.Invalid, false, out _, out _, out var depthSize));
+        var size = (ulong)depthSize.Size;
+        var pitch = TileGeometry.DepthPitch(ShadowMapSide, sizeof(ushort));
+        var description = ImageDescription.Create();
+        description.Data = new GuestSpan(ShadowMap, size);
+        description.PixelFormat = GpuFormat.D16Unorm;
+        description.GuestFormat = DepthFormatRule.Find(GuestDepthFormat.Z16)!.GuestFormat;
+        description.Type = GuestImageType.Color2D;
+        description.Extent = new GpuExtent3D(ShadowMapSide, ShadowMapSide, 1);
+        description.Resources = new SubresourceCount(1, 1);
+        description.Pitch = pitch;
+        description.BytesPerBlock = sizeof(ushort);
+        description.Samples = 1;
+        description.TileMode = GuestTileMode.Depth;
+        description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = pitch, Height = ShadowMapSide };
+        var view = ImageViewDescription.Default with
+        {
+            Format = GpuFormat.D16Unorm,
+            Type = GpuImageViewType.Type2D,
+            Aspect = GpuImageAspect.DepthBit,
+            LayerCount = 1,
+            Usage = GpuImageUsage.DepthStencilAttachmentBit,
+        };
+        return new ImageRequest(description, view, ImageRole.DepthTarget);
     }
 
     private static Func<ulong, int, bool> SubmitAndComplete(Rig rig) => (_, _) =>

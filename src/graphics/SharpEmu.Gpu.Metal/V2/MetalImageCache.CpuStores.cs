@@ -4,6 +4,7 @@
 using System.Diagnostics;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -35,10 +36,12 @@ namespace SharpEmu.Gpu.Metal.V2;
 //  - A request is the store's own. The worker takes requests between packets (the relay runs
 //    at every packet boundary), so it is late only by one packet's work, which while shaders
 //    compile cold is hundreds of milliseconds. A request still not taken after
-//    StorePublishTakeTimeoutMilliseconds means a hung worker: it is withdrawn under the lock,
-//    so it cannot be written back after the store, and the store takes the old path.
-// Every store that takes the old path anyway is counted by reason and reported. A managed
-// write is published before it lands (MarkPreciseCpuWrite) and never after (MarkCpuWriteLanded).
+//    StorePublishTakeTimeoutMilliseconds (as it was when the request was made) means a hung
+//    worker: it is withdrawn under the lock, so it cannot be written back after the store,
+//    and the store takes the old path.
+// Every store that takes the old path anyway is counted by reason and reported once the lock
+// is let go, and the time faulting threads spend blocked here is counted. A managed write is
+// published before it lands (MarkPreciseCpuWrite) and never after (MarkCpuWriteLanded).
 //
 // SHARPEMU_METAL_V2_PUBLISH_BEFORE_STORE=0 gives every store the old path.
 internal sealed partial class MetalImageCache
@@ -48,6 +51,7 @@ internal sealed partial class MetalImageCache
     private const int MaxStorePublishRounds = 8;
     private const int StoreCompletionReportMilliseconds = 1000;
     private const int MaxStorePublishReports = 16;
+    private const int StoreShutdownPollMilliseconds = 250;
 
     private static readonly bool PublishBeforeStoreDefault =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PUBLISH_BEFORE_STORE") != "0";
@@ -64,6 +68,8 @@ internal sealed partial class MetalImageCache
         Full,
         // The writeback could not be recorded.
         Failed,
+        // The writeback left some bytes behind: no run could carry them.
+        Partial,
         // The GPU kept writing the range for every round.
         Rounds,
     }
@@ -82,9 +88,15 @@ internal sealed partial class MetalImageCache
         public int State;
         public ulong Serial;
         public int Count;
-        public string? Unwritten;
+        public int TakeTimeoutMilliseconds;
+        // A failed request: why, and the image whose writeback fell short.
+        public StorePublishFallback Shortfall;
+        public ImageDescription Unwritten;
         public readonly ResourceSlotIdentifier[] Images = new ResourceSlotIdentifier[MaxImagesPerStoreRequest];
     }
+
+    /// <summary>A store that took the old path, reported once the cache lock is let go.</summary>
+    internal readonly record struct StoreFallback(StorePublishFallback Reason, ulong Address, ImageDescription? Unwritten);
 
     private readonly StoreRequest[] _storeRequests = CreateStoreRequests();
     private readonly object _storeRequestGate = new();
@@ -94,12 +106,17 @@ internal sealed partial class MetalImageCache
     private long _storePublishWritebacks;
     private long _storeCompletionStalls;
     private long _storeTakeMaxTicks;
+    private long _storeBlockedTicks;
+    private long _storeBlockedMaxTicks;
     private int _storePublishReports;
 
     /// <summary>Whether a guest store into a GPU-written image waits for the image's writeback.</summary>
     internal bool PublishBeforeStore { get; set; } = PublishBeforeStoreDefault;
 
-    /// <summary>How long a store waits for the worker to take its request before it calls the worker hung.</summary>
+    /// <summary>
+    /// How long a store waits for the worker to take its request before it calls the worker
+    /// hung. Read when the request is made, so a change applies to stores made after it.
+    /// </summary>
     internal int StorePublishTakeTimeoutMilliseconds { get; set; } = 10_000;
 
     /// <summary>Requests waiting for the worker to take them.</summary>
@@ -112,23 +129,29 @@ internal sealed partial class MetalImageCache
         Interlocked.Read(ref _storeFallbacks[(int)StorePublishFallback.Hung]),
         Interlocked.Read(ref _storeFallbacks[(int)StorePublishFallback.Full]),
         Interlocked.Read(ref _storeFallbacks[(int)StorePublishFallback.Failed]),
+        Interlocked.Read(ref _storeFallbacks[(int)StorePublishFallback.Partial]),
         Interlocked.Read(ref _storeFallbacks[(int)StorePublishFallback.Rounds]),
         Interlocked.Read(ref _storeCompletionStalls));
 
     internal readonly record struct StorePublishCounters(
-        long Writebacks, long Worker, long Hung, long Full, long Failed, long Rounds, long CompletionStalls)
+        long Writebacks, long Worker, long Hung, long Full, long Failed, long Partial, long Rounds, long CompletionStalls)
     {
-        public long Fallbacks => Worker + Hung + Full + Failed + Rounds;
+        public long Fallbacks => Worker + Hung + Full + Failed + Partial + Rounds;
     }
 
     private string StorePublishCounterText()
     {
         var counts = StorePublishCounts;
-        var takeMaxMs = Interlocked.Read(ref _storeTakeMaxTicks) * 1000.0 / Stopwatch.Frequency;
         return $" wb_before_store_total={counts.Writebacks} wb_before_store_fallbacks_total={counts.Fallbacks} " +
-            $"(worker={counts.Worker} hung={counts.Hung} full={counts.Full} failed={counts.Failed} rounds={counts.Rounds}) " +
-            $"wb_before_store_stalls_total={counts.CompletionStalls} wb_before_store_take_max_ms={takeMaxMs:F1}";
+            $"(worker={counts.Worker} hung={counts.Hung} full={counts.Full} failed={counts.Failed} " +
+            $"partial={counts.Partial} rounds={counts.Rounds}) " +
+            $"wb_before_store_stalls_total={counts.CompletionStalls} " +
+            $"wb_before_store_take_max_ms={Milliseconds(Interlocked.Read(ref _storeTakeMaxTicks)):F1} " +
+            $"wb_before_store_blocked_ms_total={Milliseconds(Interlocked.Read(ref _storeBlockedTicks)):F1} " +
+            $"wb_before_store_blocked_max_ms={Milliseconds(Interlocked.Read(ref _storeBlockedMaxTicks)):F1}";
     }
+
+    private static double Milliseconds(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
 
     private static StoreRequest[] CreateStoreRequests()
     {
@@ -143,43 +166,64 @@ internal sealed partial class MetalImageCache
 
     // Before a store into [address, address + size) lands. Called and returning with the lock
     // held; it is let go while the worker and the GPU are waited for. On return no image over
-    // the range is GPU-written, unless the store took the old path.
-    private void PublishBeforeCpuStoreLocked(ulong address, ulong size, bool managedWrite)
+    // the range is GPU-written, unless the store took the old path, which the caller reports
+    // (ReportStoreFallback) once it has let the lock go. Exact asks only for the images over
+    // the stored bytes - a managed write to backed memory, which invalidates no more - and
+    // otherwise for every image on their pages, as a fault does.
+    private StoreFallback? PublishBeforeCpuStoreLocked(ulong address, ulong size, bool managedWrite, bool exact)
     {
-        if (!PublishBeforeStore || !WritebackFenceEnabled)
+        if (!PublishBeforeStore || !WritebackFenceEnabled || !HasGpuWrittenImageLocked(address, size, exact))
         {
-            return;
+            return null;
         }
 
+        var started = Stopwatch.GetTimestamp();
+        try
+        {
+            return PublishRoundsLocked(address, size, managedWrite, exact);
+        }
+        finally
+        {
+            NoteStoreBlocked(Stopwatch.GetTimestamp() - started);
+        }
+    }
+
+    private StoreFallback? PublishRoundsLocked(ulong address, ulong size, bool managedWrite, bool exact)
+    {
         for (var round = 0; !_watchingStopped; round++)
         {
-            if (!HasGpuWrittenImageLocked(address, size))
+            if (!HasGpuWrittenImageLocked(address, size, exact))
             {
-                return;
+                return null;
             }
 
             if (round == MaxStorePublishRounds)
             {
-                NoteStoreFallback(StorePublishFallback.Rounds, address);
-                return;
+                return NoteStoreFallback(StorePublishFallback.Rounds, address);
             }
 
-            if (RequestStorePublishLocked(address, size) is not { } request)
+            if (RequestStorePublishLocked(address, size, exact) is not { } request)
             {
-                NoteStoreFallback(StorePublishFallback.Full, address);
-                return;
+                return NoteStoreFallback(StorePublishFallback.Full, address);
             }
 
-            bool completed;
-            bool handedOver;
+            var completed = false;
+            var handedOver = false;
+            var returned = false;
             _lock.Exit();
             try
             {
                 completed = AwaitStoreRequest(request, managedWrite, out handedOver);
+                returned = true;
             }
             finally
             {
                 _lock.Enter();
+                if (!returned)
+                {
+                    // Thrown out of the wait: the slot goes back, and a pending request with it.
+                    FreeStoreRequestLocked(request);
+                }
             }
 
             var state = request.State;
@@ -187,8 +231,7 @@ internal sealed partial class MetalImageCache
             {
                 // Withdrawn under the lock: the worker can no longer write it back after the store.
                 FreeStoreRequestLocked(request);
-                NoteStoreFallback(handedOver ? StorePublishFallback.Hung : StorePublishFallback.Worker, address);
-                return;
+                return NoteStoreFallback(handedOver ? StorePublishFallback.Hung : StorePublishFallback.Worker, address);
             }
 
             if (!completed)
@@ -205,19 +248,21 @@ internal sealed partial class MetalImageCache
                 }
             }
 
+            var shortfall = request.Shortfall;
             var unwritten = request.Unwritten;
             FreeStoreRequestLocked(request);
             if (state == StoreRequestState.Failed)
             {
-                NoteStoreFallback(StorePublishFallback.Failed, address, unwritten);
-                return;
+                return NoteStoreFallback(shortfall, address, unwritten);
             }
         }
+
+        return null;
     }
 
-    private bool HasGpuWrittenImageLocked(ulong address, ulong size)
+    private bool HasGpuWrittenImageLocked(ulong address, ulong size, bool exact)
     {
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: !exact))
         {
             if (_slots.TryGet(imageIdentifier) is { IsGpuModified: true })
             {
@@ -230,7 +275,7 @@ internal sealed partial class MetalImageCache
 
     // A free request filled with the GPU-written images over the range, at most a request's
     // worth; the next round takes the rest. Null when every request is in use.
-    private StoreRequest? RequestStorePublishLocked(ulong address, ulong size)
+    private StoreRequest? RequestStorePublishLocked(ulong address, ulong size, bool exact)
     {
         StoreRequest? request = null;
         foreach (var candidate in _storeRequests)
@@ -248,7 +293,7 @@ internal sealed partial class MetalImageCache
         }
 
         var count = 0;
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: !exact))
         {
             if (count < MaxImagesPerStoreRequest && _slots.TryGet(imageIdentifier) is { IsGpuModified: true })
             {
@@ -258,6 +303,7 @@ internal sealed partial class MetalImageCache
 
         request.Count = count;
         request.Serial = 0;
+        request.TakeTimeoutMilliseconds = StorePublishTakeTimeoutMilliseconds;
         Volatile.Write(ref request.State, StoreRequestState.Pending);
         _storeRequestsPending++;
         return request;
@@ -271,7 +317,7 @@ internal sealed partial class MetalImageCache
         }
 
         request.Count = 0;
-        request.Unwritten = null;
+        request.Unwritten = default;
         Volatile.Write(ref request.State, StoreRequestState.Free);
     }
 
@@ -308,18 +354,25 @@ internal sealed partial class MetalImageCache
         }
 
         handedOver = true;
-        var deadline = Environment.TickCount64 + StorePublishTakeTimeoutMilliseconds;
+        var deadline = Environment.TickCount64 + request.TakeTimeoutMilliseconds;
         lock (_storeRequestGate)
         {
             while (Volatile.Read(ref request.State) == StoreRequestState.Pending)
             {
+                if (_watchingStopped || HostSessionControl.IsShutdownRequested)
+                {
+                    // The worker is going away, not hung.
+                    handedOver = false;
+                    return false;
+                }
+
                 var remaining = deadline - Environment.TickCount64;
                 if (remaining <= 0)
                 {
                     return false;
                 }
 
-                Monitor.Wait(_storeRequestGate, (int)Math.Min(remaining, int.MaxValue));
+                Monitor.Wait(_storeRequestGate, (int)Math.Min(remaining, StoreShutdownPollMilliseconds));
             }
         }
 
@@ -374,20 +427,29 @@ internal sealed partial class MetalImageCache
                 var wroteBack = false;
                 for (var index = 0; index < request.Count; index++)
                 {
-                    if (_slots.TryGet(request.Images[index]) is { IsGpuModified: true } image)
+                    if (_slots.TryGet(request.Images[index]) is not { IsGpuModified: true } image)
                     {
-                        WriteBackToGuest(image, MetalWritebackCause.HostRead);
-                        wroteBack = true;
-                        if (image.IsGpuModified)
-                        {
-                            // A writeback that could not be recorded leaves the image GPU-written.
-                            failed = true;
-                            request.Unwritten ??= ProfileLabel("writeback", in image.Description);
-                            continue;
-                        }
-
-                        Interlocked.Increment(ref _storePublishWritebacks);
+                        continue;
                     }
+
+                    var outcome = WriteBackToGuest(image, MetalWritebackCause.HostRead);
+                    wroteBack = true;
+                    if (outcome == MetalWritebackOutcome.Complete)
+                    {
+                        Interlocked.Increment(ref _storePublishWritebacks);
+                        continue;
+                    }
+
+                    // Recorded nothing (the image stays GPU-written), or left bytes behind.
+                    if (!failed || outcome == MetalWritebackOutcome.Failed)
+                    {
+                        request.Shortfall = outcome == MetalWritebackOutcome.Failed
+                            ? StorePublishFallback.Failed
+                            : StorePublishFallback.Partial;
+                        request.Unwritten = image.Description;
+                    }
+
+                    failed = true;
                 }
 
                 request.Serial = wroteBack ? _owner.CurrentSerial : 0;
@@ -423,12 +485,42 @@ internal sealed partial class MetalImageCache
         }
     }
 
-    private void NoteStoreFallback(StorePublishFallback reason, ulong address, string? image = null)
+    private void NoteStoreBlocked(long ticks)
+    {
+        Interlocked.Add(ref _storeBlockedTicks, ticks);
+        var max = Interlocked.Read(ref _storeBlockedMaxTicks);
+        while (ticks > max)
+        {
+            var seen = Interlocked.CompareExchange(ref _storeBlockedMaxTicks, ticks, max);
+            if (seen == max)
+            {
+                break;
+            }
+
+            max = seen;
+        }
+    }
+
+    // Counted where it happens, under the lock; the report waits for the lock to be let go.
+    private StoreFallback NoteStoreFallback(
+        StorePublishFallback reason, ulong address, ImageDescription? unwritten = null)
     {
         Interlocked.Increment(ref _storeFallbacks[(int)reason]);
+        return new StoreFallback(reason, address, unwritten);
+    }
+
+    // Without the cache lock: it formats and writes to the console.
+    private void ReportStoreFallback(in StoreFallback? fallback)
+    {
+        if (fallback is not { } report)
+        {
+            return;
+        }
+
+        var unwritten = report.Unwritten is { } image ? $" unwritten={ProfileLabel("writeback", in image)}" : "";
         ReportStorePublish(
-            $"A guest store into a GPU-written image took the old path ({reason}): address=0x{address:X16}" +
-            (image != null ? $" unwritten={image}" : "") + ". " +
+            $"A guest store into a GPU-written image took the old path ({report.Reason}): " +
+            $"address=0x{report.Address:X16}{unwritten}. " +
             "The image reloads from guest memory, which does not hold what the GPU wrote.");
     }
 

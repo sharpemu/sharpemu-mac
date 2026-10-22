@@ -336,18 +336,25 @@ internal sealed partial class MetalImageCache
         }
 
         CountLockedCpuWrite(mayOwn);
-        using var held = _lock.Hold();
-        if (mayOwn && publish)
+        StoreFallback? fallback = null;
+        bool hit;
+        using (_lock.Hold())
         {
-            // A GPU-written image's bytes reach guest memory before the store lands over them
-            // (MetalImageCache.CpuStores.cs).
-            PublishBeforeCpuStoreLocked(address, size, managedWrite: false);
+            if (mayOwn && publish)
+            {
+                // A GPU-written image's bytes reach guest memory before the store lands over them
+                // (MetalImageCache.CpuStores.cs).
+                fallback = PublishBeforeCpuStoreLocked(address, size, managedWrite: false, exact: false);
+            }
+
+            var metadataHit = OnMetadataCpuWriteLocked(address, size);
+            var imageHit = mayOwn && InvalidateAliases(address, size);
+            CountOwnerCpuWriteOutcome(mayOwn, imageHit);
+            hit = imageHit | metadataHit;
         }
 
-        var metadataHit = OnMetadataCpuWriteLocked(address, size);
-        var imageHit = mayOwn && InvalidateAliases(address, size);
-        CountOwnerCpuWriteOutcome(mayOwn, imageHit);
-        return imageHit | metadataHit | stagedHit | fenced;
+        ReportStoreFallback(fallback);
+        return hit | stagedHit | fenced;
     }
 
     // A managed write of exactly these bytes. Unlike a fault it names the bytes it
@@ -373,17 +380,25 @@ internal sealed partial class MetalImageCache
 
         CountLockedCpuWrite(mayOwn);
         var backed = mayOwn && _guestMemory.IsBacked(address, size);
-        using var held = _lock.Hold();
-        if (mayOwn)
+        StoreFallback? fallback = null;
+        bool hit;
+        using (_lock.Hold())
         {
-            // The write has not landed yet: the GPU's bytes go under it first.
-            PublishBeforeCpuStoreLocked(address, size, managedWrite: true);
+            if (mayOwn)
+            {
+                // The write has not landed yet: the GPU's bytes go under it first, for the
+                // images it invalidates (every one on its pages, unless it is backed).
+                fallback = PublishBeforeCpuStoreLocked(address, size, managedWrite: true, exact: backed);
+            }
+
+            var metadataHit = OnMetadataCpuWriteLocked(address, size);
+            var imageHit = mayOwn && InvalidatePreciseWrite(address, size, backed);
+            CountOwnerCpuWriteOutcome(mayOwn, imageHit);
+            hit = imageHit | metadataHit;
         }
 
-        var metadataHit = OnMetadataCpuWriteLocked(address, size);
-        var imageHit = mayOwn && InvalidatePreciseWrite(address, size, backed);
-        CountOwnerCpuWriteOutcome(mayOwn, imageHit);
-        return imageHit | metadataHit | stagedHit;
+        ReportStoreFallback(fallback);
+        return hit | stagedHit;
     }
 
     /// <summary>The host wrote exactly <c>[address, address + size)</c> of guest memory.</summary>

@@ -121,6 +121,10 @@ internal interface IMetalImageTransfer
         SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
         ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0);
 
+    // Copies each range's bytes into the range beside it, in order, in one blit pass: how a
+    // writeback no window holds whole is gathered into scratch and scattered back out.
+    void EncodeBufferCopies(IMetalSubmissionContext context, ReadOnlySpan<(MetalGuestRange From, MetalGuestRange To)> copies);
+
     // Hands one cached surface's contents to another over the same guest bytes, on the
     // device. False when the pair is not one the transfer can carry, and the caller
     // publishes through guest memory instead.
