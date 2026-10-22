@@ -476,10 +476,10 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.True(host.CompletedSerial < serial);
         Assert.False(owner.WaitForSubmissionOffWorker(serial, 10_000));
 
-        Assert.False(Task.Run(() => owner.WaitForSubmissionOffWorker(serial, 50)).Result);
+        Assert.False(OffTheWorker(host, () => owner.WaitForSubmissionOffWorker(serial, 50)).Result);
         Assert.True(host.Relay.HasPendingCommands);
 
-        var waiter = Task.Run(() => owner.WaitForSubmissionOffWorker(serial, 10_000));
+        var waiter = OffTheWorker(host, () => owner.WaitForSubmissionOffWorker(serial, 10_000));
         host.RunPendingOperations();
         Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
         Assert.True(waiter.Result);
@@ -487,6 +487,19 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         WaitForCompletions(host);
         Assert.Equal(0x77u, rig.Backing.Read32(GuestBase + 0x10000));
     }
+
+    // A thread of its own: Task.Run from the bound test thread can run inline on it, making
+    // the waiter the worker.
+    private static Task<bool> OffTheWorker(MetalRenderHost host, Func<bool> wait) =>
+        Task.Factory.StartNew(
+            () =>
+            {
+                Assert.False(host.Relay.IsGpuQueueThread);
+                return wait();
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
 
     [Theory]
     [InlineData(null, "Deferred")]
