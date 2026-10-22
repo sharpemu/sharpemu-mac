@@ -159,29 +159,41 @@ internal sealed partial class MetalRenderHost
                 $"written={stage.Program.Resources!.Info.Buffers[index].Written} data={text}");
         }
 
-        // Constants the shader reaches through a V# it loads from guest memory itself.
-        Span<byte> window = stackalloc byte[512];
+        // Constants the shader reaches through a V# it loads from guest memory itself. The view
+        // uniform buffer is 2.5 KB with the temporal parameters and jitter past offset 1.9 KB, so
+        // a large range is shown from its start and from there.
         foreach (var range in snapshot.DeviceAddressRanges)
         {
-            if (!range.Planned || range.Base == 0 || range.Size == 0)
+            if (!range.Planned || range.Base == 0 || range.Size == 0 || !_memory.CanRead(range.Base, 1))
             {
                 continue;
             }
 
-            var take = (int)Math.Min((ulong)window.Length, range.Size);
-            var text = new StringBuilder();
-            if (_memory.CanRead(range.Base, 1) && TryReadGuest(range.Base, window[..take]))
-            {
-                for (var at = 0; at + 4 <= take; at += 4)
-                {
-                    text.Append(BitConverter.ToUInt32(window[at..(at + 4)]).ToString("X8", CultureInfo.InvariantCulture))
-                        .Append(at % 16 == 12 ? '|' : ' ');
-                }
-            }
-
             Console.Error.WriteLine(
-                $"{header} device_range handle={range.Handle} @{range.Base:X}+{range.Size:X} written={range.Written} data={text}");
+                $"{header} device_range handle={range.Handle} @{range.Base:X}+{range.Size:X} written={range.Written} " +
+                $"data={DiagHexWindow(range.Base, 0, Math.Min(range.Size, 256UL))}" +
+                (range.Size >= 2560
+                    ? $" data@1792={DiagHexWindow(range.Base, 1792, 768)}"
+                    : string.Empty));
         }
+    }
+
+    private string DiagHexWindow(ulong baseAddress, ulong offset, ulong length)
+    {
+        var bytes = new byte[length];
+        var text = new StringBuilder();
+        if (!TryReadGuest(baseAddress + offset, bytes))
+        {
+            return "unreadable";
+        }
+
+        for (var at = 0; at + 4 <= bytes.Length; at += 4)
+        {
+            text.Append(BitConverter.ToUInt32(bytes, at).ToString("X8", CultureInfo.InvariantCulture))
+                .Append(at % 16 == 12 ? '|' : ' ');
+        }
+
+        return text.ToString();
     }
 
     // A colour attachment a pass is about to draw into.
