@@ -51,8 +51,15 @@ public static class GpuReferenceClock
             throw GpuFatal.Fatal($"Cannot convert the host clock: ticks=0x{hostTicks:X16} frequency={hostFrequency}");
         }
 
-        return value;
+        return DiagScale == 1.0 ? value : (ulong)(value * DiagScale);
     }
+
+    // [WIP] diag: SHARPEMU_DIAG_GPU_CLOCK_SCALE=<factor> multiplies every guest GPU clock
+    // read, so GPU spans the guest measures look that much shorter (or longer).
+    private static readonly double DiagScale =
+        double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_GPU_CLOCK_SCALE"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture,
+            out var scale) && scale > 0 ? scale : 1.0;
 }
 
 /// <summary>

@@ -488,6 +488,15 @@ public static class KernelRuntimeCompatExports
     internal static ulong ReadProcessTimeCounterAt(long timestamp)
     {
         var elapsedTicks = Math.Max(0, timestamp - _processStartCounter);
+        if (DiagProcessTimeScale is > 0.0 and not 1.0)
+        {
+            var after = (long)(DiagProcessTimeScaleAfterSeconds * Stopwatch.Frequency);
+            if (elapsedTicks > after)
+            {
+                elapsedTicks = after + (long)((elapsedTicks - after) * DiagProcessTimeScale);
+            }
+        }
+
         if (_stopwatchTicksAreNanoseconds)
         {
             return unchecked((ulong)elapsedTicks);
@@ -511,7 +520,20 @@ public static class KernelRuntimeCompatExports
     /// stub reading the raw host counter agrees with
     /// <see cref="ProcessTimeCounterFrequency"/>.
     /// </summary>
-    public static bool HostCounterMatchesProcessTimeFrequency => _stopwatchTicksAreNanoseconds;
+    public static bool HostCounterMatchesProcessTimeFrequency => _stopwatchTicksAreNanoseconds && DiagProcessTimeScale is 0.0 or 1.0;
+
+    // [WIP] diag: SHARPEMU_DIAG_PROCESS_TIME_SCALE=<factor> slows (factor < 1) the process-time
+    // counter the guest paces its frames with, so each frame advances less game time.
+    internal static readonly double DiagProcessTimeScale =
+        double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_PROCESS_TIME_SCALE"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture,
+            out var scale) && scale > 0 ? scale : 1.0;
+
+    // SHARPEMU_DIAG_PROCESS_TIME_SCALE_AFTER=<seconds>: the scale applies from then on.
+    internal static readonly double DiagProcessTimeScaleAfterSeconds =
+        double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_PROCESS_TIME_SCALE_AFTER"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture,
+            out var seconds) && seconds > 0 ? seconds : 0.0;
 
     [SysAbiExport(
         Nid = "BNowx2l588E",
