@@ -982,6 +982,7 @@ internal sealed partial class MetalRenderHost :
         // bytes the GPU wrote, say) does not report the GPU's time as its own work.
         using var waitProfile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandGpuWait);
+        using var storeDiagScope = MetalStoreDiag.Enter(MetalStoreDiag.Activity.GpuWait);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var serial = FlushCommandBuffer(MetalFlushCause.WaitGpu);
         var waited = _previousCommandBuffer;
@@ -1027,6 +1028,7 @@ internal sealed partial class MetalRenderHost :
 
         using var waitProfile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandGpuWait);
+        using var storeDiagScope = MetalStoreDiag.Enter(MetalStoreDiag.Activity.CommittedWait);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var profile = _completions.WaitFor(serial);
         if (DsTrace.Gpu && DsTrace.Armed)

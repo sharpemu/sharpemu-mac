@@ -557,6 +557,7 @@ internal sealed partial class MetalRenderHost
             else if (!compiling.IsCompleted)
             {
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                using var storeDiagScope = MetalStoreDiag.Enter(MetalStoreDiag.Activity.LibraryWait);
                 // A module still queued behind the pool's other compiles runs here and now:
                 // the worker needs it before any of them.
                 if (module.Job is { } job && MetalLibraryCompilePool.Shared.TryRunHere(job))
@@ -700,6 +701,7 @@ internal sealed partial class MetalRenderHost
     public PipelineHandle CreateGraphicsPipeline(GraphicsPipelineDescription description)
     {
         Interlocked.Increment(ref _pipelineWaitsBlocking);
+        using var storeDiagScope = MetalStoreDiag.Enter(MetalStoreDiag.Activity.GraphicsPipelineBuild);
         RequireDrawableDescription(description);
         // A draw that could be left out may have started this compile; it is waited for
         // rather than built a second time.
@@ -1501,6 +1503,7 @@ internal sealed partial class MetalRenderHost
     public PipelineHandle CreateComputePipeline(ComputePipelineDescription description)
     {
         Interlocked.Increment(ref _pipelineWaitsBlocking);
+        using var storeDiagScope = MetalStoreDiag.Enter(MetalStoreDiag.Activity.ComputePipelineBuild);
         var module = RequireModule(description.Program);
         nint error = 0;
         // The driver turns the function into a GPU binary here, on the worker thread,

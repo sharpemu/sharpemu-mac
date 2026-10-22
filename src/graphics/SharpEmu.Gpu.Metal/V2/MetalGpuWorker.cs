@@ -119,6 +119,8 @@ internal sealed class MetalGpuWorkerRelay : IGpuQueueRelay
             throw GpuFatal.Fatal("Only the Metal GPU worker can run relay commands.");
         }
 
+        MetalStoreDiag.NoteBoundary();
+
         while (HasPendingCommands)
         {
             Action command;

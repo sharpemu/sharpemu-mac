@@ -98,6 +98,10 @@ internal sealed partial class MetalImageCache
         public ImageDescription Unwritten;
         // The images whose writebacks left bytes behind.
         public int PartialCount;
+        // STORE_DIAG: what the worker did with the request.
+        public long ServiceStartTicks;
+        public long ServiceEndTicks;
+        public string? DiagImages;
         public readonly ImageDescription[] Partials = new ImageDescription[MaxImagesPerStoreRequest];
         public readonly ResourceSlotIdentifier[] Images = new ResourceSlotIdentifier[MaxImagesPerStoreRequest];
     }
@@ -376,6 +380,9 @@ internal sealed partial class MetalImageCache
         }
 
         var started = Stopwatch.GetTimestamp();
+        var postMark = MetalStoreDiag.On ? MetalStoreDiag.Snapshot() : default;
+        var postSerial = MetalStoreDiag.On ? _owner.CurrentSerial : 0;
+        var postCompleted = MetalStoreDiag.On ? _owner.CompletedSerial : 0;
         if (!_owner.TryRunOnWorker(_serviceStoreRequests ??= ServiceStoreRequests))
         {
             return false;
@@ -404,8 +411,35 @@ internal sealed partial class MetalImageCache
             }
         }
 
-        NoteStoreTakeLatency(Stopwatch.GetTimestamp() - started);
+        var taken = Stopwatch.GetTimestamp();
+        NoteStoreTakeLatency(taken - started);
+        if (!MetalStoreDiag.On)
+        {
+            WaitForStoreWriteback(request.Serial);
+            return true;
+        }
+
+        var takeMark = MetalStoreDiag.Snapshot();
+        var takeCompleted = _owner.CompletedSerial;
+        // The writeback's submission is the last of the queue: waiting for the one before it
+        // separates the GPU's backlog from the writeback's own run.
+        var backlogMs = 0.0;
+        if (request.Serial > 1 && request.Serial > takeCompleted + 1)
+        {
+            var backlogStarted = Stopwatch.GetTimestamp();
+            WaitForStoreWriteback(request.Serial - 1);
+            backlogMs = Milliseconds(Stopwatch.GetTimestamp() - backlogStarted);
+        }
+
         WaitForStoreWriteback(request.Serial);
+        var done = Stopwatch.GetTimestamp();
+        MetalStoreDiag.Report(
+            $"t={Environment.TickCount64 % 1000000} take_ms={Milliseconds(taken - started):F1} " +
+            $"service_ms={Milliseconds(request.ServiceEndTicks - request.ServiceStartTicks):F1} " +
+            $"complete_ms={Milliseconds(done - taken):F1} backlog_ms={backlogMs:F1} " +
+            $"serial={request.Serial} post_serial={postSerial} post_completed={postCompleted} take_completed={takeCompleted} " +
+            $"ahead_at_take={(long)(request.Serial - takeCompleted)} images={request.Count} {request.DiagImages} " +
+            MetalStoreDiag.Describe(postMark, takeMark));
         return true;
     }
 
@@ -453,6 +487,12 @@ internal sealed partial class MetalImageCache
                     continue;
                 }
 
+                if (MetalStoreDiag.On)
+                {
+                    request.ServiceStartTicks = Stopwatch.GetTimestamp();
+                    request.DiagImages = null;
+                }
+
                 var failed = false;
                 var wroteBack = false;
                 for (var index = 0; index < request.Count; index++)
@@ -460,6 +500,11 @@ internal sealed partial class MetalImageCache
                     if (_slots.TryGet(request.Images[index]) is not { IsGpuModified: true } image)
                     {
                         continue;
+                    }
+
+                    if (MetalStoreDiag.On)
+                    {
+                        request.DiagImages += $"[{ProfileLabel("writeback", image.Description)}]";
                     }
 
                     var outcome = WriteBackToGuest(image, MetalWritebackCause.HostRead);
@@ -491,6 +536,11 @@ internal sealed partial class MetalImageCache
 
                 request.Serial = wroteBack ? _owner.CurrentSerial : 0;
                 recorded |= wroteBack;
+                if (MetalStoreDiag.On)
+                {
+                    request.ServiceEndTicks = Stopwatch.GetTimestamp();
+                }
+
                 Volatile.Write(ref request.State, failed ? StoreRequestState.Failed : StoreRequestState.Recorded);
                 _storeRequestsPending--;
             }
