@@ -22,6 +22,7 @@ internal static class MetalStoreDiag
         ComputePipelineBuild,
         GpuWait,
         CommittedWait,
+        LibraryWaitBeforePreparation,
         Count,
     }
 
@@ -129,6 +130,12 @@ internal static class MetalStoreDiag
         for (var index = 0; index < (int)Activity.Count; index++)
         {
             text += $"{(Activity)index}={Ms(take.Ticks[index] - post.Ticks[index]):F0} ";
+        }
+
+        text = text.TrimEnd() + "] cum=[";
+        foreach (var activity in new[] { Activity.LibraryWait, Activity.LibraryWaitInGraphics, Activity.LibraryWaitInCompute, Activity.LibraryWaitBeforePreparation })
+        {
+            text += $"{activity}={Ms(take.Ticks[(int)activity]):F0} ";
         }
 
         return text.TrimEnd() + "]";

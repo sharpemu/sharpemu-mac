@@ -623,6 +623,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        using var storeDiagScope = MetalStoreDiag.Enter(MetalStoreDiag.Activity.LibraryWaitBeforePreparation);
         StartQueuedCompile(firstCompiling);
         StartQueuedCompile(secondCompiling);
         AwaitServingStores(firstCompiling);
