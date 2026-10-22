@@ -421,6 +421,9 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         private bool Contains(ulong address, ulong length) => address >= GuestBase && address - GuestBase + length <= Size;
 
+        // Guest memory the GPU has no window onto: nothing can be written back into it.
+        public bool NoWindows { get; set; }
+
         public bool TryHoldRange(ulong address, ulong size) => false;
         public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address) { address = 0; return false; }
         public bool TryMapBacked(ulong address, ulong size, ulong backingOffset, GuestPageProtection protection, out HostViewFailure failure) { failure = HostViewFailure.None; return false; }
@@ -432,7 +435,7 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         public bool TryResolveBackingAlias(ulong address, ulong size, out ulong alias)
         {
-            alias = Contains(address, size) ? (ulong)_block + (address - GuestBase) : 0;
+            alias = !NoWindows && Contains(address, size) ? (ulong)_block + (address - GuestBase) : 0;
             return alias != 0;
         }
 
@@ -492,6 +495,12 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         public Func<Action, bool>? RunOnWorker { get; set; }
 
         public bool TryRunOnWorker(Action work) => RunOnWorker?.Invoke(work) ?? false;
+
+        public bool IsWorkerThread => false;
+
+        public void CommitRecorded()
+        {
+        }
     }
 
     private sealed class Rig : IDisposable
@@ -522,6 +531,7 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         public MetalImageCache Cache { get; }
         public Owner CacheOwner { get; }
         public PageGuard Pages => _pages;
+        public Backing GuestBacking => _backing;
 
         // inUseFrames 0 leaves budget eviction to the frame guard and the idle minimum.
         public void Configure(

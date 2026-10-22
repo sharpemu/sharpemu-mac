@@ -12,5 +12,9 @@ public interface IGuestImageStore
     // that cannot use the difference treats it as a fault.
     bool MarkPreciseCpuWrite(ulong address, ulong size) => MarkCpuWrite(address, size);
 
+    // A managed write that has already landed, reported again for an upload that may have
+    // read the bytes before it. Unlike a fault, nothing may be put under these bytes now.
+    bool MarkCpuWriteLanded(ulong address, ulong size) => MarkCpuWrite(address, size);
+
     void Unregister(ulong address, ulong size);
 }

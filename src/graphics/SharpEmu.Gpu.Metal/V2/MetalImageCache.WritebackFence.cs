@@ -81,8 +81,7 @@ internal sealed partial class MetalImageCache
         var timeouts = Interlocked.Exchange(ref _fenceTimeouts, 0);
         var waitMs = ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         return $" wb_fenced={added} wb_fence_live={FencedWritebackCount} wb_fence_waits={waits} " +
-            $"wb_fence_wait_ms={waitMs:F1} wb_fence_timeouts={timeouts} " +
-            $"wb_before_store_total={StorePublishCounts.Writebacks} wb_before_store_timeouts_total={StorePublishCounts.Timeouts}";
+            $"wb_fence_wait_ms={waitMs:F1} wb_fence_timeouts={timeouts}" + StorePublishCounterText();
     }
 
     // The writeback of these bytes was just recorded into the submission with this serial.

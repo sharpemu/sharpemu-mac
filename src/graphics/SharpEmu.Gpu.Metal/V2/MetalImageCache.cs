@@ -63,6 +63,14 @@ internal interface IMetalImageCacheOwner
     // was not handed over: on the worker itself, or with the worker gone.
     bool TryRunOnWorker(Action work) => false;
 
+    // Whether the calling thread is the GPU worker.
+    bool IsWorkerThread => false;
+
+    // Commits the command buffer being recorded. On the worker.
+    void CommitRecorded()
+    {
+    }
+
     void ClearTextureColor(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height, in GpuClearColor color);
 
     void ClearTextureDepthStencil(

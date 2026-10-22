@@ -312,7 +312,12 @@ internal sealed partial class MetalImageCache
 
     // A CPU write on the faulting thread. Most writes (command building, labels)
     // touch no image page, and the live-owner counts answer those without the lock.
-    bool IGuestImageStore.MarkCpuWrite(ulong address, ulong size)
+    bool IGuestImageStore.MarkCpuWrite(ulong address, ulong size) => MarkCpuWrite(address, size, publish: true);
+
+    // The write is in guest memory already, so no GPU bytes may be put under it.
+    bool IGuestImageStore.MarkCpuWriteLanded(ulong address, ulong size) => MarkCpuWrite(address, size, publish: false);
+
+    private bool MarkCpuWrite(ulong address, ulong size, bool publish)
     {
         if (!IsValidRange(address, size))
         {
@@ -331,14 +336,14 @@ internal sealed partial class MetalImageCache
         }
 
         CountLockedCpuWrite(mayOwn);
-        if (mayOwn)
+        using var held = _lock.Hold();
+        if (mayOwn && publish)
         {
             // A GPU-written image's bytes reach guest memory before the store lands over them
             // (MetalImageCache.CpuStores.cs).
-            PublishBeforeCpuStore(address, size);
+            PublishBeforeCpuStoreLocked(address, size, managedWrite: false);
         }
 
-        using var held = _lock.Hold();
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
         var imageHit = mayOwn && InvalidateAliases(address, size);
         CountOwnerCpuWriteOutcome(mayOwn, imageHit);
@@ -369,6 +374,12 @@ internal sealed partial class MetalImageCache
         CountLockedCpuWrite(mayOwn);
         var backed = mayOwn && _guestMemory.IsBacked(address, size);
         using var held = _lock.Hold();
+        if (mayOwn)
+        {
+            // The write has not landed yet: the GPU's bytes go under it first.
+            PublishBeforeCpuStoreLocked(address, size, managedWrite: true);
+        }
+
         var metadataHit = OnMetadataCpuWriteLocked(address, size);
         var imageHit = mayOwn && InvalidatePreciseWrite(address, size, backed);
         CountOwnerCpuWriteOutcome(mayOwn, imageHit);

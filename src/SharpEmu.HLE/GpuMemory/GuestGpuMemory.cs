@@ -179,7 +179,7 @@ public sealed class GuestGpuMemory : IDisposable
         // The new bytes must be visible before the store reads its page state.
         Interlocked.MemoryBarrier();
         Buffers?.MarkCpuWriteLanded(address, size);
-        _ = Images?.MarkCpuWrite(address, size);
+        _ = Images?.MarkCpuWriteLanded(address, size);
     }
 
     public bool Covers(ulong address, ulong size)
