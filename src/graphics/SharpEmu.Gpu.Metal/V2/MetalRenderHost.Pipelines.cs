@@ -1501,6 +1501,27 @@ internal sealed partial class MetalRenderHost
             var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreFragmentTests
                 ? MetalV2Formats.CompareFunction(state.DepthCompare)
                 : MetalV2Formats.CompareFunction(GpuCompareOp.Always);
+
+            // DIAG (speckle bisect): SHARPEMU_DIAG_DEPTH_EQUAL=always|geq|leq replaces an Equal depth test, and
+            // SHARPEMU_DIAG_DEPTH_LOG=1 prints the depth state of every mesh pipeline once per state.
+            if (entry.HasDepth && state.DepthTestEnabled && state.DepthCompare == GpuCompareOp.Equal &&
+                Environment.GetEnvironmentVariable("SHARPEMU_DIAG_DEPTH_EQUAL") is { Length: > 0 } diagEqual)
+            {
+                depthCompare = MetalV2Formats.CompareFunction(diagEqual switch
+                {
+                    "geq" => GpuCompareOp.GreaterOrEqual,
+                    "leq" => GpuCompareOp.LessOrEqual,
+                    _ => GpuCompareOp.Always,
+                });
+            }
+
+            if (Environment.GetEnvironmentVariable("SHARPEMU_DIAG_DEPTH_LOG") == "1" && entry.Mesh is not null)
+            {
+                Console.Error.WriteLine(
+                    $"[DIAG][DEPTHSTATE] vs=0x{entry.MeshHash:X16} {entry.Profile} test={state.DepthTestEnabled} " +
+                    $"compare={state.DepthCompare} write={state.DepthWriteEnabled} hasDepth={entry.HasDepth}");
+            }
+
             MetalV2Native.SendVoidValue(descriptor, MetalNative.Selector("setDepthCompareFunction:"), depthCompare);
             MetalNative.SendVoidBool(
                 descriptor,
