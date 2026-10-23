@@ -25,6 +25,8 @@ internal sealed partial class MetalRenderHost
 
         /// <summary>See <see cref="Gen5MslShader.PersistentThreads"/>.</summary>
         public bool PersistentThreads;
+        public bool WritesStepReport;
+        public bool UsesPairLocks;
         public nuint PrimitiveType;
         public nint CullMode;
         public nint Winding;
@@ -1550,6 +1552,8 @@ internal sealed partial class MetalRenderHost
             State = state,
             Graphics = false,
             PersistentThreads = module.Shader.PersistentThreads,
+            WritesStepReport = module.Shader.WritesStepReport,
+            UsesPairLocks = module.Shader.UsesPairLocks,
             ThreadsPerThreadgroup = threads,
             Profile = ProfileLabelFor(module, null, null),
             VertexHash = module.Hash,

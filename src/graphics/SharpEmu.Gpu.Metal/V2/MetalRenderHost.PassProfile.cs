@@ -325,6 +325,10 @@ internal sealed partial class MetalRenderHost
 
         var descriptor = MetalNative.Send(
             MetalNative.Class("MTLComputePassDescriptor"), MetalNative.Selector("computePassDescriptor"));
+        if (ConcurrentComputeEnabled)
+        {
+            MetalNative.SendVoidNUInt(descriptor, SelSetComputeDispatchType, 1);
+        }
         var attachments = MetalNative.Send(descriptor, SelSampleBufferAttachments);
         var slot = MetalNative.SendAtIndex(attachments, SelObjectAtIndex, 0);
         MetalNative.SendVoid(slot, SelSetSampleBuffer, _ppBuffers[record.Buffer]);

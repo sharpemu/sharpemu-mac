@@ -963,7 +963,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             // leaves it to this transfer, which saves the encoder boundary.
             var shared = context.TryShareComputeEncoder(guestAddress, guest.Size);
             var compute = shared != 0 ? shared : _tiler.BeginCompute(context);
-            _tiler.EncodeTextureBlockCopies(compute, guest, view, _tiles, direction);
+            _tiler.EncodeTextureBlockCopies(compute, guest, view, _tiles, direction,
+                serializeDispatches: shared != 0 && context.SharedComputeIsConcurrent);
             if (shared != 0)
             {
                 context.EndSharedCompute();

@@ -404,7 +404,8 @@ internal sealed unsafe class MetalTiler : IDisposable
     /// one that does not is a caller bug, not a fallback.
     /// </summary>
     public void EncodeTextureBlockCopies(
-        nint encoder, MetalBufferSpan tiled, nint view, List<MetalTileTransfer> transfers, MetalTileDirection direction)
+        nint encoder, MetalBufferSpan tiled, nint view, List<MetalTileTransfer> transfers, MetalTileDirection direction,
+        bool serializeDispatches = false)
     {
         if (view == 0 || transfers.Count == 0 || !tiled.IsValid)
         {
@@ -425,6 +426,7 @@ internal sealed unsafe class MetalTiler : IDisposable
         var pipelineKind = (TileBlockKind)uint.MaxValue;
         uint pipelineBytes = 0;
         var subresource = stackalloc uint[2];
+        var dispatched = false;
         foreach (ref readonly var transfer in CollectionsMarshal.AsSpan(transfers))
         {
             if (!MetalTilerShaders.SupportsTextureCopy(transfer.BytesPerElement) || transfer.Tail || transfer.Depth != 1)
@@ -447,7 +449,15 @@ internal sealed unsafe class MetalTiler : IDisposable
             subresource[1] = transfer.Level;
             MetalNative.SendSetBytes(encoder, SelSetBytes, (nint)subresource, (nuint)sizeof(uint) * 2,
                 MetalTilerShaders.SubresourceIndex);
+            if (serializeDispatches && dispatched)
+            {
+                // Sub-byte stores may share a packed destination word at a subresource
+                // edge. Keep utility dispatches ordered until their footprints are exposed.
+                MetalV2Native.SendMemoryBarrierScope(encoder, MetalNative.Selector("memoryBarrierWithScope:"),
+                    Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+            }
             Dispatch(encoder, arguments, MetalTilerShaders.Threadgroup(transfer.Kind));
+            dispatched = true;
         }
     }
 

@@ -323,6 +323,10 @@ public interface IRenderHost
 
     void ShaderAccessBarrier();
 
+    // The host records dispatch footprints and orders compute dependencies itself.
+    // Guest barriers still call the barrier methods unconditionally.
+    bool TracksComputeDependencies => false;
+
     // Clears the bound color targets to one colour in place of the draw.
     void ClearColorTargets(ReadOnlySpan<ColorTargetState> targets, SolidColorClear clear);
 

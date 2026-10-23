@@ -279,6 +279,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var stageIndex = StageIndexOf(program.Stage);
+        if (stageIndex == StageCompute) OrderComputeExternalWrites();
         var prepared = _stageBindings[stageIndex];
         prepared.StageResources = stage;
         prepared.Program = program;
