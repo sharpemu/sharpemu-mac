@@ -224,6 +224,7 @@ internal sealed class ShaderProgramCache
     // (~4 % of the Demon's Souls render thread) for a debug dump that is almost never on.
     private readonly bool _spirvDumpEnabled = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV"), "1", StringComparison.Ordinal);
 
+    private readonly IRecipeDiagnosticSink? _recipeDiagnostics;
     private readonly ResourceReadBatchObserver _observeCachedReads;
     private readonly GuestWordReader _readGuestWord;
     private readonly GuestWordReader _readCleanGuestWord;
@@ -238,6 +239,7 @@ internal sealed class ShaderProgramCache
         _context = context;
         _compiler = compiler;
         _host = host;
+        _recipeDiagnostics = host.RecipeDiagnostics;
         _observeCachedReads = ObserveCachedTableReads;
         _readGuestWord = ReadGuestWord;
         _readCleanGuestWord = ReadCleanGuestWord;
@@ -624,6 +626,7 @@ internal sealed class ShaderProgramCache
         _captureTableWords = true;
         try
         {
+            using (new RecipeMaterializationTimer(_recipeDiagnostics))
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
             {
                 // Failure capture needs the full walk, so a dump run bypasses the cache.
@@ -762,6 +765,7 @@ internal sealed class ShaderProgramCache
                         _linkedPrograms.Add(linkedKey, linked);
                     }
                     entry = linked;
+                    using var linkedTimer = new RecipeMaterializationTimer(_recipeDiagnostics);
                     if (!ResourceMaterializer.Materialize(entry.Plan, inputs.WithReader(inputs.ReadMemory, pendingLoads: false),
                         ref snapshot, ref specialization, out var linkedFailure))
                     {
@@ -782,6 +786,7 @@ internal sealed class ShaderProgramCache
             }
         }
         finally { _captureTableWords = false; MaterializingShader.Hash = 0; }
+        _recipeDiagnostics?.Materialized(source, entry.Plan, snapshot);
         _imageDescriptorTrace.Record(source, entry.Plan, snapshot);
 
         if (AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex &&

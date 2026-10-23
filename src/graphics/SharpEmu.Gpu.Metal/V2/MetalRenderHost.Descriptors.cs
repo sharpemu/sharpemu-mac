@@ -958,6 +958,7 @@ internal sealed partial class MetalRenderHost
                 hasPushData = true;
             }
 
+            if (_recipes is not null) RecipeBindings(stage);
             stage.Committed = true;
         }
 
