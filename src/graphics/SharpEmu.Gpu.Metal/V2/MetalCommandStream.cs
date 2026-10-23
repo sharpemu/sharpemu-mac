@@ -270,6 +270,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // the label whenever the GPU could not write it.
     public void RecordEndOfPipe(in EndOfPipeWrite write)
     {
+        FlushComputeBatch("label");
         using var endOfPipeScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandEndOfPipe);
         _endOfPipeRecords++;
@@ -742,6 +743,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
     {
+        FlushComputeBatch("cp-write");
         if (source.IsEmpty)
         {
             return;
@@ -847,6 +849,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </remarks>
     public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
     {
+        FlushComputeBatch("cp-write");
         if (count <= 0)
         {
             return;
@@ -986,6 +989,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES")
     {
+        FlushComputeBatch("cp-write");
         _ = kind;
         _cpOverlay.Forget(address, (ulong)source.Length);
         _labelOverlay.Forget(address, (ulong)source.Length);
@@ -2081,7 +2085,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public void OnQueueReset(int queueId) => _translation!.QueueReset(queueId);
 
-    public void ReleaseShaderWrites() => _translation?.ReleaseShaderWrites();
+    public void ReleaseShaderWrites()
+    {
+        FlushComputeBatch("acquire");
+        _translation?.ReleaseShaderWrites();
+    }
 
     /// <summary>
     /// Runs interpreter slices until nothing is runnable or the budget ends; blocked

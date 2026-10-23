@@ -137,6 +137,8 @@ internal sealed partial class MetalRenderHost
 
     private readonly Dictionary<BindingLayout, ArgumentPlan> _argumentLayouts = new();
     private readonly Dictionary<(uint, uint, uint, uint, bool), (nint Handle, ulong ResourceId)> _samplers = new();
+    private readonly ulong[] _stageArgumentAddresses = new ulong[StageCount];
+    private ulong _pushAddress;
     private readonly nint[] _stageArgumentBuffers = new nint[StageCount];
     private readonly ulong[] _stageArgumentOffsets = new ulong[StageCount];
     private readonly bool[] _stageArgumentValid = new bool[StageCount];
@@ -963,6 +965,7 @@ internal sealed partial class MetalRenderHost
         {
             var range = _guestMemory.Allocate(PushData.ByteSize, 256, out var span);
             System.Runtime.InteropServices.MemoryMarshal.AsBytes(pushData).CopyTo(span);
+            _pushAddress = range.GpuAddress;
             _pushBuffer = range.Buffer;
             _pushOffset = range.Offset;
             _hasPushData = true;
@@ -1069,6 +1072,7 @@ internal sealed partial class MetalRenderHost
             }
         }
 
+        _stageArgumentAddresses[stageIndex] = range.GpuAddress;
         _stageArgumentBuffers[stageIndex] = range.Buffer;
         _stageArgumentOffsets[stageIndex] = range.Offset;
         _stageArgumentValid[stageIndex] = true;
@@ -1344,7 +1348,7 @@ internal sealed partial class MetalRenderHost
 
     // Argument-buffer references are indirect, so the encoder is told which textures
     // the draw touches. The guest windows live in the residency set instead.
-    private void ApplyStageBindings(bool graphics)
+    private void ApplyStageBindings(bool graphics, bool bindComputeBuffers = true)
     {
         if (graphics)
         {
@@ -1377,7 +1381,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        BindStageBuffers(_computeEncoder, StageCompute, SelSetComputeBuffer);
+        if (bindComputeBuffers) BindStageBuffers(_computeEncoder, StageCompute, SelSetComputeBuffer);
         NameResidentBuffers(_computeEncoder, _guestMemory.ResidentBuffers, stages: 0);
 
         for (var index = 0; index < _usedResourceCount; index++)

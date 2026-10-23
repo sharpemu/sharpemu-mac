@@ -137,6 +137,7 @@ internal sealed partial class MetalRenderHost
         if (_computeDependencies.NeedsBarrier(footprint))
         {
             ComputeDependencyBarriers++;
+            FlushComputeBatch("dependency");
             ComputeScopeBarrier();
         }
         else if (_computeDependencies.HasDispatch)
@@ -172,6 +173,7 @@ internal sealed partial class MetalRenderHost
     // Reset only after encoding the barrier, including guest and shared-transfer cuts.
     private void ComputeScopeBarrier()
     {
+        FlushComputeBatch("barrier");
         ComputeScopeBarriers++;
         MetalV2Native.SendMemoryBarrierScope(
             _computeEncoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);

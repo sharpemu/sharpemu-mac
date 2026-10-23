@@ -21,6 +21,7 @@ internal sealed partial class MetalRenderHost
     {
         public ulong Id;
         public nint State;
+        public nint BatchState;
         public bool Graphics;
 
         /// <summary>See <see cref="Gen5MslShader.PersistentThreads"/>.</summary>
@@ -2075,6 +2076,7 @@ internal sealed partial class MetalRenderHost
         MetalBinaryArchive.For(_device)?.Flush(wait: true, TimeSpan.FromSeconds(10));
         foreach (var entry in _pipelineEntries.Values)
         {
+            ReleaseState(entry.BatchState);
             if (entry.State != 0)
             {
                 ReleaseState(entry.State);

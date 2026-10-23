@@ -347,6 +347,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _ = EnsureCommandBuffer();
+        FlushComputeBatch("transfer");
         NoteRecordedWork();
         _transferInSharedEncoder = false;
         if (TransfersShareCompute && _computeEncoder != 0 && texture != 0 && otherTexture == 0 &&
@@ -1371,6 +1372,7 @@ internal sealed partial class MetalRenderHost :
     /// </remarks>
     public void FillGuestMemory(ulong address, ulong size, uint value, bool allowHost = true)
     {
+        FlushComputeBatch("transfer");
         if (size == 0)
         {
             return;
@@ -1507,6 +1509,7 @@ internal sealed partial class MetalRenderHost :
     /// </remarks>
     public void CopyGuestMemory(ulong destination, ulong source, ulong size, bool allowHost = true)
     {
+        FlushComputeBatch("transfer");
         if (size == 0)
         {
             return;
@@ -1638,6 +1641,7 @@ internal sealed partial class MetalRenderHost :
         uint argument3,
         ulong argument4)
     {
+        if (operation == RecordedOperation.DispatchDirect) _dispatchInitiator = argument3;
         if (!MetalV2Diagnostics.Verbose)
         {
             return;
@@ -2242,6 +2246,7 @@ internal sealed partial class MetalRenderHost :
         var (pageWatches, pageWatchPeak) = _imageCache.TakePageWatchCounters();
         Console.Error.WriteLine(
             $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
+            ComputeBatchCounters() +
             // Colour loads a full-screen first draw made dead (MetalPassLoads).
             $"load_elided={loadsElided} load_elided_mb={(loadElidedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"join_refused=[{joinRefusals}] load_refused=[{loadRefusals}] subset_joins={subsetJoins} subset_load_avoided_mb={(subsetLoadBytes / 1048576.0).ToString("F1", culture)} " +

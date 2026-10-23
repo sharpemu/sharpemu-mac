@@ -77,6 +77,9 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// guest writes and reads such a record with one instruction, which other CUs see whole; here
 /// each dword is its own access, and UE5's Nanite culling read queue records half written.
 /// <c>SHARPEMU_MSL_PERSISTENT_RECORDS=0</c> accesses them dword by dword.</param>
+/// <param name="ComputeBatchEntryPoint">Also emit a segmented-grid compute entry with
+/// request-local argument/push pointers and reconstructed group IDs. The Metal V2
+/// host requests this ABI; standalone translator callers retain the ordinary entry.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
@@ -92,7 +95,8 @@ public sealed record Gen5MslCodegenOptions(
     bool GraphicsLoopStepCap = false,
     bool LaneSpillCopies = true,
     bool PersistentWaitFences = true,
-    bool PersistentRecordLocks = true)
+    bool PersistentRecordLocks = true,
+    bool ComputeBatchEntryPoint = false)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
