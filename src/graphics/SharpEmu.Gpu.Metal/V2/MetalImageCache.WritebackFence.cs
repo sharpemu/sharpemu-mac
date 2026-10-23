@@ -93,7 +93,8 @@ internal sealed partial class MetalImageCache
             $"wb_fence_wait_ms={waitMs:F1} wb_fence_timeouts={timeouts} " +
             $"wb_staged_runs_total={Interlocked.Read(ref _stagedWritebackRuns)} " +
             $"wb_partial_total={Interlocked.Read(ref _shortWritebacks)} " +
-            $"wb_unrecorded_total={Interlocked.Read(ref _unrecordedWritebacks)}" + StorePublishCounterText();
+            $"wb_unrecorded_total={Interlocked.Read(ref _unrecordedWritebacks)}" + StorePublishCounterText() +
+            EagerPublishCounterText();
     }
 
     // The writeback of these bytes was just recorded into the submission with this serial.

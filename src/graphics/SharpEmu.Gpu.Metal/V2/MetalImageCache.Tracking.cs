@@ -324,7 +324,9 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
-        // A writeback still in flight over the page lands first; the store waits for it.
+        // A writeback still in flight over the page lands first; the store waits for it, and
+        // without a bound for one recorded ahead of it (MetalImageCache.EagerPublish.cs).
+        var eager = WaitForEagerWritebacks(address, size);
         var fenced = Volatile.Read(ref _fencedWritebackCount) != 0 && WaitForFencedWritebacks(address, size);
 
         // A cached staged copy over the page is stale from here; the store may land once its watch is gone.
@@ -332,7 +334,8 @@ internal sealed partial class MetalImageCache
         var mayOwn = _pageOwners.MayHaveOwners(address, size);
         if (!mayOwn && !MetadataWatchOverlaps(address, size))
         {
-            return stagedHit | fenced;
+            // An image released since the wait above may have had one recorded first.
+            return stagedHit | fenced | eager | WaitForEagerWritebacks(address, size);
         }
 
         CountLockedCpuWrite(mayOwn);
@@ -343,12 +346,17 @@ internal sealed partial class MetalImageCache
             if (mayOwn && publish)
             {
                 // A GPU-written image's bytes reach guest memory before the store lands over them
-                // (MetalImageCache.CpuStores.cs).
-                fallback = PublishBeforeCpuStoreLocked(address, size, managedWrite: false, exact: false);
+                // (MetalImageCache.CpuStores.cs), and so does a writeback recorded ahead meanwhile.
+                do
+                {
+                    var round = PublishBeforeCpuStoreLocked(address, size, managedWrite: false, exact: false);
+                    fallback ??= round;
+                }
+                while (WaitForEagerWritebacksLocked(address, size));
             }
 
             var metadataHit = OnMetadataCpuWriteLocked(address, size);
-            var imageHit = mayOwn && InvalidateAliases(address, size);
+            var imageHit = mayOwn && InvalidateAliases(address, size, guestStore: true);
             CountOwnerCpuWriteOutcome(mayOwn, imageHit);
             hit = imageHit | metadataHit;
         }
@@ -372,10 +380,12 @@ internal sealed partial class MetalImageCache
             stagedHit = staged.OnPreciseCpuWrite(address, size, _guestMemory.IsBacked(address, size));
         }
 
+        // A writeback recorded ahead of the write lands first (MetalImageCache.EagerPublish.cs).
+        var eager = WaitForEagerWritebacks(address, size);
         var mayOwn = _pageOwners.MayHaveOwners(address, size);
         if (!mayOwn && !MetadataWatchOverlaps(address, size))
         {
-            return stagedHit;
+            return stagedHit | eager | WaitForEagerWritebacks(address, size);
         }
 
         CountLockedCpuWrite(mayOwn);
@@ -387,12 +397,18 @@ internal sealed partial class MetalImageCache
             if (mayOwn)
             {
                 // The write has not landed yet: the GPU's bytes go under it first, for the
-                // images it invalidates (every one on its pages, unless it is backed).
-                fallback = PublishBeforeCpuStoreLocked(address, size, managedWrite: true, exact: backed);
+                // images it invalidates (every one on its pages, unless it is backed), and so
+                // does a writeback recorded ahead meanwhile.
+                do
+                {
+                    var round = PublishBeforeCpuStoreLocked(address, size, managedWrite: true, exact: backed);
+                    fallback ??= round;
+                }
+                while (WaitForEagerWritebacksLocked(address, size));
             }
 
             var metadataHit = OnMetadataCpuWriteLocked(address, size);
-            var imageHit = mayOwn && InvalidatePreciseWrite(address, size, backed);
+            var imageHit = mayOwn && InvalidatePreciseWrite(address, size, backed, guestStore: true);
             CountOwnerCpuWriteOutcome(mayOwn, imageHit);
             hit = imageHit | metadataHit;
         }
@@ -412,7 +428,7 @@ internal sealed partial class MetalImageCache
         StagedRanges?.OnHostWrite(address, size);
         var backed = _guestMemory.IsBacked(address, size);
         using var held = _lock.Hold();
-        InvalidatePreciseWrite(address, size, backed);
+        InvalidatePreciseWrite(address, size, backed, guestStore: false);
     }
 
     // A write of known bytes through the backing never meets the page watch, so the
@@ -425,11 +441,11 @@ internal sealed partial class MetalImageCache
     // A write that goes through the guest mapping needs the watch gone first, and an
     // image already without one, or with bytes only its texture holds, is handled as a
     // fault is: the whole image is refreshed.
-    private bool InvalidatePreciseWrite(ulong address, ulong size, bool backed)
+    private bool InvalidatePreciseWrite(ulong address, ulong size, bool backed, bool guestStore)
     {
         if (!backed)
         {
-            return InvalidateAliases(address, size);
+            return InvalidateAliases(address, size, guestStore);
         }
 
         var covered = false;
@@ -441,6 +457,11 @@ internal sealed partial class MetalImageCache
             }
 
             covered = true;
+            if (guestStore)
+            {
+                NoteStoreLocked(image);
+            }
+
             var (start, end) = image.OverlapWithin(address, size);
             if (image.IsWatched && !image.IsGpuModified)
             {
@@ -455,7 +476,7 @@ internal sealed partial class MetalImageCache
         return covered;
     }
 
-    private bool InvalidateAliases(ulong address, ulong size)
+    private bool InvalidateAliases(ulong address, ulong size, bool guestStore)
     {
         var covered = false;
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
@@ -466,6 +487,11 @@ internal sealed partial class MetalImageCache
             }
 
             covered = true;
+            if (guestStore)
+            {
+                NoteStoreLocked(image);
+            }
+
             image.InvalidateCpuWrite(address, size);
             UnwatchImage(imageIdentifier);
         }
@@ -553,6 +579,7 @@ internal sealed partial class MetalImageCache
         using var held = _lock.Hold();
         _previousFrameStartTick = _frameStartTick;
         _frameStartTick = _collectionTick;
+        _cacheFrame++;
         _idleClock.MarkFrame(_collectionTick);
     }
 

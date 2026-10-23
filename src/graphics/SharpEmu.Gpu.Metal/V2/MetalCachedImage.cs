@@ -64,6 +64,8 @@ internal enum MetalWritebackCause : byte
     ImageOverlap,
     Release,
     DrainAll,
+    // Ahead of a guest store expected into it (MetalImageCache.EagerPublish.cs).
+    Eager,
 }
 
 // What a cached image has been bound as; the upload role follows from it.
@@ -316,6 +318,13 @@ internal sealed class MetalCachedImage : IDisposable
     // The submission serial of the command buffer that last wrote the image, so a
     // writeback knows whether the GPU work it depends on has been recorded.
     public ulong GpuWriteSerial;
+
+    // The cache frame of the last guest store into the image once a store has needed it written
+    // back first; zero while none has (MetalImageCache.EagerPublish.cs).
+    public long StoreFrame;
+
+    // Written back ahead of a store that has not come yet.
+    public bool EagerUnstored;
 
     // The newest submission that bound this image's texture or any of its views.
     // An argument buffer holds a gpuResourceID, which Metal does not retain, so

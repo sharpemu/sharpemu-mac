@@ -467,6 +467,7 @@ internal sealed partial class MetalImageCache
                     if (outcome == MetalWritebackOutcome.Complete)
                     {
                         Interlocked.Increment(ref _storePublishWritebacks);
+                        NoteStorePublishedLocked(request.Images[index], image);
                         continue;
                     }
 
@@ -474,6 +475,7 @@ internal sealed partial class MetalImageCache
                     {
                         // Recorded, with bytes left behind: counted, and the rounds go on.
                         Interlocked.Increment(ref _storePublishWritebacks);
+                        NoteStorePublishedLocked(request.Images[index], image);
                         request.Partials[request.PartialCount++] = image.Description;
                         continue;
                     }

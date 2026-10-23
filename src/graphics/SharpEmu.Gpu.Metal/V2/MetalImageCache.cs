@@ -59,6 +59,11 @@ internal interface IMetalImageCacheOwner
     // did not complete in time, or when called on the worker, which would wait for itself.
     bool WaitForSubmissionOffWorker(ulong serial, int timeoutMilliseconds) => CompletedSerial >= serial;
 
+    // The same on the worker, for a submission it has already committed: that one completes
+    // without the worker, so this waits until it has, or until teardown. False without waiting
+    // off the worker or for a submission not committed yet.
+    bool WaitForCommittedSubmissionOnWorker(ulong serial) => CompletedSerial >= serial;
+
     // Hands work to the GPU worker from another thread without waiting for it. False when it
     // was not handed over: on the worker itself, or with the worker gone.
     bool TryRunOnWorker(Action work) => false;
@@ -2799,7 +2804,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     }
 
     private readonly long[] _uploadCauses = new long[5];
-    private readonly long[] _writebackCauses = new long[7];
+    private readonly long[] _writebackCauses = new long[8];
     private long _stagedWritebackRuns;
     private long _shortWritebacks;
     private long _unrecordedWritebacks;

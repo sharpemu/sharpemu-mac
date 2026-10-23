@@ -565,6 +565,14 @@ internal sealed partial class MetalRenderHost :
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandFlush);
         // An upload left for a pass is made before the buffer it belongs in is committed.
         _imageCache.DrainDeferredRefreshes();
+        if (_preparation is null)
+        {
+            // So is the writeback of an image a guest store is expected into, ahead of it
+            // (MetalImageCache.EagerPublish.cs). Inside a preparation everything is stamped
+            // with this serial already; the next commit records it.
+            _imageCache.RecordEagerWritebacks();
+        }
+
         if (_commandBuffer == 0)
         {
             return _nextSerial;
@@ -1263,6 +1271,25 @@ internal sealed partial class MetalRenderHost :
         }
 
         return _completions.WaitForSignalled(serial, timeoutMilliseconds);
+    }
+
+    bool IMetalImageCacheOwner.WaitForCommittedSubmissionOnWorker(ulong serial)
+    {
+        if (CompletedSerial >= serial)
+        {
+            return true;
+        }
+
+        if (!_relay.IsGpuQueueThread || serial > _previousSerial)
+        {
+            return false;
+        }
+
+        while (!_completions.WaitForSignalled(serial, 1000) && !SharpEmu.HLE.HostSessionControl.IsShutdownRequested)
+        {
+        }
+
+        return true;
     }
 
     bool IMetalImageCacheOwner.TryRunOnWorker(Action work) => !_relay.IsGpuQueueThread && _relay.TryPost(work);
