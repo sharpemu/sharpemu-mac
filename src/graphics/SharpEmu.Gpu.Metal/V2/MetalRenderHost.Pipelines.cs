@@ -175,11 +175,11 @@ internal sealed partial class MetalRenderHost
     {
         LookupModule(program).BindingSuccessor = true;
         if (stage != ShaderStage.Compute) return;
-        Compiler.EnsureStarted(program.Id, () =>
+        Compiler.EnsureStarted(program.Id, () => SharpEmu.Libs.Gpu.Scheduling.GpuFatal.RunAhead(() =>
         {
             var ready = RequireModule(program, onWorker: false);
             return new MetalPipelineCompiler.Result(BuildComputePipelineState(ready.Function, info.Hash, ready.ArchiveKey));
-        });
+        }));
     }
 
     public bool ProgramCompilationFailed(ShaderProgram program, ShaderStage stage)
@@ -223,6 +223,7 @@ internal sealed partial class MetalRenderHost
             Hash = hash,
             Stage = stage,
             LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+            BindingSuccessor = SharpEmu.Libs.Gpu.Scheduling.GpuFatal.IsAhead,
         };
 
         // The library compiles on the module pool and the handle is returned at once: the
@@ -244,7 +245,9 @@ internal sealed partial class MetalRenderHost
                 }
 
                 module.Contended = MetalCompileScheduler.Shared.PrewarmInFlight > 0;
-                BuildModule(module, stage);
+                if (module.BindingSuccessor)
+                    SharpEmu.Libs.Gpu.Scheduling.GpuFatal.RunAhead(() => { BuildModule(module, stage); return 0; });
+                else BuildModule(module, stage);
             }
             finally
             {

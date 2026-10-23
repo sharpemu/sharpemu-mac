@@ -22,6 +22,18 @@ public static class GpuFatal
     [ThreadStatic]
     internal static bool ThrowOnFatal;
 
+    public static bool IsAhead => ThrowOnFatal;
+
+    // Speculative replacement work may fail while an existing program remains usable.
+    // Restore the thread's policy even when the translation or driver compile throws.
+    public static T RunAhead<T>(Func<T> work)
+    {
+        var previous = ThrowOnFatal;
+        ThrowOnFatal = true;
+        try { return work(); }
+        finally { ThrowOnFatal = previous; }
+    }
+
     public sealed class AbandonedWorkException(string message) : Exception(message);
 
     /// <summary>

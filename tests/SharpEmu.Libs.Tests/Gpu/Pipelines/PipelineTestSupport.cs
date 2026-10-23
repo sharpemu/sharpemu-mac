@@ -166,6 +166,7 @@ internal sealed class FakeShaderCompiler(Func<ShaderCompileRequest, byte[]>? com
     public List<ShaderCompileRequest> Requests { get; } = new();
 
     public string? Rejection { get; set; }
+    public bool FatalRejection { get; set; }
 
     public List<FakeCompiledShader> Shaders { get; } = new();
 
@@ -181,6 +182,7 @@ internal sealed class FakeShaderCompiler(Func<ShaderCompileRequest, byte[]>? com
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {
         Requests.Add(request);
+        if (FatalRejection) throw SharpEmu.Libs.Gpu.Scheduling.GpuFatal.Fatal("forced successor fatal");
         if (Rejection is { } rejection)
         {
             shader = null;

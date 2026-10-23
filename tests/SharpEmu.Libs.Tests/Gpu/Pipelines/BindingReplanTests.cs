@@ -179,15 +179,17 @@ public sealed class BindingReplanTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void FailedOrCancelledSuccessorKeepsTheOriginalProgram(bool cancel)
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void FailedOrCancelledSuccessorKeepsTheOriginalProgram(int failure)
     {
-        var bind = Create(cancel ? 13u : 14u);
+        var bind = Create(13u + (uint)failure);
         try
         {
             var first = bind.Run();
-            if (cancel) bind.Guest.Host.CancelBackgroundTranslation = true;
+            if (failure == 1) bind.Guest.Host.CancelBackgroundTranslation = true;
+            else if (failure == 2) bind.Guest.Compiler.FatalRejection = true;
             else bind.Guest.Compiler.Rejection = "forced successor rejection";
             bind.Pending = true;
             Assert.Equal(first, bind.Run());

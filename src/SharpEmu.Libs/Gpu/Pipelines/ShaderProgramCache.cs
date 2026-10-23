@@ -693,17 +693,24 @@ internal sealed class ShaderProgramCache
     private void StartSuccessor(ShaderSource source, StageCompileOptions options, ProgramKey key, ProgramSourceEntry committed,
         ProgramSourceEntry next, ResourceSpecialization specialization, uint cursor, ResourceSnapshot snapshot, DeviceBindingLoads.Request request)
     {
-        var detachedSource = source with { UserData = [.. source.UserData] };
-        var translate = PreparePermutation(detachedSource, options.Detached(), next, specialization.Clone(), cursor,
-            key, true, snapshot.WithUserData(detachedSource.UserData));
         committed.Successor = next;
         committed.SuccessorRequest = request;
-        committed.SuccessorWork = _host.TranslateShaderInBackground(() =>
+        try
         {
-            var permutation = translate();
-            _host.PrecompileProgram(permutation.Handle, detachedSource.Stage, permutation.Program);
-            return permutation;
-        });
+            var detachedSource = source with { UserData = [.. source.UserData] };
+            var translate = GpuFatal.RunAhead(() => PreparePermutation(detachedSource, options.Detached(), next,
+                specialization.Clone(), cursor, key, true, snapshot.WithUserData(detachedSource.UserData)));
+            committed.SuccessorWork = _host.TranslateShaderInBackground(() => GpuFatal.RunAhead(() =>
+            {
+                var permutation = translate();
+                _host.PrecompileProgram(permutation.Handle, detachedSource.Stage, permutation.Program);
+                return permutation;
+            }));
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            committed.SuccessorWork = Task.FromException<ProgramPermutation>(exception);
+        }
     }
 
     private ProgramSourceEntry ReplanWithDeviceBindingLoad(ShaderSource source, StageCompileOptions options,
