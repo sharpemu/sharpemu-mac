@@ -475,6 +475,193 @@ public sealed unsafe class SpinLoopNapPatcherTests
         }
     }
 
+    // push rbp ; mov rbp,rsp ; push rbx ; mov ecx,4 ; loop: pause ; mov rax,rcx ; call rdtsc ; dec ecx ; jnz loop ;
+    // mov eax,0x11223344 ; pop rbx ; pop rbp ; ret ; (pad) ; rdtsc wrapper at 0x30. A timed spin wait with a frame:
+    // the shape of WaitForJobs. The first five bytes (the prologue) are what an entry probe displaces.
+    private static byte[] TimedSpinWithPrologue()
+    {
+        var function = new byte[0x30 + RdtscWrapper.Length];
+        byte[] head =
+        [
+            0x55,                         // 0: push rbp
+            0x48, 0x89, 0xE5,             // 1: mov rbp, rsp
+            0x53,                         // 4: push rbx
+            0xB9, 0x04, 0x00, 0x00, 0x00, // 5: mov ecx, 4
+            0xF3, 0x90,                   // 10: loop: pause
+            0x48, 0x89, 0xC8,             // 12: mov rax, rcx
+            0xE8, 0x1C, 0x00, 0x00, 0x00, // 15: call 0x30 (next ip 20)
+            0xFF, 0xC9,                   // 20: dec ecx
+            0x75, 0xF2,                   // 22: jnz loop (next ip 24, 10 - 24 = -14)
+            0xB8, 0x44, 0x33, 0x22, 0x11, // 24: mov eax, 0x11223344
+            0x5B,                         // 29: pop rbx
+            0x5D,                         // 30: pop rbp
+            0xC3,                         // 31: ret
+        ];
+        head.CopyTo(function, 0);
+        Array.Fill(function, (byte)0xCC, head.Length, 0x30 - head.Length);
+        RdtscWrapper.CopyTo(function, 0x30);
+        return function;
+    }
+
+    [Fact]
+    public void ProbesTheEntryOfATimedSpinWaitAndStaysTransparent()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var image = SpinImage.Create(TimedSpinWithPrologue(), entry: true);
+        Assert.Equal(1, image.Result.PauseSites);
+        Assert.Equal(1, image.Result.PatchedSites);
+        Assert.Equal(1, image.Result.EntrySites);
+        Assert.Equal(1, image.Result.EntryPatchedSites);
+        Assert.Equal(0, image.Result.FailedSites);
+
+        // The function's first bytes are now a jmp into a trampoline that calls the entry probe.
+        Assert.Equal(0xE9, image.ReadByte(0));
+        var trampoline = (ulong)((long)image.Base + 5 + BinaryPrimitives.ReadInt32LittleEndian(image.Read(1, 4)));
+        var lead = image.ReadAbsolute(trampoline, 21);
+        Assert.Equal(0xE8, lead[8]);
+        var probe = (ulong)((long)trampoline + 8 + 5 + BinaryPrimitives.ReadInt32LittleEndian(lead.AsSpan(9, 4)));
+        var entryProbe = SpinNapRuntime.EnsureEntryProbeBytes(1_000_000_000);
+        Assert.NotEmpty(entryProbe);
+        Assert.Equal(entryProbe, image.ReadAbsolute(probe, entryProbe.Length));
+        // The displaced prologue follows the lead unchanged: push rbp ; mov rbp,rsp ; push rbx.
+        Assert.Equal(new byte[] { 0x55, 0x48, 0x89, 0xE5, 0x53 }, image.ReadAbsolute(trampoline + 21, 5));
+
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Fact]
+    public void LeavesTheEntryOfAFunctionWithoutATimedWaitAlone()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        // The plain pause loop (no clock read in it) is patched at the pause only.
+        byte[] function =
+        [
+            0xB9, 0x04, 0x00, 0x00, 0x00, // mov ecx, 4
+            0xF3, 0x90,                   // loop: pause
+            0xFF, 0xC9,                   // dec ecx
+            0x75, 0xFA,                   // jnz loop
+            0xB8, 0x44, 0x33, 0x22, 0x11, // mov eax, 0x11223344
+            0xC3,                         // ret
+        ];
+        using var image = SpinImage.Create(function, entry: true);
+        Assert.Equal(1, image.Result.PatchedSites);
+        Assert.Equal(0, image.Result.EntrySites);
+        Assert.Equal(0xB9, image.ReadByte(0));
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    [Fact]
+    public void RefusesAnEntrySpanThatTheFunctionBranchesInto()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        // As the timed wait with a frame, but a jump from inside the loop targets the middle of the
+        // prologue span (offset 4, `push rbx`): replacing the span with a jmp would break that path.
+        var function = TimedSpinWithPrologue();
+        function[22] = 0x75; // jnz rel8 -> offset 4 instead of the loop head (next ip 24, 4 - 24 = -20)
+        function[23] = 0xEC;
+        using var image = SpinImage.Create(function, entry: true);
+        Assert.Equal(0, image.Result.EntrySites);
+        Assert.Equal(0x55, image.ReadByte(0));
+    }
+
+    private static readonly byte[] ReadThreadSelf = [0x65, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0, 0xC3]; // mov rax, gs:[0]; ret
+
+    [DllImport("libc")]
+    private static extern nint pthread_self();
+
+    [Fact]
+    public void DarwinThreadKeyIsThePthreadSelfPointer()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 || !OperatingSystem.IsMacOS())
+            return;
+
+        // The probe keys its streak table on gs:[0] where it can. It must be the host pthread of
+        // the guest thread (guest threads are host pthreads), distinct per thread.
+        using var image = SpinImage.Create(ReadThreadSelf);
+        var read = (delegate* unmanaged<ulong>)image.Base;
+        Assert.Equal((ulong)pthread_self(), read());
+        ulong other = 0;
+        ulong otherSelf = 0;
+        var thread = new Thread(() =>
+        {
+            other = read();
+            otherSelf = (ulong)pthread_self();
+        });
+        thread.Start();
+        thread.Join();
+        Assert.Equal(otherSelf, other);
+        Assert.NotEqual((ulong)pthread_self(), other);
+    }
+
+    // mov ecx,4 ; loop: pause ; mov rax,rcx ; dec ecx ; jnz loop. Four hits: the first opens the streak, the next
+    // three nap.
+    private static byte[] FourPauseLoop() =>
+    [
+        0xB9, 0x04, 0x00, 0x00, 0x00, // mov ecx, 4
+        0xF3, 0x90,                   // loop: pause
+        0x48, 0x89, 0xC8,             // mov rax, rcx
+        0xFF, 0xC9,                   // dec ecx
+        0x75, 0xF7,                   // jnz loop (next ip 14, 5 - 14 = -9)
+        0xB8, 0x44, 0x33, 0x22, 0x11, // mov eax, 0x11223344
+        0xC3,                         // ret
+    ];
+
+    [Theory]
+    [InlineData(long.MaxValue, long.MaxValue, 1, 12)]    // young streak: the short step, 1 ms
+    [InlineData(0L, long.MaxValue, 15, 40)]               // middle step, 5 ms
+    [InlineData(0L, 0L, 60, 200)]                         // full step, 20 ms
+    public void NapLengthFollowsTheAgeOfTheStreakAndIsCounted(long step1, long step2, int minMs, int maxMs)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var (code, _) = SpinNapRuntime.BuildNappingProbeForTest(1_000_000_000, 1_000, 5_000, 20_000, step1, step2, persist: true);
+        using var image = SpinImage.Create(FourPauseLoop(), probeOverride: code);
+        Assert.Equal(1, image.Result.PatchedSites);
+
+        var napsBefore = SpinNapRuntime.PauseNapCount;
+        var msBefore = SpinNapRuntime.NapMilliseconds;
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+        Assert.Equal(3, SpinNapRuntime.PauseNapCount - napsBefore);
+        var napped = SpinNapRuntime.NapMilliseconds - msBefore;
+        Assert.InRange(napped, minMs, maxMs);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ANapEitherKeepsOrEndsTheStreak(bool persist)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        // 5 ms naps. The thread's last-hit time is the wake time when the streak persists (so the
+        // next hit sees the real gap and keeps napping), the pre-nap time otherwise (so the gap to
+        // the next hit includes the nap and the streak restarts).
+        var (code, table) = SpinNapRuntime.BuildNappingProbeForTest(
+            1_000_000_000, 5_000, 5_000, 5_000, long.MaxValue, long.MaxValue, persist);
+        using var image = SpinImage.Create(FourPauseLoop(), probeOverride: code);
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+
+        using var clock = SpinImage.Create(RdtscWrapper);
+        var now = ((delegate* unmanaged<long>)clock.Base)();
+        var sinceLast = (now - SpinNapRuntime.TestTableLast(table)) / 1_000_000.0; // ms at 1 GHz
+        if (persist)
+        {
+            Assert.InRange(sinceLast, 0, 3);
+        }
+        else
+        {
+            Assert.True(sinceLast >= 4.5, $"expected the last hit before the final nap, got {sinceLast} ms");
+        }
+    }
+
     private sealed class SpinImage : IDisposable
     {
         private const ulong ImageSize = 0x10000;
@@ -491,7 +678,8 @@ public sealed unsafe class SpinLoopNapPatcherTests
 
         public GuestRedZonePatcher.SpinPatchResult Result { get; }
 
-        public static SpinImage Create(byte[] function, bool locked = false, byte[]? lockedProbe = null)
+        public static SpinImage Create(
+            byte[] function, bool locked = false, byte[]? lockedProbe = null, bool entry = false, byte[]? probeOverride = null)
         {
             var memory = new PhysicalVirtualMemory();
             const ulong holeSize = 0x4000000;
@@ -516,7 +704,9 @@ public sealed unsafe class SpinLoopNapPatcherTests
 
             var probe = SpinNapRuntime.EnsureProbeBytes(1_000_000_000);
             lockedProbe ??= locked ? SpinNapRuntime.EnsureLockedProbeBytes(1_000_000_000) : [];
-            var result = GuestRedZonePatcher.PatchSpinLoops(memory, memory, headers, imageBase, ImageSize, probe, "test", lockedProbe);
+            var entryProbe = entry ? SpinNapRuntime.EnsureEntryProbeBytes(1_000_000_000) : [];
+            var result = GuestRedZonePatcher.PatchSpinLoops(
+                memory, memory, headers, imageBase, ImageSize, probeOverride ?? probe, "test", lockedProbe, entryProbe);
             return new SpinImage(memory, imageBase, result);
         }
 

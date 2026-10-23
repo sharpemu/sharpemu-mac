@@ -45,7 +45,9 @@ internal static partial class GuestRedZonePatcher
         int UnrelocatableSites,
         int NonLoopSites,
         int LockedSites = 0,
-        int LockedNonLoopSites = 0);
+        int LockedNonLoopSites = 0,
+        int EntrySites = 0,
+        int EntryPatchedSites = 0);
 
     public static SpinPatchResult PatchSpinLoops(
         IVirtualMemory memory,
@@ -55,7 +57,8 @@ internal static partial class GuestRedZonePatcher
         ulong imageSize,
         ReadOnlySpan<byte> probeCode,
         string moduleName,
-        ReadOnlySpan<byte> lockedProbeCode = default)
+        ReadOnlySpan<byte> lockedProbeCode = default,
+        ReadOnlySpan<byte> entryProbeCode = default)
     {
         ArgumentNullException.ThrowIfNull(memory);
         ArgumentNullException.ThrowIfNull(physicalMemory);
@@ -68,9 +71,12 @@ internal static partial class GuestRedZonePatcher
         }
 
         var includeLocked = !lockedProbeCode.IsEmpty;
+        var includeEntry = !entryProbeCode.IsEmpty;
         var lockedAddresses = new HashSet<ulong>();
+        var entryAddresses = new HashSet<ulong>();
         var sites = CollectSpinSites(
-            memory, programHeaders, imageBase, functionStarts, includeLocked, lockedAddresses, out var result);
+            memory, programHeaders, imageBase, functionStarts, includeLocked, lockedAddresses,
+            includeEntry ? entryAddresses : null, out var result);
         if (sites.Count == 0)
         {
             return result;
@@ -78,7 +84,7 @@ internal static partial class GuestRedZonePatcher
 
         sites.Sort(static (left, right) => left.Address.CompareTo(right.Address));
         // The probe sits at the arena's start so every site's `call rel32` reaches it.
-        var requiredBytes = AlignUp(checked((ulong)sites.Count * 128UL + (ulong)probeCode.Length + (ulong)lockedProbeCode.Length + 16UL + PageSize), PageSize);
+        var requiredBytes = AlignUp(checked((ulong)sites.Count * 128UL + (ulong)probeCode.Length + (ulong)lockedProbeCode.Length + (ulong)entryProbeCode.Length + 32UL + PageSize), PageSize);
         if (!TryAllocateTrampolines(physicalMemory, imageBase, imageSize, requiredBytes, sites, out var cursor))
         {
             Console.Error.WriteLine(
@@ -108,21 +114,46 @@ internal static partial class GuestRedZonePatcher
             cursor = AlignUp(cursor + (ulong)lockedProbeCode.Length, 16);
         }
 
+        var entryProbeAddress = 0UL;
+        if (includeEntry)
+        {
+            entryProbeAddress = cursor;
+            if (!memory.TryWrite(cursor, entryProbeCode))
+            {
+                Console.Error.WriteLine($"[LOADER][WARN] {moduleName} spin-nap: could not place the entry probe.");
+                return result with { FailedSites = sites.Count };
+            }
+
+            cursor = AlignUp(cursor + (ulong)entryProbeCode.Length, 16);
+        }
+
         var patched = 0;
         var lockedPatched = 0;
+        var entryPatched = 0;
         var failed = 0;
         var previousEnd = 0UL;
         foreach (var site in sites)
         {
             var isLockedSite = lockedAddresses.Contains(site.Address);
-            var siteProbe = isLockedSite ? lockedProbeAddress : probeAddress;
-            if (site.Address < previousEnd || !TryPatchSpinSite(memory, site, siteProbe, ref cursor, end))
+            var isEntrySite = entryAddresses.Contains(site.Address);
+            var siteProbe = isLockedSite ? lockedProbeAddress : isEntrySite ? entryProbeAddress : probeAddress;
+            var done = site.Address >= previousEnd &&
+                (isEntrySite
+                    ? TryPatchSpinEntry(memory, site, siteProbe, ref cursor, end)
+                    : TryPatchSpinSite(memory, site, siteProbe, ref cursor, end));
+            if (!done)
             {
                 failed++;
                 continue;
             }
 
             previousEnd = site.Address + (ulong)site.ByteLength;
+            if (isEntrySite)
+            {
+                entryPatched++;
+                continue;
+            }
+
             patched++;
             if (isLockedSite)
             {
@@ -130,11 +161,13 @@ internal static partial class GuestRedZonePatcher
             }
         }
 
-        result = result with { PatchedSites = patched, FailedSites = failed };
+        result = result with { PatchedSites = patched, FailedSites = failed, EntryPatchedSites = entryPatched };
+        SpinNapRuntime.NotePatched(patched, entryPatched);
         Console.Error.WriteLine(
             $"[LOADER] {moduleName} spin-nap: functions={result.Functions} pause_sites={result.PauseSites} " +
             $"patched={result.PatchedSites} failed={result.FailedSites} unrelocatable={result.UnrelocatableSites} " +
             $"non_loop={result.NonLoopSites}" +
+            (includeEntry ? $" entry_sites={result.EntrySites} entry_patched={entryPatched}" : string.Empty) +
             (includeLocked
                 ? $" locked_sites={result.LockedSites} locked_patched={lockedPatched} locked_non_loop={result.LockedNonLoopSites}."
                 : "."));
@@ -148,6 +181,7 @@ internal static partial class GuestRedZonePatcher
         IReadOnlyList<ulong> functionStarts,
         bool includeLocked,
         HashSet<ulong> lockedAddresses,
+        HashSet<ulong>? entryAddresses,
         out SpinPatchResult result)
     {
         var sites = new List<PatchSite>();
@@ -157,6 +191,7 @@ internal static partial class GuestRedZonePatcher
         var nonLoop = 0;
         var lockedSites = 0;
         var lockedNonLoop = 0;
+        var entrySites = 0;
         var decoded = new List<DecodedInstruction>();
         var branchTargets = new HashSet<ulong>();
         var leafCallees = new Dictionary<ulong, bool>();
@@ -243,6 +278,8 @@ internal static partial class GuestRedZonePatcher
                     memory, programHeaders, imageBase, decoded, functionStart, functionEnd, branchTargets);
 
                 var lastSiteEnd = 0UL;
+                var firstSiteAddress = ulong.MaxValue;
+                var timedSpin = false;
                 for (var index = 0; index < decoded.Count; index++)
                 {
                     var isPause = decoded[index].Instruction.Code == Code.Pause;
@@ -260,6 +297,11 @@ internal static partial class GuestRedZonePatcher
                             nonLoop++;
                             continue;
                         }
+
+                        // A loop that closes only through a call to a small leaf (a clock read) is a
+                        // timed wait: pause, read the clock, compare with a deadline, go round.
+                        timedSpin |= entryAddresses is not null &&
+                            !ClosesShortBackwardLoop(decoded, index, decoded[index].Instruction.IP);
                     }
                     else if (!InShortLockedLoop(decoded, index))
                     {
@@ -280,6 +322,7 @@ internal static partial class GuestRedZonePatcher
                     }
 
                     sites.Add(span);
+                    firstSiteAddress = Math.Min(firstSiteAddress, span.Address);
                     if (isLocked)
                     {
                         lockedSites++;
@@ -288,11 +331,59 @@ internal static partial class GuestRedZonePatcher
 
                     lastSiteEnd = span.Address + (ulong)span.ByteLength;
                 }
+
+                // A function with a timed spin wait is also probed at its entry: a caller that polls
+                // it (it returns as soon as some queue shows pending work, and the caller finds the
+                // work not runnable) re-enters it in a tight lap that never reaches the pause.
+                if (timedSpin &&
+                    TryBuildEntrySpan(decoded, branchTargets, firstSiteAddress, out var entrySpan))
+                {
+                    sites.Add(entrySpan);
+                    entryAddresses!.Add(entrySpan.Address);
+                    entrySites++;
+                }
             }
         }
 
-        result = new SpinPatchResult(functionCount, pauseSites, 0, 0, unrelocatable, nonLoop, lockedSites, lockedNonLoop);
+        result = new SpinPatchResult(
+            functionCount, pauseSites, 0, 0, unrelocatable, nonLoop, lockedSites, lockedNonLoop, entrySites);
         return sites;
+    }
+
+    // The function's first instructions up to MinimumJumpBytes, whole, for an entry probe: straight-line
+    // (no control flow), no branch target of the function inside the span after its first instruction,
+    // and ending before the first pause site.
+    private static bool TryBuildEntrySpan(
+        IReadOnlyList<DecodedInstruction> decoded,
+        IReadOnlySet<ulong> branchTargets,
+        ulong firstSiteAddress,
+        out PatchSite site)
+    {
+        site = default;
+        var instructions = new List<Instruction>(3);
+        var byteLength = 0;
+        for (var index = 0; index < decoded.Count && byteLength < MinimumJumpBytes; index++)
+        {
+            var instruction = decoded[index].Instruction;
+            if (instruction.FlowControl != FlowControl.Next ||
+                (index != 0 && branchTargets.Contains(instruction.IP)) ||
+                instruction.Code == Code.INVALID)
+            {
+                return false;
+            }
+
+            instructions.Add(instruction);
+            byteLength += instruction.Length;
+        }
+
+        if (byteLength < MinimumJumpBytes ||
+            decoded[0].Instruction.IP + (ulong)byteLength > firstSiteAddress)
+        {
+            return false;
+        }
+
+        site = new PatchSite(decoded[0].Instruction.IP, byteLength, instructions, 0, instructions.Count);
+        return true;
     }
 
     // `xchg r,mem` (implicitly locked) or any lock-prefixed read-modify-write.
@@ -699,6 +790,59 @@ internal static partial class GuestRedZonePatcher
         suffix?.CopyTo(trampoline, restoreOffset + 8);
         branch?.CopyTo(trampoline, restoreOffset + 8 + suffixLength);
         var returnJumpOffset = restoreOffset + 8 + suffixLength + branchLength;
+        if (!TryWriteRelativeJump(
+                trampoline.AsSpan(returnJumpOffset, 5),
+                trampolineCursor + (ulong)returnJumpOffset,
+                site.Address + (ulong)site.ByteLength))
+        {
+            return false;
+        }
+
+        var originalPatch = new byte[site.ByteLength];
+        originalPatch.AsSpan().Fill(0x90);
+        if (!TryWriteRelativeJump(originalPatch.AsSpan(0, 5), site.Address, trampolineCursor) ||
+            !memory.TryWrite(trampolineCursor, trampoline) ||
+            !memory.TryWrite(site.Address, originalPatch))
+        {
+            return false;
+        }
+
+        trampolineCursor = AlignUp(trampolineCursor + (ulong)trampolineLength, 16);
+        return true;
+    }
+
+    // The entry of a function: call the probe below the callee's red zone, then the displaced
+    // prologue instructions exactly as they were (they may push, so rsp is already restored), then back.
+    private static bool TryPatchSpinEntry(
+        IVirtualMemory memory,
+        PatchSite site,
+        ulong probeAddress,
+        ref ulong trampolineCursor,
+        ulong trampolineEnd)
+    {
+        const int leadLength = 21; // lea rsp,[rsp-256] (8) + call rel32 (5) + lea rsp,[rsp+256] (8)
+        if (!TryEncodeSegment(site.Instructions, 0, site.Instructions.Count, trampolineCursor + leadLength, out var relocated) ||
+            relocated is null)
+        {
+            return false;
+        }
+
+        var trampolineLength = leadLength + relocated.Length + 5;
+        if (trampolineCursor > trampolineEnd || (ulong)trampolineLength > trampolineEnd - trampolineCursor)
+        {
+            return false;
+        }
+
+        var trampoline = new byte[trampolineLength];
+        WriteLeaRsp(trampoline.AsSpan(0, 8), -256);
+        if (!TryWriteRelativeCall(trampoline.AsSpan(8, 5), trampolineCursor + 8, probeAddress))
+        {
+            return false;
+        }
+
+        WriteLeaRsp(trampoline.AsSpan(13, 8), 256);
+        relocated.CopyTo(trampoline, leadLength);
+        var returnJumpOffset = leadLength + relocated.Length;
         if (!TryWriteRelativeJump(
                 trampoline.AsSpan(returnJumpOffset, 5),
                 trampolineCursor + (ulong)returnJumpOffset,

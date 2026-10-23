@@ -662,9 +662,12 @@ public sealed class SelfLoader : ISelfLoader
             var lockedProbe = SpinNapRuntime.LockedEnabled
                 ? SpinNapRuntime.EnsureLockedProbeBytes(SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency)
                 : [];
+            var entryProbe = SpinNapRuntime.EntryEnabled
+                ? SpinNapRuntime.EnsureEntryProbeBytes(SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency)
+                : [];
             _ = GuestRedZonePatcher.PatchSpinLoops(
                 virtualMemory, physicalMemory, programHeaders, imageBase, imageSize, probe,
-                string.IsNullOrEmpty(title) ? "guest" : title, lockedProbe);
+                string.IsNullOrEmpty(title) ? "guest" : title, lockedProbe, entryProbe);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
