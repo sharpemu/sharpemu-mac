@@ -415,6 +415,9 @@ internal static partial class MetalV2Presenter
     {
         var host = _host!;
         var qosApplied = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        // The one thread every guest draw and flip passes through: above the guest's worker pool,
+        // which otherwise keeps every core busy and queues this thread behind it.
+        SharpEmu.HLE.Host.HostThreadPrecedence.TryBoostCurrentThread("Metal v2 GPU worker");
         if (DsTrace.On)
         {
             DsTrace.RegisterThread(2, 0, Thread.CurrentThread.Name ?? "MetalV2Worker", qosApplied ? 1 : 0);
@@ -741,6 +744,9 @@ internal static partial class MetalV2Presenter
     {
         var qosApplied = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
             SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        // Each pass promotes the frames that are due and sleeps to the next refresh: the real-time
+        // band presents each flip on its refresh instead of up to 9% late.
+        SharpEmu.HLE.Host.HostThreadPrecedence.TryApplyTimeConstraintToCurrentThread("Metal v2 flip pacer");
         if (DsTrace.On)
         {
             DsTrace.RegisterThread(4, 0, Thread.CurrentThread.Name ?? "FlipPacer", qosApplied ? 1 : 0);

@@ -408,7 +408,8 @@ internal sealed class MetalCompletionQueue : IDisposable
     {
         // A completion carries a flip and an interrupt the guest is waiting on, so
         // the thread is a frame-deadline thread like the worker and the presenter
-        // (UserInteractive, applied by the thread's creation).
+        // (UserInteractive, applied by the thread's creation), and ahead of the guest's workers.
+        SharpEmu.HLE.Host.HostThreadPrecedence.TryBoostCurrentThread("Metal completion");
         if (DsTrace.On)
         {
             DsTrace.RegisterThread(3, 0, Thread.CurrentThread.Name ?? "MetalCompletion", qosApplied ? 1 : 0);

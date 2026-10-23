@@ -189,6 +189,9 @@ public sealed class GuestTimerService : IDisposable
 
     private void Run()
     {
+        // Every timed guest wait ends on this thread, and it only pops due timers and runs their
+        // short callbacks: the real-time band keeps its wakeups on the deadline.
+        HostThreadPrecedence.TryApplyTimeConstraintToCurrentThread(_name);
         var due = new List<GuestTimer>();
         while (!_stopping)
         {
