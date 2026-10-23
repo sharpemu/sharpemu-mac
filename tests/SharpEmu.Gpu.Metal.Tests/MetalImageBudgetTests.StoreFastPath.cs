@@ -16,6 +16,47 @@ public sealed partial class MetalImageBudgetTests
     private static readonly MethodInfo FenceMethod = typeof(MetalImageCache)
         .GetMethod("FenceWriteback", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
+    private sealed class RollingWritebackContext(MetalTransferHarness harness) : IMetalSubmissionContext
+    {
+        public nint Device => harness.Device;
+        public nint CommandBuffer => harness.CommandBuffer;
+        public ulong SubmissionSerial => harness.SubmissionSerial;
+        public ulong CompletedSerial => harness.CompletedSerial;
+        public bool WantsEncodedLabels => true;
+        public bool Rolled { get; private set; }
+        public void ProfileEncoded(string label)
+        {
+            if (Rolled) return;
+            harness.Submit();
+            harness.Begin();
+            Rolled = true;
+        }
+    }
+
+    [Fact]
+    public void ATransferThatRollsItsSubmissionRetainsTheNewestFenceSerial()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Acquire(GuestBase, ImageRole.ColorTarget);
+        var initial = rig.Harness.SubmissionSerial;
+        var rolling = new RollingWritebackContext(rig.Harness);
+        rig.CacheOwner.TransferContext = rolling;
+        rig.CacheOwner.CompletedOverride = 0;
+        rig.Cache.FlushGpuWrites(GuestBase, ImageSize, MetalWritebackCause.StorageDescriptor);
+        Assert.True(rolling.Rolled);
+        Assert.True(rolling.SubmissionSerial > initial);
+        ulong waited = 0;
+        rig.CacheOwner.WaitOffWorker = (serial, _) =>
+        {
+            waited = serial;
+            rig.CacheOwner.CompletedOverride = serial;
+            return true;
+        };
+        ((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(GuestBase, 8);
+        Assert.Equal(rolling.SubmissionSerial, waited);
+    }
+
     [Fact]
     public void CanonicalAliasResolutionAndUncertaintyAreDeviceIndependent()
     {

@@ -545,10 +545,11 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         // What runs when the cache records a transfer; a test supplies it.
         public Action? OnBeginTransfer { get; set; }
 
+        public IMetalSubmissionContext? TransferContext { get; set; }
         public IMetalSubmissionContext BeginTransfer(MetalTransferCause cause)
         {
             OnBeginTransfer?.Invoke();
-            return harness;
+            return TransferContext ?? harness;
         }
         public bool HasPendingGpuWrite(ulong address, ulong size) => false;
         public void FillGuestRange(ulong address, ulong size, uint value) { }

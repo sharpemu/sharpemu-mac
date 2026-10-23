@@ -1520,7 +1520,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         _owner.LandHeldCopies(description.Data.Address + aligned, alignedEnd - aligned);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
-        FenceWriteback(description.Data.Address + aligned, alignedEnd - aligned, context.SubmissionSerial, cause, fenceMappingSnapshot);
+        var fencedSerial = context.SubmissionSerial;
+        FenceWriteback(description.Data.Address + aligned, alignedEnd - aligned, fencedSerial, cause, fenceMappingSnapshot);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         if (!_transfer.EncodeTextureToGuest(
                 context, in description, range, image.Texture, destination, default, aligned, alignedEnd - aligned))
@@ -1533,6 +1534,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (context.WantsEncodedLabels)
         {
             context.ProfileEncoded(ProfileLabel("writeback-run", in description));
+        }
+        if (context.SubmissionSerial != fencedSerial)
+        {
+            FenceWriteback(description.Data.Address + aligned, alignedEnd - aligned,
+                context.SubmissionSerial, cause, fenceMappingSnapshot);
         }
         image.MarkPublished(aligned, alignedEnd);
         NoteOwnGuestWrite(description.Data.Address + aligned, alignedEnd - aligned);
@@ -2364,10 +2370,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
         // Reserve before any piece or stencil transfer can be encoded/executed.
         // Partial/refused encodes keep the conservative fence until completion.
-        FenceWriteback(description.Data.Address, description.Data.Size, context.SubmissionSerial, cause, fenceMappingSnapshot);
+        var fencedSerial = context.SubmissionSerial;
+        FenceWriteback(description.Data.Address, description.Data.Size, fencedSerial, cause, fenceMappingSnapshot);
         if (description.HasStencil)
         {
-            FenceWriteback(description.Stencil.Address, description.Stencil.Size, context.SubmissionSerial, cause, fenceMappingSnapshot);
+            FenceWriteback(description.Stencil.Address, description.Stencil.Size, fencedSerial, cause, fenceMappingSnapshot);
         }
         ulong written;
         if (destination.IsValid && destination.Size >= description.Data.Size)
@@ -2401,6 +2408,18 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (context.WantsEncodedLabels)
         {
             context.ProfileEncoded(ProfileLabel("writeback", in description));
+        }
+        // Profiling or a transfer split can roll the context to a newer
+        // submission. Retain the old post-encode newest-serial guarantee too.
+        if (context.SubmissionSerial != fencedSerial)
+        {
+            FenceWriteback(description.Data.Address, description.Data.Size,
+                context.SubmissionSerial, cause, fenceMappingSnapshot);
+            if (description.HasStencil)
+            {
+                FenceWriteback(description.Stencil.Address, description.Stencil.Size,
+                    context.SubmissionSerial, cause, fenceMappingSnapshot);
+            }
         }
         image.ClearGpuModified();
         // The retile is a GPU store into guest memory: until it completes the bytes
