@@ -664,6 +664,19 @@ internal sealed partial class MetalRenderHost
     private uint _upcomingFirstVertex;
     private readonly uint[] _upcomingIndices = new uint[6];
     private int _upcomingIndexCount;
+    private LoadRefusal _upcomingCoverageRefusal;
+
+    public void NoteIndexedDrawCoverageRefusal(IndexedDrawCoverageRefusal reason) =>
+        _upcomingCoverageRefusal = reason switch
+        {
+            IndexedDrawCoverageRefusal.Indirect => LoadRefusal.Indirect,
+            IndexedDrawCoverageRefusal.NoInstances => LoadRefusal.NoInstances,
+            IndexedDrawCoverageRefusal.Restart => LoadRefusal.Restart,
+            IndexedDrawCoverageRefusal.IndexCount => LoadRefusal.IndexCount,
+            IndexedDrawCoverageRefusal.IndexRange => LoadRefusal.IndexRange,
+            IndexedDrawCoverageRefusal.IndexRead => LoadRefusal.IndexRead,
+            _ => LoadRefusal.VertexRange,
+        };
 
     // The colour attachments of the pass being opened whose load became DontCare, and the
     // attachments and bytes that saved since the last report.
@@ -677,6 +690,7 @@ internal sealed partial class MetalRenderHost
             ? entry
             : null;
         _upcomingIndexCount = 0;
+        _upcomingCoverageRefusal = LoadRefusal.CoverageUnknown;
         _upcomingVertexCount = vertexCount;
         _upcomingFirstVertex = firstVertex;
     }
@@ -716,11 +730,19 @@ internal sealed partial class MetalRenderHost
         ReadOnlySpan<uint> vertexIndices)
     {
         Array.Clear(_elidedLoads);
-        if (!MetalV2Diagnostics.ElideLoads || entry is null || entry.ConstantPositions is null ||
-            entry.OverwriteMask == 0 || entry.Mesh is not null || entry.CullsEverything || vertexCount == 0 ||
-            entry.GraphicsDescription is { } description &&
-                (description.StaticParameters.AlphaToCoverageEnable || description.PixelInfo?.SampleMaskExportEnable == true))
+        _passLoadRefusals = null;
+        if (state.ColorAttachmentCount == 0) return;
+        if (!MetalV2Diagnostics.ElideLoads) { RefuseLoad(LoadRefusal.Disabled); return; }
+        if (entry is null) { RefuseLoad(LoadRefusal.Pipeline); return; }
+        if (entry.Mesh is not null) { RefuseLoad(LoadRefusal.Mesh); return; }
+        if (entry.ConstantPositions is null) { RefuseLoad(LoadRefusal.Positions); return; }
+        if (entry.OverwriteMask == 0) { RefuseLoad(OverwriteRefusal(entry, 0)); return; }
+        if (entry.CullsEverything) { RefuseLoad(LoadRefusal.Culled); return; }
+        if (vertexCount == 0) { RefuseLoad(_upcomingCoverageRefusal); return; }
+        if (entry.GraphicsDescription is { } description &&
+            (description.StaticParameters.AlphaToCoverageEnable || description.PixelInfo?.SampleMaskExportEnable == true))
         {
+            RefuseLoad(LoadRefusal.SampleMask);
             return;
         }
 
@@ -729,6 +751,7 @@ internal sealed partial class MetalRenderHost
             if (state.ColorAttachments[index].View.Handle == 0 || index >= _attachmentCount ||
                 _attachmentWidths[index] != state.Width || _attachmentHeights[index] != state.Height)
             {
+                RefuseLoad(LoadRefusal.Size);
                 return;
             }
         }
@@ -737,6 +760,7 @@ internal sealed partial class MetalRenderHost
         var depthAttached = depthStencil.View.Handle != 0 && (depthStencil.HasDepth || depthStencil.HasStencil);
         if (depthAttached && (_depthAttachmentWidth != state.Width || _depthAttachmentHeight != state.Height))
         {
+            RefuseLoad(LoadRefusal.Size);
             return;
         }
 
@@ -751,7 +775,7 @@ internal sealed partial class MetalRenderHost
         if (!vertexIndices.IsEmpty)
         {
             positions = MetalPassLoads.IndexedPositions(positions, vertexIndices);
-            if (positions is null) return;
+            if (positions is null) { RefuseLoad(LoadRefusal.VertexRange); return; }
         }
         var draw = new MetalPassLoads.Draw(
             positions,
@@ -776,11 +800,25 @@ internal sealed partial class MetalRenderHost
         {
             if (state.ColorAttachments[index].IsClear || _overrideClear[index])
             {
+                RefuseLoad(LoadRefusal.Clear);
                 continue;
             }
 
             _elidedLoads[index] = MetalPassLoads.OverwritesAttachment(
                 in draw, index, _attachmentWidths[index], _attachmentHeights[index]);
+            if (!_elidedLoads[index])
+            {
+                var reason = (entry.OverwriteMask & (1u << index)) == 0 ? OverwriteRefusal(entry, index)
+                    : state.Samples > 1 ? LoadRefusal.Samples
+                    : state.Layers > 1 ? LoadRefusal.Layers
+                    : entry.CullMode != Mtl.CullModeNone ? LoadRefusal.Cull
+                    : rejects ? (_dynamicState.StencilTestEnabled ? LoadRefusal.StencilTest : LoadRefusal.DepthTest)
+                    : Math.Clamp(scissor.Left, 0, (int)state.Width) != 0 ||
+                        Math.Clamp(scissor.Top, 0, (int)state.Height) != 0 ||
+                        scissor.Right < state.Width || scissor.Bottom < state.Height ? LoadRefusal.Scissor
+                    : LoadRefusal.Coverage;
+                RefuseLoad(reason);
+            }
         }
     }
 
@@ -874,8 +912,10 @@ internal sealed partial class MetalRenderHost
         // An attachment still waiting for its upload was not the open pass's target when
         // that pass began, so the pass cannot be continued: it is resolved below instead.
         var continues = !foldedClear && _pendingClears.Count == 0 && !_imageCache.HasDeferredRefreshes &&
-            CanContinuePass(in state) &&
-            (_lastDrawColorCount == state.ColorAttachmentCount || !JoinBindingsNeedBoundary(depthOnly: false));
+            CanContinuePass(in state);
+        var bindingsRefused = continues && _lastDrawColorCount != state.ColorAttachmentCount &&
+            JoinBindingsNeedBoundary(depthOnly: false);
+        continues &= !bindingsRefused;
         if (continues && (launch is not { } requested || TryTakePreparedLaunch(requested)))
         {
             if (_lastDrawColorCount != 0 && state.ColorAttachmentCount != 0)
@@ -885,10 +925,14 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        if (!continues && launch is null && !foldedClear && _pendingClears.Count == 0 &&
-            !_imageCache.HasDeferredRefreshes && TryJoinSubset(in state, upcoming))
+        // A full-set return refused by its bindings is already accounted for.
+        // It cannot be a smaller subset too; do not count a second refusal.
+        if (!continues && !bindingsRefused)
         {
-            return;
+            if (_renderingActive && (launch is not null || foldedClear || _pendingClears.Count != 0 || _imageCache.HasDeferredRefreshes))
+                RefuseJoin(launch is not null ? JoinRefusal.Launch
+                    : foldedClear || _pendingClears.Count != 0 ? JoinRefusal.PendingClear : JoinRefusal.Refresh);
+            else if (TryJoinSubset(in state, upcoming)) return;
         }
 
         if (continues)

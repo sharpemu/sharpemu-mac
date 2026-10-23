@@ -47,7 +47,7 @@ public static partial class Gen5MslTranslator
             IReadOnlyList<Gen5ShaderInstruction> instructions,
             ShaderClipSpaceTransform clip)
         {
-            if (clip.DepthPlanes != ShaderDepthPlanes.None || clip.UserClipPlanes is { Length: > 0 })
+            if (clip.UserClipPlanes is { Length: > 0 })
             {
                 // The program clips planes these positions do not describe.
                 return null;
@@ -57,6 +57,18 @@ public static partial class Gen5MslTranslator
             for (uint vertex = 0; vertex < ConstantPositionVertices; vertex++)
             {
                 if (!TryEvaluatePosition(instructions, vertex, out var position))
+                {
+                    return null;
+                }
+
+                // HostPlaneDistances uses the guest position, before the host clip-space
+                // transform. A known nonnegative distance at every vertex cannot clip
+                // any part of a primitive. Keep user/auxiliary clip planes conservative.
+                var guestZ = position[2];
+                var guestW = position[3];
+                if (((clip.DepthPlanes & ShaderDepthPlanes.NearAtZero) != 0 && !(guestZ >= 0f)) ||
+                    ((clip.DepthPlanes & ShaderDepthPlanes.NearAtNegativeW) != 0 && !(guestZ + guestW >= 0f)) ||
+                    ((clip.DepthPlanes & ShaderDepthPlanes.Far) != 0 && !(guestW - guestZ >= 0f)))
                 {
                     return null;
                 }

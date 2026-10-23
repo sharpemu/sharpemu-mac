@@ -2237,13 +2237,14 @@ internal sealed partial class MetalRenderHost :
         var frequency = System.Diagnostics.Stopwatch.Frequency;
         var (loadsElided, loadElidedBytes) = TakeElidedLoads();
         var (subsetJoins, subsetLoadBytes) = TakeSubsetJoins();
+        var (joinRefusals, loadRefusals) = TakePassRefusals();
         var (refreshesSkipped, refreshSkippedBytes) = _imageCache.TakeSkippedRefreshes();
         var (pageWatches, pageWatchPeak) = _imageCache.TakePageWatchCounters();
         Console.Error.WriteLine(
             $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
             // Colour loads a full-screen first draw made dead (MetalPassLoads).
             $"load_elided={loadsElided} load_elided_mb={(loadElidedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
-            $"subset_joins={subsetJoins} subset_load_avoided_mb={(subsetLoadBytes / 1048576.0).ToString("F1", culture)} " +
+            $"join_refused=[{joinRefusals}] load_refused=[{loadRefusals}] subset_joins={subsetJoins} subset_load_avoided_mb={(subsetLoadBytes / 1048576.0).ToString("F1", culture)} " +
             // Uploads of CPU-written targets a pass cleared or overwrote whole (DeferredRefresh).
             $"refresh_skipped={refreshesSkipped} refresh_skipped_mb={(refreshSkippedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             // Slices are what the queue actually ran: a submission that suspends is

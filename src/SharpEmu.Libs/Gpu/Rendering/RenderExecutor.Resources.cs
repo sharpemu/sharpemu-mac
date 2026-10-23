@@ -742,6 +742,8 @@ public sealed partial class RenderExecutor
         _host.NoteUpcomingDraw(in pipeline, 0, 0);
         if (emission.IndirectArgumentsAddress != 0 || draw.InstanceCount == 0)
         {
+            _host.NoteIndexedDrawCoverageRefusal(emission.IndirectArgumentsAddress != 0
+                ? IndexedDrawCoverageRefusal.Indirect : IndexedDrawCoverageRefusal.NoInstances);
             return;
         }
         if (!emission.Indexed)
@@ -750,8 +752,10 @@ public sealed partial class RenderExecutor
             _host.NoteUpcomingDraw(in pipeline, count, emission.FirstVertex);
             return;
         }
-        if (!_host.NeedsIndexedDrawCoverage(in pipeline) || primitiveRestart)
+        if (!_host.NeedsIndexedDrawCoverage(in pipeline)) return;
+        if (primitiveRestart)
         {
+            _host.NoteIndexedDrawCoverageRefusal(IndexedDrawCoverageRefusal.Restart);
             return;
         }
         var indexCount = emission.TriangleListIndices != 0 ? emission.TriangleListIndices : draw.Count;
@@ -761,23 +765,30 @@ public sealed partial class RenderExecutor
         }
         if (indexCount is 0 or > 6)
         {
+            _host.NoteIndexedDrawCoverageRefusal(IndexedDrawCoverageRefusal.IndexCount);
             return;
         }
         var stride = source.Type == GpuIndexType.Uint16 ? 2 : 4;
         var byteCount = (int)indexCount * stride;
         if (source.Size < (ulong)byteCount)
         {
+            _host.NoteIndexedDrawCoverageRefusal(IndexedDrawCoverageRefusal.IndexRange);
             return;
         }
         Span<byte> bytes = stackalloc byte[6 * sizeof(uint)];
         bytes = bytes[..byteCount];
         if (source.HostData is { } data)
         {
-            if (data.Length < byteCount) return;
+            if (data.Length < byteCount)
+            {
+                _host.NoteIndexedDrawCoverageRefusal(IndexedDrawCoverageRefusal.IndexRange);
+                return;
+            }
             data.AsSpan(0, byteCount).CopyTo(bytes);
         }
         else if (!_host.TryReadGuest(source.Address, bytes))
         {
+            _host.NoteIndexedDrawCoverageRefusal(IndexedDrawCoverageRefusal.IndexRead);
             return;
         }
         Span<uint> vertices = stackalloc uint[(int)indexCount];
@@ -787,7 +798,11 @@ public sealed partial class RenderExecutor
                 ? System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes[(index * stride)..])
                 : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(index * stride)..]);
             var vertex = (long)value + emission.VertexOffset;
-            if (vertex is < 0 or >= 6) return;
+            if (vertex is < 0 or >= 6)
+            {
+                _host.NoteIndexedDrawCoverageRefusal(IndexedDrawCoverageRefusal.VertexRange);
+                return;
+            }
             vertices[index] = (uint)vertex;
         }
         _host.NoteUpcomingIndexedDraw(in pipeline, vertices);

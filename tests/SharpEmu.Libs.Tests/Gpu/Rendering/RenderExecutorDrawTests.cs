@@ -118,6 +118,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
         _host.WriteGuest(IndexBase, bytes);
         _executor.DrawIndexed(7, Banks(), Indexed(6, indexType: indexType, baseVertex: baseVertex));
         Assert.Equal(expected, _host.UpcomingIndices);
+        Assert.Null(_host.CoverageRefusal);
     }
 
     [Theory]
@@ -134,6 +135,9 @@ public sealed class RenderExecutorDrawTests : IDisposable
         _executor.DrawIndexed(7, Banks(), arguments);
         Assert.Null(_host.UpcomingIndices);
         Assert.Equal((0u, 0u), _host.UpcomingVertices);
+        Assert.Equal(indirect ? IndexedDrawCoverageRefusal.Indirect
+            : count > 6 ? IndexedDrawCoverageRefusal.IndexCount
+            : IndexedDrawCoverageRefusal.VertexRange, _host.CoverageRefusal);
     }
 
     private const ulong IndirectArguments = RecordingRenderHost.MemoryBase + 0x60_0000;

@@ -53,6 +53,8 @@ internal sealed partial class MetalRenderHost
         public int Joins;
         public long JoinLoadAvoidedBytes;
         public long LoadElidedBytes;
+        public long[]? JoinRefusals;
+        public long[]? LoadRefusals;
         public ulong Groups;
         public Dictionary<string, int>? Shaders;
         public string End = string.Empty;
@@ -312,6 +314,8 @@ internal sealed partial class MetalRenderHost
         }
 
         record.Shape = builder.ToString();
+        record.LoadRefusals = _passLoadRefusals;
+        _passLoadRefusals = null;
         record.LoadBytes = loadBytes;
         record.StoreBytes = storeBytes;
     }
@@ -536,7 +540,7 @@ internal sealed partial class MetalRenderHost
                 $"us={microseconds:F0} gap_us={gap:F0} {stages}draws={record.Draws} tg={record.Groups} " +
                 $"ld_mb={record.LoadBytes / 1048576.0:F1} st_mb={record.StoreBytes / 1048576.0:F1} " +
                 $"end={(record.End.Length == 0 ? "?" : record.End)} a=[{record.Shape}] sh=[{shaders}] " +
-                $"after=[{after}] n_after={record.After?.Count ?? 0} joins={record.Joins} join_load_avoided_mb={record.JoinLoadAvoidedBytes / 1048576.0:F1} load_elided_mb={record.LoadElidedBytes / 1048576.0:F1}")).Append('\n');
+                $"after=[{after}] n_after={record.After?.Count ?? 0} joins={record.Joins} join_load_avoided_mb={record.JoinLoadAvoidedBytes / 1048576.0:F1} load_elided_mb={record.LoadElidedBytes / 1048576.0:F1} join_refused=[{FormatRefusals<JoinRefusal>(record.JoinRefusals)}] load_refused=[{FormatRefusals<LoadRefusal>(record.LoadRefusals)}]")).Append('\n');
         }
 
         var span = lastEnd > firstStart && firstStart != ulong.MaxValue

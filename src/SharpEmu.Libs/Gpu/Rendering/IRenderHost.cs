@@ -11,6 +11,11 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 // A host buffer and the byte offset a guest address maps to inside it.
 public readonly record struct BufferBinding(ulong Handle, ulong Offset);
 
+public enum IndexedDrawCoverageRefusal
+{
+    Indirect, NoInstances, Restart, IndexCount, IndexRange, IndexRead, VertexRange,
+}
+
 // The packet arguments of a draw the host keeps until the next flip.
 public readonly record struct TargetlessDrawArguments(ulong SubmitId, bool Indexed, GpuCommands.DrawIndexedArguments Indexed_, GpuCommands.DrawAutoArguments Auto);
 
@@ -235,6 +240,7 @@ public interface IRenderHost
     void NoteUpcomingDraw(in PipelineHandle pipeline, uint vertexCount, uint firstVertex) { }
     // Only request a CPU read of a small index list when the host has a coverage proof to use it with.
     bool NeedsIndexedDrawCoverage(in PipelineHandle pipeline) => false;
+    void NoteIndexedDrawCoverageRefusal(IndexedDrawCoverageRefusal reason) { }
     void NoteUpcomingIndexedDraw(in PipelineHandle pipeline, ReadOnlySpan<uint> vertexIndices) =>
         NoteUpcomingDraw(in pipeline, 0, 0);
 
