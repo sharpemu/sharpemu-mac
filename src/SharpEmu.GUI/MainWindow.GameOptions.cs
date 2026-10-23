@@ -219,7 +219,7 @@ public partial class MainWindow
                 "Fit");
             GameVSyncToggle.IsChecked = effective.VSync;
             GameOverlayEnabledToggle.IsChecked = effective.OverlayEnabled;
-            GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "TitleBar");
+            GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "Full");
             GameOverlayCornerBox.SelectedItem = FindChoice(_overlayCornerChoices, effective.OverlayCorner, "TopRight");
             GameHdrModeBox.SelectedItem = FindChoice(
                 _hdrModeChoices,
@@ -286,7 +286,7 @@ public partial class MainWindow
             VSync = GameVSyncToggle.IsChecked == true,
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
-            OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),
+            OverlayMode = SelectedComboText(GameOverlayModeBox, "Full"),
             OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),
             EnvironmentToggles = BuildGameEnvironmentEntries(),
             CustomEnvironmentVariables = PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables,

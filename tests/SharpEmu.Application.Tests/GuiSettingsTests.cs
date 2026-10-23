@@ -15,7 +15,7 @@ public sealed class GuiSettingsTests
         var settings = new GuiSettings();
         Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], settings.EnvironmentToggles);
         Assert.True(settings.OverlayEnabled);
-        Assert.Equal("TitleBar", settings.OverlayMode);
+        Assert.Equal("Full", settings.OverlayMode);
         Assert.Equal("Guest", settings.BinkPlaybackMode);
         settings.EnvironmentToggles.Clear();
         Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], new GuiSettings().EnvironmentToggles);

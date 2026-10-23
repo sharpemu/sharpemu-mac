@@ -11,6 +11,8 @@ Open **Options → Rendering**, globally or for one game.
 - **Display mode:** Full shows all counters and the frame graph. Minimal shows
   guest FPS, process CPU usage, process GPU usage, and elapsed session time.
   Title bar shows the same minimal values in the window title.
+  FPS is the guest frame rate averaged over the last four seconds, so a title
+  that runs at one or two frames a second does not flicker to 0.0 between frames.
 - **Screen corner:** choose any of the four corners. This setting applies only
   to the on-screen panel.
 
@@ -56,12 +58,12 @@ Wildcard samples use [PdhGetFormattedCounterArray](https://learn.microsoft.com/e
 
 ## macOS
 
-The Metal backend does not draw the on-screen panels, so the display works in
-**Title bar** mode only. Full and Minimal show nothing. A borderless or
-full-screen window has no title bar and shows nothing either. The display is
-on by default, in Title bar mode, with the top-right corner saved. F1 and
-`SHARPEMU_OVERLAY=0` work as described above. F2 changes the saved corner only
-for the on-screen panel, so it has no visible effect.
+The Metal backend draws the Full and Minimal panels as the last quad of the
+present pass, scaled to the display's pixel density and clipped to the window.
+The display is on by default, in Full mode, with the top-right corner saved.
+Title bar mode shows the summary in the window title; a borderless or
+full-screen window has no title bar and shows nothing. F1, F2 and
+`SHARPEMU_OVERLAY=0` work as described above.
 
 GPU usage on macOS is the utilization of the whole GPU, read from the
 `Device Utilization %` statistic of the `IOAccelerator` service. macOS has no

@@ -115,10 +115,10 @@ be paired and connected to macOS.
 
 ## The performance display is missing
 
-The default display is the title bar summary, and a full-screen window has no
-title bar. The on-screen panels are not drawn by the Metal backend. See
-[Performance display](../performance-overlay.md). `SHARPEMU_OVERLAY=0` starts the
-display hidden, and F1 shows it.
+The default display is the full on-screen panel. A saved **Title bar** mode shows
+the summary in the window title instead, and a full-screen window has no title
+bar. See [Performance display](../performance-overlay.md).
+`SHARPEMU_OVERLAY=0` starts the display hidden, and F1 shows it.
 
 ## Stopping a game
 

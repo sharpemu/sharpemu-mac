@@ -91,7 +91,7 @@ public sealed class ApplicationSettings
 
     public bool OverlayEnabled { get; set; } = true;
     public string OverlayCorner { get; set; } = "TopRight";
-    public string OverlayMode { get; set; } = "TitleBar";
+    public string OverlayMode { get; set; } = "Full";
 
     /// <summary>Names of SHARPEMU_* switches set to "1" in the emulator's environment at launch.</summary>
     public List<string> EnvironmentToggles { get; set; } = ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"];
@@ -204,7 +204,7 @@ public sealed class ApplicationSettings
             settings.GuestDisplayResolution, "1080p", "720p", "1440p", "2160p");
         settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Guest", "Host", "Skip");
         settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
-        settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "TitleBar", "Full", "Minimal");
+        settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "Full", "Minimal", "TitleBar");
         settings.DisplayIndex = Math.Max(0, settings.DisplayIndex);
         settings.RefreshRate = Math.Clamp(settings.RefreshRate, 0, 1000);
         settings.EmbeddedConsoleHeight = NormalizeConsoleSize(settings.EmbeddedConsoleHeight, 240, 120);
