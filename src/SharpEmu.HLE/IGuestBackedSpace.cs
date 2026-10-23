@@ -47,6 +47,12 @@ public interface IGuestBackedSpace
 
     object? BackingAliasSnapshot => null;
 
+    // Optional admission proof for reusing a previously resolved alias span. An
+    // opaque snapshot alone is insufficient: backing lifetime/admission may change
+    // without replacing it. Implement with existing mapping/backing state only;
+    // this check must not wait, allocate or resolve the range again.
+    bool IsBackingAliasSnapshotCurrent(object snapshot) => false;
+
     bool TryEnterBackingAliasAccess() => false;
 
     void ExitBackingAliasAccess()

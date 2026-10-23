@@ -1506,6 +1506,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public object? BackingAliasSnapshot => _backedSpace?.AliasSnapshot;
 
+    public bool IsBackingAliasSnapshotCurrent(object snapshot) =>
+        !Volatile.Read(ref _disposed) && _backedSpace?.IsAliasSnapshotCurrent(snapshot) == true;
+
     public bool TryEnterBackingAliasAccess() => !_disposed && _backedSpace is { } backed && backed.TryEnterAliasAccess();
 
     public void ExitBackingAliasAccess() => _backedSpace?.ExitAliasAccess();

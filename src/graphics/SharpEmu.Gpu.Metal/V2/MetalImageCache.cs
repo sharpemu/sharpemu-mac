@@ -2972,6 +2972,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     public void Dispose()
     {
+        _metadataCodes.Dispose();
         if (_disposed)
         {
             return;

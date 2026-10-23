@@ -406,7 +406,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         // Residency is per submission: a window is named by the submissions that resolve a
         // range through it, never by every submission after.
         _touchedWindows.Clear();
-        _residentDirty = true;
+        MarkResidentsDirty();
         using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             _pinnedWindows.Clear();
@@ -440,6 +440,9 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     // device-address encoder names - whose cuts may not move before it ends.
     private readonly MetalWindowSet _pinnedWindows;
     private bool _residentDirty = true;
+    private long _residentVersion;
+    public long ResidentVersion => Volatile.Read(ref _residentVersion);
+    private void MarkResidentsDirty() { _residentDirty = true; Interlocked.Increment(ref _residentVersion); }
 
     /// <summary>The buffer of one window, created if it has none; zero when no window has the id.</summary>
     public nint WindowBuffer(int id)
@@ -1040,6 +1043,11 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             $"alias_contiguous={contiguous} start_alias=0x{startAlias:X16} end_alias=0x{endAlias:X16}.");
     }
 
+    private readonly record struct WindowLookup(ulong Address, ulong Size, object Mapping, ulong Serial,
+        long Partition, long Trap, MetalGuestRange Range);
+    private readonly WindowLookup?[] _windowLookups = new WindowLookup?[64];
+    internal long WindowLookupHits { get; private set; }
+
     private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved, bool warn = true)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.GuestWindowResolve);
@@ -1048,6 +1056,33 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         {
             return false;
         }
+
+        var snapshot = _backing.BackingAliasSnapshot;
+        var slot = (int)(((gpuVa >> 4) ^ size) & 63);
+        if (SharpEmu.Libs.Gpu.Pipelines.HostLookupCounters.Enabled && snapshot is not null &&
+            _backing.IsBackingAliasSnapshotCurrent(snapshot) && _windowLookups[slot] is { } cached && cached.Address == gpuVa && cached.Size == size &&
+            cached.Serial == _submissionSerial && ReferenceEquals(cached.Mapping, snapshot) &&
+            cached.Range.BackingOffset is { } cachedOffset)
+        {
+            // Restoring a single-copy chunk can renew its window. Run that ordering
+            // before comparing the existing partition/trap epochs, even on a hit.
+            RestoreSingleCopyRange(cachedOffset, size);
+            using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
+            {
+                FillSingleCopyHolesLocked(cachedOffset, size);
+                if (cached.Partition == _partition.Version && cached.Trap == _trapVersion &&
+                    _backing.IsBackingAliasSnapshotCurrent(snapshot))
+                {
+                    resolved = cached.Range;
+                    WindowLookupHits++;
+                    SharpEmu.Libs.Gpu.Pipelines.HostLookupCounters.Note(SharpEmu.Libs.Gpu.Pipelines.HostLookupCounters.Cache.Window, true);
+                    Trap?.NoteBinding("resolve-cached", gpuVa, size, (ulong)resolved.Buffer, resolved.Offset, resolved.GpuAddress);
+                    return true;
+                }
+            }
+        }
+        _windowLookups[slot] = null;
+        SharpEmu.Libs.Gpu.Pipelines.HostLookupCounters.Note(SharpEmu.Libs.Gpu.Pipelines.HostLookupCounters.Cache.Window, false);
 
         // A range that crosses the edge between two mappings of one allocation is
         // still contiguous in the backing, so it still has one window address; the
@@ -1066,6 +1101,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         // A released chunk gets its bytes back before any window names it (single-copy textures).
         RestoreSingleCopyRange(offset, size);
         MetalWindowPartition.Window window;
+        long observedPartition, observedTrap;
         using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             FillSingleCopyHolesLocked(offset, size);
@@ -1111,11 +1147,12 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             EnsureBuffer(window);
             window.LastUsedSerial = _submissionSerial;
             _pinnedWindows.Add(window.Id);
+            observedPartition = _partition.Version; observedTrap = _trapVersion;
         }
 
         if (_touchedWindows.Add(window.Id))
         {
-            _residentDirty = true;
+            MarkResidentsDirty();
         }
 
         var windowOffset = offset - window.Start;
@@ -1133,6 +1170,9 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
                 $"address=0x{gpuVa:X16} offset=0x{windowOffset:X} window={window.Id} delta=0x{(gpuVa ^ windowOffset) & 0xFFF:X}.");
         }
 
+        if (SharpEmu.Libs.Gpu.Pipelines.HostLookupCounters.Enabled && snapshot is not null &&
+            _backing.IsBackingAliasSnapshotCurrent(snapshot))
+            _windowLookups[slot] = new(gpuVa, size, snapshot, _submissionSerial, observedPartition, observedTrap, resolved);
         Trap?.NoteBinding($"resolve[{window.Id}]", gpuVa, size, (ulong)window.Buffer, windowOffset, resolved.GpuAddress);
         return true;
     }
@@ -1574,7 +1614,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
             _residentBuffers[index] = _residentBuffers[--_residentCount];
             _residentBuffers[_residentCount] = 0;
-            _residentDirty = true;
+            MarkResidentsDirty();
             return;
         }
     }
@@ -1690,7 +1730,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
 
         _residentBuffers[_residentCount++] = buffer;
-        _residentDirty = true;
+        MarkResidentsDirty();
     }
 
     public void Dispose()

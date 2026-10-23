@@ -65,6 +65,8 @@ public sealed unsafe partial class MetalSingleCopyTests(ITestOutputHelper output
         public bool TryClearBacking(ulong offset, ulong size) => false;
         public ulong BackingChunkBytes => views.ChunkBytes;
         public GuestSingleCopy? SingleCopy => views.SingleCopy;
+        public object? BackingAliasSnapshot => views.AliasSnapshot;
+        public bool IsBackingAliasSnapshotCurrent(object snapshot) => views.IsAvailable && ReferenceEquals(snapshot, views.AliasSnapshot);
         public bool IsBackedView(ulong address) => views.Contains(address, 1);
         public bool IsBackedRange(ulong address, ulong size) => views.Contains(address, size);
         public (ulong Base, ulong Size) BackingAliasRange => (views.AliasBase, views.Size);
@@ -548,8 +550,14 @@ public sealed unsafe partial class MetalSingleCopyTests(ITestOutputHelper output
         Assert.True(near.Offset >= size);
         var holes = rig.Harness.Buffer(2 * size);
         Copy(rig.Harness, near.Buffer, near.Offset - size, holes, 2 * size);
+        var hits = rig.Memory.WindowLookupHits;
+        Assert.Equal(near, rig.Memory.Resolve(rig.ImageAddress + size, size));
+        Assert.Equal(hits + 1, rig.Memory.WindowLookupHits);
         var staged = rig.Memory.Resolve(rig.ImageAddress, size);
         Assert.False(rig.Memory.IsInPlace(staged));
+        // The refill changed the trap epoch even for a cached neighbour window.
+        rig.Memory.Resolve(rig.ImageAddress + size, size);
+        Assert.Equal(hits + 1, rig.Memory.WindowLookupHits);
         Assert.True(rig.Memory.HasStaleSingleCopyWindows);
         var stagedReadback = rig.Harness.Buffer(size);
         Copy(rig.Harness, staged.Buffer, staged.Offset, stagedReadback, size);

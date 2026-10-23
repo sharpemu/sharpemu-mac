@@ -6,6 +6,7 @@ using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -926,6 +927,7 @@ internal sealed partial class MetalImageCache
     }
 
     private long _dccRepeatsSkipped;
+    private readonly MetalMetadataCodeCache _metadataCodes = new();
     private long _dccSlicesCoalesced;
 
     // Page-watched metadata ranges, 4 KiB aligned, address to size. A CPU store into
@@ -1761,10 +1763,15 @@ internal sealed partial class MetalImageCache
                 // now reads half-written data, and claiming it would hide the real clear.
                 // The deferral is remembered, so a draw that lands before it settles is not
                 // wiped by applying it later.
-                var pending = _owner.HasPendingGpuWrite(address, sliceSize);
+                var metadataSource = _owner as IResourceDependencySource;
+                var cachedCode = _metadataCodes.TryGet(metadataSource, address, sliceSize, out var observedCode);
+                var readEpoch = metadataSource?.DependencyEpoch ?? default;
+                var pending = !cachedCode && _owner.HasPendingGpuWrite(address, sliceSize);
                 // Settled metadata says what it holds through its guest bytes; the first one
                 // is read before the lock, which the backing does not need.
-                var readable = !pending && _backing.TryReadBacking(address, firstByte);
+                var readable = cachedCode || !pending && _backing.TryReadBacking(address, firstByte);
+                if (cachedCode) firstByte[0] = observedCode;
+                else if (readable) _metadataCodes.Keep(metadataSource, address, sliceSize, firstByte[0], readEpoch);
                 byte code;
                 var recorded = false;
                 GpuClearColor clear;

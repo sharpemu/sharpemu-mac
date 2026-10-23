@@ -252,6 +252,82 @@ public sealed class MetalResourceDependencyTests
         }
     }
 
+    [Fact]
+    public void ShaderOwnershipMemoRetainsWritesAndMappingSynchronization()
+    {
+        using var rig = new Rig();
+        rig.Host.SynchronizeShaderCode(rig.Address, 4);
+        var hits = rig.Host.ShaderOwnershipHits;
+        rig.Host.SynchronizeShaderCode(rig.Address, 4);
+        Assert.Equal(hits + 1, rig.Host.ShaderOwnershipHits);
+        rig.Host.NoteGuestMemoryWrite(rig.Address, 4, MetalGpuWriteOrigin.Copy);
+        rig.Host.SynchronizeShaderCode(rig.Address, 4);
+        Assert.Equal(hits + 1, rig.Host.ShaderOwnershipHits);
+        rig.Host.SynchronizeShaderCode(rig.Address, 4);
+        Assert.Equal(hits + 2, rig.Host.ShaderOwnershipHits);
+        rig.Manager.Register(rig.Address, Rig.Size, GuestPageProtection.Read | GuestPageProtection.Write);
+        rig.Host.SynchronizeShaderCode(rig.Address, 4);
+        Assert.Equal(hits + 2, rig.Host.ShaderOwnershipHits);
+    }
+
+    [Fact]
+    public void ShaderOwnershipDeclinesAnOwedCompletionEvenWithoutAnEpochChange()
+    {
+        using var rig = new Rig();
+        rig.Host.FinalGuestTablesEnabled = true;
+        rig.Host.SynchronizeShaderCode(rig.Address, 4);
+        rig.Host.SynchronizeShaderCode(rig.Address, 4);
+        var hits = rig.Host.ShaderOwnershipHits;
+        var owed = typeof(MetalRenderHost).GetField("_owedHostLabels", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        try
+        {
+            owed.SetValue(rig.Host, 1L);
+            Assert.False(((IResourceDependencySource)rig.Host).DependencyReadsReady);
+            rig.Host.SynchronizeShaderCode(rig.Address, 4);
+            Assert.Equal(hits, rig.Host.ShaderOwnershipHits);
+        }
+        finally { owed.SetValue(rig.Host, 0L); }
+        rig.Host.SynchronizeShaderCode(rig.Address, 4);
+        Assert.Equal(hits, rig.Host.ShaderOwnershipHits);
+        rig.Host.SynchronizeShaderCode(rig.Address, 4);
+        Assert.Equal(hits + 1, rig.Host.ShaderOwnershipHits);
+    }
+
+    [Fact]
+    public void MetadataCodeProofExpiresOnCpuGpuAliasAndMappingChanges()
+    {
+        using var rig = new Rig();
+        using var cache = new MetalMetadataCodeCache();
+        var source = (IResourceDependencySource)rig.Host;
+        void CaptureCode() => cache.Keep(source, rig.Address, 4096, 0, source.DependencyEpoch);
+        CaptureCode();
+        Assert.True(cache.TryGet(source, rig.Address, 4096, out var code));
+        Assert.Equal(0, code);
+        rig.Write(0x8101);
+        Assert.False(cache.TryGet(source, rig.Address, 4096, out _));
+        rig.Write(0x8000); CaptureCode();
+        rig.Manager.MarkCpuWrite(rig.Address + 128, 4);
+        Assert.False(cache.TryGet(source, rig.Address, 4096, out _));
+        CaptureCode();
+        // Even a writer of the interior makes the full-slice pending query necessary.
+        rig.Host.NoteGuestMemoryWrite(rig.Address + 128, 4, MetalGpuWriteOrigin.Copy);
+        Assert.False(cache.TryGet(source, rig.Address, 4096, out _));
+        rig.Host.FlushAndWaitForGpu(); CaptureCode();
+        Assert.True(cache.TryGet(source, rig.Address, 4096, out _));
+        Assert.True(rig.Memory.Views.TryMapReservedRange(rig.AliasAddress, Rig.Size, 0, HostPageProtection.ReadWrite, out _));
+        Assert.True(rig.Memory.TryWrite(rig.AliasAddress, BitConverter.GetBytes(11u)));
+        Assert.False(cache.TryGet(source, rig.Address, 4096, out _));
+        CaptureCode();
+        Assert.False(cache.TryGet(source, rig.Address, 4096, out _));
+        Assert.True(rig.Memory.Views.Unmap(rig.AliasAddress, Rig.Size, out _));
+        // Production mapping transactions also publish the existing mapping epoch.
+        rig.Manager.Register(rig.Address, Rig.Size, GuestPageProtection.Read | GuestPageProtection.Write);
+        rig.Write(0x8000); CaptureCode();
+        Assert.True(cache.TryGet(source, rig.Address, 4096, out _));
+        rig.Manager.WriteGenerations.ReleaseFaultWatch(rig.Address);
+        Assert.False(cache.TryGet(source, rig.Address, 4096, out _));
+    }
+
     private static ResourceDependency Capture(Rig rig)
     {
         Assert.True(((IResourceDependencySource)rig.Host).TryCaptureDependency(rig.Address,

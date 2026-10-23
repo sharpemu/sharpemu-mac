@@ -235,6 +235,9 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
 
     public object AliasSnapshot => _views.AliasSnapshot;
 
+    public bool IsAliasSnapshotCurrent(object snapshot) =>
+        !Volatile.Read(ref _disposed) && _views.IsAvailable && ReferenceEquals(snapshot, _views.AliasSnapshot);
+
     public bool TryEnterAliasAccess() => _views.TryEnterAliasAccess();
 
     public void ExitAliasAccess() => _views.ExitAliasAccess();

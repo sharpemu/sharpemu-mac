@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
@@ -991,6 +992,7 @@ internal sealed partial class MetalRenderHost
     private void WriteArgumentBuffer(MetalStageBindings stage, int stageIndex)
     {
         if (TryReplayArguments(stage, stageIndex)) return;
+        HostLookupCounters.Note(HostLookupCounters.Cache.ArgumentPatch, false);
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ArgumentBufferWrite);
         var layout = stage.Program.Bindings!;
         var plan = ArgumentPlanOf(layout);
@@ -1403,7 +1405,7 @@ internal sealed partial class MetalRenderHost
                 : Mtl.RenderStageVertex | Mtl.RenderStageFragment;
             BindStageBuffers(_renderEncoder, StageVertex, meshStage ? SelSetMeshBuffer : SelSetVertexBuffer);
             BindStageBuffers(_renderEncoder, StageFragment, SelSetFragmentBuffer);
-            NameResidentBuffers(_renderEncoder, _guestMemory.ResidentBuffers, stages);
+            NameGuestResidentBuffers(_renderEncoder, stages);
 
             for (var index = 0; index < _usedResourceCount; index++)
             {
@@ -1424,7 +1426,7 @@ internal sealed partial class MetalRenderHost
         }
 
         if (bindComputeBuffers) BindStageBuffers(_computeEncoder, StageCompute, SelSetComputeBuffer);
-        NameResidentBuffers(_computeEncoder, _guestMemory.ResidentBuffers, stages: 0);
+        NameGuestResidentBuffers(_computeEncoder, stages: 0);
 
         for (var index = 0; index < _usedResourceCount; index++)
         {
@@ -1472,6 +1474,25 @@ internal sealed partial class MetalRenderHost
     // a range through them - or, with the reach profile, those holding the granules the
     // title's programs are known to reach. Only that encoder: the rest of the submission
     // names the windows its own bindings resolved.
+    private readonly MetalResidencyWalk _residentWalk = new();
+    private readonly MetalResidencyWalk _deviceWindowWalk = new();
+    private MetalWindowSet? _namedWalkSet;
+    private ulong _namedWalkSerial;
+    private long _namedWalkPartition, _namedWalkTrap;
+
+    private void NameGuestResidentBuffers(nint encoder, nuint stages)
+    {
+        var version = _guestMemory.ResidentVersion;
+        if (HostLookupCounters.Enabled && _residentWalk.IsCurrent(_encoderEpoch, version, stages))
+        {
+            HostLookupCounters.Note(HostLookupCounters.Cache.ResidentWalk, true);
+            return;
+        }
+        HostLookupCounters.Note(HostLookupCounters.Cache.ResidentWalk, false);
+        NameResidentBuffers(encoder, _guestMemory.ResidentBuffers, stages);
+        _residentWalk.Record(_encoderEpoch, version, stages);
+    }
+
     private void NameDeviceAddressWindows(nint encoder, nuint stages)
     {
         // The named windows are settled with the submission's table; a program bound
@@ -1487,9 +1508,23 @@ internal sealed partial class MetalRenderHost
             _commandBufferReachWindows.UnionWith(named);
         }
 
+        var partition = _guestMemory.PartitionVersion;
+        var trap = _guestMemory.TrapVersion;
+        if (HostLookupCounters.Enabled && ReferenceEquals(_namedWalkSet, named) && _namedWalkSerial == _submissionSerial &&
+            _namedWalkPartition == partition && _namedWalkTrap == trap &&
+            _deviceWindowWalk.IsCurrent(_encoderEpoch, named.Version, stages))
+        {
+            HostLookupCounters.Note(HostLookupCounters.Cache.DeviceWindowWalk, true);
+            return;
+        }
+        HostLookupCounters.Note(HostLookupCounters.Cache.DeviceWindowWalk, false);
+        if (!ReferenceEquals(_namedWalkSet, named) || _namedWalkSerial != _submissionSerial ||
+            _namedWalkPartition != partition || _namedWalkTrap != trap) _deviceWindowWalk.Reset();
         _guestMemory.CopyWindowBuffers(named, _deviceAddressBuffers);
-
         NameResidentBuffers(encoder, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deviceAddressBuffers), stages);
+        _namedWalkSet = named; _namedWalkSerial = _submissionSerial;
+        _namedWalkPartition = partition; _namedWalkTrap = trap;
+        _deviceWindowWalk.Record(_encoderEpoch, named.Version, stages);
     }
 
     private readonly List<nint> _deviceAddressBuffers = new();

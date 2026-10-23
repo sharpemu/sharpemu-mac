@@ -58,10 +58,18 @@ public sealed unsafe class MetalGuestWindowGranuleTests(ITestOutputHelper output
         public bool IsBackedView(ulong address) => Contains(address, 1);
         public bool IsBackedRange(ulong address, ulong size) => Contains(address, size);
         public (ulong Base, ulong Size) BackingAliasRange => ((ulong)_block, BackingSize);
+        public object? BackingAliasSnapshot => Snapshot;
+        public bool IsBackingAliasSnapshotCurrent(object snapshot) => WindowsAvailable && ReferenceEquals(snapshot, Snapshot);
+        internal bool WindowsAvailable = true;
+        internal object Snapshot = new();
+        internal ulong MappingOffset;
+        internal int Resolves;
 
         public bool TryResolveBackingAlias(ulong address, ulong size, out ulong alias)
         {
-            alias = Contains(address, size) ? (ulong)_block + (address - GuestBase) : 0;
+            Resolves++;
+            alias = WindowsAvailable && Contains(address, size) && MappingOffset + address - GuestBase + size <= BackingSize
+                ? (ulong)_block + MappingOffset + (address - GuestBase) : 0;
             return alias != 0;
         }
 
@@ -90,6 +98,44 @@ public sealed unsafe class MetalGuestWindowGranuleTests(ITestOutputHelper output
 
     private static MetalGuestMemory Memory(Backing backing, ulong maxUploadBytes = 64UL * 1024 * 1024) =>
         new(Device.Value, backing, new BackingMemory(backing), GranuleBytes, MaxWindowBytes, maxUploadBytes);
+
+    [Fact]
+    public void WindowLookupReusesOnlyTheSameMappingPartitionAndSubmission()
+    {
+        if (!RequireDevice()) return;
+        using var backing = new Backing();
+        using var memory = Memory(backing);
+        memory.BeginSubmission(1, 0);
+        var address = GuestBase + 256;
+        var first = memory.ResolveWritable(address, 16);
+        var resolves = backing.Resolves;
+        Assert.Equal(first, memory.ResolveWritable(address, 16));
+        Assert.Equal(resolves, backing.Resolves);
+        Assert.Equal(1, memory.WindowLookupHits);
+        // Admission can be revoked without replacing the mapping snapshot.
+        backing.WindowsAvailable = false;
+        Assert.False(memory.ResolveWritable(address, 16).IsValid);
+        Assert.Equal(1, memory.WindowLookupHits);
+        backing.WindowsAvailable = true;
+        Assert.True(memory.ResolveWritable(address, 16).IsValid);
+        Assert.Equal(1, memory.WindowLookupHits);
+        backing.MappingOffset = GranuleBytes;
+        backing.Snapshot = new();
+        var remapped = memory.ResolveWritable(address, 16);
+        Assert.NotEqual(first.GpuAddress, remapped.GpuAddress);
+        Assert.Equal(1, memory.WindowLookupHits);
+        backing.MappingOffset = 0; backing.Snapshot = new();
+        memory.BeginSubmission(2, 0);
+        var straddle = memory.ResolveWritable(StraddleAddress, StraddleSize);
+        Assert.True(straddle.IsValid);
+        var changed = memory.ResolveWritable(address, 16);
+        Assert.Equal(straddle.Buffer, changed.Buffer);
+        Assert.Equal(changed, memory.ResolveWritable(address, 16));
+        Assert.Equal(2, memory.WindowLookupHits);
+        memory.BeginSubmission(3, 0);
+        Assert.True(memory.ResolveWritable(address, 16).IsValid);
+        Assert.Equal(2, memory.WindowLookupHits);
+    }
 
     // Two buffers over the same pages are not coherent inside a command buffer on Apple GPUs:
     // a GPU write through one and a later read through the other in the same command buffer

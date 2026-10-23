@@ -166,7 +166,7 @@ internal sealed partial class MetalGuestMemory
             {
                 view.Touched = true;
                 _touchedViews.Add(view);
-                _residentDirty = true;
+                MarkResidentsDirty();
             }
         }
 

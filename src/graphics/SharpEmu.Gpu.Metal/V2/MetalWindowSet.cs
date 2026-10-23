@@ -14,6 +14,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 internal sealed class MetalWindowSet
 {
     private ulong[] _words;
+    public long Version { get; private set; }
 
     public MetalWindowSet(int capacity = 64) =>
         _words = new ulong[Math.Max(1, (capacity + 63) / 64)];
@@ -67,6 +68,7 @@ internal sealed class MetalWindowSet
         }
 
         _words[word] |= bit;
+        Version++;
         return true;
     }
 
@@ -75,7 +77,9 @@ internal sealed class MetalWindowSet
         var word = id >> 6;
         if (word < _words.Length)
         {
+            var before = _words[word];
             _words[word] &= ~(1UL << (id & 63));
+            if (before != _words[word]) Version++;
         }
     }
 
@@ -85,10 +89,11 @@ internal sealed class MetalWindowSet
         return id >= 0 && word < _words.Length && (_words[word] & (1UL << (id & 63))) != 0;
     }
 
-    public void Clear() => Array.Clear(_words);
+    public void Clear() { Array.Clear(_words); Version++; }
 
     public void CopyFrom(MetalWindowSet other)
     {
+        Version++;
         if (_words.Length < other._words.Length)
         {
             _words = new ulong[other._words.Length];
@@ -117,6 +122,7 @@ internal sealed class MetalWindowSet
             }
         }
 
+        if (added) Version++;
         return added;
     }
 
@@ -140,6 +146,7 @@ internal sealed class MetalWindowSet
     /// <summary>Replaces this set with the ids in both <paramref name="left"/> and <paramref name="right"/>.</summary>
     public void SetIntersection(MetalWindowSet left, MetalWindowSet right)
     {
+        Version++;
         var length = Math.Min(left._words.Length, right._words.Length);
         if (_words.Length < length)
         {
