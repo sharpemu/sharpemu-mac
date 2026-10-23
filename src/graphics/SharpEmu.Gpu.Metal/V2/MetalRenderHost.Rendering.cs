@@ -1250,6 +1250,7 @@ internal sealed partial class MetalRenderHost
             MetalMemoryTelemetry.ComputeEncoders.Add();
         }
 
+        ComputeEncoders++;
         RetainEncoder(_computeEncoder);
 
         if (_computeEncoder == 0)
@@ -1835,7 +1836,6 @@ internal sealed partial class MetalRenderHost
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        OrderComputeExternalWrites();
         // A persistent-thread kernel spins on memory other work publishes, which can be what a
         // label copy held for the commit writes: the copy would land only after the kernel had
         // waited out its budget for it (UE5's Nanite culling took twice as long per dispatch).
@@ -1880,16 +1880,10 @@ internal sealed partial class MetalRenderHost
 
     public bool TryDispatchIndirect(ulong argumentsAddress)
     {
-        OrderComputeExternalWrites();
-        if (ConcurrentComputeEnabled)
-        {
-            FlushGpuWrites(argumentsAddress, 3 * sizeof(uint), MetalWritebackCause.StorageDescriptor);
-        }
+        FlushGpuWrites(argumentsAddress, 3 * sizeof(uint), MetalWritebackCause.StorageDescriptor);
         // Storage resolution can share a preceding producer's staged allocation or
         // gather GPU-written counts, rather than snapshotting stale CPU-visible bytes.
-        var range = ConcurrentComputeEnabled
-            ? ResolveStorageBuffer(argumentsAddress, 3 * sizeof(uint), written: false)
-            : _guestMemory.Resolve(argumentsAddress, 3 * sizeof(uint));
+        var range = ResolveStorageBuffer(argumentsAddress, 3 * sizeof(uint), written: false);
         if (!range.IsValid)
         {
             return false;

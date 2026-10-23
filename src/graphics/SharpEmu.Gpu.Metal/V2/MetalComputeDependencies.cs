@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
+
 namespace SharpEmu.Gpu.Metal.V2;
 
 // Guest addresses catch aliases across views/windows/staged copies; native buffer
@@ -18,7 +20,7 @@ internal readonly record struct MetalComputeAccess(
 
 internal sealed class MetalComputeFootprint
 {
-    internal readonly List<MetalComputeAccess> Accesses = [];
+    internal readonly List<MetalComputeAccess> Accesses = new(128);
     internal bool UnknownRead;
     internal bool UnknownWrite;
 
@@ -49,7 +51,10 @@ internal sealed class MetalComputeFootprint
 /// </summary>
 internal sealed class MetalComputeDependencies
 {
-    private readonly List<MetalComputeAccess> _epoch = [];
+    // Bound both storage and comparisons. A full epoch takes a scope barrier, never
+    // another encoder; an oversized single footprint is retained as unknown instead.
+    internal const int EpochCapacity = 4096;
+    private readonly List<MetalComputeAccess> _epoch = new(EpochCapacity);
     private bool _unknownRead;
     private bool _unknownWrite;
     private bool _hasDispatch;
@@ -59,11 +64,11 @@ internal sealed class MetalComputeDependencies
     internal bool NeedsBarrier(MetalComputeFootprint next)
     {
         if (!_hasDispatch) return false;
-        if (_unknownWrite || next.UnknownWrite ||
-            (next.UnknownRead && _hasWrite) ||
-            (_unknownRead && next.Accesses.Any(access => access.Written))) return true;
-        foreach (var access in next.Accesses)
-        foreach (var previous in _epoch)
+        if (_epoch.Count + next.Accesses.Count > EpochCapacity ||
+            _unknownWrite || next.UnknownWrite ||
+            (next.UnknownRead && _hasWrite) || (_unknownRead && HasWrite(next))) return true;
+        foreach (ref readonly var access in CollectionsMarshal.AsSpan(next.Accesses))
+        foreach (ref readonly var previous in CollectionsMarshal.AsSpan(_epoch))
         {
             if (access.Conflicts(previous)) return true;
         }
@@ -73,11 +78,25 @@ internal sealed class MetalComputeDependencies
 
     internal void Record(MetalComputeFootprint next)
     {
-        _epoch.AddRange(next.Accesses);
+        if (next.Accesses.Count > EpochCapacity)
+        {
+            _unknownRead = _unknownWrite = true;
+        }
+        else
+        {
+            _epoch.AddRange(next.Accesses);
+        }
         _unknownRead |= next.UnknownRead;
         _unknownWrite |= next.UnknownWrite;
-        _hasWrite |= next.UnknownWrite || next.Accesses.Any(access => access.Written);
+        _hasWrite |= next.UnknownWrite || HasWrite(next);
         _hasDispatch = true;
+    }
+
+    private static bool HasWrite(MetalComputeFootprint footprint)
+    {
+        foreach (ref readonly var access in CollectionsMarshal.AsSpan(footprint.Accesses))
+            if (access.Written) return true;
+        return false;
     }
 
     internal void Reset()

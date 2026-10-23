@@ -279,7 +279,6 @@ internal sealed partial class MetalRenderHost
         }
 
         var stageIndex = StageIndexOf(program.Stage);
-        if (stageIndex == StageCompute) OrderComputeExternalWrites();
         var prepared = _stageBindings[stageIndex];
         prepared.StageResources = stage;
         prepared.Program = program;
@@ -566,12 +565,15 @@ internal sealed partial class MetalRenderHost
         var stage = (MetalStageBindings)prepared;
         var info = stage.Program.Resources!.Info;
         var snapshot = stage.StageResources.Resources;
+        var captureCompute = ConcurrentComputeEnabled && stage.Program.Stage == ShaderStageKind.Compute;
+        if (captureCompute) BeginComputeFootprint(stage);
         for (var index = 0; index < stage.ImageCount; index++)
         {
             if (index == stage.MovieLuma || index == stage.MovieChroma)
             {
                 stage.Textures[index] = AcquireHostMovieView(index == stage.MovieLuma ? 0 : 1);
                 stage.TextureIds[index] = MetalNative.SendGpuResourceId(stage.Textures[index], SelGpuResourceId);
+                if (captureCompute) NoteComputeImage(stage, index);
                 continue;
             }
 
@@ -601,6 +603,8 @@ internal sealed partial class MetalRenderHost
                 NotePendingInputDump(stage.Textures[index], identifier, index, role);
                 BindStorageMipViews(stage, info.Images[index], identifier, request with { Role = role }, index);
             }
+
+            if (captureCompute) NoteComputeImage(stage, index);
         }
 
         for (var index = 0; index < stage.BufferCount; index++)
@@ -673,6 +677,8 @@ internal sealed partial class MetalRenderHost
                 descriptor.Address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
             stage.Buffers[index] = range;
             stage.BufferLengths[index] = BoundBufferBytes(size, range);
+            if (captureCompute) NoteComputeBuffer(descriptor.Address, stage.BufferLengths[index], range,
+                written || info.Buffers[index].Atomic);
             ReportBufferBinding(stage, index, in descriptor, requested, size, range);
         }
 
