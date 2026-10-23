@@ -700,6 +700,7 @@ internal static partial class MetalV2Presenter
                 }
             }
 
+            EncodePerfOverlay(encoder, window.ContentsScale);
             MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
             MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
             MetalMemoryTelemetry.Commits.Add();
