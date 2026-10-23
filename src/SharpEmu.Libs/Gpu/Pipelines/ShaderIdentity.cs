@@ -63,7 +63,7 @@ public static class ShaderIdentity
         return ComputeContent(memory, ranges, label);
     }
 
-    public static ulong ComputeContent(ICpuMemory memory, ReadOnlySpan<(ulong Address, uint SizeBytes)> ranges, string label)
+    public static ulong ComputeContent(ICpuMemory memory, ReadOnlySpan<(ulong Address, uint SizeBytes)> ranges, string label, Func<string, Exception>? invalid = null)
     {
         // Shaders without a declared hash are rehashed on every draw, so the hasher and
         // the code buffer are reused per thread instead of allocated per call.
@@ -80,7 +80,7 @@ public static class ShaderIdentity
             var code = buffer.AsSpan(0, (int)sizeBytes);
             if (!memory.TryRead(address, code))
             {
-                throw Scheduling.GpuFatal.Fatal($"The shader code is unreadable: label={label} shader=0x{address:X16} size=0x{sizeBytes:X8}.");
+                throw (invalid ?? Scheduling.GpuFatal.Fatal)($"The shader code is unreadable: label={label} shader=0x{address:X16} size=0x{sizeBytes:X8}.");
             }
 
             hash.Append(code);
@@ -101,7 +101,7 @@ public static class ShaderIdentity
 public sealed record ReadyShaderIdentity(ulong Hash, ulong ContentHash);
 
 public sealed class ShaderIdentityCache(ICpuMemory memory, Action<ulong, ulong> synchronize,
-    SharpEmu.HLE.GpuMemory.GuestWriteGenerations? generations)
+    SharpEmu.HLE.GpuMemory.GuestWriteGenerations? generations, Func<string, Exception>? invalid = null)
 {
     internal static readonly bool Enabled = Environment.GetEnvironmentVariable("SHARPEMU_PROGRAM_INTERN") != "0";
     private sealed record Entry(ReadyShaderIdentity Identity, SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token[] Tokens);
@@ -122,9 +122,9 @@ public sealed class ShaderIdentityCache(ICpuMemory memory, Action<ulong, ulong> 
             var tokens = Enabled && generations is not null
                 ? ranges.ToArray().Select(range => generations.Register(range.Address, range.SizeBytes)).ToArray()
                 : [];
-            var content = ShaderIdentity.ComputeContent(memory, ranges, label);
+            var content = ShaderIdentity.ComputeContent(memory, ranges, label, invalid);
             if (!ShaderIdentity.TryReadDeclaredHash(memory, shader.CodeAddress, out var declared))
-                throw Scheduling.GpuFatal.Fatal($"The shader code is unreadable: label={label} shader=0x{shader.CodeAddress:X16}.");
+                throw (invalid ?? Scheduling.GpuFatal.Fatal)($"The shader code is unreadable: label={label} shader=0x{shader.CodeAddress:X16}.");
             var hash = declared == 0 ? content : declared;
             var identity = _entries.TryGetValue(shader, out var previous) && previous.Identity.Hash == hash && previous.Identity.ContentHash == content
                 ? previous.Identity : new ReadyShaderIdentity(hash, content);

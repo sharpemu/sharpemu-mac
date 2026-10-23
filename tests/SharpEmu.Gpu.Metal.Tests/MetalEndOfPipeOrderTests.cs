@@ -1167,6 +1167,50 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         WaitForCompletions(host);
     }
 
+    [Fact]
+    public void IssueBlocksPreserveDeviceCopyLabelAndReadOrderingInSplitAndSerial()
+    {
+        if (!RequireDevice()) return;
+        ulong[] Replay(bool split)
+        {
+            using var rig = new Rig(Device.Value);
+            var host = rig.Host;
+            var issues = new OrderedCommandStreamHost(host, split, blocks: 2, itemsPerBlock: 8);
+            Thread? consumer = null;
+            if (split) consumer = new Thread(() => issues.Consume(enterBlock: () => MetalAutoreleasePool.Enter()));
+            consumer?.Start();
+            try
+            {
+                const ulong filled = GuestBase + 0x10000;
+                const ulong copied = GuestBase + 0x14000;
+                issues.FillBufferInOrder(filled, 64, 0x12345678);
+                issues.CopyBufferInOrder(copied, filled, 64);
+                issues.RecordEndOfPipe(new(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 0x1122334455667788));
+                issues.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0xABCDEFUL), "WRITE_DATA");
+                issues.EmitGlobalBarrier();
+                issues.SynchronizeGpu();
+                Span<byte> bytes = stackalloc byte[8];
+                var values = new ulong[4];
+                var addresses = new[] { filled, copied, WindowedLabel, LaterLabel };
+                for (var index = 0; index < addresses.Length; index++)
+                {
+                    Assert.True(issues.TryReadGuestOperand(addresses[index], bytes));
+                    values[index] = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+                }
+                return values;
+            }
+            finally
+            {
+                issues.Stop();
+                if (consumer is not null) Assert.True(consumer.Join(5000));
+            }
+        }
+        var serial = Replay(false);
+        var split = Replay(true);
+        Assert.Equal(new ulong[] { 0x1234567812345678, 0x1234567812345678, 0x1122334455667788, 0xABCDEF }, serial);
+        Assert.Equal(serial, split);
+    }
+
     private sealed class Rig : IDisposable
     {
         private readonly nint _queue;

@@ -190,16 +190,73 @@ public static partial class AgcExports
             }
         }
 
+        // The ordered issue consumer owns these states. They never attach an
+        // interpreter or share SubmittedDcbState with A's live queue state.
+        private readonly Dictionary<int, SubmittedDcbState> _issuedStates = new();
+        private RegisterBanks? _issuedBanks;
+        private bool _usesIssues;
+
+        private SubmittedDcbState IssuedState(int queueId)
+        {
+            if (!_issuedStates.TryGetValue(queueId, out var state))
+            {
+                state = new SubmittedDcbState { QueueName = $"issue[{queueId}]" };
+                _issuedStates.Add(queueId, state);
+            }
+            return state;
+        }
+
+        public void BeginIssuedSubmission(int queueId, ulong submitId)
+        {
+            _usesIssues = true;
+            IssuedState(queueId).ActiveSubmissionId = submitId;
+        }
+
+        public void DrawIssued(int queueId, ulong submitId, RegisterBanks banks, in IssueProgramIdentities programs,
+            bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
+        {
+            var state = IssuedState(queueId);
+            state.ActiveSubmissionId = submitId;
+            state.FrameDrawCount++;
+            state.SawIndexedDraw |= indexed;
+            _executing = state;
+            _issuedBanks = banks;
+            _pipelines!.IssuedPrograms = programs;
+            RecordKnownColorTargets(state, banks);
+            try { RunExecutorDraw(submitId, state, banks, indexed, indexedArguments, autoArguments); }
+            finally { _executing = null; _issuedBanks = null; _pipelines.IssuedPrograms = default; }
+        }
+
+        public void DispatchIssued(int queueId, ulong submitId, RegisterBanks banks, in IssueProgramIdentities programs,
+            uint x, uint y, uint z, uint initiator, ulong indirect)
+        {
+            var state = IssuedState(queueId);
+            state.ActiveSubmissionId = submitId;
+            state.FrameDispatchCount++;
+            _executing = state;
+            _issuedBanks = banks;
+            _pipelines!.IssuedPrograms = programs;
+            try { ExecuteDispatch(_executor!, submitId, banks, x, y, z, initiator, indirect); }
+            finally { _executing = null; _issuedBanks = null; _pipelines.IssuedPrograms = default; }
+        }
+
+        public void ResetIssuedQueue(int queueId)
+        {
+            var state = IssuedState(queueId);
+            state.SawIndexedDraw = false;
+            state.GuestDrawKind = GuestDrawKind.None;
+        }
+
         // Resolves the programs of deferred draws ahead of them, for a host that answers reads from
         // another thread; draws are deferred whenever it exists.
         private readonly ParallelProgramPrefetch? _parallel;
 
         // The context bank of the queue whose slice runs now; the Metal host rebuilds its records from it.
-        public ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
+        public ContextRegisters? CurrentContextRegisters => _issuedBanks?.Context ?? _current?.TypedRegisters?.Context;
 
         public SubmittedVertexData? FindSubmittedVertexData(VertexInputInfo input)
         {
-            var snapshot = _current?.CurrentVertexSnapshot;
+            var snapshot = (_executing ?? _current)?.CurrentVertexSnapshot;
             if (snapshot?.Data is not { } data || snapshot.ExportShaderAddress != input.Stage.ShaderBase || !data.Matches(input))
             {
                 DcbSubmissionProfile.RecordVertexSnapshot(snapshot is not null, matched: false);
@@ -675,7 +732,7 @@ public static partial class AgcExports
         // Runs before the display buffer is captured: the deferred composite lands in it first.
         public void PrepareFlip(int handle, int displayBufferIndex)
         {
-            var state = _gpuState.Graphics;
+            var state = _usesIssues ? IssuedState(0) : _gpuState.Graphics;
             TraceFramePacketSummary(state);
             SyncCpuWrittenGuestImages(_context);
             if (_executor is { } executor)

@@ -12,6 +12,40 @@ public sealed class SceneSmokeTests(ITestOutputHelper output) : SceneTestBase(ou
     private const uint Size = 64;
 
     [Fact]
+    public void NativeIssueConsumerAndSerialIssuePathRenderTheSameMixedPm4Tape()
+    {
+        (byte[] Pixels, uint[] Compute, uint[] Tape)? Replay(bool split)
+        {
+            using var rig = CreateRig(split);
+            if (rig is null) return null;
+            var target = rig.ColorTarget(Size, Size);
+            var buffer = rig.Memory.Allocate(64 * 4, 256);
+            var state = new SceneState(Size, Size).ColorTarget(0, target, Size, Size);
+            var pm4 = new ScenePm4();
+            for (var index = 0; index < 8; index++)
+            {
+                rig.DrawMesh(pm4, state, SceneDraws.Quad(0.5f, index / 7f, 0.25f, 1f));
+                rig.Dispatch(pm4, ScenePrograms.StoreGlobalId, Descriptors.Buffer(buffer, 4, 64, format: 20), 1);
+                // A real WAIT_REG_MEM on the compute shader's output must commit its
+                // prefix, suspend if necessary, and observe the same bytes in both modes.
+                pm4.Packet(0x3C, 0x13u, (uint)buffer, (uint)(buffer >> 32), 0x5A5Au, 0xFFFFFFFFu, 0);
+            }
+            var tape = pm4.ToArray();
+            rig.Submit(tape);
+            Assert.Empty(rig.Fatals);
+            return (rig.ReadImage(target, Size, Size), rig.Read<uint>(buffer, 64), tape);
+        }
+        var serial = Replay(false);
+        if (serial is null) return;
+        var split = Replay(true)!.Value;
+        Assert.Equal(serial.Value.Tape, split.Tape);
+        Assert.Equal(serial.Value.Pixels, split.Pixels);
+        Assert.Equal(serial.Value.Compute, split.Compute);
+        Assert.Equal(0x5A5Au, split.Compute[0]);
+        Assert.Equal(63u ^ 0x5A5Au, split.Compute[63]);
+    }
+
+    [Fact]
     public void ATriangleFromThePacketStreamLandsOnItsPixels()
     {
         using var rig = CreateRig();

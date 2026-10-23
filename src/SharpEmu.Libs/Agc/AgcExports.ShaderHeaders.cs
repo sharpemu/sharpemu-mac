@@ -13,11 +13,11 @@ public static partial class AgcExports
     internal static ulong GetShaderHeaderAddress(ulong codeAddress) =>
         _shaderHeadersByCode.TryGetValue(codeAddress, out var header) ? header : 0;
 
-    internal static ShaderHeaderRegistry CreateShaderHeaderRegistry(CpuContext context) =>
+    internal static ShaderHeaderRegistry CreateShaderHeaderRegistry(CpuContext context, Func<string, Exception>? invalid = null) =>
         new(
             context,
             GetShaderHeaderAddress,
             codeAddress => ShaderCompiler.Gen5ShaderTranslator.TryGetFusedProgramParts(context, codeAddress, out var continuation, out var continuationHeader)
                 ? new FusedProgramParts(continuation, continuationHeader)
-                : null);
+                : null, invalid: invalid);
 }

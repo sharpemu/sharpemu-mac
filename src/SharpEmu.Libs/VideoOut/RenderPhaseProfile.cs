@@ -68,6 +68,9 @@ public static class RenderPhaseProfile
         TakePresentation,
         /// <summary>Running one slice of the guest command stream.</summary>
         CommandStream,
+        WorkerApply,
+        WorkerAWaitsForB,
+        WorkerBWaitsForA,
         CommandMemorySync,
         CommandMemoryRead,
         CommandGpuWait,
@@ -251,6 +254,18 @@ public static class RenderPhaseProfile
             ? seconds
             : 5.0;
 
+    public enum Worker { None, A, B }
+    [ThreadStatic] private static Worker _worker;
+    public static void SetWorker(Worker worker) => _worker = worker;
+    private static readonly long[] WorkerServiceTicks = new long[3];
+    private static readonly long[] WorkerCpuNs = new long[3];
+    public static void RecordWorkerService(Worker worker, long ticks, long cpuNanoseconds)
+    {
+        if (!Enabled) return;
+        Interlocked.Add(ref WorkerServiceTicks[(int)worker], ticks);
+        Interlocked.Add(ref WorkerCpuNs[(int)worker], cpuNanoseconds);
+    }
+    private static readonly long[][] WorkerTicks = [new long[(int)Phase.Count], new long[(int)Phase.Count], new long[(int)Phase.Count]];
     private static readonly long[] _ticks = new long[(int)Phase.Count];
     private static readonly long[] _entries = new long[(int)Phase.Count];
     private static long _frames;
@@ -310,8 +325,8 @@ public static class RenderPhaseProfile
             return;
         }
 
-        _commandReadCalls[(int)kind]++;
-        _commandReadBytes[(int)kind] += bytes;
+        Interlocked.Increment(ref _commandReadCalls[(int)kind]);
+        Interlocked.Add(ref _commandReadBytes[(int)kind], bytes);
     }
     /// <summary>Whether <see cref="RecordImageUpload"/> would record anything.</summary>
     /// <remarks>
@@ -450,7 +465,7 @@ public static class RenderPhaseProfile
             }
 
             Charge(phase);
-            _entries[(int)phase]++;
+            Interlocked.Increment(ref _entries[(int)phase]);
         }
     }
 
@@ -463,7 +478,7 @@ public static class RenderPhaseProfile
 
         var previous = Charge(phase);
         _scopeDepth++;
-        _entries[(int)phase]++;
+        Interlocked.Increment(ref _entries[(int)phase]);
         return new Scope(previous);
     }
 
@@ -492,10 +507,11 @@ public static class RenderPhaseProfile
         var previous = _current;
         if (_lastTimestamp != 0)
         {
-            _ticks[(int)previous] += now - _lastTimestamp;
+            Interlocked.Add(ref _ticks[(int)previous], now - _lastTimestamp);
+            Interlocked.Add(ref WorkerTicks[(int)_worker][(int)previous], now - _lastTimestamp);
             if (FrameTraceEnabled)
             {
-                _framePhaseTicks[(int)previous] += now - _lastTimestamp;
+                Interlocked.Add(ref _framePhaseTicks[(int)previous], now - _lastTimestamp);
             }
         }
 
@@ -537,8 +553,8 @@ public static class RenderPhaseProfile
             _frameTrace[traceOffset + 1] = _previousFrameTimestamp == 0 ? 0 : now - _previousFrameTimestamp;
             _frameTrace[traceOffset + 2] = Interlocked.Read(ref _lastSubmissionTimestamp);
             _frameTrace[traceOffset + 3] = Interlocked.Read(ref _submissionCount);
-            Array.Copy(_framePhaseTicks, 0, _frameTrace, traceOffset + 4, (int)Phase.Count);
-            Array.Clear(_framePhaseTicks);
+            for (var i = 0; i < (int)Phase.Count; i++)
+                _frameTrace[traceOffset + 4 + i] = Interlocked.Exchange(ref _framePhaseTicks[i], 0);
             _previousFrameTimestamp = now;
             _frameTraceCount++;
         }
@@ -569,10 +585,8 @@ public static class RenderPhaseProfile
         var accounted = 0L;
         for (var index = 0; index < (int)Phase.Count; index++)
         {
-            var phaseTicks = _ticks[index];
-            _ticks[index] = 0;
-            var entries = _entries[index];
-            _entries[index] = 0;
+            var phaseTicks = Interlocked.Exchange(ref _ticks[index], 0);
+            var entries = Interlocked.Exchange(ref _entries[index], 0);
             accounted += phaseTicks;
             if (phaseTicks <= 0)
             {
@@ -593,9 +607,24 @@ public static class RenderPhaseProfile
                     $"{part.Phase}={part.Percent:F1}%" +
                     (part.Entries > 0 ? $"/n{part.Entries}" : string.Empty))));
 
+        var workers = new List<string>();
+        for (var worker = 1; worker <= 2; worker++)
+        {
+            long total = 0;
+            for (var phase = 0; phase < (int)Phase.Count; phase++)
+            {
+                var ticks = Interlocked.Exchange(ref WorkerTicks[worker][phase], 0);
+                total += ticks;
+                if (ticks != 0) workers.Add($"{(Phase)phase}_{(Worker)worker}={ticks * 1000.0 / Stopwatch.Frequency:F2}ms");
+            }
+            workers.Add($"worker_{(Worker)worker}_total_ms={total * 1000.0 / Stopwatch.Frequency:F2}");
+            workers.Add($"worker_{(Worker)worker}_service_ms={Interlocked.Exchange(ref WorkerServiceTicks[worker], 0) * 1000.0 / Stopwatch.Frequency:F2}");
+            workers.Add($"worker_{(Worker)worker}_cpu_ms={Interlocked.Exchange(ref WorkerCpuNs[worker], 0) / 1000000.0:F2}");
+        }
         Console.Error.WriteLine(
             $"[PERF][RENDER_MS] window_s={seconds:F1} frames={frames} " +
-            string.Join(" ", parts.Select(part => $"{part.Phase}={part.Milliseconds:F2}ms/n{part.Entries}")));
+            string.Join(" ", parts.Select(part => $"{part.Phase}={part.Milliseconds:F2}ms/n{part.Entries}")) +
+            " " + string.Join(" ", workers));
 
         GpuWaitSiteProfile.Report();
         ComputeCompileProfile.Report();
@@ -616,12 +645,9 @@ public static class RenderPhaseProfile
         var commandReads = new List<string>();
         for (var index = 0; index < (int)CommandReadKind.Count; index++)
         {
-            if (_commandReadCalls[index] != 0)
-            {
-                commandReads.Add($"{(CommandReadKind)index}={_commandReadCalls[index]}/bytes{_commandReadBytes[index]}");
-            }
-            _commandReadCalls[index] = 0;
-            _commandReadBytes[index] = 0;
+            var calls = Interlocked.Exchange(ref _commandReadCalls[index], 0);
+            var bytes = Interlocked.Exchange(ref _commandReadBytes[index], 0);
+            if (calls != 0) commandReads.Add($"{(CommandReadKind)index}={calls}/bytes{bytes}");
         }
         if (commandReads.Count != 0)
         {
