@@ -123,6 +123,57 @@ public sealed partial class MetalImageBudgetTests
         Assert.Equal(expected, rig.ReadGuest(GuestBase, ImageSize));
     }
 
+    // A timeout is a diagnostic interval, not permission to overwrite guest memory
+    // before an already recorded GPU store. Exercise both fault/retry and HLE stores.
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void AFenceTimeoutKeepsTheStoreBlockedUntilWritebackCompletes(bool managed, bool fastPath)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Cache.StoreFastPathEnabled = fastPath;
+        var (_, written) = ReleaseAGpuWrittenImage(rig);
+        var writebackSerial = rig.Harness.SubmissionSerial;
+        var attempts = 0;
+        rig.Cache.WritebackFenceTimeoutMilliseconds = 1;
+        rig.CacheOwner.WaitOffWorker = (serial, timeout) =>
+        {
+            Assert.Equal(writebackSerial, serial);
+            Assert.Equal(1, timeout);
+            Assert.Equal(1, rig.Cache.FencedWritebackCount);
+            Assert.False(rig.Pages.Allows(GuestBase, FaultKind.Write));
+            if (++attempts <= 2) return false;
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            return rig.Harness.CompletedSerial >= serial;
+        };
+
+        byte[] expected;
+        if (managed)
+        {
+            expected = ManagedWriteOverAFencedWriteback(rig, written);
+        }
+        else
+        {
+            Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase + 0x40, 8));
+            expected = (byte[])written.Clone();
+            new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }.CopyTo(expected, 0x40);
+            rig.WriteGuest(GuestBase + 0x40, expected.AsSpan(0x40, 8).ToArray());
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+        }
+
+        Assert.Equal(3, attempts);
+        Assert.Equal((1L, 2L), rig.Cache.FenceWaitCounts);
+        rig.Cache.Collect();
+        Assert.Equal(0, rig.Cache.FencedWritebackCount);
+        Assert.True(rig.Pages.Allows(GuestBase, FaultKind.Write));
+        Assert.Equal(expected, rig.ReadGuest(GuestBase, ImageSize));
+    }
+
     // The GPU worker making a managed write cannot wait for a submission it may still be
     // recording: it commits and waits for the GPU instead, and never deadlocks on itself.
     [Fact]
@@ -195,18 +246,27 @@ public sealed partial class MetalImageBudgetTests
         Assert.Equal(1, rig.Cache.FencedWritebackCount);
     }
 
-    // A store that cannot wait - the timeout, or the GPU worker itself - drops the fence and
-    // proceeds as it did before, counted.
-    [Fact]
-    public void AStoreThatCannotWaitDropsTheFenceAndIsCounted()
+    // Teardown may release a waiter even when the GPU cannot complete anymore.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AStoreWaitingForARecordedWritebackCanLeaveOnShutdown(bool managed)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         _ = ReleaseAGpuWrittenImage(rig);
-        rig.CacheOwner.WaitOffWorker = (_, _) => false;
+        var attempts = 0;
+        rig.CacheOwner.WaitOffWorker = (_, _) =>
+        {
+            attempts++;
+            rig.Cache.StopWatching();
+            return false;
+        };
 
-        Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase, 8));
-        Assert.Equal((1L, 1L), rig.Cache.FenceWaitCounts);
+        if (managed) _ = ((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(GuestBase, 8);
+        else Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase, 8));
+        Assert.Equal(1, attempts);
+        Assert.Equal((1L, 0L), rig.Cache.FenceWaitCounts);
         Assert.Equal(0, rig.Cache.FencedWritebackCount);
         Assert.True(rig.Pages.Allows(GuestBase, FaultKind.Write));
     }

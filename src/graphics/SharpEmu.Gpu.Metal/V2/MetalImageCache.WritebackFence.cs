@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Gpu.Metal.V2;
@@ -25,9 +26,10 @@ namespace SharpEmu.Gpu.Metal.V2;
 // counts at most 127 watches a page, and Silent Hill, 400 ms behind on the GPU, reached that.
 //
 // The wait never runs on the GPU worker (it would be waiting for itself), holds no cache lock,
-// asks the worker to commit a submission it is still recording, and gives up after
-// SHARPEMU_METAL_V2_WRITEBACK_FENCE_TIMEOUT_MS (250 ms) with a warning - a store that cannot
-// wait lands as it did before. SHARPEMU_METAL_V2_WRITEBACK_FENCE=0 keeps no watch at all.
+// asks the worker to commit a submission it is still recording, and reports a stall every
+// SHARPEMU_METAL_V2_WRITEBACK_FENCE_TIMEOUT_MS (250 ms). A timeout never admits a store:
+// only completion or session shutdown ends the wait. SHARPEMU_METAL_V2_WRITEBACK_FENCE=0
+// keeps no watch at all.
 //
 // A managed (HLE) write never faults, so it asks before it lands instead: it waits for a
 // fenced writeback over its exact bytes (WaitForFencedWritebacksUnder). On the worker, which
@@ -140,7 +142,7 @@ internal sealed partial class MetalImageCache
     /// <summary>Whether a recorded writeback keeps its guest range watched until it completes.</summary>
     internal bool WritebackFenceEnabled { get; set; } = WritebackFenceDefault;
 
-    /// <summary>How long a faulting guest store waits for a writeback's submission.</summary>
+    /// <summary>Interval for reporting a store still waiting for a writeback submission.</summary>
     internal int WritebackFenceTimeoutMilliseconds { get; set; } = WritebackFenceTimeoutDefault;
 
     /// <summary>Writebacks whose range is still watched for their submission.</summary>
@@ -157,7 +159,7 @@ internal sealed partial class MetalImageCache
         (Interlocked.Read(ref _stagedWritebackRuns), Interlocked.Read(ref _shortWritebacks),
             Interlocked.Read(ref _unrecordedWritebacks));
 
-    /// <summary>Guest stores that waited for a writeback, and the waits that gave up.</summary>
+    /// <summary>Store waits for a writeback, and expired diagnostic wait intervals.</summary>
     internal (long Waits, long Timeouts) FenceWaitCounts =>
         (Interlocked.Read(ref _fenceWaits), Interlocked.Read(ref _fenceTimeouts));
 
@@ -286,7 +288,7 @@ internal sealed partial class MetalImageCache
     }
 
     // Removes the watches of the fenced writebacks sharing a page with the range that are no
-    // newer than the serial the store waited for (or gave up on). One recorded while it waited
+    // newer than the completed serial the store waited for. One recorded while it waited
     // keeps its watch, and the retried store faults again and waits for that one too.
     private void ReleaseFencesOverLocked(ulong address, ulong size, ulong upToSerial, ulong completed, ulong backing, bool resolved)
     {
@@ -368,25 +370,14 @@ internal sealed partial class MetalImageCache
 
         if (byteOverlap) MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.TrueOverlap);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var landed = _owner.WaitForSubmissionOffWorker(pending, WritebackFenceTimeoutMilliseconds);
+        WaitForFencedSubmission(pending, address, cause, managed: false);
         Interlocked.Add(ref _fenceWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         Interlocked.Increment(ref _fenceWaits);
-        if (!landed)
-        {
-            Interlocked.Increment(ref _fenceTimeouts);
-            if (Interlocked.Increment(ref _fenceTimeoutReports) <= MaxFenceTimeoutReports)
-            {
-                Console.Error.WriteLine(
-                    $"[METAL-V2][WARN] A guest store into a recorded writeback did not wait for it: " +
-                    $"address=0x{address:X16} serial={pending} completed={_owner.CompletedSerial} cause={cause} " +
-                    $"timeout_ms={WritebackFenceTimeoutMilliseconds}. The writeback may land over the store.");
-            }
-        }
 
         completed = SampleFenceCompletion();
         lock (_fenceGate)
         {
-            ReleaseFencesOverLocked(address, size, Math.Max(pending, completed), completed, backing, resolved);
+            ReleaseFencesOverLocked(address, size, completed, completed, backing, resolved);
         }
 
         return true;
@@ -397,7 +388,7 @@ internal sealed partial class MetalImageCache
     /// writeback still storing into them, which would otherwise complete after the write and
     /// land over it. A managed write never faults, so nothing retries it and no watch is
     /// dropped here; a fence ends when its submission completes. Off the worker the wait is
-    /// a faulting store's, bounded by the same timeout. The worker cannot wait for a
+    /// a faulting store's, with the same diagnostic interval. The worker cannot wait for a
     /// submission it may still be recording, so it commits and waits for the GPU, as it does
     /// for the writeback it records before its own managed write (AwaitStoreRequest). Called
     /// without the cache lock.
@@ -433,31 +424,37 @@ internal sealed partial class MetalImageCache
 
         if (byteOverlap) MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.TrueOverlap);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        bool landed;
         if (_owner.IsWorkerThread)
         {
             _owner.WaitForGpu();
-            landed = true;
         }
         else
         {
-            landed = _owner.WaitForSubmissionOffWorker(pending, WritebackFenceTimeoutMilliseconds);
+            WaitForFencedSubmission(pending, address, cause, managed: true);
         }
 
         Interlocked.Add(ref _fenceWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         Interlocked.Increment(ref _fenceWaits);
-        if (!landed)
+        return true;
+    }
+
+    // An encoded writeback cannot be withdrawn. Letting the store through on a
+    // timeout lets that GPU write corrupt reused guest heap. Match the publication
+    // path's completion/shutdown rule, without holding either cache or fence lock.
+    private void WaitForFencedSubmission(ulong serial, ulong address, MetalWritebackCause cause, bool managed)
+    {
+        while (!_owner.WaitForSubmissionOffWorker(serial, WritebackFenceTimeoutMilliseconds))
         {
+            if (_watchingStopped || HostSessionControl.IsShutdownRequested) return;
             Interlocked.Increment(ref _fenceTimeouts);
             if (Interlocked.Increment(ref _fenceTimeoutReports) <= MaxFenceTimeoutReports)
             {
                 Console.Error.WriteLine(
-                    $"[METAL-V2][WARN] A managed write into a recorded writeback did not wait for it: " +
-                    $"address=0x{address:X16} serial={pending} completed={_owner.CompletedSerial} cause={cause} " +
-                    $"timeout_ms={WritebackFenceTimeoutMilliseconds}. The writeback may land over the write.");
+                    $"[METAL-V2][WARN] A {(managed ? "managed write" : "guest store")} is still waiting for a recorded writeback: " +
+                    $"address=0x{address:X16} serial={serial} completed={_owner.CompletedSerial} cause={cause} " +
+                    $"interval_ms={WritebackFenceTimeoutMilliseconds}. The store remains blocked.");
             }
         }
-        return true;
     }
 
     // Shutdown: the page guard refuses to be freed with a watch outstanding.
