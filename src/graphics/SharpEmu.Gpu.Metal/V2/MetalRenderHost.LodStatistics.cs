@@ -52,6 +52,15 @@ internal sealed partial class MetalRenderHost
     internal static unsafe nint NewMipStatisticsFunction(nint library, string entry, bool enabled, out nint error)
     {
         error = 0;
+        var specializedName = entry + (enabled ? "_sharpemu_mip_on" : "_sharpemu_mip_off");
+        // Binary-archive AIR is specialized. The plain-key library contains both named
+        // values, so loading one must select that value rather than re-specialize baked AIR.
+        var stored = MetalNative.Send(library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(specializedName));
+        if (stored != 0)
+        {
+            return stored;
+        }
+
         var values = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLFunctionConstantValues"), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
@@ -61,6 +70,24 @@ internal sealed partial class MetalRenderHost
             MetalNative.SendSetConstantValue(
                 values, MetalNative.Selector("setConstantValue:type:atIndex:"), (nint)(&value), MetalDataTypeBool,
                 Gen5MslShader.MipStatisticsFunctionConstantIndex);
+            if (MetalBinaryArchive.PlainPixelKey)
+            {
+                var descriptor = MetalNative.Send(
+                    MetalNative.Send(MetalNative.Class("MTLFunctionDescriptor"), MetalNative.Selector("alloc")),
+                    MetalNative.Selector("init"));
+                try
+                {
+                    MetalNative.SendVoid(descriptor, MetalNative.Selector("setName:"), MetalNative.NsString(entry));
+                    MetalNative.SendVoid(descriptor, MetalNative.Selector("setSpecializedName:"), MetalNative.NsString(specializedName));
+                    MetalNative.SendVoid(descriptor, MetalNative.Selector("setConstantValues:"), values);
+                    return MetalNative.Send(library, MetalNative.Selector("newFunctionWithDescriptor:error:"), descriptor, ref error);
+                }
+                finally
+                {
+                    MetalNative.SendVoid(descriptor, MetalNative.Selector("release"));
+                }
+            }
+
             return MetalNative.Send(
                 library,
                 MetalNative.Selector("newFunctionWithName:constantValues:error:"),
