@@ -465,6 +465,9 @@ internal sealed class ShaderProgramCache
         _materializingHash = source.Hash;
         inputs.UserData = source.UserData;
         inputs.ShaderBase = source.Address;
+        // ReadLog needs actual read observations for ComputeProgramRetry. A dependency
+        // bypass would supply no bytes to that log, so keep its existing full path.
+        inputs.DependencySource = ReadLog is null ? _host as IResourceDependencySource : null;
         inputs.ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
             ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
                 Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,

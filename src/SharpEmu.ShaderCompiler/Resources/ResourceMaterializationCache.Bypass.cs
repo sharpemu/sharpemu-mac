@@ -1,0 +1,243 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+namespace SharpEmu.ShaderCompiler.Resources;
+
+public sealed partial class ResourceMaterializationCache
+{
+    public static readonly bool DependencyBypassEnabled = PerfSwitches.Enabled("SHARPEMU_RESOURCE_BYPASS");
+    public static readonly bool VerifyDependencyBypass = PerfSwitches.Verify("SHARPEMU_RESOURCE_BYPASS_VERIFY");
+    private readonly bool _dependencyBypass;
+    private readonly bool _verifyDependencyBypass;
+    private readonly Dictionary<BypassKey, DependencyPacket> _packets = new();
+    private readonly HashSet<BypassKey> _uncertified = new();
+    private readonly long _packetByteBudget;
+    private readonly record struct BypassKey(ShaderResourcePlan Plan, ulong ShaderBase, ComputeSelectorState? Compute);
+    private long _packetBytes;
+    public long BypassedCalls { get; private set; }
+    public long PatchedCalls { get; private set; }
+    public long FullPathCalls { get; private set; }
+    internal static bool UsesWord(ulong[] mask, int index) => IsUsed(mask, index);
+
+    private enum FullReason { Disabled, NoSource, Cold, Inputs, CpuWrite, GpuWrite, PendingWriter, Mapping, ImageIdentity, Overlay, Unavailable, Count }
+    private static readonly long[] FullReasons = new long[(int)FullReason.Count];
+    private static long _bypassCalls;
+    private static long _patchedCalls;
+
+    // Printed by Metal's periodic PERF report. These count calls which never entered
+    // MaterializeCore, separately from the legacy cache's byte-validation hits.
+    public static string TakeBypassReport()
+    {
+        var reasons = string.Join(',', Enumerable.Range(0, (int)FullReason.Count).Select(index =>
+            $"{(FullReason)index}:{Interlocked.Exchange(ref FullReasons[index], 0)}"));
+        return $"resmat_bypassed={Interlocked.Exchange(ref _bypassCalls, 0)} resmat_patched={Interlocked.Exchange(ref _patchedCalls, 0)} resmat_full=[{reasons}]";
+    }
+
+    private sealed class DependencyPacket
+    {
+        public required ResourcePatchPlan Plan;
+        public required ResourceRuntimeInputs Readers;
+        public required IResourceDependencySource Source;
+        public required ResourceDependencyEpoch Epoch;
+        public required ResourceDependency[] Dependencies;
+        public required ResourceSnapshot Snapshot;
+        public required ulong[] UsedUserData;
+        public required int[] DynamicWords;
+        public required ResourceSpecialization Specialization;
+        public DependencyPacket? Next;
+        // Published snapshots stay immutable. A bounded memo avoids allocating on repeated
+        // rings; a new scalar value needs its own shell under ResourceSnapshot's owned ABI.
+        public readonly Dictionary<ulong, ResourceSnapshot> Patches = new();
+        public long Bytes;
+
+        public void Dispose()
+        {
+            foreach (var dependency in Dependencies) dependency.Dispose();
+        }
+    }
+
+    private bool TryBypass(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+        ref ResourceSnapshot snapshot, ref ResourceSpecialization specialization, out FullReason reason)
+    {
+        reason = !_dependencyBypass ? FullReason.Disabled : inputs.DependencySource is null ? FullReason.NoSource : FullReason.Cold;
+        if (!_dependencyBypass || inputs.DependencySource is not { } source || DeviceBindingLoads.Deferred) return false;
+        var key = new BypassKey(plan, inputs.ShaderBase, inputs.ComputeState);
+        if (!_packets.TryGetValue(key, out var head))
+        {
+            if (_uncertified.Contains(key)) reason = FullReason.Unavailable;
+            return false;
+        }
+        reason = FullReason.Inputs;
+        var epoch = source.DependencyEpoch;
+        for (var packet = head; packet is not null; packet = packet.Next)
+        {
+            if (!ReferenceEquals(packet.Source, source) ||
+                !ReferenceEquals(packet.Readers.ReadMemory, inputs.ReadMemory) ||
+                !ReferenceEquals(packet.Readers.ReadCleanMemory, inputs.ReadCleanMemory) ||
+                !ReferenceEquals(packet.Readers.DataWritePending, inputs.DataWritePending) ||
+                !ReferenceEquals(packet.Readers.ResourceWordPending, inputs.ResourceWordPending) ||
+                !ReferenceEquals(packet.Readers.ResourceWordWriter, inputs.ResourceWordWriter) ||
+                packet.Readers.ReadsClean != inputs.ReadsClean ||
+                !packet.Plan.Matches(packet.Snapshot.UserData, inputs.UserData, packet.UsedUserData, out var patched) ||
+                (patched && !packet.Plan.CanPatch(packet.Snapshot, inputs.UserData))) continue;
+            reason = EpochReason(packet.Epoch, epoch);
+            if (reason != FullReason.Cold) continue;
+            foreach (var dependency in packet.Dependencies)
+            {
+                var status = dependency.Validate();
+                if (status == ResourceDependencyStatus.Current) continue;
+                reason = (FullReason)((int)FullReason.CpuWrite + (int)status - 1);
+                break;
+            }
+            // A writer/overlay transition during validation cannot certify a packet.
+            if (reason != FullReason.Cold || source.DependencyEpoch != epoch) continue;
+
+            snapshot = packet.Snapshot;
+            if (patched)
+            {
+                var patchKey = ResourcePatchPlan.Key(inputs.UserData, packet.DynamicWords);
+                if (packet.Patches.TryGetValue(patchKey, out var previous) && SameUserData(previous.UserData, inputs.UserData))
+                    snapshot = previous;
+                else
+                {
+                    var words = new uint[inputs.UserData.Count];
+                    for (var word = 0; word < words.Length; word++) words[word] = inputs.UserData[word];
+                    snapshot = packet.Plan.Apply(packet.Snapshot, words);
+                    var bytes = 256L + words.Length * sizeof(uint) + snapshot.Buffers.Length * IntPtr.Size + packet.Plan.Patches.Length * 40L;
+                    if (packet.Patches.Count < 512 && _packetBytes <= _packetByteBudget - bytes)
+                    {
+                        // A hash is only a probe; exact roots above decide every hit.
+                        packet.Patches[patchKey] = snapshot;
+                        packet.Bytes += bytes;
+                        _packetBytes += bytes;
+                    }
+                }
+                PatchedCalls++;
+                Interlocked.Increment(ref _patchedCalls);
+            }
+            else
+            {
+                BypassedCalls++;
+                Interlocked.Increment(ref _bypassCalls);
+            }
+            specialization = packet.Specialization;
+            Hits++;
+            if (_verifyDependencyBypass) VerifyBypass(plan, inputs, snapshot, specialization);
+            return true;
+        }
+        return false;
+    }
+
+    private static FullReason EpochReason(ResourceDependencyEpoch previous, ResourceDependencyEpoch current) =>
+        previous.Mapping != current.Mapping ? FullReason.Mapping :
+        previous.Images != current.Images ? FullReason.ImageIdentity :
+        previous.Overlay != current.Overlay || previous.Labels != current.Labels ? FullReason.Overlay :
+        previous.GpuWrites != current.GpuWrites ? FullReason.GpuWrite : FullReason.Cold;
+
+    private static void VerifyBypass(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+        ResourceSnapshot snapshot, ResourceSpecialization specialization)
+    {
+        var fresh = new ResourceSnapshot();
+        var freshSpecialization = new ResourceSpecialization();
+        if (!ResourceMaterializer.Materialize(plan, inputs, ref fresh, ref freshSpecialization, out var failure))
+            throw new InvalidOperationException($"Resource bypass verification failed: {failure}");
+        if (Difference(snapshot, specialization, fresh, freshSpecialization) is { } difference)
+            throw new InvalidOperationException($"Resource bypass verification mismatch: {difference}");
+    }
+
+    private void CapturePacket(Entry entry, ResourceRuntimeInputs inputs, ResourceSnapshot? observed = null)
+    {
+        if (!_dependencyBypass || inputs.DependencySource is not { } source || entry.MovedReads || DeviceBindingLoads.Deferred) return;
+        for (var word = 0; word < entry.UserData.Length; word++)
+            if (IsUsed(entry.UsedUserData, word) && entry.UserData[word] != inputs.UserData[word]) return;
+        var key = new BypassKey(entry.Plan, inputs.ShaderBase, inputs.ComputeState);
+        var size = entry.EstimatedBytes + entry.RangeAddresses.Length * 256L +
+            256L + entry.UserData.Length * sizeof(uint);
+        if (size > _packetByteBudget) return;
+        var epoch = source.DependencyEpoch;
+        var result = observed ?? entry.Snapshot;
+        ResourceDependency[] dependencies = [];
+        var count = 0;
+        try
+        {
+            for (var range = 0; range < entry.RangeAddresses.Length; range++)
+            {
+                if (!source.TryCaptureDependency(entry.RangeAddresses[range],
+                    entry.Bytes.AsSpan(entry.RangeOffsets[range], entry.RangeLengths[range]),
+                    entry.RangeClean[range], out var dependency) || dependency is null)
+                {
+                    dependency?.Dispose();
+                    if (_uncertified.Count >= 2048) _uncertified.Clear();
+                    _uncertified.Add(key);
+                    return;
+                }
+                // Most unsupported ranges refuse at the first token. Keep that ordinary
+                // fallback allocation-free instead of allocating an array before probing.
+                if (dependencies.Length == 0) dependencies = new ResourceDependency[entry.RangeAddresses.Length];
+                dependencies[count++] = dependency;
+            }
+            foreach (var dependency in dependencies)
+            {
+                if (dependency.Validate() != ResourceDependencyStatus.Current) return;
+                size += Math.Max(0, dependency.RetainedBytes - 256);
+            }
+            if (size > _packetByteBudget) return;
+            if (source.DependencyEpoch != epoch) return;
+
+            // Independent byte/count bounds: a packet retains the snapshot and may outlive
+            // its legacy cache entry. Clearing drops only optimization state.
+            if (_packets.Count >= 2048 || _packetBytes > _packetByteBudget - size) ClearPackets();
+            _uncertified.Remove(key);
+            _packets.TryGetValue(key, out var previous);
+            var roots = new uint[inputs.UserData.Count];
+            for (var word = 0; word < roots.Length; word++) roots[word] = inputs.UserData[word];
+            var patchPlan = entry.Plan.PatchPlan;
+            var dynamicWords = new List<int>();
+            for (var word = 0; word < roots.Length; word++)
+                if (!IsUsed(entry.UsedUserData, word) || patchPlan.IsPatchable(word)) dynamicWords.Add(word);
+            var packet = new DependencyPacket
+            {
+                Plan = patchPlan,
+                UsedUserData = entry.UsedUserData,
+                DynamicWords = dynamicWords.ToArray(),
+                Source = source, Epoch = epoch, Dependencies = dependencies,
+                Snapshot = PatchedSnapshot(result, result.Buffers,
+                    result.FlattenedResourceTable, roots),
+                Specialization = entry.Specialization,
+                Readers = new ResourceRuntimeInputs
+                {
+                    ReadMemory = inputs.ReadMemory, ReadCleanMemory = inputs.ReadCleanMemory,
+                    ReadsClean = inputs.ReadsClean, DataWritePending = inputs.DataWritePending,
+                    ResourceWordPending = inputs.ResourceWordPending, ResourceWordWriter = inputs.ResourceWordWriter,
+                },
+                Next = previous, Bytes = size,
+            };
+            _packetBytes += packet.Bytes;
+            _packets[key] = packet;
+            count = 0; // Ownership moved to the packet.
+            // Eight alternate descriptor/root sets per immutable plan, newest first.
+            var tail = packet;
+            for (var depth = 1; depth < 8 && tail.Next is not null; depth++) tail = tail.Next;
+            var discarded = tail.Next;
+            tail.Next = null;
+            while (discarded is not null)
+            {
+                discarded.Dispose();
+                _packetBytes -= discarded.Bytes;
+                discarded = discarded.Next;
+            }
+        }
+        finally
+        {
+            for (var index = 0; index < count; index++) dependencies[index].Dispose();
+        }
+    }
+
+    private void ClearPackets()
+    {
+        foreach (var head in _packets.Values)
+            for (var packet = head; packet is not null; packet = packet.Next) packet.Dispose();
+        _packets.Clear();
+        _packetBytes = 0;
+    }
+}

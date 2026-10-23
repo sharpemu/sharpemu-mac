@@ -44,7 +44,7 @@ public sealed partial class RenderExecutor
     }
 
     // Merges the vertex ranges, obtains one host buffer per merged range and offsets every slot into it.
-    private BufferBinding[] AcquireVertexBuffers(VertexInputInfo vertexInput)
+    private void AcquireVertexBuffers(VertexInputInfo vertexInput, Span<BufferBinding> prepared)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawVertexBufferAcquisition);
         var buffers = vertexInput.Buffers;
@@ -107,7 +107,6 @@ public sealed partial class RenderExecutor
             range.Binding = _host.ObtainBuffer(range.BaseAddress, size, isWritten: false);
         }
 
-        var prepared = new BufferBinding[buffers.Length];
         BufferBinding? nullBuffer = null;
         Span<ulong> acquiredBytes = stackalloc ulong[buffers.Length];
         acquiredBytes.Clear();
@@ -147,8 +146,6 @@ public sealed partial class RenderExecutor
             _host.TraceVertexBuffer(vertexInput.Stage.Program?.Hash ?? 0, attribute, buffers[slot],
                 prepared[slot], sizes[slot], acquiredBytes[slot]);
         }
-
-        return prepared;
     }
 
     private PreparedIndexBuffer AcquireIndexBuffer(in IndexSource source)
@@ -512,7 +509,11 @@ public sealed partial class RenderExecutor
             _host.BindResources(pixelBindings);
         }
 
-        var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : [];
+        var vertexBufferCount = meshInput is null ? vertexInput.Buffers.Length : 0;
+        if (vertexBufferCount > VertexInputInfo.MaxBuffers)
+            throw _host.Fatal($"The vertex input has too many buffers: count={vertexBufferCount} max={VertexInputInfo.MaxBuffers}.");
+        Span<BufferBinding> vertexBuffers = stackalloc BufferBinding[vertexBufferCount];
+        if (meshInput is null) AcquireVertexBuffers(vertexInput, vertexBuffers);
         var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
         var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
             ? _host.ObtainBuffer(

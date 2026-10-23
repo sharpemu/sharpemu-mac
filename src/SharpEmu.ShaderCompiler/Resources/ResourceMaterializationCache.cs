@@ -848,14 +848,18 @@ public sealed partial class ResourceMaterializationCache
     // SHARPEMU_RESOURCE_CACHE_MB overrides the default total.
     public const long DefaultByteBudget = 256L << 20;
 
-    // byteBudget is the total estimated retained bytes: three quarters for the two
-    // generations, one quarter for the rebases' recent entries. Negative takes the default.
-    public ResourceMaterializationCache(int generationCapacity = 16384, long byteBudget = -1)
+    // byteBudget covers legacy generations, recent rebases and dependency packets.
+    // Negative takes the default; disabling packets gives their budget to generations.
+    public ResourceMaterializationCache(int generationCapacity = 16384, long byteBudget = -1,
+        bool? dependencyBypass = null, bool? verifyDependencyBypass = null)
     {
+        _dependencyBypass = dependencyBypass ?? DependencyBypassEnabled;
+        _verifyDependencyBypass = verifyDependencyBypass ?? VerifyDependencyBypass;
         _generationCapacity = Math.Max(1, generationCapacity);
         var budget = byteBudget >= 0 ? byteBudget : ConfiguredByteBudget();
         _recentByteBudget = budget / 4;
-        _generationByteBudget = Math.Max(1, (budget - _recentByteBudget) / 2);
+        _packetByteBudget = _dependencyBypass ? budget / 4 : 0;
+        _generationByteBudget = Math.Max(1, (budget - _recentByteBudget - _packetByteBudget) / 2);
     }
 
     private static long ConfiguredByteBudget() =>
@@ -864,7 +868,7 @@ public sealed partial class ResourceMaterializationCache
             : DefaultByteBudget;
 
     // The estimated bytes the cache retains: both generations and the rebases' recent entries.
-    public long RetainedBytes => _youngBytes + _oldBytes + _recentBytes;
+    public long RetainedBytes => _youngBytes + _oldBytes + _recentBytes + _packetBytes;
 
     public int EntryCount => _young.Count + _old.Count;
 
@@ -1060,6 +1064,18 @@ public sealed partial class ResourceMaterializationCache
             return "ranges";
         if (!cached.UserData.AsSpan().SequenceEqual(fresh.UserData))
             return "user_data";
+        if (cached.BindlessImages.Length != fresh.BindlessImages.Length) return "bindless.count";
+        for (var index = 0; index < cached.BindlessImages.Length; index++)
+        {
+            var left = cached.BindlessImages[index];
+            var right = fresh.BindlessImages[index];
+            if (left.Slot != right.Slot || left.Address != right.Address ||
+                !left.VariantImages.AsSpan().SequenceEqual(right.VariantImages) ||
+                !left.DescriptorVariants.AsSpan().SequenceEqual(right.DescriptorVariants) ||
+                !left.Entries.AsSpan().SequenceEqual(right.Entries) ||
+                Words("bindless.descriptor", left.Descriptors, right.Descriptors) is not null)
+                return $"bindless[{index}]";
+        }
         return null;
     }
 
@@ -1071,6 +1087,13 @@ public sealed partial class ResourceMaterializationCache
         ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
+        if (TryBypass(plan, inputs, ref snapshot, ref specialization, out var reason))
+        {
+            failure = default;
+            return true;
+        }
+        FullPathCalls++;
+        Interlocked.Increment(ref FullReasons[(int)reason]);
         var timing = new MaterializationTiming(MissDiagnosticsEnabled);
         try
         {
@@ -1149,6 +1172,7 @@ public sealed partial class ResourceMaterializationCache
                     snapshot = HitSnapshot(variant, inputs.UserData, rebase);
                     specialization = variant.Specialization;
                     failure = default;
+                    if (!rebase.Moves(variant, inputs.UserData)) CapturePacket(variant, inputs, snapshot);
                     return true;
                 }
 
@@ -1203,6 +1227,7 @@ public sealed partial class ResourceMaterializationCache
                             snapshot = evaluated.Snapshot;
                             specialization = evaluated.Specialization;
                             failure = default;
+                            CapturePacket(evaluated, inputs);
                             return true;
                         }
 
@@ -1286,6 +1311,7 @@ public sealed partial class ResourceMaterializationCache
                     snapshot = HitSnapshot(refreshed, inputs.UserData, rebase);
                     specialization = refreshed.Specialization;
                     failure = default;
+                    CapturePacket(refreshed, inputs);
                     return true;
                 }
             }
@@ -1377,6 +1403,7 @@ public sealed partial class ResourceMaterializationCache
             }
 
             Store(key, built);
+            CapturePacket(built, inputs);
             return true;
         }
         finally

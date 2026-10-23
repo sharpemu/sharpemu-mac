@@ -1,0 +1,13 @@
+<!-- Copyright (C) 2026 SharpEmu Emulator Project -->
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/SharpEmu.ShaderCompiler/SharpEmu.ShaderCompiler.csproj" />
+    <Compile Include="../../tests/SharpEmu.ShaderCompiler.Tests/Resources/ResourceTestProgram.cs" Link="ResourceTestProgram.cs" />
+  </ItemGroup>
+</Project>

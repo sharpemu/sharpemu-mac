@@ -47,6 +47,9 @@ public sealed class ShaderResourcePlan
     public bool RequiresSpecializationMemory { get; private set; }
     public ShaderResourceInfo Info { get; private set; } = new();
 
+    private ResourcePatchPlan? _patchPlan;
+    internal ResourcePatchPlan PatchPlan => _patchPlan ??= new ResourcePatchPlan(this);
+
     internal RawReadPrefetchPlan? RawReadPrefetch { get; set; }
     private readonly object _compileGate = new();
     private CompiledResourceEvaluator? _compiledEvaluator;
