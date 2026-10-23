@@ -14,6 +14,7 @@ public sealed class RuntimeValueValidator
     private readonly uint _userDataCount;
     private readonly int _tableReadCount;
     private readonly ScalarValue? _activeMask;
+    private readonly IReadOnlySet<int>? _deviceMemory;
     private readonly HashSet<ScalarValue> _visiting = [];
 
     // Set when a failure traces back to a phi that isn't loop-invariant (e.g. a
@@ -24,13 +25,17 @@ public sealed class RuntimeValueValidator
     // for image/sampler handles specifically).
     public bool ControlDependent { get; private set; }
 
-    public RuntimeValueValidator(ScalarValueGraph graph, uint userDataBase, uint userDataCount, int tableReadCount, ScalarValue? activeMask = null)
+    // deviceMemory: loads left to the device (DeviceBindingLoads); a value read through one
+    // is not host-evaluable.
+    public RuntimeValueValidator(ScalarValueGraph graph, uint userDataBase, uint userDataCount, int tableReadCount, ScalarValue? activeMask = null,
+        IReadOnlySet<int>? deviceMemory = null)
     {
         _graph = graph;
         _userDataBase = userDataBase;
         _userDataCount = userDataCount;
         _tableReadCount = tableReadCount;
         _activeMask = activeMask;
+        _deviceMemory = deviceMemory;
     }
 
     public static bool IsUniformOperation(ScalarOperation operation) => operation switch
@@ -119,7 +124,7 @@ public sealed class RuntimeValueValidator
                     return false;
                 }
 
-                var nested = new RuntimeValueValidator(_graph, _userDataBase, _userDataCount, _tableReadCount, value.Operands[1]);
+                var nested = new RuntimeValueValidator(_graph, _userDataBase, _userDataCount, _tableReadCount, value.Operands[1], _deviceMemory);
                 var ok = nested.Validate(value.Operands[0]);
                 if (nested.ControlDependent)
                 {
@@ -131,14 +136,14 @@ public sealed class RuntimeValueValidator
             case ScalarValueKind.ResourceTableWord:
                 return value.Payload < (ulong)_tableReadCount;
             case ScalarValueKind.ScalarAddressWord:
-                if (!IsRawRead(value) || value.Operands[0].Kind != ScalarValueKind.AddressHandle)
+                if (!IsRawRead(value) || value.Operands[0].Kind != ScalarValueKind.AddressHandle || IsDeviceLoad(value))
                 {
                     return false;
                 }
 
                 break;
             case ScalarValueKind.ScalarBufferWord:
-                if (!IsRawRead(value) || value.Operands[0].Kind != ScalarValueKind.BufferHandle)
+                if (!IsRawRead(value) || value.Operands[0].Kind != ScalarValueKind.BufferHandle || IsDeviceLoad(value))
                 {
                     return false;
                 }
@@ -195,6 +200,8 @@ public sealed class RuntimeValueValidator
 
         return true;
     }
+
+    private bool IsDeviceLoad(ScalarValue read) => _deviceMemory is not null && _deviceMemory.Contains(read.MemoryIndex);
 
     // A raw read is a scalar load whose memory record has the matching scalar kind.
     public bool IsRawRead(ScalarValue value)

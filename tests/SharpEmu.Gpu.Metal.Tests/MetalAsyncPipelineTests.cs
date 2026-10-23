@@ -353,4 +353,19 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
         Assert.Equal(0, rig.Host.PipelinesCompiling);
         Assert.Empty(rig.Fatals);
     }
+    [Fact]
+    public void ASuccessorCompileIsReadyOnlyWhenItsResultCanBeTakenWithoutStartingAnotherBuild()
+    {
+        using var gate = new ManualResetEventSlim(false);
+        using var compiler = new MetalPipelineCompiler(static () => { }, 1) { Gate = gate };
+        compiler.EnsureStarted("successor", () => Named("successor-result"));
+        Assert.False(compiler.IsReady("successor"));
+        compiler.EnsureStarted("successor", () => throw new InvalidOperationException("duplicate build"));
+        gate.Set();
+        Assert.True(SpinWait.SpinUntil(() => compiler.IsReady("successor"), Patience));
+        Assert.True(compiler.TryTake("successor", () => throw new InvalidOperationException("unexpected rebuild"), out var result));
+        Assert.Equal("successor-result", result!.VertexLayout);
+        Assert.False(compiler.IsReady("successor"));
+    }
+
 }

@@ -214,7 +214,7 @@ internal sealed partial class MetalRenderHost
             foreach (var module in _modules)
             {
                 // A module still compiling on the pool is its compile's until it is done.
-                if (Volatile.Read(ref module.Function) == 0 || module.Compiling is { IsCompleted: false } ||
+                if (Volatile.Read(ref module.Function) == 0 || module.BindingSuccessor || module.Compiling is { IsCompleted: false } ||
                     module.LastUsedTicks > recent)
                 {
                     continue;

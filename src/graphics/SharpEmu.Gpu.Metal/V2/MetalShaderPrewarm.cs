@@ -12,6 +12,7 @@ using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -191,6 +192,7 @@ internal static class MetalShaderPrewarm
     private static int _failed;
     private static int _runtimeHits;
     private static int _deduplicated;
+    private static int _superseded;
     private static readonly ConcurrentQueue<ulong> _completed = new();
     private static readonly ConcurrentDictionary<string, ManualResetEventSlim> _inFlight = new(StringComparer.Ordinal);
 
@@ -271,6 +273,7 @@ internal static class MetalShaderPrewarm
         var stamp = Stamp(compiler, device);
         // Seeded before the compute prewarm or the game plans a shader.
         MetalDeviceDataLoadsStore.Open(directory, stamp);
+        MetalDeviceBindingLoadsStore.Open(directory, stamp);
         // Loaded before the gate lets the game go, so every module the game creates
         // finds the graphics libraries queued; they compile once the computes the guest is
         // held for are done.
@@ -720,6 +723,12 @@ internal static class MetalShaderPrewarm
         IGuestGpuBackend compiler,
         nint device)
     {
+        var bindingKey = DeviceBindingLoads.PlanKey(record.Hash, null, ShaderStage.Compute, record.Info.WaveSize, record.ExcludedUserDataRegisters, record.UserDataBase, record.UserDataCount);
+        if (record.DeviceBindingMemory is { } loads && !DeviceBindingLoads.IsCurrent(bindingKey, loads))
+        {
+            Interlocked.Increment(ref _superseded);
+            return;
+        }
         if (!ShaderPrewarmCompiler.TryCompilePrewarm(
                 record,
                 code,
@@ -864,6 +873,7 @@ internal static class MetalShaderPrewarm
         var summary =
             $"[LOADER][INFO] Shader prewarm done: compiled={Volatile.Read(ref _compiled)} " +
             $"failed={Volatile.Read(ref _failed)} same_source={Volatile.Read(ref _deduplicated)} " +
+            $"superseded={Volatile.Read(ref _superseded)} " +
             $"runtime_first={Volatile.Read(ref _runtimeFirst)} " +
             $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
             $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
@@ -918,6 +928,7 @@ internal static class MetalShaderPrewarm
         MetalStaticPrecompile.Stop();
         MetalLibraryPrewarm.Stop();
         MetalDeviceDataLoadsStore.Stop();
+        MetalDeviceBindingLoadsStore.Stop();
         foreach (var thread in Volatile.Read(ref _threads))
         {
             if (thread != Thread.CurrentThread)

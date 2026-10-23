@@ -242,6 +242,8 @@ public sealed class RuntimeValueEvaluator
     internal void RecordPrefetchedConsumer(ScalarValue node, ulong address) =>
         ResourceMaterializationCache.RecordReadConsumer(_plan, node, address);
 
+    internal bool DeferRead(ScalarValue node, ulong address) => DeviceBindingLoads.Defer(_plan, _inputs, node, address);
+
     internal bool ReadRawWord(ScalarValueKind kind, ulong low, ulong high, uint offset, ulong records, long immediate,
         bool absolute, out ulong result, ScalarValue node)
     {
@@ -256,7 +258,19 @@ public sealed class RuntimeValueEvaluator
                 return true;
         }
 
-        if (_inputs.ReadMemory is null || !_inputs.ReadMemory(address, out var word))
+        // A word the GPU is still writing is left to the device by a re-plan instead of
+        // waited for (DeviceBindingLoads): unknown here, the caller plans again.
+        if (_inputs.ResourceWordPending is not null && DeviceBindingLoads.Defer(_plan, _inputs, node, address))
+        {
+            return false;
+        }
+
+        MaterializingShader.BeginRead(_plan, node);
+        uint word = 0;
+        bool read;
+        try { read = _inputs.ReadMemory is not null && _inputs.ReadMemory(address, out word); if (read) BindingWaitProvenance.Consumed(word); }
+        finally { MaterializingShader.EndRead(); }
+        if (!read)
         {
             // Every read is evaluated up front, including ones in branches the shader skips
             // when a pointer is null. A load through a null base cannot execute on hardware,
@@ -417,7 +431,7 @@ public sealed class RuntimeValueEvaluator
                 out var address) == RawAddress.Read &&
             _inputs.DataWritePending!(address))
         {
-            DeviceDataLoads.Learn(_plan.Hash, memoryIndices);
+            DeviceDataLoads.Learn(_plan.DeviceDataKey, memoryIndices);
         }
     }
 
@@ -469,7 +483,7 @@ public sealed class RuntimeValueEvaluator
         {
             foreach (var (slot, memoryIndices) in plan.DeviceDataSlots)
             {
-                if (AllLearned(plan.Hash, memoryIndices))
+                if (AllLearned(plan.DeviceDataKey, memoryIndices))
                 {
                     continue;
                 }
@@ -495,11 +509,11 @@ public sealed class RuntimeValueEvaluator
         }
     }
 
-    private static bool AllLearned(ulong hash, int[] memoryIndices)
+    private static bool AllLearned(ulong key, int[] memoryIndices)
     {
         foreach (var index in memoryIndices)
         {
-            if (!DeviceDataLoads.Contains(hash, index))
+            if (!DeviceDataLoads.Contains(key, index))
             {
                 return false;
             }

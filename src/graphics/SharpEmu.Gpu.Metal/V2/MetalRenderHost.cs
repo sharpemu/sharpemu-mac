@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.HLE.DsTrace;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Abstractions;
@@ -592,6 +593,7 @@ internal sealed partial class MetalRenderHost :
         PassProfileCommit(serial, cause == PassEndCause.Present);
         if (cause == PassEndCause.Present)
         {
+            _bindingPresentId++;
             _imageCache.MarkFrame();
         }
 
@@ -677,6 +679,8 @@ internal sealed partial class MetalRenderHost :
 
     private int _slowWaitReports;
     private double _previousCommitTime;
+    private ulong _bindingPresentId;
+    private (ulong Start, ulong End, ulong Serial, MetalGpuWriteOrigin Origin) _bindingReadWriter;
     private ulong _lastReadAddress;
     private ulong _lastReadSize;
     private readonly long[] _waitsByReason = new long[MetalWaitReasons.Count];
@@ -1058,6 +1062,9 @@ internal sealed partial class MetalRenderHost :
         Interlocked.Add(ref _gpuWaitTicks, finished - started);
         _waitsByReason[(int)reason]++;
         _waitTicksByReason[(int)reason] += finished - started;
+        if (MaterializingShader.Hash != 0)
+            BindingWaitProvenance.Wait(reason == MetalWaitReason.ReadRange ? _bindingReadWriter.Serial : serial, reason == MetalWaitReason.ReadRange ? _bindingReadWriter.Origin.ToString() : reason.ToString(),
+                _lastReadAddress, finished - started, _bindingPresentId);
         var frequency = System.Diagnostics.Stopwatch.Frequency;
         if (finished - started <= frequency / 50 || _slowWaitReports >= 4)
         {
@@ -1741,6 +1748,7 @@ internal sealed partial class MetalRenderHost :
         var pending = _gpuWrites.PendingSerial(address, size, CompletedSerial);
         if (pending != 0)
         {
+            _bindingReadWriter = _gpuWrites.LastMatch;
             if (size <= SmallReadWaitBytes)
             {
                 ReportSmallReadWaitSite(address, size);
@@ -2329,6 +2337,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
             .Append(TakeCopyReadCounters())
+            .Append(" resident_reads_pending=").Append(Interlocked.Exchange(ref _residentReadsPending, 0))
             .Append(" inline_eop=").Append(TakeInlineCompletions())
             .Append(" gpu_labels=").Append(labels.GpuTimed)
             .Append(" host_labels=").Append(labels.WithoutWindow)
@@ -2352,6 +2361,8 @@ internal sealed partial class MetalRenderHost :
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
             .Append(" device_address_writes=").Append(DeviceAddressWrites)
             .Append(TakeDeviceAddressReachCounters())
+            .Append(DeviceBindingLoads.TakeReport())
+            .Append(BindingWaitProvenance.TakeReport())
             .Append(" data_slots_device=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.LearnedSlots)
             .Append(" data_replans=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.Replans)
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)

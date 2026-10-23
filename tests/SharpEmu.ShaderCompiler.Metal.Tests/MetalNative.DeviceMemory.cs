@@ -82,4 +82,24 @@ internal static partial class MetalNative
         Marshal.Copy(contents, words, 0, count);
         return Array.ConvertAll(words, static word => unchecked((uint)word));
     }
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial void SendCopyBindingWords(nint encoder, nint selector, nint source, nuint sourceOffset,
+        nint destination, nuint destinationOffset, nuint length);
+
+    public static void CopyBindingWords(nint commandBuffer, nint memory, nuint source, nuint destination, nuint length)
+    {
+        var blit = Send(commandBuffer, Selector("blitCommandEncoder"));
+        SendCopyBindingWords(blit, Selector("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"),
+            memory, source, memory, destination, length);
+        SendVoid(blit, Selector("endEncoding"));
+    }
+
+    public static void CompleteBindingWriter(Action<nint> encode)
+    {
+        var command = Send(SharedQueue.Value, Selector("commandBuffer"));
+        encode(command);
+        SendVoid(command, Selector("commit"));
+        SendVoid(command, Selector("waitUntilCompleted"));
+    }
+
 }

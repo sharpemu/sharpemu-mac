@@ -19,6 +19,10 @@ namespace SharpEmu.ShaderCompiler.Resources;
 /// A host may persist what it learns (<see cref="Learned"/>) and hand it to the next start
 /// (<see cref="Seed"/>) before any shader is planned, so the first plan already leaves those
 /// loads to the device and no shader is compiled twice.
+/// A load is a memory index, which names a record of one plan's memory table: the "hash"
+/// every member takes is the plan's <see cref="ShaderResourcePlan.DeviceDataKey"/>
+/// (<see cref="DeviceBindingLoads.KeyFor"/>), the shader hash told apart by the vertex fetch
+/// the host embeds, since the embedding drops records and renumbers the rest.
 /// </remarks>
 public static class DeviceDataLoads
 {
@@ -141,6 +145,38 @@ public static class MaterializingShader
     public static ulong Hash
     {
         get => _hash;
-        set => _hash = value;
+        set { _hash = value; _readKind = ScalarValueKind.Undefined; _pc = 0; _component = 0; _planKey = 0; }
     }
+
+    [ThreadStatic]
+    private static ScalarValueKind _readKind;
+
+    [ThreadStatic]
+    private static int _readMemoryIndex;
+
+    // The plan node whose word the host is reading now (Undefined between reads), so a wait
+    // the read causes can name it.
+    public static ScalarValueKind ReadKind => _readKind;
+    public static int ReadMemoryIndex => _readMemoryIndex;
+
+    [ThreadStatic] private static uint _pc;
+    [ThreadStatic] private static uint _component;
+    [ThreadStatic] private static ulong _planKey;
+    public static uint ReadPc => _pc;
+    public static uint ReadComponent => _component;
+    public static ulong PlanKey => _planKey;
+    [ThreadStatic] private static string? _readReason;
+    public static string ReadReason => _readReason ?? "host_required";
+
+    internal static void BeginRead(ShaderResourcePlan plan, ScalarValue node)
+    {
+        _readReason = DeviceBindingLoads.TakeReadReason();
+        _pc = plan.Memory[node.MemoryIndex].Pc;
+        _component = plan.Memory[node.MemoryIndex].ComponentIndex;
+        _planKey = plan.DeviceBindingKey;
+        _readKind = node.Kind;
+        _readMemoryIndex = node.MemoryIndex;
+    }
+
+    internal static void EndRead() => _readKind = ScalarValueKind.Undefined;
 }

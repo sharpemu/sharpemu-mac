@@ -156,6 +156,21 @@ internal sealed class MetalPipelineCompiler : IDisposable
     /// out of order with the requests waits here for its own key, so the order in which
     /// compiles end does not matter.
     /// </summary>
+    public bool HasFailed(object key) => _pending.TryGetValue(key, out var pending) && (pending.Work.IsFaulted || pending.Work.IsCanceled);
+
+    public bool IsReady(object key) => _pending.TryGetValue(key, out var pending) && pending.Work.IsCompletedSuccessfully;
+
+    // Enqueue without taking a completed state: the next real dispatch owns registration.
+    public void EnsureStarted(object key, Func<Result> build)
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(MetalPipelineCompiler));
+        var pending = new Pending(build) { StartedTicks = Stopwatch.GetTimestamp() };
+        if (!_pending.TryAdd(key, pending)) return;
+        Interlocked.Increment(ref _started);
+        Interlocked.Increment(ref _running);
+        _queue.Add(pending);
+    }
+
     public bool TryTake(object key, Func<Result> build, out Result? result) => TryTake(key, build, out result, null);
 
     public bool TryTake(object key, Func<Result> build, out Result? result, string? label)

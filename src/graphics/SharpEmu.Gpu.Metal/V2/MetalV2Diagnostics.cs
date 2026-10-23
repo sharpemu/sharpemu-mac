@@ -105,6 +105,15 @@ internal static class MetalV2Diagnostics
     public static readonly bool DataLoadsOnDevice =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DATA_LOADS_DEVICE"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_WAIT_RESOURCE_WORDS=1 makes a resource materialization read a binding
+    // word (an address, V# word or table index a resource derives from) the GPU is still
+    // writing and wait for its writer, as before. Otherwise the shader is planned again with
+    // that load on the device (DeviceBindingLoads) when the device can take what derives from it.
+    public static readonly bool ResidentReadPending = true;
+
+    public static readonly bool WaitResourceWords =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_RESOURCE_WORDS"), "1", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_OVERLAY_PAGE_FILTER=0 makes every guest read take the pending
     // command-processor write overlay's lock to learn that no pending write is on its pages,
     // as before the overlay kept its lock-free page counts.

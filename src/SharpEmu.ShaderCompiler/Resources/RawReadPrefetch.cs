@@ -265,6 +265,8 @@ internal static class RawReadPrefetch
             scratch.Bytes = new byte[Math.Max(length, scratch.Bytes.Length * 2)];
         }
 
+        for (var index = start; index < end; index++)
+            if (evaluator.DeferRead(scratch.Values[index], addresses[index])) return;
         var bytes = scratch.Bytes.AsSpan(0, length);
         if (!reader(first, bytes, clean))
         {

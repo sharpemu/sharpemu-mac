@@ -275,6 +275,9 @@ internal sealed class CompiledResourceTransaction
             ResourceMaterializationProfile.CountRead(ResourceMaterializationProfile.ReadCounter.GroupIneligible);
             return false;
         }
+        if (!clean)
+            for (var index = 0; index < count; index++)
+                if (DeviceBindingLoads.Defer(plan, inputs, nodes[index], first + (ulong)index * 4)) return false;
         Span<byte> bytes = stackalloc byte[count * 4];
         using (ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.CompiledGroupRead))
             if (!reader(first, bytes, clean || inputs.ReadsClean))
@@ -312,11 +315,18 @@ internal sealed class CompiledResourceTransaction
         var state = RuntimeValueEvaluator.ResolveRawAddress(kind, addressBase, high, records, immediate, (uint)offset, out var address);
         if (state == RuntimeValueEvaluator.RawAddress.Failed) return false;
         if (state == RuntimeValueEvaluator.RawAddress.Zero) return true;
+        if (!clean && DeviceBindingLoads.Defer(plan, inputs, node, address)) return false;
         var reader = clean ? inputs.ReadCleanMemory : inputs.ReadMemory;
         uint word;
         // As in the evaluator: a null base, or an absolute address the shader carries that nothing maps, reads zero.
-        using (ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.CompiledWordRead))
-            if (reader is null || !reader(address, out word)) return (addressBase & ~3UL) == 0 || (absolute && reader is not null && !clean && !inputs.ReadsClean);
+        MaterializingShader.BeginRead(plan, node);
+        try
+        {
+            using (ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.CompiledWordRead))
+                if (reader is null || !reader(address, out word)) return (addressBase & ~3UL) == 0 || (absolute && reader is not null && !clean && !inputs.ReadsClean);
+            BindingWaitProvenance.Consumed(word);
+        }
+        finally { MaterializingShader.EndRead(); }
         value = word;
         ResourceMaterializationCache.RecordReadConsumer(plan, node, address);
         return true;

@@ -1319,6 +1319,8 @@ public sealed partial class ResourceMaterializationCache
                     ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                     ReadsClean = inputs.ReadsClean,
                 DataWritePending = inputs.DataWritePending,
+                    ResourceWordPending = inputs.ResourceWordPending,
+                    ResourceWordWriter = inputs.ResourceWordWriter,
                     ComputeState = inputs.ComputeState,
                     TablePhase = recorder.TablePhase,
                 };
@@ -1327,7 +1329,9 @@ public sealed partial class ResourceMaterializationCache
             if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
                 return false;
 
-            if (recorder.Failed)
+            // A word read as unknown for a re-plan (DeviceBindingLoads) makes this result one
+            // the caller throws away.
+            if (recorder.Failed || DeviceBindingLoads.Deferred)
             {
                 Uncacheable++;
                 Interlocked.Increment(ref _totalUncacheable);
@@ -2439,7 +2443,8 @@ public sealed partial class ResourceMaterializationCache
             var table = _tableInputs;
             if (table is null || !ReferenceEquals(table.ReadMemory, read) || !ReferenceEquals(table.ReadCleanMemory, clean) ||
                 !ReferenceEquals(table.ReadResidentMemory, resident) || table.ReadsClean != inputs.ReadsClean ||
-                !ReferenceEquals(table.DataWritePending, inputs.DataWritePending))
+                !ReferenceEquals(table.DataWritePending, inputs.DataWritePending) ||
+                !ReferenceEquals(table.ResourceWordPending, inputs.ResourceWordPending))
             {
                 _tableInputs = table = new ResourceRuntimeInputs
                 {
@@ -2448,6 +2453,8 @@ public sealed partial class ResourceMaterializationCache
                     ReadResidentMemory = resident,
                     ReadsClean = inputs.ReadsClean,
                     DataWritePending = inputs.DataWritePending,
+                    ResourceWordPending = inputs.ResourceWordPending,
+                    ResourceWordWriter = inputs.ResourceWordWriter,
                 };
             }
 

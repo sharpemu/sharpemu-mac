@@ -70,4 +70,28 @@ public sealed unsafe partial class MetalClearFoldingTests
         Assert.Equal((0L, 0L, 1L, 0L), host.CopyReadCounters);
         Assert.True(host.CompletedSerial >= serial);
     }
+    [Fact]
+    public void ResidentCopyReadsUseFinalSourceBytesAndRejectPendingSourcesOrLaterOverwrites()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        RecordPendingCopy(rig);
+        var bytes = new byte[16];
+        Assert.True(host.TryReadResidentGuestBytes(CopyDestination, bytes, false));
+        Assert.Equal(new uint[] { 0xA000, 0xA001, 0xA002, 0xA003 },
+            Enumerable.Range(0, 4).Select(i => BitConverter.ToUInt32(bytes, i * 4)));
+        rig.WriteBacking32(CopySource, 0xBEEF0001);
+        Assert.True(host.TryReadResidentGuestBytes(CopyDestination, bytes, false));
+        Assert.Equal(0xBEEF0001u, BitConverter.ToUInt32(bytes));
+        host.NoteGuestMemoryWrite(CopySource, 4, MetalGpuWriteOrigin.StorageBuffer);
+        Assert.False(host.TryReadResidentGuestBytes(CopyDestination, bytes, false));
+        host.NoteGuestMemoryWrite(CopyDestination, 4, MetalGpuWriteOrigin.StorageBuffer);
+        Assert.False(host.TryReadResidentGuestBytes(CopyDestination, bytes, false));
+        host.FlushAndWaitForGpu();
+        rig.WriteBacking32(CopyDestination, 0xCAFE0002);
+        Assert.True(host.TryReadResidentGuestBytes(CopyDestination, bytes, false));
+        Assert.Equal(0xCAFE0002u, BitConverter.ToUInt32(bytes));
+    }
+
 }

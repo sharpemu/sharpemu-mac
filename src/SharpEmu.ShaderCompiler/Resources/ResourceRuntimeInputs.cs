@@ -37,7 +37,13 @@ public sealed class ResourceRuntimeInputs
     // (DeviceDataLoads); null leaves every data word flattened.
     public Func<ulong, bool>? DataWritePending { get; init; }
 
-    public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
+    // Whether reading the dword at this address would wait for recorded GPU work, asked
+    // without waiting. A binding word found pending is left to the device by a re-plan
+    // (DeviceBindingLoads); null reads every word.
+    public Func<ulong, bool>? ResourceWordPending { get; init; }
+    public Func<ulong, BindingWordWriter>? ResourceWordWriter { get; init; }
+
+    public ResourceRuntimeInputs WithReader(GuestWordReader? reader, bool pendingLoads = true) => new()
     {
         UserData = UserData,
         ShaderBase = ShaderBase,
@@ -49,7 +55,9 @@ public sealed class ResourceRuntimeInputs
         ReadResidentMemory = ReadResidentMemory,
         CompareResidentMemory = CompareResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
-        DataWritePending = DataWritePending,
+        DataWritePending = pendingLoads ? DataWritePending : null,
+        ResourceWordPending = pendingLoads ? ResourceWordPending : null,
+        ResourceWordWriter = pendingLoads ? ResourceWordWriter : null,
     };
 }
 

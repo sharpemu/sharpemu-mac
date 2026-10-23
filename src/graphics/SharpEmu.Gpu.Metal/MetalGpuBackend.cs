@@ -35,6 +35,8 @@ public static class MetalGpuBackend
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.CompiledTransactions = false;
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.SpecializationGuards = false;
         SharpEmu.ShaderCompiler.Resources.ResourceTracker.UnvalidatedAddressWordsAreMemory = false;
+        // Not an opt-out: binding words the GPU is still writing go to the device unless asked not to.
+        SharpEmu.ShaderCompiler.Resources.DeviceBindingLoads.Enabled = !V2.MetalV2Diagnostics.WaitResourceWords;
     }
 
     public static void Register()

@@ -18,8 +18,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// shader on the GPU worker, about a second apiece, 37 of them in one burst that drew
 /// nothing for 41 s. The file is per translator build (the planner decides what a memory
 /// index names); the files of other builds are kept up to <see cref="MaxOtherFiles"/>.
-/// One text line per learned shader: the hash and every load it holds, the last line of a
-/// shader winning. SHARPEMU_METAL_V2_DEVICE_DATA_STORE=0 turns it off.
+/// One text line per learned shader: its key (the plan's DeviceDataKey: the hash, or the hash
+/// mixed with an embedded vertex fetch) and every load it holds, the last line of a shader
+/// winning. SHARPEMU_METAL_V2_DEVICE_DATA_STORE=0 turns it off.
 /// </summary>
 internal static class MetalDeviceDataLoadsStore
 {
@@ -36,7 +37,7 @@ internal static class MetalDeviceDataLoadsStore
     internal static string FileName(string stamp) =>
         string.Create(
             CultureInfo.InvariantCulture,
-            $"{FilePrefix}-{(uint)XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(stamp)):x8}.txt");
+            $"{FilePrefix}-{(uint)XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(stamp + SharpEmu.ShaderCompiler.AssemblyCodeIdentity.Of(typeof(DeviceDataLoads).Assembly))):x8}.txt");
 
     /// <summary>Seeds what earlier starts of this build learned and records what this one learns.</summary>
     public static void Open(string directory, string stamp)
@@ -187,12 +188,12 @@ internal static class MetalDeviceDataLoadsStore
         File.Move(temporary, path, overwrite: true);
     }
 
-    internal static void PruneOtherFiles(string directory, string current)
+    internal static void PruneOtherFiles(string directory, string current, string prefix = FilePrefix)
     {
         try
         {
             var others = new DirectoryInfo(directory)
-                .EnumerateFiles(FilePrefix + "*.txt")
+                .EnumerateFiles(prefix + "*.txt")
                 .Where(file => !string.Equals(file.Name, Path.GetFileName(current), StringComparison.Ordinal))
                 .OrderByDescending(file => file.LastWriteTimeUtc)
                 .Skip(MaxOtherFiles);
@@ -207,7 +208,7 @@ internal static class MetalDeviceDataLoadsStore
         }
     }
 
-    private static void WriteLoop(string path, BlockingCollection<string> writes)
+    internal static void WriteLoop(string path, BlockingCollection<string> writes)
     {
         try
         {

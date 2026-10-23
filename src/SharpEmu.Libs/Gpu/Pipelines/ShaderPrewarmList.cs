@@ -138,6 +138,14 @@ public sealed class ComputePrewarmRecord
     public Gen5ComputeSystemRegisters? SystemRegisters { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
 
+    // The binding loads the plan the specialization was taken from left to the device
+    // (DeviceBindingLoads), in order; the replay plans with exactly these, since they decide
+    // the plan's buffers. Null: the replay plans with the learned ones (a predicted record).
+    public int[]? DeviceBindingMemory { get; init; }
+    public int[]? DeviceDataMemory { get; init; }
+    public ulong ExcludedUserDataRegisters { get; init; }
+    public string DeviceLoadCompiler { get; init; } = AssemblyCodeIdentity.Of(typeof(ShaderResourcePlan).Assembly);
+
     public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
         (Hash, CodeSize, Address, ContinuationAddressOffset);
 }
@@ -160,7 +168,7 @@ public sealed class ShaderPrewarmList : IDisposable
     public static string FirstFrameFileName => Stem + ".first-frame";
 
     private const uint Magic = 0x57504553;
-    private const uint FormatVersion = 6;
+    private const uint FormatVersion = 7;
     private const byte CodeKind = 1;
     private const byte ComputeKind = 2;
     private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);
@@ -650,7 +658,7 @@ public sealed class ShaderPrewarmList : IDisposable
         var builder = new StringBuilder();
         foreach (var type in new[]
         {
-            typeof(ComputeInputInfo), typeof(Gen5ComputeSystemRegisters), typeof(ResourceSpecialization),
+            typeof(ComputePrewarmRecord), typeof(ComputeInputInfo), typeof(Gen5ComputeSystemRegisters), typeof(ResourceSpecialization),
             typeof(BufferSpecialization), typeof(ImageSpecialization), typeof(BufferCandidateTableSpecialization),
         })
         {
@@ -812,6 +820,20 @@ public sealed class ShaderPrewarmList : IDisposable
             writer.Write(sampler.BorderColorType);
         }
 
+        writer.Write(record.ExcludedUserDataRegisters);
+        writer.Write(record.DeviceDataMemory?.Length ?? 0);
+        foreach (var index in record.DeviceDataMemory ?? []) writer.Write(index);
+        writer.Write(record.DeviceLoadCompiler);
+        writer.Write(record.DeviceBindingMemory is not null);
+        if (record.DeviceBindingMemory is { } deviceBindingMemory)
+        {
+            writer.Write(deviceBindingMemory.Length);
+            foreach (var index in deviceBindingMemory)
+            {
+                writer.Write(index);
+            }
+        }
+
         writer.Flush();
         return stream.ToArray();
     }
@@ -886,6 +908,20 @@ public sealed class ShaderPrewarmList : IDisposable
             specialization.Samplers.Add(new SamplerSpecialization(reader.ReadInt32(), reader.ReadUInt32(), reader.ReadUInt32()));
         }
 
+        var excludedUserDataRegisters = reader.ReadUInt64();
+        var deviceDataMemory = new List<int>();
+        for (var count = CheckedCount(reader.ReadInt32(), payload.Length); count > 0; count--) deviceDataMemory.Add(reader.ReadInt32());
+        var deviceLoadCompiler = reader.ReadString();
+        int[]? deviceBindingMemory = null;
+        if (reader.ReadBoolean())
+        {
+            deviceBindingMemory = new int[CheckedCount(reader.ReadInt32(), payload.Length)];
+            for (var index = 0; index < deviceBindingMemory.Length; index++)
+            {
+                deviceBindingMemory[index] = reader.ReadInt32();
+            }
+        }
+
         return new ComputePrewarmRecord
         {
             Hash = hash,
@@ -898,6 +934,10 @@ public sealed class ShaderPrewarmList : IDisposable
             Info = info,
             SystemRegisters = registers,
             Specialization = specialization,
+            DeviceBindingMemory = deviceBindingMemory,
+            DeviceLoadCompiler = deviceLoadCompiler,
+            DeviceDataMemory = [.. deviceDataMemory],
+            ExcludedUserDataRegisters = excludedUserDataRegisters,
         };
     }
 

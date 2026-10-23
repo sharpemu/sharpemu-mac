@@ -99,6 +99,92 @@ public sealed class ShaderPrewarmListTests : IDisposable
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
     }
 
+    // s_load_dwordx4 s[0:3], s[0:1], 0; buffer_load_format_x v0, off, s[0:3], 0; s_nop 1;
+    // s_endpgm: the V# is read from the table s[0:1] points at (ScalarAddressWord binding
+    // reads). The s_nop keeps its hash apart from other tests' programs: the learned binding
+    // loads are process-wide.
+    private static readonly uint[] TableBoundLoadProgram = [0xF4080000, 0xFA000000, 0xE0000000, 0x80000000, 0xBF800001, 0xBF810000];
+    private const ulong TableAddress = PipelineTestGuest.MemoryBase + 0x2_0000;
+
+    // One bind of TableBoundLoadProgram while the GPU is still writing its V#, through a
+    // program cache made after the host offers the pending words.
+    private static (ulong Hash, byte[] Spirv, IShaderPipelineHost Host) BindWhileTheTableIsPending(ShaderPrewarmList? list)
+    {
+        var guest = new PipelineTestGuest(Compile);
+        guest.Host.ShaderPrewarm = list;
+        guest.Host.ResourceWordPending = address => address >= TableAddress && address < TableAddress + 16;
+        var programs = new ShaderProgramCache(guest.Context, guest.Compiler, guest.Host);
+        guest.RegisterProgram(CodeAddress, HeaderAddress, TableBoundLoadProgram);
+        guest.WriteWords(TableAddress, PipelineTestGuest.BufferDescriptor(BufferAddress, 4, 64, BufferDescriptorWords.Format32UInt));
+        var source = guest.Source(CodeAddress, ShaderStage.Compute, [unchecked((uint)TableAddress), (uint)(TableAddress >> 32)]);
+        var cursor = 0u;
+        programs.GetOrCompile(source, PipelineTestGuest.ComputeOptions(threadsX: 64), ref cursor, out _);
+        return (Assert.Single(programs.Entries).Plan.DeviceBindingKey, Assert.Single(guest.Compiler.Shaders).Spirv, guest.Host);
+    }
+
+    // Demon's Souls batch 5: a compute bound while the GPU wrote its V# was planned again with
+    // the load on the device (one buffer fewer) and recorded with that specialization; the
+    // next start planned it without the load and the prewarm failed with "shader resource
+    // specialization does not match the plan: ... buffers=5/4".
+    [Fact]
+    public void ARecordOfAShaderReplannedWithADeviceBindingLoadReplaysWithThatLoadAtTheNextStart()
+    {
+        ulong hash;
+        byte[] runtime;
+        IShaderPipelineHost host;
+        using (var list = Open())
+        {
+            (hash, runtime, host) = BindWhileTheTableIsPending(list);
+        }
+
+        try
+        {
+            var learned = DeviceBindingLoads.For(hash);
+            Assert.NotNull(learned);
+            // The next start, before anything is learned.
+            DeviceBindingLoads.Forget(hash);
+            using var reloaded = Open();
+            var (record, code) = Assert.Single(reloaded.LoadedComputes());
+            Assert.Equal(learned.Order(), record.DeviceBindingMemory!);
+            Assert.Empty(record.Specialization.Buffers);
+
+            // Planned with the loads learned so far (none), the plan binds the V# as a buffer
+            // the recorded specialization does not have.
+            var unrecorded = new ComputePrewarmRecord
+            {
+                Hash = record.Hash, CodeSize = record.CodeSize, Address = record.Address, UserDataBase = record.UserDataBase,
+                UserDataCount = record.UserDataCount, PushDataCursor = record.PushDataCursor, Info = record.Info,
+                SystemRegisters = record.SystemRegisters, Specialization = record.Specialization,
+            };
+            Assert.False(ShaderProgramCache.TryCompilePrewarm(
+                unrecorded, code, new FakeShaderCompiler(Compile), host.SharedInt64AtomicsEnabled, host.ExecGuardElisionEnabled,
+                host.ShaderSignedZeroInfNanPreserveFloat32Supported, out _, out _, out var mismatch));
+            Assert.Contains("shader resource specialization does not match the plan", mismatch);
+            Assert.Contains("buffers=1/0", mismatch);
+
+            // The record names the loads its plan left to the device: the prewarm compiles
+            // what the bind compiled.
+            Assert.True(
+                ShaderProgramCache.TryCompilePrewarm(
+                    record, code, new FakeShaderCompiler(Compile), host.SharedInt64AtomicsEnabled, host.ExecGuardElisionEnabled,
+                    host.ShaderSignedZeroInfNanPreserveFloat32Supported, out var compiled, out _, out var error),
+                error);
+            Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
+            Assert.False(DeviceBindingLoads.IsCurrent(hash, record.DeviceBindingMemory!));
+
+            // Seeded with what the earlier start learned (MetalDeviceBindingLoadsStore), the
+            // first bind plans with the load at once and compiles the same program, once.
+            DeviceBindingLoads.Seed(hash, record.DeviceBindingMemory!, []);
+            Assert.True(DeviceBindingLoads.IsCurrent(hash, record.DeviceBindingMemory!));
+            var (_, seeded, _) = BindWhileTheTableIsPending(null);
+            Assert.Equal(runtime, seeded);
+        }
+        finally
+        {
+            DeviceBindingLoads.Forget(hash);
+        }
+    }
+
     [Fact]
     public void OlderFormatRecordsAreRejectedBeforeAppending()
     {
@@ -421,4 +507,22 @@ public sealed class ShaderPrewarmListTests : IDisposable
 
         Assert.True(File.Exists(Path.Combine(_directory, ShaderPrewarmList.FileName)));
     }
+    [Fact]
+    public void APrewarmFromAnotherDeviceLoadCompilerIsRejectedBeforePlanning()
+    {
+        using (var list = Open()) BindWhileTheTableIsPending(list);
+        using var reloaded = Open();
+        var (record, code) = Assert.Single(reloaded.LoadedComputes());
+        var incompatible = new ComputePrewarmRecord
+        {
+            Hash = record.Hash, CodeSize = record.CodeSize, Address = record.Address, UserDataBase = record.UserDataBase,
+            UserDataCount = record.UserDataCount, PushDataCursor = record.PushDataCursor, Info = record.Info,
+            Specialization = record.Specialization, DeviceBindingMemory = record.DeviceBindingMemory,
+            DeviceDataMemory = record.DeviceDataMemory, DeviceLoadCompiler = "incompatible-compiler",
+        };
+        Assert.False(ShaderProgramCache.TryCompilePrewarm(incompatible, code, new FakeShaderCompiler(Compile),
+            false, true, false, out _, out _, out var error));
+        Assert.Contains("compiler identity is incompatible", error);
+    }
+
 }

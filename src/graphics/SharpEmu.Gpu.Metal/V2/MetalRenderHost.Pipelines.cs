@@ -88,6 +88,7 @@ internal sealed partial class MetalRenderHost
     private sealed class MetalShaderModule
     {
         public nint Library;
+        public volatile bool BindingSuccessor;
         public nint Function;
         // The function with the LOD statistics counters compiled in, for a program that
         // declares the function constant (Function is then the one without), built when a
@@ -145,6 +146,63 @@ internal sealed partial class MetalRenderHost
 
     /// <summary>Runs where a module's library compile starts, on whichever thread runs it; tests hold it.</summary>
     internal Action? BeforeLibraryCompile { get; set; }
+
+    public bool BackgroundShaderCompilationSupported => true;
+    private readonly object _bindingTranslationGate = new();
+    private readonly List<Task> _bindingTranslations = [];
+    private bool _bindingTranslationsStopping;
+    private static readonly SemaphoreSlim BindingTranslationSlots = new(2);
+
+    public Task<T> TranslateShaderInBackground<T>(Func<T> translate)
+    {
+        _ = Compiler;
+        lock (_bindingTranslationGate)
+        {
+            if (_bindingTranslationsStopping) return Task.FromCanceled<T>(new CancellationToken(true));
+            _bindingTranslations.RemoveAll(task => task.IsCompleted);
+            var task = Task.Run(async () =>
+            {
+                await BindingTranslationSlots.WaitAsync().ConfigureAwait(false);
+                try { return translate(); }
+                finally { BindingTranslationSlots.Release(); }
+            });
+            _bindingTranslations.Add(task);
+            return task;
+        }
+    }
+
+    public void PrecompileProgram(ShaderProgram program, ShaderStage stage, ShaderProgramInfo info)
+    {
+        LookupModule(program).BindingSuccessor = true;
+        if (stage != ShaderStage.Compute) return;
+        Compiler.EnsureStarted(program.Id, () =>
+        {
+            var ready = RequireModule(program, onWorker: false);
+            return new MetalPipelineCompiler.Result(BuildComputePipelineState(ready.Function, info.Hash, ready.ArchiveKey));
+        });
+    }
+
+    public bool ProgramCompilationFailed(ShaderProgram program, ShaderStage stage)
+    {
+        var module = LookupModule(program);
+        var failed = module.Compiling is { IsFaulted: true } or { IsCanceled: true } ||
+            stage == ShaderStage.Compute && Compiler.HasFailed(program.Id);
+        if (failed) module.BindingSuccessor = false;
+        return failed;
+    }
+
+    public bool IsProgramReady(ShaderProgram program, ShaderStage stage)
+    {
+        var module = LookupModule(program);
+        var ready = (module.Compiling is null || module.Compiling.IsCompletedSuccessfully) && module.Library != 0 &&
+            (stage != ShaderStage.Compute || Compiler.IsReady(program.Id));
+        if (ready)
+        {
+            module.LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            module.BindingSuccessor = false;
+        }
+        return ready;
+    }
 
     public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
     {
@@ -1738,12 +1796,20 @@ internal sealed partial class MetalRenderHost
     public bool TryReadCleanGuestWord(ulong address, out uint word)
     {
         word = 0;
-        if (_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
+        if (_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)) || IsResidentRangePending(address, sizeof(uint)))
         {
             return false;
         }
 
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        if (_cpOverlay.Count != 0 && OverlayCoverage(address, sizeof(uint)) == MetalOverlayCoverage.Full)
+        {
+            bytes.Clear();
+            ApplyPendingCommandProcessorBytes(address, bytes);
+            ApplyPendingLabelBytes(address, bytes);
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            return true;
+        }
         if (!_backing.TryReadBacking(address, bytes))
         {
             return false;
@@ -1767,8 +1833,36 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        _ = clean;
-        if (!_backing.TryReadBacking(address, destination))
+        // A recorded store still writing these bytes: TryReadGuestWord would wait for it (or the
+        // word is deferred to the device), so the caller reads the words one at a time rather
+        // than seeding last frame's bytes. The clean reader does not wait, so neither does this.
+        if (TryReadThroughPendingCopy(address, destination)) return true;
+
+        if (IsResidentRangePending(address, (ulong)destination.Length))
+        {
+            return false;
+        }
+
+        if (_cpOverlay.Count != 0 && OverlayCoverage(address, (ulong)destination.Length) == MetalOverlayCoverage.Full)
+        {
+            destination.Clear();
+            ApplyPendingCommandProcessorBytes(address, destination);
+            ApplyPendingLabelBytes(address, destination);
+            return true;
+        }
+
+        if (_cpOverlay.Count != 0 && OverlayCoverage(address, (ulong)destination.Length) != MetalOverlayCoverage.None)
+        {
+            // IsResidentRangePending proved every pending byte is answered by the overlay.
+            // Read only the remaining clean bytes; do not touch a GPU writer's backing.
+            for (var offset = 0; offset < destination.Length; offset += sizeof(uint))
+            {
+                var part = destination.Slice(offset, Math.Min(sizeof(uint), destination.Length - offset));
+                if (OverlayCoverage(address + (ulong)offset, (ulong)part.Length) == MetalOverlayCoverage.Full) part.Clear();
+                else if (!_backing.TryReadBacking(address + (ulong)offset, part)) return false;
+            }
+        }
+        else if (!_backing.TryReadBacking(address, destination))
         {
             return false;
         }
@@ -1778,11 +1872,48 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
+    private long _residentReadsPending;
+
+    // Whether a recorded GPU store that has yet to complete may write any of these bytes: the
+    // test WaitForGuestBytes waits on. Counted as resident_reads_pending on the WAITS line.
+    private bool IsResidentRangePending(ulong address, ulong size)
+    {
+        if (!MetalV2Diagnostics.ResidentReadPending || !_gpuWrites.MayCover(address, size) ||
+            PendingSerialHinted(address, size) == 0)
+        {
+            return false;
+        }
+
+        if (_cpOverlay.Count != 0 && OverlayCoverage(address, size) != MetalOverlayCoverage.None)
+        {
+            // Bytes a command-processor write still owes are read as written, without a wait
+            // (TryReadGuest), so only a dword the overlay does not answer whole has to be clear.
+            var pending = false;
+            for (var offset = 0UL; offset < size && !pending; offset += sizeof(uint))
+            {
+                var length = Math.Min(sizeof(uint), size - offset);
+                pending = OverlayCoverage(address + offset, length) != MetalOverlayCoverage.Full &&
+                    PendingSerialHinted(address + offset, length) != 0;
+            }
+
+            if (!pending)
+            {
+                return false;
+            }
+        }
+
+        Interlocked.Increment(ref _residentReadsPending);
+        return true;
+    }
+
+    internal long ResidentReadsPending => Interlocked.Read(ref _residentReadsPending);
+
     // Ranges closer than this share one ownership and overlay test in TryCompareResidentGuestBytes.
     private const ulong CompareClusterGapBytes = 16 * 1024;
 
     // TryReadResidentGuestBytes for each range, compared where it lies. The same refusals apply
-    // (a GPU-modified image over a byte, a pending command-processor write), tested once for each
+    // (a GPU-modified image over a byte, a pending command-processor write, a recorded GPU store
+    // still writing a byte, whether the range is read clean or not), tested once for each
     // run of nearby ranges rather than for each range, and a refusal answers false for the
     // caller to read the ranges itself. So do the cases this does not model: pending label
     // bytes (reading them retires entries), a released single-copy chunk (reading restores it),
@@ -1830,7 +1961,8 @@ internal sealed partial class MetalRenderHost
             var size = high - low;
             if (_imageCache.HasGpuModifiedImageBytes(low, size) ||
                 (_cpOverlay.Count != 0 &&
-                 _cpOverlay.Coverage(low, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None))
+                 _cpOverlay.Coverage(low, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None) ||
+                IsResidentRangePending(low, size))
             {
                 return false;
             }
@@ -1872,6 +2004,35 @@ internal sealed partial class MetalRenderHost
     public Func<ulong, bool>? DataWritePending =>
         MetalV2Diagnostics.DataLoadsOnDevice ? _dataWritePending ??= IsDataWordPending : null;
 
+    private Func<ulong, bool>? _resourceWordPending;
+
+    // A binding word a resource materialization would wait for (DeviceBindingLoads), asked
+    // without waiting: a recorded store with a known range covers it. Bytes a GPU-modified
+    // image owns are not offered: the device would read them before the image's writeback.
+    // Always offered, so words_waited counts under SHARPEMU_METAL_V2_WAIT_RESOURCE_WORDS=1 too.
+    public Func<ulong, bool>? ResourceWordPending => _resourceWordPending ??= IsResourceWordPending;
+
+    private Func<ulong, BindingWordWriter>? _resourceWriter;
+    public Func<ulong, BindingWordWriter>? ResourceWordWriter => _resourceWriter ??= BindingWriter;
+    private BindingWordWriter BindingWriter(ulong address)
+    {
+        _ = _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial);
+        var match = _gpuWrites.LastMatch;
+        return new(match.Serial, match.Origin.ToString());
+    }
+
+    private bool IsResourceWordPending(ulong address) =>
+        _gpuWrites.MayCover(address, sizeof(uint)) &&
+        !(_imageCache.MayOwn(address, sizeof(uint)) && _imageCache.HasGpuModifiedImageBytes(address, sizeof(uint))) &&
+        IsDataWordPending(address) && !HasKnownBindingWord(address);
+
+    private bool HasKnownBindingWord(ulong address)
+    {
+        if (_cpOverlay.Count != 0 && OverlayCoverage(address, sizeof(uint)) == MetalOverlayCoverage.Full) return true;
+        Span<byte> value = stackalloc byte[sizeof(uint)];
+        return TryReadThroughPendingCopy(address, value);
+    }
+
     private bool IsDataWordPending(ulong address) =>
         _gpuWrites.MayCover(address, sizeof(uint)) &&
         _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0 &&
@@ -1892,6 +2053,14 @@ internal sealed partial class MetalRenderHost
 
     private void DisposePipelines()
     {
+        Task[] translations;
+        lock (_bindingTranslationGate)
+        {
+            _bindingTranslationsStopping = true;
+            translations = [.. _bindingTranslations];
+        }
+        try { Task.WaitAll(translations); }
+        catch (AggregateException) { /* Failed successors kept their old entry. */ }
         // Let whatever is still compiling finish before the device goes away.
         _compiler?.Dispose();
         _compiler = null;

@@ -48,8 +48,8 @@ public sealed class DeviceDataLoadTests
         };
         Assert.True(RuntimeValueEvaluator.FlattenResourceTable(flattened, inputs, out var table));
         Assert.Equal(0x1234u, table[dataSlot.Key]);
-        Assert.Equal(1, DeviceDataLoads.CountFor(LearnedHash));
-        Assert.True(DeviceDataLoads.Contains(LearnedHash, dataMemory));
+        Assert.Equal(1, DeviceDataLoads.CountFor(flattened.DeviceDataKey));
+        Assert.True(DeviceDataLoads.Contains(flattened.DeviceDataKey, dataMemory));
 
         var replanned = ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash, 0, 2);
         Assert.Equal(4, replanned.TableReads.Count);
@@ -94,7 +94,7 @@ public sealed class DeviceDataLoadTests
             DataWritePending = _ => true,
         };
         Assert.True(RuntimeValueEvaluator.FlattenResourceTable(plan, inputs, out _));
-        Assert.Equal(1, DeviceDataLoads.CountFor(LearnedHash + 1));
+        Assert.Equal(1, DeviceDataLoads.CountFor(plan.DeviceDataKey));
         Assert.Equal(5 - 1, ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash + 1, 0, 2).TableReads.Count);
     }
 
@@ -140,8 +140,8 @@ public sealed class DeviceDataLoadTests
 
         Assert.Equal(0x4321u, table[dataSlot.Key]);
         Assert.Equal(1, pendingProbes);
-        Assert.Equal(1, DeviceDataLoads.CountFor(hash));
-        Assert.True(DeviceDataLoads.Contains(hash, dataSlot.Value[0]));
+        Assert.Equal(1, DeviceDataLoads.CountFor(plan.DeviceDataKey));
+        Assert.True(DeviceDataLoads.Contains(plan.DeviceDataKey, dataSlot.Value[0]));
 
         // Learned: the next bind of the same plan makes no probe at all.
         pendingProbes = 0;
@@ -165,12 +165,70 @@ public sealed class DeviceDataLoadTests
             DataWritePending = _ => false,
         };
         Assert.True(RuntimeValueEvaluator.EvaluateSources(plan, [], inputs, plan.CleanFlatSlots, true, out _, out _));
-        Assert.Equal(0, DeviceDataLoads.CountFor(hash));
+        Assert.Equal(0, DeviceDataLoads.CountFor(plan.DeviceDataKey));
 
         // A host with no pending-write probe pays nothing and learns nothing.
         Assert.True(RuntimeValueEvaluator.EvaluateSources(
             plan, [], new ResourceRuntimeInputs { UserData = [(uint)TableBase, 0], ReadMemory = memory.Read },
             plan.CleanFlatSlots, true, out _, out _));
-        Assert.Equal(0, DeviceDataLoads.CountFor(hash));
+        Assert.Equal(0, DeviceDataLoads.CountFor(plan.DeviceDataKey));
+    }
+
+    // s[8:11] is a V#; pc 8 is a buffer load a host may embed as a vertex fetch; s16 and s17
+    // are data dwords the shader only stores.
+    private const int SecondDataOffset = 48;
+
+    private static Gen5ShaderProgram FetchAndTwoDataProgram() => Program(
+        ScalarLoad(0, 0, destination: 8, count: 4),
+        BufferLoad(8, 8),
+        ScalarLoad(16, 0, destination: 16, immediateOffset: DataOffset),
+        ScalarLoad(24, 0, destination: 17, immediateOffset: SecondDataOffset),
+        Vop1(32, "VMovB32", 4, Gen5Operand.Scalar(16)),
+        Vop1(40, "VMovB32", 5, Gen5Operand.Scalar(17)),
+        BufferStore(48, 8, dwords: 2),
+        EndProgram(56));
+
+    // An embedded fetch drops its buffer load from the memory table, so the second data load
+    // of the embedded plan has the index of the first one in the plain plan. A load learned
+    // for one embedding is kept apart from the other: the plain plan still flattens both.
+    [Fact]
+    public void PlansOfOneHashWithAnotherEmbeddedFetch_LearnSeparateLoads()
+    {
+        const ulong hash = LearnedHash + 0x30;
+        var program = FetchAndTwoDataProgram();
+        var plain = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, 0, 2);
+        var embedded = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, 0, 2,
+            fixedFunctionVertexLoads: new HashSet<uint> { 8 });
+        Assert.Equal(DeviceBindingLoads.PlanKey(hash, null, ShaderStage.Compute, 64, 0, 0, 2), plain.DeviceDataKey);
+        Assert.NotEqual(hash, embedded.DeviceDataKey);
+        Assert.True(plain.Memory.TryGetIndex(16, 0, out var plainFirst));
+        Assert.True(embedded.Memory.TryGetIndex(16, 0, out var embeddedFirst));
+        Assert.True(embedded.Memory.TryGetIndex(24, 0, out var embeddedSecond));
+        Assert.Equal(plainFirst, embeddedSecond);
+        Assert.Equal(2, plain.DeviceDataSlots.Count);
+        Assert.Equal(2, embedded.DeviceDataSlots.Count);
+
+        // The embedded plan's bind learns its second data load.
+        var memory = new TestWordMemory { Base = TableBase, Words = new uint[16] };
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = [(uint)TableBase, 0],
+            ReadMemory = memory.Read,
+            DataWritePending = address => address == TableBase + SecondDataOffset,
+        };
+        Assert.True(RuntimeValueEvaluator.FlattenResourceTable(embedded, inputs, out _));
+        Assert.Equal(1, DeviceDataLoads.CountFor(embedded.DeviceDataKey));
+        Assert.True(DeviceDataLoads.Contains(embedded.DeviceDataKey, embeddedSecond));
+        Assert.Equal(0, DeviceDataLoads.CountFor(plain.DeviceDataKey));
+
+        var plainAgain = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, 0, 2);
+        Assert.Equal(2, plainAgain.DeviceDataSlots.Count);
+        Assert.True(plainAgain.FlattenedSlotByMemoryIndex.ContainsKey(plainFirst));
+
+        var embeddedAgain = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, 0, 2,
+            fixedFunctionVertexLoads: new HashSet<uint> { 8 });
+        var kept = Assert.Single(embeddedAgain.DeviceDataSlots);
+        Assert.Equal([embeddedFirst], kept.Value);
+        Assert.False(embeddedAgain.FlattenedSlotByMemoryIndex.ContainsKey(embeddedSecond));
     }
 }

@@ -79,12 +79,12 @@ public sealed class StageCompileOptions
 
     internal StageCompileOptions Detached()
     {
-        if (!Reusable)
-        {
-            return this;
-        }
-
         var copy = (StageCompileOptions)MemberwiseClone();
+        copy.VertexInfo = VertexInfo?.Detached();
+        copy.PixelInfo = PixelInfo?.Detached();
+        copy.ComputeInfo = ComputeInfo?.Detached();
+        copy.VertexInterpolants = [.. VertexInterpolants];
+        copy.PixelOutputs = [.. PixelOutputs];
         copy.Reusable = false;
         return copy;
     }
@@ -187,6 +187,9 @@ internal sealed class ProgramSourceEntry
     // last seen to agree with it (DeviceDataLoads).
     public int DeviceDataLoadCount { get; init; }
     public int DeviceDataGeneration { get; set; }
+    public Task<ProgramPermutation>? SuccessorWork { get; set; }
+    public ProgramSourceEntry? Successor { get; set; }
+    public DeviceBindingLoads.Request? SuccessorRequest { get; set; }
 }
 
 // Programs keyed by identity and static state; each draw materializes its resources and reuses
@@ -235,6 +238,7 @@ internal sealed class ShaderProgramCache
         _prefetchResidentGuestBytes = PrefetchEnabled ? _readResidentGuestBytes : null;
         _compareResidentGuestBytes = ResourceMaterializationCache.InPlaceValidateEnabled ? CompareResidentGuestBytes : null;
         _dataWritePending = host.DataWritePending;
+        _resourceWordPending = host.ResourceWordPending;
     }
 
     // Where the preparation running now logs what it reads of guest memory, for a dispatch
@@ -269,6 +273,13 @@ internal sealed class ShaderProgramCache
         ReadLog is null && _host.TryCompareResidentGuestBytes(addresses, lengths, offsets, recorded);
 
     private readonly Func<ulong, bool>? _dataWritePending;
+    private readonly Func<ulong, bool>? _resourceWordPending;
+
+    // How many binding loads one bind may hand to the device, one re-plan each (a V# is four
+    // loads, a T# eight), before its materialization reads (and waits for) every word left.
+    // A later bind goes on where this one stopped.
+    private const int MaxBindingReplans = 16;
+    internal static bool BackgroundReplan { get; set; } = PerfSwitches.Enabled("SHARPEMU_METAL_V2_REPLAN_BACKGROUND");
     private ResourceRuntimeInputs? _inputs;
     // The shader the reused inputs' image-candidate trace attributes candidates to.
     private ulong _materializingHash;
@@ -398,9 +409,36 @@ internal sealed class ShaderProgramCache
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
         {
             BuildStaticState(source.Stage, options);
+            _staticState.Add(source.UserDataBase);
+            _staticState.Add((uint)source.ExcludedUserDataRegisters);
+            _staticState.Add((uint)(source.ExcludedUserDataRegisters >> 32));
             var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
                 source.ContinuationAddressOffset, CollectionsMarshal.AsSpan(_staticState));
             _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out key, out entry);
+        }
+        if (entry?.SuccessorWork is { IsCompleted: true } work)
+        {
+            if (!work.IsCompletedSuccessfully || _host.ProgramCompilationFailed(work.Result.Handle, source.Stage))
+            {
+                _ = work.Exception;
+                foreach (var load in entry.Successor!.Plan.DeviceBindingMemory ?? new HashSet<int>())
+                    if (entry.Plan.DeviceBindingMemory?.Contains(load) != true)
+                        DeviceBindingLoads.Refuse(entry.Plan.DeviceBindingKey, load, notify: false);
+                DeviceBindingLoads.NotifyChanged(entry.Plan.DeviceBindingKey);
+                BindingWaitProvenance.Decision(entry.SuccessorRequest, "compile_failed");
+                entry.Successor = null;
+                entry.SuccessorWork = null;
+            }
+            else if (_host.IsProgramReady(work.Result.Handle, source.Stage))
+            {
+                entry.Successor!.Permutations.Add(work.Result);
+                var old = entry;
+                entry = entry.Successor;
+                old.SuccessorWork = null;
+                old.Successor = null;
+                _programs[key!] = entry;
+                BindingWaitProvenance.Decision(old.SuccessorRequest, "ready");
+            }
         }
         var sourceWasCached = entry is not null;
         if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -421,6 +459,8 @@ internal sealed class ShaderProgramCache
             ReadResidentMemory = _prefetchResidentGuestBytes,
             CompareResidentMemory = _compareResidentGuestBytes,
             DataWritePending = _dataWritePending,
+            ResourceWordPending = _resourceWordPending,
+            ResourceWordWriter = _host.ResourceWordWriter,
         };
         _materializingHash = source.Hash;
         inputs.UserData = source.UserData;
@@ -437,13 +477,13 @@ internal sealed class ShaderProgramCache
             _programs.Add(key, entry);
             ShaderCacheCounters.CountProgram();
         }
-        else if (_dataWritePending is not null && entry.DeviceDataGeneration != DeviceDataLoads.Generation)
+        else if (entry.Successor is null && _dataWritePending is not null && entry.DeviceDataGeneration != DeviceDataLoads.Generation)
         {
             // An earlier bind learned that the GPU writes data words this plan flattened: the
             // program is planned again with them left to the device, and compiles fresh
             // permutations under new ids. Recorded work keeps the pipelines it already holds.
             var generation = DeviceDataLoads.Generation;
-            if (DeviceDataLoads.CountFor(source.Hash) != entry.DeviceDataLoadCount)
+            if (DeviceDataLoads.CountFor(entry.Plan.DeviceDataKey) != entry.DeviceDataLoadCount)
             {
                 ProgramSourceEntry? replanned = null;
                 try
@@ -487,18 +527,78 @@ internal sealed class ShaderProgramCache
             // Failure capture needs the full walk, so a dump run bypasses the cache.
             bool materialized;
             ResourceMaterializationFailure materializationFailure;
-            _host.BeginGuestWordReads();
-            try
+            var committed = entry;
+            for (var attempt = 0; ; attempt++)
             {
-                materialized = _materializations is not null && captureIndirectImageFailure is null
-                    ? _materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
-                        out materializationFailure)
-                    : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
-                        captureIndirectImageFailure);
-            }
-            finally
-            {
-                _host.EndGuestWordReads();
+                // A binding word the GPU is still writing is not waited for: the attempt reads
+                // it as unknown and names it, the shader is planned again with it on the device,
+                // and the bind materializes again (DeviceBindingLoads). The last attempt waits. A
+                // linked program plans its own graph under the caller's hash, so its loads would
+                // not name the same records: it keeps waiting.
+                DeviceBindingLoads.BeginAttempt(_resourceWordPending is not null && !hasShaderCalls && attempt < MaxBindingReplans && committed.Successor is null);
+                DeviceBindingLoads.Request? deferred;
+                _host.BeginGuestWordReads();
+                try
+                {
+                    materialized = _materializations is not null && captureIndirectImageFailure is null
+                        ? _materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
+                            out materializationFailure)
+                        : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
+                            captureIndirectImageFailure);
+                }
+                finally
+                {
+                    _host.EndGuestWordReads();
+                    deferred = DeviceBindingLoads.EndAttempt();
+                }
+
+                if (deferred is not { } request)
+                {
+                    break;
+                }
+
+                entry = ReplanWithDeviceBindingLoad(source, options, entry, request);
+                if (ReferenceEquals(entry, committed)) continue;
+
+                // The candidate is materialized against its own plan before translation;
+                // the reference bind below is synchronous and cannot defer again.
+                DeviceBindingLoads.BeginAttempt(defer: false);
+                _host.BeginGuestWordReads();
+                try
+                {
+                    materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure);
+                }
+                finally { _host.EndGuestWordReads(); DeviceBindingLoads.EndAttempt(); }
+                if (materialized && BackgroundReplan && _host.BackgroundShaderCompilationSupported && committed.Permutations.Count != 0)
+                {
+                    StartSuccessor(source, options, key ??= BuildProgramKey(source), committed, entry, specialization, pushDataCursor, snapshot, request);
+                    entry = committed;
+                    // Existing permutations remain valid, with fresh synchronized resource words.
+                    DeviceBindingLoads.BeginAttempt(defer: false);
+                    _host.BeginGuestWordReads();
+                    try
+                    {
+                        materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure);
+                    }
+                    finally { _host.EndGuestWordReads(); DeviceBindingLoads.EndAttempt(); }
+                }
+                else if (materialized)
+                {
+                    _programs[key ??= BuildProgramKey(source)] = entry;
+                }
+                else
+                {
+                    // Even a candidate whose run-time materialization fails must keep the
+                    // known-correct entry. Never publish partial snapshot or specialization.
+                    foreach (var load in entry.Plan.DeviceBindingMemory ?? new HashSet<int>())
+                        if (committed.Plan.DeviceBindingMemory?.Contains(load) != true)
+                            DeviceBindingLoads.Refuse(committed.Plan.DeviceBindingKey, load, notify: false);
+                    DeviceBindingLoads.NotifyChanged(committed.Plan.DeviceBindingKey);
+                    entry = committed;
+                    BindingWaitProvenance.Decision(request, "materialize_failed");
+                    continue;
+                }
+                break;
             }
 
             if (!materialized)
@@ -530,7 +630,10 @@ internal sealed class ShaderProgramCache
                         (uint)source.UserData.Length,
                         beforeResourceTracking: captureLinkedImages ? plan => failedLinkedPlan = plan : null,
                         waveSize: source.Stage == ShaderStage.Mesh
-                            ? options.MeshInfo!.Geometry.WaveSize : options.ComputeInfo?.WaveSize ?? 32u);
+                            ? options.MeshInfo!.Geometry.WaveSize : options.ComputeInfo?.WaveSize ?? 32u,
+                        // Linking renumbers memory records. Until the learned key names the
+                        // complete library shape, this graph keeps its synchronous reads.
+                        deviceBindingMemory: new HashSet<int>(), deviceDataMemory: new HashSet<int>());
                     failedLinkedPlan = null;
                     linked = new ProgramSourceEntry { Program = program, Plan = plan,
                         HasShaderCalls = program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64"),
@@ -538,7 +641,7 @@ internal sealed class ShaderProgramCache
                     _linkedPrograms.Add(linkedKey, linked);
                 }
                 entry = linked;
-                if (!ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization))
+                if (!ResourceMaterializer.Materialize(entry.Plan, inputs.WithReader(inputs.ReadMemory, pendingLoads: false), ref snapshot, ref specialization))
                     throw new InvalidOperationException("The linked shader resources could not be materialized.");
             }
             catch (Exception exception) when (exception is InvalidOperationException or ResourcePlanException)
@@ -583,6 +686,69 @@ internal sealed class ShaderProgramCache
         }
 
         return permutation.Handle;
+    }
+
+    // Keep the closure on this cold path. A lambda capturing source in GetOrCompileCore
+    // allocates a display class even on every cached draw.
+    private void StartSuccessor(ShaderSource source, StageCompileOptions options, ProgramKey key, ProgramSourceEntry committed,
+        ProgramSourceEntry next, ResourceSpecialization specialization, uint cursor, ResourceSnapshot snapshot, DeviceBindingLoads.Request request)
+    {
+        var detachedSource = source with { UserData = [.. source.UserData] };
+        var translate = PreparePermutation(detachedSource, options.Detached(), next, specialization.Clone(), cursor,
+            key, true, snapshot.WithUserData(detachedSource.UserData));
+        committed.Successor = next;
+        committed.SuccessorRequest = request;
+        committed.SuccessorWork = _host.TranslateShaderInBackground(() =>
+        {
+            var permutation = translate();
+            _host.PrecompileProgram(permutation.Handle, detachedSource.Stage, permutation.Program);
+            return permutation;
+        });
+    }
+
+    private ProgramSourceEntry ReplanWithDeviceBindingLoad(ShaderSource source, StageCompileOptions options,
+        ProgramSourceEntry entry, DeviceBindingLoads.Request request)
+    {
+        var key = entry.Plan.DeviceBindingKey;
+        if (entry.Plan.DeviceBindingMemory?.Contains(request.MemoryIndex) == true)
+        {
+            DeviceBindingLoads.KeepOnHost(key, request.MemoryIndex);
+            BindingWaitProvenance.Decision(request, "host_read");
+            return entry;
+        }
+        var learned = new HashSet<int>(entry.Plan.DeviceBindingMemory ?? new HashSet<int>()) { request.MemoryIndex };
+        var group = (request.TableWords ?? []).Where(index => !DeviceBindingLoads.IsRefused(key, index)).Take(64).ToArray();
+        learned.UnionWith(group);
+        var candidate = TryPlan(learned, out var reason);
+        if (candidate is null && group.Length != 0)
+        {
+            learned = new HashSet<int>(entry.Plan.DeviceBindingMemory ?? new HashSet<int>()) { request.MemoryIndex };
+            candidate = TryPlan(learned, out reason);
+        }
+        if (candidate is null)
+        {
+            DeviceBindingLoads.Refuse(key, request.MemoryIndex);
+            if (reason == "plan_failed") DeviceBindingLoads.CountPlanFailure();
+            BindingWaitProvenance.Decision(request, reason ?? "plan_failed");
+            return entry;
+        }
+        foreach (var index in learned) DeviceBindingLoads.Learn(key, index, notify: false);
+        DeviceBindingLoads.NotifyChanged(key);
+        DeviceBindingLoads.NoteRebuild(key, out _);
+        DeviceBindingLoads.CountReplan(request.Kind);
+        BindingWaitProvenance.Decision(request, "accepted");
+        return candidate;
+
+        ProgramSourceEntry? TryPlan(IReadOnlySet<int> loads, out string? reason)
+        {
+            reason = "plan_failed";
+            try
+            {
+                var next = CreateEntry(source, options.Detached(), loads);
+                return DeviceBindingLoads.Accepts(entry.Plan, next.Plan, out reason) ? next : null;
+            }
+            catch (ShaderProgramRejectedException) { return null; }
+        }
     }
 
     // The key of the entry the static state was just built for.
@@ -645,7 +811,15 @@ internal sealed class ShaderProgramCache
         }
     }
 
-    private ProgramSourceEntry CreateEntry(ShaderSource source, StageCompileOptions options)
+    // What a record keeps of the binding loads its plan left to the device: a replay plans
+    // with these, since they decide the plan's buffers (ShaderResourcePlan.Extract).
+    private static int[] DeviceBindingMemoryOf(ShaderResourcePlan plan) =>
+        plan.DeviceBindingMemory is { } memory ? [.. memory.Order()] : [];
+
+    // deviceBindingMemory: the binding loads a replayed record's plan left to the device; null
+    // plans with the learned ones (DeviceBindingLoads).
+    private ProgramSourceEntry CreateEntry(ShaderSource source, StageCompileOptions options,
+        IReadOnlySet<int>? deviceBindingMemory = null, IReadOnlySet<int>? deviceDataMemory = null)
     {
         using var planningScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPlanning);
         var program = Decode(source);
@@ -673,12 +847,14 @@ internal sealed class ShaderProgramCache
         }
 
         ShaderResourcePlan plan;
-        var deviceDataLoads = DeviceDataLoads.CountFor(source.Hash);
+        // Learned under the plan's key (the hash told apart by the embedded fetch), read
+        // before planning so a load learned meanwhile still replans.
+        var fetchLoads = fetch?.Loads.Select(load => load.Pc).ToHashSet();
         var deviceDataGeneration = DeviceDataLoads.Generation;
         try
         {
             plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
-                fetch?.Loads.Select(load => load.Pc).ToHashSet(),
+                fetchLoads,
                 beforeResourceTracking: dumpPlanning ? resourcePlan => ShaderPlanningDump.WriteGraph(source, resourcePlan) : null,
                 // Resource planning must use the guest wave size of shader compilation: graphics
                 // stages compile as wave32 (see the compile request); compute follows the dispatch.
@@ -688,7 +864,8 @@ internal sealed class ShaderProgramCache
                     ShaderStage.Compute => options.ComputeInfo?.WaveSize ?? 64u,
                     _ => 32u,
                 },
-                excludedUserDataRegisters: source.ExcludedUserDataRegisters);
+                excludedUserDataRegisters: source.ExcludedUserDataRegisters,
+                deviceBindingMemory: deviceBindingMemory, deviceDataMemory: deviceDataMemory);
         }
         catch (ResourcePlanException exception)
         {
@@ -705,7 +882,7 @@ internal sealed class ShaderProgramCache
         return new ProgramSourceEntry
         {
             Plan = plan,
-            DeviceDataLoadCount = deviceDataLoads,
+            DeviceDataLoadCount = plan.DeviceDataMemory.Count,
             DeviceDataGeneration = deviceDataGeneration,
             Program = program,
             HasBitwiseExclusiveOr = exclusiveOr,
@@ -824,7 +1001,11 @@ internal sealed class ShaderProgramCache
         return inputs.ToArray();
     }
 
-    private ProgramPermutation CompilePermutation(
+    private ProgramPermutation CompilePermutation(ShaderSource source, StageCompileOptions options, ProgramSourceEntry entry,
+        ResourceSpecialization specialization, uint pushDataCursor, ProgramKey key, bool sourceWasCached, ResourceSnapshot snapshot) =>
+        PreparePermutation(source, options, entry, specialization, pushDataCursor, key, sourceWasCached, snapshot)();
+
+    private Func<ProgramPermutation> PreparePermutation(
         ShaderSource source,
         StageCompileOptions options,
         ProgramSourceEntry entry,
@@ -836,7 +1017,8 @@ internal sealed class ShaderProgramCache
     {
         if (ShaderCorpus.Enabled && _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var corpusCode))
         {
-            ShaderCorpus.RecordCompile(source, options, corpusCode, CorpusHostFlags(options), specialization, pushDataCursor);
+            ShaderCorpus.RecordCompile(source, options, corpusCode, CorpusHostFlags(options), specialization, pushDataCursor,
+                DeviceBindingMemoryOf(entry.Plan), [.. entry.Plan.DeviceDataMemory.Order()]);
         }
 
         var program = entry.Program;
@@ -876,132 +1058,140 @@ internal sealed class ShaderProgramCache
                 throw new ShaderProgramRejectedException($"The mesh output exceeds device memory limits: bytes={outputBytes} " +
                     $"output_limit={limits.MaxOutputMemoryBytes} payload_output_limit={limits.MaxPayloadAndOutputMemoryBytes}.");
         }
+        var id = ++_nextProgramId;
+        _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capturedCode);
+        var graphicsPrewarm = _host.GraphicsPrewarm;
+        var prewarm = _host.ShaderPrewarm;
         var permutationDump = ShaderPermutationDump.WriteInputs(
             source, key, sourceWasCached, _programs.Keys, entry.Permutations,
-            specialization, request, pushDataCursor, _nextProgramId + 1);
-        IGuestCompiledShader? compiled;
-        string error;
-        bool translated;
-        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramTranslation))
+            specialization, request, pushDataCursor, id);
+        return () =>
         {
-            translated = _compiler.TryCompileProgram(request, out compiled, out error);
-        }
-        if (!translated || compiled is null)
-        {
-            ShaderCallDump.Write(permutationDump, program, snapshot, plan.Memory, _host.TryReadCleanGuestWord);
-            throw new ShaderProgramRejectedException($"The shader program cannot be compiled: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}{DescribeCode(source.Address)}.");
-        }
-
-        ShaderCacheCounters.CountCompile();
-        if (RenderPhaseProfile.Enabled && request.Mesh is not null && compiled.PayloadFileExtension == "spv")
-        {
-            var payload = compiled.Payload;
-            var barriers = 0;
-            var loops = 0;
-            var elections = 0;
-            var atomicOrs = 0;
-            var loads = 0;
-            var stores = 0;
-            var instructions = 0;
-            var functionInstructions = 0;
-            var beforeFirstLoop = 0;
-            var insideFunction = false;
-            for (var offset = 20; offset < payload.Length;)
+            IGuestCompiledShader? compiled;
+            string error;
+            bool translated;
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramTranslation))
             {
-                var instruction = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(offset));
-                var wordCount = (int)(instruction >> 16);
-                if (wordCount == 0 || wordCount > (payload.Length - offset) / 4) break;
-                instructions++;
-                // SPIR-V opcode numbers: Libs does not reference the Vulkan shader compiler.
-                switch (instruction & 0xffff)
+                translated = _compiler.TryCompileProgram(request, out compiled, out error);
+            }
+            if (!translated || compiled is null)
+            {
+                ShaderCallDump.Write(permutationDump, program, snapshot, plan.Memory, _host.TryReadCleanGuestWord);
+                throw new ShaderProgramRejectedException($"The shader program cannot be compiled: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}{DescribeCode(source.Address)}.");
+            }
+
+            ShaderCacheCounters.CountCompile();
+            if (RenderPhaseProfile.Enabled && request.Mesh is not null && compiled.PayloadFileExtension == "spv")
+            {
+                var payload = compiled.Payload;
+                var barriers = 0;
+                var loops = 0;
+                var elections = 0;
+                var atomicOrs = 0;
+                var loads = 0;
+                var stores = 0;
+                var instructions = 0;
+                var functionInstructions = 0;
+                var beforeFirstLoop = 0;
+                var insideFunction = false;
+                for (var offset = 20; offset < payload.Length;)
                 {
-                    case 54: insideFunction = true; break; // OpFunction
-                    case 56: insideFunction = false; break; // OpFunctionEnd
-                    case 224: barriers++; break; // OpControlBarrier
-                    case 246: // OpLoopMerge
-                        if (loops == 0) beforeFirstLoop = functionInstructions;
-                        loops++;
-                        break;
-                    case 333: elections++; break; // OpGroupNonUniformElect
-                    case 241: atomicOrs++; break; // OpAtomicOr
-                    case 61: loads++; break; // OpLoad
-                    case 62: stores++; break; // OpStore
+                    var instruction = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(offset));
+                    var wordCount = (int)(instruction >> 16);
+                    if (wordCount == 0 || wordCount > (payload.Length - offset) / 4) break;
+                    instructions++;
+                    // SPIR-V opcode numbers: Libs does not reference the Vulkan shader compiler.
+                    switch (instruction & 0xffff)
+                    {
+                        case 54: insideFunction = true; break; // OpFunction
+                        case 56: insideFunction = false; break; // OpFunctionEnd
+                        case 224: barriers++; break; // OpControlBarrier
+                        case 246: // OpLoopMerge
+                            if (loops == 0) beforeFirstLoop = functionInstructions;
+                            loops++;
+                            break;
+                        case 333: elections++; break; // OpGroupNonUniformElect
+                        case 241: atomicOrs++; break; // OpAtomicOr
+                        case 61: loads++; break; // OpLoad
+                        case 62: stores++; break; // OpStore
+                    }
+                    if (insideFunction) functionInstructions++;
+                    offset += wordCount * 4;
                 }
-                if (insideFunction) functionInstructions++;
-                offset += wordCount * 4;
+                Console.Error.WriteLine($"[PERF][MESH_COMPILE] hash=0x{source.Hash:X16} bytes={payload.Length} " +
+                    $"static_barriers={barriers} static_loops={loops} static_elections={elections} static_atomic_or={atomicOrs} " +
+                    $"static_instructions={instructions} static_loads={loads} static_stores={stores} " +
+                    $"static_before_first_loop={beforeFirstLoop} " +
+                    $"bound_format_specialization=enabled buffer_formats={string.Join(',', resources.Info.Buffers.Select(buffer => buffer.DescriptorFormat))}");
             }
-            Console.Error.WriteLine($"[PERF][MESH_COMPILE] hash=0x{source.Hash:X16} bytes={payload.Length} " +
-                $"static_barriers={barriers} static_loops={loops} static_elections={elections} static_atomic_or={atomicOrs} " +
-                $"static_instructions={instructions} static_loads={loads} static_stores={stores} " +
-                $"static_before_first_loop={beforeFirstLoop} " +
-                $"bound_format_specialization=enabled buffer_formats={string.Join(',', resources.Info.Buffers.Select(buffer => buffer.DescriptorFormat))}");
-        }
-        if (resources.Info.UsesDeviceAddresses)
-        {
-            ShaderCacheCounters.CountDeviceAddressProgram();
-            if (VideoOut.BufferUploadProfile.Enabled || SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled)
+            if (resources.Info.UsesDeviceAddresses)
             {
-                var accesses = plan.Memory.Entries.Where(memory => !memory.PlanningOnly &&
-                    memory.Kind is MemoryResourceKind.ScalarAddress or MemoryResourceKind.Flat or MemoryResourceKind.Global).ToArray();
-                var instructions = accesses.Select(memory => $"0x{memory.Pc:X}:{memory.Kind}:{memory.Access}").Distinct().ToArray();
-                Console.Error.WriteLine($"[PERF][DEVICE_ADDRESS_PROGRAM] stage={source.Stage} hash=0x{source.Hash:X16} " +
-                    $"address=0x{source.Address:X16} accesses={accesses.Length} " +
-                    $"bounded_ranges={plan.DeviceAddressRanges.Count(range => range.Bounded && range.Plannable)} " +
-                    $"unbounded_ranges={plan.DeviceAddressRanges.Count(range => !range.Bounded || !range.Plannable)} " +
-                    $"instructions={string.Join(',', instructions.Take(32))} omitted={Math.Max(0, instructions.Length - 32)}");
+                ShaderCacheCounters.CountDeviceAddressProgram();
+                if (VideoOut.BufferUploadProfile.Enabled || SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled)
+                {
+                    var accesses = plan.Memory.Entries.Where(memory => !memory.PlanningOnly &&
+                        memory.Kind is MemoryResourceKind.ScalarAddress or MemoryResourceKind.Flat or MemoryResourceKind.Global).ToArray();
+                    var instructions = accesses.Select(memory => $"0x{memory.Pc:X}:{memory.Kind}:{memory.Access}").Distinct().ToArray();
+                    Console.Error.WriteLine($"[PERF][DEVICE_ADDRESS_PROGRAM] stage={source.Stage} hash=0x{source.Hash:X16} " +
+                        $"address=0x{source.Address:X16} accesses={accesses.Length} " +
+                        $"bounded_ranges={plan.DeviceAddressRanges.Count(range => range.Bounded && range.Plannable)} " +
+                        $"unbounded_ranges={plan.DeviceAddressRanges.Count(range => !range.Bounded || !range.Plannable)} " +
+                        $"instructions={string.Join(',', instructions.Take(32))} omitted={Math.Max(0, instructions.Length - 32)}");
+                }
             }
-        }
 
-        if (!layout.UsesPushData)
-        {
-            ShaderCacheCounters.CountShaderDataFallback();
-        }
-
-        _compiler.CountShaderCompilation();
-        // Payload is made on each read (the Metal one encodes the whole source), so only
-        // for a dump that is on.
-        if (permutationDump is not null)
-        {
-            ShaderPermutationDump.WriteModule(permutationDump, compiled.Payload, compiled.PayloadFileExtension);
-        }
-
-        CompiledShaderDump.Write(source.Label, source.Address, source.Hash, compiled, program);
-        var id = ++_nextProgramId;
-        var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
-        var info = CreateProgramInfo(source, entry, resources, layout, request, compiled.InputLocationMask);
-        if (source.Stage != ShaderStage.Compute &&
-            _host.GraphicsPrewarm is { } graphicsPrewarm &&
-            _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var graphicsCapture))
-        {
-            graphicsPrewarm.Record(
-                graphicsCapture,
-                ShaderCorpus.Create(source, options, graphicsCapture, CorpusHostFlags(options), specialization, pushDataCursor));
-        }
-
-        if (source.Stage == ShaderStage.Compute &&
-            _host.ShaderPrewarm is { } prewarm &&
-            _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capture))
-        {
-            prewarm.RecordCompute(capture, new ComputePrewarmRecord
+            if (!layout.UsesPushData)
             {
-                Hash = source.Hash,
-                CodeSize = source.CodeSize,
-                Address = capture.Address,
-                ContinuationAddressOffset = source.ContinuationAddressOffset,
-                UserDataBase = source.UserDataBase,
-                UserDataCount = (uint)source.UserData.Length,
-                PushDataCursor = pushDataCursor,
-                Info = options.ComputeInfo!,
-                SystemRegisters = options.ComputeSystemRegisters,
-                Specialization = specialization.Clone(),
-            });
-        }
+                ShaderCacheCounters.CountShaderDataFallback();
+            }
 
-        return new ProgramPermutation
-        {
-            Specialization = specialization,
-            Program = info,
-            Handle = new ShaderProgram(id, module),
+            _compiler.CountShaderCompilation();
+            // Payload is made on each read (the Metal one encodes the whole source), so only
+            // for a dump that is on.
+            if (permutationDump is not null)
+            {
+                ShaderPermutationDump.WriteModule(permutationDump, compiled.Payload, compiled.PayloadFileExtension);
+            }
+
+            CompiledShaderDump.Write(source.Label, source.Address, source.Hash, compiled, program);
+            var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
+            var info = CreateProgramInfo(source, entry, resources, layout, request, compiled.InputLocationMask);
+            if (source.Stage != ShaderStage.Compute &&
+                graphicsPrewarm is not null && capturedCode is { } graphicsCapture)
+            {
+                graphicsPrewarm.Record(
+                    graphicsCapture,
+                    ShaderCorpus.Create(source, options, graphicsCapture, CorpusHostFlags(options), specialization, pushDataCursor,
+                        DeviceBindingMemoryOf(plan), [.. plan.DeviceDataMemory.Order()]));
+            }
+
+            if (source.Stage == ShaderStage.Compute &&
+                prewarm is not null && capturedCode is { } capture)
+            {
+                prewarm.RecordCompute(capture, new ComputePrewarmRecord
+                {
+                    Hash = source.Hash,
+                    CodeSize = source.CodeSize,
+                    Address = capture.Address,
+                    ContinuationAddressOffset = source.ContinuationAddressOffset,
+                    UserDataBase = source.UserDataBase,
+                    UserDataCount = (uint)source.UserData.Length,
+                    PushDataCursor = pushDataCursor,
+                    Info = options.ComputeInfo!,
+                    SystemRegisters = options.ComputeSystemRegisters,
+                    Specialization = specialization.Clone(),
+                    DeviceBindingMemory = DeviceBindingMemoryOf(plan),
+                    DeviceDataMemory = [.. plan.DeviceDataMemory.Order()],
+                    ExcludedUserDataRegisters = source.ExcludedUserDataRegisters,
+                });
+            }
+
+            return new ProgramPermutation
+            {
+                Specialization = specialization,
+                Program = info,
+                Handle = new ShaderProgram(id, module),
+            };
         };
     }
 
@@ -1181,6 +1371,8 @@ internal sealed class ShaderProgramCache
         GpuFatal.ThrowOnFatal = true;
         try
         {
+            if (record.DeviceLoadCompiler != AssemblyCodeIdentity.Of(typeof(ShaderResourcePlan).Assembly))
+                throw new InvalidOperationException("The corpus device-load compiler identity is incompatible.");
             var context = record.Code.CreateContext();
             if (record.Options is not { } options)
             {
@@ -1189,7 +1381,7 @@ internal sealed class ShaderProgramCache
 
             var cache = new ShaderProgramCache(context, null!, new CorpusReplayHost(record.Host));
             var source = record.CreateSource();
-            var entry = cache.CreateEntry(source, options);
+            var entry = cache.CreateEntry(source, options, record.DeviceBindingMemory?.ToHashSet(), record.DeviceDataMemory?.ToHashSet());
             if (record.Specialization is not { } specialization)
             {
                 return true;
@@ -1298,13 +1490,15 @@ internal sealed class ShaderProgramCache
         layout = null;
         try
         {
+            if (record.DeviceLoadCompiler != AssemblyCodeIdentity.Of(typeof(ShaderResourcePlan).Assembly))
+            { error = "The prewarm device-load compiler identity is incompatible."; return false; }
             if (!Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out var program, out error))
             {
                 return false;
             }
 
             var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, record.Hash, record.UserDataBase, record.UserDataCount,
-                waveSize: record.Info.WaveSize);
+                waveSize: record.Info.WaveSize, excludedUserDataRegisters: record.ExcludedUserDataRegisters, deviceBindingMemory: record.DeviceBindingMemory?.ToHashSet(), deviceDataMemory: record.DeviceDataMemory?.ToHashSet());
             var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
                 record.Info.DispatchThreadDimensions);

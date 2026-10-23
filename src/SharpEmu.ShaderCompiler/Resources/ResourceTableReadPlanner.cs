@@ -13,6 +13,11 @@ public sealed class ResourceTableReadPlanner
     private readonly ScalarValueGraph _graph;
     private readonly ShaderStage _stage;
     private readonly ulong _hash;
+    // Binding loads a host learned the GPU writes (DeviceBindingLoads): never flattened and
+    // never host-evaluable, so whatever derives from them is computed on the device.
+    private readonly IReadOnlySet<int>? _deviceBinding;
+    private readonly ulong _deviceDataKey;
+    private readonly IReadOnlySet<int>? _deviceDataMemory;
     private readonly List<ResourceTableRead> _reads = [];
     private readonly List<ScalarValue> _dynamicReads = [];
     private readonly List<(ScalarValue Read, uint Slot)> _patches = [];
@@ -21,11 +26,15 @@ public sealed class ResourceTableReadPlanner
     private readonly HashSet<ScalarValue> _visited = [];
     private readonly Dictionary<ScalarValue, ScalarValue> _replacements = [];
 
-    private ResourceTableReadPlanner(ScalarValueGraph graph, ShaderStage stage, ulong hash)
+    private ResourceTableReadPlanner(ScalarValueGraph graph, ShaderStage stage, ulong hash, IReadOnlySet<int>? deviceBinding,
+        ulong deviceDataKey, IReadOnlySet<int>? deviceDataMemory)
     {
         _graph = graph;
         _stage = stage;
         _hash = hash;
+        _deviceBinding = deviceBinding;
+        _deviceDataKey = deviceDataKey;
+        _deviceDataMemory = deviceDataMemory;
     }
 
     public sealed record Result(
@@ -35,8 +44,10 @@ public sealed class ResourceTableReadPlanner
         IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex,
         int DataSlotStart);
 
-    public static Result Plan(ScalarValueGraph graph, ShaderStage stage, ulong hash) =>
-        new ResourceTableReadPlanner(graph, stage, hash).Run();
+    // deviceDataKey: what DeviceDataLoads learned this plan's data loads under (the hash when null).
+    public static Result Plan(ScalarValueGraph graph, ShaderStage stage, ulong hash, IReadOnlySet<int>? deviceBinding = null,
+        ulong? deviceDataKey = null, IReadOnlySet<int>? deviceDataMemory = null) =>
+        new ResourceTableReadPlanner(graph, stage, hash, deviceBinding, deviceDataKey ?? hash, deviceDataMemory).Run();
 
     private Result Run()
     {
@@ -78,12 +89,13 @@ public sealed class ResourceTableReadPlanner
         // uses their values. A load a host learned the GPU writes stays a device load, but
         // what its address depends on is still collected as before.
         var validatorReadCount = _reads.Count;
-        var deviceData = DeviceDataLoads.For(_hash);
+        var deviceData = _deviceDataMemory ?? DeviceDataLoads.For(_deviceDataKey);
         foreach (var access in _graph.Accesses)
         {
             if (access?.Read is { Kind: ScalarValueKind.ScalarAddressWord } read &&
                 IsRawRead(read) && read.Operands[1].IsConstant &&
-                new RuntimeValueValidator(_graph, _graph.UserDataBase, _graph.UserDataCount, validatorReadCount).Validate(read))
+                new RuntimeValueValidator(_graph, _graph.UserDataBase, _graph.UserDataCount, validatorReadCount,
+                    deviceMemory: _deviceBinding).Validate(read))
             {
                 var pc = _graph.Memory[read.MemoryIndex].Pc;
                 if (deviceData is not null && deviceData.Contains(read.MemoryIndex))
@@ -141,7 +153,7 @@ public sealed class ResourceTableReadPlanner
         }
 
         _visiting.RemoveAt(_visiting.Count - 1);
-        if (!IsRawRead(value))
+        if (!IsRawRead(value) || (_deviceBinding is not null && _deviceBinding.Contains(value.MemoryIndex)))
         {
             return;
         }
@@ -159,7 +171,7 @@ public sealed class ResourceTableReadPlanner
 
         // A read whose address depends on values the host cannot know (a loop over data the
         // shader loaded itself) cannot be flattened; the shader performs it on the device.
-        if (!new RuntimeValueValidator(_graph, _graph.UserDataBase, _graph.UserDataCount, 0).Validate(value))
+        if (!new RuntimeValueValidator(_graph, _graph.UserDataBase, _graph.UserDataCount, 0, deviceMemory: _deviceBinding).Validate(value))
         {
             return;
         }

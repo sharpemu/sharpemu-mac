@@ -210,7 +210,8 @@ internal static partial class MetalNative
         uint threadgroupCount = 1,
         IReadOnlyList<DeviceTable>? tables = null,
         IReadOnlyList<DeviceTable>? bindlessTables = null,
-        Func<DescriptorBindingKind, nint>? textureOfClass = null)
+        Func<DescriptorBindingKind, nint>? textureOfClass = null,
+        Action<nint>? beforeCompute = null)
     {
         result = [];
         stepCapHits = 0;
@@ -315,7 +316,7 @@ internal static partial class MetalNative
                 bufferContents.Length,
                 out result,
                 out error,
-                threadgroupCount))
+                threadgroupCount, beforeCompute))
         {
             return false;
         }
@@ -691,7 +692,7 @@ internal static partial class MetalNative
         int resultLength,
         out byte[] result,
         out string error,
-        uint threadgroupCount = 1)
+        uint threadgroupCount = 1, Action<nint>? beforeCompute = null)
     {
         result = [];
         error = string.Empty;
@@ -723,6 +724,7 @@ internal static partial class MetalNative
         }
 
         var commandBuffer = Send(queue, Selector("commandBuffer"));
+        beforeCompute?.Invoke(commandBuffer);
         var encoder = Send(commandBuffer, Selector("computeCommandEncoder"));
         SendVoid(encoder, Selector("setComputePipelineState:"), pipeline);
         foreach (var (buffer, index) in bindings)

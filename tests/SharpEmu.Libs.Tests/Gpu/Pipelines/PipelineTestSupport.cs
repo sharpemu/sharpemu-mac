@@ -129,6 +129,18 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     // Answers resident reads from the fake memory, as a host whose GPU owns nothing does.
     public bool ResidentReadsEnabled { get; set; }
 
+    // Binding words the GPU is still writing (DeviceBindingLoads); read by a program cache
+    // when it is made.
+    public Func<ulong, bool>? ResourceWordPending { get; set; }
+    public bool BackgroundShaderCompilationSupported { get; set; }
+    public bool CancelBackgroundTranslation { get; set; }
+    public Task<T> TranslateShaderInBackground<T>(Func<T> translate) => CancelBackgroundTranslation
+        ? Task.FromCanceled<T>(new CancellationToken(true)) : Task.Run(translate);
+    public bool SuccessorLibraryReady { get; set; } = true;
+    public bool SuccessorPipelineReady { get; set; } = true;
+    public bool IsProgramReady(ShaderProgram program, ShaderStage stage) => SuccessorLibraryReady && (stage != ShaderStage.Compute || SuccessorPipelineReady);
+
+
     public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean) =>
         ResidentReadsEnabled && memory.TryRead(address, destination);
 

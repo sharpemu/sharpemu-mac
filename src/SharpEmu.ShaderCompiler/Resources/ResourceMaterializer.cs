@@ -99,6 +99,7 @@ public static partial class ResourceMaterializer
         using var totalProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Total);
         if (!MaterializeSnapshot(plan, inputs, captureIndirectImageFailure is not null, out var materialized, out failure))
         {
+            if (DeviceBindingLoads.Deferred) failure = ResourceMaterializationFailure.DeferredPendingLoad;
             return false;
         }
 
@@ -106,6 +107,7 @@ public static partial class ResourceMaterializer
         DeviceAddressRange[] ranges;
         using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DeviceAddressRanges))
             ranges = DeviceAddressRangePlanner.Evaluate(plan, inputs);
+        if (DeviceBindingLoads.Deferred) { failure = ResourceMaterializationFailure.DeferredPendingLoad; return false; }
         foreach (var range in ranges)
         {
             if (!plan.WrittenRangeSlotByHandle.TryGetValue(range.Handle, out var slot))
@@ -197,7 +199,10 @@ public static partial class ResourceMaterializer
             evaluateTable: true, out var values, out var table, out var activeSources,
             additionalTableWords: checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount)))
         {
-            SpecializationFailed(DiagnoseSnapshotEvaluationFailure(plan, inputs, activeSources));
+            // A word read as unknown for a re-plan is no failure, and diagnosing it would read
+            // (and wait for) that word (DeviceBindingLoads).
+            if (!DeviceBindingLoads.Deferred)
+                SpecializationFailed(DiagnoseSnapshotEvaluationFailure(plan, inputs, activeSources));
             return false;
         }
 

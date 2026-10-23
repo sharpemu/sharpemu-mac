@@ -43,6 +43,11 @@ public sealed record ShaderCorpusRecord
     public ulong ExcludedUserDataRegisters { get; init; }
     public StageCompileOptions? Options { get; init; }
     public ResourceSpecialization? Specialization { get; init; }
+    // The binding loads the specialization's plan left to the device (DeviceBindingLoads); the
+    // replay plans with exactly these. Null (older records): with the learned ones.
+    public int[]? DeviceBindingMemory { get; init; }
+    public int[]? DeviceDataMemory { get; init; }
+    public string DeviceLoadCompiler { get; init; } = AssemblyCodeIdentity.Of(typeof(ShaderResourcePlan).Assembly);
     public uint PushDataCursor { get; init; }
     public ShaderCorpusHostFlags Host { get; init; } = new();
     public string? DecodeError { get; init; }
@@ -67,7 +72,7 @@ public static class ShaderCorpus
     public const string FileExtension = ".corpus";
 
     private const uint Magic = 0x50434553;
-    private const uint FormatVersion = 1;
+    private const uint FormatVersion = 2;
 
     private static string? CorpusDirectory = SharpEmuPaths.ResolveDumpPath(DirectoryVariable, "shader-corpus");
 
@@ -135,11 +140,11 @@ public static class ShaderCorpus
 
     // Taken before the translation of one permutation: everything its compile request is made of.
     internal static void RecordCompile(ShaderSource source, StageCompileOptions options, ShaderCodeCapture code, ShaderCorpusHostFlags host,
-        ResourceSpecialization specialization, uint pushDataCursor)
+        ResourceSpecialization specialization, uint pushDataCursor, int[]? deviceBindingMemory = null, int[]? deviceDataMemory = null)
     {
         try
         {
-            var record = Create(source, options, code, host, specialization, pushDataCursor);
+            var record = Create(source, options, code, host, specialization, pushDataCursor, deviceBindingMemory, deviceDataMemory);
             var stem = Stem(record);
             var variant = XxHash3.HashToUInt64(JsonSerializer.SerializeToUtf8Bytes(record with { UserData = new uint[source.UserData.Length] }, JsonOptions));
             Record($"{stem}-{variant:X16}", stem, record);
@@ -179,7 +184,8 @@ public static class ShaderCorpus
         ShaderProgramCache.TryBuildCorpusRequest(record, out request, out error);
 
     internal static ShaderCorpusRecord Create(ShaderSource source, StageCompileOptions options, ShaderCodeCapture code,
-        ShaderCorpusHostFlags host, ResourceSpecialization? specialization, uint pushDataCursor) =>
+        ShaderCorpusHostFlags host, ResourceSpecialization? specialization, uint pushDataCursor,
+        int[]? deviceBindingMemory = null, int[]? deviceDataMemory = null) =>
         new()
         {
             Code = code,
@@ -191,15 +197,20 @@ public static class ShaderCorpus
             ExcludedUserDataRegisters = source.ExcludedUserDataRegisters,
             Options = options,
             Specialization = specialization,
+            DeviceBindingMemory = deviceBindingMemory,
+            DeviceDataMemory = deviceDataMemory,
             PushDataCursor = pushDataCursor,
             Host = host,
         };
 
-    // The program and the inputs of its stage, without the specialization and without the user-data
-    // values the translation never reads (only their count).
+    // The program and the inputs of its stage, without the specialization (and the binding loads
+    // of its plan) and without the user-data values the translation never reads (only their count).
     private static string Stem(ShaderCorpusRecord record)
     {
-        var keyed = record with { Specialization = null, PushDataCursor = 0, UserData = new uint[record.UserData.Length] };
+        var keyed = record with
+        {
+            Specialization = null, DeviceBindingMemory = null, DeviceDataMemory = null, PushDataCursor = 0, UserData = new uint[record.UserData.Length],
+        };
         var key = XxHash3.HashToUInt64(JsonSerializer.SerializeToUtf8Bytes(keyed, JsonOptions));
         return $"{LabelOf(record.Stage)}-{record.Hash:X16}-{key:X16}";
     }

@@ -127,14 +127,21 @@ public sealed class ShaderResourcePlan
 
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
-        ulong excludedUserDataRegisters = 0)
+        ulong excludedUserDataRegisters = 0, IReadOnlySet<int>? deviceBindingMemory = null, IReadOnlySet<int>? deviceDataMemory = null)
     {
         // Mesh system inputs are not uniform user data, even when a GS pointer occupies s0:s1.
         // A caller whose user data starts below its system scalars names them itself.
         var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize,
             excludedUserDataRegisters: excludedUserDataRegisters | (stage == ShaderStage.Mesh ? 0xFCUL : 0));
         var plan = new ShaderResourcePlan(graph, stage, hash);
-        var reads = ResourceTableReadPlanner.Plan(graph, stage, hash);
+        plan.DeviceBindingKey = DeviceBindingLoads.PlanKey(hash, fixedFunctionVertexLoads, stage, waveSize, excludedUserDataRegisters, userDataBase, userDataCount);
+        // A replay of a recorded program (the shader prewarm) names the loads the plan its
+        // specialization was taken from left to the device; a live plan takes the learned ones.
+        plan.DeviceBindingMemory = !DeviceBindingLoads.Enabled ? null : deviceBindingMemory is null
+            ? DeviceBindingLoads.For(plan.DeviceBindingKey)
+            : deviceBindingMemory.Count == 0 ? null : new HashSet<int>(deviceBindingMemory);
+        plan.DeviceDataMemory = new HashSet<int>(deviceDataMemory ?? DeviceDataLoads.For(plan.DeviceDataKey) ?? new HashSet<int>());
+        var reads = ResourceTableReadPlanner.Plan(graph, stage, hash, plan.DeviceBindingMemory, plan.DeviceDataKey, plan.DeviceDataMemory);
         var memo = new Dictionary<ScalarValue, ScalarValue>();
         ScalarValue Rewrite(ScalarValue value) => graph.Substitute(value, reads.Replacements, memo);
         ScalarValue RewriteRead(ScalarValue read)
@@ -249,6 +256,18 @@ public sealed class ShaderResourcePlan
         return plan;
     }
 
+    // The binding loads this plan leaves to the device (DeviceBindingLoads); null when none.
+    public IReadOnlySet<int>? DeviceBindingMemory { get; private set; }
+
+    // What DeviceBindingLoads learns this plan's loads under: the shader hash, told apart by
+    // the vertex fetch the host embeds, which renumbers the memory records.
+    public ulong DeviceBindingKey { get; private set; }
+
+    // What DeviceDataLoads learns this plan's data loads under: the same key, for the same
+    // reason (a learned memory index names a record of this embedding's table only).
+    public ulong DeviceDataKey => DeviceBindingKey;
+    public IReadOnlySet<int> DeviceDataMemory { get; private set; } = new HashSet<int>();
+
     // The first flattened slot no descriptor depends on (ResourceTableReadPlanner's data reads).
     public int DataSlotStart { get; private set; }
 
@@ -285,15 +304,19 @@ public sealed class ShaderResourcePlan
         foreach (var branch in ResourceBranches) Push(branch.Condition);
         foreach (var read in DynamicReads) Push(read);
         foreach (var image in IndirectImages) Push(image.Key);
-        foreach (var access in Accesses)
+        for (var index = 0; index < Accesses.Length; index++)
         {
+            var access = Accesses[index];
             if (access is null) continue;
             Push(access.Handle);
             Push(access.SamplerHandle);
-            Push(access.Offset);
+            if (!FullReadOnlyByteBuffer(index)) Push(access.Offset);
             Push(access.Active);
             if (access.Read is { } read)
-                foreach (var operand in read.Operands) Push(operand);
+            {
+                if (FullReadOnlyByteBuffer(index)) Push(read.Operands[0]);
+                else foreach (var operand in read.Operands) Push(operand);
+            }
         }
 
         var referenced = new HashSet<long>();
@@ -330,6 +353,22 @@ public sealed class ShaderResourcePlan
         }
 
         return result;
+    }
+
+    // A raw byte buffer's host binding covers its complete constant V#. Runtime
+    // offsets are bounded by that descriptor in the emitter and cannot select another
+    // resource. Keep every formatted, swizzled, large, writable or runtime V# rooted.
+    private bool FullReadOnlyByteBuffer(int index)
+    {
+        var memory = Memory[index];
+        if (memory.Kind != MemoryResourceKind.Buffer || memory.Access != MemoryAccess.Read || memory.Typed || memory.Formatted ||
+            memory.DeviceDescriptor || memory.Resource >= Info.Buffers.Count) return false;
+        var resource = Info.Buffers[(int)memory.Resource];
+        if (resource.Written || resource.Atomic || resource.Source >= DescriptorSources.Count) return false;
+        var words = DescriptorSources[(int)resource.Source].Dwords;
+        return words.Length == 4 && words.All(word => word.IsConstant) &&
+            ((uint)words[1].Payload & 0xFFFF0000u) == 0 &&
+            words[2].Payload is > 0 and <= DeviceAddressRangePlanner.MaxRangeBytes;
     }
 
     public const int WrittenRangeDwordCount = 3;
@@ -397,7 +436,7 @@ public sealed class ShaderResourcePlan
 
     public bool ValidateRuntimeValue(ScalarValue value, out bool controlDependent)
     {
-        var validator = new RuntimeValueValidator(Graph, UserDataBase, UserDataCount, TableReads.Count);
+        var validator = new RuntimeValueValidator(Graph, UserDataBase, UserDataCount, TableReads.Count, deviceMemory: DeviceBindingMemory);
         var ok = validator.Validate(value);
         controlDependent = validator.ControlDependent;
         return ok;

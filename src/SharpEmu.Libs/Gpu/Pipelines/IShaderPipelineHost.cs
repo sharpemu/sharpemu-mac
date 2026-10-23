@@ -139,6 +139,19 @@ public interface IShaderPipelineHost
     // be re-planned to load them on the device (DeviceDataLoads); null keeps them flattened.
     Func<ulong, bool>? DataWritePending => null;
 
+    // Whether TryReadGuestWord of this dword would wait for recorded GPU work, answered
+    // without waiting. A host that returns a delegate lets a shader whose binding words the
+    // GPU is still writing be re-planned to compute what derives from them on the device
+    // (DeviceBindingLoads) instead of waiting; null reads and waits.
+    Func<ulong, bool>? ResourceWordPending => null;
+    Func<ulong, BindingWordWriter>? ResourceWordWriter => null;
+
+    bool BackgroundShaderCompilationSupported => false;
+    Task<T> TranslateShaderInBackground<T>(Func<T> translate) => Task.Run(translate);
+    void PrecompileProgram(ShaderProgram program, ShaderStage stage, ShaderProgramInfo info) { }
+    bool IsProgramReady(ShaderProgram program, ShaderStage stage) => true;
+    bool ProgramCompilationFailed(ShaderProgram program, ShaderStage stage) => false;
+
     // Creates the host module of one compiled permutation and returns its handle.
     ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId);
 

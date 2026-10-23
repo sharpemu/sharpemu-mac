@@ -518,7 +518,8 @@ public sealed partial class ResourceTracker
             }
 
             if (current.Kind == ScalarValueKind.ScalarBufferWord ||
-                UnvalidatedAddressWordsAreMemory && current.Kind == ScalarValueKind.ScalarAddressWord &&
+                (UnvalidatedAddressWordsAreMemory || _plan.DeviceBindingMemory?.Contains(current.MemoryIndex) == true) &&
+                current.Kind == ScalarValueKind.ScalarAddressWord &&
                 !_plan.ValidateRuntimeValue(current))
             {
                 return true;

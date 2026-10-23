@@ -189,6 +189,8 @@ public readonly record struct ClipSpaceTransform(
 
 public sealed class VertexInputInfo
 {
+    internal VertexInputInfo Detached() => (VertexInputInfo)MemberwiseClone();
+
     public const int MaxBuffers = 32;
 
     public VertexInputBuffer[] Buffers { get; init; } = [];
@@ -240,6 +242,8 @@ public readonly record struct GuestGeometryConfiguration
 
 public sealed class PixelInputInfo
 {
+    internal PixelInputInfo Detached() => (PixelInputInfo)MemberwiseClone();
+
     public const int InterpolatorCount = 32;
     public const int TargetCount = 8;
     public const uint NoPerspectiveCenterRegister = uint.MaxValue;
@@ -289,6 +293,8 @@ public sealed class PixelInputInfo
 
 public sealed class ComputeInputInfo
 {
+    internal ComputeInputInfo Detached() => (ComputeInputInfo)MemberwiseClone();
+
     public uint ThreadsX { get; init; }
     public uint ThreadsY { get; init; }
     public uint ThreadsZ { get; init; }
