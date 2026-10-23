@@ -21,12 +21,14 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// compilers again.
 ///
 /// A serialized archive is a fat file: an air64 slice, a metallib with the AIR of every
-/// function in it, and a slice of GPU binaries for this device. That gives two caches:
+/// captured function, and a slice of GPU binaries for this device. It need not contain
+/// unused entry points from the original source library. That gives two caches:
 ///
 /// <list type="bullet">
 /// <item>Libraries. Each library the host compiles from MSL gets one archive file, named by
 /// a hash of its source and compile options and written from the first pipeline made from
-/// it. Opened as a library (newLibraryWithURL) its AIR slice stands in for the MSL front end:
+/// it. Alternative compute entries use separate keys (ComputeBatchKey), since capturing
+/// one pipeline does not preserve the library's other kernels. Opened as a library (newLibraryWithURL) its AIR slice stands in for the MSL front end:
 /// measured on 159 Demon's Souls compute libraries with the macOS cache cleared, 0.13-0.44 ms
 /// a library against 330-540 ms through newLibraryWithSource. A compute library's file also
 /// holds its pipeline's binary, and opened as an archive (about 6 ms) it stands in for the
@@ -327,11 +329,18 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         return XxHash128.HashToUInt128(MemoryMarshal.AsBytes(source.AsSpan()), seed);
     }
 
+    // An archive contains the functions captured by its pipeline descriptors, not
+    // necessarily every entry in the source library. Keep the segmented kernel apart
+    // from the ordinary compute kernel, including archives written before batching.
+    internal static UInt128 ComputeBatchKey(UInt128 key) =>
+        key == default ? default : key ^ new UInt128(0x434F4D505554455FUL, 0x42415443485F5631UL);
+
     /// <summary>
     /// The library stored for <paramref name="key"/>, owned by the caller, or zero. A file
-    /// that fails its trailer or that Metal will not open is deleted. Any thread.
+    /// that fails its trailer, that Metal will not open, or that lacks the required
+    /// entry point is deleted. Any thread.
     /// </summary>
-    public nint TryLoadLibrary(UInt128 key)
+    public nint TryLoadLibrary(UInt128 key, string? requiredEntryPoint = null)
     {
         if (key == default || !_known.ContainsKey(key))
         {
@@ -355,6 +364,19 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             {
                 Reject(key, path);
                 return 0;
+            }
+
+            if (requiredEntryPoint is not null)
+            {
+                var function = MetalNative.Send(library, MetalNative.Selector("newFunctionWithName:"),
+                    MetalNative.NsString(requiredEntryPoint));
+                if (function == 0)
+                {
+                    MetalNative.SendVoid(library, SelRelease);
+                    Reject(key, path);
+                    return 0;
+                }
+                MetalNative.SendVoid(function, SelRelease);
             }
 
             Touch(path);
