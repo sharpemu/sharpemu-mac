@@ -21,7 +21,8 @@ internal enum Gen5MslPreludes
     Float64 = 1 << 5,
     Bvh = 1 << 6,
     MipStatistics = 1 << 7,
-    All = (1 << 8) - 1,
+    DeviceSamplers = 1 << 8,
+    All = (1 << 9) - 1,
 }
 
 // Compiles shader requests into Metal source with argument-buffer bindings.
@@ -1138,6 +1139,9 @@ public static partial class Gen5MslTranslator
                 preludes |= Gen5MslPreludes.MipStatistics;
             }
 
+            if (_request.Resources.Info.Samplers.Any(sampler => sampler.Device))
+                preludes |= Gen5MslPreludes.DeviceSamplers;
+
             return preludes;
         }
 
@@ -1149,6 +1153,9 @@ public static partial class Gen5MslTranslator
             {
                 EmitFormatLoadPrelude(source);
             }
+
+            if ((preludes & Gen5MslPreludes.DeviceSamplers) != 0)
+                source.Append(MslTemplates.Render("device_sampler_prelude"));
 
             EmitResourcePrelude(source);
         }

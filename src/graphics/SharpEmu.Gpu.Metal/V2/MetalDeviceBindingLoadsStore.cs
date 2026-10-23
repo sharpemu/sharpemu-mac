@@ -51,6 +51,7 @@ internal static class MetalDeviceBindingLoadsStore
         {
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, FileName(stamp));
+            var existed = File.Exists(path);
             var keys = Load(path, out var lines);
             var learned = 0;
             var refused = 0;
@@ -88,7 +89,7 @@ internal static class MetalDeviceBindingLoadsStore
             DeviceBindingLoads.Changed += OnChanged;
             writer.Start();
             Console.Error.WriteLine(
-                $"[LOADER][INFO] Device binding loads seeded: keys={keys.Count} loads={learned} refused={refused}");
+                $"[LOADER][INFO] Device binding loads seeded: keys={keys.Count} loads={learned} refused={refused} file={Path.GetFileName(path)} status={(existed ? "loaded" : "cold_build")}");
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {

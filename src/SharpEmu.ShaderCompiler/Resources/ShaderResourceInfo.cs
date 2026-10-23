@@ -109,6 +109,10 @@ public sealed class ImageResource
 
 public sealed class SamplerResource
 {
+    // The S# is read from SGPRs by an explicit-LOD device sampler. Source is a
+    // zero placeholder used only to keep the host binding layout well formed.
+    public bool Device { get; set; }
+
     public uint Source { get; set; }
     public uint FirstUsePc { get; set; }
     public bool ForcePointFiltering { get; set; }

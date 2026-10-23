@@ -19,7 +19,8 @@ namespace SharpEmu.ShaderCompiler.Resources;
 /// unflattened and unvalidated, so every value derived from it is computed on the device
 /// (device descriptors, device addresses, device loads), and materializes again.
 /// A re-plan is kept only when it costs nothing the host must know (<see cref="Accepts"/>):
-/// an image or sampler descriptor cannot be read on the device, and a store whose range the
+/// image identities and unsupported sampler forms must remain host-evaluable; explicit
+/// zero-LOD 2D/3D samplers can consume their S# on the device. A store whose range the
 /// host can no longer evaluate would make every later read wait. Such a load is refused and
 /// read (waited for) as before. SHARPEMU_METAL_V2_WAIT_RESOURCE_WORDS=1 turns
 /// <see cref="Enabled"/> off.
@@ -69,6 +70,8 @@ public static class DeviceBindingLoads
     // Re-plans refused because planning failed with the loads on the device, and learned
     // loads kept on the device although read on the host (KeepOnHost).
     private static long _planFailed;
+    private static long _planFailedReads;
+    private static long _totalReplans, _totalRefused, _totalPlanFailed;
     private static long _keptOnHost;
     private static long _learned;
     private static long _seeded;
@@ -290,7 +293,11 @@ public static class DeviceBindingLoads
     }
 
     /// <summary>A re-plan was refused because planning failed with the load on the device.</summary>
-    public static void CountPlanFailure() => Interlocked.Increment(ref _planFailed);
+    public static void CountPlanFailure()
+    {
+        Interlocked.Increment(ref _planFailed);
+        Interlocked.Increment(ref _totalPlanFailed);
+    }
 
     // Whether a pending word of this load is waited for rather than deferred: refused, kept
     // on the host, or its key capped.
@@ -401,11 +408,13 @@ public static class DeviceBindingLoads
         }
 
         Interlocked.Increment(ref _refusedReplans);
+        Interlocked.Increment(ref _totalRefused);
     }
 
     public static void CountReplan(ScalarValueKind kind)
     {
         Interlocked.Increment(ref _replans);
+        Interlocked.Increment(ref _totalReplans);
     }
 
     /// <summary>
@@ -454,6 +463,7 @@ public static class DeviceBindingLoads
         if (!t_deferring || WaitsFor(plan.DeviceBindingKey, node.MemoryIndex))
         {
             Interlocked.Increment(ref Waited[KindIndex(node.Kind)]);
+            if (reason.StartsWith("plan_failed", StringComparison.Ordinal)) Interlocked.Increment(ref _planFailedReads);
             return false;
         }
 
@@ -551,6 +561,31 @@ public static class DeviceBindingLoads
         return true;
     }
 
+    // One pending S# component moves the complete descriptor to the device. Leaving
+    // siblings flattened would still read the producer's buffer on the host. Expand
+    // only leaf loads belonging to the descriptor, not its host-evaluable table roots.
+    internal static IReadOnlySet<int>? ExpandSamplerLoads(ScalarValueGraph graph, IReadOnlySet<int>? loads)
+    {
+        if (loads is null || loads.Count == 0) return loads;
+        var expanded = new HashSet<int>(loads);
+        foreach (var access in graph.Accesses)
+        {
+            if (access?.SamplerHandle is not { } sampler) continue;
+            var leaves = new HashSet<int>();
+            var pending = new Stack<ScalarValue>(sampler.Operands);
+            var seen = new HashSet<ScalarValue>();
+            while (pending.TryPop(out var value))
+            {
+                if (!seen.Add(value)) continue;
+                if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord)
+                    leaves.Add(value.MemoryIndex);
+                else foreach (var operand in value.Operands) pending.Push(operand);
+            }
+            if (leaves.Overlaps(loads)) expanded.UnionWith(leaves);
+        }
+        return expanded;
+    }
+
     /// <summary>
     /// Checks each access before replacing a plan: retain its tracked write range and
     /// every host-required image and sampler identity, including their descriptor words.
@@ -618,7 +653,8 @@ public static class DeviceBindingLoads
         {
             if (x == MemoryAccessInfo.NoResource || y == MemoryAccessInfo.NoResource) return x == y;
             return x < current.Info.Samplers.Count && y < replanned.Info.Samplers.Count &&
-                SameDescriptor(current.Info.Samplers[(int)x].Source, replanned.Info.Samplers[(int)y].Source);
+                (replanned.Info.Samplers[(int)y].Device ||
+                 SameDescriptor(current.Info.Samplers[(int)x].Source, replanned.Info.Samplers[(int)y].Source));
         }
         bool SameDescriptor(uint x, uint y)
         {
@@ -658,7 +694,7 @@ public static class DeviceBindingLoads
         FormattableString.Invariant(
             $" words_waited=[addr={Interlocked.Exchange(ref Waited[0], 0)} buf={Interlocked.Exchange(ref Waited[1], 0)}]") +
         FormattableString.Invariant(
-            $" words_replans=[ok={Interlocked.Exchange(ref _replans, 0)} refused={TakeRefused()} kept_on_host={Interlocked.Exchange(ref _keptOnHost, 0)}] binding_loads_device={LearnedLoads}");
+            $" words_replans=[ok={Interlocked.Exchange(ref _replans, 0)} refused={TakeRefused()} kept_on_host={Interlocked.Exchange(ref _keptOnHost, 0)}] words_replans_total=[ok={Interlocked.Read(ref _totalReplans)} refused={Interlocked.Read(ref _totalRefused)} plan_failed={Interlocked.Read(ref _totalPlanFailed)}] words_refused_reads=[plan_failed={Interlocked.Exchange(ref _planFailedReads, 0)}] binding_loads_device={LearnedLoads}");
 
     private static string TakeRefused() => FormattableString.Invariant(
         $"{Interlocked.Exchange(ref _refusedReplans, 0)} plan_failed={Interlocked.Exchange(ref _planFailed, 0)}");

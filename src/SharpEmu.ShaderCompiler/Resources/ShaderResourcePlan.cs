@@ -140,6 +140,7 @@ public sealed class ShaderResourcePlan
         plan.DeviceBindingMemory = !DeviceBindingLoads.Enabled ? null : deviceBindingMemory is null
             ? DeviceBindingLoads.For(plan.DeviceBindingKey)
             : deviceBindingMemory.Count == 0 ? null : new HashSet<int>(deviceBindingMemory);
+        plan.DeviceBindingMemory = DeviceBindingLoads.ExpandSamplerLoads(graph, plan.DeviceBindingMemory);
         plan.DeviceDataMemory = new HashSet<int>(deviceDataMemory ?? DeviceDataLoads.For(plan.DeviceDataKey) ?? new HashSet<int>());
         var reads = ResourceTableReadPlanner.Plan(graph, stage, hash, plan.DeviceBindingMemory, plan.DeviceDataKey, plan.DeviceDataMemory);
         var memo = new Dictionary<ScalarValue, ScalarValue>();

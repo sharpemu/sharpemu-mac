@@ -1,0 +1,114 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+// Explicit-LOD sampling needs no derivatives or anisotropic footprint. Decode the
+// live S# and filter texture.read taps instead of constructing an immutable host
+// MTLSamplerState from pending GPU bytes. Texture views still provide conversion
+// and swizzle. This path deliberately excludes cube, compare and implicit LOD.
+inline float sharpemu_sampler_coord(float c, uint mode)
+{
+    if (mode == 0u) return fract(c);
+    if (mode == 1u) { float p = c - floor(c * 0.5f) * 2.0f; return min(p, 2.0f - p); }
+    if (mode == 3u || mode == 5u || mode == 7u) c = abs(c);
+    if (mode == 2u || mode == 3u || mode == 4u || mode == 5u) return clamp(c, 0.0f, 1.0f);
+    // Border modes need only one complete texel outside the image. Bound the
+    // coordinate before float-to-int conversion, including very large finite inputs.
+    return clamp(c, -1.0f, 2.0f);
+}
+inline int sharpemu_sampler_texel(int x, int size, uint mode, thread bool& outside)
+{
+    if (mode == 0u) return (x % size + size) % size;
+    if (mode == 1u) { int p = (x % (2 * size) + 2 * size) % (2 * size); return min(p, 2 * size - 1 - p); }
+    if (mode >= 4u) outside |= x < 0 || x >= size;
+    return clamp(x, 0, size - 1);
+}
+inline float4 sharpemu_sampler_border(uint4 s)
+{
+    // As in the host sampler, indexed custom borders use transparent black.
+    uint type = s.w >> 30;
+    return type == 2u ? float4(1.0f) : type == 1u ? float4(0.0f, 0.0f, 0.0f, 1.0f) : float4(0.0f);
+}
+
+inline float4 sharpemu_sampler_mip(texture2d<float> t, float2 c, uint4 s, uint mip, bool linear)
+{
+    uint2 modes = uint2((s.x >> 0u) & 7u, (s.x >> 3u) & 7u);
+    c.x = sharpemu_sampler_coord(c.x, modes.x);
+    c.y = sharpemu_sampler_coord(c.y, modes.y);
+    int2 size = int2(t.get_width(mip), t.get_height(mip));
+    float2 position = c * float2(size) - (linear ? 0.5f : 0.0f);
+    int2 base = int2(floor(position));
+    float2 fraction = fract(position);
+    float4 result = float4(0.0f);
+    for (uint tap = 0u; tap < (linear ? 4u : 1u); ++tap)
+    {
+        int2 delta = int2((tap >> 0u) & 1u, (tap >> 1u) & 1u);
+        int2 p = base + delta;
+        bool outside = false;
+        p.x = sharpemu_sampler_texel(p.x, size.x, modes.x, outside);
+        p.y = sharpemu_sampler_texel(p.y, size.y, modes.y, outside);
+        float4 value = outside ? sharpemu_sampler_border(s) : t.read(uint2(p), mip);
+        float weight = linear ? (delta.x != 0 ? fraction.x : 1.0f - fraction.x) * (delta.y != 0 ? fraction.y : 1.0f - fraction.y) : 1.0f;
+        result += value * weight;
+    }
+    return result;
+}
+inline float4 sharpemu_device_sample_lz(texture2d<float> t, float2 c, uint4 s, bool unorm)
+{
+    bool pixelCoords = unorm || (s.x & 0x8000u) != 0u;
+    if (pixelCoords) c /= float2(t.get_width(), t.get_height());
+    uint mipFilter = (s.z >> 26u) & 3u;
+    float lod = mipFilter == 0u || pixelCoords ? 0.0f :
+        min(max(0.0f, float(s.y & 0xFFFu) / 256.0f), float((s.y >> 12u) & 0xFFFu) / 256.0f);
+    lod = clamp(lod, 0.0f, float(t.get_num_mip_levels() - 1u));
+    // POINT/ANISO_POINT and BILINEAR/ANISO_BILINEAR share the same
+    // explicit-level footprint, since the instruction supplies no gradients.
+    bool linear = ((s.z >> (lod > 0.0f ? 22u : 20u)) & 1u) != 0u;
+    if (mipFilter != 2u) return sharpemu_sampler_mip(t, c, s, uint(floor(lod + 0.5f)), linear);
+    uint lower = uint(floor(lod));
+    uint upper = min(lower + 1u, t.get_num_mip_levels() - 1u);
+    return mix(sharpemu_sampler_mip(t, c, s, lower, linear),
+               sharpemu_sampler_mip(t, c, s, upper, linear), fract(lod));
+}
+
+inline float4 sharpemu_sampler_mip(texture3d<float> t, float3 c, uint4 s, uint mip, bool linear)
+{
+    uint3 modes = uint3((s.x >> 0u) & 7u, (s.x >> 3u) & 7u, (s.x >> 6u) & 7u);
+    c.x = sharpemu_sampler_coord(c.x, modes.x);
+    c.y = sharpemu_sampler_coord(c.y, modes.y);
+    c.z = sharpemu_sampler_coord(c.z, modes.z);
+    int3 size = int3(t.get_width(mip), t.get_height(mip), t.get_depth(mip));
+    float3 position = c * float3(size) - (linear ? 0.5f : 0.0f);
+    int3 base = int3(floor(position));
+    float3 fraction = fract(position);
+    float4 result = float4(0.0f);
+    for (uint tap = 0u; tap < (linear ? 8u : 1u); ++tap)
+    {
+        int3 delta = int3((tap >> 0u) & 1u, (tap >> 1u) & 1u, (tap >> 2u) & 1u);
+        int3 p = base + delta;
+        bool outside = false;
+        p.x = sharpemu_sampler_texel(p.x, size.x, modes.x, outside);
+        p.y = sharpemu_sampler_texel(p.y, size.y, modes.y, outside);
+        p.z = sharpemu_sampler_texel(p.z, size.z, modes.z, outside);
+        float4 value = outside ? sharpemu_sampler_border(s) : t.read(uint3(p), mip);
+        float weight = linear ? (delta.x != 0 ? fraction.x : 1.0f - fraction.x) * (delta.y != 0 ? fraction.y : 1.0f - fraction.y) * (delta.z != 0 ? fraction.z : 1.0f - fraction.z) : 1.0f;
+        result += value * weight;
+    }
+    return result;
+}
+inline float4 sharpemu_device_sample_lz(texture3d<float> t, float3 c, uint4 s, bool unorm)
+{
+    bool pixelCoords = unorm || (s.x & 0x8000u) != 0u;
+    if (pixelCoords) c /= float3(t.get_width(), t.get_height(), t.get_depth());
+    uint mipFilter = (s.z >> 26u) & 3u;
+    float lod = mipFilter == 0u || pixelCoords ? 0.0f :
+        min(max(0.0f, float(s.y & 0xFFFu) / 256.0f), float((s.y >> 12u) & 0xFFFu) / 256.0f);
+    lod = clamp(lod, 0.0f, float(t.get_num_mip_levels() - 1u));
+    // POINT/ANISO_POINT and BILINEAR/ANISO_BILINEAR share the same
+    // explicit-level footprint, since the instruction supplies no gradients.
+    bool linear = ((s.z >> (lod > 0.0f ? 22u : 20u)) & 1u) != 0u;
+    if (mipFilter != 2u) return sharpemu_sampler_mip(t, c, s, uint(floor(lod + 0.5f)), linear);
+    uint lower = uint(floor(lod));
+    uint upper = min(lower + 1u, t.get_num_mip_levels() - 1u);
+    return mix(sharpemu_sampler_mip(t, c, s, lower, linear),
+               sharpemu_sampler_mip(t, c, s, upper, linear), fract(lod));
+}

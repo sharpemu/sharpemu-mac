@@ -32,10 +32,12 @@ public sealed class BindingReplanTests
         public bool Pending { get; set; }
         public List<ulong> PendingReads { get; } = [];
 
-        public ShaderProgram Run()
+        public ShaderProgram Run() => Run(out _);
+
+        public ShaderProgram Run(out ShaderStageResources stage)
         {
             var cursor = 0u;
-            return Programs.GetOrCompile(Source, PipelineTestGuest.ComputeOptions(threadsX: 64), ref cursor, out _);
+            return Programs.GetOrCompile(Source, PipelineTestGuest.ComputeOptions(threadsX: 64), ref cursor, out stage);
         }
     }
 
@@ -201,6 +203,61 @@ public sealed class BindingReplanTests
             Assert.Equal(first, bind.Run());
         }
         finally { foreach (var entry in bind.Programs.Entries) DeviceBindingLoads.Forget(entry.Plan.DeviceBindingKey); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DeviceSamplerReplansAndIncompatibleImageClassesRetainActualSamplerData(bool incompatibleFirst)
+    {
+        var background = ShaderProgramCache.BackgroundReplan;
+        ShaderProgramCache.BackgroundReplan = false;
+        var guest = new PipelineTestGuest();
+        Bind? bind = null;
+        guest.Host.ResourceWordPending = address => bind!.Pending && address >= TableAddress && address < TableAddress + 16;
+        // s_load_dwordx4 s[16:19], s[0:1], 0; image_sample_lz v0, v0, s[8:15], s[16:19].
+        guest.RegisterProgram(CodeAddress, HeaderAddress,
+            [0xF4080400, 0xFA000000, 0xF09C0108, 0x00820000, 0xBF80001A, 0xBF810000]);
+        uint[] words = [0x08007492, 0x00FFF000, 0x00100000, 0x80000000];
+        guest.WriteWords(TableAddress, words);
+        var user = new uint[16];
+        user[0] = unchecked((uint)TableAddress); user[1] = (uint)(TableAddress >> 32);
+        user[8] = 0x20; user[9] = (incompatibleFirst ? 69u : 71u) << 20;
+        user[11] = 9u << 28 | DescriptorConstants.IdentityImageSwizzle;
+        var source = guest.Source(CodeAddress, ShaderStage.Compute, user);
+        bind = new Bind { Guest = guest, Programs = new ShaderProgramCache(guest.Context, guest.Compiler, guest.Host), Source = source };
+        try
+        {
+            var reference = bind.Run(out var referenceStage);
+            Assert.Equal(words, Assert.Single(referenceStage.Resources.Samplers));
+            bind.Pending = true;
+            var next = bind.Run(out var deviceStage);
+            if (incompatibleFirst)
+            {
+                Assert.Equal(reference, next);
+                Assert.False(Assert.Single(Assert.Single(bind.Programs.Entries).Plan.Info.Samplers).Device);
+                Assert.Equal(words, Assert.Single(deviceStage.Resources.Samplers));
+            }
+            else
+            {
+                Assert.NotEqual(reference, next);
+                Assert.True(Assert.Single(Assert.Single(bind.Programs.Entries).Plan.Info.Samplers).Device);
+                // Same T# source, now integer: it must go back to a synchronized host
+                // plan instead of publishing an unsupported zero/placeholder sampler.
+                user[9] = 69u << 20;
+                words[0] = 0x08007491;
+                guest.WriteWords(TableAddress, words);
+                var restored = bind.Run(out var restoredStage);
+                Assert.NotEqual(next, restored);
+                Assert.False(Assert.Single(Assert.Single(bind.Programs.Entries).Plan.Info.Samplers).Device);
+                Assert.Equal(words, Assert.Single(restoredStage.Resources.Samplers));
+            }
+        }
+        finally
+        {
+            ShaderProgramCache.BackgroundReplan = background;
+            foreach (var entry in bind.Programs.Entries) DeviceBindingLoads.Forget(entry.Plan.DeviceBindingKey);
+        }
     }
 
 }
