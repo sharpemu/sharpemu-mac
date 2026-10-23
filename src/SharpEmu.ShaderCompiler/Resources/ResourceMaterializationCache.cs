@@ -2225,6 +2225,8 @@ public sealed partial class ResourceMaterializationCache
 
     private sealed class Entry
     {
+        public CaptureRefusal? CaptureRefusal;
+        public WeakReference<DependencyPacket>? CapturedPacket;
         public required ShaderResourcePlan Plan { get; init; }
         public required uint[] UserData { get; init; }
         // The user data words the evaluator read, one bit per word.

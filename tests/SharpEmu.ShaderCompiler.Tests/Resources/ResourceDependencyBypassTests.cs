@@ -18,7 +18,26 @@ public sealed class ResourceDependencyBypassTests
         internal int Reads, ResidentReads, Captures;
         internal ResourceDependencyEpoch Epoch;
         internal bool RefuseCapture, CorruptCapture, Pending;
+        internal bool ByteValidation;
+        internal ResourceCaptureFailure Failure = ResourceCaptureFailure.PendingWriter;
+        internal long Policy, Retry;
+        internal int ByteValidations;
         public ResourceDependencyEpoch DependencyEpoch => Epoch;
+        public ResourceDependencyFailure CaptureFailure => new(ResourceRangeClass.ChunkedBacking, Failure);
+        public long CapturePolicyVersion => Policy;
+        public long CaptureRetryVersion => Retry;
+        public bool UsesDependencyByteValidation => ByteValidation;
+        public bool TryValidateDependencyBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths,
+            ReadOnlySpan<int> offsets, ReadOnlySpan<byte> expected)
+        {
+            ByteValidations++;
+            if (Pending) return false;
+            for (var range = 0; range < addresses.Length; range++)
+                for (var offset = 0; offset < lengths[range]; offset += 4)
+                    if (!Words.TryGetValue(addresses[range] + (ulong)offset, out var word) ||
+                        word != BitConverter.ToUInt32(expected[(offsets[range] + offset)..])) return false;
+            return true;
+        }
 
         internal bool Read(ulong address, out uint word) { Reads++; return Words.TryGetValue(address, out word); }
         internal bool Resident(ulong address, Span<byte> bytes, bool clean)
@@ -265,10 +284,115 @@ public sealed class ResourceDependencyBypassTests
         stream.Run(Roots());
         Assert.Equal(0, stream.Cache.BypassedCalls);
         memory.RefuseCapture = false;
+        memory.Retry++; // Completion of the original writer, without a new GPU write.
         stream.Run(Roots());
         stream.Run(Roots());
         Assert.Equal(1, stream.Cache.BypassedCalls);
         stream.EqualFull();
+    }
+
+    [Fact]
+    public void PhysicalRefusalsAreConstantTimePerEntryUntilMappingOrPolicyChanges()
+    {
+        var memory = TableMemory();
+        memory.RefuseCapture = true;
+        memory.Failure = ResourceCaptureFailure.PhysicalWatch;
+        var stream = new Stream(TablePlan(), memory, verify: false);
+        stream.Run(Roots());
+        var captures = memory.Captures;
+        for (var i = 0; i < 100; i++)
+        {
+            memory.Epoch = memory.Epoch with { GpuWrites = (ulong)i, Overlay = i };
+            memory.Retry++;
+            stream.Run(Roots());
+        }
+        Assert.Equal(captures, memory.Captures);
+        memory.Epoch = memory.Epoch with { Mapping = 1 };
+        stream.Run(Roots());
+        Assert.Equal(captures + 1, memory.Captures);
+        memory.Policy++;
+        stream.Run(Roots());
+        Assert.Equal(captures + 2, memory.Captures);
+        // A different table is not negatively cached by the first one's shader key.
+        stream.Run(Roots(table: 0x2000));
+        Assert.True(memory.Captures > captures + 2);
+        stream.EqualFull();
+    }
+
+    [Fact]
+    public void BytePacketsValidateEveryReadWithoutPhysicalCaptureOrLegacyWalk()
+    {
+        var memory = TableMemory();
+        memory.ByteValidation = true;
+        memory.RefuseCapture = true;
+        var stream = new Stream(TablePlan(), memory, verify: false);
+        stream.Run(Roots());
+        var reads = memory.Reads;
+        var resident = memory.ResidentReads;
+        for (var i = 0; i < 100; i++)
+        {
+            memory.Epoch = memory.Epoch with { GpuWrites = (ulong)i, Overlay = i, Labels = i };
+            stream.Run(Roots());
+        }
+        Assert.Equal(100, stream.Cache.BypassedCalls);
+        Assert.Equal(100, stream.Cache.ByteValidatedCalls);
+        Assert.Equal(0, memory.Captures);
+        Assert.Equal(reads, memory.Reads);
+        Assert.Equal(resident, memory.ResidentReads);
+        stream.EqualFull();
+        memory.Words[0x1040] = 88; // Native/alias store with no notification.
+        stream.Run(Roots());
+        Assert.Equal(2, stream.Cache.FullPathCalls);
+        stream.EqualFull();
+        stream.Run(Roots(0x11000));
+        Assert.Equal(1, stream.Cache.PatchedCalls);
+        stream.EqualFull();
+    }
+
+    [Fact]
+    public void BytePacketsKeepMappingImagePendingAndPolicyVetoes()
+    {
+        var memory = TableMemory();
+        memory.ByteValidation = true;
+        var stream = new Stream(TablePlan(), memory);
+        stream.Run(Roots());
+        stream.Run(Roots());
+        memory.Pending = true;
+        stream.Run(Roots());
+        Assert.Equal(2, stream.Cache.FullPathCalls);
+        memory.Pending = false;
+        stream.Run(Roots());
+        memory.Epoch = memory.Epoch with { Images = 1 };
+        stream.Run(Roots());
+        Assert.Equal(3, stream.Cache.FullPathCalls);
+        memory.Epoch = memory.Epoch with { Mapping = 1 };
+        stream.Run(Roots());
+        Assert.Equal(4, stream.Cache.FullPathCalls);
+        memory.Policy++;
+        stream.Run(Roots());
+        Assert.Equal(5, stream.Cache.FullPathCalls);
+        stream.EqualFull();
+    }
+
+    [Fact]
+    public void BytePacketsEnrollOnlyAfterTheCompleteObservedReadSetIsSafe()
+    {
+        var memory = TableMemory();
+        memory.ByteValidation = true;
+        memory.Pending = true;
+        var stream = new Stream(TablePlan(), memory, verify: false);
+        stream.Run(Roots());
+        Assert.True(memory.ByteValidations > 0);
+        Assert.Equal(1, stream.Cache.FullPathCalls);
+        var validations = memory.ByteValidations;
+        stream.Run(Roots());
+        Assert.Equal(validations, memory.ByteValidations);
+        memory.Pending = false;
+        memory.Retry++;
+        stream.Run(Roots());
+        stream.Run(Roots());
+        Assert.Equal(3, stream.Cache.FullPathCalls);
+        Assert.Equal(1, stream.Cache.ByteValidatedCalls);
     }
 
     [Fact]

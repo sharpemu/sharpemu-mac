@@ -15,11 +15,13 @@ using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 var frames = args.Length == 0 ? 30 : int.Parse(args[0]);
 var verify = args.Contains("--verify");
 CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
-var modes = args.Contains("--ds-mix") ? new[] { "ds-before", "ds-after" } : new[] { "full", "legacy", "packets" };
+var modes = args.Contains("--chunked") ? new[] { "legacy", "refused", "byte-packets" } :
+    args.Contains("--ds-mix") ? new[] { "ds-before", "ds-after" } : new[] { "full", "legacy", "packets" };
 Console.WriteLine($"arch={RuntimeInformation.ProcessArchitecture} frames={frames} calls_per_frame=15178 verify={verify} synthetic=1");
 foreach (var mode in modes)
 {
-    var memory = new Memory { UseGenerations = mode == "ds-after" };
+    var memory = new Memory { UseGenerations = mode == "ds-after", RefuseCapture = mode is "refused" or "byte-packets",
+        ByteValidation = mode == "byte-packets" };
     var plan = MakePlan();
     var plans = Enumerable.Range(0, mode.StartsWith("ds-") ? 48 : 12).Select(_ => MakePlan()).ToArray();
     var inputs = new ResourceRuntimeInputs
@@ -135,12 +137,26 @@ sealed class Memory : IResourceDependencySource
     private readonly uint[] _words = new uint[0x200];
     private readonly long[] _versions = new long[0x200];
     public long Reads, Allocations, Started;
-    public bool UseGenerations, RefuseCapture;
+    public bool UseGenerations, RefuseCapture, ByteValidation;
     public List<(ulong Address, uint Word)>? LogWords;
     public List<byte[]>? LogRuns;
     private readonly GuestWriteGenerations _generations = new();
     public ResourceDependencyFailure CaptureFailure => new(ResourceRangeClass.GuestBacking, ResourceCaptureFailure.NativeWatch);
     public ResourceDependencyEpoch DependencyEpoch => default;
+    public bool UsesDependencyByteValidation => ByteValidation;
+    public bool TryValidateDependencyBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths,
+        ReadOnlySpan<int> offsets, ReadOnlySpan<byte> expected)
+    {
+        for (var range = 0; range < addresses.Length; range++)
+        {
+            var start = checked((int)((addresses[range] - 0x1000) / 4));
+            var length = lengths[range];
+            Reads += length / 4;
+            if (start < 0 || start > _words.Length - length / 4 ||
+                !MemoryMarshal.AsBytes(_words.AsSpan(start, length / 4)).SequenceEqual(expected.Slice(offsets[range], length))) return false;
+        }
+        return true;
+    }
     public Memory()
     {
         for (var descriptor = 0; descriptor < 8; descriptor++)

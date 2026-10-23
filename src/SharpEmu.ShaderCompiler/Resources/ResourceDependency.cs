@@ -27,6 +27,17 @@ public interface IResourceDependencySource
 
     ResourceDependencyFailure CaptureFailure => new(ResourceRangeClass.Unknown, ResourceCaptureFailure.Unsupported);
 
+    // Some backings cannot issue durable physical-watch receipts (for example,
+    // sub-provider-page protection on Rosetta). They may instead validate ALL
+    // recorded bytes using the same nonwaiting ownership checks as normal reads.
+    // This is a byte-validated packet, never a generation-only certificate.
+    bool UsesDependencyByteValidation => false;
+    long CapturePolicyVersion => 0;
+    // Completion can make a pending writer capturable without recording a new write.
+    long CaptureRetryVersion => 0;
+    bool TryValidateDependencyBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths,
+        ReadOnlySpan<int> offsets, ReadOnlySpan<byte> expected) => false;
+
     // Capture may allocate; Validate must neither read bytes nor allocate. A failed
     // capture grants no reuse. Implementations own any write-watch bookkeeping.
     bool TryCaptureDependency(ulong address, ReadOnlySpan<byte> expected, bool clean,

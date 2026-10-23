@@ -14,6 +14,7 @@ public sealed partial class ResourceMaterializationCache
     private readonly long _packetByteBudget;
     private readonly record struct BypassKey(ShaderResourcePlan Plan, ulong ShaderBase, ComputeSelectorState? Compute);
     private long _packetBytes;
+    public long ByteValidatedCalls { get; private set; }
     public long BypassedCalls { get; private set; }
     public long PatchedCalls { get; private set; }
     public long FullPathCalls { get; private set; }
@@ -28,6 +29,7 @@ public sealed partial class ResourceMaterializationCache
 
     private static long _bypassCalls;
     private static long _patchedCalls;
+    private static long _byteValidatedCalls;
 
     // Printed by Metal's periodic PERF report. These count calls which never entered
     // MaterializeCore, separately from the legacy cache's byte-validation hits.
@@ -40,7 +42,7 @@ public sealed partial class ResourceMaterializationCache
             var count = Interlocked.Exchange(ref RangeMisses[index], 0);
             return count == 0 ? null : $"{(ResourceRangeClass)(index / CaptureFailureCount)}/{(ResourceCaptureFailure)(index % CaptureFailureCount)}:{count}";
         }).Where(item => item is not null));
-        return $"resmat_range_miss=[{ranges}] resmat_bypassed={Interlocked.Exchange(ref _bypassCalls, 0)} resmat_patched={Interlocked.Exchange(ref _patchedCalls, 0)} resmat_full=[{reasons}]";
+        return $"resmat_range_miss=[{ranges}] resmat_bypassed={Interlocked.Exchange(ref _bypassCalls, 0)} resmat_patched={Interlocked.Exchange(ref _patchedCalls, 0)} resmat_byte_validated={Interlocked.Exchange(ref _byteValidatedCalls, 0)} resmat_full=[{reasons}]";
     }
 
     private sealed class DependencyPacket
@@ -57,6 +59,9 @@ public sealed partial class ResourceMaterializationCache
         public required ulong[] ReadAddresses;
         public required int[] ReadOffsets, ReadLengths;
         public required byte[] ReadBytes;
+        public bool ByteValidated;
+        public long CapturePolicy;
+        public bool Disposed;
         public DependencyPacket? Next;
         // Published snapshots stay immutable. A bounded memo avoids allocating on repeated
         // rings; a new scalar value needs its own shell under ResourceSnapshot's owned ABI.
@@ -65,6 +70,7 @@ public sealed partial class ResourceMaterializationCache
 
         public void Dispose()
         {
+            Disposed = true;
             foreach (var dependency in Dependencies) dependency.Dispose();
         }
     }
@@ -89,6 +95,7 @@ public sealed partial class ResourceMaterializationCache
         for (var packet = head; packet is not null; packet = packet.Next)
         {
             if (!ReferenceEquals(packet.Source, source) ||
+                packet.CapturePolicy != source.CapturePolicyVersion ||
                 !ReferenceEquals(packet.Readers.ReadMemory, inputs.ReadMemory) ||
                 !ReferenceEquals(packet.Readers.ReadCleanMemory, inputs.ReadCleanMemory) ||
                 !ReferenceEquals(packet.Readers.DataWritePending, inputs.DataWritePending) ||
@@ -98,7 +105,17 @@ public sealed partial class ResourceMaterializationCache
                 !packet.Plan.Matches(packet.Snapshot.UserData, inputs.UserData, packet.UsedUserData, out var patched) ||
                 (patched && !packet.Plan.CanPatch(packet.Snapshot, inputs.UserData))) continue;
             reason = EpochReason(packet.Epoch, epoch);
+            // Global writers/overlays need not invalidate a byte packet when none
+            // of its reads overlap them. Mapping and resource identity still veto.
+            if (packet.ByteValidated && reason is FullReason.GpuWrite or FullReason.Overlay)
+                reason = FullReason.Cold;
             if (reason != FullReason.Cold) continue;
+            if (packet.ByteValidated && !source.TryValidateDependencyBytes(packet.ReadAddresses,
+                packet.ReadLengths, packet.ReadOffsets, packet.ReadBytes))
+            {
+                reason = FullReason.Unavailable;
+                continue;
+            }
             foreach (var dependency in packet.Dependencies)
             {
                 var status = dependency.Validate();
@@ -109,7 +126,9 @@ public sealed partial class ResourceMaterializationCache
             // A writer/overlay transition during validation cannot certify a packet.
             if (reason != FullReason.Cold || source.DependencyEpoch != epoch) continue;
 
-            if (inputs.ObserveCachedRead is { } observe)
+            if (inputs.ObserveCachedReads is { } observeBatch)
+                observeBatch(packet.ReadAddresses, packet.ReadLengths, packet.ReadOffsets, packet.ReadBytes);
+            else if (inputs.ObserveCachedRead is { } observe)
             {
                 for (var range = 0; range < packet.ReadAddresses.Length; range++)
                     observe(packet.ReadAddresses[range], packet.ReadBytes.AsSpan(packet.ReadOffsets[range], packet.ReadLengths[range]));
@@ -143,6 +162,11 @@ public sealed partial class ResourceMaterializationCache
                 Interlocked.Increment(ref _bypassCalls);
             }
             specialization = packet.Specialization;
+            if (packet.ByteValidated)
+            {
+                ByteValidatedCalls++;
+                Interlocked.Increment(ref _byteValidatedCalls);
+            }
             Hits++;
             if (_verifyDependencyBypass) VerifyBypass(plan, inputs, snapshot, specialization);
             return true;
@@ -170,19 +194,49 @@ public sealed partial class ResourceMaterializationCache
     private void CapturePacket(Entry entry, ResourceRuntimeInputs inputs, ResourceSnapshot? observed = null)
     {
         if (!_dependencyBypass || inputs.DependencySource is not { } source || entry.MovedReads || DeviceBindingLoads.Deferred) return;
+        var epoch = source.DependencyEpoch;
+        var policy = source.CapturePolicyVersion;
+        // Cache refusal on the actual immutable read set, not just on a shader key.
+        // Unsupported physical watches retry only after mapping/policy changes;
+        // transient refusals retry in a new dependency epoch. Neither scans roots.
+        if (entry.CaptureRefusal is { } refusal && ReferenceEquals(refusal.Source, source) && refusal.Policy == policy &&
+            (refusal.Failure.Reason is ResourceCaptureFailure.PhysicalWatch or ResourceCaptureFailure.Unsupported
+                ? refusal.Epoch.Mapping == epoch.Mapping : refusal.Epoch == epoch && refusal.Retry == source.CaptureRetryVersion)) return;
         for (var word = 0; word < entry.UserData.Length; word++)
             if (IsUsed(entry.UsedUserData, word) && entry.UserData[word] != inputs.UserData[word]) return;
+        if (entry.CapturedPacket?.TryGetTarget(out var captured) == true && !captured.Disposed && captured.ByteValidated &&
+            ReferenceEquals(captured.Source, source) && captured.CapturePolicy == policy &&
+            ReferenceEquals(captured.Readers.ReadMemory, inputs.ReadMemory) &&
+            ReferenceEquals(captured.Readers.ReadCleanMemory, inputs.ReadCleanMemory) &&
+            ReferenceEquals(captured.Readers.DataWritePending, inputs.DataWritePending) &&
+            ReferenceEquals(captured.Readers.ResourceWordPending, inputs.ResourceWordPending) &&
+            ReferenceEquals(captured.Readers.ResourceWordWriter, inputs.ResourceWordWriter) &&
+            captured.Readers.ReadsClean == inputs.ReadsClean &&
+            captured.Epoch.Mapping == epoch.Mapping && captured.Epoch.Images == epoch.Images &&
+            captured.Plan.Matches(captured.Snapshot.UserData, inputs.UserData, captured.UsedUserData, out var patched) &&
+            (!patched || captured.Plan.CanPatch(captured.Snapshot, inputs.UserData))) return;
         var key = new BypassKey(entry.Plan, inputs.ShaderBase, inputs.ComputeState);
-        var size = entry.EstimatedBytes + entry.RangeAddresses.Length * 256L +
+        var byteValidated = source.UsesDependencyByteValidation && entry.RangeAddresses.Length != 0;
+        var size = entry.EstimatedBytes + (byteValidated ? 0 : entry.RangeAddresses.Length * 256L) +
             256L + entry.UserData.Length * sizeof(uint);
         if (size > _packetByteBudget) return;
-        var epoch = source.DependencyEpoch;
         var result = observed ?? entry.Snapshot;
         ResourceDependency[] dependencies = [];
         var count = 0;
         try
         {
-            for (var range = 0; range < entry.RangeAddresses.Length; range++)
+            // The evaluator may have read across an intervening writer. Do not
+            // publish a result whose complete read set is no longer current.
+            if (byteValidated && !source.TryValidateDependencyBytes(entry.RangeAddresses,
+                entry.RangeLengths, entry.RangeOffsets, entry.Bytes))
+            {
+                var failure = new ResourceDependencyFailure(ResourceRangeClass.Unknown, ResourceCaptureFailure.Changed);
+                entry.CaptureRefusal = new(source, epoch, policy, source.CaptureRetryVersion, failure);
+                if (_uncertified.Count >= 2048) _uncertified.Clear();
+                _uncertified[key] = failure;
+                return;
+            }
+            for (var range = 0; !byteValidated && range < entry.RangeAddresses.Length; range++)
             {
                 if (!source.TryCaptureDependency(entry.RangeAddresses[range],
                     entry.Bytes.AsSpan(entry.RangeOffsets[range], entry.RangeLengths[range]),
@@ -191,6 +245,7 @@ public sealed partial class ResourceMaterializationCache
                     dependency?.Dispose();
                     if (_uncertified.Count >= 2048) _uncertified.Clear();
                     _uncertified[key] = source.CaptureFailure;
+                    entry.CaptureRefusal = new(source, epoch, policy, source.CaptureRetryVersion, source.CaptureFailure);
                     return;
                 }
                 // Most unsupported ranges refuse at the first token. Keep that ordinary
@@ -224,6 +279,7 @@ public sealed partial class ResourceMaterializationCache
                 UsedUserData = entry.UsedUserData,
                 DynamicWords = dynamicWords.ToArray(),
                 Source = source, Epoch = epoch, Dependencies = dependencies,
+                ByteValidated = byteValidated, CapturePolicy = policy,
                 Snapshot = PatchedSnapshot(result, result.Buffers,
                     result.FlattenedResourceTable, roots),
                 Specialization = entry.Specialization,
@@ -237,6 +293,8 @@ public sealed partial class ResourceMaterializationCache
             };
             _packetBytes += packet.Bytes;
             _packets[key] = packet;
+            entry.CapturedPacket = new(packet);
+            entry.CaptureRefusal = null;
             count = 0; // Ownership moved to the packet.
             // Eight alternate descriptor/root sets per immutable plan, newest first.
             var tail = packet;
@@ -255,6 +313,9 @@ public sealed partial class ResourceMaterializationCache
             for (var index = 0; index < count; index++) dependencies[index].Dispose();
         }
     }
+
+    private sealed record CaptureRefusal(IResourceDependencySource Source, ResourceDependencyEpoch Epoch,
+        long Policy, long Retry, ResourceDependencyFailure Failure);
 
     private void ClearPackets()
     {

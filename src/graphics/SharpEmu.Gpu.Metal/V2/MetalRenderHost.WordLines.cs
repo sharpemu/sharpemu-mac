@@ -30,6 +30,11 @@ internal sealed partial class MetalRenderHost : IResourceDependencySource
 
     // Kill switch retains the original protected-image-token enrollment policy.
     internal bool ResourceGenerationsEnabled { get; set; } = SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOURCE_GENERATIONS");
+    bool IResourceDependencySource.UsesDependencyByteValidation => ResourceGenerationsEnabled && _backing.BackingChunkBytes != 0;
+    long IResourceDependencySource.CapturePolicyVersion => ResourceGenerationsEnabled ? 1 : 0;
+    long IResourceDependencySource.CaptureRetryVersion => (long)CompletedSerialHint;
+    bool IResourceDependencySource.TryValidateDependencyBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths,
+        ReadOnlySpan<int> offsets, ReadOnlySpan<byte> expected) => TryCompareResidentGuestBytes(addresses, lengths, offsets, expected);
     private ResourceDependencyFailure _dependencyFailure;
     ResourceDependencyFailure IResourceDependencySource.CaptureFailure => _dependencyFailure;
     private readonly long[,] _dependencyCaptures = new long[(int)ResourceRangeClass.Released + 1, (int)ResourceCaptureFailure.Unsupported + 1];

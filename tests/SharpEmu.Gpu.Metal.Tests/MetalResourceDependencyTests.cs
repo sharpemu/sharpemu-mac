@@ -19,6 +19,71 @@ public sealed class MetalResourceDependencyTests
 {
     private static readonly Lazy<nint> Device = new(MetalNative.MTLCreateSystemDefaultDevice);
     private static long _nextMapping;
+
+    [Fact]
+    public void ChunkedTablesBypassAfterRealSubpageProtectionLosesPhysicalCopyEligibility()
+    {
+        using var rig = new Rig(chunked: true);
+        var source = (IResourceDependencySource)rig.Host;
+        using (var initial = Capture(rig)) Assert.Equal(ResourceDependencyStatus.Current, initial.Validate());
+        // Rosetta's logical 4K protection call succeeds, but the ledger cannot
+        // issue a 16K provider receipt. Even another page in the same view loses
+        // optional copy eligibility; descriptor bytes themselves remain readable.
+        rig.ProtectSubpage();
+        var copied = source.TryCaptureDependency(rig.Address, BitConverter.GetBytes(0x8000u), false, out var afterProtection);
+        afterProtection?.Dispose();
+        if (System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64)
+        {
+            Assert.False(copied);
+            Assert.Equal(ResourceCaptureFailure.PhysicalWatch, source.CaptureFailure.Reason);
+        }
+        var captures = rig.Memory.PhysicalCaptures;
+        rig.Run();
+        for (var i = 0; i < 32; i++)
+        {
+            rig.Host.NoteGuestMemoryWrite(rig.Address + 0x8000, 4, MetalGpuWriteOrigin.Copy);
+            rig.Run();
+        }
+        Assert.Equal(32, rig.Cache.BypassedCalls);
+        Assert.Equal(32, rig.Cache.ByteValidatedCalls);
+        Assert.Equal(captures, rig.Memory.PhysicalCaptures);
+        // An alias store must be seen even when it does not notify the table's VA.
+        Assert.True(rig.Memory.Views.TryMapReservedRange(rig.AliasAddress, Rig.Size, 0, HostPageProtection.ReadWrite, out _));
+        Assert.True(rig.Memory.TryWrite(rig.AliasAddress, BitConverter.GetBytes(91u)));
+        rig.Run();
+        Assert.Equal(91u, rig.Snapshot.FlattenedResourceTable[0]);
+        Assert.Equal(2, rig.Cache.FullPathCalls);
+        rig.Run();
+        Assert.Equal(33, rig.Cache.ByteValidatedCalls);
+        rig.Host.ResourceGenerationsEnabled = false;
+        rig.Run();
+        Assert.Equal(3, rig.Cache.FullPathCalls);
+        Assert.Equal(33, rig.Cache.ByteValidatedCalls);
+    }
+
+    [Fact]
+    public void ChunkedBytePacketsDeclinePendingWritersAndOrderedLabels()
+    {
+        using var rig = new Rig(chunked: true);
+        rig.Run();
+        rig.Run();
+        Assert.Equal(1, rig.Cache.ByteValidatedCalls);
+        rig.Host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, rig.Address + 0x4000, 77));
+        rig.Run();
+        Assert.Equal(2, rig.Cache.ByteValidatedCalls);
+        rig.Host.NoteGuestMemoryWrite(rig.Address, 4, MetalGpuWriteOrigin.Copy);
+        var source = (IResourceDependencySource)rig.Host;
+        Assert.False(source.TryValidateDependencyBytes([rig.Address], [4], [0], BitConverter.GetBytes(0x8000u)));
+        rig.Host.FlushAndWaitForGpu();
+        rig.Host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, rig.Address, 55));
+        Assert.False(source.TryValidateDependencyBytes([rig.Address], [4], [0], BitConverter.GetBytes(0x8000u)));
+        rig.Run();
+        Assert.Equal(55u, rig.Snapshot.FlattenedResourceTable[0]);
+        rig.Host.FlushAndWaitForGpu();
+        rig.Run();
+        rig.Run();
+        Assert.True(rig.Cache.ByteValidatedCalls > 1);
+    }
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
@@ -214,7 +279,7 @@ public sealed class MetalResourceDependencyTests
         public Memory Memory { get; }
         public MetalRenderHost Host { get; }
 
-        public Rig(bool native = false, bool staged = false)
+        public Rig(bool native = false, bool staged = false, bool chunked = false)
         {
             for (var attempt = 0; attempt < 256; attempt++)
             {
@@ -226,7 +291,7 @@ public sealed class MetalResourceDependencyTests
             Assert.NotEqual(0UL, Address);
             var views = new SharedBackingViews(_viewsHost, Size);
             Assert.True(views.TryMapReservedRange(Address, Size, 0, HostPageProtection.ReadWrite, out _));
-            Memory = new Memory(views, native);
+            Memory = new Memory(views, native, chunked);
             Manager.Register(Address, 2 * Size, GuestPageProtection.Read | GuestPageProtection.Write);
             GuestGpuMemoryHook.Attach(null);
             GuestGpuMemoryHook.Attach(Manager);
@@ -251,6 +316,8 @@ public sealed class MetalResourceDependencyTests
             Manager.MarkCpuWriteLanded(Address, 4);
         }
         public void Run() => Assert.True(Cache.Materialize(_plan, _inputs, _resident, ref Snapshot, ref _specialization, out _));
+        public void ProtectSubpage() => Assert.True(((IHostDerivedProtectionMemory)_viewsHost).ChangeDerivedAccess(
+            Address + 0x4000, 0x1000, GuestPageProtection.Read | GuestPageProtection.Write, HostPageProtection.ReadOnly, ordinaryEnrollment: true));
         public void Dispose()
         {
             typeof(ResourceMaterializationCache).GetMethod("ClearPackets", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.Invoke(Cache, null);
@@ -273,10 +340,14 @@ public sealed class MetalResourceDependencyTests
         public void RemoveWatch(ulong address, ulong size) { }
     }
 
-    private sealed class Memory(SharedBackingViews views, bool native) : ICpuMemory, IGuestBackedSpace, ICpuMappedReadWatchSource
+    private sealed class Memory(SharedBackingViews views, bool native, bool chunked) : ICpuMemory, IGuestBackedSpace, ICpuMappedReadWatchSource
     {
         public SharedBackingViews Views => views;
         public Action? AfterCapture;
+        public int PhysicalCaptures;
+        public ulong BackingChunkBytes => chunked ? 65536UL : 0;
+        public bool TryEnterBackingAliasAccess() => views.TryEnterAliasAccess();
+        public void ExitBackingAliasAccess() => views.ExitAliasAccess();
         public bool TryRead(ulong address, Span<byte> bytes) => views.TryReadBacking(address, bytes);
         public bool TryWrite(ulong address, ReadOnlySpan<byte> bytes) => views.TryWriteBacking(address, bytes);
         public bool CanRead(ulong address, ulong size) => views.Contains(address, size);
@@ -295,6 +366,7 @@ public sealed class MetalResourceDependencyTests
             views.TryReadMappedCopy(address, size, source, bytes, out observation);
         public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong address, ulong size, ulong source, Span<byte> bytes, out CpuMappedCopyObservation? observation)
         {
+            PhysicalCaptures++;
             var result = views.TryReadMappedCopyWithWriteWatch(address, size, source, bytes, out observation);
             AfterCapture?.Invoke();
             return result;

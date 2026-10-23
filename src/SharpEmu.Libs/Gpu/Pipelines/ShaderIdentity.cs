@@ -150,12 +150,41 @@ public sealed class ShaderIdentityCache(ICpuMemory memory, Action<ulong, ulong> 
 // Interval counts are drained alongside materialization counters in Metal's PERF line.
 public static class ProgramInternCounters
 {
-    private static long _codeHits, _codeMisses, _headerHits, _headerMisses;
-    internal static void CodeHit() => Interlocked.Increment(ref _codeHits);
-    internal static void CodeMiss() => Interlocked.Increment(ref _codeMisses);
-    internal static void HeaderHit() => Interlocked.Increment(ref _headerHits);
-    internal static void HeaderMiss() => Interlocked.Increment(ref _headerMisses);
-    public static string TakeReport() =>
-        $"program_intern_hit={Interlocked.Exchange(ref _codeHits, 0)} program_intern_miss={Interlocked.Exchange(ref _codeMisses, 0)} " +
-        $"header_intern_hit={Interlocked.Exchange(ref _headerHits, 0)} header_intern_miss={Interlocked.Exchange(ref _headerMisses, 0)}";
+    // These are diagnostics on every shader/header lookup. Single-writer shards
+    // avoid a contended global atomic on each warm draw; reports take deltas.
+    private sealed class Counts
+    {
+        internal readonly long[] Values = new long[4];
+        internal readonly long[] Reported = new long[4];
+    }
+    private static readonly System.Collections.Concurrent.ConcurrentBag<Counts> Shards = new();
+    private static readonly object ReportGate = new();
+    [ThreadStatic] private static Counts? _local;
+    private static void Add(int index)
+    {
+        var counts = _local;
+        if (counts is null) Shards.Add(_local = counts = new());
+        Volatile.Write(ref counts.Values[index], counts.Values[index] + 1);
+    }
+    internal static void CodeHit() => Add(0);
+    internal static void CodeMiss() => Add(1);
+    internal static void HeaderHit() => Add(2);
+    internal static void HeaderMiss() => Add(3);
+    public static string TakeReport()
+    {
+        lock (ReportGate)
+        {
+            Span<long> totals = stackalloc long[4];
+            totals.Clear();
+            foreach (var counts in Shards)
+                for (var index = 0; index < totals.Length; index++)
+                {
+                    var current = Volatile.Read(ref counts.Values[index]);
+                    totals[index] += current - counts.Reported[index];
+                    counts.Reported[index] = current;
+                }
+            return $"program_intern_hit={totals[0]} program_intern_miss={totals[1]} " +
+                $"header_intern_hit={totals[2]} header_intern_miss={totals[3]}";
+        }
+    }
 }

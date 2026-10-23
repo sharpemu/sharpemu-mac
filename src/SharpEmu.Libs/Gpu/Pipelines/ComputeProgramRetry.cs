@@ -65,7 +65,7 @@ internal sealed class GuestReadLog
     private const int MaxBytes = 64 * 1024;
 
     private readonly List<(ulong Address, uint Word)> _words = [];
-    private readonly List<(ulong Address, byte[] Bytes)> _runs = [];
+    private readonly List<(ulong Address, ReadOnlyMemory<byte> Bytes)> _runs = [];
     private readonly object _gate = new();
     private int _bytes;
 
@@ -123,6 +123,28 @@ internal sealed class GuestReadLog
         }
     }
 
+    // Only immutable materialization packet storage is passed here. Keep the
+    // exact validated observation alive across packet eviction without re-copying.
+    internal void CachedBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths,
+        ReadOnlySpan<int> offsets, ReadOnlyMemory<byte> bytes)
+    {
+        lock (_gate)
+        {
+            // A slice retains the whole packet array. Admit the complete batch
+            // before retaining any of it, preserving the log's byte bound.
+            if (!Complete || bytes.Length > MaxBytes - _bytes)
+            {
+                Complete = false;
+                return;
+            }
+            for (var index = 0; index < addresses.Length; index++)
+            {
+                _runs.Add((addresses[index], bytes.Slice(offsets[index], lengths[index])));
+            }
+            _bytes += bytes.Length;
+        }
+    }
+
     /// <summary>
     /// Whether every logged read would read the same now, asked without waiting: a range the GPU
     /// may still own, or one the host cannot answer from what it holds, does not hold.
@@ -156,7 +178,7 @@ internal sealed class GuestReadLog
             foreach (var (address, expected) in _runs)
             {
                 var now = scratch.AsSpan(0, expected.Length);
-                if (!read(address, now, false) || !now.SequenceEqual(expected))
+                if (!read(address, now, false) || !now.SequenceEqual(expected.Span))
                 {
                     return false;
                 }
