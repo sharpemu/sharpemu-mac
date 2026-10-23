@@ -1840,7 +1840,7 @@ public static partial class Gen5MslTranslator
         private void EmitBallotStore(uint loRegister, string condition)
         {
             var hiRegister = loRegister + 1;
-            if (!IsWave64)
+            if (!IsWave64 && !FragmentLaneMasksEnabled)
             {
                 Line($"s[{loRegister}] = sharpemu_ballot({condition});");
                 if (hiRegister < ScalarRegisterFileCount &&
@@ -1868,7 +1868,9 @@ public static partial class Gen5MslTranslator
                     Line($"{laneCondition} = {condition};");
                 }
 
-                Line($"{MaskBallotMarker}({loRegister}, {laneCondition});");
+                var marker = !IsWave64 && loRegister == VccLoRegister && VccIsLowHalfOnly
+                    ? MaskBallot32Marker : MaskBallotMarker;
+                Line($"{marker}({loRegister}, {laneCondition});");
                 return;
             }
 
@@ -2155,6 +2157,11 @@ public static partial class Gen5MslTranslator
                 instruction.Opcode is "SBfeU64" or "SBfeI64")
             {
                 return TryEmitScalar64(instruction, destination, out error);
+            }
+
+            if (FragmentLaneMasksEnabled && TryEmitLaneMaskOp(instruction, destination))
+            {
+                return true;
             }
 
             var left = Temp("uint", RawSource(instruction, 0));

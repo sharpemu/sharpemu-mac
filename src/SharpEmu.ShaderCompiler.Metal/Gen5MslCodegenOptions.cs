@@ -86,6 +86,12 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// under one bounds proof (<c>sharpemu_load_dword_run</c>), falling back to the per-dword
 /// checks when any dword of the run is out of range. <c>SHARPEMU_MSL_DWORDRUNS=0</c> checks
 /// every dword alone.</param>
+/// <param name="AcyclicStructure">Split shared acyclic regions after ordinary structuring
+/// fails. SHARPEMU_MSL_ACYCLIC_STRUCTURE=0 disables the bounded retry.</param>
+/// <param name="FragmentLaneMasks">Keep fragment masks as lane predicates when scalar bits
+/// are unobserved. SHARPEMU_MSL_FRAGMENT_MASKS=0 restores eager masks.</param>
+/// <param name="ExecReconvergence">Prove entry-mask identities and share local ALU guards.
+/// SHARPEMU_MSL_EXEC_RECONVERGENCE=0 restores the full-mask-only proof.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
@@ -103,7 +109,10 @@ public sealed record Gen5MslCodegenOptions(
     bool PersistentWaitFences = true,
     bool PersistentRecordLocks = true,
     bool DeviceSpanAccess = true,
-    bool RawDwordRuns = true)
+    bool RawDwordRuns = true,
+    bool AcyclicStructure = true,
+    bool FragmentLaneMasks = true,
+    bool ExecReconvergence = true)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -124,5 +133,8 @@ public sealed record Gen5MslCodegenOptions(
         PersistentWaitFences: Environment.GetEnvironmentVariable("SHARPEMU_MSL_PERSISTENT_FENCES") != "0",
         PersistentRecordLocks: Environment.GetEnvironmentVariable("SHARPEMU_MSL_PERSISTENT_RECORDS") != "0",
         DeviceSpanAccess: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEVICESPAN") != "0",
-        RawDwordRuns: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DWORDRUNS") != "0");
+        RawDwordRuns: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DWORDRUNS") != "0",
+        AcyclicStructure: Environment.GetEnvironmentVariable("SHARPEMU_MSL_ACYCLIC_STRUCTURE") != "0",
+        FragmentLaneMasks: Environment.GetEnvironmentVariable("SHARPEMU_MSL_FRAGMENT_MASKS") != "0",
+        ExecReconvergence: Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_RECONVERGENCE") != "0");
 }

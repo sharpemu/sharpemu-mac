@@ -196,10 +196,10 @@ public static partial class Gen5MslTranslator
         private void ApplyLaneVariableEffects(ReadOnlySpan<char> line, int depth, bool[] valid, bool recordLazy)
         {
             var trimmed = line.Trim();
-            if (TryReadBallotMarker(trimmed, out var lo, out var condition))
+            if (TryReadBallotMarker(trimmed, out var lo, out var condition, out var lowOnly))
             {
                 InvalidateLaneVariable(valid, (int)lo);
-                InvalidateLaneVariable(valid, (int)lo + 1);
+                if (!lowOnly) InvalidateLaneVariable(valid, (int)lo + 1);
                 if (depth == 0 && lo < LaneVariableSlots && condition == LaneVariableName(lo))
                 {
                     valid[lo] = true;

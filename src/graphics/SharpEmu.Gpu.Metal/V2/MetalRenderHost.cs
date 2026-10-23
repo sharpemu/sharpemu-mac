@@ -2311,6 +2311,7 @@ internal sealed partial class MetalRenderHost :
             // bounds check. The refused counts kept the per-dword form (a GLC pair snapshot;
             // a swizzled/placed buffer access; a coherent or locked persistent-kernel record).
             $"{DescribeMslMemoryRewrites()} " +
+            $"{ShaderCompiler.Metal.Gen5MslTranslator.Statistics.OptimizationReport} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed} " +
             (_meshletCache?.TakeCounters() ?? "meshlet_draws=0") + " " + TakeIndirectCounters());
         _slowWaitReports = 0;

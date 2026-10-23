@@ -55,6 +55,12 @@ public static partial class Gen5MslTranslator
             /// <summary>The pair whose lane variable the op sets, or -1.</summary>
             public required int LaneVariable { get; init; }
 
+            // Fragment scalar masks can carry bits belonging to absent/retired lanes,
+            // and wave32's high dword can be scratch data. Only the original pair
+            // expression preserves those bits when the result or SCC is observed.
+            public bool PreserveScalarBits { get; init; }
+            public bool SetsScc { get; init; }
+
             /// <summary>FixedLazy plus the source pairs found valid; set when the bodies resolve.</summary>
             public List<uint> Lazy { get; } = [];
         }
@@ -67,7 +73,11 @@ public static partial class Gen5MslTranslator
         private bool _pairFormOnly;
 
         private bool LaneMasksEnabled =>
-            _options.DeadMaskBallotElision && IsWave64 && !IsNarrowWave64 && !ClampsExecToLanes;
+            _options.DeadMaskBallotElision &&
+            ((IsWave64 && !IsNarrowWave64 && !ClampsExecToLanes) || FragmentLaneMasksEnabled);
+
+        private bool FragmentLaneMasksEnabled =>
+            _options.DeadMaskBallotElision && _options.FragmentLaneMasks && _stage == Gen5MslStage.Pixel && !IsSingleLaneStage;
 
         private static string LaneVariableName(uint register) => $"ml{register}";
 
@@ -219,21 +229,25 @@ public static partial class Gen5MslTranslator
             }
 
             var opcode = instruction.Opcode;
-            var saveexec = opcode.EndsWith("SaveexecB64", StringComparison.Ordinal);
+            var lowOnly = FragmentLaneMasksEnabled && opcode.EndsWith("B32", StringComparison.Ordinal);
+            var suffix = lowOnly ? "B32" : "B64";
+            var ballotMarker = lowOnly ? MaskBallot32Marker : MaskBallotMarker;
+            var sccMarker = lowOnly ? SccAny32Marker : SccAnyMarker;
+            var saveexec = opcode.EndsWith("Saveexec" + suffix, StringComparison.Ordinal);
             string kind;
             if (saveexec)
             {
                 kind = opcode[1..opcode.IndexOf("Saveexec", StringComparison.Ordinal)];
             }
-            else if (opcode == "SMovB64")
+            else if (opcode == "SMov" + suffix)
             {
                 kind = "Mov";
             }
-            else if (opcode == "SNotB64")
+            else if (opcode == "SNot" + suffix)
             {
                 kind = "Not";
             }
-            else if (opcode.Length > 4 && opcode[0] == 'S' && opcode.EndsWith("B64", StringComparison.Ordinal))
+            else if (opcode.Length > 4 && opcode[0] == 'S' && opcode.EndsWith(suffix, StringComparison.Ordinal))
             {
                 kind = opcode[1..^3];
             }
@@ -267,6 +281,13 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            if (FragmentLaneMasksEnabled && !saveexec && !exactExec && !exactVcc &&
+                !instruction.Sources.Any(source => source.Kind == Gen5OperandKind.ScalarRegister &&
+                    (source.Value is ExecLoRegister or VccLoRegister || _laneVariables.Contains(source.Value))))
+            {
+                return false;
+            }
+
             var fixedLazy = new SortedSet<uint>();
             var sources = new SortedSet<uint>();
             if (!TryLaneSource(instruction.Sources[0], fixedLazy, sources, out var left))
@@ -285,7 +306,9 @@ public static partial class Gen5MslTranslator
                 _pairFormOnly = true;
                 try
                 {
-                    return TryEmitScalar64(instruction, destination, out _);
+                    return lowOnly
+                        ? TryEmitScalarAlu(instruction, out _)
+                        : TryEmitScalar64(instruction, destination, out _);
                 }
                 finally
                 {
@@ -300,7 +323,8 @@ public static partial class Gen5MslTranslator
             // The bools are plain statements: later consumers refer to them whichever form
             // the op takes.
             var laneLines = new List<string>();
-            var dests = new HashSet<uint> { destination, destination + 1 };
+            var dests = new HashSet<uint> { destination };
+            if (!lowOnly) dests.Add(destination + 1);
             string remembered;
             if (saveexec)
             {
@@ -311,12 +335,12 @@ public static partial class Gen5MslTranslator
                     laneLines.Add($"vcc = {old};");
                 }
 
-                laneLines.Add($"{MaskBallotMarker}({destination}, {old});");
+                laneLines.Add($"{ballotMarker}({destination}, {old});");
                 laneLines.Add($"exec = {next};");
-                laneLines.Add($"{MaskBallotMarker}({ExecLoRegister}, {next});");
-                laneLines.Add($"{SccAnyMarker}({ExecLoRegister})");
+                laneLines.Add($"{ballotMarker}({ExecLoRegister}, {next});");
+                laneLines.Add($"{sccMarker}({ExecLoRegister})");
                 dests.Add(ExecLoRegister);
-                dests.Add(ExecHiRegister);
+                if (!lowOnly) dests.Add(ExecHiRegister);
                 remembered = old;
             }
             else
@@ -331,10 +355,10 @@ public static partial class Gen5MslTranslator
                     laneLines.Add($"exec = {result};");
                 }
 
-                laneLines.Add($"{MaskBallotMarker}({destination}, {result});");
+                laneLines.Add($"{ballotMarker}({destination}, {result});");
                 if (kind != "Mov")
                 {
-                    laneLines.Add($"{SccAnyMarker}({destination})");
+                    laneLines.Add($"{sccMarker}({destination})");
                 }
 
                 remembered = result;
@@ -356,6 +380,8 @@ public static partial class Gen5MslTranslator
                 FixedLazy = [.. fixedLazy],
                 Dests = dests,
                 LaneVariable = variable,
+                PreserveScalarBits = FragmentLaneMasksEnabled,
+                SetsScc = kind != "Mov" || saveexec,
             });
             Line($"{MaskOpMarker}({_maskOps.Count - 1})");
             return true;
