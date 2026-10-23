@@ -505,6 +505,8 @@ internal sealed partial class MetalImageCache
                     if (MetalStoreDiag.On)
                     {
                         request.DiagImages += $"[writer_serial={image.GpuWriteSerial} writer_done={image.GpuWriteSerial <= _owner.CompletedSerial} " +
+                            $"writer_open={image.GpuWriteSerial >= _owner.CurrentSerial} prone_age={(image.StoreFrame == 0 ? -1 : _cacheFrame - image.StoreFrame)} " +
+                            $"addr=0x{image.Description.Data.Address:X} " +
                             $"mb={image.Description.Data.Size / 1048576.0:F1} {ProfileLabel("writeback", image.Description)}]";
                     }
 
