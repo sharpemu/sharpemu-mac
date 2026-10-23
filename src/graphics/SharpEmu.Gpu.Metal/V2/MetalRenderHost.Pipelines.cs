@@ -1934,8 +1934,7 @@ internal sealed partial class MetalRenderHost
             return true;
         }
 
-        if (lengths.Length != count || offsets.Length != count || _labelOverlay.Count != 0 ||
-            _backing.SingleCopy is { ReleasedChunks: > 0 })
+        if (lengths.Length != count || offsets.Length != count)
         {
             return false;
         }
@@ -1966,7 +1965,12 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = high - low;
-            if (_imageCache.HasGpuModifiedImageBytes(low, size) ||
+            // Labels/released chunks elsewhere do not invalidate these reads.
+            // Overlapping ones still take the ordered read/restoration path.
+            if (DependencyRangeReleased(low, size) ||
+                (_labelOverlay.Count != 0 &&
+                 _labelOverlay.Coverage(low, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None) ||
+                _imageCache.HasGpuModifiedImageBytes(low, size) ||
                 (_cpOverlay.Count != 0 &&
                  _cpOverlay.Coverage(low, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None) ||
                 IsResidentRangePending(low, size))

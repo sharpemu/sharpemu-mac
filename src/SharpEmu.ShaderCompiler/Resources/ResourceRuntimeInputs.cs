@@ -7,6 +7,8 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 // Reads one dword of guest memory; false when the address cannot be read.
 public delegate void ResourceReadObserver(ulong address, ReadOnlySpan<byte> bytes);
+public delegate void ResourceReadBatchObserver(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths,
+    ReadOnlySpan<int> offsets, ReadOnlyMemory<byte> bytes);
 
 public delegate bool GuestWordReader(ulong address, out uint word);
 
@@ -39,6 +41,9 @@ public sealed class ResourceRuntimeInputs
     // A bypass has already certified these original bytes. Retry logs must retain
     // the same observations even though no reader/evaluator was called on the hit.
     public ResourceReadObserver? ObserveCachedRead { get; set; }
+    // Packet storage is immutable and may be retained by a retry log. Batch replay
+    // avoids copying/allocating one byte array and taking one lock per range.
+    public ResourceReadBatchObserver? ObserveCachedReads { get; set; }
 
     // Whether recorded GPU work may still write the dword at this address, asked without
     // waiting. A data-only table word found pending is learned as a device load

@@ -42,6 +42,47 @@ public sealed class ResourceRetryReadLogTests
         Assert.Equal(22u, snapshot.FlattenedResourceTable[0]);
     }
 
+    [Fact]
+    public void BatchedPacketReplayRetainsExactBytesWithoutPerRangeCopies()
+    {
+        using var memory = new Memory();
+        var plan = Extract(Program(ScalarLoad(0, 0, 16), Vop1(8, "VMovB32", 0, Gen5Operand.Scalar(16)),
+            EndProgram(12)), userDataCount: 2);
+        var log = new GuestReadLog();
+        ResourceReadBatchObserver observe = log.CachedBytes;
+        var inputs = new ResourceRuntimeInputs { UserData = [0x1000, 0], ReadMemory = memory.Read,
+            ReadCleanMemory = memory.Read, DependencySource = memory, ObserveCachedReads = observe };
+        var cache = new ResourceMaterializationCache(dependencyBypass: true, verifyDependencyBypass: false);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        ResidentGuestBytesReader resident = memory.Resident;
+        Assert.True(cache.Materialize(plan, inputs, resident, ref snapshot, ref specialization, out _));
+        // Warm list capacity and the callback before measuring only replay storage.
+        Assert.True(cache.Materialize(plan, inputs, resident, ref snapshot, ref specialization, out _));
+        log.Clear();
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 100; i++)
+        {
+            Assert.True(cache.Materialize(plan, inputs, resident, ref snapshot, ref specialization, out _));
+            log.Clear();
+        }
+        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+        Assert.True(cache.Materialize(plan, inputs, memory.Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(1, log.Count);
+        Assert.True(log.Holds(memory.Resident));
+        memory.Write(22);
+        // Replacing/evicting the packet cannot mutate the log's old observation.
+        Assert.True(cache.Materialize(plan, inputs, memory.Resident, ref snapshot, ref specialization, out _));
+        Assert.False(log.Holds(memory.Resident));
+        memory.Available = false;
+        Assert.False(log.Holds(memory.Resident));
+        log.Clear();
+        memory.Available = true;
+        for (var i = 0; i < 16385; i++) log.CachedBytes([0x1000UL], [4], [0], BitConverter.GetBytes(22u));
+        Assert.False(log.Complete);
+        Assert.False(log.Holds(memory.Resident));
+    }
+
     private sealed class Memory : IResourceDependencySource, IDisposable
     {
         private readonly GuestWriteGenerations _versions = new();
