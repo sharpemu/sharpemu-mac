@@ -150,7 +150,7 @@ public sealed class PerformanceOverlayTests
             OverlayMode = (PerformanceOverlayMode)100,
             OverlayEnabled = false,
         }.Normalize();
-        Assert.Equal(PerformanceOverlayCorner.TopRight, options.OverlayCorner);
+        Assert.Equal(PerformanceOverlayCorner.BottomRight, options.OverlayCorner);
         Assert.Equal(PerformanceOverlayMode.Full, options.OverlayMode);
         Assert.False(options.OverlayEnabled);
     }
@@ -186,6 +186,26 @@ public sealed class PerformanceOverlayTests
     public void MissingGpuCounterDoesNotReportZero(double value, string label)
     {
         Assert.Equal(label, PerfOverlay.FormatUsage(value));
+    }
+
+    [Theory]
+    [InlineData(0, 40)]
+    [InlineData(33, 40)]
+    [InlineData(41, 80)]
+    [InlineData(500, 660)]
+    [InlineData(1900, 2000)]
+    [InlineData(60000, 10000)]
+    public void FrameGraphScaleHoldsTheSlowestFrame(double peakMilliseconds, double scale)
+    {
+        Assert.Equal(scale, PerfOverlay.ChooseGraphScale(peakMilliseconds));
+    }
+
+    [Theory]
+    [InlineData(0L, "0.0G")]
+    [InlineData(7L * 1024 * 1024 * 1024 + 512L * 1024 * 1024, "7.5G")]
+    public void DeviceMemoryIsShownInGigabytes(long bytes, string label)
+    {
+        Assert.Equal(label, PerfOverlay.FormatGigabytes(bytes));
     }
 
     [Fact]

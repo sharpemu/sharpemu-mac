@@ -60,7 +60,9 @@ Wildcard samples use [PdhGetFormattedCounterArray](https://learn.microsoft.com/e
 
 The Metal backend draws the Full and Minimal panels as the last quad of the
 present pass, scaled to the display's pixel density and clipped to the window.
-The display is on by default, in Full mode, with the top-right corner saved.
+The display is on by default, in Full mode, with the bottom-right corner saved, clear of the HUDs of the titles tried so far.
+The panel shows `GPUMEM` (device memory in use and its peak) instead of `GPUALLOC`,
+and the frame graph rescales to the slowest recent frame, printing the scale.
 Title bar mode shows the summary in the window title; a borderless or
 full-screen window has no title bar and shows nothing. F1, F2 and
 `SHARPEMU_OVERLAY=0` work as described above.

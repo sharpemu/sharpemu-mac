@@ -79,6 +79,25 @@ internal sealed partial class MetalRenderHost
             $"ring_mb={_guestMemory.RingBytes / Mb} ring_peak_mb={ringPeak / Mb}");
     }
 
+    // Feeds the on-screen performance display. Called on the window thread a few times a
+    // second: BUF is the shared memory the staging pool and upload rings hold, IMG what the
+    // image cache holds, and the device total stands in for the Vulkan allocation count.
+    // Returns the queue depth for the display: guest submissions waiting, and command
+    // buffers committed but not yet complete.
+    internal (int Pending, int InFlight) PublishOverlayStatistics()
+    {
+        var staging = StagingTiler?.Staging?.TotalBytes ?? 0UL;
+        SharpEmu.Libs.VideoOut.PerfOverlay.SetGuestCacheStatistics(
+            _guestMemory.RingBytes + staging, _imageCache.TotalUsedMemory, 0, 0);
+        if (_device != 0)
+        {
+            SharpEmu.Libs.VideoOut.PerfOverlay.SetDeviceMemoryStatistics(
+                MetalV2Native.SendValue64(_device, SelDeviceCurrentAllocatedSize));
+        }
+
+        return (CommandStream.PendingSubmissionCount, Volatile.Read(ref _inFlightCount));
+    }
+
     // Called with the command buffer about to be committed.
     private void NoteCommandBufferForTelemetry()
     {

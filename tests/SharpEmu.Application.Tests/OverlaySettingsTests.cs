@@ -16,7 +16,7 @@ public sealed class OverlaySettingsTests
         var settings = GuiSettings.NormalizeFromJson("{}");
         Assert.True(settings.OverlayEnabled);
         Assert.Equal("Full", settings.OverlayMode);
-        Assert.Equal("TopRight", settings.OverlayCorner);
+        Assert.Equal("BottomRight", settings.OverlayCorner);
     }
 
     [Fact]
@@ -38,7 +38,7 @@ public sealed class OverlaySettingsTests
             {"OverlayMode":null,"OverlayCorner":"somewhere"}
             """);
         Assert.Equal("Full", settings.OverlayMode);
-        Assert.Equal("TopRight", settings.OverlayCorner);
+        Assert.Equal("BottomRight", settings.OverlayCorner);
     }
 
     [Fact]

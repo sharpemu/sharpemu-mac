@@ -28,7 +28,7 @@ public sealed class LauncherContractTests
         Assert.Equal(new[] { "--cpu-engine=native", "--log-level=Info", "--console=ps5", "--console-language=EnglishUS",
             "--strict", "--trace-imports=17", "--window-mode=borderless", "--resolution=1280x720", "--display=0",
             "--refresh-rate=0", "--scaling=fit", "--vsync=off", "--hdr=auto", "--overlay=on",
-            "--overlay-mode=full", "--overlay-corner=topright", Path.GetFullPath("game folder/eboot.bin") }, plan.Arguments);
+            "--overlay-mode=full", "--overlay-corner=bottomright", Path.GetFullPath("game folder/eboot.bin") }, plan.Arguments);
         Assert.Equal("once", plan.Environment["TEST"]);
         Assert.Equal("0", plan.Environment["SHARPEMU_STRICT_COMPUTE"]);
         Assert.Equal("0", plan.Environment["SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"]);

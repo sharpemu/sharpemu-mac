@@ -89,7 +89,7 @@ public sealed record HostVideoOptions
     public GuestDisplayResolution DisplayResolution { get; init; } = GuestDisplayResolution.Hd;
 
     public bool OverlayEnabled { get; init; } = true;
-    public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.TopRight;
+    public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.BottomRight;
     public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.Full;
 
     // Whether HdrMode.Auto may turn HDR on: a presenter capability, not an OS property. The
@@ -128,7 +128,7 @@ public sealed record HostVideoOptions
         DisplayResolution = Enum.IsDefined(DisplayResolution)
             ? DisplayResolution
             : GuestDisplayResolution.Hd,
-        OverlayCorner = Enum.IsDefined(OverlayCorner) ? OverlayCorner : PerformanceOverlayCorner.TopRight,
+        OverlayCorner = Enum.IsDefined(OverlayCorner) ? OverlayCorner : PerformanceOverlayCorner.BottomRight,
         OverlayMode = Enum.IsDefined(OverlayMode) ? OverlayMode : PerformanceOverlayMode.Full,
     };
 }
