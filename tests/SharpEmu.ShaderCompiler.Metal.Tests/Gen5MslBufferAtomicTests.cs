@@ -32,6 +32,8 @@ public sealed class Gen5MslBufferAtomicTests(ITestOutputHelper output)
         Assert.True(control.OffsetEnabled);
         Assert.Equal(glc, control.Glc);
         var shader = Compile(fixture, 16);
+        Assert.False(shader.UsesPairLocks);
+        Assert.False(shader.WritesStepReport);
         Assert.Contains("atomic_exchange_explicit", shader.Source);
         Assert.Contains("v4, memory_order_relaxed", shader.Source);
         Assert.Contains("(v0 * 0x10u)", shader.Source);

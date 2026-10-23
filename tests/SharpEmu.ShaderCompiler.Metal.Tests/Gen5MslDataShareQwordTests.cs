@@ -63,6 +63,8 @@ public sealed class Gen5MslDataShareQwordTests(ITestOutputHelper output)
         ], 8, BufferBytes);
         var shader = Compile(fixture, Lanes);
         var splits = !returns && opcode is 0x40 or 0x41 or 0x49 or 0x4A or 0x4B;
+        Assert.Equal(!splits && opcode != 0x7E, shader.UsesPairLocks);
+        if (shader.UsesPairLocks) Assert.True(shader.WritesStepReport);
         Assert.Equal(!splits && opcode != 0x7E, shader.Source.Contains("sharpemu_lds_try_lock(", StringComparison.Ordinal));
         if (!RequireDevice())
         {

@@ -192,4 +192,9 @@ public sealed record Gen5MslShader(
     /// workgroup ID (see <see cref="Ir.Gen5PersistentThreadsAnalysis"/>): any number of groups
     /// computes the same result, so a host may launch only as many as it keeps resident.</summary>
     public bool PersistentThreads { get; init; }
+
+    // Conservative for hand-authored/older reflection. Translation supplies the
+    // exact emitted auxiliary accesses for concurrent compute scheduling.
+    public bool WritesStepReport { get; init; } = true;
+    public bool UsesPairLocks { get; init; } = true;
 }
