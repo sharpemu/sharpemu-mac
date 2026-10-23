@@ -78,8 +78,13 @@ internal static class MetalStaticPrecompile
     /// </summary>
     internal const int PresentingJobs = 1;
 
-    /// <summary>How long the frame path waits for a worker's build of a library it needs before it compiles the library itself.</summary>
-    internal static readonly TimeSpan DemandWait = TimeSpan.FromSeconds(10);
+    /// <summary>
+    /// How long the frame path waits for a worker's build of a library it needs before it
+    /// compiles the library itself. About one library compile on a performance core: the
+    /// worker runs at background QoS on an efficiency core and must never hold a frame
+    /// longer than compiling the library directly would.
+    /// </summary>
+    internal static readonly TimeSpan DemandWait = TimeSpan.FromMilliseconds(500);
 
     private const int WorkerStackBytes = 16 * 1024 * 1024;
 
