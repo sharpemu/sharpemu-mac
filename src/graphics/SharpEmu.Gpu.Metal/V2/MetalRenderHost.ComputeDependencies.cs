@@ -252,8 +252,6 @@ internal sealed partial class MetalRenderHost
         $"compute_resource_barriers={ComputeResourceBarriers} compute_guest_barriers={ComputeGuestBarriers} " +
         $"compute_dependency_reasons=[{string.Join(',', _computeDependencyReasons.Select(p => $"{p.Key}:{p.Value}"))}] " +
         $"compute_encoder_ends=[{string.Join(',', _computeEncoderEnds.Select(p => $"{p.Key}:{p.Value}"))}] " +
-        $"compute_cp_copies={ComputeCommandProcessorCopies} " +
-        $"compute_cp_refused=[{string.Join(',', _computeCopyRefusals.Select(p => $"{p.Key}:{p.Value}"))}] " +
         $"compute_chain_shaders=[{string.Join(',', _computeChainShaders.OrderByDescending(p => p.Value.Dispatches).Take(12)
             .Select(p => $"{p.Key:X16}:dispatch={p.Value.Dispatches}/unknown={p.Value.Unknown}/dependency={p.Value.Dependencies}"))}] ";
     }

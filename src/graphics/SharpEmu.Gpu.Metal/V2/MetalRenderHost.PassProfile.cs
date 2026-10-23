@@ -388,6 +388,7 @@ internal sealed partial class MetalRenderHost
     /// <summary>Why the open encoder ended, when something outside the draw stream ended it.</summary>
     private void PassProfileNoteEnd(string cause)
     {
+        if (_renderEncoder != 0 || _computeEncoder != 0) _encoderEndReason ??= cause;
         if (_ppOpen is not null && _ppOpen.End.Length == 0)
         {
             _ppOpen.End = cause;

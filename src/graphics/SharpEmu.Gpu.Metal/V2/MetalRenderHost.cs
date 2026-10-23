@@ -425,11 +425,16 @@ internal sealed partial class MetalRenderHost :
         // What lands when the encoder ends - a deferred command-processor write, a staged
         // store written back - lands after everything recorded into it. A transfer over
         // those bytes has to see them land first (an upload) or land after them (a
-        // writeback), so it gets an encoder of its own after the boundary instead.
-        if (DeferredLabelCopiesTouch(guestAddress, size) ||
-            (_stagedStorageCopies is { Count: > 0 } staged && staged.HasRecordedStoresOver(guestAddress, size)))
+        // writeback). CP-only copies can land in this encoder; EOP labels and staged
+        // stores still require the boundary.
+        if (DeferredLabelCopiesTouch(guestAddress, size))
         {
-            _landDeferredLabels |= DeferredLabelCopiesTouch(guestAddress, size);
+            OrderAfterDeferredCopies(guestAddress, size);
+            if (_computeEncoder == 0) return 0;
+        }
+
+        if (_stagedStorageCopies is { Count: > 0 } staged && staged.HasRecordedStoresOver(guestAddress, size))
+        {
             ((IMetalSubmissionContext)this).ReleaseSharedEncoder();
             return 0;
         }
@@ -2261,7 +2266,7 @@ internal sealed partial class MetalRenderHost :
         var (pageWatches, pageWatchPeak) = _imageCache.TakePageWatchCounters();
         Console.Error.WriteLine(
             $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
-            ComputeBatchCounters() + ComputeChainCounters() +
+            ComputeBatchCounters() + ComputeChainCounters() + TakeLabelLandingCounters() + " " +
             $"{_issues?.FormatProfile()} {SharpEmu.Libs.VideoOut.GpuLockProfile.Format()} " +
             // Colour loads a full-screen first draw made dead (MetalPassLoads).
             $"load_elided={loadsElided} load_elided_mb={(loadElidedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
@@ -2619,10 +2624,10 @@ internal sealed partial class MetalRenderHost :
             _labelBarrierEvent = 0;
         }
 
+        if (_labelCopyPipeline != 0) MetalNative.SendVoid(_labelCopyPipeline, SelRelease);
         _completions.Dispose();
         DisposeHostMovie();
         DisposeBindlessImages();
-        if (_computeCopyPipeline != 0) MetalNative.SendVoid(_computeCopyPipeline, SelRelease);
         DisposePipelines();
         (_transfer as IDisposable)?.Dispose();
         // The guest has gone: released chunks are not restored on the way out.

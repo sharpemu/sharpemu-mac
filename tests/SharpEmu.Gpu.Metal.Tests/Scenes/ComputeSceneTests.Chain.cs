@@ -26,8 +26,7 @@ public sealed partial class ComputeSceneTests
         Setup(rig, pm4, IncrementBuffer, [.. Vsharp(data, 4, 64), .. Vsharp(output, 4, 64)], 64)
             .DispatchDirect(1, 1, 1);
         rig.Submit(pm4);
-        Assert.True(rig.Host.ComputeCommandProcessorCopyRefusals("eop") > 0);
-        Assert.Equal(0, rig.Host.ComputeCommandProcessorCopies);
+        Assert.Equal(0, rig.Host.InEncoderLabelWrites);
         Assert.Equal(41ul, rig.Read<ulong>(label, 1)[0]);
         Assert.Equal(72u, rig.Read<uint>(output, 1)[0]);
     }
@@ -45,6 +44,7 @@ public sealed partial class ComputeSceneTests
             if (rig is null) return null;
             rig.Host.ComputeChainEnabled = chain;
             rig.Host.ConcurrentComputeEnabled = chain;
+            rig.Host.LabelsInEncoder = chain;
             rig.Program(IncrementBuffer);
             rig.Memory.Allocate(4096, 4096);
             var data = Fill(rig, 64, 0);
@@ -66,13 +66,13 @@ public sealed partial class ComputeSceneTests
             rig.Memory.Write<uint>(data, new uint[64]);
             rig.Memory.Write<uint>(output, new uint[64]);
             var encoders = rig.Host.ComputeEncoders;
-            var copies = rig.Host.ComputeCommandProcessorCopies;
+            var copies = rig.Host.InEncoderLabelWrites;
             rig.Submit(pm4);
             var actual = rig.Read<uint>(output, 64);
             Assert.Equal(overlap ? 107u : 87u, actual[0]);
             Assert.All(actual.Skip(1), word => Assert.Equal(1u, word));
             return (rig.Read<byte>(output, 256), rig.Host.ComputeEncoders - encoders,
-                rig.Host.ComputeCommandProcessorCopies - copies);
+                rig.Host.InEncoderLabelWrites - copies);
         }
         var serial = Run(false);
         if (serial is null) return;

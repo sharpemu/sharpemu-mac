@@ -1231,6 +1231,7 @@ internal sealed partial class MetalRenderHost
                 ResolveStoreActions(in next, hasNext);
             }
 
+            NoteEncoderEnded("render");
             EndAndReleaseEncoder(_renderEncoder);
             _renderEncoder = 0;
             PassProfileClose();
@@ -1291,6 +1292,7 @@ internal sealed partial class MetalRenderHost
 
         _transferSharesCompute = false;
         _computeEncoderEnds[reason] = _computeEncoderEnds.GetValueOrDefault(reason) + 1;
+        NoteEncoderEnded("compute");
         EndAndReleaseEncoder(_computeEncoder);
         _computeEncoder = 0;
         _boundComputePipeline = 0;
