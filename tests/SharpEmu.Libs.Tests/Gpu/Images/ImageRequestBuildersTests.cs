@@ -14,8 +14,11 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 
 // The image requests the presenter builds from raw target registers, descriptor words and display attributes.
 [Collection(SchedulingStateCollection.Name)]
-public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixture>
+public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixture>, IDisposable
 {
+    private readonly bool _nativeClear = ImageRequestBuilders.NativeColorClearMetadata;
+    public void Dispose() => ImageRequestBuilders.NativeColorClearMetadata = _nativeClear;
+
     private const ulong Base = 0x1_0000_0000;
 
     [Fact]
@@ -176,7 +179,11 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
 
     private readonly HeadlessVulkan? _vulkan;
 
-    public ImageRequestBuildersTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
+    public ImageRequestBuildersTests(HeadlessVulkanFixture fixture)
+    {
+        _vulkan = fixture.Vulkan;
+        ImageRequestBuilders.NativeColorClearMetadata = true;
+    }
 
     [Fact]
     public void ColorTarget_LinearTargetFromRegisters()

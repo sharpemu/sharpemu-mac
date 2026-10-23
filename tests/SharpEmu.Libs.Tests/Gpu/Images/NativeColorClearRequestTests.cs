@@ -2,13 +2,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
 
-public sealed class NativeColorClearRequestTests
+[Collection(SchedulingStateCollection.Name)]
+public sealed class NativeColorClearRequestTests : IDisposable
 {
+    private readonly bool _nativeClear = ImageRequestBuilders.NativeColorClearMetadata;
+    public NativeColorClearRequestTests() => ImageRequestBuilders.NativeColorClearMetadata = true;
+    public void Dispose() => ImageRequestBuilders.NativeColorClearMetadata = _nativeClear;
+
     [Fact]
     public void CmaskTargetUsesItsOwnMetadataSizeAndPackedClear()
     {
