@@ -64,7 +64,10 @@ internal sealed partial class MetalRenderHost
 
         // Flush retained guest dispatches before changing pipeline/bindings. Concurrent
         // dispatches require barriers on both sides, including WAW and aliased buffers.
-        ComputeScopeBarrier();
+        // Utility kernels do not enter the guest dependency tracker. Force both cuts:
+        // an empty tracker does not prove there is no native dispatch to order, and
+        // the leading cut resets it before this copy's untracked stores are encoded.
+        ComputeScopeBarrier(force: true);
         foreach (ref readonly var copy in copies)
         {
             MetalNative.SendUseResourceUsage(_computeEncoder, SelUseResourceUsage, copy.StagingBuffer, Mtl.ResourceUsageRead);
@@ -74,7 +77,7 @@ internal sealed partial class MetalRenderHost
         MetalNative.SendSetBuffer(_computeEncoder, SelSetComputeBuffer, table.Buffer, (nuint)table.Offset, 0);
         var one = new MtlSize { Width = 1, Height = 1, Depth = 1 };
         MetalNative.SendDispatch(_computeEncoder, SelDispatchThreadgroups, one, one);
-        ComputeScopeBarrier();
+        ComputeScopeBarrier(force: true);
         _boundComputePipeline = 0;
         BindStageBuffers(_computeEncoder, StageCompute, SelSetComputeBuffer);
         InEncoderLabelWrites += copies.Length;

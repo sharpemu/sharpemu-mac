@@ -23,6 +23,7 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests
         try
         {
             var encoder = host.EnsureComputeEncoder();
+            var barriers = host.ComputeScopeBarriers;
             // This kernel must finish reading zero before the first landing overwrites it.
             Snapshot(host, pipeline, LaterLabel, GuestBase + 0x10000);
             host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x1122334455667788UL), "WRITE_DATA");
@@ -38,6 +39,9 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests
             Assert.Equal(3, host.InEncoderLabelWrites);
             Assert.Equal(2, host.LabelLandingBatches);
             Assert.Equal(1, host.LabelLandingsCoalesced);
+            // These native snapshot/copy dispatches are outside the guest dependency
+            // tracker. Each landing must still encode both sides of its ordering cut.
+            Assert.Equal(barriers + 4, host.ComputeScopeBarriers);
             Assert.Equal(0, host.TakeLabelBarriers());
             // Recording has not published any CP bytes to a guest CPU reader.
             Assert.Equal(0UL, rig.Backing.Read64(LaterLabel));
