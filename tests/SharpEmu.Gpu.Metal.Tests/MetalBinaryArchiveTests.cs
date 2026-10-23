@@ -110,7 +110,7 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
                 Assert.Equal(1, writing.Counters.LibrariesWritten);
             }
             using var reading = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget);
-            Assert.Equal(0, reading.TryLoadLibrary(key, "missing_batch_entry"));
+            Assert.Equal(0, reading.TryLoadLibrary(key, requiredEntryPoint: "missing_batch_entry"));
             Assert.Equal(1, reading.Counters.Rejected);
             Assert.False(reading.HasLibrary(key));
             Assert.Empty(System.IO.Directory.GetFiles(reading.LibraryDirectory));
