@@ -24,18 +24,56 @@ public sealed class VertexTableMetadataCache
 {
     private const int MaxEntries = 4096;
     private readonly Dictionary<(RegisteredShader Shader, ulong CodeHash), VertexTableMetadata> _entries = new();
+    private readonly Dictionary<(RegisteredShader Shader, ulong CodeHash), SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token[]> _tokens = new();
+    private SharpEmu.HLE.GpuMemory.GuestWriteGenerations? _generations;
+    private Action<ulong, ulong>? _synchronize;
 
-    internal bool TryGet(RegisteredShader shader, ulong codeHash, out VertexTableMetadata? metadata) =>
-        _entries.TryGetValue((shader, codeHash), out metadata);
-
-    internal void Add(RegisteredShader shader, ulong codeHash, VertexTableMetadata metadata)
+    internal void UseWriteGenerations(SharpEmu.HLE.GpuMemory.GuestWriteGenerations? generations, Action<ulong, ulong> synchronize)
     {
+        _generations = ShaderIdentityCache.Enabled ? generations : null;
+        _synchronize = synchronize;
+    }
+
+    internal SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token[] Observe(CpuContext context, RegisteredShader shader)
+    {
+        if (_generations is null || shader.UserDataAddress == 0) return [];
+        var tokens = new List<SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token>(3);
+        void ObserveRange(ulong address, ulong size)
+        {
+            _synchronize?.Invoke(address, size);
+            tokens.Add(_generations.Register(address, size));
+        }
+        ObserveRange(shader.UserDataAddress, 0x2E);
+        if (context.TryReadUInt64(shader.UserDataAddress, out var offsets) && offsets != 0 &&
+            context.TryReadUInt16(shader.UserDataAddress + 0x2C, out var count) && count is > 0 and <= 11)
+        {
+            ObserveRange(offsets, (ulong)count * sizeof(ushort));
+            if (count > 10 && context.TryReadUInt16(offsets + 16, out var buffer) && buffer != ushort.MaxValue &&
+                context.TryReadUInt16(offsets + 20, out var attribute) && attribute != ushort.MaxValue &&
+                shader.InputSemanticsAddress != 0 && shader.InputSemanticsCount is > 0 and <= VertexInputInfo.MaxBuffers)
+                ObserveRange(shader.InputSemanticsAddress, (ulong)shader.InputSemanticsCount * sizeof(uint));
+        }
+        return tokens.ToArray();
+    }
+
+    internal bool TryGet(RegisteredShader shader, ulong codeHash, out VertexTableMetadata? metadata)
+    {
+        metadata = null;
+        var key = (shader, codeHash);
+        return (!_tokens.TryGetValue(key, out var tokens) || Array.TrueForAll(tokens, static token => token.IsCurrent)) &&
+            _entries.TryGetValue(key, out metadata);
+    }
+
+    internal void Add(RegisteredShader shader, ulong codeHash, VertexTableMetadata metadata, SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token[]? tokens = null)
+    {
+        if (tokens is not null && !Array.TrueForAll(tokens, static token => token.IsCurrent)) return;
         if (_entries.Count >= MaxEntries)
         {
             _entries.Clear();
+            _tokens.Clear();
         }
-
         _entries[(shader, codeHash)] = metadata;
+        if (tokens is { Length: > 0 }) _tokens[(shader, codeHash)] = tokens;
     }
 }
 
@@ -61,12 +99,13 @@ public static class VertexInputResolver
         VertexTableMetadata? metadata = null;
         if (metadataCache is null || !metadataCache.TryGet(shader, codeHash, out metadata))
         {
+            var tokens = metadataCache?.Observe(context, shader);
             if (!TryReadTables(context, shader, GpuCommands.Registers.UserScalarRegisters.Capacity, out metadata, out var error))
             {
                 throw GpuFatal.Fatal($"The vertex program header is invalid: shader=0x{shader.CodeAddress:X16} error={error}.");
             }
 
-            metadataCache?.Add(shader, codeHash, metadata);
+            metadataCache?.Add(shader, codeHash, metadata, tokens);
         }
 
         VertexAttributeResource[] attributes = [];

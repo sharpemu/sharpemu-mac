@@ -21,6 +21,10 @@ public sealed record ShaderSource(RegisteredShader Registered, ulong Hash, uint[
     // Registers inside the user-data range that are system values, not uniform user data.
     public ulong ExcludedUserDataRegisters { get; init; }
 
+    // Declared hashes remain diagnostic/prewarm names; mutable code is keyed by actual bytes.
+    public ulong? ContentHash { get; init; }
+    public ulong Identity => ContentHash ?? Hash;
+
     public ulong Address => Registered.CodeAddress;
 
     public uint CodeSize => Registered.TotalCodeSizeBytes;
@@ -291,7 +295,7 @@ internal sealed class ShaderProgramCache
     // The decoded instructions of a program, shared by every static variant of the same code.
     public Gen5ShaderProgram Decode(ShaderSource source)
     {
-        var key = (source.Hash, source.CodeSize, source.ContinuationAddressOffset);
+        var key = (source.Identity, source.CodeSize, source.ContinuationAddressOffset);
         if (_decoded.TryGetValue(key, out var program))
         {
             return program;
@@ -412,7 +416,7 @@ internal sealed class ShaderProgramCache
             _staticState.Add(source.UserDataBase);
             _staticState.Add((uint)source.ExcludedUserDataRegisters);
             _staticState.Add((uint)(source.ExcludedUserDataRegisters >> 32));
-            var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
+            var probe = new ProgramKeyProbe(source.Stage, source.Identity, (uint)source.UserData.Length, source.CodeSize,
                 source.ContinuationAddressOffset, CollectionsMarshal.AsSpan(_staticState));
             _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out key, out entry);
         }
@@ -760,7 +764,7 @@ internal sealed class ShaderProgramCache
 
     // The key of the entry the static state was just built for.
     private ProgramKey BuildProgramKey(ShaderSource source) =>
-        new(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
+        new(source.Stage, source.Identity, (uint)source.UserData.Length, source.CodeSize,
             source.ContinuationAddressOffset, _staticState.ToArray());
 
     private static ShaderStageResources CreateStageResources(
@@ -830,7 +834,7 @@ internal sealed class ShaderProgramCache
     {
         using var planningScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPlanning);
         var program = Decode(source);
-        if (ShaderCorpus.Enabled && _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var corpusCode))
+        if (ShaderCorpus.Enabled && _codeCaptures.TryGetValue((source.Identity, source.CodeSize, source.ContinuationAddressOffset), out var corpusCode))
         {
             ShaderCorpus.RecordPlan(source, options, corpusCode, CorpusHostFlags(options));
         }
@@ -1022,7 +1026,7 @@ internal sealed class ShaderProgramCache
         bool sourceWasCached,
         ResourceSnapshot snapshot)
     {
-        if (ShaderCorpus.Enabled && _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var corpusCode))
+        if (ShaderCorpus.Enabled && _codeCaptures.TryGetValue((source.Identity, source.CodeSize, source.ContinuationAddressOffset), out var corpusCode))
         {
             ShaderCorpus.RecordCompile(source, options, corpusCode, CorpusHostFlags(options), specialization, pushDataCursor,
                 DeviceBindingMemoryOf(entry.Plan), [.. entry.Plan.DeviceDataMemory.Order()]);
@@ -1066,7 +1070,7 @@ internal sealed class ShaderProgramCache
                     $"output_limit={limits.MaxOutputMemoryBytes} payload_output_limit={limits.MaxPayloadAndOutputMemoryBytes}.");
         }
         var id = ++_nextProgramId;
-        _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capturedCode);
+        _codeCaptures.TryGetValue((source.Identity, source.CodeSize, source.ContinuationAddressOffset), out var capturedCode);
         var graphicsPrewarm = _host.GraphicsPrewarm;
         var prewarm = _host.ShaderPrewarm;
         var permutationDump = ShaderPermutationDump.WriteInputs(

@@ -60,6 +60,11 @@ public static class ShaderIdentity
             return declaredHash;
         }
 
+        return ComputeContent(memory, ranges, label);
+    }
+
+    public static ulong ComputeContent(ICpuMemory memory, ReadOnlySpan<(ulong Address, uint SizeBytes)> ranges, string label)
+    {
         // Shaders without a declared hash are rehashed on every draw, so the hasher and
         // the code buffer are reused per thread instead of allocated per call.
         var hash = _hasher ??= new XxHash3();
@@ -89,4 +94,47 @@ public static class ShaderIdentity
 
     [ThreadStatic]
     private static byte[]? _codeBuffer;
+}
+
+// The ready identity is immutable. Tokens describe the exact observation that produced
+// it; a new observation is never substituted into an old identity after a write.
+public sealed record ReadyShaderIdentity(ulong Hash, ulong ContentHash);
+
+public sealed class ShaderIdentityCache(ICpuMemory memory, Action<ulong, ulong> synchronize,
+    SharpEmu.HLE.GpuMemory.GuestWriteGenerations? generations)
+{
+    internal static readonly bool Enabled = Environment.GetEnvironmentVariable("SHARPEMU_PROGRAM_INTERN") != "0";
+    private sealed record Entry(ReadyShaderIdentity Identity, SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token[] Tokens);
+    private readonly Dictionary<RegisteredShader, Entry> _entries = new(ReferenceEqualityComparer.Instance);
+    private readonly object _gate = new();
+
+    public ReadyShaderIdentity Get(RegisteredShader shader, string label)
+    {
+        // Identity capture contains no compilation. A short capture gate also single-flights
+        // concurrent readers; program compilation remains in the existing compile futures.
+        lock (_gate)
+        {
+            if (Enabled && generations is not null && _entries.TryGetValue(shader, out var entry) &&
+                entry.Tokens.Length != 0 && Array.TrueForAll(entry.Tokens, static token => token.IsCurrent)) return entry.Identity;
+            Span<(ulong Address, uint SizeBytes)> ranges = stackalloc (ulong, uint)[RegisteredShader.MaxCodeRanges];
+            ranges = ranges[..shader.CopyCodeRanges(ranges)];
+            foreach (var (address, size) in ranges) synchronize(address, size);
+            var tokens = Enabled && generations is not null
+                ? ranges.ToArray().Select(range => generations.Register(range.Address, range.SizeBytes)).ToArray()
+                : [];
+            var content = ShaderIdentity.ComputeContent(memory, ranges, label);
+            if (!ShaderIdentity.TryReadDeclaredHash(memory, shader.CodeAddress, out var declared))
+                throw Scheduling.GpuFatal.Fatal($"The shader code is unreadable: label={label} shader=0x{shader.CodeAddress:X16}.");
+            var hash = declared == 0 ? content : declared;
+            var identity = _entries.TryGetValue(shader, out var previous) && previous.Identity.Hash == hash && previous.Identity.ContentHash == content
+                ? previous.Identity : new ReadyShaderIdentity(hash, content);
+            if ((tokens.Length != 0 || previous is null || !ReferenceEquals(identity, previous.Identity)) &&
+                Array.TrueForAll(tokens, static token => token.IsCurrent))
+            {
+                if (_entries.Count >= 4096) _entries.Clear();
+                _entries[shader] = new Entry(identity, tokens);
+            }
+            return identity;
+        }
+    }
 }

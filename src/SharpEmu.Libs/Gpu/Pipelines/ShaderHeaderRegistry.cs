@@ -65,11 +65,14 @@ public sealed class ShaderHeaderRegistry
     private readonly Func<ulong, ulong> _headerOf;
     private readonly Func<ulong, FusedProgramParts?> _fusedPartsOf;
 
-    public ShaderHeaderRegistry(CpuContext context, Func<ulong, ulong> headerOf, Func<ulong, FusedProgramParts?> fusedPartsOf)
+    public ShaderHeaderRegistry(CpuContext context, Func<ulong, ulong> headerOf, Func<ulong, FusedProgramParts?> fusedPartsOf,
+        SharpEmu.HLE.GpuMemory.GuestWriteGenerations? generations = null, Action<ulong, ulong>? synchronize = null)
     {
         _context = context;
         _headerOf = headerOf;
         _fusedPartsOf = fusedPartsOf;
+        _generations = ShaderIdentityCache.Enabled ? generations : null;
+        _synchronize = synchronize;
     }
 
     internal (ulong Address, byte[] Code)[] ReadDiagnosticCode(ulong codeAddress)
@@ -94,7 +97,45 @@ public sealed class ShaderHeaderRegistry
         return ranges.ToArray();
     }
 
+    private SharpEmu.HLE.GpuMemory.GuestWriteGenerations? _generations;
+    private Action<ulong, ulong>? _synchronize;
+    private readonly Dictionary<ulong, (RegisteredShader Shader, ulong Header, FusedProgramParts? Fused,
+        SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token HeaderToken,
+        SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token? ContinuationToken)> _observations = new();
+
+    internal void UseWriteGenerations(SharpEmu.HLE.GpuMemory.GuestWriteGenerations? generations, Action<ulong, ulong> synchronize)
+    {
+        _generations = ShaderIdentityCache.Enabled ? generations : null;
+        _synchronize = synchronize;
+    }
+
     public RegisteredShader Require(ulong codeAddress, string label)
+    {
+        if (_generations is null) return RequireCore(codeAddress, label);
+        lock (_observations)
+        {
+            var header = _headerOf(codeAddress);
+            var fused = _fusedPartsOf(codeAddress);
+            if (_observations.TryGetValue(codeAddress, out var cached) && cached.Header == header && cached.Fused == fused &&
+                cached.HeaderToken.IsCurrent && (cached.ContinuationToken?.IsCurrent ?? true)) return cached.Shader;
+            if (header == 0) return RequireCore(codeAddress, label);
+            _synchronize?.Invoke(header, HeaderReadBytes);
+            if (fused is { } continuation) _synchronize?.Invoke(continuation.ContinuationHeaderAddress, HeaderReadBytes);
+            var token = _generations.Register(header, HeaderReadBytes);
+            var continuationToken = fused is { } parts
+                ? _generations.Register(parts.ContinuationHeaderAddress, HeaderReadBytes) : null;
+            var shader = RequireCore(codeAddress, label);
+            if (shader.HeaderAddress == header && _headerOf(codeAddress) == header && _fusedPartsOf(codeAddress) == fused &&
+                token.IsCurrent && (continuationToken?.IsCurrent ?? true))
+            {
+                if (_observations.Count >= MaxRecent) _observations.Clear();
+                _observations[codeAddress] = (shader, header, fused, token, continuationToken);
+            }
+            return shader;
+        }
+    }
+
+    private RegisteredShader RequireCore(ulong codeAddress, string label)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ShaderHeaderLookup);
         var headerAddress = _headerOf(codeAddress);

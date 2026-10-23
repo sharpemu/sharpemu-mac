@@ -619,6 +619,59 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     }
 
     [Fact]
+    public void IncrementalKeyTracksRegisterGroupsAndReturnsTheSameReadyHandle()
+    {
+        var guest = new PipelineTestGuest();
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var reference = new DescribingProvider();
+        var describingExecutor = new RenderExecutor(new RecordingRenderHost(), reference);
+        var banks = Banks();
+        var descriptions = new Dictionary<ulong, GraphicsPipelineKey>();
+        var handles = new Dictionary<GraphicsPipelineKey, PipelineHandle>();
+        for (uint i = 0; i < 32; i++)
+        {
+            banks.Context.RasterMode.CullBack = (i & 1) != 0;
+            banks.Context.RasterMode.FrontFaceClockwise = (i & 2) != 0;
+            banks.Context.Clip.DirectXClipSpace = (i & 4) != 0;
+            banks.Context.RenderTargetMask = (i & 8) == 0 ? 0xFu : 0x3u;
+            banks.Context.BlendControls[0].Enable = (i & 16) != 0;
+            describingExecutor.DrawAuto(i + 1, banks, Auto(3));
+            var description = reference.Descriptions[^1];
+            var key = ShaderPipelineCache.KeyOf(description);
+            // Use the exact same inputs as the full reference builder, then change them
+            // in place on the next iteration: reference identity cannot certify a bank.
+            var programs = reference.Graphics;
+            var host = new RecordingRenderHost();
+            var capturing = new KeyCheckingProvider(cache, programs, key, descriptions, handles);
+            new RenderExecutor(host, capturing).DrawAuto(i + 1, banks, Auto(3));
+            new RenderExecutor(host, capturing).DrawAuto(i + 100, banks, Auto(3));
+        }
+        Assert.True(cache.GraphicsPipelineCount > 1);
+    }
+
+    private sealed class KeyCheckingProvider(ShaderPipelineCache cache, GraphicsPrograms programs, GraphicsPipelineKey expected,
+        Dictionary<ulong, GraphicsPipelineKey> descriptions, Dictionary<GraphicsPipelineKey, PipelineHandle> handles) : IShaderPipelineProvider
+    {
+        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface,
+            ContextRegisters context, ReadOnlySpan<ColorComponentMap> mapping, bool pixelActive, bool depthBound, bool depthAspectBound,
+            bool stencilAspectBound = false) => programs;
+        public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertex,
+            PixelInputInfo? pixel, ContextRegisters context, in RenderingState rendering, GpuPrimitiveTopology topology, bool restart,
+            bool disableBlending, ShaderProgram vs, ShaderProgram ps)
+        {
+            var ready = cache.CreateGraphicsPipeline(colors, depth, vertex, pixel, context, rendering, topology, restart, disableBlending, vs, ps);
+            if (descriptions.TryGetValue(ready.Pipeline, out var old)) Assert.Equal(expected, old);
+            else descriptions.Add(ready.Pipeline, expected);
+            if (handles.TryGetValue(expected, out var oldHandle)) Assert.Equal(oldHandle, ready);
+            else handles.Add(expected, ready);
+            return ready;
+        }
+        public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint initiator,
+            uint x, uint y, uint z) => throw new NotSupportedException();
+        public PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program) => throw new NotSupportedException();
+    }
+
+    [Fact]
     public void TryCreateGraphicsPipeline_CachesNothingWhileTheHostCompiles()
     {
         var guest = new PipelineTestGuest();
