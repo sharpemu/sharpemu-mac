@@ -60,6 +60,28 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         }
         """;
 
+    private const string MeshSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct V { float4 position [[position]]; };
+        struct P { };
+        using M = metal::mesh<V, P, 3, 1, topology::triangle>;
+        [[mesh, max_total_threads_per_threadgroup(32)]]
+        void gen5_ms(M out, uint tid [[thread_index_in_threadgroup]])
+        {
+            if (tid == 0)
+            {
+                out.set_vertex(0, V{float4(-1, -1, 0, 1)});
+                out.set_vertex(1, V{float4(1, -1, 0, 1)});
+                out.set_vertex(2, V{float4(0, 1, 0, 1)});
+                out.set_index(0, 0);
+                out.set_index(1, 1);
+                out.set_index(2, 2);
+                out.set_primitive_count(1);
+            }
+        }
+        """;
+
     private static readonly Lazy<nint> Device = new(MetalNative.MTLCreateSystemDefaultDevice);
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"sharpemu-binary-archive-{Guid.NewGuid():N}");
@@ -131,7 +153,7 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         {
             Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
             Assert.Equal(0, writing.AcquirePipelineArchives(vertexKey, pixelKey));
-            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, vertexKey, pixelKey, missed: true);
+            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, vertexKey, pixelKey, pixelKey, missed: true);
             writing.Flush(wait: true);
             Assert.Equal(1, writing.Counters.PipelinesAdded);
             Assert.Equal(2, writing.Counters.LibrariesWritten);
@@ -161,6 +183,201 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         Assert.Contains(expected, static value => value == 0);
         Assert.Equal(expected, actual);
         Release(stored, archives, storedDescriptor, storedPixelLibrary, storedVertexLibrary, compiled, descriptor, pixelLibrary, vertexLibrary);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ACountersPipelineStoresThePlainLibraryAndBothConstantValuesStillDrawCorrectly(bool staticCapture)
+    {
+        if (!RequireDevice()) return;
+        var source = $$"""
+            #include <metal_stdlib>
+            using namespace metal;
+            constant bool {{Gen5MslShader.MipStatisticsFunctionConstantName}} [[function_constant(0)]];
+            struct Gen5PsIn { float4 position [[position]]; float4 attr0 [[user(locn0)]]; };
+            fragment float4 gen5_ps(Gen5PsIn in [[stage_in]])
+            {
+                return {{Gen5MslShader.MipStatisticsFunctionConstantName}}
+                    ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+            }
+            """;
+        var vertexKey = MetalBinaryArchive.LibraryKey(VertexSource, false);
+        var plainKey = MetalBinaryArchive.LibraryKey(source, false);
+        var pairKey = MetalBinaryArchive.LodStatisticsKey(plainKey, counters: true);
+        var vertexLibrary = Compile(VertexSource);
+        var pixelLibrary = Compile(source);
+        var vertex = Function(vertexLibrary, "gen5_vs");
+        var counters = MetalRenderHost.NewMipStatisticsFunction(pixelLibrary, "gen5_ps", true, out var error);
+        Assert.True(counters != 0, MetalNative.DescribeError(error));
+        var descriptor = RenderDescriptor(vertex, counters);
+        using (var writing = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget))
+        {
+            Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
+            if (staticCapture)
+            {
+                var shader = new Gen5MslShader(source, "gen5_ps", Gen5MslStage.Pixel, 1) { UsesMipStatisticsConstant = true };
+                Assert.True(MetalStaticPrecompile.Store(writing, device: Device.Value, shader, plainKey, out var storeError,
+                    compiledLibrary: pixelLibrary) > 0, storeError);
+            }
+
+            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, vertexKey, pairKey, plainKey, missed: true, pixelLibrary: pixelLibrary);
+            writing.Flush(wait: true);
+            Assert.True(File.Exists(Path.Combine(writing.LibraryDirectory, plainKey.ToString("x32") + MetalBinaryArchive.Extension)));
+            Assert.False(File.Exists(Path.Combine(writing.LibraryDirectory, pairKey.ToString("x32") + MetalBinaryArchive.Extension)));
+        }
+
+        using var reading = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget);
+        Assert.True(reading.WaitLoaded(TimeSpan.FromSeconds(10)));
+        var stored = reading.TryLoadLibrary(plainKey);
+        Assert.NotEqual(0, stored);
+        foreach (var enabled in new[] { false, true })
+        {
+            var function = MetalRenderHost.NewMipStatisticsFunction(stored, "gen5_ps", enabled, out error);
+            Assert.True(function != 0, MetalNative.DescribeError(error));
+            var loadedDescriptor = RenderDescriptor(vertex, function);
+            var archives = enabled ? reading.AcquirePipelineArchives(vertexKey, pairKey) : 0;
+            var state = NewRender(loadedDescriptor, archives, enabled ? MetalBinaryArchive.FailOnBinaryArchiveMiss : 0);
+            Assert.NotEqual(0, state);
+            var pixels = Draw(state);
+            output.WriteLine($"enabled={enabled} red={pixels.Where((_, i) => i % 4 == 0).Max()} green={pixels.Where((_, i) => i % 4 == 1).Max()} alpha={pixels.Where((_, i) => i % 4 == 3).Max()}");
+            Assert.Contains((byte)255, pixels.Where((_, i) => i % 4 == (enabled ? 1 : 0)));
+            Assert.All(pixels.Where((_, i) => i % 4 == (enabled ? 0 : 1)), value => Assert.Equal((byte)0, value));
+            Release(state, archives, loadedDescriptor, function);
+        }
+
+        Release(stored, descriptor, counters, vertex, pixelLibrary, vertexLibrary);
+    }
+
+    [Fact]
+    public void ASingleBakedMipValueIsRejectedAndHealedFromTheSourceLibrary()
+    {
+        if (!RequireDevice()) return;
+        var source = $$"""
+            #include <metal_stdlib>
+            using namespace metal;
+            constant bool {{Gen5MslShader.MipStatisticsFunctionConstantName}} [[function_constant(0)]];
+            struct Gen5PsIn
+            {
+                float4 position [[position]];
+            };
+            fragment float4 gen5_ps(Gen5PsIn in [[stage_in]])
+            {
+                return {{Gen5MslShader.MipStatisticsFunctionConstantName}} ? float4(1) : float4(0);
+            }
+            """;
+        var key = MetalBinaryArchive.LibraryKey(source, false);
+        var pixelLibrary = Compile(source);
+        var vertexLibrary = Compile(VertexSource);
+        var vertex = Function(vertexLibrary, "gen5_vs");
+        var pixel = MetalRenderHost.NewMipStatisticsFunction(pixelLibrary, "gen5_ps", true, out _);
+        var descriptor = RenderDescriptor(vertex, pixel);
+        using var archive = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget);
+        Assert.True(archive.WaitLoaded(TimeSpan.FromSeconds(10)));
+        // A legacy/incomplete file: one baked value without its companion.
+        Assert.True(archive.StoreLibrary(key, MetalBinaryArchive.PipelineKind.Render, descriptor) > 0);
+        Assert.Equal(0, archive.TryLoadLibrary(key, mipStatistics: true));
+        Assert.Equal(1, archive.Counters.Rejected);
+        Assert.False(archive.HasLibrary(key));
+        archive.CaptureLibrary(key, pixelLibrary, source, false);
+        archive.Flush(wait: true);
+        var healed = archive.TryLoadLibrary(key, mipStatistics: true);
+        Assert.NotEqual(0, healed);
+        Release(healed, descriptor, pixel, vertex, vertexLibrary, pixelLibrary);
+    }
+
+    [Theory]
+    [InlineData(Gen5MslStage.Vertex)]
+    [InlineData(Gen5MslStage.Pixel)]
+    [InlineData(Gen5MslStage.Compute)]
+    [InlineData(Gen5MslStage.Mesh)]
+    public void ACompiledLibraryIsPersistedEvenWhenNoRuntimePipelineUsesIt(Gen5MslStage stage)
+    {
+        if (!RequireDevice()) return;
+        var (source, entry) = stage switch
+        {
+            Gen5MslStage.Vertex => (VertexSource, "gen5_vs"),
+            Gen5MslStage.Pixel => (PixelSource, "gen5_ps"),
+            Gen5MslStage.Mesh => (MeshSource, "gen5_ms"),
+            _ => (ComputeSource, "gen5_cs"),
+        };
+        UInt128 key;
+        using (var writing = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget))
+        {
+            var previous = MetalBinaryArchive.Install(writing);
+            try
+            {
+                var library = MetalRenderHost.TryCompileLibrary(Device.Value, source, false, out var error, out key);
+                Assert.True(library != 0, error);
+                Release(library);
+                writing.Flush(wait: true);
+                Assert.Equal(1, writing.Counters.LibrariesWritten);
+                Assert.Equal(0, writing.Counters.PipelinesAdded);
+            }
+            finally
+            {
+                MetalBinaryArchive.Install(previous);
+            }
+        }
+
+        using var reading = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget);
+        var stored = reading.TryLoadLibrary(key);
+        Assert.NotEqual(0, stored);
+        var function = Function(stored, entry);
+        Release(function, stored);
+    }
+
+    [Fact]
+    public void StaleLibrariesAreEvictedButAnActiveWriterAndItsCurrentBuildFilesAreProtected()
+    {
+        if (!RequireDevice()) return;
+        string stale;
+        using (var old = MetalBinaryArchive.Open(_root, Device.Value, "translator-old", Budget))
+        {
+            Assert.True(Store(old, ComputeSource, "gen5_cs", Gen5MslStage.Compute, 1) > 0);
+            stale = old.LibraryDirectory;
+        }
+
+        using (var current = MetalBinaryArchive.Open(_root, Device.Value, "translator-current", Budget))
+        {
+            Assert.False(System.IO.Directory.Exists(stale));
+            Assert.True(current.DiskBytes() < current.Budget * MetalStaticPrecompile.ArchiveShare);
+            Assert.True(Store(current, ComputeSource, "gen5_cs", Gen5MslStage.Compute, 2) > 0);
+            Assert.Throws<IOException>(() => MetalBinaryArchive.Open(_root, Device.Value, "translator-other", Budget));
+            Assert.True(current.HasLibrary(2));
+            Assert.True(File.Exists(Path.Combine(current.LibraryDirectory, 2.ToString("x32") + MetalBinaryArchive.Extension)));
+        }
+
+        using var same = MetalBinaryArchive.Open(_root, Device.Value, "translator-current", Budget);
+        Assert.True(same.HasLibrary(2));
+        var stored = same.TryLoadLibrary(2);
+        Assert.NotEqual(0, stored);
+        Release(stored);
+    }
+
+    [Fact]
+    public async Task ConcurrentStoresStayWithinBudgetAndDoNotEvictThisSessionsLibraries()
+    {
+        if (!RequireDevice()) return;
+        long bytes;
+        using (var sizing = MetalBinaryArchive.Open(_root, Device.Value, "sizing", Budget))
+        {
+            bytes = Store(sizing, ComputeSource, "gen5_cs", Gen5MslStage.Compute, 1);
+            Assert.True(bytes > 0);
+        }
+
+        var budget = bytes + bytes / 2;
+        using var writing = MetalBinaryArchive.Open(_root, Device.Value, "current", budget);
+        Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
+        var results = await Task.WhenAll(new[] { (UInt128)2, (UInt128)3 }.Select(key => Task.Run(() =>
+            (Key: key, Bytes: Store(writing, ComputeSource, "gen5_cs", Gen5MslStage.Compute, key)))));
+        var stored = Assert.Single(results, result => result.Bytes > 0);
+        Assert.Single(results, result => result.Bytes < 0);
+        Assert.InRange(writing.DiskBytes(), 1, budget);
+        var library = writing.TryLoadLibrary(stored.Key);
+        Assert.NotEqual(0, library);
+        Release(library);
+        Assert.Empty(System.IO.Directory.GetFiles(writing.LibraryDirectory, "*.tmp"));
     }
 
     [Fact]
@@ -265,7 +482,7 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         using (var writing = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
         {
             Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
-            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, vertexKey, pixelKey, missed: true);
+            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, vertexKey, pixelKey, pixelKey, missed: true);
             writing.Flush(wait: true);
         }
 
@@ -296,7 +513,7 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         {
             directory = writing.Directory;
             Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
-            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, default, default, missed: true);
+            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, default, default, default, missed: true);
             writing.Flush(wait: true);
         }
 
@@ -332,7 +549,7 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
             using var writing = MetalBinaryArchive.Open(_root, device, "translator-a", Budget);
             Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
             var descriptor = RenderDescriptor(vertex, pixel, formats[index]);
-            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, pairs[index].Vertex, pairs[index].Pixel, missed: true);
+            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, pairs[index].Vertex, pairs[index].Pixel, pairs[index].Pixel, missed: true);
             writing.Flush(wait: true);
             Assert.Equal(1, writing.Counters.PipelinesAdded);
             Release(descriptor);
@@ -381,7 +598,7 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         using (var writing = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
         {
             Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
-            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, 1, 2, missed: true);
+            writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, 1, 2, 2, missed: true);
             writing.Flush(wait: true);
             path = Assert.Single(System.IO.Directory.GetFiles(writing.Directory, MetalBinaryArchive.SegmentPrefix + "*"));
         }
@@ -417,16 +634,16 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         var next = RenderDescriptor(vertex, pixel, PixelFormatBgra8Unorm);
         using var writing = MetalBinaryArchive.Open(_root, device, "translator-a", Budget);
         Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
-        writing.NoteRenderPipeline(first, MetalBinaryArchive.PipelineKind.Render, 1, 2, missed: true);
+        writing.NoteRenderPipeline(first, MetalBinaryArchive.PipelineKind.Render, 1, 2, 2, missed: true);
         writing.Flush(wait: true);
         var segment = Assert.Single(System.IO.Directory.GetFiles(writing.Directory, MetalBinaryArchive.SegmentPrefix + "*"));
         var written = File.ReadAllBytes(segment);
         // The archive is given what it holds: serializeToURL reports success and writes no file.
-        writing.NoteRenderPipeline(same, MetalBinaryArchive.PipelineKind.Render, 1, 2, missed: true);
+        writing.NoteRenderPipeline(same, MetalBinaryArchive.PipelineKind.Render, 1, 2, 2, missed: true);
         writing.Flush(wait: true);
         Assert.Equal(written, File.ReadAllBytes(segment));
         // The segment was not closed by it: the next pipeline joins the first in its file.
-        writing.NoteRenderPipeline(next, MetalBinaryArchive.PipelineKind.Render, 1, 2, missed: true);
+        writing.NoteRenderPipeline(next, MetalBinaryArchive.PipelineKind.Render, 1, 2, 2, missed: true);
         writing.Flush(wait: true);
         Assert.Equal(3, writing.Counters.PipelinesAdded);
         Assert.Equal(segment, Assert.Single(System.IO.Directory.GetFiles(writing.Directory, MetalBinaryArchive.SegmentPrefix + "*")));
@@ -452,7 +669,7 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
             writing.RefusedByArchiver = descriptor => descriptor == descriptors[2];
             foreach (var descriptor in descriptors)
             {
-                writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, 1, 2, missed: true);
+                writing.NoteRenderPipeline(descriptor, MetalBinaryArchive.PipelineKind.Render, 1, 2, 2, missed: true);
             }
 
             writing.Flush(wait: true);
@@ -475,6 +692,82 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         }
 
         Release(archives);
+        Release(descriptors);
+        Release(pixel, vertex, pixelLibrary, vertexLibrary);
+    }
+
+    [Fact]
+    public void PipelinesThatSerializeAloneSurviveACombinationFailure()
+    {
+        if (!RequireDevice()) return;
+        var vertexLibrary = Compile(VertexSource);
+        var pixelLibrary = Compile(PixelSource);
+        var vertex = Function(vertexLibrary, "gen5_vs");
+        var pixel = Function(pixelLibrary, "gen5_ps");
+        var descriptors = new[]
+        {
+            RenderDescriptor(vertex, pixel),
+            RenderDescriptor(vertex, pixel, PixelFormatBgra8Unorm),
+        };
+        using (var writing = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget))
+        {
+            Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
+            writing.RefusedBatchByArchiver = batch => batch.Count > 1;
+            for (var index = 0; index < descriptors.Length; index++)
+            {
+                writing.NoteRenderPipeline(descriptors[index], MetalBinaryArchive.PipelineKind.Render,
+                    (UInt128)(index + 1), 10, 10, missed: true);
+            }
+
+            writing.Flush(wait: true);
+            Assert.Equal(0, writing.SegmentCounters.PipelinesRefused);
+            Assert.Equal(2, System.IO.Directory.GetFiles(writing.Directory, MetalBinaryArchive.SegmentPrefix + "*" + MetalBinaryArchive.Extension).Length);
+        }
+
+        using var reading = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget);
+        Assert.True(reading.WaitLoaded(TimeSpan.FromSeconds(10)));
+        for (var index = 0; index < descriptors.Length; index++)
+        {
+            var archives = reading.AcquirePipelineArchives((UInt128)(index + 1), 10);
+            Assert.NotEqual(0, archives);
+            var state = NewRender(descriptors[index], archives, MetalBinaryArchive.FailOnBinaryArchiveMiss);
+            Assert.NotEqual(0, state);
+            Release(state, archives);
+        }
+
+        Release(descriptors);
+        Release(pixel, vertex, pixelLibrary, vertexLibrary);
+    }
+
+    [Fact]
+    public void VertexOnlyAndFragmentPipelinesAreBothPersisted()
+    {
+        if (!RequireDevice()) return;
+        var vertexLibrary = Compile(VertexSource);
+        var pixelLibrary = Compile(PixelSource);
+        var vertex = Function(vertexLibrary, "gen5_vs");
+        var pixel = Function(pixelLibrary, "gen5_ps");
+        var descriptors = new[] { RenderDescriptor(vertex, 0, 0), RenderDescriptor(vertex, pixel) };
+        MetalNative.SendVoidNUInt(descriptors[0], MetalNative.Selector("setDepthAttachmentPixelFormat:"), 252);
+        using (var writing = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget))
+        {
+            Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
+            writing.NoteRenderPipeline(descriptors[0], MetalBinaryArchive.PipelineKind.Render, 1, 0, 0, missed: true);
+            writing.NoteRenderPipeline(descriptors[1], MetalBinaryArchive.PipelineKind.Render, 1, 2, 2, missed: true);
+            writing.Flush(wait: true);
+        }
+
+        using var reading = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget);
+        Assert.True(reading.WaitLoaded(TimeSpan.FromSeconds(10)));
+        for (var index = 0; index < descriptors.Length; index++)
+        {
+            var archives = reading.AcquirePipelineArchives(1, index == 0 ? 0 : (UInt128)2);
+            Assert.NotEqual(0, archives);
+            var state = NewRender(descriptors[index], archives, MetalBinaryArchive.FailOnBinaryArchiveMiss);
+            Assert.NotEqual(0, state);
+            Release(state, archives);
+        }
+
         Release(descriptors);
         Release(pixel, vertex, pixelLibrary, vertexLibrary);
     }

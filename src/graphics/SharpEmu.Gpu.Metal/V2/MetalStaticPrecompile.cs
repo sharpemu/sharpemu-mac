@@ -570,7 +570,8 @@ internal static class MetalStaticPrecompile
     /// fragment's inputs as its outputs, or a mesh pipeline. Everything is released before
     /// it returns. The file's bytes, or -1 (with the reason, or none when skipped).
     /// </summary>
-    internal static long Store(MetalBinaryArchive archive, nint device, Gen5MslShader shader, UInt128 key, out string? error)
+    internal static long Store(MetalBinaryArchive archive, nint device, Gen5MslShader shader, UInt128 key, out string? error,
+        nint compiledLibrary = 0, bool reserved = false)
     {
         error = null;
         var source = shader.Source;
@@ -596,7 +597,7 @@ internal static class MetalStaticPrecompile
 
         nint stub = 0;
         var ownsStub = false;
-        if (stubSource is not null && (stub = StubVertex(device, stubSource, shader.UsesPerVertexInputs, out ownsStub, out error)) == 0)
+        if (stubSource is not null && (stub = StubVertex(device, stubSource, shader.UsesPerVertexInputs, out ownsStub, out error, cache: compiledLibrary == 0)) == 0)
         {
             return -1;
         }
@@ -605,9 +606,14 @@ internal static class MetalStaticPrecompile
         nint library = 0;
         nint function = 0;
         nint descriptor = 0;
+        nint alternateFunction = 0;
+        nint alternateDescriptor = 0;
         try
         {
-            library = MetalRenderHost.TryCompileLibrary(device, source, shader.UsesPerVertexInputs, out var compileError, out _, askArchive: false);
+            var compileError = string.Empty;
+            library = compiledLibrary != 0
+                ? MetalNative.Send(compiledLibrary, MetalNative.Selector("retain"))
+                : MetalRenderHost.TryCompileLibrary(device, source, shader.UsesPerVertexInputs, out compileError, out _, askArchive: false);
             if (library == 0)
             {
                 error = compileError;
@@ -626,11 +632,27 @@ internal static class MetalStaticPrecompile
             }
 
             descriptor = Descriptor(kind, entry, function, stub, source);
-            return descriptor == 0 ? -1 : archive.StoreLibrary(key, kind, descriptor);
+            if (shader.UsesMipStatisticsConstant && MetalBinaryArchive.PlainPixelKey)
+            {
+                alternateFunction = MetalRenderHost.NewMipStatisticsFunction(library, entry, enabled: true, out functionError);
+                if (alternateFunction == 0)
+                {
+                    error = MetalNative.DescribeError(functionError);
+                    return -1;
+                }
+
+                alternateDescriptor = Descriptor(kind, entry, alternateFunction, stub, source);
+                if (alternateDescriptor == 0)
+                {
+                    return -1;
+                }
+            }
+
+            return descriptor == 0 ? -1 : archive.StoreLibrary(key, kind, descriptor, reserved, alternateDescriptor);
         }
         finally
         {
-            foreach (var handle in (ReadOnlySpan<nint>)[descriptor, function, library, ownsStub ? stub : 0])
+            foreach (var handle in (ReadOnlySpan<nint>)[alternateDescriptor, alternateFunction, descriptor, function, library, ownsStub ? stub : 0])
             {
                 if (handle != 0)
                 {
@@ -749,12 +771,14 @@ internal static class MetalStaticPrecompile
 
     // The stub vertex function of a fragment input layout, compiled once and kept (a few
     // dozen layouts per title).
-    private static nint StubVertex(nint device, string source, bool usesPerVertexInputs, out bool owned, out string? error)
+    private static nint StubVertex(nint device, string source, bool usesPerVertexInputs, out bool owned, out string? error, bool cache = true)
     {
         error = null;
         owned = false;
         var cacheKey = (usesPerVertexInputs ? "1" : "0") + source;
-        if (_stubs.TryGetValue(cacheKey, out var cached))
+        // Archive captures may outlive Stop(), which releases the static workers' cache.
+        // Their stub is owned by the capture rather than borrowed from that cache.
+        if (cache && _stubs.TryGetValue(cacheKey, out var cached))
         {
             return cached;
         }
@@ -775,7 +799,7 @@ internal static class MetalStaticPrecompile
         }
 
         // Past the cap (or raced by another thread) the caller releases it after its one use.
-        owned = _stubs.Count >= MaxStubVertices || !_stubs.TryAdd(cacheKey, function);
+        owned = !cache || _stubs.Count >= MaxStubVertices || !_stubs.TryAdd(cacheKey, function);
         return function;
     }
 
