@@ -1104,7 +1104,8 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
 
         var windowOffset = offset - window.Start;
-        resolved = new MetalGuestRange(window.Buffer, windowOffset, size, window.GpuAddress + windowOffset);
+        resolved = new MetalGuestRange(window.Buffer, windowOffset, size, window.GpuAddress + windowOffset)
+        { BackingOffset = offset };
         // Mappings are page-granular on both sides, so a page-aligned guest address has to
         // resolve to a page-aligned window offset. When it does not, some view record's
         // guest address and backing offset disagree below the page, and every range it

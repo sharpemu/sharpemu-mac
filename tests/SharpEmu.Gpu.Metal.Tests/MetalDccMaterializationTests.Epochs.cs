@@ -78,6 +78,10 @@ public sealed unsafe partial class MetalDccMaterializationTests
         Assert.Equal(written.GpuModified, writtenBack.GpuModified);
         Assert.True(writtenBack.Binding > written.Binding);
 
+        // The CPU store follows the real writeback; a diagnostic timeout no
+        // longer admits it while this test's unsubmitted command buffer is pending.
+        rig.Harness.Submit();
+        rig.Harness.Begin();
         Assert.True(((IGuestImageStore)rig.Cache).MarkCpuWrite(ImageAddress, 4));
         Assert.True(rig.Cache.GetImage(target).IsCpuDirty);
         Assert.True(CacheCounts.Of(rig.Cache).Binding > writtenBack.Binding);

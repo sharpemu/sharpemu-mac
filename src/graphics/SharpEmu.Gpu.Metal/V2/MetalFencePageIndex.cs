@@ -27,9 +27,9 @@ internal sealed class MetalFencePageIndex
             alias < start || alias - start >= capacity || size > capacity - (alias - start) ||
             !ReferenceEquals(snapshot, backing.BackingAliasSnapshot)) return false;
         offset = alias - start;
-        // Tracker-page queries and backing-page queries must have the same
-        // boundaries. Unusual sub-page mappings stay on the authoritative path.
-        return Valid(offset, size) && (offset & 4095) == (address & 4095);
+        // This is a byte identity, even when the page index cannot represent it.
+        // Index capacity/alignment are checked separately by the hint's caller.
+        return true;
     }
 
     // Serial is also the generation: submissions never reuse a serial. Overflow

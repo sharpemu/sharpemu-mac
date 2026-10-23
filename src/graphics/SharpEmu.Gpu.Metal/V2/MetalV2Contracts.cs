@@ -10,6 +10,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 internal readonly record struct MetalGuestRange(nint Buffer, ulong Offset, ulong Size, ulong GpuAddress)
 {
     public bool IsValid => Buffer != 0;
+
+    // Canonical identity captured by ResolveWritable, independent of later VA remaps.
+    public ulong? BackingOffset { get; init; }
 }
 
 // The command buffer currently being recorded and the completion serials of the queue.
@@ -125,7 +128,7 @@ internal interface IMetalImageTransfer
     // shorter than the piece): the texture alone still holds those bytes.
     bool EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
-        ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0);
+        ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0, Action? beforeEncode = null);
 
     // Scratch for this command buffer in a hazard-tracked staging buffer: Metal orders the
     // passes that read and write it, where the guest ring and windows are untracked.

@@ -191,7 +191,7 @@ public sealed partial class MetalImageBudgetTests
     }
 
     [Fact]
-    public void AChangedMappingSnapshotCannotRejectAnOutstandingFence()
+    public void UnrelatedStoresAfterAMappingChangeDoNotWait()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
@@ -206,10 +206,293 @@ public sealed partial class MetalImageBudgetTests
             rig.Harness.Begin();
             return rig.Harness.CompletedSerial >= serial;
         };
-        // Unknown mapping identity must take the authoritative path even for
-        // an address whose newly resolved backing page has no index entry.
+        // An unrelated mapping publication does not change the encoded destination.
         ((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(GuestBase + 0x40000, 8);
+        ((IGuestImageStore)rig.Cache).MarkCpuWriteLanded(GuestBase + 0x40000, 8);
+        Assert.Equal(0, waits);
+        Assert.Equal(1, rig.Cache.FencedWritebackCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ARemappedVaStillWaitsForTheCapturedDestinationThroughItsOldAlias(bool fastPath)
+    {
+        if (!RequireDevice()) return;
+        const ulong mirror = GuestBase + 0x800000;
+        using var rig = new Rig(Device.Value, layout: backing => backing.MirrorStart = mirror);
+        var written = MetalTileOracle.Pattern((int)ImageSize, 0x5A);
+        rig.WriteGuest(GuestBase, written);
+        rig.Acquire(GuestBase, ImageRole.ColorTarget);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        rig.Cache.StoreFastPathEnabled = fastPath;
+        // Remap after ResolveWritable, before the writeback publishes its fence.
+        rig.CacheOwner.OnBeginTransfer = () =>
+        {
+            rig.GuestBacking.RemapOffset = 0x100000;
+            rig.GuestBacking.AliasSnapshot = new object();
+        };
+        rig.Cache.FlushGpuWrites(GuestBase, ImageSize, MetalWritebackCause.HostRead);
+        rig.CacheOwner.OnBeginTransfer = null;
+        var waits = 0;
+        rig.CacheOwner.WaitOffWorker = (serial, _) =>
+        {
+            waits++;
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            return rig.Harness.CompletedSerial >= serial;
+        };
+        IGuestImageStore store = rig.Cache;
+        store.MarkPreciseCpuWrite(GuestBase + 0x40000, 8);
+        Assert.Equal(0, waits);
+        store.MarkPreciseCpuWrite(mirror + 0x40, 8);
         Assert.Equal(1, waits);
+        var patch = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        rig.WriteGuest(mirror + 0x40, patch);
+        store.MarkCpuWriteLanded(mirror + 0x40, 8);
+        patch.CopyTo(written, 0x40);
+        Assert.Equal(written, rig.ReadGuest(mirror, ImageSize));
+        Assert.Contains("wb_fence_waits_byte_overlap=1", rig.Cache.TakeWritebackFenceCounters());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScatteredWritebackRangesDoNotMakeUnrelatedStoresWait(bool fastPath)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value, layout: backing =>
+        {
+            backing.ScatterStart = GuestBase;
+            backing.ScatterBytes = ImageSize;
+            backing.ScatterChunk = 4096;
+        });
+        ReleaseAGpuWrittenImage(rig);
+        rig.Cache.StoreFastPathEnabled = fastPath;
+        rig.GuestBacking.AliasSnapshot = new object();
+        var waits = 0;
+        rig.CacheOwner.WaitOffWorker = (serial, _) =>
+        {
+            waits++;
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            return rig.Harness.CompletedSerial >= serial;
+        };
+        IGuestImageStore store = rig.Cache;
+        store.MarkPreciseCpuWrite(GuestBase + 0x40000, 8);
+        store.MarkCpuWriteLanded(GuestBase + 0x40000, 8);
+        Assert.Equal(0, waits);
+        // A query crossing scattered pages must still find its actual overlap.
+        store.MarkPreciseCpuWrite(GuestBase + 4092, 8);
+        Assert.Equal(1, waits);
+        var counters = rig.Cache.TakeWritebackFenceCounters();
+        Assert.Contains("wb_fence_waits_byte_overlap=1", counters);
+        Assert.Contains("wb_fence_waits_partial_run=1", counters);
+        Assert.Contains("wb_fence_waits_mapping_uncertainty=0", counters);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MappingChangesKeepExactBytesDistinctFromTrackerPageOverlap(bool fastPath)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Cache.StoreFastPathEnabled = fastPath;
+        FenceMethod.Invoke(rig.Cache, new object?[] { GuestBase + 0x40, 8UL,
+            rig.Harness.SubmissionSerial, MetalWritebackCause.Release, (ulong?)0x40, false });
+        rig.GuestBacking.AliasSnapshot = new object();
+        var waits = 0;
+        rig.CacheOwner.WaitOffWorker = (serial, _) =>
+        {
+            waits++;
+            rig.CacheOwner.CompletedOverride = serial;
+            return true;
+        };
+        IGuestImageStore store = rig.Cache;
+        store.MarkPreciseCpuWrite(GuestBase + 0x80, 8);
+        Assert.Equal(0, waits);
+        // Landed/fault notifications deliberately keep the baseline's tracker-page semantics.
+        store.MarkCpuWriteLanded(GuestBase + 0x80, 8);
+        Assert.Equal(1, waits);
+        var counters = rig.Cache.TakeWritebackFenceCounters();
+        Assert.Contains("wb_fence_waits_page_overlap=1", counters);
+        Assert.Contains("wb_fence_waits_byte_overlap=0", counters);
+        Assert.Contains("wb_fence_waits_mapping_uncertainty=0", counters);
+    }
+
+    [Fact]
+    public void AnUnindexedKnownDestinationDoesNotMakeUnrelatedStoresWait()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        // Deliberately outside the hint's capacity, but still an exact physical identity.
+        FenceMethod.Invoke(rig.Cache, new object?[] { GuestBase, ImageSize,
+            rig.Harness.SubmissionSerial, MetalWritebackCause.Release, (ulong?)(1UL << 40), false });
+        ((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(GuestBase + 0x40000, 8);
+        Assert.Equal((0L, 0L), rig.Cache.FenceWaitCounts);
+        rig.CacheOwner.WaitOffWorker = (serial, _) =>
+        {
+            Thread.Sleep(2);
+            rig.CacheOwner.CompletedOverride = serial;
+            return true;
+        };
+        ((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(GuestBase, 8);
+        var counters = rig.Cache.TakeWritebackFenceCounters();
+        Assert.Contains("wb_fence_waits_byte_overlap=1", counters);
+        Assert.Contains("wb_fence_waits_unindexed=1", counters);
+        Assert.Contains("wb_fence_waits_mapping_uncertainty=0", counters);
+        Assert.True(CounterValue(counters, "wb_fence_wait_ms_unindexed") > 0);
+        Assert.Contains("wb_fence_waits_unindexed=0", rig.Cache.TakeWritebackFenceCounters());
+    }
+
+    [Fact]
+    public void AnUnknownDestinationRetainsItsWaitAndReportsUncertainty()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        FenceMethod.Invoke(rig.Cache, new object?[] { GuestBase, ImageSize,
+            rig.Harness.SubmissionSerial, MetalWritebackCause.Release, null, false });
+        rig.CacheOwner.WaitOffWorker = (serial, _) =>
+        {
+            rig.CacheOwner.CompletedOverride = serial;
+            return true;
+        };
+        ((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(GuestBase + 0x40000, 8);
+        var counters = rig.Cache.TakeWritebackFenceCounters();
+        Assert.Contains("wb_fence_waits_mapping_uncertainty=1", counters);
+        Assert.Contains("wb_fence_waits_unindexed=1", counters);
+        Assert.Contains("wb_fence_waits_byte_overlap=0", counters);
+    }
+
+    private static double CounterValue(string counters, string name) =>
+        double.Parse(counters.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Single(value => value.StartsWith(name + "=", StringComparison.Ordinal))[(name.Length + 1)..],
+            System.Globalization.CultureInfo.CurrentCulture);
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void APartialRunMustCompleteBeforeAnOverlappingStore(bool managed, bool fastPath)
+    {
+        if (!RequireDevice()) return;
+        const ulong mirror = GuestBase + 0x800000;
+        using var rig = new Rig(Device.Value, layout: backing => backing.MirrorStart = mirror);
+        rig.Cache.StoreFastPathEnabled = fastPath;
+        var written = MetalTileOracle.Pattern((int)ImageSize, 0x5A);
+        rig.WriteGuest(GuestBase, written);
+        var image = rig.Cache.GetImage(rig.Acquire(GuestBase, ImageRole.ColorTarget));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        rig.WriteGuest(GuestBase, MetalTileOracle.Pattern((int)ImageSize, 0xC3));
+        var method = typeof(MetalImageCache).GetMethod("TryWriteBackRun", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var args = new object?[] { image, 0UL, 4096UL, MetalWritebackCause.ImageOverlap, null };
+        Assert.True((bool)method.Invoke(rig.Cache, args)!);
+        Assert.Equal(1, rig.Cache.FencedWritebackCount);
+        // The image owner index is keyed by guest VA. This other mapping reaches
+        // the same bytes without finding that owner: the fence is independently needed.
+        Assert.True(image.IsGpuModified);
+        var waits = 0;
+        rig.CacheOwner.WaitOffWorker = (serial, _) =>
+        {
+            waits++;
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            return rig.Harness.CompletedSerial >= serial;
+        };
+        IGuestImageStore store = rig.Cache;
+        store.MarkPreciseCpuWrite(mirror + 8192, 8);
+        Assert.Equal(0, waits);
+        if (managed) store.MarkPreciseCpuWrite(mirror + 0x40, 8);
+        else Assert.True(store.MarkCpuWrite(mirror + 0x40, 8));
+        Assert.Equal(1, waits);
+        var patch = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        rig.WriteGuest(mirror + 0x40, patch);
+        if (managed) store.MarkCpuWriteLanded(mirror + 0x40, 8);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        patch.CopyTo(written, 0x40);
+        Assert.Equal(written.AsSpan(0, 4096).ToArray(), rig.ReadGuest(GuestBase, 4096));
+        var counters = rig.Cache.TakeWritebackFenceCounters();
+        Assert.Contains("wb_fence_waits_partial_run=1", counters);
+        Assert.Contains("wb_fence_waits_byte_overlap=1", counters);
+        Assert.Equal(CounterValue(counters, "wb_fence_wait_ms"), CounterValue(counters, "wb_fence_wait_ms_partial_run"));
+    }
+
+    [Fact]
+    public void BaselinesUnfencedPartialRunCanOverwriteALaterCpuStore()
+    {
+        if (!RequireDevice()) return;
+        const ulong mirror = GuestBase + 0x800000;
+        using var rig = new Rig(Device.Value, layout: backing => backing.MirrorStart = mirror);
+        rig.Cache.WritebackFenceEnabled = false;
+        var written = MetalTileOracle.Pattern((int)ImageSize, 0x5A);
+        rig.WriteGuest(GuestBase, written);
+        var image = rig.Cache.GetImage(rig.Acquire(GuestBase, ImageRole.ColorTarget));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        var method = typeof(MetalImageCache).GetMethod("TryWriteBackRun", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        Assert.True((bool)method.Invoke(rig.Cache, new object?[] {
+            image, 0UL, 4096UL, MetalWritebackCause.ImageOverlap, null })!);
+        Assert.Equal(0, rig.Cache.FencedWritebackCount);
+        // Reproduce the baseline's partial-run ordering: the CPU lands before
+        // the recorded GPU retile. Its patch is demonstrably overwritten.
+        var patch = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        Assert.NotEqual(patch, written.AsSpan(0x40, 8).ToArray());
+        IGuestImageStore store = rig.Cache;
+        store.MarkPreciseCpuWrite(mirror + 0x40, 8);
+        rig.WriteGuest(mirror + 0x40, patch);
+        store.MarkCpuWriteLanded(mirror + 0x40, 8);
+        Assert.Equal((0L, 0L), rig.Cache.FenceWaitCounts);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        Assert.Equal(written.AsSpan(0x40, 8).ToArray(), rig.ReadGuest(GuestBase + 0x40, 8));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ARefusedWritebackHasNoFenceAsInTheBaseline(bool fastPath)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Cache.StoreFastPathEnabled = fastPath;
+        var image = rig.Cache.GetImage(rig.Acquire(GuestBase, ImageRole.ColorTarget, samples: 2));
+        var method = typeof(MetalImageCache).GetMethod("TryWriteBackRun", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        Assert.False((bool)method.Invoke(rig.Cache, new object?[] {
+            image, 0UL, 4096UL, MetalWritebackCause.ImageOverlap, null })!);
+        Assert.Equal(0, rig.Cache.FencedWritebackCount);
+        rig.Cache.FlushGpuWrites(GuestBase, ImageSize, MetalWritebackCause.HostRead);
+        Assert.Equal(0, rig.Cache.FencedWritebackCount);
+        Assert.True(image.IsGpuModified);
+    }
+
+    [Fact]
+    public void AStagedWritebackWithNoSelectedSubresourcesDoesNotCopyScratchIntoGuestMemory()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var image = rig.Cache.GetImage(rig.Acquire(GuestBase, ImageRole.ColorTarget));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        var expected = MetalTileOracle.Pattern((int)ImageSize, 0xC3);
+        rig.WriteGuest(GuestBase, expected);
+        var batchType = typeof(MetalImageCache).GetNestedType("WritebackFenceBatch", BindingFlags.NonPublic)!;
+        var batch = Activator.CreateInstance(batchType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            null, new object[] { rig.Cache, rig.Harness, MetalWritebackCause.HostRead }, null)!;
+        var method = typeof(MetalImageCache).GetMethod("WriteBackStaged", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        // Valid destination, empty layer selection: the transfer accepts an empty
+        // operation and never calls the before-encode hook or initialises scratch.
+        var carried = (ulong)method.Invoke(rig.Cache, new object[] { rig.Harness, image,
+            new SubresourceRange(0, 1, 0, 0), 0UL, ImageSize, default(MetalGuestRange), 0UL, batch })!;
+        Assert.Equal(0UL, carried);
+        Assert.Equal(0, rig.Cache.FencedWritebackCount);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        Assert.Equal(expected, rig.ReadGuest(GuestBase, ImageSize));
     }
 
     [Fact]
@@ -223,7 +506,7 @@ public sealed partial class MetalImageBudgetTests
         rig.CacheOwner.WaitOffWorker = (waited, _) =>
         {
             Assert.Equal(serial, waited);
-            FenceMethod.Invoke(rig.Cache, new object[] { GuestBase, ImageSize, serial + 1, MetalWritebackCause.Release, rig.GuestBacking.BackingAliasSnapshot! });
+            FenceMethod.Invoke(rig.Cache, new object[] { GuestBase, ImageSize, serial + 1, MetalWritebackCause.Release, (ulong?)0, false });
             rig.CacheOwner.CompletedOverride = serial;
             return true;
         };

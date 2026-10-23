@@ -1509,7 +1509,6 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             RefreshBeforeWriteback(image);
         }
 
-        var fenceMappingSnapshot = _backing.BackingAliasSnapshot;
         var destination = _guestMemory.ResolveWritable(
             description.Data.Address + aligned, alignedEnd - aligned);
         if (!destination.IsValid || destination.Size < alignedEnd - aligned)
@@ -1520,11 +1519,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         _owner.LandHeldCopies(description.Data.Address + aligned, alignedEnd - aligned);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
-        var fencedSerial = context.SubmissionSerial;
-        FenceWriteback(description.Data.Address + aligned, alignedEnd - aligned, fencedSerial, cause, fenceMappingSnapshot);
+        var fences = new WritebackFenceBatch(this, context, cause);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
-        if (!_transfer.EncodeTextureToGuest(
-                context, in description, range, image.Texture, destination, default, aligned, alignedEnd - aligned))
+        if (!EncodeWriteback(context, image, range, destination, default, aligned, alignedEnd - aligned,
+                0, fences, partial: true))
         {
             // Nothing was retiled, so the run is not published; the caller writes the image back whole.
             failure = MetalAliasFallbackReason.RetileRefused;
@@ -1535,11 +1533,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             context.ProfileEncoded(ProfileLabel("writeback-run", in description));
         }
-        if (context.SubmissionSerial != fencedSerial)
-        {
-            FenceWriteback(description.Data.Address + aligned, alignedEnd - aligned,
-                context.SubmissionSerial, cause, fenceMappingSnapshot);
-        }
+        fences.Extend();
         image.MarkPublished(aligned, alignedEnd);
         NoteOwnGuestWrite(description.Data.Address + aligned, alignedEnd - aligned);
         _writebackCauses[(int)cause]++;
@@ -2363,19 +2357,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         RefreshBeforeWriteback(image);
         ref readonly var description = ref image.Description;
         _owner.LandHeldCopies(description.Data.Address, description.Data.Size);
-        var fenceMappingSnapshot = _backing.BackingAliasSnapshot;
         var destination = description.Data.Size <= TransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
             : default;
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
-        // Reserve before any piece or stencil transfer can be encoded/executed.
-        // Partial/refused encodes keep the conservative fence until completion.
-        var fencedSerial = context.SubmissionSerial;
-        FenceWriteback(description.Data.Address, description.Data.Size, fencedSerial, cause, fenceMappingSnapshot);
-        if (description.HasStencil)
-        {
-            FenceWriteback(description.Stencil.Address, description.Stencil.Size, fencedSerial, cause, fenceMappingSnapshot);
-        }
+        var fences = new WritebackFenceBatch(this, context, cause);
         ulong written;
         if (destination.IsValid && destination.Size >= description.Data.Size)
         {
@@ -2383,14 +2369,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 ? _guestMemory.ResolveWritable(description.Stencil.Address, description.Stencil.Size)
                 : default;
             var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
-            written = _transfer.EncodeTextureToGuest(
-                context, in description, range, image.Texture, destination, stencil, 0, description.Data.Size)
+            written = EncodeWriteback(context, image, range, destination, stencil, 0, description.Data.Size,
+                description.Stencil.Address, fences, partial: false)
                 ? description.Data.Size
                 : 0;
         }
         else
         {
-            written = WriteBackInPieces(context, image);
+            written = WriteBackInPieces(context, image, fences);
         }
 
         if (written == 0)
@@ -2409,18 +2395,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             context.ProfileEncoded(ProfileLabel("writeback", in description));
         }
-        // Profiling or a transfer split can roll the context to a newer
-        // submission. Retain the old post-encode newest-serial guarantee too.
-        if (context.SubmissionSerial != fencedSerial)
-        {
-            FenceWriteback(description.Data.Address, description.Data.Size,
-                context.SubmissionSerial, cause, fenceMappingSnapshot);
-            if (description.HasStencil)
-            {
-                FenceWriteback(description.Stencil.Address, description.Stencil.Size,
-                    context.SubmissionSerial, cause, fenceMappingSnapshot);
-            }
-        }
+        // A transfer or profiling hook may have rolled to a newer submission.
+        fences.Extend();
         image.ClearGpuModified();
         // The retile is a GPU store into guest memory: until it completes the bytes
         // in guest memory are the old ones, so a read of them has to wait for it.
@@ -2449,12 +2425,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // only through windows, because a retile stores into guest memory and the upload ring
     // is nobody's guest memory. A run with no writable window keeps the texture
     // authoritative for those layers and says so. Returns the image bytes carried.
-    private ulong WriteBackInPieces(IMetalSubmissionContext context, MetalCachedImage image)
+    private ulong WriteBackInPieces(IMetalSubmissionContext context, MetalCachedImage image, WritebackFenceBatch fences)
     {
         ref readonly var description = ref image.Description;
         if (!TrySplitLayers(in description, out var layers, out var layerBytes))
         {
-            return WriteBackInRuns(context, image, 0, description.Data.Size);
+            return WriteBackInRuns(context, image, 0, description.Data.Size, fences);
         }
 
         var batch = (uint)Math.Clamp(TransferPieceBytes / layerBytes, 1, layers);
@@ -2470,7 +2446,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             {
                 // These layers are not one backed span; cut them into the runs that are
                 // rather than leaving the whole piece in the texture.
-                written += WriteBackInRuns(context, image, pieceBase, pieceBase + pieceSize);
+                written += WriteBackInRuns(context, image, pieceBase, pieceBase + pieceSize, fences);
                 continue;
             }
 
@@ -2479,8 +2455,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     description.Stencil.Address + (stencilLayerBytes * first), stencilLayerBytes * count)
                 : default;
             var range = new SubresourceRange(0, description.Resources.Levels, first, count);
-            written += _transfer.EncodeTextureToGuest(
-                context, in description, range, image.Texture, piece, stencilPiece, pieceBase, pieceSize)
+            written += EncodeWriteback(context, image, range, piece, stencilPiece, pieceBase, pieceSize,
+                description.Stencil.Address + stencilLayerBytes * first, fences, partial: true)
                 ? pieceSize
                 : 0;
         }
@@ -2494,7 +2470,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // depth kernels write only whole, scattered over the backing in 64 KB pieces; a band
     // that crosses a window edge - is staged (WriteBackStaged). Only bytes no window holds at
     // all, a hole in the guest mapping, stay in the texture. Returns the image bytes carried.
-    private ulong WriteBackInRuns(IMetalSubmissionContext context, MetalCachedImage image, ulong from, ulong to)
+    private ulong WriteBackInRuns(IMetalSubmissionContext context, MetalCachedImage image, ulong from, ulong to,
+        WritebackFenceBatch fences)
     {
         ref readonly var description = ref image.Description;
         var address = description.Data.Address;
@@ -2525,16 +2502,18 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             {
                 var destination = _guestMemory.ResolveWritable(address + run.Offset, run.Size);
                 if (destination.IsValid && destination.Size >= run.Size &&
-                    _transfer.EncodeTextureToGuest(
-                        context, in description, range, image.Texture,
-                        destination with { Size = run.Size }, stencil, run.Offset, run.Size))
+                    EncodeWriteback(context, image, range, destination with { Size = run.Size }, stencil,
+                        run.Offset, run.Size,
+                        description.Stencil.Address + stencilLayerBytes * (layerBytes != 0 ? run.Offset / layerBytes : 0),
+                        fences, partial: true))
                 {
                     carried = run.Size;
                 }
             }
             else
             {
-                carried = WriteBackStaged(context, image, range, run.Offset, run.Size, stencil);
+                carried = WriteBackStaged(context, image, range, run.Offset, run.Size, stencil,
+                    description.Stencil.Address + stencilLayerBytes * (layerBytes != 0 ? run.Offset / layerBytes : 0), fences);
             }
 
             if (carried < run.Size)
@@ -2605,14 +2584,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
     // A writeback run no window holds whole: the texture is retiled into scratch and the
     // scratch copied into each backed piece of the run, all on the GPU in this command
-    // buffer, and the caller notes and fences the image's range as for any writeback. The
+    // buffer. Only the pieces actually copied back are fenced. The
     // scratch first takes the guest's bytes, so a byte of the run the retile does not write
     // keeps its value, as it does in place. The scratch is a hazard-tracked staging buffer,
     // so Metal orders the three passes through it (each reads or writes it); the guest ring
     // and windows are untracked. Returns the run bytes carried: every backed one.
     private ulong WriteBackStaged(
         IMetalSubmissionContext context, MetalCachedImage image, SubresourceRange range, ulong offset, ulong size,
-        MetalGuestRange stencil)
+        MetalGuestRange stencil, ulong stencilAddress, WritebackFenceBatch fences)
     {
         ref readonly var description = ref image.Description;
         var address = description.Data.Address + offset;
@@ -2646,11 +2625,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             carried += guest.Size;
         }
 
-        _transfer.EncodeBufferCopies(context, copies);
-        if (!_transfer.EncodeTextureToGuest(context, in description, range, image.Texture, scratch, stencil, offset, size))
+        var encoded = false;
+        if (!EncodeWriteback(context, image, range, scratch, stencil, offset, size,
+                stencilAddress, fences, partial: true, scratch: true, beforeEncode: () =>
+                {
+                    encoded = true;
+                    // Close stores before even the scratch's preservation read: bytes
+                    // not covered by the retile will also be copied back afterwards.
+                    foreach (var (at, guest) in pieces) fences.Add(address + at, guest, partial: true);
+                    _transfer.EncodeBufferCopies(context, copies);
+                }) || !encoded)
         {
-            // The retile encoded nothing: copying the scratch back would only rewrite the
-            // guest's own bytes, and the run is not carried.
+            // A refusal or empty selection encoded no retile. Scratch may still be
+            // uninitialised, so none of it may be copied back to guest memory.
             return 0;
         }
 
