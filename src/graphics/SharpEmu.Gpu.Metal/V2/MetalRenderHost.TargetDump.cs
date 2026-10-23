@@ -440,6 +440,13 @@ internal sealed partial class MetalRenderHost
                     _dumpsByTexture[texture] = seen + 1;
                     _targetDumps++;
                     WriteDumpPng(rgba, width, height, label, seen, texture);
+                    if (DiagDumpRaw)
+                    {
+                        // [WIP] diag: SHARPEMU_DIAG_DUMP_RAW=1 keeps the snapshot's bytes too.
+                        File.WriteAllBytes(Path.Combine(_dumpTargetsDirectory!, string.Format(
+                            CultureInfo.InvariantCulture, "{0:D4}-raw-{1}x{2}-fmt{3}-{4}.bin",
+                            _targetDumps, width, height, format, seen)), source.ToArray());
+                    }
                 }
             }
             catch (Exception exception)
@@ -640,6 +647,8 @@ internal sealed partial class MetalRenderHost
 
     private static unsafe ReadOnlySpan<byte> DumpSpan(nint contents, int length) =>
         new((void*)contents, length);
+
+    private static readonly bool DiagDumpRaw = Environment.GetEnvironmentVariable("SHARPEMU_DIAG_DUMP_RAW") == "1";
 
     private void WriteDumpPng(byte[] rgba, uint width, uint height, string label, int index, nint texture)
     {
