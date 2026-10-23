@@ -155,6 +155,20 @@ internal interface IMetalImageTransfer
         in ImageDescription sourceDescription, nint sourceTexture,
         in ImageDescription targetDescription, nint targetTexture);
 
+    bool HasDenseAliasCoverage(in ImageDescription description) => false;
+
+    bool CanDiscardAliasForOverwrite(in ImageDescription target, in ImageDescription source) => false;
+
+    // A single texture-to-texture pass, without any intermediate buffer. A refusal
+    // encodes nothing and leaves the conservative publication path available.
+    bool TryEncodeFusedAlias(IMetalSubmissionContext context,
+        in ImageDescription sourceDescription, nint sourceTexture,
+        in ImageDescription targetDescription, nint targetTexture, out string refusal)
+    {
+        refusal = "unsupported-transfer";
+        return false;
+    }
+
     // Whether the depth image's texture, sampled in its own format, reads what a texture of
     // the colour description over the same guest bytes would (MetalImageTransfer). False
     // keeps the two as separate textures.

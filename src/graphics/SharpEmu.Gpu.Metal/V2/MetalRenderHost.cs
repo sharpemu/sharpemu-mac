@@ -2542,6 +2542,7 @@ internal sealed partial class MetalRenderHost :
         var (subsetJoins, subsetJoinsSampled) = TakeSubsetJoins();
         Console.Error.WriteLine(
             $"[METAL-V2][TBDR] passes={passes} empty={emptyPasses} returned={returnedPasses} " +
+            _imageCache.TakeAliasTransitionText() + " " +
             $"load_mb={(loadBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"store_mb={((storeBytes - discardedBytes) / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"discarded_mb={(discardedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +

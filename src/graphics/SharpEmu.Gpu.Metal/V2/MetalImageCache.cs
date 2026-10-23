@@ -609,6 +609,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     continue;
                 }
 
+                _aliasRoundTrip++;
+                _aliasRoundTripBytes += (long)sharedSize;
                 var (dirtyStart, dirtyEnd) = image.OverlapWithin(sharedStart, sharedSize);
                 var declined = MetalAliasFallbackReason.None;
                 if (takesGpuOwnership && TryHandOverAliasRun(other, otherStart, otherEnd, out declined))
@@ -1381,7 +1383,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         PromoteLinearView(image);
         EnsureViewUsageLocked(image, in request.View);
         WatchImage(imageIdentifier);
-        SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
+        var deferAliases = deferRefresh && AliasTransitionsEnabled && CanDeferRefresh(image) &&
+            !image.Description.HasStencil && !image.Description.IsBlock && !image.Description.IsVolume &&
+            image.Description.Resources.Levels == 1 && image.Description.TransferLayers == 1;
+        if (!deferAliases) SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
         // The pass about to begin may clear or overwrite all of it; BeginRendering decides
         // whether the upload is worth making (MetalImageCache.DeferredRefresh).
         var defer = deferRefresh && CanDeferRefresh(image);
@@ -1410,7 +1415,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             image.NoteUse(_owner.CurrentSerial);
             var deferredView = image.GetOrCreateView(request.View);
-            DeferRefreshLocked(deferredView, image, depth: false, stencilOnly: false);
+            DeferRefreshLocked(deferredView, imageIdentifier, image, depth: false, stencilOnly: false, deferAliases);
             return deferredView;
         }
 
@@ -1497,7 +1502,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             image.NoteUse(_owner.CurrentSerial);
             var deferredView = image.GetOrCreateView(request.View);
-            DeferRefreshLocked(deferredView, image, depth: true, stencilOnly);
+            DeferRefreshLocked(deferredView, imageIdentifier, image, depth: true, stencilOnly, aliasesPending: false);
             return deferredView;
         }
 
@@ -1632,6 +1637,20 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             if (_slots.TryGet(imageIdentifier) is { } image && image.GpuOverlaps(address, size))
             {
+                var (start, end) = image.OverlapWithin(address, size);
+                if (AliasTransitionsEnabled && cause == MetalWritebackCause.HostRead &&
+                    !image.Description.HasStencil && !image.IsCpuDirty && image.FirstLevel == 0 &&
+                    image.Sparse is null && (start != 0 || end != image.Description.Data.Size))
+                {
+                    if (image.IsPublished(start, end)) continue;
+                    if (TryWriteBackRun(image, start, end, cause, out var refusal))
+                    {
+                        _aliasCpuReadRuns++;
+                        _aliasCpuReadBytes += (long)(end - start);
+                        continue;
+                    }
+                    RefuseAliasTransition($"cpu-read-{refusal}");
+                }
                 WriteBackToGuest(image, cause);
             }
         }
@@ -1761,6 +1780,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             image.Description.Data.Address != other.Description.Data.Address ||
             image.Description.Data.Size != other.Description.Data.Size)
         {
+            RefuseAliasTransition("range-or-owner");
             return false;
         }
 
@@ -1776,10 +1796,22 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureSparseBacked(image);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, image.Texture);
-        if (!_transfer.TryEncodeTextureToTexture(
-                context, in other.Description, other.Texture, in image.Description, image.Texture))
+        var refusal = "disabled";
+        var fused = AliasTransitionsEnabled && _transfer.TryEncodeFusedAlias(
+            context, in other.Description, other.Texture, in image.Description, image.Texture, out refusal);
+        if (fused)
         {
-            return false;
+            _aliasFused++;
+            _aliasFusedBytes += (long)image.Description.Data.Size;
+        }
+        else
+        {
+            RefuseAliasTransition(refusal);
+            if (!_transfer.TryEncodeTextureToTexture(
+                    context, in other.Description, other.Texture, in image.Description, image.Texture))
+            {
+                return false;
+            }
         }
 
         if (context.WantsEncodedLabels)
