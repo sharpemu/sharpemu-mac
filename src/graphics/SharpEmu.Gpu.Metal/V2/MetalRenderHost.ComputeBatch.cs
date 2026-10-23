@@ -25,6 +25,8 @@ internal sealed partial class MetalRenderHost
     private bool _batchFirstHasArguments, _batchFirstHasPush;
     internal long ComputeBatchedDispatches { get; private set; }
     internal long ComputeBatches { get; private set; }
+    internal long ComputeBatchRecompiles { get; private set; }
+    internal long ComputeBatchFallbacks { get; private set; }
     internal long ComputeBatchFlushes(string reason) => _computeBatchFlushReasons.GetValueOrDefault(reason);
     private readonly Dictionary<string, long> _computeBatchFlushReasons = new(StringComparer.Ordinal);
 
@@ -43,6 +45,14 @@ internal sealed partial class MetalRenderHost
             entry.ComputeDescription is not { } description ||
             LookupModule(description.Program).Shader.ComputeBatchEntryPoint is null)
             return false;
+        // Resolve when a second request can join, before retaining its bindings.
+        // On failure the queued singleton flushes normally and this dispatch keeps
+        // its current bindings. Singletons never need the optional pipeline.
+        if (entry.BatchUnavailable || (_computeBatchCount != 0 && ComputeBatchState(entry) == 0))
+        {
+            ComputeBatchFallbacks += 1 + _computeBatchCount;
+            return false;
+        }
         groups = (uint)(product * z);
         return true;
     }
@@ -74,16 +84,43 @@ internal sealed partial class MetalRenderHost
     private nint ComputeBatchState(MetalPipelineEntry entry)
     {
         if (entry.BatchState != 0) return entry.BatchState;
+        if (entry.BatchUnavailable) return 0;
         var module = RequireModule(entry.ComputeDescription!.Program);
-        var function = MetalNative.Send(module.Library, MetalNative.Selector("newFunctionWithName:"),
-            MetalNative.NsString(module.Shader.ComputeBatchEntryPoint!));
-        if (function == 0) throw Fatal("A segmented compute entry point is missing from its Metal library.");
+        var name = module.Shader.ComputeBatchEntryPoint!;
+        var key = MetalBinaryArchive.ComputeBatchKey(module.ArchiveKey);
+        var library = MetalBinaryArchive.For(_device)?.TryLoadLibrary(key, requiredEntryPoint: name) ?? 0;
+        nint function = 0;
         try
         {
-            entry.BatchState = BuildComputePipelineState(function, entry.VertexHash, module.ArchiveKey);
+            // A cold source library already has both kernels. A warm archive made
+            // from the ordinary pipeline may contain only the ordinary kernel.
+            function = MetalNative.Send(library != 0 ? library : module.Library,
+                MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(name));
+            if (function == 0)
+            {
+                ComputeBatchRecompiles++;
+                var shader = module.Compiled.AcquireShader();
+                if (library != 0) MetalNative.SendVoid(library, SelRelease);
+                library = 0;
+                library = TryCompileLibrary(_device, shader.Source, shader.UsesPerVertexInputs,
+                    out _, out _, askArchive: false);
+                module.Compiled.ReleaseSource();
+                if (library != 0)
+                    function = MetalNative.Send(library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(name));
+            }
+            if (function == 0)
+            {
+                entry.BatchUnavailable = true;
+                return 0;
+            }
+            entry.BatchState = BuildComputePipelineState(function, entry.VertexHash, key);
             return entry.BatchState;
         }
-        finally { MetalNative.SendVoid(function, SelRelease); }
+        finally
+        {
+            if (function != 0) MetalNative.SendVoid(function, SelRelease);
+            if (library != 0) MetalNative.SendVoid(library, SelRelease);
+        }
     }
 
     private void FlushComputeBatch(string reason)
@@ -162,6 +199,7 @@ internal sealed partial class MetalRenderHost
 
     private string ComputeBatchCounters() =>
         $"compute_batched_dispatches={ComputeBatchedDispatches} compute_batches={ComputeBatches} " +
+        $"compute_batch_recompiles={ComputeBatchRecompiles} compute_batch_fallbacks={ComputeBatchFallbacks} " +
         $"compute_avg_batch={(ComputeBatches == 0 ? 0 : (double)ComputeBatchedDispatches / ComputeBatches).ToString("F2", CultureInfo.InvariantCulture)} " +
         $"compute_batch_flush=[{string.Join(',', _computeBatchFlushReasons.Select(pair => $"{pair.Key}:{pair.Value}"))}] ";
 }

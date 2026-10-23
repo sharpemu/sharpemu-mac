@@ -95,6 +95,30 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
     }
 
     [Fact]
+    public void AnArchiveMissingTheRequiredEntryIsRejected()
+    {
+        if (!RequireDevice()) return;
+        var key = MetalBinaryArchive.ComputeBatchKey(MetalBinaryArchive.LibraryKey(ComputeSource, usesPerVertexInputs: false));
+        var library = Compile(ComputeSource);
+        var function = Function(library, "gen5_cs");
+        try
+        {
+            using (var writing = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget))
+            {
+                writing.CaptureCompute(key, function);
+                writing.Flush(wait: true);
+                Assert.Equal(1, writing.Counters.LibrariesWritten);
+            }
+            using var reading = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget);
+            Assert.Equal(0, reading.TryLoadLibrary(key, "missing_batch_entry"));
+            Assert.Equal(1, reading.Counters.Rejected);
+            Assert.False(reading.HasLibrary(key));
+            Assert.Empty(System.IO.Directory.GetFiles(reading.LibraryDirectory));
+        }
+        finally { Release(function, library); }
+    }
+
+    [Fact]
     public void ALibraryAndComputePipelineFromTheArchiveComputeWhatTheCompiledOnesDo()
     {
         if (!RequireDevice()) return;
