@@ -87,7 +87,8 @@ public sealed class RosettaVectorStorePatchTests
         var result = GuestRedZonePatcher.Patch(memory, memory, programHeaders, imageBase, imageSize);
         Assert.Equal(0, result.RedZoneFunctions);
         Assert.Equal(2, result.VectorStoreCount);
-        Assert.Equal(2, result.PatchedSites);
+        // Both stores are relocated in one grouped span, while both must still split.
+        Assert.Equal(1, result.PatchedSites);
         Assert.Equal(0, result.FailedSites);
 
         byte* source = stackalloc byte[32];
