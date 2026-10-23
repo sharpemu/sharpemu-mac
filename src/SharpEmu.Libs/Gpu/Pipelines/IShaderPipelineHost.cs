@@ -52,6 +52,11 @@ public readonly record struct MeshShaderLimits(
 // The host objects the shader and pipeline caches need: modules, pipelines, limits and guest readers.
 public interface IShaderPipelineHost
 {
+    // Native vertex fetch is not robust: the entire acquired span must be
+    // mapped, as well as being in bounds of the guest descriptor.
+    bool VertexFetchRangeIsMapped(ulong address, ulong size) => false;
+    uint MaxFixedFunctionVertexBuffers => 0;
+
     uint MaxPushDescriptors { get; }
 
     bool ComputeWave64Supported { get; }

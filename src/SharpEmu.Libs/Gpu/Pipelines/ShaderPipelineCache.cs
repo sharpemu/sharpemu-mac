@@ -238,6 +238,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
             depthAspectBound, stencilAspectBound, triangleList, null);
 
+    public GraphicsPrograms GetGraphicsPrograms(
+        VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive, bool depthBound, bool depthAspectBound, bool stencilAspectBound,
+        bool triangleList, VertexFetchBounds fetchBounds) =>
+        GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping,
+            pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, null, fetchBounds);
+
     // A primitive-shader draw compiled as a ShaderStage.Mesh program (hosts with mesh shaders,
     // MeshShadersSupported). The depth target's aspects are not passed in, so a bound depth
     // target stands for its depth aspect.
@@ -292,14 +300,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool depthAspectBound,
         bool stencilAspectBound,
         bool triangleList,
-        MeshDrawConfiguration? mesh)
+        MeshDrawConfiguration? mesh, VertexFetchBounds fetchBounds = default)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return ResolveGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
-                depthAspectBound, stencilAspectBound, triangleList, mesh);
+                depthAspectBound, stencilAspectBound, triangleList, mesh, fetchBounds);
         }
     }
 
@@ -314,7 +322,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool depthAspectBound,
         bool stencilAspectBound,
         bool triangleList,
-        MeshDrawConfiguration? mesh)
+        MeshDrawConfiguration? mesh, VertexFetchBounds fetchBounds = default)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var vertexSource = PrepareSource(
@@ -322,6 +330,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             mesh is null ? "vertex" : "mesh", vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount,
             probeWrittenRegisters: true, VertexUserDataBase, ref _vertexUserData, vertex.GeometryUserDataAddress);
         var vertexInfo = mesh is null ? PrepareVertexInput(vertexSource, shaderInterface, context) : new VertexInputInfo();
+        vertexInfo.FetchBounds = fetchBounds;
         vertexInfo.IeeeMode = vertex.GeometryResource1.IeeeMode;
         vertexInfo.FloatMode = vertex.GeometryResource1.FloatMode;
         vertexInfo.Dx10Clamp = vertex.GeometryResource1.Dx10Clamp;
@@ -1439,7 +1448,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         for (var binding = 0; binding < info.Buffers.Length; binding++)
         {
             var buffer = info.Buffers[binding];
-            state.Bindings[binding] = new PipelineVertexBinding(buffer.Stride, buffer.PerInstance);
+            state.Bindings[binding] = new PipelineVertexBinding(buffer.Stride, buffer.PerInstance, buffer.Divisor);
         }
 
         for (var index = 0; index < info.Attributes.Length; index++)

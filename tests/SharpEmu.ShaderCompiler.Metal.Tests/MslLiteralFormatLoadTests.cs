@@ -25,6 +25,35 @@ public sealed class MslLiteralFormatLoadTests(ITestOutputHelper output)
 
     private static readonly uint Identity = Swizzle(4, 5, 6, 7);
 
+    public static IEnumerable<object[]> BufferFormats() => Enumerable.Range(1, 77)
+        .Where(format => Gfx10UnifiedFormat.TryDecode((uint)format, out var data, out _) && data != 0)
+        .Select(format => new object[] { (uint)format });
+
+    [Theory]
+    [MemberData(nameof(BufferFormats))]
+    public void NarrowFormatsMatchThePortableDecoderIncludingPartialTails(uint format)
+    {
+        if (!RequireDevice()) return;
+        foreach (var offset in new[] { 17, 56, 62 })
+        {
+            var swizzle = offset == 56 ? Swizzle(7, 4, 1, 0) : Identity;
+            var narrow = Compile(format, swizzle, offset, false, out var narrowPush);
+            var portable = Compile(format, swizzle, offset, true, out var portablePush);
+            var initial = new byte[BufferBytes];
+            new Random(173).NextBytes(initial);
+            byte[] Execute(Gen5MslShader shader, byte[] push)
+            {
+                Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out var error), error);
+                Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, initial, push,
+                    shader.ArgumentLayout!, 1, out var result, out error), error);
+                return result;
+            }
+            Assert.DoesNotContain("sharpemu_gfx10_formats[(", narrow.Source, StringComparison.Ordinal);
+            Assert.Contains("sharpemu_gfx10_formats[(", portable.Source, StringComparison.Ordinal);
+            Assert.Equal(Execute(portable, portablePush), Execute(narrow, narrowPush));
+        }
+    }
+
     [Fact]
     public void ALiteralWholeDwordFormatLoadsOneRun()
     {
@@ -36,10 +65,10 @@ public sealed class MslLiteralFormatLoadTests(ITestOutputHelper output)
         var two = Compile(Float32x4, Swizzle(4, 5, 0, 0), offset: 16);
         Assert.Contains("sharpemu_load_words<2>(b0, ", two.Source, StringComparison.Ordinal);
 
-        // A format of narrower components keeps the descriptor-table form.
+        // Narrow components also resolve their layout before executing the shader.
         var packed = Compile(14, Identity, offset: 16);
         Assert.DoesNotContain("sharpemu_load_words<", packed.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_gfx10_formats[(", packed.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_gfx10_formats[(", packed.Source, StringComparison.Ordinal);
     }
 
     // dword offset 16 is aligned and 18 is not; 56 and 58 run past the end of the buffer.
@@ -126,6 +155,9 @@ public sealed class MslLiteralFormatLoadTests(ITestOutputHelper output)
     // v1 = the byte offset (OFFEN); buffer_load_format_xyzw v[4:7] from s[8:11]; the four
     // registers are stored at bytes 0, 4, 8 and 12 of the same buffer.
     private static Gen5MslShader Compile(uint format, uint swizzle, int offset)
+        => Compile(format, swizzle, offset, false, out _);
+
+    private static Gen5MslShader Compile(uint format, uint swizzle, int offset, bool portable, out byte[] push)
     {
         var fixture = new Gen5ComputeFixture(
             "format-load-literal",
@@ -133,10 +165,10 @@ public sealed class MslLiteralFormatLoadTests(ITestOutputHelper output)
                 0x7E0202FF, (uint)offset,                     // v_mov_b32 v1, offset
                 0xE0000000u | (3u << 18) | (1u << 12),        // buffer_load_format_xyzw v[4:7], v1, s[8:11], 0 offen
                 0x80020401,
-                0xE0700000, 0x80020400,                       // buffer_store_dword v4 offset:0
-                0xE0700004, 0x80020500,                       // buffer_store_dword v5 offset:4
-                0xE0700008, 0x80020600,                       // buffer_store_dword v6 offset:8
-                0xE070000C, 0x80020700,                       // buffer_store_dword v7 offset:12
+                0xE0700000, 0x80030400,                       // buffer_store_dword v4, s[12:15] offset:0
+                0xE0700004, 0x80030500,                       // buffer_store_dword v5 offset:4
+                0xE0700008, 0x80030600,                       // buffer_store_dword v6 offset:8
+                0xE070000C, 0x80030700,                       // buffer_store_dword v7 offset:12
                 0xBF810000,                                   // s_endpgm
             ],
             8,
@@ -146,10 +178,29 @@ public sealed class MslLiteralFormatLoadTests(ITestOutputHelper output)
         userData[9] = 0;
         userData[10] = BufferBytes;
         userData[11] = (format << 12) | swizzle;
+        Array.Copy(userData, 8, userData, 12, 4);
         var request = Gen5ComputeFixtures.RequestOrThrow(
             Gen5ComputeFixtures.DecodeOrThrow(fixture),
             ShaderStage.Compute,
             runtimeInputs: new ResourceRuntimeInputs { UserData = userData });
+        push = new byte[PushData.ByteSize];
+        if (portable)
+        {
+            var plan = ShaderResourcePlan.Extract(request.Program, ShaderStage.Compute, 1, 0, 16);
+            var resources = new SpecializedResourceInfo { Info = request.Resources.Info.Clone() };
+            foreach (var buffer in resources.Info.Buffers)
+            {
+                buffer.PackedStride = 0;
+                if (buffer.Formatted && !buffer.Written) buffer.DescriptorFormat = 0;
+            }
+            var layout = BindingLayout.Allocate(resources.Info,
+                BindingLayout.CollectUserDataRegisters(request.Program, 0, 16), false, false, false, 0, portableBuffers: true);
+            for (var i = 0; i < layout.UserDataRegisters.Count; i++)
+                BitConverter.TryWriteBytes(push.AsSpan(i * 4), userData[layout.UserDataRegisters[i]]);
+            for (uint i = 0; i < resources.Info.Buffers.Count; i++)
+                BitConverter.TryWriteBytes(push.AsSpan((int)(layout.FirstBufferWordDword() + i * 2 + 1) * 4), userData[11]);
+            request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1 };
+        }
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         return shader!;
     }

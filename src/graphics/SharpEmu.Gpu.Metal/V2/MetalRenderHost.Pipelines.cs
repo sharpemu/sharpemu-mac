@@ -74,6 +74,8 @@ internal sealed partial class MetalRenderHost
         // program fetches makes every vertex the same one, and the draw then rasterises
         // nothing at all while looking perfectly ordinary from the outside.
         public string? VertexLayout;
+        public bool FixedFunctionVertexFetch;
+        public bool ShaderVertexFetch;
 
         // What the state is made again from once the shader cache bound released it
         // (State zero; MetalRenderHost.ShaderCache): the description the executor created
@@ -900,6 +902,9 @@ internal sealed partial class MetalRenderHost
             Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
             VertexHash = vertexModule.Hash,
             VertexLayout = compiled.VertexLayout,
+            FixedFunctionVertexFetch = description.VertexStage.VertexFetchComponents.Any(components => components != 0),
+            ShaderVertexFetch = description.VertexStage.Buffers.Any(buffer => buffer.Read && !buffer.Scalar) ||
+                description.VertexStage.UsesDeviceAddresses,
             GraphicsDescription = description,
             LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
         };
@@ -1280,7 +1285,8 @@ internal sealed partial class MetalRenderHost
         {
             for (var binding = 0; binding < vertexInput.BindingCount && binding < MaxVertexBufferSlots; binding++)
             {
-                key.Add(vertexInput.Bindings[binding].Stride).Add(vertexInput.Bindings[binding].Instance);
+                key.Add(vertexInput.Bindings[binding].Stride).Add(vertexInput.Bindings[binding].Instance)
+                    .Add(vertexInput.Bindings[binding].Divisor);
             }
 
             for (var index = 0; index < vertexInput.AttributeCount; index++)
@@ -1376,6 +1382,10 @@ internal sealed partial class MetalRenderHost
             if (stride == 0)
             {
                 MetalV2Native.SendVoidValue(layout, MetalNative.Selector("setStepRate:"), 0);
+            }
+            else
+            {
+                MetalV2Native.SendVoidValue(layout, MetalNative.Selector("setStepRate:"), vertexInput.Bindings[binding].Divisor);
             }
 
             report?.Append(

@@ -130,9 +130,9 @@ public readonly record struct MeshDrawParameters(
     ulong IndexAddress);
 
 // The vertex buffer words of one fetch slot as the vertex program declares them.
-public readonly record struct VertexInputBuffer(ulong Address, uint Stride, uint RecordCount, bool PerInstance = false)
+public readonly record struct VertexInputBuffer(ulong Address, uint Stride, uint RecordCount, bool PerInstance = false, uint Divisor = 1, ulong ByteLength = 0)
 {
-    public ulong Size => Stride != 0 ? (ulong)Stride * RecordCount : RecordCount;
+    public ulong Size => ByteLength != 0 ? ByteLength : Stride != 0 ? (ulong)Stride * RecordCount : RecordCount;
 }
 
 // One attribute of the vertex tables: its buffer words, the registers it fills and its buffer slot.
@@ -193,8 +193,30 @@ public sealed class VertexInputInfo
 
     public const int MaxBuffers = 32;
 
-    public VertexInputBuffer[] Buffers { get; init; } = [];
-    public VertexAttributeResource[] Attributes { get; init; } = [];
+    public VertexInputBuffer[] Buffers { get; set; } = [];
+    public VertexAttributeResource[] Attributes { get; set; } = [];
+    private sealed class AffineFetchState
+    {
+        public VertexFetchBounds Bounds;
+        public uint[] Pcs = [];
+    }
+    private AffineFetchState? _affineFetch;
+    public VertexFetchBounds FetchBounds
+    {
+        get => _affineFetch?.Bounds ?? default;
+        set
+        {
+            if (value != default || _affineFetch is not null) (_affineFetch ??= new()).Bounds = value;
+        }
+    }
+    public uint[] AffineFetchPcs
+    {
+        get => _affineFetch?.Pcs ?? [];
+        set
+        {
+            if (value.Length != 0 || _affineFetch is not null) (_affineFetch ??= new()).Pcs = value;
+        }
+    }
     public bool FetchEmbedded { get; init; }
     public int FetchAttributeRegister { get; init; }
     public int FetchBufferRegister { get; init; }
@@ -206,6 +228,12 @@ public sealed class VertexInputInfo
     public ClipSpaceTransform ClipSpace { get; init; }
     public ShaderStageResources Stage { get; set; }
 }
+
+// Inclusive system-id ranges proved from a direct draw packet, before resolving
+// programs. Indirect/GPU-generated index ranges remain unknown; no CPU readback.
+public readonly record struct VertexFetchBounds(
+    uint FirstVertex, uint VertexCount, uint FirstInstance, uint InstanceCount,
+    bool VerticesKnown = false, bool InstancesKnown = false);
 
 public sealed record MeshDrawConfiguration
 {

@@ -112,6 +112,14 @@ public interface IShaderPipelineProvider
         GetGraphicsPrograms(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
             depthAspectBound, stencilAspectBound);
 
+    GraphicsPrograms GetGraphicsPrograms(
+        VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive, bool depthBound, bool depthAspectBound, bool stencilAspectBound,
+        bool triangleList, VertexFetchBounds fetchBounds) =>
+        GetGraphicsPrograms(vertex, pixel, shaderInterface, context, targetExportMapping,
+            pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList);
+
     GraphicsPrograms GetMeshGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,

@@ -2297,6 +2297,11 @@ internal sealed partial class MetalRenderHost
         NoteRecordedWork();
         Interlocked.Increment(ref _drawCount);
         SharpEmu.Libs.VideoOut.PerfOverlay.RecordDraw();
+        // A mixed draw belongs to both counters; procedural draws to neither.
+        if (_boundGraphicsPipeline?.FixedFunctionVertexFetch == true)
+            Interlocked.Increment(ref _fixedFunctionFetchDraws);
+        if (_boundGraphicsPipeline?.ShaderVertexFetch == true)
+            Interlocked.Increment(ref _shaderFetchDraws);
         NotePassDraw(_boundGraphicsPipeline?.Profile);
         Interlocked.Add(ref _drawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks);
         _recordedCommands++;

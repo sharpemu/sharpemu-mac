@@ -200,6 +200,10 @@ internal sealed partial class MetalRenderHost
     {
         EnableLodStatistics();
         PortableBufferWord.Enabled = PortableBuffers;
+        PortableBufferWord.SpecializeReadFormats =
+            Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SPECIALIZE_BUFFER_FORMATS") != "0";
+        SharpEmu.Libs.Gpu.Pipelines.AffineVertexFetchResolver.Enabled =
+            Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_VERTEX_FETCH") != "0";
     }
 
     /// <summary>GET_LOD_STATS reports this host packed on the GPU.</summary>

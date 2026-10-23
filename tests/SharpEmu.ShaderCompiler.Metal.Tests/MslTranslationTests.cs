@@ -1241,7 +1241,7 @@ public sealed class MslTranslationTests
     [Theory]
     [InlineData(true, 22u)]
     [InlineData(false, 0u)]
-    public void TypedBufferLoadUsesTheInstructionFormatAndUntypedKeepsTheDescriptorTable(bool typed, uint typedFormat)
+    public void TypedBufferLoadUsesTheInstructionFormatAndUntypedSpecializesTheDescriptor(bool typed, uint typedFormat)
     {
         var load = new Gen5ShaderInstruction(
             0,
@@ -1266,9 +1266,9 @@ public sealed class MslTranslationTests
         var scalars = new uint[256];
         scalars[8] = 0x2000;
         scalars[10] = 64;
-        // The untyped load takes the descriptor's format. 8_8 is not whole dwords, so it keeps
-        // the table form (a whole-dword literal format loads as one run, tested separately).
-        scalars[11] = (typed ? 77u : 14u) << 12;
+        // A known untyped 8_8 UNORM layout folds to byte extraction/conversion;
+        // the typed load instead uses the instruction's 32-bit float format.
+        scalars[11] = ((typed ? 77u : 14u) << 12) | 0xFACu;
         var shader = CompileMaterialized(new Gen5ShaderProgram(0, [load, end]), scalars[..12]);
 
         if (typed)
@@ -1278,9 +1278,9 @@ public sealed class MslTranslationTests
         }
         else
         {
-            Assert.Contains("sharpemu_gfx10_formats[(", shader.Source, StringComparison.Ordinal);
-            Assert.Contains("== 7u ?", shader.Source, StringComparison.Ordinal);
-            Assert.Contains(": true);", shader.Source, StringComparison.Ordinal);
+            Assert.DoesNotContain("sharpemu_gfx10_formats[(", shader.Source, StringComparison.Ordinal);
+            Assert.Contains(", 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
+            Assert.Matches(@"bool t\d+ = t\d+ && t\d+;", shader.Source);
             Assert.DoesNotContain("sharpemu_format_bytes", shader.Source, StringComparison.Ordinal);
         }
     }

@@ -185,6 +185,7 @@ internal sealed class ProgramSourceEntry
     public BoundedCopy? BoundedCopy { get; init; }
     public EmbeddedVertexFetchPlan? EmbeddedFetch { get; init; }
     public ShaderVertexInput[] VertexInputs { get; init; } = [];
+    public IReadOnlyList<AffineVertexFetchLoad> AffineFetches { get; init; } = [];
     public List<ProgramPermutation> Permutations { get; } = new(8);
 
     // How many device data loads the plan was extracted with, and the registry generation
@@ -680,6 +681,42 @@ internal sealed class ShaderProgramCache
         MaterializingShader.Hash = 0;
         _imageDescriptorTrace.Record(source, entry.Plan, snapshot);
 
+        if (AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex &&
+            options.VertexInfo is { Attributes.Length: 0, FetchEmbedded: false } affineInfo &&
+            ShaderCompileRequest.AllowsEmbeddedVertexFetch(entry.Program, options.PrimitiveShader, options.MeshPerVertexParameterMask) &&
+            !entry.Plan.Info.WritesDeviceAddresses && !entry.Plan.Info.Buffers.Any(buffer => buffer.Written))
+        {
+            List<VertexAttributeResource>? attributes = null;
+            List<VertexInputBuffer>? buffers = null;
+            List<uint>? pcs = null;
+            foreach (var load in entry.AffineFetches)
+            {
+                var access = entry.Plan.Memory.Find(load.Pc);
+                if ((attributes?.Count ?? 0) >= Math.Min(VertexInputInfo.MaxBuffers, _host.MaxFixedFunctionVertexBuffers) ||
+                    access is null || access.DeviceDescriptor ||
+                    access.Resource >= snapshot.Buffers.Length ||
+                    access.BufferDescriptor?.ChooseStrategy(false, !load.Raw, false) == BufferLoweringStrategy.BoundedCandidateTable)
+                    continue;
+                var words = snapshot.Buffers[access.Resource];
+                if (words.Length < 4 || !AffineVertexFetchResolver.TryResolve(load, BufferDescriptorWords.From(words),
+                        affineInfo.FetchBounds, out var buffer, out var attribute)) continue;
+                if (!_host.VertexFetchRangeIsMapped(buffer.Address, buffer.Size)) continue;
+                var location = attributes?.Count ?? 0;
+                (attributes ??= []).Add(attribute with { AttributeId = location, BufferIndex = location });
+                (buffers ??= []).Add(buffer);
+                (pcs ??= []).Add(load.Pc);
+            }
+            if (pcs is { Count: > 0 })
+            {
+                affineInfo.Attributes = attributes!.ToArray();
+                affineInfo.Buffers = buffers!.ToArray();
+                affineInfo.AffineFetchPcs = pcs.ToArray();
+                // This layout has its own static program key. The portable plan above
+                // stays available for every draw whose bounds cannot be proved.
+                return GetOrCompileCore(source, options, ref pushDataCursor, out stage);
+            }
+        }
+
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
         {
             foreach (var candidate in entry.Permutations)
@@ -883,7 +920,16 @@ internal sealed class ShaderProgramCache
         if (dumpPlanning) ShaderPlanningDump.WriteInput(source, program);
         EmbeddedVertexFetchPlan? fetch = null;
         ShaderVertexInput[] vertexInputs = [];
-        if (source.Stage == ShaderStage.Vertex && options.VertexInfo is { FetchEmbedded: true } vertexInfo &&
+        if (source.Stage == ShaderStage.Vertex && options.VertexInfo is { AffineFetchPcs.Length: > 0 } affineInfo)
+        {
+            fetch = new EmbeddedVertexFetchPlan();
+            for (var location = 0; location < affineInfo.AffineFetchPcs.Length; location++)
+                fetch.Loads.Add(new(affineInfo.AffineFetchPcs[location], location,
+                    (uint)affineInfo.Attributes[location].RegisterCount, []));
+            vertexInputs = BuildVertexInputs(fetch, affineInfo, source);
+            program = fetch.RemoveUnusedScalarLoads(program);
+        }
+        else if (source.Stage == ShaderStage.Vertex && options.VertexInfo is { FetchEmbedded: true } vertexInfo &&
             ShaderCompileRequest.AllowsEmbeddedVertexFetch(program, options.PrimitiveShader, options.MeshPerVertexParameterMask))
         {
             fetch = EmbeddedVertexFetchDetector.Detect(
@@ -943,6 +989,8 @@ internal sealed class ShaderProgramCache
             BoundedCopy = source.Stage == ShaderStage.Compute ? BoundedFillDetector.DetectCopy(program) : null,
             EmbeddedFetch = fetch,
             VertexInputs = vertexInputs,
+            AffineFetches = AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex
+                ? EmbeddedVertexFetchDetector.Detect(program, -2, -2, source.UserDataBase, (uint)source.UserData.Length, 32).AffineLoads : [],
         };
     }
 

@@ -14,6 +14,9 @@ public sealed record EmbeddedVertexFetchLoad(uint Pc, int AttributeId, uint Comp
 public sealed class EmbeddedVertexFetchPlan
 {
     public List<EmbeddedVertexFetchLoad> Loads { get; } = [];
+    // Descriptor provenance is proved separately by the resource planner, including
+    // constant V# words and scalar loads/reloads through lane spills.
+    public List<AffineVertexFetchLoad> AffineLoads { get; } = [];
     public int VertexOffsetScalarRegister { get; set; } = ShaderResourceInfo.NoScalarRegister;
     public int InstanceOffsetScalarRegister { get; set; } = ShaderResourceInfo.NoScalarRegister;
 
@@ -27,11 +30,71 @@ public sealed class EmbeddedVertexFetchPlan
                 ? instruction with { Encoding = Gen5ShaderEncoding.Sopp, Opcode = "SNop", Sources = [], Destinations = [], Control = null }
                 : instruction).ToArray());
     }
+
+    // Generic prologs can share pointer/descriptor loads with unrelated accesses.
+    // Remove only complete scalar loads whose results are dead after substitution.
+    // A transfer or relative register read makes this simple liveness proof ineligible.
+    public Gen5ShaderProgram RemoveUnusedScalarLoads(Gen5ShaderProgram program)
+    {
+        if (program.Instructions.Any(instruction =>
+                Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out _) ||
+                instruction.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) ||
+                instruction.Opcode.Contains("GprIdx", StringComparison.Ordinal))) return program;
+        var replaced = Loads.Select(load => load.Pc).ToHashSet();
+        var live = new HashSet<uint>();
+        var descriptorChain = new HashSet<uint>();
+        var instructions = program.Instructions.ToArray();
+        for (var index = instructions.Length - 1; index >= 0; index--)
+        {
+            var instruction = instructions[index];
+            if (replaced.Contains(instruction.Pc) && instruction.Control is Gen5BufferMemoryControl fetch)
+            {
+                for (uint word = 0; word < 4; word++) descriptorChain.Add(fetch.ScalarResource + word);
+                continue;
+            }
+            if (instruction.Control is Gen5ScalarMemoryControl &&
+                instruction.Opcode.StartsWith("SLoadDword", StringComparison.Ordinal) &&
+                instruction.Destinations.Any(destination => descriptorChain.Contains(destination.Value)) &&
+                instruction.Destinations.All(destination => !live.Contains(destination.Value)))
+            {
+                foreach (var destination in instruction.Destinations) descriptorChain.Remove(destination.Value);
+                foreach (var source in instruction.Sources)
+                    if (source.Kind == Gen5OperandKind.ScalarRegister)
+                    {
+                        descriptorChain.Add(source.Value);
+                        descriptorChain.Add(source.Value + 1);
+                    }
+                instructions[index] = instruction with
+                {
+                    Encoding = Gen5ShaderEncoding.Sopp, Opcode = "SNop", Sources = [], Destinations = [], Control = null,
+                };
+                continue;
+            }
+            foreach (var destination in instruction.Destinations)
+                if (destination.Kind == Gen5OperandKind.ScalarRegister) live.Remove(destination.Value);
+            foreach (var source in instruction.Sources)
+                if (source.Kind == Gen5OperandKind.ScalarRegister)
+                {
+                    live.Add(source.Value);
+                    if (instruction.Opcode.Contains("64", StringComparison.Ordinal) || instruction.Control is Gen5ScalarMemoryControl)
+                        live.Add(source.Value + 1);
+                }
+            if (instruction.Control is Gen5BufferMemoryControl buffer)
+                for (uint word = 0; word < 4; word++) live.Add(buffer.ScalarResource + word);
+            if (instruction.Control is Gen5ImageControl)
+            {
+                // Image operand widths are wider than buffer operands. Leave every
+                // preceding scalar load alone once such an access is encountered.
+                for (uint register = 0; register < 128; register++) live.Add(register);
+            }
+        }
+        return new(program.Address, instructions);
+    }
 }
 
 // Finds the attribute and buffer table walks of an embedded vertex fetch and the
 // buffer loads they end in, so the host can bind them as fixed-function attributes.
-public static class EmbeddedVertexFetchDetector
+public static partial class EmbeddedVertexFetchDetector
 {
     private const int ScalarRegisterCount = 108;
     private const int VectorRegisterCount = 256;
@@ -118,6 +181,7 @@ public static class EmbeddedVertexFetchDetector
         // Unknown targets can enter any instruction. Do not rewrite a program with unresolved transfers.
         if (program.Instructions.Any(instruction => instruction.Opcode is
             "SSetpcB64" or "SSwappcB64" or "SRfeB64" or "SCallB64")) return plan;
+        plan.AffineLoads.AddRange(DetectAffine(program));
         var graph = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
         if (graph.Blocks.Count == 0) return plan;
         var initial = new TrackingState();
