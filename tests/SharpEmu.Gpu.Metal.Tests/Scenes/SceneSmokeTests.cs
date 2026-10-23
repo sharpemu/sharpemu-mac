@@ -92,7 +92,7 @@ public sealed class SceneSmokeTests(ITestOutputHelper output) : SceneTestBase(ou
     {
         using var rig = CreateRig(useEnvironment: true);
         if (rig is null) return;
-        var split = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") != "0";
+        var split = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") == "1";
         Assert.Equal(!split, rig.Relay.IsGpuQueueThread);
         var buffer = rig.Memory.Allocate(64 * 4, 256);
         var pm4 = rig.Dispatch(new ScenePm4(), ScenePrograms.StoreGlobalId,
