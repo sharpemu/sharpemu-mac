@@ -95,8 +95,9 @@ public static class KernelRuntimeCompatExports
     // Adaptive nap for usleep(<1 ms) polling loops (a worker pool waiting for jobs). The
     // first short sleeps of a streak sleep exactly what they ask for, so a wait that ends
     // quickly stays fast; once one thread has been polling for SHARPEMU_USLEEP_NAP_AFTER_US (default 500 us)
-    // its short sleeps really sleep, for max(requested, SHARPEMU_USLEEP_NAP_US) (default
-    // 250 us; 0 turns naps off). A streak ends when the thread spends more than 2 ms
+    // its short sleeps really sleep, for max(requested, nap) where nap ramps from a tenth of
+    // SHARPEMU_USLEEP_NAP_US (default 250 us; 0 turns naps off) up to it as the streak lengthens
+    // (see NapRamp; SHARPEMU_NAP_RAMP=0 naps the full amount from the start). A streak ends when the thread spends more than 2 ms
     // between short sleeps or sleeps for 1 ms or more. Per thread, not per title.
     internal static readonly long UsleepNapMicroseconds =
         ReadNonNegativeEnvironmentInteger("SHARPEMU_USLEEP_NAP_US", 250);
@@ -130,7 +131,10 @@ public static class KernelRuntimeCompatExports
         _lastShortUsleep = now;
         if (UsleepNapMicroseconds > 0 && now - _shortUsleepStreakStart >= _usleepNapAfterTicks)
         {
-            HostTiming.SleepMicroseconds(Math.Max((long)micros, UsleepNapMicroseconds));
+            // The nap ramps with the streak's age (SHARPEMU_NAP_RAMP=0: always the full cap).
+            var nap = SharpEmu.HLE.Host.NapRamp.Microseconds(
+                now - _shortUsleepStreakStart, _usleepNapAfterTicks, UsleepNapMicroseconds);
+            HostTiming.SleepMicroseconds(Math.Max((long)micros, nap));
             _lastShortUsleep = Stopwatch.GetTimestamp();
             return true;
         }

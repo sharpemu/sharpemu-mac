@@ -45,7 +45,11 @@ public sealed class SleepAndPriorityQosTests
             {
                 napped++;
                 var tookUs = (Stopwatch.GetTimestamp() - before) * 1_000_000 / Stopwatch.Frequency;
-                Assert.True(tookUs >= KernelRuntimeCompatExports.UsleepNapMicroseconds / 2, $"nap took {tookUs} us");
+                // A nap ramps up from a tenth of the configured amount (SHARPEMU_NAP_RAMP=0: the whole).
+                var floorUs = NapRamp.Enabled
+                    ? KernelRuntimeCompatExports.UsleepNapMicroseconds / NapRamp.Denominator
+                    : KernelRuntimeCompatExports.UsleepNapMicroseconds;
+                Assert.True(tookUs >= floorUs / 2, $"nap took {tookUs} us");
             }
         }
 
@@ -76,6 +80,39 @@ public sealed class SleepAndPriorityQosTests
         Assert.False(KernelRuntimeCompatExports_YieldNap(ref start, ref last, 3_000 + gap + 1, gap, after));
         Assert.False(KernelRuntimeCompatExports_YieldNap(ref start, ref last, 3_000 + gap + 100, gap, after));
         Assert.True(KernelRuntimeCompatExports_YieldNap(ref start, ref last, 3_000 + gap + 600, gap, after));
+    }
+
+    [Fact]
+    public void NapRampGrowsWithTheStreakAndReachesTheCapAtEightTimesTheThreshold()
+    {
+        const long after = 500;
+        const long cap = 250;
+        Assert.Equal(25, NapRamp.Microseconds(true, 500, after, cap));
+        Assert.Equal(25, NapRamp.Microseconds(true, 999, after, cap));
+        Assert.Equal(50, NapRamp.Microseconds(true, 1_000, after, cap));
+        Assert.Equal(100, NapRamp.Microseconds(true, 2_000, after, cap));
+        Assert.Equal(100, NapRamp.Microseconds(true, 3_999, after, cap));
+        Assert.Equal(250, NapRamp.Microseconds(true, 4_000, after, cap));
+        Assert.Equal(250, NapRamp.Microseconds(true, long.MaxValue, after, cap));
+
+        // Monotonic, never above the cap, never zero.
+        var previous = 0L;
+        for (long age = 0; age < 10_000; age += 7)
+        {
+            var nap = NapRamp.Microseconds(true, age, after, cap);
+            Assert.InRange(nap, Math.Max(1, previous), cap);
+            previous = nap;
+        }
+
+        Assert.Equal(1, NapRamp.Microseconds(true, 500, after, 3));
+    }
+
+    [Fact]
+    public void NapRampOffOrWithoutAThresholdNapsTheWholeCap()
+    {
+        Assert.Equal(250, NapRamp.Microseconds(false, 500, 500, 250));
+        Assert.Equal(250, NapRamp.Microseconds(true, 500, 0, 250));
+        Assert.Equal(0, NapRamp.Microseconds(true, 500, 500, 0));
     }
 
     private static bool KernelRuntimeCompatExports_YieldNap(ref long start, ref long last, long now, long gap, long after) =>
