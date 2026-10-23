@@ -432,7 +432,8 @@ public sealed class RuntimeValueEvaluator
                 out var address) == RawAddress.Read &&
             _inputs.DataWritePending!(address))
         {
-            DeviceDataLoads.Learn(_plan.DeviceDataKey, memoryIndices);
+            if (DeviceDataLoads.Learn(_plan.DeviceDataKey, memoryIndices) && _plan.DeviceControlSlots.Contains(slot))
+                DeviceDataLoads.CountControlWord();
         }
     }
 

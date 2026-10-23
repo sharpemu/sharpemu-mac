@@ -326,9 +326,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
                 throw Fatal($"The GDS fill range is outside the buffer: offset=0x{address:X} size=0x{size:X}.");
             }
 
+            if (((address | size) & 3) == 0 && GdsOnGpu()) { FillGdsOnGpu(address, size, value); return; }
+            if (((address | size) & 3) != 0) { _gdsHostFallbacks++; _gdsAlignmentFallbacks++; }
+
             // The data share is a shared-storage buffer, so the host fill is visible to
             // the GPU without a transfer; a shader write to it is ordered by Metal.
-            SynchronizeGpu();
+            if (GpuWordsEnabled) WaitForCpuGds(); else SynchronizeGpu();
             var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(
                 _guestMemory.GdsWords().Slice((int)address, (int)size));
             words.Fill(value);
@@ -356,7 +359,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
             return;
         }
 
-        SynchronizeGpu();
+        var gdsOffset = sourceIsGds ? source : destination;
+        if (gdsOffset > MetalGuestMemory.GdsBytes || size > MetalGuestMemory.GdsBytes - gdsOffset)
+            throw Fatal($"The GDS copy is outside the buffer: offset=0x{gdsOffset:X} size=0x{size:X}.");
+        if (TryCopyGdsOnGpu(destination, source, size, sourceIsGds)) return;
+        if (GpuWordsEnabled) WaitForCpuGds(); else SynchronizeGpu();
         var gds = _guestMemory.GdsWords();
         if (sourceIsGds)
         {
@@ -365,6 +372,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
                 throw Fatal($"The GDS copy source is outside the buffer: offset=0x{source:X} size=0x{size:X}.");
             }
 
+            if (GpuWordsEnabled) WaitForGuestBytes(destination, size);
             var watch = _guard?.Begin(destination, size, "gds-copy") ?? -1;
             var wrote = _memory.TryWrite(destination, gds.Slice((int)source, (int)size));
             _guard?.End(watch);
@@ -390,7 +398,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
 
     public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount)
     {
-        SynchronizeGpu();
+        if (GpuWordsEnabled) WaitForCpuGds();
+        else SynchronizeGpu();
         GlobalDataShare.ReadWords(_guestMemory.GdsWords(), destination, wordOffset, wordCount);
     }
 
@@ -460,7 +469,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
                 {
                     if (!encoded) PublishHostLabel(in label, owed);
                     TriggerInterrupt(eventId, contextId);
-                });
+                }, publication: owed ? (label.Destination, (ulong)EndOfPipeLabelBytes(label.Kind)) : null);
                 break;
             case EndOfPipeWriteKind.Flip:
             case EndOfPipeWriteKind.FlipWithWrite32:
@@ -469,7 +478,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
                     if (!encoded) PublishHostLabel(in label, owed);
                     VideoOutBackendServices.CompleteFlipOnGpu(requestId);
                     MetalV2Presenter.SignalFlipPacer();
-                });
+                }, publication: owed ? (label.Destination, (ulong)EndOfPipeLabelBytes(label.Kind)) : null);
                 break;
             case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
                 QueueCompletion(() =>
@@ -478,7 +487,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
                     VideoOutBackendServices.CompleteFlipOnGpu(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                     TriggerInterrupt(eventId, 0);
-                });
+                }, publication: owed ? (label.Destination, (ulong)EndOfPipeLabelBytes(label.Kind)) : null);
                 break;
             case EndOfPipeWriteKind.GdsWrite32:
                 RecordEndOfPipeGdsWrite(in write);
@@ -495,7 +504,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
                 if (!encoded)
                 {
                     QueueCompletion(() => PublishHostLabel(in label, owed),
-                        lazy ? (label.Destination, EndOfPipeLabelBytes(label.Kind)) : null);
+                        lazy ? (label.Destination, EndOfPipeLabelBytes(label.Kind)) : null,
+                        publication: owed ? (label.Destination, (ulong)EndOfPipeLabelBytes(label.Kind)) : null);
                 }
 
                 break;
@@ -545,7 +555,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         var wordOffset = write.GdsWordOffset;
         var wordCount = write.GdsWordCount;
         Interlocked.Increment(ref _owedHostLabels);
-        QueueCompletion(() =>
+        Interlocked.Increment(ref _owedGdsSnapshots);
+        _gdsHostSnapshotSerial = QueueCompletion(() =>
         {
             try
             {
@@ -562,8 +573,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
             finally
             {
                 Interlocked.Decrement(ref _owedHostLabels);
+                Interlocked.Decrement(ref _owedGdsSnapshots);
             }
-        });
+        }, publication: (destinationAddress, bytes));
     }
 
     /// <summary>
@@ -596,7 +608,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
             {
                 Interlocked.Decrement(ref _owedHostLabels);
             }
-        });
+        }, publication: (address, sizeof(uint)));
     }
 
     /// <summary>
@@ -916,7 +928,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
             {
                 Interlocked.Decrement(ref _owedHostLabels);
             }
-        }, lazy ? (address, bytes.Length) : null);
+        }, lazy ? (address, bytes.Length) : null, publication: (address, (ulong)bytes.Length));
     }
 
     private bool TryEncodeCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
@@ -1886,13 +1898,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
     /// <see cref="RidesNextCommit"/>): the worker commits it when it parks, and a wait
     /// packet polling these bytes commits it through the Poll cause.
     /// </param>
-    private void QueueCompletion(Action work, (ulong Address, int Bytes)? lazyLabel = null)
+    private ulong QueueCompletion(Action work, (ulong Address, int Bytes)? lazyLabel = null,
+        (ulong Address, ulong Size)? publication = null)
     {
         if (InlineCompletions && LastWorkSerial <= CompletedSerial && _completions.PendingCount == 0)
         {
             Interlocked.Increment(ref _inlineCompletionCount);
             work();
-            return;
+            return 0;
         }
 
         // Nothing has been recorded since the last flush, so everything this completion
@@ -1905,7 +1918,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         if (pending != 0 && pending <= _previousSerial)
         {
             Enqueue(pending);
-            return;
+            return pending;
         }
 
         var serial = SubmissionSerial;
@@ -1916,20 +1929,26 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
             _lazyLabelRanges.Add(open);
             _pendingLabelWrites++;
             Interlocked.Increment(ref _lazyLabelCompletions);
-            return;
+            return serial;
         }
 
         FlushCommandBuffer(MetalFlushCause.Completion);
-        return;
+        return serial;
 
-        void Enqueue(ulong on) => _completions.Enqueue(on, () =>
+        void Enqueue(ulong on)
         {
-            var ran = System.Diagnostics.Stopwatch.GetTimestamp();
-            Interlocked.Add(ref _completionLatencyTicks, ran - queued);
-            Interlocked.Increment(ref _completionCount);
-            ReportSlowCompletion(on, queued, ran);
-            work();
-        });
+            var publicationRecord = publication is { } range
+                ? _hostPublications.Add(range.Address, range.Size, on) : null;
+            _completions.Enqueue(on, () =>
+            {
+                var ran = System.Diagnostics.Stopwatch.GetTimestamp();
+                Interlocked.Add(ref _completionLatencyTicks, ran - queued);
+                Interlocked.Increment(ref _completionCount);
+                ReportSlowCompletion(on, queued, ran);
+                try { work(); }
+                finally { publicationRecord?.Complete(); }
+            });
+        }
     }
 
     // An end-of-pipe completion the guest is waiting on that took long enough to cost

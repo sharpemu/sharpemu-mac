@@ -530,7 +530,7 @@ internal sealed partial class MetalImageCache
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_owner.IsWorkerThread)
         {
-            _owner.WaitForGpu();
+            _owner.WaitForSubmission(pending);
         }
         else
         {

@@ -178,4 +178,33 @@ public sealed partial class DeviceBindingLoadTests
         finally { DeviceBindingLoads.Forget(plan.DeviceBindingKey); }
     }
 
+    [Theory]
+    [InlineData("BufferStoreDword")]
+    [InlineData("BufferAtomicAdd")]
+    public void BoundedByteBufferWriteOffsetsCanStayOnTheDeviceWithoutLosingTheirWriteBinding(string opcode)
+    {
+        var program = Program(MoveScalar(0, 8, 0x2000), MoveScalar(4, 9, 0),
+            MoveScalar(8, 10, 64), MoveScalar(12, 11, 0),
+            ScalarLoad(16, 0, 16), Vop1(24, "VMovB32", 0, Gen5Operand.Scalar(16)),
+            BufferAccess(28, opcode, 8, offsetEnabled: true), EndProgram(36));
+        var hash = BaseHash + 0x900 + (opcode == "BufferAtomicAdd" ? 1u : 0u);
+        var plan = Plan(program, hash);
+        var slot = Assert.Single(plan.DeviceDataSlots);
+        var next = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, 0, 8,
+            deviceDataMemory: slot.Value.ToHashSet());
+        Assert.Equal(plan.Info.Buffers.Count, next.Info.Buffers.Count);
+        Assert.True(Assert.Single(next.Info.Buffers).Written);
+        Assert.True(DeviceBindingLoads.Accepts(plan, next));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = [(uint)TableBase, 0, 0, 0, 0, 0, 0, 0],
+            ReadMemory = (ulong at, out uint word) => throw new InvalidOperationException($"CPU read of GPU offset {at:X}"),
+        };
+        Assert.True(ResourceMaterializer.Materialize(next, inputs, ref snapshot, ref specialization));
+        Assert.Equal(new uint[] { 0x2000, 0, 64, 0 }, Assert.Single(snapshot.Buffers));
+        Assert.False(next.Memory[slot.Value[0]].PlanningOnly);
+    }
+
 }

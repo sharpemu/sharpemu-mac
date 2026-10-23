@@ -114,6 +114,7 @@ internal sealed partial class MetalRenderHost
     private sealed class ArgumentPlan(Gen5MslArgumentLayout layout, int[]?[] fieldResources, int[]?[] fieldMips)
     {
         public readonly Gen5MslArgumentLayout Layout = layout;
+        public readonly bool UsesGds = layout.Fields.Any(field => field.Kind == DescriptorBindingKind.GlobalDataShare);
         public readonly int[]?[] FieldResources = fieldResources;
 
         // Per texture element, the mip it binds of its image: a dynamic-mip storage image
@@ -990,10 +991,13 @@ internal sealed partial class MetalRenderHost
     // The stage's Tier 2 argument buffer, mirroring the binding layout in descriptor order.
     private void WriteArgumentBuffer(MetalStageBindings stage, int stageIndex)
     {
-        if (TryReplayArguments(stage, stageIndex)) return;
-        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ArgumentBufferWrite);
         var layout = stage.Program.Bindings!;
         var plan = ArgumentPlanOf(layout);
+        // Also runs for persistent/replayed argument records: their pointer value
+        // is stable, but a new dispatch can write GDS in a later submission.
+        if (plan.UsesGds) _gdsSerial = SubmissionSerial;
+        if (TryReplayArguments(stage, stageIndex)) return;
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ArgumentBufferWrite);
         var argumentLayout = plan.Layout;
         if (argumentLayout.Fields.Count == 0)
         {

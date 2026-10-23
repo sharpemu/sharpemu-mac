@@ -25,6 +25,9 @@ internal enum MetalWaitReason
     /// <summary>The image cache needed the GPU to finish before touching a texture.</summary>
     ImageCache,
 
+    HostPublication,
+    UnknownWriter,
+    GdsRead,
     Other,
 }
 
@@ -50,7 +53,7 @@ internal static class MetalWaitReasons
     public const int Count = (int)MetalWaitReason.Other + 1;
 
     public static readonly string[] Names =
-        ["cp", "sync", "read_image", "read_range", "image_cache", "other"];
+        ["cp", "sync", "read_image", "read_range", "image_cache", "host_publication", "unknown_writer", "gds_read", "other"];
 }
 
 internal static class MetalGpuWriteOrigins

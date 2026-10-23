@@ -368,7 +368,7 @@ internal sealed partial class MetalImageCache
             ServiceStoreRequests();
             if (Volatile.Read(ref request.State) != StoreRequestState.Pending)
             {
-                _owner.WaitForGpu();
+                _owner.WaitForSubmission(request.Serial);
                 return true;
             }
 

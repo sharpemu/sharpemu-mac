@@ -38,13 +38,14 @@ internal sealed partial class MetalRenderHost
     public bool IsCommandBlockCurrent(in CommandReadToken token) => token == CurrentCommandReadToken();
 
     private CommandReadToken CurrentCommandReadToken() =>
-        new(_cpOverlay.Version, (long)_gpuWrites.Version, _imageCache.ImageSetVersion, _imageCache.Epochs.GpuModified);
+        new(_cpOverlay.Version, (long)_gpuWrites.Version, _imageCache.ImageSetVersion, _imageCache.Epochs.GpuModified + (long)_hostPublications.Version);
 
     // True when every byte of the range would be read straight from memory, without overlay bytes
     // and without a wait, and the range is read into destination. Every test is an overlap test,
     // so passing for the range implies passing for each read inside it.
     private bool TryReadUnownedBytes(ulong address, ulong size, Span<byte> destination)
     {
+        if (HostPublicationPending(address, size)) return false;
         if (_cpOverlay.Count != 0 && OverlayCoverageHinted(address, size) != MetalOverlayCoverage.None)
         {
             return false;

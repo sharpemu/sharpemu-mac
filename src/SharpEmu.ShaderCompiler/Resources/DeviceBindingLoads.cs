@@ -139,7 +139,7 @@ public static class DeviceBindingLoads
         var key = KeyFor(hash, fetch);
         foreach (var value in new ulong[] { (ulong)stage, waveSize, excluded, userBase, userCount })
             key = (key ^ value) * 1099511628211UL;
-        return key;
+        return ShaderResourcePlan.DeviceControlWords ? key : (key ^ 0xB2C04E7A8D130F69UL);
     }
 
     [ThreadStatic]

@@ -1833,8 +1833,7 @@ internal sealed partial class MetalRenderHost
             // Resolve prior writers before consulting overlays. B owns the recording
             // command buffer, so this can commit retained batches and deferred copies.
             var observed = LastGuestTableRead;
-            if (Volatile.Read(ref _owedHostLabels) != 0)
-                SynchronizeGuestTables();
+            WaitForHostPublication(address, sizeof(uint));
             if (_gpuWrites.MayCover(address, sizeof(uint)) || _imageCache.MayOwn(address, sizeof(uint)))
                 WaitForGuestBytes(address, sizeof(uint));
             LastGuestTableRead = observed;

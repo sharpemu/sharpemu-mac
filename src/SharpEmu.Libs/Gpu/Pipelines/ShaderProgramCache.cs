@@ -1620,7 +1620,7 @@ internal sealed partial class ShaderProgramCache
         GpuFatal.ThrowOnFatal = true;
         try
         {
-            if (record.DeviceLoadCompiler != AssemblyCodeIdentity.Of(typeof(ShaderResourcePlan).Assembly))
+            if (record.DeviceLoadCompiler != ShaderResourcePlan.DeviceLoadCompilerIdentity)
                 throw new InvalidOperationException("The corpus device-load compiler identity is incompatible.");
             var context = record.Code.CreateContext();
             if (record.Options is not { } options)
@@ -1739,7 +1739,7 @@ internal sealed partial class ShaderProgramCache
         layout = null;
         try
         {
-            if (record.DeviceLoadCompiler != AssemblyCodeIdentity.Of(typeof(ShaderResourcePlan).Assembly))
+            if (record.DeviceLoadCompiler != ShaderResourcePlan.DeviceLoadCompilerIdentity)
             { error = "The prewarm device-load compiler identity is incompatible."; return false; }
             if (!Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out var program, out error))
             {

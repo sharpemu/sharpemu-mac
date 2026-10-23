@@ -27,7 +27,7 @@ public sealed class OrderedCommandStreamHostTests
 
     // The same RenderExecutor and recording renderer used by the draw/compute suites:
     // the comparison below includes its emitted resources, state and semantic commands.
-    private sealed class EncodedHost : ManagedCommandStreamHost, ICommandIssueRenderer, ICommandStreamHost
+    private sealed class EncodedHost : ManagedCommandStreamHost, ICommandIssueRenderer, ICommandStreamHost, ICommandIssueReadTokenSource
     {
         internal readonly RecordingRenderHost Render;
         internal readonly FakePipelineProvider Pipelines = new();
@@ -38,6 +38,8 @@ public sealed class OrderedCommandStreamHostTests
         internal bool PipelineNotReady;
         internal bool Delay;
         internal int Draws;
+        private long _tokenVersion;
+        public CommandReadToken IssueReadToken => new(_tokenVersion, 0, 0, 0);
         internal EncodedHost(RecordingRenderHost render) : base(render.GuestMemory, new EndOfPipeEvents(), new FlipTarget())
         { Render = render; Executor = new(render, Pipelines); }
         public void BeginIssuedSubmission(int queueId, ulong submitId) => Semantics.Add($"begin {queueId} {submitId}");
@@ -46,6 +48,7 @@ public sealed class OrderedCommandStreamHostTests
             bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
         {
             BeforeDraw?.Invoke();
+            _tokenVersion++;
             if (Delay && (++Draws & 3) == 0) Thread.Yield();
             Semantics.Add($"draw {queueId}/{submitId} {banks.Context.LineWidth} {banks.Context.ScreenViewport.Viewports[0].XScale} {banks.Shader.Vertex.ExportUserScalars.Values[0]}");
             if (indexed) Executor.DrawIndexed(submitId, banks, indexedArguments);
@@ -89,6 +92,36 @@ public sealed class OrderedCommandStreamHostTests
             Host.Stop();
             if (_consumer is not null) Assert.True(_consumer.Join(5000));
         }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void UnknownWriterInvalidatesATokenWithoutAcknowledgingButTheReadStillOrdersIt(bool split, bool enabled)
+    {
+        using var fatal = new FatalScope();
+        var target = new EncodedHost(new());
+        using var runner = new Runner(target, split);
+        runner.Host.InvalidateUnknownWriterTokens = enabled;
+        Banks().CopyTo(runner.Queue.GetInterpreter(0).TypedRegisters);
+        const ulong address = RecordingRenderHost.MemoryBase + 0x900000;
+        target.BeforeDraw = () => target.Memory.TryWrite(address, BitConverter.GetBytes(0x87654321u));
+        var token = target.IssueReadToken;
+        runner.Host.DrawAuto(1, Auto(3));
+        Assert.False(runner.Host.IsCommandBlockCurrent(token));
+        if (enabled)
+        {
+            Assert.Empty(target.Semantics);
+            Assert.Contains("writer_token_invalidations=1", runner.Host.FormatProfile());
+            Assert.DoesNotContain("ack_WriterPrefix=", runner.Host.FormatProfile());
+        }
+        else Assert.Contains("ack_WriterPrefix=1/", runner.Host.FormatProfile());
+        Span<byte> bytes = stackalloc byte[4];
+        Assert.True(runner.Host.TryReadGuest(address, bytes));
+        Assert.Equal(0x87654321u, BinaryPrimitives.ReadUInt32LittleEndian(bytes));
+        Assert.Single(target.Semantics.Where(item => item.StartsWith("draw ")));
     }
 
     [Fact]
