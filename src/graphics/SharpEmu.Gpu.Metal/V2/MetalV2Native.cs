@@ -261,6 +261,14 @@ internal static partial class MetalV2Native
     public static partial nint SendRange(nint receiver, nint selector, nuint location, nuint length);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    internal static partial nint SendNewIndirectCommands(
+        nint receiver, nint selector, nint descriptor, nuint count, nuint options);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    internal static partial void SendExecuteIndirectCommands(
+        nint receiver, nint selector, nint buffer, NsRange range);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidValue(nint receiver, nint selector, nuint value);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]

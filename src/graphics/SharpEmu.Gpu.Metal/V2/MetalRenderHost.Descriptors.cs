@@ -1396,7 +1396,7 @@ internal sealed partial class MetalRenderHost
 
     // Argument-buffer references are indirect, so the encoder is told which textures
     // the draw touches. The guest windows live in the residency set instead.
-    private void ApplyStageBindings(bool graphics, bool bindComputeBuffers = true)
+    private void ApplyStageBindings(bool graphics, bool bindComputeBuffers = true, bool bindGraphicsBuffers = true)
     {
         if (graphics)
         {
@@ -1407,8 +1407,11 @@ internal sealed partial class MetalRenderHost
             var stages = meshStage
                 ? Mtl.RenderStageMesh | Mtl.RenderStageFragment
                 : Mtl.RenderStageVertex | Mtl.RenderStageFragment;
-            BindStageBuffers(_renderEncoder, StageVertex, meshStage ? SelSetMeshBuffer : SelSetVertexBuffer);
-            BindStageBuffers(_renderEncoder, StageFragment, SelSetFragmentBuffer);
+            if (bindGraphicsBuffers)
+            {
+                BindStageBuffers(_renderEncoder, StageVertex, meshStage ? SelSetMeshBuffer : SelSetVertexBuffer);
+                BindStageBuffers(_renderEncoder, StageFragment, SelSetFragmentBuffer);
+            }
             NameGuestResidentBuffers(_renderEncoder, stages);
 
             for (var index = 0; index < _usedResourceCount; index++)

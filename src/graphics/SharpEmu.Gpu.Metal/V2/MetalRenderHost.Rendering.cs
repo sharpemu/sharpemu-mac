@@ -1214,6 +1214,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        FlushIcbRun();
         var ending = _renderingState;
         if (_renderEncoder != 0)
         {
@@ -1441,25 +1442,34 @@ internal sealed partial class MetalRenderHost
 
         var entry = _pendingGraphicsPipeline ??
             throw Fatal("A draw has no bound Metal render pipeline state.");
-        if (!ReferenceEquals(_boundGraphicsPipeline, entry))
+        var depthStencilState = GetDepthStencilState(entry, in _dynamicState);
+        IcbBeforeApply(entry, depthStencilState);
+        if (!ReferenceEquals(_boundGraphicsPipeline, entry) || (!_icbEncodingDraw && _boundRenderState != entry.State))
         {
             // Every later draw of this encoder with the entry (its rectangle states too) is
             // in the same command buffer.
-            UsePipelineState(entry);
-            MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, entry.State);
-            _boundRenderState = entry.State;
-            MetalV2Native.SendVoidValue(
-                _renderEncoder, SelSetCullMode, (nuint)(MetalV2Diagnostics.IgnoreFragmentTests ? Mtl.CullModeNone : entry.CullMode));
-            MetalV2Native.SendVoidValue(_renderEncoder, SelSetFrontFacingWinding, (nuint)entry.Winding);
-            MetalV2Native.SendVoidValue(_renderEncoder, SelSetDepthClipMode, (nuint)entry.DepthClipMode);
-            MetalV2Native.SendVoidValue(_renderEncoder, SelSetTriangleFillMode, (nuint)entry.FillMode);
+            if (!_icbEncodingDraw)
+            {
+                UsePipelineState(entry);
+                MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, entry.State);
+                _boundRenderState = entry.State;
+            }
+            // A continuing ICB run already proved these parent values equal,
+            // even when its per-command shader/pipeline changes.
+            if (!_icbEncodingDraw || _icbRun.Commands.Count == 0)
+            {
+                MetalV2Native.SendVoidValue(
+                    _renderEncoder, SelSetCullMode, (nuint)(MetalV2Diagnostics.IgnoreFragmentTests ? Mtl.CullModeNone : entry.CullMode));
+                MetalV2Native.SendVoidValue(_renderEncoder, SelSetFrontFacingWinding, (nuint)entry.Winding);
+                MetalV2Native.SendVoidValue(_renderEncoder, SelSetDepthClipMode, (nuint)entry.DepthClipMode);
+                MetalV2Native.SendVoidValue(_renderEncoder, SelSetTriangleFillMode, (nuint)entry.FillMode);
+            }
             _boundGraphicsPipeline = entry;
         }
 
         // Encoder state survives between draws, so only what changed is sent. A draw
         // costs twenty-odd message sends otherwise, and consecutive draws in one pass
         // share almost all of their state.
-        var depthStencilState = GetDepthStencilState(entry, in _dynamicState);
         if (_boundDepthStencilState != depthStencilState)
         {
             MetalNative.SendVoid(_renderEncoder, SelSetDepthStencilState, depthStencilState);
@@ -1514,7 +1524,7 @@ internal sealed partial class MetalRenderHost
             _boundStencilBack = _dynamicState.BackStencil.Reference;
         }
 
-        for (var index = 0; index < _vertexBufferCount; index++)
+        for (var index = 0; !_icbEncodingDraw && index < _vertexBufferCount; index++)
         {
             if (_boundVertexBuffers[index] == _vertexBuffers[index] &&
                 _boundVertexOffsets[index] == _vertexOffsets[index])
@@ -1532,7 +1542,7 @@ internal sealed partial class MetalRenderHost
             _boundVertexOffsets[index] = _vertexOffsets[index];
         }
 
-        ApplyStageBindings(graphics: true);
+        ApplyStageBindings(graphics: true, bindGraphicsBuffers: !_icbEncodingDraw);
     }
 
     private void SetDepthBias(float constant, float slope, float clamp)
@@ -1711,6 +1721,13 @@ internal sealed partial class MetalRenderHost
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
+        if (_icbEncodingDraw)
+        {
+            QueueIcbDraw();
+            CountDraw(started);
+            ProfileWork(entry, "draw", WorkShape.Vertices(vertexCount, instanceCount));
+            return;
+        }
         if (entry.Mesh is { } mesh)
         {
             DrawMesh(mesh, vertexCount, instanceCount, indexed: false, firstIndexOrVertex: firstVertex,
@@ -1770,6 +1787,13 @@ internal sealed partial class MetalRenderHost
 
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
+        if (_icbEncodingDraw)
+        {
+            QueueIcbDraw();
+            CountDraw(started);
+            ProfileWork(entry, "draw-indexed", WorkShape.Indices(indexCount, instanceCount));
+            return;
+        }
         if (entry.Mesh is { } mesh)
         {
             DrawMesh(mesh, indexCount, instanceCount, indexed: true, firstIndexOrVertex: firstIndex,
@@ -2373,6 +2397,7 @@ internal sealed partial class MetalRenderHost
 
     private void RecordMemoryBarrier(nuint afterStages)
     {
+        FlushIcbRun();
         const nuint scope = Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures | Mtl.BarrierScopeRenderTargets;
         if (_renderEncoder != 0)
         {

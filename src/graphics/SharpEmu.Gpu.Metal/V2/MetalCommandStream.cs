@@ -2064,6 +2064,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         NoteFlipForCompilingDraws();
         _recipes?.EndFrame();
         Console.Error.WriteLine($"[METAL-V2][HOST-LOOKUPS] scope=frame frame={Interlocked.Read(ref FlipsCaptured)} {SharpEmu.Libs.Gpu.Pipelines.HostLookupCounters.TakeReport()}");
+        ReportIcbFrame();
         ReplayEndFrame();
         // The one point in the frame that is outside a flush, so the safe place to read
         // back everything the passes since the last flip wrote.
