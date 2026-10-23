@@ -17,14 +17,23 @@ public sealed class AffineVertexFetchResolverTests
         new(0xA0, 4, new(kind, divisor, bias), 0);
 
     [Fact]
+    public void RefusalReasonsDistinguishUnknownBoundsAndUnsafeFootprints()
+    {
+        Assert.False(AffineVertexFetchResolver.TryResolve(Load(), Descriptor(), default, out _, out _, out var reason));
+        Assert.Equal(VertexFetchRefusal.BoundsUnknown, reason);
+        Assert.False(AffineVertexFetchResolver.TryResolve(Load(), Descriptor(records: 2), Direct, out _, out _, out reason));
+        Assert.Equal(VertexFetchRefusal.Footprint, reason);
+    }
+
+    [Fact]
     public void ProvedDirectAndConstantFetchesHaveExactRanges()
     {
         Assert.True(AffineVertexFetchResolver.TryResolve(Load(), Descriptor(), Direct, out var buffer, out _));
         Assert.Equal(16u, buffer.Stride);
-        Assert.Equal(128ul, buffer.Size);
+        Assert.Equal(96ul, buffer.Size);
         Assert.True(AffineVertexFetchResolver.TryResolve(Load(bias: 1), Descriptor(), Direct, out buffer, out _));
         Assert.Equal(0x200010ul, buffer.Address);
-        Assert.Equal(112ul, buffer.Size);
+        Assert.Equal(96ul, buffer.Size);
         Assert.True(AffineVertexFetchResolver.TryResolve(Load(), Descriptor(stride: 0, records: 64), default, out buffer, out _));
         Assert.Equal(0u, buffer.Stride);
         Assert.Equal(16ul, buffer.Size);

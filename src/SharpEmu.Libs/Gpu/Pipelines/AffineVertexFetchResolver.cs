@@ -9,13 +9,20 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 
 // Backend opt-in: Metal 3.2 has no robust vertex fetch enabled here. Prove the
 // complete native fetch range before replacing any individual shader load.
+public enum VertexFetchRefusal { None, Descriptor, Format, Selector, Index, BoundsUnknown, BoundsRange, Footprint, Alignment, Resource, Mapping, Capacity, Eligibility, NoAffineIndex }
+
 public static class AffineVertexFetchResolver
 {
     public static bool Enabled { get; set; }
 
     public static bool TryResolve(AffineVertexFetchLoad load, BufferDescriptorWords descriptor,
         VertexFetchBounds bounds, out VertexInputBuffer buffer, out VertexAttributeResource attribute)
+        => TryResolve(load, descriptor, bounds, out buffer, out attribute, out _);
+
+    public static bool TryResolve(AffineVertexFetchLoad load, BufferDescriptorWords descriptor,
+        VertexFetchBounds bounds, out VertexInputBuffer buffer, out VertexAttributeResource attribute, out VertexFetchRefusal refusal)
     {
+        refusal = VertexFetchRefusal.Descriptor;
         buffer = default;
         attribute = default;
         if (load.Raw)
@@ -24,17 +31,22 @@ public static class AffineVertexFetchResolver
             descriptor = descriptor with { Word3 = (descriptor.Word3 & ~0x7FFFFu) | format << 12 | 0xFACu };
         }
         if (load.Components is 0 or > 4 || descriptor.Type != 0 || descriptor.SwizzleEnabled || descriptor.AddThreadId ||
-            descriptor.Address == 0 || !Gfx10UnifiedFormat.TryDecode(descriptor.Format, out var data, out var number) ||
+            descriptor.Address == 0) return false;
+        refusal = VertexFetchRefusal.Format;
+        if (!Gfx10UnifiedFormat.TryDecode(descriptor.Format, out var data, out var number) ||
             !NativeFormat(descriptor.Format) || number is 2 or 3) return false;
         var bytes = Gfx10UnifiedFormat.GetAccessByteSize(data, 4);
         if (bytes == 0) return false;
+        refusal = VertexFetchRefusal.Selector;
         for (var component = 0; component < load.Components; component++)
         {
             var selector = (descriptor.DestinationSelectXYZW >> (component * 3)) & 7;
             if (selector is 2 or 3) return false;
         }
 
+        refusal = VertexFetchRefusal.Index;
         var index = load.Index;
+        if (index.BiasScalarRegister >= 0) return false;
         if (index.Divisor == 0 || (index.Kind == VertexFetchIndex.Vertex && index.Divisor != 1)) return false;
         // Metal adds baseInstance after stepping, while the guest divides the full
         // instance id. Without rebasing outside the guest allocation these differ.
@@ -47,16 +59,21 @@ public static class AffineVertexFetchResolver
             var known = index.Kind == VertexFetchIndex.Vertex ? bounds.VerticesKnown : bounds.InstancesKnown;
             var start = index.Kind == VertexFetchIndex.Vertex ? bounds.FirstVertex : bounds.FirstInstance;
             var count = index.Kind == VertexFetchIndex.Vertex ? bounds.VertexCount : bounds.InstanceCount;
-            if (!known || count == 0 || (ulong)start + count - 1 > uint.MaxValue) return false;
+            refusal = VertexFetchRefusal.BoundsUnknown;
+            if (!known) return false;
+            refusal = VertexFetchRefusal.BoundsRange;
+            if (count == 0 || (ulong)start + count - 1 > uint.MaxValue) return false;
             first = start / index.Divisor;
             last = ((ulong)start + count - 1) / index.Divisor;
         }
+        refusal = VertexFetchRefusal.BoundsRange;
         first += index.Bias;
         last += index.Bias;
         if (last > uint.MaxValue) return false;
         var offset = (ulong)load.OffsetBytes;
         var stride = (ulong)descriptor.Stride;
         var end = last * stride + offset + bytes;
+        refusal = VertexFetchRefusal.Footprint;
         var footprint = descriptor.Footprint();
         if (footprint is null || end > footprint || end > uint.MaxValue ||
             (descriptor.Address + end) > 0x1_0000_0000_0000UL) return false;
@@ -66,6 +83,7 @@ public static class AffineVertexFetchResolver
         if (descriptor.OutOfBounds == 1 && (constant && index.Kind != VertexFetchIndex.Constant || last >= descriptor.RecordCount)) return false;
         if (descriptor.OutOfBounds == 2 && descriptor.RecordCount == 0) return false;
         if (descriptor.OutOfBounds == 3 && stride == 0 && offset + bytes > descriptor.RecordCount) return false;
+        refusal = VertexFetchRefusal.Alignment;
         if (stride != 0 && (offset + bytes > stride || (stride & 3) != 0)) return false;
         var address = descriptor.Address + offset + index.Bias * stride;
         if ((address & 3) != 0) return false;
@@ -77,9 +95,12 @@ public static class AffineVertexFetchResolver
         };
         buffer = new(address, nativeStride, nativeDescriptor.RecordCount,
             index.Kind == VertexFetchIndex.Instance && !constant, index.Divisor,
-            constant ? bytes : footprint.Value - offset - index.Bias * stride);
+            // The native stage never indexes beyond the proved last record. Binding
+            // the unused descriptor tail would add mapping checks/copies for no fetch.
+            constant ? bytes : end - offset - index.Bias * stride);
         attribute = new(nativeDescriptor, 0, (int)load.Components, 0,
             index.Kind == VertexFetchIndex.Instance && !constant ? 1u : 0u, 0, 0);
+        refusal = VertexFetchRefusal.None;
         return true;
     }
 

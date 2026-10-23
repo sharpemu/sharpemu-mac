@@ -95,6 +95,7 @@ internal sealed partial class MetalRenderHost :
     private static readonly bool WaitOnCommandBuffer =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_ON_COMMAND_BUFFER") == "1";
     private long _drawCount;
+    private long _positionOnlyVertexDraws;
     private long _fixedFunctionFetchDraws;
     private long _shaderFetchDraws;
     private long _drawTicks;
@@ -2123,7 +2124,7 @@ internal sealed partial class MetalRenderHost :
     }
 
     public bool VertexFetchRangeIsMapped(ulong address, ulong size) =>
-        size != 0 && ClampMappedSize(address, size) == size;
+        address != 0 && size != 0 && size <= ulong.MaxValue - address && _memory.CanRead(address, size);
     // Keep the rectangle-list draw/rebase slots available too; excess attributes
     // retain their shader fetch rather than making that draw unrepresentable.
     public uint MaxFixedFunctionVertexBuffers => RectangleRebaseFirstSlot - VertexBufferSlotBase;
@@ -2227,6 +2228,7 @@ internal sealed partial class MetalRenderHost :
         // time below covers them all and not only the one that happened to be done.
         DrainFinishedSubmissions();
         var draws = Interlocked.Exchange(ref _drawCount, 0);
+        var positionOnly = Interlocked.Exchange(ref _positionOnlyVertexDraws, 0);
         var fixedFetch = Interlocked.Exchange(ref _fixedFunctionFetchDraws, 0);
         var shaderFetch = Interlocked.Exchange(ref _shaderFetchDraws, 0);
         var drawTicks = Interlocked.Exchange(ref _drawTicks, 0);
@@ -2282,7 +2284,8 @@ internal sealed partial class MetalRenderHost :
             (SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.DcbHashEnabled
                 ? $"dcbhash_checks={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashChecks} dcbhash_mismatches={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashMismatches} "
                 : string.Empty) +
-            $"draws={draws} vertex_fetch_fixed_draws={fixedFetch} vertex_fetch_shader_draws={shaderFetch} " +
+            $"draws={draws} vertex_fetch_fixed_draws={fixedFetch} vertex_fetch_shader_draws={shaderFetch} position_only_draws={positionOnly} " +
+            SharpEmu.Libs.Gpu.Pipelines.VertexFetchCounters.TakeReport() + " " +
             $"passes={passes} flushes={flushes} flush_by=[{flushBy}] flush_deferred={TakeDeferredStreamFlushes()} " +
             $"{ResourceMaterializationCache.TakeBypassReport()} {TakeDependencyCaptureReport()} {ProgramInternCounters.TakeReport()} " +
             // Page-guard write watches held, and the most one page reached (the guard fails past 127).
