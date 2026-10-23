@@ -198,6 +198,8 @@ internal sealed class RecordingRenderHost : IRenderHost
         Calls.Add($"debug {operation} {submitId} {argument0:X} {argument1:X} {argument2:X} {argument3:X} {argument4:X}");
 
     public bool WantsIndexedCoverage { get; set; }
+    public IndexedDrawCoverageRefusal? CoverageRefusal { get; private set; }
+    public void NoteIndexedDrawCoverageRefusal(IndexedDrawCoverageRefusal reason) => CoverageRefusal = reason;
     public (uint Count, uint First) UpcomingVertices { get; private set; }
     public uint[]? UpcomingIndices { get; private set; }
     public bool NeedsIndexedDrawCoverage(in PipelineHandle pipeline) => WantsIndexedCoverage;
@@ -205,6 +207,7 @@ internal sealed class RecordingRenderHost : IRenderHost
     {
         UpcomingVertices = (vertexCount, firstVertex);
         UpcomingIndices = null;
+        CoverageRefusal = null;
     }
     public void NoteUpcomingIndexedDraw(in PipelineHandle pipeline, ReadOnlySpan<uint> vertexIndices) =>
         UpcomingIndices = vertexIndices.ToArray();

@@ -46,57 +46,58 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private bool TryJoinSubset(in RenderingState state, MetalPipelineEntry? upcoming)
     {
+        if (!_renderingActive || _renderEncoder == 0) return false;
         var enabled = state.ColorAttachmentCount == 0
             ? MetalV2Diagnostics.JoinDepthOnlyDraws : MetalV2Diagnostics.JoinSubsetDraws;
-        if (!enabled || upcoming is null || !_renderingActive || _renderEncoder == 0)
-        {
-            return false;
-        }
+        if (!enabled) return RefuseJoin(JoinRefusal.Disabled);
+        if (upcoming is null) return RefuseJoin(JoinRefusal.Pipeline);
 
         ref readonly var open = ref _renderingState;
         if (state.ColorAttachmentCount >= open.ColorAttachmentCount || open.ColorAttachmentCount == 0 ||
-            open.ColorAttachmentCount > MaxColorAttachments || _passAttachmentCount != open.ColorAttachmentCount ||
-            state.Width != open.Width || state.Height != open.Height ||
-            state.Layers != open.Layers || state.Samples != open.Samples)
-        {
-            return false;
-        }
+            open.ColorAttachmentCount > MaxColorAttachments || _passAttachmentCount != open.ColorAttachmentCount)
+            return RefuseJoin(JoinRefusal.ColorCount);
+        if (state.Width != open.Width || state.Height != open.Height) return RefuseJoin(JoinRefusal.Size);
+        if (state.Layers != open.Layers) return RefuseJoin(JoinRefusal.Layers);
+        if (state.Samples != open.Samples) return RefuseJoin(JoinRefusal.Samples);
 
         ref readonly var depth = ref state.DepthStencilAttachment;
         ref readonly var openDepth = ref open.DepthStencilAttachment;
+        if (depth.DepthClear || depth.StencilClear) return RefuseJoin(JoinRefusal.Clear);
         if (depth.View.Handle != openDepth.View.Handle ||
-            depth.DepthClear || depth.StencilClear || depth.Format != openDepth.Format ||
+            depth.Format != openDepth.Format ||
             depth.HasDepth != openDepth.HasDepth || depth.HasStencil != openDepth.HasStencil ||
             (depth.View.Handle != 0 && (_depthAttachmentLevel != _passDepthLevel || _depthAttachmentSlice != _passDepthSlice)))
         {
-            return false;
+            return RefuseJoin(JoinRefusal.Depth);
         }
 
-        if (upcoming.Mesh is not null || upcoming.RectangleStates is not null ||
-            upcoming.GraphicsDescription is not { } description || description.Rendering.ColorCount != state.ColorAttachmentCount ||
+        if (upcoming.RectangleStates is not null) return RefuseJoin(JoinRefusal.Rectangle);
+        // The variant compiler preserves the mesh stage and its launch interface.
+        if (upcoming.GraphicsDescription is not { } description || description.Rendering.ColorCount != state.ColorAttachmentCount ||
             description.StaticParameters.Samples != open.Samples)
         {
-            return false;
+            return RefuseJoin(JoinRefusal.Pipeline);
         }
 
         if (description.PixelStage is not null && description.PixelProgram.IsValid &&
             (LookupModule(description.PixelProgram).Shader.ColorOutputMask >> (int)state.ColorAttachmentCount) != 0)
         {
-            return false;
+            return RefuseJoin(JoinRefusal.Exports);
         }
 
         for (var index = 0; index < state.ColorAttachmentCount; index++)
         {
             ref readonly var next = ref state.ColorAttachments[index];
             ref readonly var previous = ref open.ColorAttachments[index];
-            if (next.IsClear || next.View.Handle != previous.View.Handle || next.Format != previous.Format ||
-                index >= _attachmentCount || _attachmentLevels[index] != _passLevels[index] ||
+            if (next.IsClear) return RefuseJoin(JoinRefusal.Clear);
+            if (next.View.Handle != previous.View.Handle) return RefuseJoin(JoinRefusal.Texture);
+            if (next.Format != previous.Format) return RefuseJoin(JoinRefusal.Format);
+            if (index >= _attachmentCount || _attachmentLevels[index] != _passLevels[index] ||
                 _attachmentSlices[index] != _passSlices[index] ||
-                _attachmentDepthPlanes[index] != _passDepthPlanes[index] ||
-                _attachmentWidths[index] != _passWidths[index] || _attachmentHeights[index] != _passHeights[index])
-            {
-                return false;
-            }
+                _attachmentDepthPlanes[index] != _passDepthPlanes[index])
+                return RefuseJoin(JoinRefusal.Subresource);
+            if (_attachmentWidths[index] != _passWidths[index] || _attachmentHeights[index] != _passHeights[index])
+                return RefuseJoin(JoinRefusal.Size);
         }
 
         if (JoinBindingsNeedBoundary(state.ColorAttachmentCount == 0))
@@ -107,7 +108,7 @@ internal sealed partial class MetalRenderHost
         var variant = SubsetJoinVariant(upcoming, description, in open);
         if (variant is null)
         {
-            return false;
+            return RefuseJoin(JoinRefusal.Compiling);
         }
 
         _joinedPipeline = upcoming;
@@ -128,9 +129,10 @@ internal sealed partial class MetalRenderHost
     // would have made. Apply the same sampling and deferred-copy guards there.
     private bool JoinBindingsNeedBoundary(bool depthOnly)
     {
-        if (SamplesOpenAttachment())
+        if (SamplesOpenAttachment() is { } sampled)
         {
             if (depthOnly) _depthOnlyJoinsSampled++;
+            RefuseJoin(sampled);
             return true;
         }
 
@@ -141,6 +143,7 @@ internal sealed partial class MetalRenderHost
             // The pass this begins is the boundary the copies land at, even when they wait for the commit.
             _landDeferredLabels = true;
             if (depthOnly) _depthOnlyJoinsDeferredCopies++;
+            RefuseJoin(JoinRefusal.Copies);
             return true;
         }
 
@@ -213,7 +216,7 @@ internal sealed partial class MetalRenderHost
 
     // Whether a texture the draw binds is one of the open pass's attachments, or a
     // view of one. A program that reaches images through bindless tables could reach any.
-    private bool SamplesOpenAttachment()
+    private JoinRefusal? SamplesOpenAttachment()
     {
         foreach (var stage in _joinStages)
         {
@@ -224,14 +227,14 @@ internal sealed partial class MetalRenderHost
 
             if (stage.Program.Bindings is { BindlessImageTableCount: > 0 })
             {
-                return true;
+                return JoinRefusal.Bindless;
             }
 
             for (var index = 0; index < stage.ImageCount; index++)
             {
                 if (IsOpenAttachment(stage.Textures[index]))
                 {
-                    return true;
+                    return JoinRefusal.Sampled;
                 }
 
                 if (stage.MipTextures[index] is { } mips)
@@ -240,14 +243,14 @@ internal sealed partial class MetalRenderHost
                     {
                         if (IsOpenAttachment(mip))
                         {
-                            return true;
+                            return JoinRefusal.Sampled;
                         }
                     }
                 }
             }
         }
 
-        return false;
+        return null;
     }
 
     private bool IsOpenAttachment(nint texture)
@@ -371,6 +374,7 @@ internal sealed partial class MetalRenderHost
             PixelInfo = description.PixelInfo,
             PixelProgram = description.PixelProgram,
             PixelStage = description.PixelStage,
+            LodStatistics = description.LodStatistics,
             StaticParameters = parameters,
         };
     }
