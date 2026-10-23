@@ -143,6 +143,77 @@ public sealed partial class ComputeSceneTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public void MixedDispatchStreamUsesTheSameEncodersAsSerial(bool touchingCopies)
+    {
+        (byte[] Bytes, long Encoders, long AllEncoders, long Barriers, long Independent)? Run(bool concurrent)
+        {
+            using var rig = CreateRig();
+            if (rig is null) return null;
+            rig.Host.ConcurrentComputeEnabled = concurrent;
+            rig.Program(IncrementBuffer);
+            rig.Memory.Allocate(4096, 4096);
+            var buffers = Enumerable.Range(0, 4).Select(_ => Fill(rig, 64, 0)).ToArray();
+            var label = Fill(rig, 64, 0);
+            var expected = new uint[4];
+            var pm4 = new ScenePm4();
+            for (var index = 0; index < 64; index++)
+            {
+                // Two disjoint pairs can overlap; alternating direction in each pair
+                // introduces RAW, WAR and WAW cuts. Unrelated CP writes must stay held.
+                var source = index % 4;
+                var destination = source ^ 1;
+                var copyTarget = touchingCopies && index % 8 == 0 ? buffers[source] : label;
+                pm4.Packet(ScenePm4.OpWriteData, 5u << 8,
+                    (uint)copyTarget, (uint)(copyTarget >> 32), 41u);
+                if (copyTarget != label) expected[source] = 41;
+                expected[destination] = expected[source] + 1;
+                Setup(rig, pm4, IncrementBuffer,
+                        [.. Vsharp(buffers[source], 4, 64), .. Vsharp(buffers[destination], 4, 64)], 64)
+                    .DispatchDirect(1, 1, 1);
+            }
+
+            rig.Submit(pm4); // warm the pipeline before counting real stream boundaries
+            foreach (var buffer in buffers) rig.Memory.Write<uint>(buffer, new uint[64]);
+            var encodersBefore = rig.Host.ComputeEncoders;
+            var allBefore = MetalMemoryTelemetry.ComputeEncoders.Total + MetalMemoryTelemetry.BlitEncoders.Total +
+                MetalMemoryTelemetry.RenderEncoders.Total;
+            var dispatchesBefore = rig.Host.ComputeDispatches;
+            var barriersBefore = rig.Host.ComputeDependencyBarriers;
+            var independentBefore = rig.Host.ComputeIndependentDispatches;
+            rig.Submit(pm4);
+            var encoders = rig.Host.ComputeEncoders - encodersBefore;
+            var allEncoders = MetalMemoryTelemetry.ComputeEncoders.Total + MetalMemoryTelemetry.BlitEncoders.Total +
+                MetalMemoryTelemetry.RenderEncoders.Total - allBefore;
+            Assert.Equal(64, rig.Host.ComputeDispatches - dispatchesBefore);
+            Assert.True(encoders > 0);
+            if (!concurrent) Assert.Equal(barriersBefore, rig.Host.ComputeDependencyBarriers);
+            for (var index = 0; index < buffers.Length; index++)
+                Assert.Equal(expected[index], rig.Read<uint>(buffers[index], 64)[0]);
+            Assert.Equal(41u, rig.Read<uint>(label, 1)[0]);
+            var bytes = buffers.SelectMany(buffer => rig.Read<byte>(buffer, 256)).ToArray();
+            return (bytes, encoders, allEncoders, rig.Host.ComputeDependencyBarriers - barriersBefore,
+                rig.Host.ComputeIndependentDispatches - independentBefore);
+        }
+
+        var serial = Run(false);
+        if (serial is null) return;
+        var concurrent = Run(true)!.Value;
+        Output.WriteLine($"touchingCopies={touchingCopies} serial/concurrent compute encoders=" +
+            $"{serial.Value.Encoders}/{concurrent.Encoders}, all encoders=" +
+            $"{serial.Value.AllEncoders}/{concurrent.AllEncoders}, dependency barriers=" +
+            $"{concurrent.Barriers}, independent={concurrent.Independent}");
+        Assert.Equal(serial.Value.Bytes, concurrent.Bytes);
+        Assert.Equal(serial.Value.Encoders, concurrent.Encoders);
+        if (SharpEmu.Logging.MemoryTelemetry.Enabled)
+            Assert.Equal(serial.Value.AllEncoders, concurrent.AllEncoders);
+        if (!touchingCopies) Assert.Equal(1, concurrent.Encoders);
+        Assert.True(concurrent.Barriers > 0);
+        Assert.True(concurrent.Independent > 0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public void EncoderDispatchTypeAndAllGuestBarriersArePreserved(bool concurrent)
     {
         using var rig = CreateRig();

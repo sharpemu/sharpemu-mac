@@ -23,6 +23,9 @@ internal sealed partial class MetalRenderHost
     private ulong _computeBoundaryValue;
     private ulong _computeBoundarySerial;
     private ulong _lastConcurrentComputeSerial;
+    internal long ComputeDispatches { get; private set; }
+    internal long ComputeScopeBarriers { get; private set; }
+    internal long ComputeEncoders { get; private set; }
     internal long ComputeDependencyBarriers { get; private set; }
     internal long ComputeGuestBarriers { get; private set; }
     internal long ComputeIndependentDispatches { get; private set; }
@@ -31,21 +34,70 @@ internal sealed partial class MetalRenderHost
         MetalNative.Selector("computeCommandEncoderWithDispatchType:");
     private static readonly nint SelSetComputeDispatchType = MetalNative.Selector("setDispatchType:");
 
-    private void OrderComputeExternalWrites()
+    // CP copies and staged stores keep the same range-specific materialization as
+    // serial recording. Draining all held writes before every dispatch splits the
+    // encoder even for unrelated labels; scope barriers only order actual GPU work.
+    // Captured only for compute, while BindResources already has the resolved ranges.
+    // Render preparation and CommitBindings do no dependency work. Keep the storage
+    // across dispatches, including those that reuse the committed bindings.
+    private void BeginComputeFootprint(MetalStageBindings stage)
     {
-        if (!ConcurrentComputeEnabled) return;
-        // CP copies and staged writebacks have footprints outside the dispatch tracker.
-        // Land them before resolving bindings as well as before native dispatches:
-        // virtual-range disjointness alone cannot exclude a physical backing alias.
-        OrderAfterDeferredCopies(0, ulong.MaxValue);
-        OrderAfterStagedStores(0, ulong.MaxValue);
+        var footprint = _computeFootprint;
+        footprint.Clear();
+        footprint.Accesses.EnsureCapacity(stage.BufferCount * 4 + stage.ImageCount * 9 + 8);
+        var program = stage.Program;
+        var info = program.Resources!.Info;
+        var layout = program.Bindings!;
+        footprint.UnknownRead = program.UsesDeviceAddresses || info.UsesDeviceAddresses;
+        footprint.UnknownWrite = program.WritesDeviceAddresses || info.WritesDeviceAddresses;
+        if (layout.BindlessImageTableCount != 0 || stage.StageResources.Resources.BindlessImages.Length != 0)
+            footprint.UnknownRead = footprint.UnknownWrite = true;
+        for (var index = 0; index < layout.Descriptors.Count; index++)
+        {
+            var binding = layout.Descriptors[index];
+            if (binding.Kind is DescriptorBindingKind.GlobalDataShare or
+                DescriptorBindingKind.MipStatistics or DescriptorBindingKind.FaultBuffer)
+                footprint.UnknownRead = footprint.UnknownWrite = true;
+        }
+    }
+
+    private void NoteComputeBuffer(ulong address, uint bytes, in MetalGuestRange range, bool written)
+    {
+        if (!range.IsValid) return;
+        NoteComputeGuestRange(address, bytes, written);
+        _computeFootprint.Accesses.Add(new(MetalComputeAddressSpace.Buffer,
+            (ulong)range.Buffer, range.Offset, bytes, written));
+        _computeFootprint.Accesses.Add(new(MetalComputeAddressSpace.Device,
+            0, range.GpuAddress, bytes, written));
+    }
+
+    private void NoteComputeImage(MetalStageBindings stage, int index)
+    {
+        var imageInfo = stage.Program.Resources!.Info.Images[index];
+        var written = imageInfo.Written || imageInfo.Atomic;
+        if (!_imageCache.TryGetImage(stage.Images[index], out var image) ||
+            index == stage.MovieLuma || index == stage.MovieChroma)
+        {
+            _computeFootprint.UnknownRead = true;
+            _computeFootprint.UnknownWrite |= written;
+            return;
+        }
+
+        // Backing extents cover format and subresource aliases, not just the bound view.
+        var description = image.Description;
+        NoteComputeGuestRange(description.Data.Address, description.Data.Size, written);
+        NoteComputeGuestRange(description.Stencil.Address, description.Stencil.Size, written);
+        _computeFootprint.Accesses.Add(new(MetalComputeAddressSpace.Texture, (ulong)image.Texture, 0, 1, written));
     }
 
     private void OrderComputeDispatch(ulong indirectArguments = 0, MetalGuestRange indirectRange = default)
     {
+        ComputeDispatches++;
         if (!ConcurrentComputeEnabled) return;
         var footprint = _computeFootprint;
-        footprint.Clear();
+        var accessCount = footprint.Accesses.Count;
+        var unknownRead = footprint.UnknownRead;
+        var unknownWrite = footprint.UnknownWrite;
         var stage = _stageBindings[StageCompute];
         if ((_preparedStageMask & (1 << StageCompute)) == 0 || !stage.Committed)
         {
@@ -55,51 +107,6 @@ internal sealed partial class MetalRenderHost
         else
         {
             var program = stage.Program;
-            var info = program.Resources!.Info;
-            var layout = program.Bindings!;
-            footprint.UnknownRead = program.UsesDeviceAddresses || info.UsesDeviceAddresses;
-            footprint.UnknownWrite = program.WritesDeviceAddresses || info.WritesDeviceAddresses;
-            if (layout.BindlessImageTableCount != 0 || stage.StageResources.Resources.BindlessImages.Length != 0 ||
-                layout.Descriptors.Any(binding => binding.Kind is DescriptorBindingKind.GlobalDataShare or
-                    DescriptorBindingKind.MipStatistics or DescriptorBindingKind.FaultBuffer))
-            {
-                // Runtime-selected resources and auxiliary atomic feedback have no bounded
-                // binding footprint here. Never infer independence from shader identity.
-                footprint.UnknownRead = footprint.UnknownWrite = true;
-            }
-
-            for (var index = 0; index < stage.BufferCount; index++)
-            {
-                var range = stage.Buffers[index];
-                if (!range.IsValid) continue; // null descriptor: shader cannot access it
-                var descriptor = BufferDescriptorWords.From(stage.StageResources.Resources.Buffers[index]);
-                var written = info.Buffers[index].Written || info.Buffers[index].Atomic;
-                NoteComputeGuestRange(descriptor.Address, stage.BufferLengths[index], written);
-                footprint.Accesses.Add(new(MetalComputeAddressSpace.Buffer,
-                    (ulong)range.Buffer, range.Offset, stage.BufferLengths[index], written));
-                footprint.Accesses.Add(new(MetalComputeAddressSpace.Device,
-                    0, range.GpuAddress, stage.BufferLengths[index], written));
-            }
-
-            for (var index = 0; index < stage.ImageCount; index++)
-            {
-                var written = info.Images[index].Written || info.Images[index].Atomic;
-                if (!_imageCache.TryGetImage(stage.Images[index], out var image) ||
-                    index == stage.MovieLuma || index == stage.MovieChroma)
-                {
-                    footprint.UnknownRead = true;
-                    footprint.UnknownWrite |= written;
-                    continue;
-                }
-
-                // Use the entire cached backing image, not a texture-view ID or guessed
-                // mip extent. This also covers differently formatted/subresource aliases.
-                var description = image.Description;
-                NoteComputeGuestRange(description.Data.Address, description.Data.Size, written);
-                NoteComputeGuestRange(description.Stencil.Address, description.Stencil.Size, written);
-                footprint.Accesses.Add(new(MetalComputeAddressSpace.Texture, (ulong)image.Texture, 0, 1, written));
-            }
-
             // Shader-internal diagnostics and pair locks are real device writes too.
             // Reflection records whether emission actually uses these trailing pointers.
             if (_pendingComputePipeline is not { } pipeline)
@@ -138,6 +145,10 @@ internal sealed partial class MetalRenderHost
         }
 
         _computeDependencies.Record(footprint);
+        // Auxiliary and indirect accesses belong to this dispatch, not its bindings.
+        footprint.Accesses.RemoveRange(accessCount, footprint.Accesses.Count - accessCount);
+        footprint.UnknownRead = unknownRead;
+        footprint.UnknownWrite = unknownWrite;
     }
 
     private void NoteComputeGuestRange(ulong address, ulong size, bool written)
@@ -161,6 +172,7 @@ internal sealed partial class MetalRenderHost
     // Reset only after encoding the barrier, including guest and shared-transfer cuts.
     private void ComputeScopeBarrier()
     {
+        ComputeScopeBarriers++;
         MetalV2Native.SendMemoryBarrierScope(
             _computeEncoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
         _computeDependencies.Reset();

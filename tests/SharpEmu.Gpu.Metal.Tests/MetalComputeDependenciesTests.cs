@@ -141,4 +141,49 @@ public sealed class MetalComputeDependenciesTests
         tracker.Record(Range(ulong.MaxValue - 2, 8, true));
         Assert.True(tracker.NeedsBarrier(Range(0x1000, 4, false)));
     }
+    [Fact]
+    public void FullEpochRequiresABarrierWithoutGrowingItsStorage()
+    {
+        var tracker = new MetalComputeDependencies();
+        var read = Range(0x1000, 4, false);
+        for (var index = 0; index < MetalComputeDependencies.EpochCapacity; index++)
+        {
+            Assert.False(tracker.NeedsBarrier(read));
+            tracker.Record(read);
+        }
+        Assert.True(tracker.NeedsBarrier(read));
+        tracker.Reset();
+        Assert.False(tracker.NeedsBarrier(read));
+    }
+
+    [Fact]
+    public void OversizedFootprintIsConservativeOnTheNextDispatch()
+    {
+        var tracker = new MetalComputeDependencies();
+        var read = Range(0x1000, 4, false);
+        for (var index = 0; index < MetalComputeDependencies.EpochCapacity; index++)
+            read.Guest(0x2000, 4, false);
+        tracker.Record(read);
+        Assert.True(tracker.NeedsBarrier(Range(0x3000, 4, false)));
+    }
+
+    [Fact]
+    public void ReusedMixedDependencyCaptureAllocatesNoBytes()
+    {
+        var tracker = new MetalComputeDependencies();
+        var footprint = Range(0x1000, 4, false);
+        void Dispatch(int index)
+        {
+            footprint.Clear();
+            footprint.Guest(0x1000 + (ulong)(index % 8) * 64, 64, (index & 1) == 0);
+            if (tracker.NeedsBarrier(footprint)) tracker.Reset();
+            tracker.Record(footprint);
+        }
+        for (var index = 0; index < 100; index++) Dispatch(index);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var index = 0; index < 10000; index++) Dispatch(index);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.Equal(0, allocated);
+    }
+
 }

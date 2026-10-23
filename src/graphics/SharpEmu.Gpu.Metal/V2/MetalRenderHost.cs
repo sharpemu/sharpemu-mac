@@ -2428,6 +2428,8 @@ internal sealed partial class MetalRenderHost :
             $"cleared_mb={(clearedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"end_clear={endClearCount} end_target={endTargetCount} end_transfer={endTransferCount} " +
             $"end_compute={endComputeCount} end_flush={endFlushCount} end_present={endPresentCount} " +
+            $"compute_dispatches={ComputeDispatches} compute_barriers={ComputeScopeBarriers} " +
+            $"compute_dependency_barriers={ComputeDependencyBarriers} compute_encoders={ComputeEncoders} " +
             $"end_other={endOtherCount} end_indirect={TakeIndirectPassEnds()} {TakeExecutorPassEnds()} targetless={targetlessCount} " +
             $"clears=[{TakeClearArrivals()}] clear_passes={clearPasses} " +
             $"clear_depth={clearDepthPasses} clear_mpx={(clearPixels / 1e6).ToString("F1", culture)} " +
