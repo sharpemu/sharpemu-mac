@@ -92,6 +92,36 @@ public sealed class VertexInputResolverTests : IDisposable
     }
 
     [Fact]
+    public void HeaderMetadataCacheInvalidatesSemanticsAndDirectOffsetsAtTheSameAddress()
+    {
+        var shader = RegisterTables();
+        WriteWord(Semantics, SemanticWord(1, 4, 2));
+        using var generations = new SharpEmu.HLE.GpuMemory.GuestWriteGenerations();
+        var cache = new VertexTableMetadataCache();
+        cache.UseWriteGenerations(generations, static (_, _) => { });
+        void Capture()
+        {
+            var tokens = cache.Observe(_context, shader);
+            Assert.True(VertexInputResolver.TryReadTables(_context, shader, 32, out var metadata, out _));
+            cache.Add(shader, 1, metadata, tokens);
+        }
+        Capture();
+        Assert.True(cache.TryGet(shader, 1, out var first));
+        generations.NoteWrite(Semantics, 4);
+        WriteWord(Semantics, SemanticWord(0, 6, 4));
+        Assert.False(cache.TryGet(shader, 1, out _));
+        Capture();
+        Assert.True(cache.TryGet(shader, 1, out var second));
+        Assert.NotEqual(first!.InputSemantics, second!.InputSemantics);
+        generations.NoteWrite(DirectOffsets + VertexBufferTableType * 2, 2);
+        WriteHalf(DirectOffsets + VertexBufferTableType * 2, 12);
+        Assert.False(cache.TryGet(shader, 1, out _));
+        Capture();
+        Assert.True(cache.TryGet(shader, 1, out var third));
+        Assert.Equal(12, third!.VertexBufferRegister);
+    }
+
+    [Fact]
     public void TryReadTables_ReadsTheRegistersAndSemanticsFromTheHeader()
     {
         var shader = RegisterTables(semanticCount: 2);

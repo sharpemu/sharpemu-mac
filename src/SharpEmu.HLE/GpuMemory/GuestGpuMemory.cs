@@ -45,6 +45,7 @@ public sealed class GuestGpuMemory : IDisposable
     {
         AddressSpace = addressSpace;
         _pages = new PageGuard(addressSpace);
+        WriteGenerations = new GuestWriteGenerations(_pages);
     }
 
     public IGuestAddressSpace AddressSpace { get; }
@@ -54,6 +55,8 @@ public sealed class GuestGpuMemory : IDisposable
     public IGuestImageStore? Images => Volatile.Read(ref _images);
 
     public PageGuard Pages => _pages;
+
+    public GuestWriteGenerations WriteGenerations { get; }
 
     // Stores arrive once the host GPU is ready; null stores cannot perform cache recovery.
     public void AttachStores(IGuestBufferStore? buffers, IGuestImageStore? images)
@@ -102,7 +105,9 @@ public sealed class GuestGpuMemory : IDisposable
         bool handled;
         if (kind == FaultKind.Write)
         {
+            WriteGenerations.NoteWrite(address, faultSize);
             handled = (buffers?.MarkCpuWrite(address, faultSize) ?? false) | (images?.MarkCpuWrite(address, faultSize) ?? false);
+            handled |= WriteGenerations.ReleaseFaultWatch(address);
         }
         else
         {
@@ -161,6 +166,7 @@ public sealed class GuestGpuMemory : IDisposable
             return false;
         }
 
+        WriteGenerations.NoteWrite(address, size);
         _ = Buffers?.MarkCpuWrite(address, size);
         _ = Images?.MarkPreciseCpuWrite(address, size);
         return true;
@@ -178,6 +184,7 @@ public sealed class GuestGpuMemory : IDisposable
 
         // The new bytes must be visible before the store reads its page state.
         Interlocked.MemoryBarrier();
+        WriteGenerations.NoteWrite(address, size);
         Buffers?.MarkCpuWriteLanded(address, size);
         _ = Images?.MarkCpuWriteLanded(address, size);
     }
@@ -236,6 +243,7 @@ public sealed class GuestGpuMemory : IDisposable
     // The host mapping takes the guest protection here; the views themselves are mapped read-write.
     public void Register(ulong address, ulong size, GuestPageProtection protection)
     {
+        WriteGenerations.NoteRemap(address, size);
         using var registerScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegister);
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"map guest={protection}");
@@ -271,6 +279,7 @@ public sealed class GuestGpuMemory : IDisposable
             return false;
         }
 
+        WriteGenerations.NoteUnboundedWrite();
         _pages.Permissions.Set(address, size, protection);
         _pages.Reapply(address, size);
         return true;
@@ -306,6 +315,7 @@ public sealed class GuestGpuMemory : IDisposable
 
         void Unmap(IGpuTickScheduler? scheduler)
         {
+            WriteGenerations.NoteRemap(address, size);
             if (scheduler is { Active: true })
             {
                 using var drainScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.UnregisterDrain);
@@ -432,6 +442,7 @@ public sealed class GuestGpuMemory : IDisposable
 
     public void Dispose()
     {
+        WriteGenerations.Dispose();
         _pages.Dispose();
         _spansLock.Dispose();
         Volatile.Write(ref _spanSnapshot, null);

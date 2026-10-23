@@ -1186,6 +1186,7 @@ internal sealed partial class MetalRenderHost :
     /// <summary>Recorded work stores into this guest range.</summary>
     public void NoteGuestMemoryWrite(ulong address, ulong size, MetalGpuWriteOrigin origin)
     {
+        GuestGpuMemoryHook.Current?.WriteGenerations.NoteWrite(address, size);
         // Recorded after any pending command-processor bytes there, so it is what a read
         // of them has to see from now on, whenever it lands.
         using (var overlayScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.WriteNoteOverlays))
@@ -1232,6 +1233,7 @@ internal sealed partial class MetalRenderHost :
     /// </summary>
     public void NoteUnboundedGuestMemoryWrite()
     {
+        GuestGpuMemoryHook.Current?.WriteGenerations.NoteUnboundedWrite();
         // The store may reach DCC metadata without re-arming a claim there.
         _imageCache.ForgetAllStandingDccClaims();
         _gpuWrites.NoteUnbounded(SubmissionSerial);

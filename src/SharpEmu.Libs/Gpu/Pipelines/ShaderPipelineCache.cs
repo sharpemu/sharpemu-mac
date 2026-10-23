@@ -27,6 +27,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly IShaderPipelineHost _host;
     private readonly ShaderHeaderRegistry _registry;
     private readonly ShaderProgramCache _programs;
+    private readonly ShaderIdentityCache _identities;
     private readonly VertexTableMetadataCache _vertexTables = new();
     // The last user data array of each graphics stage, kept under _resolveGate.
     private uint[]? _vertexUserData;
@@ -37,28 +38,30 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // Nothing writes a resolved draw's arrays.
     private Gen5PixelOutputBinding[] _lastBoundOutputs = [];
     private readonly PixelInputArrays _pixelInputArrays = new();
-    private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
-    private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
+    private readonly ReadyPipelineCache<GraphicsPipelineKey> _graphicsPipelines = new();
+    private readonly ReadyPipelineCache<ComputePipelineKey> _computePipelines = new();
     private readonly Dictionary<Gen5ShaderProgram, bool> _rayTracingComputePrograms = new();
     private readonly object _gate = new();
     // The options of each stage's lookup, refilled under _gate (StageCompileOptions.Detached).
     private readonly StageCompileOptions _vertexOptions = StageCompileOptions.CreateReusable();
     private readonly StageCompileOptions _pixelOptions = StageCompileOptions.CreateReusable();
     private readonly StageCompileOptions _computeOptions = StageCompileOptions.CreateReusable();
-    // The pipeline maps: a lookup takes this lock or _gate, an addition both; a cached draw so does
-    // not wait for the program preparation a resolving thread holds _gate for.
-    private readonly object _pipelineGate = new();
     private readonly bool _strictShaders = Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") != "0";
     private readonly bool _skipRayTracing = Environment.GetEnvironmentVariable("SHARPEMU_SKIP_RT") == "1";
     private readonly HashSet<(ShaderStage Stage, ulong Hash, uint CodeSize)> _reportedShaderSkips = [];
     private readonly HashSet<(uint Stages, uint PrimitiveType, uint MaxOutput, uint MaxVerticesOut)> _reportedMeshSkips = [];
 
-    public ShaderPipelineCache(CpuContext context, IShaderPipelineHost host, IGuestGpuBackend compiler, ShaderHeaderRegistry registry)
+    public ShaderPipelineCache(CpuContext context, IShaderPipelineHost host, IGuestGpuBackend compiler, ShaderHeaderRegistry registry, SharpEmu.HLE.GpuMemory.GuestWriteGenerations? writeGenerations = null)
     {
         _context = context;
         _compiler = compiler;
         _host = host;
         _registry = registry;
+        var generations = writeGenerations ?? (context.Memory is ICpuMappedReadWatchSource
+            ? SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current?.WriteGenerations : null);
+        _registry.UseWriteGenerations(generations, host.SynchronizeShaderCode);
+        _vertexTables.UseWriteGenerations(generations, host.SynchronizeShaderCode);
+        _identities = new ShaderIdentityCache(context.Memory, host.SynchronizeShaderCode, generations);
         _programs = new ShaderProgramCache(context, compiler, host);
     }
 
@@ -172,14 +175,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
         var registered = _registry.Require(codeAddress, label);
-        Span<(ulong Address, uint SizeBytes)> ranges = stackalloc (ulong, uint)[RegisteredShader.MaxCodeRanges];
-        ranges = ranges[..registered.CopyCodeRanges(ranges)];
-        foreach (var (address, sizeBytes) in ranges)
-        {
-            _host.SynchronizeShaderCode(address, sizeBytes);
-        }
-
-        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, ranges, label);
+        var identity = _identities.Get(registered, label);
+        var hash = identity.Hash;
         var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label, ref userDataMemo);
         if (stage == ShaderStage.Mesh && registered.IsFused)
         {
@@ -190,20 +187,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             prefixed[0] = (uint)geometryPointer;
             prefixed[1] = (uint)(geometryPointer >> 32);
             userData.CopyTo(prefixed, (int)VertexUserDataBase);
-            return new ShaderSource(registered, hash, prefixed, 0, stage);
+            return new ShaderSource(registered, hash, prefixed, 0, stage) { ContentHash = identity.ContentHash };
         }
 
         // A source is immutable, so a draw that resolves to the same one as the last draw of its
         // stage shares it instead of allocating another.
         ref var last = ref _lastSources[(int)stage];
-        if (last is not null && ReferenceEquals(last.Registered, registered) && last.Hash == hash &&
+        if (last is not null && ReferenceEquals(last.Registered, registered) && last.Hash == hash && last.Identity == identity.ContentHash &&
             ReferenceEquals(last.UserData, userData) && last.UserDataBase == userDataBase && last.Stage == stage &&
             last.ExcludedUserDataRegisters == 0)
         {
             return last;
         }
 
-        return last = new ShaderSource(registered, hash, userData, userDataBase, stage);
+        return last = new ShaderSource(registered, hash, userData, userDataBase, stage) { ContentHash = identity.ContentHash };
     }
 
     // The last source of each stage, kept under _resolveGate like the user data memos.
@@ -511,7 +508,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         // The program's half of the viewport transform the draw state sets the rest of.
         var clipSpace = HostViewport(context).ClipSpace;
         return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
-            shaderInterface.VertexOutputControl, clipSpace, _vertexTables, source.Hash);
+            shaderInterface.VertexOutputControl, clipSpace, _vertexTables, source.Identity);
     }
 
     private HostViewportTransform HostViewport(ContextRegisters context)
@@ -927,7 +924,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         if (retry is not null)
         {
             // The source is read again (the code hash and the user data), the rest only checked.
-            if (retry.Matches(source, dispatchInitiator, dimensionX, dimensionY, dimensionZ) &&
+            if (retry.Source?.Identity == source.Identity && retry.Matches(source, dispatchInitiator, dimensionX, dimensionY, dimensionZ) &&
                 retry.Reads.Holds(_host.TryReadResidentGuestBytes))
             {
                 retry.Reused = true;
@@ -1105,72 +1102,66 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         handle = default;
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
-        // The lookup fills objects this thread reuses for every draw; only a new pipeline gets its own.
-        var lookup = _graphicsLookup ??= new GraphicsPipelineKey
-        {
-            Rendering = new PipelineRenderingState(),
-            VertexInput = new PipelineVertexInputState(),
-            StaticParameters = new PipelineStaticParameters(),
-        };
-        lookup.Rendering.Reset();
-        lookup.VertexInput.Reset();
-        lookup.StaticParameters.Reset();
-        FillGraphicsState(colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, lookup.Rendering, lookup.StaticParameters, lookup.VertexInput,
-            _host.DepthBoundsInPipelineState);
-        lookup.VertexProgramId = vertexProgram.Id;
-        lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
         var lodStatistics = pixelInput is not null && _host.PixelPipelinesFollowLodStatistics && MipStatistics.TitleUsesCounters;
-        lookup.LodStatistics = lodStatistics;
-        lock (_pipelineGate)
+        PipelineStateMemo? memo = null;
+        GraphicsPipelineKey lookup;
+        if (ShaderIdentityCache.Enabled)
         {
-            if (_graphicsPipelines.TryGetValue(lookup, out handle))
+            if (!ReferenceEquals(_stateMemoOwner, this))
             {
-                return true;
+                _stateMemoOwner = this;
+                _stateMemo = new();
             }
+            memo = _stateMemo!;
+            if (memo.Update(colors, depth, vertexInput, pixelInput, context, rendering, topology, primitiveRestartEnabled,
+                disableBlending, vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, _host.DepthBoundsInPipelineState,
+                lodStatistics, out handle)) return true;
+            lookup = memo.Key;
         }
-
+        else
+        {
+            // The lookup fills objects this thread reuses for every draw; only a new pipeline gets its own.
+            lookup = _graphicsLookup ??= new GraphicsPipelineKey
+            {
+                Rendering = new PipelineRenderingState(),
+                VertexInput = new PipelineVertexInputState(),
+                StaticParameters = new PipelineStaticParameters(),
+            };
+            lookup.Rendering.Reset();
+            lookup.VertexInput.Reset();
+            lookup.StaticParameters.Reset();
+            FillGraphicsState(colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
+                vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, lookup.Rendering, lookup.StaticParameters, lookup.VertexInput,
+                _host.DepthBoundsInPipelineState);
+            lookup.VertexProgramId = vertexProgram.Id;
+            lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
+            lookup.LodStatistics = lodStatistics;
+        }
+        if (_graphicsPipelines.TryGet(lookup, out handle))
+        {
+            memo?.Publish(handle);
+            return true;
+        }
         var description = BuildGraphicsDescription(
             colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
             vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, _host.DepthBoundsInPipelineState, lodStatistics);
         var key = KeyOf(description);
-        profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
-        lock (_gate)
-        {
-            profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
-            if (_graphicsPipelines.TryGetValue(key, out handle))
-            {
-                return true;
-            }
-
-            if (RenderTrace.Enabled && RenderTrace.Pipeline())
-            {
-                RenderTrace.Write(
-                    $"PipelineCache create graphics vertex=0x{vertexProgram.Id:X16} pixel=0x{key.PixelProgramId:X16} colors={key.Rendering.ColorCount} " +
-                    $"depth={description.StaticParameters.WithDepth} samples={description.StaticParameters.Samples}");
-
-            }
-
-            PipelineHandle created;
-            if (wait)
-            {
-                created = _host.CreateGraphicsPipeline(description);
-            }
-            else if (!_host.TryCreateGraphicsPipeline(description, out created))
-            {
-                return false;
-            }
-
-            lock (_pipelineGate)
-            {
-                _graphicsPipelines.Add(key, created);
-            }
-
-            ShaderCacheCounters.CountGraphicsPipeline();
-            handle = created;
-            return true;
-        }
+        var available = CompileGraphicsPipeline(key, description, wait, out handle);
+        if (available) memo?.Publish(handle);
+        return available;
     }
+
+    // Keep the cold closure out of the ready-lookup method: capturing its parameters
+    // there would allocate a display class even when the first probe returns a handle.
+    private bool CompileGraphicsPipeline(GraphicsPipelineKey key, GraphicsPipelineDescription description, bool wait, out PipelineHandle handle) =>
+        _graphicsPipelines.GetOrCreate(key, () =>
+        {
+            PipelineHandle created;
+            if (wait) created = _host.CreateGraphicsPipeline(description);
+            else if (!_host.TryCreateGraphicsPipeline(description, out created)) return null;
+            ShaderCacheCounters.CountGraphicsPipeline();
+            return created;
+        }, wait, out handle);
 
     [ThreadStatic]
     private static GraphicsPipelineKey? _graphicsLookup;
@@ -1230,7 +1221,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         PipelineRenderingState renderingState,
         PipelineStaticParameters parameters,
         PipelineVertexInputState vertexState,
-        bool depthBoundsInPipelineState = true)
+        bool depthBoundsInPipelineState = true,
+        bool fillColors = true, bool fillRaster = true, bool fillVertex = true)
     {
         if (colors.Length > PipelineStaticParameters.ColorAttachmentCount)
         {
@@ -1251,98 +1243,110 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var vertexStage = vertexInput.Stage.Program ?? throw GpuFatal.Fatal("The vertex stage has no program.");
         var pixelStage = pixelActive ? pixelInput!.Stage.Program ?? throw GpuFatal.Fatal("The pixel stage has no program.") : null;
         var colorCount = (uint)colors.Length;
-        parameters.ColorCount = colorCount;
-        renderingState.ColorCount = colorCount;
-        for (var index = 0; index < colors.Length; index++)
+        if (fillColors)
         {
-            ref readonly var color = ref colors[index];
-            var format = rendering.ColorAttachments[index].Format;
-            if (!color.Image.IsValid || format == GpuFormat.Undefined)
+            parameters.ColorCount = colorCount;
+            renderingState.ColorCount = colorCount;
+            for (var index = 0; index < colors.Length; index++)
             {
-                throw GpuFatal.Fatal($"A color attachment has no image or format: slot={color.Slot} format={format}.");
+                ref readonly var color = ref colors[index];
+                var format = rendering.ColorAttachments[index].Format;
+                if (!color.Image.IsValid || format == GpuFormat.Undefined)
+                {
+                    throw GpuFatal.Fatal($"A color attachment has no image or format: slot={color.Slot} format={format}.");
+                }
+
+                renderingState.ColorFormats[index] = format;
+                // A target the pixel program never exports keeps its contents, as on hardware; the
+                // host output would otherwise write an undefined value (e.g. depth-only passes that
+                // leave a color target bound and export only to the null target).
+                var exportTarget = color.Slot == 0 && context.BlendControls[0].UsesSecondarySource &&
+                    (context.ColorTargets[0].Info & (1u << 16)) == 0
+                    ? 0 : PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
+                var exported = pixelStage is not null &&
+                    (exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0);
+                var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.ColorWriteMaskForSlot(color.Slot)) : 0;
+                parameters.SetColorMask(index, colorMask);
+                if (RenderTrace.Enabled && RenderTrace.Pipeline())
+                {
+                    RenderTrace.Write(
+                        $"PipelineCache output slot={color.Slot} export={exportTarget} " +
+                        $"guestMask=0x{context.ColorWriteMaskForSlot(color.Slot):X} " +
+                        $"exported={(exported ? 1 : 0)} shaderMask=0x{pixelStage?.PixelColorExportMasks ?? 0:X8} " +
+                        $"mapping=0x{color.Resolution.ExportMapping.Packed:X2} hostMask=0x{colorMask:X} format={(int)format}");
+                }
             }
 
-            renderingState.ColorFormats[index] = format;
-            // A target the pixel program never exports keeps its contents, as on hardware; the
-            // host output would otherwise write an undefined value (e.g. depth-only passes that
-            // leave a color target bound and export only to the null target).
-            var exportTarget = color.Slot == 0 && context.BlendControls[0].UsesSecondarySource &&
-                (context.ColorTargets[0].Info & (1u << 16)) == 0
-                ? 0 : PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
-            var exported = pixelStage is not null &&
-                (exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0);
-            var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.ColorWriteMaskForSlot(color.Slot)) : 0;
-            parameters.SetColorMask(index, colorMask);
-            if (RenderTrace.Enabled && RenderTrace.Pipeline())
-            {
-                RenderTrace.Write(
-                    $"PipelineCache output slot={color.Slot} export={exportTarget} " +
-                    $"guestMask=0x{context.ColorWriteMaskForSlot(color.Slot):X} " +
-                    $"exported={(exported ? 1 : 0)} shaderMask=0x{pixelStage?.PixelColorExportMasks ?? 0:X8} " +
-                    $"mapping=0x{color.Resolution.ExportMapping.Packed:X2} hostMask=0x{colorMask:X} format={(int)format}");
-            }
         }
-
         var withDepth = depth.HasTarget;
-        if (withDepth)
+        if (fillRaster)
         {
-            renderingState.DepthFormat = rendering.DepthFormat;
-            renderingState.StencilFormat = rendering.StencilFormat;
-        }
-
-        var samples = rendering.Samples;
-        if (colorCount == 0 && !withDepth)
-        {
-            samples = 1u << context.AntialiasingConfig.SampleCountLog2;
-            var flag = ImageDescription.VulkanSampleCount(samples);
-            if (flag == 0 || (noAttachmentSampleCounts & flag) == 0)
+            renderingState.DepthFormat = GpuFormat.Undefined;
+            renderingState.StencilFormat = GpuFormat.Undefined;
+            if (withDepth)
             {
-                throw GpuFatal.Fatal($"The device cannot rasterize without attachments at the draw's sample count: samples={samples}.");
+                renderingState.DepthFormat = rendering.DepthFormat;
+                renderingState.StencilFormat = rendering.StencilFormat;
             }
-        }
 
-        if (samples == 0 || ImageDescription.VulkanSampleCount(samples) == 0)
+            var samples = rendering.Samples;
+            if (colorCount == 0 && !withDepth)
+            {
+                samples = 1u << context.AntialiasingConfig.SampleCountLog2;
+                var flag = ImageDescription.VulkanSampleCount(samples);
+                if (flag == 0 || (noAttachmentSampleCounts & flag) == 0)
+                {
+                    throw GpuFatal.Fatal($"The device cannot rasterize without attachments at the draw's sample count: samples={samples}.");
+                }
+            }
+
+            if (samples == 0 || ImageDescription.VulkanSampleCount(samples) == 0)
+            {
+                throw GpuFatal.Fatal($"The draw's sample count is invalid: samples={samples}.");
+            }
+
+            var depthState = withDepth ? depth.Target.State : default;
+            var rectangleList = topology == GpuPrimitiveTopology.PatchList;
+            var mode = context.RasterMode;
+            parameters.NegativeOneToOne = !context.Clip.DirectXClipSpace;
+            parameters.DepthClipEnable = HostViewportTransform.DepthClipOf(context);
+            parameters.Topology = topology;
+            parameters.PrimitiveRestartEnable = primitiveRestartEnabled;
+            parameters.Samples = samples;
+            parameters.SampleShadingEnable = pixelActive && samples > 1 && pixelInput!.SampleShading;
+            parameters.WithDepth = withDepth;
+            parameters.DepthBoundsTestEnable = depthState.DepthBoundsTestEnabled;
+            parameters.DepthMinBounds = depthState.DepthMinBounds;
+            parameters.DepthMaxBounds = depthState.DepthMaxBounds;
+            parameters.StencilTestEnable = depthState.StencilTestEnabled;
+            parameters.StencilFront = withDepth ? depthState.FrontOperations : StencilOperations.Default;
+            parameters.StencilBack = withDepth ? depthState.BackOperations : StencilOperations.Default;
+            parameters.CullBack = !rectangleList && mode.CullBack;
+            parameters.CullFront = !rectangleList && mode.CullFront;
+            parameters.FrontFaceClockwise = mode.FrontFaceClockwise;
+            parameters.AlphaToCoverageEnable = AlphaToCoverageEnabled(colors, context, pixelActive);
+        }
+        if (fillColors)
         {
-            throw GpuFatal.Fatal($"The draw's sample count is invalid: samples={samples}.");
-        }
+            for (var index = 0; index < colors.Length; index++)
+            {
+                var slot = colors[index].Slot;
+                var blend = context.BlendControls[slot];
+                parameters.SetColorSourceBlend(index, (byte)blend.ColorSourceFactor);
+                parameters.SetColorBlendFunction(index, (byte)blend.ColorFunction);
+                parameters.SetColorDestinationBlend(index, (byte)blend.ColorDestinationFactor);
+                parameters.SetAlphaSourceBlend(index, (byte)blend.AlphaSourceFactor);
+                parameters.SetAlphaBlendFunction(index, (byte)blend.AlphaFunction);
+                parameters.SetAlphaDestinationBlend(index, (byte)blend.AlphaDestinationFactor);
+                parameters.SetSeparateAlphaBlend(index, blend.SeparateAlpha);
+                parameters.SetBlendEnable(index, blend.Enable && !disableBlending);
+                parameters.SetBlendBypass(index, ((context.ColorTargets[slot].Info >> 16) & 0x1) != 0);
+            }
 
-        var depthState = withDepth ? depth.Target.State : default;
-        var rectangleList = topology == GpuPrimitiveTopology.PatchList;
-        var mode = context.RasterMode;
-        parameters.NegativeOneToOne = !context.Clip.DirectXClipSpace;
-        parameters.DepthClipEnable = HostViewportTransform.DepthClipOf(context);
-        parameters.Topology = topology;
-        parameters.PrimitiveRestartEnable = primitiveRestartEnabled;
-        parameters.Samples = samples;
-        parameters.SampleShadingEnable = pixelActive && samples > 1 && pixelInput!.SampleShading;
-        parameters.WithDepth = withDepth;
-        parameters.DepthBoundsTestEnable = depthState.DepthBoundsTestEnabled;
-        parameters.DepthMinBounds = depthState.DepthMinBounds;
-        parameters.DepthMaxBounds = depthState.DepthMaxBounds;
-        parameters.StencilTestEnable = depthState.StencilTestEnabled;
-        parameters.StencilFront = withDepth ? depthState.FrontOperations : StencilOperations.Default;
-        parameters.StencilBack = withDepth ? depthState.BackOperations : StencilOperations.Default;
-        parameters.CullBack = !rectangleList && mode.CullBack;
-        parameters.CullFront = !rectangleList && mode.CullFront;
-        parameters.FrontFaceClockwise = mode.FrontFaceClockwise;
-        parameters.AlphaToCoverageEnable = AlphaToCoverageEnabled(colors, context, pixelActive);
-        for (var index = 0; index < colors.Length; index++)
-        {
-            var slot = colors[index].Slot;
-            var blend = context.BlendControls[slot];
-            parameters.SetColorSourceBlend(index, (byte)blend.ColorSourceFactor);
-            parameters.SetColorBlendFunction(index, (byte)blend.ColorFunction);
-            parameters.SetColorDestinationBlend(index, (byte)blend.ColorDestinationFactor);
-            parameters.SetAlphaSourceBlend(index, (byte)blend.AlphaSourceFactor);
-            parameters.SetAlphaBlendFunction(index, (byte)blend.AlphaFunction);
-            parameters.SetAlphaDestinationBlend(index, (byte)blend.AlphaDestinationFactor);
-            parameters.SetSeparateAlphaBlend(index, blend.SeparateAlpha);
-            parameters.SetBlendEnable(index, blend.Enable && !disableBlending);
-            parameters.SetBlendBypass(index, ((context.ColorTargets[slot].Info >> 16) & 0x1) != 0);
+            NormalizeStaticParameters(parameters, depthBoundsInPipelineState);
         }
-
-        NormalizeStaticParameters(parameters, depthBoundsInPipelineState);
-        FillVertexInputState(vertexInput, vertexState);
+        if (fillRaster && !fillColors) NormalizeStaticParameters(parameters, depthBoundsInPipelineState);
+        if (fillVertex) FillVertexInputState(vertexInput, vertexState);
         return (vertexStage, pixelStage);
     }
 
@@ -1460,86 +1464,31 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         var stage = input.Stage.Program ?? throw GpuFatal.Fatal("The compute stage has no program.");
         var key = new ComputePipelineKey(program.Id);
-        lock (_pipelineGate)
-        {
-            if (_computePipelines.TryGetValue(key, out var cached))
-            {
-                return cached;
-            }
-        }
-
-        profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
-        lock (_gate)
-        {
-            profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
-            if (_computePipelines.TryGetValue(key, out var cached))
-            {
-                return cached;
-            }
-
-            if (RenderTrace.Enabled && RenderTrace.Pipeline())
-            {
-                RenderTrace.Write($"PipelineCache create compute program=0x{program.Id:X16} hash=0x{stage.Hash:X16}");
-            }
-
-            var created = _host.CreateComputePipeline(new ComputePipelineDescription { Input = input, Program = program, Stage = stage });
-            lock (_pipelineGate)
-            {
-                _computePipelines.Add(key, created);
-            }
-
-            ShaderCacheCounters.CountComputePipeline();
-            return created;
-        }
+        if (_computePipelines.TryGet(key, out var cached)) return cached;
+        CompileComputePipeline(key, input, program, stage, wait: true, out var handle);
+        return handle;
     }
 
     public bool TryCreateComputePipeline(ComputeInputInfo input, ShaderProgram program, out PipelineHandle handle)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
-        handle = default;
-        if (!program.IsValid)
-        {
-            throw GpuFatal.Fatal("The dispatch has no compute program.");
-        }
-
+        if (!program.IsValid) throw GpuFatal.Fatal("The dispatch has no compute program.");
         var stage = input.Stage.Program ?? throw GpuFatal.Fatal("The compute stage has no program.");
         var key = new ComputePipelineKey(program.Id);
-        lock (_pipelineGate)
-        {
-            if (_computePipelines.TryGetValue(key, out var cached))
-            {
-                handle = cached;
-                return true;
-            }
-        }
-
-        profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
-        lock (_gate)
-        {
-            profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
-            if (_computePipelines.TryGetValue(key, out var cached))
-            {
-                handle = cached;
-                return true;
-            }
-
-            if (!_host.TryCreateComputePipeline(
-                    new ComputePipelineDescription { Input = input, Program = program, Stage = stage },
-                    out var created))
-            {
-                return false;
-            }
-
-            lock (_pipelineGate)
-            {
-                _computePipelines.Add(key, created);
-            }
-
-            ShaderCacheCounters.CountComputePipeline();
-            handle = created;
-            return true;
-        }
+        if (_computePipelines.TryGet(key, out handle)) return true;
+        return CompileComputePipeline(key, input, program, stage, wait: false, out handle);
     }
+
+    private bool CompileComputePipeline(ComputePipelineKey key, ComputeInputInfo input, ShaderProgram program, ShaderProgramInfo stage,
+        bool wait, out PipelineHandle handle) => _computePipelines.GetOrCreate(key, () =>
+        {
+            var description = new ComputePipelineDescription { Input = input, Program = program, Stage = stage };
+            PipelineHandle created;
+            if (wait) created = _host.CreateComputePipeline(description);
+            else if (!_host.TryCreateComputePipeline(description, out created)) return null;
+            ShaderCacheCounters.CountComputePipeline();
+            return created;
+        }, wait, out handle);
 
     public Task? GetComputePipelineCompletion(ShaderProgram program)
     {
