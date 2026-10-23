@@ -8,6 +8,7 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -44,14 +45,15 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {
         shader = null;
-        if (!Gen5MslTranslator.TryCompileProgram(request, out var compiled, out error))
+        var options = Gen5MslCodegenOptions.FromEnvironment with { ComputeBatchEntryPoint = request.Stage == ShaderStage.Compute };
+        if (!Gen5MslTranslator.TryCompileProgram(request, out var compiled, out error, options))
         {
             return false;
         }
 
         // The request is kept so the render host can drop the source once the library is
         // built and translate it again if it is ever needed (MetalCompiledGuestShader).
-        shader = new MetalCompiledGuestShader(compiled, request);
+        shader = new MetalCompiledGuestShader(compiled, request, options);
         return true;
     }
 

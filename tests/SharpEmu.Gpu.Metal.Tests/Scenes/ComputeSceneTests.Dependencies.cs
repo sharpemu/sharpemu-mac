@@ -99,6 +99,7 @@ public sealed partial class ComputeSceneTests
             else if (concurrent) Assert.True(barriers >= (chain == "indirect" ? 2 : 31),
                 $"chain={chain} dependency barriers={barriers}");
             else Assert.Equal(0, rig.Host.ComputeDependencyBarriers);
+            if (chain == "atomics") Assert.Equal(0, rig.Host.ComputeBatchedDispatches);
             var values = rig.Read<uint>(first, 256);
             if (chain == "producer-consumer")
                 Assert.Equal(Enumerable.Range(0, 256).Select(i => (uint)i * 7 + 32), values);

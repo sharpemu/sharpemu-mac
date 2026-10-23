@@ -154,6 +154,9 @@ public sealed record Gen5MslShader(
     bool WritesLayer = false,
     bool WritesViewportIndex = false)
 {
+    /// <summary>Optional segmented-grid entry, with the same translated workgroup body.</summary>
+    public string? ComputeBatchEntryPoint { get; init; }
+
     /// <summary>MSL 4.0 (macOS 26), not the backend's usual version, compiles this source:
     /// a pixel shader declares metal::vertex_value inputs, which only that version has.</summary>
     public const nuint PerVertexInputsLanguageVersion = (4 << 16) | 0;

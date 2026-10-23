@@ -257,6 +257,8 @@ internal sealed partial class MetalRenderHost
     private void ReleasePipelineState(MetalPipelineEntry entry)
     {
         ReleaseState(entry.State);
+        ReleaseState(entry.BatchState);
+        entry.BatchState = 0;
         if (entry.RectangleStates is { } rectangles)
         {
             // The first rectangle state is entry.State itself.

@@ -50,6 +50,9 @@ internal sealed partial class MetalRenderHost
         public long LoadBytes;
         public long StoreBytes;
         public int Draws;
+        public int BatchedDispatches;
+        public int Batches;
+        public Dictionary<string, int>? BatchFlushReasons;
         public int Joins;
         public long JoinLoadAvoidedBytes;
         public long LoadElidedBytes;
@@ -538,6 +541,9 @@ internal sealed partial class MetalRenderHost
                 culture,
                 $"[METAL-V2][PASS-PROF] f={submission.Frame} s={serial} i={record.Index} k={record.Kind} " +
                 $"us={microseconds:F0} gap_us={gap:F0} {stages}draws={record.Draws} tg={record.Groups} " +
+                $"batched_dispatches={record.BatchedDispatches} batches={record.Batches} " +
+                $"avg_batch={(record.Batches == 0 ? 0 : (double)record.BatchedDispatches / record.Batches):F2} " +
+                $"batch_flush=[{(record.BatchFlushReasons is null ? string.Empty : string.Join(',', record.BatchFlushReasons.Select(pair => $"{pair.Key}:{pair.Value}")))}] " +
                 $"ld_mb={record.LoadBytes / 1048576.0:F1} st_mb={record.StoreBytes / 1048576.0:F1} " +
                 $"end={(record.End.Length == 0 ? "?" : record.End)} a=[{record.Shape}] sh=[{shaders}] " +
                 $"after=[{after}] n_after={record.After?.Count ?? 0} joins={record.Joins} join_load_avoided_mb={record.JoinLoadAvoidedBytes / 1048576.0:F1} load_elided_mb={record.LoadElidedBytes / 1048576.0:F1} join_refused=[{FormatRefusals<JoinRefusal>(record.JoinRefusals)}] load_refused=[{FormatRefusals<LoadRefusal>(record.LoadRefusals)}]")).Append('\n');

@@ -1282,6 +1282,7 @@ internal sealed partial class MetalRenderHost
 
     private void EndComputeEncoder()
     {
+        FlushComputeBatch("encoder");
         if (_computeEncoder == 0)
         {
             return;
@@ -1410,7 +1411,8 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        EnsureComputePipelineState(EnsureComputeEncoder(), entry);
+        if (_computeBatchPipeline is not null && !ReferenceEquals(_computeBatchPipeline, entry))
+            FlushComputeBatch("pipeline");
         _pendingComputePipeline = entry;
     }
 
@@ -1945,6 +1947,19 @@ internal sealed partial class MetalRenderHost
             groupsX = PersistentThreadGroups;
         }
 
+        if (_computeBatchCount != 0 && _batchInitiator != _dispatchInitiator)
+            FlushComputeBatch("initiator");
+        if (CanBatchCompute(entry, groupsX, groupsY, groupsZ, out var batchGroups))
+        {
+            if (_computeBatchCount == ComputeBatchCapacity || (ulong)_computeBatchGroups + batchGroups > uint.MaxValue)
+                FlushComputeBatch("capacity");
+            OrderComputeDispatch(); // A real dependency flushes before its scope barrier.
+            QueueComputeBatch(entry, groupsX, groupsY, batchGroups);
+            CountDraw(started);
+            return;
+        }
+
+        FlushComputeBatch("ineligible");
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
         OrderComputeDispatch();
@@ -1962,6 +1977,7 @@ internal sealed partial class MetalRenderHost
 
     public bool TryDispatchIndirect(ulong argumentsAddress)
     {
+        FlushComputeBatch("indirect");
         FlushGpuWrites(argumentsAddress, 3 * sizeof(uint), MetalWritebackCause.StorageDescriptor);
         // Storage resolution can share a preceding producer's staged allocation or
         // gather GPU-written counts, rather than snapshotting stale CPU-visible bytes.

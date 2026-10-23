@@ -46,6 +46,10 @@ public sealed record MslArgumentField(
 // textures and samplers take eight bytes each, counts take four; the host fills it directly.
 public sealed class Gen5MslArgumentLayout
 {
+    // A 16-byte header (request count, padding), then 32-byte records:
+    // resource/push GPU pointers, inclusive start/exclusive end group prefix, X/Y counts.
+    public const int ComputeBatchHeaderBytes = 16;
+    public const int ComputeBatchRequestBytes = 32;
     public const int ResourcesBufferIndex = 0;
     public const int PushDataBufferIndex = 1;
     public const string StructName = "Gen5StageResources";

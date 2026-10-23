@@ -25,7 +25,8 @@ namespace SharpEmu.Gpu.Metal;
 /// for the rare consumer that needs the text afterwards, checked against the hash of
 /// the dropped text. A shader without a request (the fixed ones) keeps its source.
 /// </remarks>
-internal sealed class MetalCompiledGuestShader(Gen5MslShader shader, ShaderCompileRequest? request = null) : IGuestCompiledShader
+internal sealed class MetalCompiledGuestShader(Gen5MslShader shader, ShaderCompileRequest? request = null,
+    Gen5MslCodegenOptions? options = null) : IGuestCompiledShader
 {
     private readonly ShaderCompileRequest? _request = request;
     private Gen5MslShader _shader = shader;
@@ -76,7 +77,7 @@ internal sealed class MetalCompiledGuestShader(Gen5MslShader shader, ShaderCompi
             return current;
         }
 
-        if (!Gen5MslTranslator.TryCompileProgram(_request!, out var regenerated, out var error))
+        if (!Gen5MslTranslator.TryCompileProgram(_request!, out var regenerated, out var error, options))
         {
             throw new InvalidOperationException(
                 $"A released MSL source could not be translated again: hash=0x{_request!.Hash:X16} error={error}");
