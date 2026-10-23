@@ -1845,7 +1845,10 @@ public static partial class VideoOutExports
         // render loop on a vblank equeue advance only when it fires. Timer
         // coalescing on a non-user-interactive thread would smear those wakeups
         // across tens of milliseconds and show up directly as judder, so the
-        // thread is created at the one QoS class macOS exempts from coalescing.
+        // thread is created at the one QoS class macOS exempts from coalescing. Each tick only
+        // raises events and sleeps to the next one: the real-time band keeps the 60 Hz clock on
+        // its deadline (a timeshare thread wakes 9% late on average).
+        SharpEmu.HLE.Host.HostThreadPrecedence.TryApplyTimeConstraintToCurrentThread("SharpEmu-Vblank");
         var pending = new List<(ulong Equeue, ulong Ident, ulong DataHint, ulong UserData)>();
         while (Volatile.Read(ref _vblankStopRequested) == 0)
         {

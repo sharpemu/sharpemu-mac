@@ -55,6 +55,8 @@ internal sealed class MetalScheduleNudge : IDisposable
 
     private void Run(bool qosApplied)
     {
+        // Committing a buffer late stalls the GPU behind it: ahead of the guest's worker pool.
+        SharpEmu.HLE.Host.HostThreadPrecedence.TryBoostCurrentThread("Metal v2 schedule nudge");
         foreach (var buffer in _buffers.GetConsumingEnumerable())
         {
             // The wait autoreleases driver temporaries on a thread that has no pool.
