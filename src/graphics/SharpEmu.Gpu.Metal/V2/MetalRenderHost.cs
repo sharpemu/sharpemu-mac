@@ -2217,6 +2217,7 @@ internal sealed partial class MetalRenderHost :
         var seconds = (now - _statsTimestamp) / (double)System.Diagnostics.Stopwatch.Frequency;
         _statsTimestamp = now;
         _recipes?.Report(Console.Error);
+        ReportReplay("partial_frame", _replayFrame);
         // Read every submission that has finished since the last report, so the GPU
         // time below covers them all and not only the one that happened to be done.
         DrainFinishedSubmissions();
@@ -2617,6 +2618,7 @@ internal sealed partial class MetalRenderHost :
         _completions.Dispose();
         DisposeHostMovie();
         DisposeBindlessImages();
+        _replayArena?.Dispose();
         DisposePipelines();
         (_transfer as IDisposable)?.Dispose();
         // The guest has gone: released chunks are not restored on the way out.

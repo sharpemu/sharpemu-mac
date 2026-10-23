@@ -1087,6 +1087,7 @@ public sealed partial class ResourceMaterializationCache
         ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
+        ReplayValidation = null;
         if (TryBypass(plan, inputs, ref snapshot, ref specialization, out var reason))
         {
             failure = default;

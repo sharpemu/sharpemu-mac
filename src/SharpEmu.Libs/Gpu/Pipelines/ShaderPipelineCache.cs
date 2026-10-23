@@ -1121,17 +1121,33 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var lodStatistics = pixelInput is not null && _host.PixelPipelinesFollowLodStatistics && MipStatistics.TitleUsesCounters;
         PipelineStateMemo? memo = null;
         GraphicsPipelineKey lookup;
-        if (ShaderIdentityCache.Enabled)
+        if (_host.RecipeReplay is not null || ShaderIdentityCache.Enabled)
         {
-            if (!ReferenceEquals(_stateMemoOwner, this))
+            if (_host.RecipeReplay is not null)
             {
-                _stateMemoOwner = this;
-                _stateMemo = new();
+                var recipeKey = (vertexProgram.Id, pixelInput is null ? 0 : pixelProgram.Id);
+                if (!_recipePipelineStates.TryGetValue(recipeKey, out memo))
+                {
+                    if (_recipePipelineStates.Count >= 4096) _recipePipelineStates.Clear();
+                    _recipePipelineStates.Add(recipeKey, memo = new());
+                }
             }
-            memo = _stateMemo!;
+            else
+            {
+                if (!ReferenceEquals(_stateMemoOwner, this))
+                {
+                    _stateMemoOwner = this;
+                    _stateMemo = new();
+                }
+                memo = _stateMemo!;
+            }
             if (memo.Update(colors, depth, vertexInput, pixelInput, context, rendering, topology, primitiveRestartEnabled,
                 disableBlending, vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, _host.DepthBoundsInPipelineState,
-                lodStatistics, out handle)) return true;
+                lodStatistics, out handle))
+            {
+                _host.RecipeReplay?.PipelineReplay(true);
+                return true;
+            }
             lookup = memo.Key;
         }
         else
@@ -1153,6 +1169,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
             lookup.LodStatistics = lodStatistics;
         }
+        _host.RecipeReplay?.PipelineReplay(false);
         if (_graphicsPipelines.TryGet(lookup, out handle))
         {
             memo?.Publish(handle);
@@ -1479,9 +1496,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         var stage = input.Stage.Program ?? throw GpuFatal.Fatal("The compute stage has no program.");
+        if (_host.RecipeReplay is not null && stage.ReplayComputePipeline.Pipeline != 0)
+        {
+            _host.RecipeReplay.PipelineReplay(true);
+            return stage.ReplayComputePipeline;
+        }
+        _host.RecipeReplay?.PipelineReplay(false);
         var key = new ComputePipelineKey(program.Id);
-        if (_computePipelines.TryGet(key, out var cached)) return cached;
+        if (_computePipelines.TryGet(key, out var cached))
+        {
+            if (_host.RecipeReplay is not null) stage.ReplayComputePipeline = cached;
+            return cached;
+        }
         CompileComputePipeline(key, input, program, stage, wait: true, out var handle);
+        if (_host.RecipeReplay is not null) stage.ReplayComputePipeline = handle;
         return handle;
     }
 
@@ -1490,9 +1518,17 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         if (!program.IsValid) throw GpuFatal.Fatal("The dispatch has no compute program.");
         var stage = input.Stage.Program ?? throw GpuFatal.Fatal("The compute stage has no program.");
+        if (_host.RecipeReplay is not null && stage.ReplayComputePipeline.Pipeline != 0)
+        {
+            handle = stage.ReplayComputePipeline;
+            _host.RecipeReplay.PipelineReplay(true);
+            return true;
+        }
+        _host.RecipeReplay?.PipelineReplay(false);
         var key = new ComputePipelineKey(program.Id);
-        if (_computePipelines.TryGet(key, out handle)) return true;
-        return CompileComputePipeline(key, input, program, stage, wait: false, out handle);
+        var ready = _computePipelines.TryGet(key, out handle) || CompileComputePipeline(key, input, program, stage, wait: false, out handle);
+        if (ready && _host.RecipeReplay is not null) stage.ReplayComputePipeline = handle;
+        return ready;
     }
 
     private bool CompileComputePipeline(ComputePipelineKey key, ComputeInputInfo input, ShaderProgram program, ShaderProgramInfo stage,

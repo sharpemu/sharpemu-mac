@@ -52,6 +52,7 @@ public readonly record struct MeshShaderLimits(
 // The host objects the shader and pipeline caches need: modules, pipelines, limits and guest readers.
 public interface IShaderPipelineHost
 {
+    IRecipeReplaySink? RecipeReplay => null;
     IRecipeDiagnosticSink? RecipeDiagnostics => null;
 
     // Native vertex fetch is not robust: the entire acquired span must be

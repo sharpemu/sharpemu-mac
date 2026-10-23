@@ -33,6 +33,7 @@ internal sealed partial class MetalRenderHost
     // The host descriptors of one stage, reused across draws so a draw allocates nothing.
     internal sealed class MetalStageBindings : IPreparedBindings
     {
+        internal PreparedStageRecipe? Replay;
         public ShaderStageResources StageResources;
         public ShaderProgramInfo Program = null!;
         public nint[] Textures = [];
@@ -266,6 +267,8 @@ internal sealed partial class MetalRenderHost
 
     public IPreparedBindings PrepareBindings(ShaderStageResources stage)
     {
+        if (TryReplayBindings(stage, out var replayed)) return replayed;
+        if (_replayIssue) _replayIssueBindingMisses++;
         var program = RequireProgram(stage);
         var resources = program.Resources!;
         var layout = program.Bindings!;
@@ -282,6 +285,7 @@ internal sealed partial class MetalRenderHost
 
         var stageIndex = StageIndexOf(program.Stage);
         var prepared = _stageBindings[stageIndex];
+        prepared.Replay = null;
         prepared.StageResources = stage;
         prepared.Program = program;
         prepared.Committed = false;
@@ -350,6 +354,7 @@ internal sealed partial class MetalRenderHost
         }
 
         stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
+        KeepBindingRecipe(prepared);
         return prepared;
     }
 
@@ -964,6 +969,15 @@ internal sealed partial class MetalRenderHost
 
         if (hasPushData)
         {
+            var pushBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(pushData);
+            if (RecipeReplayEnabled && (_replayArena ??= new(_device)).Intern(pushBytes, _submissionSerial,
+                    CompletedSerialHint, out var persistentPush))
+            {
+                var persistent = persistentPush.Range;
+                _pushAddress = persistent.GpuAddress; _pushBuffer = persistent.Buffer; _pushOffset = persistent.Offset;
+                _hasPushData = true; NoteUsedResource(persistent.Buffer, Mtl.ResourceUsageRead);
+                return;
+            }
             var range = _guestMemory.Allocate(PushData.ByteSize, 256, out var span);
             System.Runtime.InteropServices.MemoryMarshal.AsBytes(pushData).CopyTo(span);
             _pushAddress = range.GpuAddress;
@@ -976,6 +990,7 @@ internal sealed partial class MetalRenderHost
     // The stage's Tier 2 argument buffer, mirroring the binding layout in descriptor order.
     private void WriteArgumentBuffer(MetalStageBindings stage, int stageIndex)
     {
+        if (TryReplayArguments(stage, stageIndex)) return;
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ArgumentBufferWrite);
         var layout = stage.Program.Bindings!;
         var plan = ArgumentPlanOf(layout);
@@ -986,7 +1001,19 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        var range = _guestMemory.Allocate(Math.Max(argumentLayout.ByteSize, 16u), 256, out var argument);
+        var byteCount = (int)Math.Max(argumentLayout.ByteSize, 16u);
+        MetalGuestRange range = default;
+        Span<byte> argument;
+        if (RecipeReplayEnabled)
+        {
+            _replayArena ??= new(_device);
+            _argumentBuildGeneration = _replayArena.Generation;
+            if (_argumentReplayScratch.Length < byteCount) _argumentReplayScratch = new byte[byteCount];
+            argument = _argumentReplayScratch.AsSpan(0, byteCount);
+            _replayTransientPointer = false;
+            _argumentUses.Clear(); _recordingArgumentUses = true;
+        }
+        else range = _guestMemory.Allocate((ulong)byteCount, 256, out argument);
         argument.Clear();
         var imageCursor = 0;
         var fields = argumentLayout.Fields;
@@ -1073,6 +1100,17 @@ internal sealed partial class MetalRenderHost
             }
         }
 
+        if (RecipeReplayEnabled)
+        {
+            KeepArgumentRecipe(stage, stageIndex, argumentLayout, argument, 0, ref range);
+            _recordingArgumentUses = false;
+            if (!range.IsValid)
+            {
+                range = _guestMemory.Allocate((ulong)byteCount, 256, out var destination);
+                argument.CopyTo(destination);
+            }
+        }
+
         _stageArgumentAddresses[stageIndex] = range.GpuAddress;
         _stageArgumentBuffers[stageIndex] = range.Buffer;
         _stageArgumentOffsets[stageIndex] = range.Offset;
@@ -1155,9 +1193,11 @@ internal sealed partial class MetalRenderHost
                     ? ReachFeedbackAddress()
                     : MetalNative.SendGpuAddress(_guestMemory.NullBuffer, SelGpuAddress);
             case DescriptorBindingKind.FlattenedResourceTable:
-                return UploadDwords(stage.StageResources.Resources.FlattenedResourceTable);
+                return RecipeReplayEnabled ? UploadReplayDwords(stage.StageResources.Resources.FlattenedResourceTable)
+                    : UploadDwords(stage.StageResources.Resources.FlattenedResourceTable);
             case DescriptorBindingKind.ShaderData:
-                return UploadDwords(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount));
+                return RecipeReplayEnabled ? UploadReplayDwords(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount))
+                    : UploadDwords(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount));
             case DescriptorBindingKind.MipStatistics:
                 return LodStatisticsAddress();
             default:
@@ -1327,6 +1367,7 @@ internal sealed partial class MetalRenderHost
 
     internal void NoteUsedResource(nint resource, nuint usage)
     {
+        if (_recordingArgumentUses) _argumentUses.Add((resource, usage));
         for (var index = 0; index < _usedResourceCount; index++)
         {
             if (_usedResources[index] == resource)

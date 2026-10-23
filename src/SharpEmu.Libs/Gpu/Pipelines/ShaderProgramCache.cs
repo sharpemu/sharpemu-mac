@@ -176,6 +176,7 @@ internal sealed class ProgramPermutation
 // One decoded program with its resource plan and every permutation compiled from it.
 internal sealed class ProgramSourceEntry
 {
+    public List<PreparedProgramRecipe> Recipes { get; } = new();
     public required ShaderResourcePlan Plan { get; init; }
     public required Gen5ShaderProgram Program { get; init; }
     public required bool HasBitwiseExclusiveOr { get; init; }
@@ -199,7 +200,7 @@ internal sealed class ProgramSourceEntry
 
 // Programs keyed by identity and static state; each draw materializes its resources and reuses
 // the permutation whose specialization and push-data start match, else compiles one more.
-internal sealed class ShaderProgramCache
+internal sealed partial class ShaderProgramCache
 {
     private readonly ImageDescriptorTrace _imageDescriptorTrace = new();
     private const uint MaxInstructionScan = 16384;
@@ -240,6 +241,7 @@ internal sealed class ShaderProgramCache
         _compiler = compiler;
         _host = host;
         _recipeDiagnostics = host.RecipeDiagnostics;
+        if (_materializations is not null) _materializations.CaptureReplayValidation = host.RecipeReplay is not null;
         _observeCachedReads = ObserveCachedTableReads;
         _readGuestWord = ReadGuestWord;
         _readCleanGuestWord = ReadCleanGuestWord;
@@ -501,6 +503,7 @@ internal sealed class ShaderProgramCache
 
     private ShaderProgram GetOrCompileCore(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor, out ShaderStageResources stage)
     {
+        if (_materializations is not null) _materializations.CaptureReplayValidation = _host.RecipeReplay is not null;
         ProgramKey? key = null;
         ProgramSourceEntry? entry;
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
@@ -609,6 +612,8 @@ internal sealed class ShaderProgramCache
         // A backend that cannot link compiles the caller alone, as every backend did before
         // linking existed: its S_SWAPPC_B64 calls are skipped rather than the program refused.
         var hasShaderCalls = entry.HasShaderCalls && _compiler.LinkedShaderCallsSupported;
+        if (TryReplayProgram(entry, source, options, ref pushDataCursor, out var replayHandle, out stage)) return replayHandle;
+        var recipeStarted = _host.RecipeReplay is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
 
         // Both are assigned by the materialization that follows; a failed one throws.
         ResourceSnapshot snapshot = null!;
@@ -786,6 +791,7 @@ internal sealed class ShaderProgramCache
             }
         }
         finally { _captureTableWords = false; MaterializingShader.Hash = 0; }
+        var recipeCost = _host.RecipeReplay is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp() - recipeStarted;
         _recipeDiagnostics?.Materialized(source, entry.Plan, snapshot);
         _imageDescriptorTrace.Record(source, entry.Plan, snapshot);
 
@@ -833,6 +839,7 @@ internal sealed class ShaderProgramCache
                 if (layout.PushDataStartDword == PushData.StartFor(pushDataCursor, layout.ShaderDataDwordCount) && candidate.Specialization.Equals(specialization))
                 {
                     stage = CreateStageResources(candidate.Program, snapshot, source, options);
+                    KeepProgramRecipe(entry, source, candidate.Handle, stage, recipeCost);
                     layout.AdvancePushData(ref pushDataCursor);
                     if (RenderTrace.Enabled && RenderTrace.Pipeline())
                     {
@@ -848,6 +855,7 @@ internal sealed class ShaderProgramCache
         entry.Permutations.Add(permutation);
         ShaderCacheCounters.CountPermutation();
         stage = CreateStageResources(permutation.Program, snapshot, source, options);
+        KeepProgramRecipe(entry, source, permutation.Handle, stage, recipeCost);
         permutation.Bindings.AdvancePushData(ref pushDataCursor);
         if (RenderTrace.Enabled && RenderTrace.Pipeline())
         {

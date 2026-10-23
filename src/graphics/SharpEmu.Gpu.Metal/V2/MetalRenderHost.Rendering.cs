@@ -1702,6 +1702,7 @@ internal sealed partial class MetalRenderHost
 
     public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
     {
+        ReplayOperation(MetalRecipeOperation.Draw, vertexCount, instanceCount, firstVertex, firstInstance);
         if (_recipes is not null) RecipeEmission(1, vertexCount, instanceCount, firstVertex, firstInstance);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyGraphicsState();
@@ -1755,6 +1756,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
     {
+        ReplayOperation(MetalRecipeOperation.DrawIndexed, indexCount, instanceCount, firstIndex, unchecked((ulong)vertexOffset), firstInstance);
         if (_recipes is not null) RecipeEmission(2, indexCount, instanceCount, firstIndex, unchecked((ulong)vertexOffset), firstInstance);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_indexBuffer == 0)
@@ -1818,6 +1820,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndirect(BufferBinding arguments)
     {
+        ReplayOperation(MetalRecipeOperation.DrawIndirect, arguments.Handle, arguments.Offset);
         if (_recipes is not null) RecipeBufferLocation(3, arguments);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         // The guest's argument layout is (vertexCount, instanceCount, firstVertex,
@@ -1864,6 +1867,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
     {
+        ReplayOperation(MetalRecipeOperation.DrawIndexedIndirect, arguments.Handle, arguments.Offset);
         if (_recipes is not null) RecipeBufferLocation(4, arguments);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_indexBuffer == 0)
@@ -1931,6 +1935,7 @@ internal sealed partial class MetalRenderHost
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
     {
+        ReplayOperation(MetalRecipeOperation.Dispatch, groupsX, groupsY, groupsZ);
         if (_recipes is not null) RecipeEmission(5, groupsX, groupsY, groupsZ);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         // A persistent-thread kernel spins on memory other work publishes, which can be what a
@@ -1962,6 +1967,7 @@ internal sealed partial class MetalRenderHost
 
         if (_computeBatchCount != 0 && _batchInitiator != _dispatchInitiator)
             FlushComputeBatch("initiator");
+        ReplayOperation(MetalRecipeOperation.Dispatch, groupsX, groupsY, groupsZ);
         if (CanBatchCompute(entry, groupsX, groupsY, groupsZ, out var batchGroups))
         {
             if (_computeBatchCount == ComputeBatchCapacity || (ulong)_computeBatchGroups + batchGroups > uint.MaxValue)
@@ -2009,6 +2015,7 @@ internal sealed partial class MetalRenderHost
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
         if (_recipes is not null) RecipeBufferLocation(6, new BufferBinding(unchecked((ulong)range.Buffer), range.Offset));
+        ReplayOperation(MetalRecipeOperation.DispatchIndirect, unchecked((ulong)range.Buffer), range.Offset);
         OrderComputeDispatch(argumentsAddress, range);
         MetalV2Native.SendDispatchIndirect(
             encoder,
@@ -2308,6 +2315,7 @@ internal sealed partial class MetalRenderHost
 
     private void CountDraw(long startedTicks)
     {
+        ReplayRecordEmission();
         if (_recipes is not null && _recipeActive) _recipeEmissions++;
         NoteRecordedWork();
         Interlocked.Increment(ref _drawCount);
