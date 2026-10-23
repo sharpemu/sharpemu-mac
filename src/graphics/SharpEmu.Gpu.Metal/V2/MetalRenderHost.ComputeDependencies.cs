@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Rendering;
+using System.Globalization;
 using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 
@@ -9,6 +10,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 
 internal sealed partial class MetalRenderHost
 {
+    internal bool ComputeChainEnabled { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMPUTE_CHAIN") != "0";
+
     // 0 restores the serial encoder and the executor's original pre/post barriers.
     internal bool ConcurrentComputeEnabled { get; set; } =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CONCURRENT_COMPUTE") != "0";
@@ -29,6 +33,16 @@ internal sealed partial class MetalRenderHost
     internal long ComputeDependencyBarriers { get; private set; }
     internal long ComputeGuestBarriers { get; private set; }
     internal long ComputeIndependentDispatches { get; private set; }
+    internal long ComputeResourceBarriers { get; private set; }
+    internal long ComputeIndirectDispatches { get; private set; }
+    private readonly Dictionary<string, long> _computeDependencyReasons = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _computeEncoderEnds = new(StringComparer.Ordinal);
+    private sealed class ComputeChainShaderCounts
+    {
+        internal long Dispatches, Unknown, Dependencies;
+    }
+    private readonly Dictionary<ulong, ComputeChainShaderCounts> _computeChainShaders = new();
+    private static readonly nint SelComputeResourceBarrier = MetalNative.Selector("memoryBarrierWithResources:count:");
 
     private static readonly nint SelComputeEncoderDispatchType =
         MetalNative.Selector("computeCommandEncoderWithDispatchType:");
@@ -50,25 +64,32 @@ internal sealed partial class MetalRenderHost
         var layout = program.Bindings!;
         footprint.UnknownRead = program.UsesDeviceAddresses || info.UsesDeviceAddresses;
         footprint.UnknownWrite = program.WritesDeviceAddresses || info.WritesDeviceAddresses;
+        if (ComputeChainEnabled && footprint.UnknownRead)
+            CaptureComputeDeviceRanges(stage);
         if (layout.BindlessImageTableCount != 0 || stage.StageResources.Resources.BindlessImages.Length != 0)
             footprint.UnknownRead = footprint.UnknownWrite = true;
         for (var index = 0; index < layout.Descriptors.Count; index++)
         {
             var binding = layout.Descriptors[index];
-            if (binding.Kind is DescriptorBindingKind.GlobalDataShare or
-                DescriptorBindingKind.MipStatistics or DescriptorBindingKind.FaultBuffer)
+            if (binding.Kind is DescriptorBindingKind.GlobalDataShare or DescriptorBindingKind.MipStatistics ||
+                (binding.Kind == DescriptorBindingKind.FaultBuffer &&
+                 (!ComputeChainEnabled || _singleCopy is not null)))
                 footprint.UnknownRead = footprint.UnknownWrite = true;
+            // fault_word_count is zero. Without single-copy traps this pointer
+            // only receives host-private reach feedback: atomic OR/add with unused
+            // return values. No shader consumes it and the CPU uses atomic exchange;
+            // it adds no guest ordering edge. Trap/control feedback stays unknown.
         }
     }
 
     private void NoteComputeBuffer(ulong address, uint bytes, in MetalGuestRange range, bool written)
     {
         if (!range.IsValid) return;
-        NoteComputeGuestRange(address, bytes, written);
+        NoteComputeGuestRange(address, bytes, written, range.Buffer);
         _computeFootprint.Accesses.Add(new(MetalComputeAddressSpace.Buffer,
-            (ulong)range.Buffer, range.Offset, bytes, written));
+            (ulong)range.Buffer, range.Offset, bytes, written, range.Buffer));
         _computeFootprint.Accesses.Add(new(MetalComputeAddressSpace.Device,
-            0, range.GpuAddress, bytes, written));
+            0, range.GpuAddress, bytes, written, range.Buffer));
     }
 
     private void NoteComputeImage(MetalStageBindings stage, int index)
@@ -85,9 +106,22 @@ internal sealed partial class MetalRenderHost
 
         // Backing extents cover format and subresource aliases, not just the bound view.
         var description = image.Description;
-        NoteComputeGuestRange(description.Data.Address, description.Data.Size, written);
-        NoteComputeGuestRange(description.Stencil.Address, description.Stencil.Size, written);
-        _computeFootprint.Accesses.Add(new(MetalComputeAddressSpace.Texture, (ulong)image.Texture, 0, 1, written));
+        NoteComputeGuestRange(description.Data.Address, description.Data.Size, written, image.Texture);
+        NoteComputeGuestRange(description.Stencil.Address, description.Stencil.Size, written, image.Texture);
+        _computeFootprint.Accesses.Add(new(MetalComputeAddressSpace.Texture, (ulong)image.Texture, 0, 1, written, image.Texture));
+    }
+
+    private void CaptureComputeDeviceRanges(MetalStageBindings stage)
+    {
+        var ranges = stage.StageResources.Resources.DeviceAddressRanges;
+        // Planned means the base can be evaluated. An unbounded handle is merely
+        // capped to 16 MiB by the residency planner: it is NOT an independence proof.
+        if (!stage.Program.Resources!.Info.DeviceAddressRangesComplete || ranges.Length == 0) return;
+        for (var index = 0; index < ranges.Length; index++)
+            if (!ranges[index].Planned || !ranges[index].Bounded) return;
+        _computeFootprint.UnknownRead = _computeFootprint.UnknownWrite = false;
+        foreach (var range in ranges)
+            NoteComputeGuestRange(range.Base, range.Size, range.Written);
     }
 
     private void OrderComputeDispatch(ulong indirectArguments = 0, MetalGuestRange indirectRange = default)
@@ -127,18 +161,35 @@ internal sealed partial class MetalRenderHost
 
         if (indirectArguments != 0)
         {
-            NoteComputeGuestRange(indirectArguments, 3 * sizeof(uint), written: false);
+            ComputeIndirectDispatches++;
+            NoteComputeGuestRange(indirectArguments, 3 * sizeof(uint), written: false, indirectRange.Buffer);
             footprint.Accesses.Add(new(MetalComputeAddressSpace.Buffer,
-                (ulong)indirectRange.Buffer, indirectRange.Offset, 3 * sizeof(uint), false));
+                (ulong)indirectRange.Buffer, indirectRange.Offset, 3 * sizeof(uint), false, indirectRange.Buffer));
             footprint.Accesses.Add(new(MetalComputeAddressSpace.Device,
-                0, indirectRange.GpuAddress, 3 * sizeof(uint), false));
+                0, indirectRange.GpuAddress, 3 * sizeof(uint), false, indirectRange.Buffer));
         }
 
-        if (_computeDependencies.NeedsBarrier(footprint))
+        var reason = _computeDependencies.BarrierReason(footprint);
+        if (ComputeChainEnabled && _pendingComputePipeline is { } active)
+        {
+            if (!_computeChainShaders.TryGetValue(active.VertexHash, out var counts))
+                _computeChainShaders.Add(active.VertexHash, counts = new());
+            counts.Dispatches++;
+            if (footprint.UnknownRead || footprint.UnknownWrite) counts.Unknown++;
+            if (reason != "none") counts.Dependencies++;
+        }
+        if (reason != "none")
         {
             ComputeDependencyBarriers++;
+            _computeDependencyReasons[reason] = _computeDependencyReasons.GetValueOrDefault(reason) + 1;
             FlushComputeBatch("dependency");
-            ComputeScopeBarrier();
+            Span<nint> resources = stackalloc nint[64];
+            if (ComputeChainEnabled && _computeDependencies.TryBarrierResources(footprint, resources, out var count))
+            {
+                ComputeResourceBarrier(resources[..count]);
+                _computeDependencies.RetireResources(resources[..count]);
+            }
+            else ComputeScopeBarrier();
         }
         else if (_computeDependencies.HasDispatch)
         {
@@ -152,14 +203,17 @@ internal sealed partial class MetalRenderHost
         footprint.UnknownWrite = unknownWrite;
     }
 
-    private void NoteComputeGuestRange(ulong address, ulong size, bool written)
+    private void NoteComputeGuestRange(ulong address, ulong size, bool written, nint resource = 0)
     {
         if (size == 0) return;
+        var previousCount = _computeFootprint.Accesses.Count;
         _computeFootprint.Guest(address, size, written);
+        if (_computeFootprint.Accesses.Count != previousCount)
+            _computeFootprint.Accesses[^1] = _computeFootprint.Accesses[^1] with { NativeResource = resource };
         if (_backing.TryResolveBackingAliasSpan(address, size, out var alias))
         {
             // Distinct guest virtual addresses can map the very same physical bytes.
-            _computeFootprint.Accesses.Add(new(MetalComputeAddressSpace.Backing, 0, alias, size, written));
+            _computeFootprint.Accesses.Add(new(MetalComputeAddressSpace.Backing, 0, alias, size, written, resource));
         }
         else
         {
@@ -170,10 +224,45 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    private unsafe void ComputeResourceBarrier(ReadOnlySpan<nint> resources)
+    {
+        fixed (nint* pointer = resources)
+            MetalV2Native.SendComputeResourceBarrier(_computeEncoder, SelComputeResourceBarrier,
+                (nint)pointer, (nuint)resources.Length);
+        ComputeResourceBarriers++;
+    }
+
+    private (ulong Frames, long Batched, long Independent, long Barriers, long Encoders) _computeReportPrevious;
+
+    private string ComputeChainCounters()
+    {
+        var frames = _bindingPresentId - _computeReportPrevious.Frames;
+        string Rate(long current, long previous) =>
+            (frames == 0 ? 0 : (double)(current - previous) / frames).ToString("F2", CultureInfo.InvariantCulture);
+        var rates = $"compute_window_frames={frames} " +
+            $"compute_batched_pf={Rate(ComputeBatchedDispatches, _computeReportPrevious.Batched)} " +
+            $"compute_independent_pf={Rate(ComputeIndependentDispatches, _computeReportPrevious.Independent)} " +
+            $"compute_barriers_pf={Rate(ComputeScopeBarriers + ComputeResourceBarriers, _computeReportPrevious.Barriers)} " +
+            $"compute_encoders_pf={Rate(ComputeEncoders, _computeReportPrevious.Encoders)} ";
+        _computeReportPrevious = (_bindingPresentId, ComputeBatchedDispatches, ComputeIndependentDispatches,
+            ComputeScopeBarriers + ComputeResourceBarriers, ComputeEncoders);
+        return rates + $"compute_chain={(ComputeChainEnabled ? 1 : 0)} compute_frames={_bindingPresentId} " +
+        $"compute_dispatches={ComputeDispatches} compute_concurrent_independent={ComputeIndependentDispatches} " +
+        $"compute_indirect_gpu={ComputeIndirectDispatches} compute_scope_barriers={ComputeScopeBarriers} " +
+        $"compute_resource_barriers={ComputeResourceBarriers} compute_guest_barriers={ComputeGuestBarriers} " +
+        $"compute_dependency_reasons=[{string.Join(',', _computeDependencyReasons.Select(p => $"{p.Key}:{p.Value}"))}] " +
+        $"compute_encoder_ends=[{string.Join(',', _computeEncoderEnds.Select(p => $"{p.Key}:{p.Value}"))}] " +
+        $"compute_cp_copies={ComputeCommandProcessorCopies} " +
+        $"compute_cp_refused=[{string.Join(',', _computeCopyRefusals.Select(p => $"{p.Key}:{p.Value}"))}] " +
+        $"compute_chain_shaders=[{string.Join(',', _computeChainShaders.OrderByDescending(p => p.Value.Dispatches).Take(12)
+            .Select(p => $"{p.Key:X16}:dispatch={p.Value.Dispatches}/unknown={p.Value.Unknown}/dependency={p.Value.Dependencies}"))}] ";
+    }
+
     // Reset only after encoding the barrier, including guest and shared-transfer cuts.
-    private void ComputeScopeBarrier()
+    private void ComputeScopeBarrier(bool force = false)
     {
         FlushComputeBatch("barrier");
+        if (ComputeChainEnabled && !force && !_computeDependencies.HasDispatch) return;
         ComputeScopeBarriers++;
         MetalV2Native.SendMemoryBarrierScope(
             _computeEncoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);

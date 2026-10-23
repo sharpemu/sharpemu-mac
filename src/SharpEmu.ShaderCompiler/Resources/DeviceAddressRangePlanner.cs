@@ -29,6 +29,25 @@ public static class DeviceAddressRangePlanner
     public const ulong MaxRangeBytes = 16 * 1024 * 1024;
     private const ulong AddressMask = 0x0000_FFFF_FFFF_FFFFul;
 
+    internal static bool CoversAllAccesses(ShaderResourcePlan plan)
+    {
+        if (plan.Graph.Program.Instructions.Any(instruction => instruction.Control is ShaderCallFaultControl)) return false;
+        for (var index = 0; index < plan.Memory.Count; index++)
+        {
+            var memory = plan.Memory[index];
+            if (memory.PlanningOnly) continue;
+            if (memory.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay") return false;
+            if (memory.BufferDescriptor is { Provenance: BufferDescriptorProvenance.Runtime }) return false;
+            if (memory.DeviceDescriptor && !plan.Graph.Program.FunctionBufferAccesses.Contains(memory.Pc)) return false;
+            if (memory.Kind is not (MemoryResourceKind.Flat or MemoryResourceKind.Global or MemoryResourceKind.ScalarAddress)) continue;
+            if (plan.DeviceAddressRanges.Any(range => range.MemoryIndices.Contains(index))) continue;
+            // Local aperture and flattened scalar accesses can conservatively refuse
+            // concurrency here; an omitted global access must never be forgiven.
+            return false;
+        }
+        return true;
+    }
+
     public static IReadOnlyList<DeviceAddressRangePlan> Plan(ShaderResourcePlan plan)
     {
         var ranges = new List<DeviceAddressRangePlan>();
@@ -328,7 +347,8 @@ public static class DeviceAddressRangePlanner
             var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
             var baseAddress = planned ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
             var size = range.Bounded ? range.Extent : MaxRangeBytes;
-            result[index] = new DeviceAddressRange(range.Handle, baseAddress, planned ? size : 0, planned, range.Written);
+            result[index] = new DeviceAddressRange(range.Handle, baseAddress, planned ? size : 0, planned, range.Written,
+                range.Bounded);
         }
 
         if (plan.Graph.Program.FunctionBufferAccesses.Count == 0) return result;
@@ -354,7 +374,7 @@ public static class DeviceAddressRangePlanner
             if (size > AddressMask - address + 1)
                 throw new ResourcePlanException("The shader function buffer range wraps the guest address space.");
             if (seen.Add((address, size, written)))
-                functionRanges.Add(new((uint)functionRanges.Count, address, size, true, written));
+                functionRanges.Add(new((uint)functionRanges.Count, address, size, true, written, Bounded: true));
         }
         return functionRanges.ToArray();
     }

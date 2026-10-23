@@ -99,6 +99,8 @@ public sealed partial class ComputeSceneTests
             else if (concurrent) Assert.True(barriers >= (chain == "indirect" ? 2 : 31),
                 $"chain={chain} dependency barriers={barriers}");
             else Assert.Equal(0, rig.Host.ComputeDependencyBarriers);
+            if (concurrent && chain is "producer-consumer" or "atomics" or "indirect")
+                Assert.True(rig.Host.ComputeResourceBarriers > 0);
             if (chain == "atomics") Assert.Equal(0, rig.Host.ComputeBatchedDispatches);
             var values = rig.Read<uint>(first, 256);
             if (chain == "producer-consumer")

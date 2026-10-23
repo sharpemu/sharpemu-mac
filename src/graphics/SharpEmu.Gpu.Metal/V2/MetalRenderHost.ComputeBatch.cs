@@ -29,6 +29,7 @@ internal sealed partial class MetalRenderHost
     internal long ComputeBatchFallbacks { get; private set; }
     internal long ComputeBatchFlushes(string reason) => _computeBatchFlushReasons.GetValueOrDefault(reason);
     private readonly Dictionary<string, long> _computeBatchFlushReasons = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _computeBatchRefusals = new(StringComparer.Ordinal);
 
     private bool CanBatchCompute(MetalPipelineEntry entry, uint x, uint y, uint z, out uint groups)
     {
@@ -37,14 +38,21 @@ internal sealed partial class MetalRenderHost
         // diagnostics, pair locks and persistent queues have no independence proof.
         var product = (ulong)x * y;
         groups = 0;
-        if (!ComputeBatchEnabled || !ConcurrentComputeEnabled || MetalShaderProfile.Enabled || DumpTargetsEnabled ||
-            (_dispatchInitiator & ~0xA079u) != 0 || x == 0 || y == 0 || z == 0 || product > uint.MaxValue || product * z > uint.MaxValue ||
-            entry.PersistentThreads || entry.WritesStepReport || entry.UsesPairLocks ||
-            _computeFootprint.UnknownRead || _computeFootprint.UnknownWrite ||
-            (_preparedStageMask & (1 << StageCompute)) == 0 || !_stageBindings[StageCompute].Committed ||
+        var reason = !ComputeBatchEnabled ? "disabled" : !ConcurrentComputeEnabled ? "serial" :
+            MetalShaderProfile.Enabled || DumpTargetsEnabled ? "diagnostic" :
+            (_dispatchInitiator & ~0xA079u) != 0 ? "initiator" :
+            x == 0 || y == 0 || z == 0 || product > uint.MaxValue || product * z > uint.MaxValue ? "grid" :
+            entry.PersistentThreads ? "persistent" : entry.WritesStepReport ? "step-report" :
+            entry.UsesPairLocks ? "pair-locks" : _computeFootprint.UnknownWrite ? "unknown-write" :
+            _computeFootprint.UnknownRead ? "unknown-read" :
+            (_preparedStageMask & (1 << StageCompute)) == 0 || !_stageBindings[StageCompute].Committed ? "bindings" :
             entry.ComputeDescription is not { } description ||
-            LookupModule(description.Program).Shader.ComputeBatchEntryPoint is null)
+            LookupModule(description.Program).Shader.ComputeBatchEntryPoint is null ? "entry-point" : null;
+        if (reason is not null)
+        {
+            _computeBatchRefusals[reason] = _computeBatchRefusals.GetValueOrDefault(reason) + 1;
             return false;
+        }
         // Resolve when a second request can join, before retaining its bindings.
         // On failure the queued singleton flushes normally and this dispatch keeps
         // its current bindings. Singletons never need the optional pipeline.
@@ -200,6 +208,7 @@ internal sealed partial class MetalRenderHost
     private string ComputeBatchCounters() =>
         $"compute_batched_dispatches={ComputeBatchedDispatches} compute_batches={ComputeBatches} " +
         $"compute_batch_recompiles={ComputeBatchRecompiles} compute_batch_fallbacks={ComputeBatchFallbacks} " +
+        $"compute_batch_refused=[{string.Join(',', _computeBatchRefusals.Select(pair => $"{pair.Key}:{pair.Value}"))}] " +
         $"compute_avg_batch={(ComputeBatches == 0 ? 0 : (double)ComputeBatchedDispatches / ComputeBatches).ToString("F2", CultureInfo.InvariantCulture)} " +
         $"compute_batch_flush=[{string.Join(',', _computeBatchFlushReasons.Select(pair => $"{pair.Key}:{pair.Value}"))}] ";
 }

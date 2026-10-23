@@ -208,6 +208,9 @@ public sealed class ShaderResourceInfo
     public int InstanceOffsetScalarRegister { get; set; } = NoScalarRegister;
     public bool HasBitwiseExclusiveOr { get; set; }
     public bool UsesDeviceAddresses { get; set; }
+    // Every emitted device access is represented by an evaluated range. False
+    // for dynamic descriptors/call faults or an address the planner cannot model.
+    public bool DeviceAddressRangesComplete { get; set; }
 
     /// <summary>
     /// The program stores through the device-address page table, so it can write any
@@ -233,6 +236,7 @@ public sealed class ShaderResourceInfo
         InstanceOffsetScalarRegister = InstanceOffsetScalarRegister,
         HasBitwiseExclusiveOr = HasBitwiseExclusiveOr,
         UsesDeviceAddresses = UsesDeviceAddresses,
+        DeviceAddressRangesComplete = DeviceAddressRangesComplete,
         WritesDeviceAddresses = WritesDeviceAddresses,
     };
 }

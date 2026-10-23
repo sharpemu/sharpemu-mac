@@ -243,6 +243,7 @@ public sealed class ShaderResourcePlan
         plan.CleanFlatSlots = cleanSlots;
         plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);
         plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan);
+        plan.Info.DeviceAddressRangesComplete = DeviceAddressRangePlanner.CoversAllAccesses(plan);
 
         // Each written handle owns three flattened slots after the table reads: base
         // low, base high and size, which the shader checks every store against.
