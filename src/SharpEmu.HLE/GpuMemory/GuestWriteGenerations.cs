@@ -2,16 +2,24 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Collections.Concurrent;
+using System.Numerics;
 
 namespace SharpEmu.HLE.GpuMemory;
 
-// Durable content versions, separate from upload dirty bits. Hash collisions only reject
-// an otherwise usable token. A normal store performs one interlocked increment, without
-// looking up registered ranges or taking an observer lock.
+// Durable content versions, separate from upload dirty bits. A sparse 2 MiB directory
+// skips unwatched granules; bitmaps inside live granules select only watched 4 KiB pages.
+// Enrollment publishes the bit before sampling the version and reading bytes. Stores
+// never take an observer lock, allocate, or issue atomics for unwatched pages.
 public sealed class GuestWriteGenerations : IDisposable
 {
-    private const int StripeCount = 65536;
-    private readonly long[] _versions = new long[StripeCount];
+    private const ulong GranuleBytes = 2 * 1024 * 1024;
+    private const int PagesPerGranule = (int)(GranuleBytes / TrackerLayout.PageBytes);
+    private readonly WatchedGranule?[] _granules = new WatchedGranule[TrackerLayout.SpaceBytes / GranuleBytes];
+    private sealed class WatchedGranule
+    {
+        public readonly long[] Versions = new long[PagesPerGranule];
+        public readonly long[] Watched = new long[PagesPerGranule / 64];
+    }
     private readonly ConcurrentDictionary<ulong, PageWatch> _pages = new();
     private readonly PageGuard? _guard;
     private long _epoch;
@@ -28,26 +36,30 @@ public sealed class GuestWriteGenerations : IDisposable
     {
         private readonly GuestWriteGenerations _owner;
         private readonly long _epoch;
-        private readonly int[] _stripes;
+        private readonly int[] _indices;
+        private readonly WatchedGranule[] _granules;
         private readonly long[] _versions;
         private readonly PageWatch[] _pages;
 
-        private Token(GuestWriteGenerations owner, long epoch, int[] stripes, long[] versions, PageWatch[] pages)
+        private Token(GuestWriteGenerations owner, long epoch, int[] indices, WatchedGranule[] granules, long[] versions, PageWatch[] pages)
         {
             _owner = owner;
             _epoch = epoch;
-            _stripes = stripes;
+            _indices = indices;
+            _granules = granules;
             _versions = versions;
             _pages = pages;
         }
+
+        public long RetainedBytes => 224L + _indices.Length * (sizeof(int) + sizeof(long) + 2 * IntPtr.Size);
 
         public bool IsCurrent
         {
             get
             {
                 if (Volatile.Read(ref _owner._epoch) != _epoch) return false;
-                for (var i = 0; i < _stripes.Length; i++)
-                    if (Volatile.Read(ref _owner._versions[_stripes[i]]) != _versions[i] ||
+                for (var i = 0; i < _indices.Length; i++)
+                    if (Volatile.Read(ref _granules[i].Versions[_indices[i]]) != _versions[i] ||
                         (_owner._guard is not null && Volatile.Read(ref _pages[i].Armed) == 0)) return false;
                 return Volatile.Read(ref _owner._epoch) == _epoch;
             }
@@ -58,15 +70,26 @@ public sealed class GuestWriteGenerations : IDisposable
             var first = address / TrackerLayout.PageBytes;
             var count = checked((int)((address + size - 1) / TrackerLayout.PageBytes - first + 1));
             var epoch = Volatile.Read(ref owner._epoch);
-            var stripes = new int[count];
+            var indices = new int[count];
+            var granules = new WatchedGranule[count];
             var versions = new long[count];
             var pages = new PageWatch[count];
             for (var i = 0; i < count; i++)
             {
                 var page = (first + (ulong)i) * TrackerLayout.PageBytes;
-                stripes[i] = Stripe(page);
+                var slot = page / GranuleBytes;
+                var granule = Volatile.Read(ref owner._granules[slot]);
+                if (granule is null)
+                {
+                    var created = new WatchedGranule();
+                    granule = Interlocked.CompareExchange(ref owner._granules[slot], created, null) ?? created;
+                }
+                var index = (int)((page / TrackerLayout.PageBytes) % PagesPerGranule);
+                Interlocked.Or(ref granule.Watched[index / 64], 1L << (index % 64));
+                indices[i] = index;
+                granules[i] = granule;
                 // Sample before arming; a fault in progress must invalidate this capture.
-                versions[i] = Volatile.Read(ref owner._versions[stripes[i]]);
+                versions[i] = Volatile.Read(ref granule.Versions[index]);
                 if (owner._guard is null) continue;
                 var watch = owner._pages.GetOrAdd(page, static p => new PageWatch(p));
                 pages[i] = watch;
@@ -81,7 +104,7 @@ public sealed class GuestWriteGenerations : IDisposable
                 }
                 finally { Volatile.Write(ref watch.Gate, 0); }
             }
-            return new Token(owner, epoch, stripes, versions, pages);
+            return new Token(owner, epoch, indices, granules, versions, pages);
         }
     }
 
@@ -95,16 +118,33 @@ public sealed class GuestWriteGenerations : IDisposable
         return Token.Capture(this, address, size);
     }
 
-    private static int Stripe(ulong address) => (int)((address / TrackerLayout.PageBytes) % StripeCount);
-
     public void NoteWrite(ulong address, ulong size)
     {
         if (size == 0) return;
         if (!new GuestSpan(address, size).IsValid) { NoteUnboundedWrite(); return; }
+        var first = address / TrackerLayout.PageBytes;
         var last = (address + size - 1) / TrackerLayout.PageBytes;
-        if (last - address / TrackerLayout.PageBytes >= StripeCount) { NoteUnboundedWrite(); return; }
-        for (var page = address / TrackerLayout.PageBytes; page <= last; page++)
-            Interlocked.Increment(ref _versions[page % StripeCount]);
+        // Bound work for unbounded/huge notifications just as the former striped table did.
+        if (last - first >= 65536) { NoteUnboundedWrite(); return; }
+        for (var slot = first / PagesPerGranule; slot <= last / PagesPerGranule; slot++)
+        {
+            var granule = Volatile.Read(ref _granules[slot]);
+            if (granule is null) continue;
+            var start = (int)(Math.Max(first, slot * PagesPerGranule) - slot * PagesPerGranule);
+            var end = (int)(Math.Min(last, (slot + 1) * PagesPerGranule - 1) - slot * PagesPerGranule);
+            for (var word = start / 64; word <= end / 64; word++)
+            {
+                var bits = (ulong)Volatile.Read(ref granule.Watched[word]);
+                if (word == start / 64) bits &= ulong.MaxValue << (start % 64);
+                if (word == end / 64) bits &= ulong.MaxValue >> (63 - end % 64);
+                while (bits != 0)
+                {
+                    var bit = BitOperations.TrailingZeroCount(bits);
+                    Interlocked.Increment(ref granule.Versions[word * 64 + bit]);
+                    bits &= bits - 1;
+                }
+            }
+        }
     }
 
     public void NoteUnboundedWrite() => Interlocked.Increment(ref _epoch);
