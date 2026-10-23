@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Gpu.Metal.V2;
@@ -28,7 +29,8 @@ internal sealed partial class MetalImageCache
     // The view a pass will name the attachment by, the image, and the GPU-write marking
     // the acquire left for later: a colour target, or a depth target and whether it
     // writes only the stencil plane.
-    private readonly record struct DeferredRefresh(nint View, MetalCachedImage Image, bool Depth, bool StencilOnly);
+    private readonly record struct DeferredRefresh(nint View, ResourceSlotIdentifier Identifier,
+        MetalCachedImage Image, bool Depth, bool StencilOnly, bool AliasesPending);
 
     private readonly List<DeferredRefresh> _deferredRefreshes = [];
 
@@ -56,9 +58,10 @@ internal sealed partial class MetalImageCache
         image.Texture != 0 && !ImageDescription.IsEmptyRange(image.Description.Data);
 
     // Caller holds the lock.
-    private void DeferRefreshLocked(nint view, MetalCachedImage image, bool depth, bool stencilOnly)
+    private void DeferRefreshLocked(nint view, ResourceSlotIdentifier identifier, MetalCachedImage image,
+        bool depth, bool stencilOnly, bool aliasesPending)
     {
-        _deferredRefreshes.Add(new DeferredRefresh(view, image, depth, stencilOnly));
+        _deferredRefreshes.Add(new DeferredRefresh(view, identifier, image, depth, stencilOnly, aliasesPending));
         Volatile.Write(ref _deferredRefreshCount, _deferredRefreshes.Count);
     }
 
@@ -243,6 +246,10 @@ internal sealed partial class MetalImageCache
     private void CompleteDeferredLocked(in DeferredRefresh entry, bool overwritten)
     {
         var image = entry.Image;
+        if (entry.AliasesPending && (!overwritten || !TryDiscardOverwrittenAliases(entry.Identifier)))
+        {
+            SynchronizeAliases(entry.Identifier, takesGpuOwnership: true);
+        }
         if (overwritten && image.IsCpuDirty)
         {
             Interlocked.Increment(ref _refreshesSkipped);

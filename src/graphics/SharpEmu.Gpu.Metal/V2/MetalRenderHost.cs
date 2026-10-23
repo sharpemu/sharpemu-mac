@@ -2464,6 +2464,7 @@ internal sealed partial class MetalRenderHost :
         Console.Error.WriteLine(
             $"[METAL-V2][TBDR] passes={passes} empty={emptyPasses} returned={returnedPasses} " +
             $"frames={frames} passes_per_frame={PerFrame(passes + clearPasses)} " +
+            _imageCache.TakeAliasTransitionText(frames) + " " +
             $"subset_joins_per_frame={PerFrame(subsetJoins)} depth_joins_per_frame={PerFrame(depthJoins)} " +
             $"load_elided_mb_per_frame={PerFrame(loadElidedBytes / 1048576.0)} discarded_mb_per_frame={PerFrame(discardedBytes / 1048576.0)} " +
             $"load_mb={(loadBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +

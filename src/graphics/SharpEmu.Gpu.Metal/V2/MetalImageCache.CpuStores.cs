@@ -187,6 +187,10 @@ internal sealed partial class MetalImageCache
     // otherwise for every image on their pages, as a fault does.
     private StoreFallback? PublishBeforeCpuStoreLocked(ulong address, ulong size, bool managedWrite, bool exact)
     {
+        if (AliasTransitionsEnabled && managedWrite && exact && WritebackFenceEnabled)
+        {
+            DiscardFullyOverwrittenByCpuLocked(address, size);
+        }
         if (!PublishBeforeStore || !WritebackFenceEnabled || !HasGpuWrittenImageLocked(address, size, exact))
         {
             return null;
