@@ -20,7 +20,24 @@ public sealed class ImportResultLoggingTests
         using var backend = new DirectExecutionBackend(modules);
         var method = typeof(DirectExecutionBackend).GetMethod(
             "ShouldLogImportResult", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var filter = method.CreateDelegate<ImportResultFilter>(backend);
+        // The runtime now receives its preclassified stub entry, rather than a NID.
+        // Construct the real entry so the benign-result classification is exercised too.
+        var entryType = method.GetParameters()[0].ParameterType.GetElementType()!;
+        var entries = new Dictionary<string, object>();
+        bool Filter(string nid, OrbisGen2Result result, out int occurrence)
+        {
+            if (!entries.TryGetValue(nid, out var entry))
+            {
+                entry = Activator.CreateInstance(entryType,
+                    [0UL, nid, null, false, false, false, false, 0UL])!;
+                entries.Add(nid, entry);
+            }
+            object?[] arguments = [entry, result, 0];
+            var log = (bool)method.Invoke(backend, arguments)!;
+            occurrence = (int)arguments[2]!;
+            return log;
+        }
+        ImportResultFilter filter = Filter;
         bool ShouldLog(string nid, OrbisGen2Result result) => filter(nid, result, out _);
 
         foreach (var nid in new[] { "9UK1vLZQft4", "7H0iTOciTLo" })

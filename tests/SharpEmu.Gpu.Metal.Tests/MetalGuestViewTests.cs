@@ -405,11 +405,18 @@ internal sealed unsafe class ShmScatteredBacking : IGuestBackedSpace, ICpuMemory
         }
 
         _alias = mmap(0, (nuint)backingBytes, ProtRead | ProtWrite, MapShared, _descriptor, 0);
-        Base = (ulong)mmap(0, (nuint)viewBytes, ProtNone, MapPrivate | MapAnon, -1, 0);
-        if (_alias == -1 || Base == ulong.MaxValue)
+        // Rosetta mmap can return a 4 KiB boundary. Guest views round their
+        // no-copy extent to 16 KiB, so reserve and trim an explicitly aligned VA.
+        const ulong viewAlignment = 16384;
+        var reservation = (ulong)mmap(0, (nuint)(viewBytes + viewAlignment), ProtNone, MapPrivate | MapAnon, -1, 0);
+        if (_alias == -1 || reservation == ulong.MaxValue)
         {
             throw new InvalidOperationException("mmap failed.");
         }
+        Base = (reservation + viewAlignment - 1) & ~(viewAlignment - 1);
+        var prefix = Base - reservation;
+        if (prefix != 0) munmap((nint)reservation, (nuint)prefix);
+        munmap((nint)(Base + viewBytes), (nuint)(viewAlignment - prefix));
 
         var pieces = viewBytes / Piece;
         var backingPieces = backingBytes / Piece;

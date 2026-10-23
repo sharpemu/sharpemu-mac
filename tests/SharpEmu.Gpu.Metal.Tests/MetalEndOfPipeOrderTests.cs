@@ -576,7 +576,9 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
 
         WaitForGpu(host, open);
         WaitForCompletions(host);
-        Assert.True(rig.Backing.Read64(clockLabel) > 1);
+        // Completion serial publication can precede the callback's clock store.
+        // Wait for that observable effect as well as GPU completion.
+        WaitUntil(() => rig.Backing.Read64(clockLabel) > 1);
     }
 
     private (ulong Parsed, ulong GpuDone, (ulong WhileHeld, ulong AfterDrain) Clock,
@@ -671,18 +673,24 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
+        using var hold = new ManualResetEventSlim(false);
         var host = rig.Host;
         Assert.True(host.WritesGdsAtEndOfPipe);
         BinaryPrimitives.WriteUInt32LittleEndian(host.GuestMemory.GdsWords()[8..], 0xC0DE_0001);
         BinaryPrimitives.WriteUInt32LittleEndian(host.GuestMemory.GdsWords()[12..], 0xC0DE_0002);
 
-        // Work ahead of it, so the store has something to wait for.
-        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, LaterLabel, 1));
-        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, 1, destination, GdsWordOffset: 2, GdsWordCount: 2));
-        Assert.Equal(0UL, rig.Backing.Read64(destination));
-
-        host.FlushCommandBuffer();
-        WaitForGpu(host, host.LastWorkSerial);
+        try
+        {
+            // The fallback may commit while recording the store. Hold its completion
+            // explicitly so a fast GPU cannot publish the bytes before this assertion.
+            host.Completions.Enqueue(host.SubmissionSerial, () => hold.Wait(TimeSpan.FromSeconds(10)));
+            host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, LaterLabel, 1));
+            host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, 1, destination, GdsWordOffset: 2, GdsWordCount: 2));
+            Assert.Equal(0UL, rig.Backing.Read64(destination));
+            host.FlushCommandBuffer();
+            WaitForGpu(host, host.LastWorkSerial);
+        }
+        finally { hold.Set(); }
         WaitForCompletions(host);
         WaitUntil(() => rig.Backing.Read64(destination) != 0);
         Assert.Equal(0xC0DE_0001u, rig.Backing.Read32(destination));
