@@ -238,7 +238,7 @@ internal sealed class ShaderProgramCache
         _context = context;
         _compiler = compiler;
         _host = host;
-        _observeCachedReads = (addresses, lengths, offsets, bytes) => ReadLog?.CachedBytes(addresses, lengths, offsets, bytes);
+        _observeCachedReads = ObserveCachedTableReads;
         _readGuestWord = ReadGuestWord;
         _readCleanGuestWord = ReadCleanGuestWord;
         _readResidentGuestBytes = ReadResidentGuestBytes;
@@ -256,6 +256,7 @@ internal sealed class ShaderProgramCache
     {
         var read = _host.TryReadGuestWord(address, out word);
         ReadLog?.Word(address, read, word);
+        RecordTableWord(address, read, word);
         return read;
     }
 
@@ -263,6 +264,7 @@ internal sealed class ShaderProgramCache
     {
         var read = _host.TryReadCleanGuestWord(address, out word);
         ReadLog?.Word(address, read, word);
+        RecordTableWord(address, read, word);
         return read;
     }
 
@@ -270,6 +272,11 @@ internal sealed class ShaderProgramCache
     {
         var read = _host.TryReadResidentGuestBytes(address, destination, clean);
         ReadLog?.Bytes(address, read, destination);
+        if (read)
+            for (var offset = 0; offset <= destination.Length - sizeof(uint); offset += sizeof(uint))
+                RecordTableWord(address + (ulong)offset, true,
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]));
+        else RecordTableWord(address, false, 0);
         return read;
     }
 
@@ -379,7 +386,9 @@ internal sealed class ShaderProgramCache
         }
         catch (ShaderProgramRejectedException exception)
         {
-            throw GpuFatal.Fatal(exception.Message);
+            if (!exception.UnreadablePointer) throw GpuFatal.Fatal(exception.Message);
+            stage = default;
+            return default;
         }
     }
 
@@ -387,12 +396,6 @@ internal sealed class ShaderProgramCache
         ref uint pushDataCursor, out ShaderProgram program, out ShaderStageResources stage, out string rejection)
     {
         rejection = string.Empty;
-        if (strictShaders)
-        {
-            program = GetOrCompile(source, options, ref pushDataCursor, out stage);
-            return true;
-        }
-
         try
         {
             program = GetOrCompileCore(source, options, ref pushDataCursor, out stage);
@@ -400,6 +403,7 @@ internal sealed class ShaderProgramCache
         }
         catch (ShaderProgramRejectedException exception)
         {
+            if (strictShaders && !exception.UnreadablePointer) throw GpuFatal.Fatal(exception.Message);
             program = default;
             stage = default;
             rejection = exception.Message;
@@ -407,7 +411,91 @@ internal sealed class ShaderProgramCache
         }
     }
 
-    private sealed class ShaderProgramRejectedException(string message) : Exception(message);
+    private sealed class ShaderProgramRejectedException(string message, bool unreadablePointer = false) : Exception(message)
+    {
+        public bool UnreadablePointer => unreadablePointer;
+    }
+
+    private readonly record struct TableWord(ulong Address, uint Word, bool Read, GuestTableReadState State);
+    private TableWord[] _tableWords = new TableWord[256];
+    private int _tableWordCount;
+    private bool _captureTableWords;
+    private readonly HashSet<ulong> _warnedUnreadable = [];
+    public long UnreadablePointerSkips { get; private set; }
+
+    private void ObserveCachedTableReads(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths,
+        ReadOnlySpan<int> offsets, ReadOnlyMemory<byte> bytes)
+    {
+        ReadLog?.CachedBytes(addresses, lengths, offsets, bytes);
+        if (!_captureTableWords) return;
+        var state = new GuestTableReadState("certified-snapshot", 0, 0, "none");
+        for (var range = 0; range < addresses.Length; range++)
+        {
+            var span = bytes.Span.Slice(offsets[range], lengths[range]);
+            for (var offset = 0; offset <= span.Length - sizeof(uint); offset += sizeof(uint))
+                RecordTableWord(addresses[range] + (ulong)offset, true,
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span[offset..]), state);
+        }
+    }
+
+    private void RecordTableWord(ulong address, bool read, uint word) =>
+        RecordTableWord(address, read, word, _host.LastGuestTableRead);
+
+    private void RecordTableWord(ulong address, bool read, uint word, GuestTableReadState state)
+    {
+        if (!_captureTableWords) return;
+        if (_tableWordCount == _tableWords.Length) Array.Resize(ref _tableWords, checked(_tableWords.Length * 2));
+        _tableWords[_tableWordCount++] = new(address, word, read, state);
+    }
+
+    private string DescribeTableReads(ulong? failedAddress)
+    {
+        var words = new System.Text.StringBuilder();
+        for (var index = 0; index < _tableWordCount; index++)
+        {
+            var item = _tableWords[index];
+            words.Append($" [0x{item.Address:X16}={(item.Read ? Convert.ToHexString(BitConverter.GetBytes(item.Word)) : "unreadable")} " +
+                $"path={item.State.Path} pending={item.State.PendingSerial} completed={item.State.CompletedSerial} writer={item.State.Writer} " +
+                $"image={item.State.ImageOwned} host_labels={item.State.HostPublications} cp={item.State.CommandProcessorOverlay} label={item.State.LabelOverlay}]");
+        }
+        return $"failed=0x{failedAddress.GetValueOrDefault():X16} observed_words={_tableWordCount} " +
+            $"bytes_le:{words} " +
+            _host.DescribeGuestTable(failedAddress.GetValueOrDefault());
+    }
+
+    private bool RecoverUnreadableTable(ShaderSource source, ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+        ref ResourceSnapshot snapshot, ref ResourceSpecialization specialization, ref ResourceMaterializationFailure failure,
+        ref bool retried)
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_GPU_MATERIALIZE_FATAL") == "1")
+            throw GpuFatal.Fatal($"Unreadable guest pointer: stage={source.Label} hash=0x{source.Hash:X16}. " +
+                DescribeTableReads(UnreadableGuestPointer.Address));
+        var before = DescribeTableReads(UnreadableGuestPointer.Address);
+        if (!retried)
+        {
+            retried = true;
+            _host.SynchronizeGuestTables();
+            _tableWordCount = 0;
+            DeviceBindingLoads.BeginAttempt(defer: false);
+            _host.BeginGuestWordReads();
+            try
+            {
+                // Bypass cached snapshots, re-plan deferrals and old evaluator memoization.
+                if (ResourceMaterializer.Materialize(plan, inputs.WithReader(inputs.ReadMemory, pendingLoads: false),
+                    ref snapshot, ref specialization, out failure)) return true;
+            }
+            finally { _host.EndGuestWordReads(); DeviceBindingLoads.EndAttempt(); }
+        }
+        // A guest pointer is transient input, never a permanent shader rejection. Preserve
+        // strict compiler policy for other failures, but skip this bind even in strict mode.
+        UnreadablePointerSkips++;
+        var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} " +
+            $"shader=0x{source.Address:X16} reason=UnreadableGuestPointer retry_reason={failure}.";
+        if (_warnedUnreadable.Count < 128 && _warnedUnreadable.Add(source.Hash))
+            Console.Error.WriteLine($"[GPU][WARN][MATERIALIZE_SKIPPED] {message} before: {before} after: " +
+                DescribeTableReads(UnreadableGuestPointer.Address));
+        throw new ShaderProgramRejectedException(message, unreadablePointer: true);
+    }
 
     private ShaderProgram GetOrCompileCore(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor, out ShaderStageResources stage)
     {
@@ -531,74 +619,69 @@ internal sealed class ShaderProgramCache
         }
 
         MaterializingShader.Hash = source.Hash;
-        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
+        var unreadableRetried = false;
+        _tableWordCount = 0;
+        _captureTableWords = true;
+        try
         {
-            // Failure capture needs the full walk, so a dump run bypasses the cache.
-            bool materialized;
-            ResourceMaterializationFailure materializationFailure;
-            var committed = entry;
-            for (var attempt = 0; ; attempt++)
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
             {
-                // A binding word the GPU is still writing is not waited for: the attempt reads
-                // it as unknown and names it, the shader is planned again with it on the device,
-                // and the bind materializes again (DeviceBindingLoads). The last attempt waits. A
-                // linked program plans its own graph under the caller's hash, so its loads would
-                // not name the same records: it keeps waiting.
-                DeviceBindingLoads.BeginAttempt(_resourceWordPending is not null && !hasShaderCalls && attempt < MaxBindingReplans && committed.Successor is null);
-                DeviceBindingLoads.Request? deferred;
-                _host.BeginGuestWordReads();
-                try
+                // Failure capture needs the full walk, so a dump run bypasses the cache.
+                bool materialized;
+                ResourceMaterializationFailure materializationFailure;
+                var committed = entry;
+                for (var attempt = 0; ; attempt++)
                 {
-                    materialized = _materializations is not null && captureIndirectImageFailure is null
-                        ? _materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
-                            out materializationFailure)
-                        : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
-                            captureIndirectImageFailure);
-                }
-                finally
-                {
-                    _host.EndGuestWordReads();
-                    deferred = DeviceBindingLoads.EndAttempt();
-                }
-
-                if (deferred is not { } request)
-                {
-                    if (materialized && !DeviceSamplerImagesCompatible(entry.Plan, specialization))
+                    // A binding word the GPU is still writing is not waited for: the attempt reads
+                    // it as unknown and names it, the shader is planned again with it on the device,
+                    // and the bind materializes again (DeviceBindingLoads). The last attempt waits. A
+                    // linked program plans its own graph under the caller's hash, so its loads would
+                    // not name the same records: it keeps waiting.
+                    DeviceBindingLoads.BeginAttempt(_resourceWordPending is not null && !hasShaderCalls && attempt < MaxBindingReplans && committed.Successor is null);
+                    DeviceBindingLoads.Request? deferred;
+                    _host.BeginGuestWordReads();
+                    try
                     {
-                        // A later bind (or a persisted first bind) can specialize the same
-                        // T# source to a different texture class. Restore a synchronized
-                        // host plan before encoding any work with an unsupported class.
-                        foreach (var load in entry.Plan.DeviceBindingMemory ?? new HashSet<int>())
-                        {
-                            DeviceBindingLoads.Refuse(entry.Plan.DeviceBindingKey, load, notify: false);
-                            BindingWaitProvenance.Decision(new(entry.Plan.DeviceBindingKey, load, ScalarValueKind.Undefined), "sampler_image_class");
-                        }
-                        DeviceBindingLoads.NotifyChanged(entry.Plan.DeviceBindingKey);
-                        entry = committed = CreateEntry(source, options.Detached(), new HashSet<int>());
-                        _programs[key ??= BuildProgramKey(source)] = entry;
-                        continue;
+                        materialized = _materializations is not null && captureIndirectImageFailure is null
+                            ? _materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
+                                out materializationFailure)
+                            : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
+                                captureIndirectImageFailure);
                     }
-                    break;
-                }
+                    finally
+                    {
+                        _host.EndGuestWordReads();
+                        deferred = DeviceBindingLoads.EndAttempt();
+                    }
 
-                entry = ReplanWithDeviceBindingLoad(source, options, entry, request);
-                if (ReferenceEquals(entry, committed)) continue;
+                    if (deferred is not { } request)
+                    {
+                        if (!materialized && materializationFailure == ResourceMaterializationFailure.UnreadableGuestPointer)
+                            materialized = RecoverUnreadableTable(source, entry.Plan, inputs, ref snapshot, ref specialization,
+                                ref materializationFailure, ref unreadableRetried);
+                        if (materialized && !DeviceSamplerImagesCompatible(entry.Plan, specialization))
+                        {
+                            // A later bind (or a persisted first bind) can specialize the same
+                            // T# source to a different texture class. Restore a synchronized
+                            // host plan before encoding any work with an unsupported class.
+                            foreach (var load in entry.Plan.DeviceBindingMemory ?? new HashSet<int>())
+                            {
+                                DeviceBindingLoads.Refuse(entry.Plan.DeviceBindingKey, load, notify: false);
+                                BindingWaitProvenance.Decision(new(entry.Plan.DeviceBindingKey, load, ScalarValueKind.Undefined), "sampler_image_class");
+                            }
+                            DeviceBindingLoads.NotifyChanged(entry.Plan.DeviceBindingKey);
+                            entry = committed = CreateEntry(source, options.Detached(), new HashSet<int>());
+                            _programs[key ??= BuildProgramKey(source)] = entry;
+                            continue;
+                        }
+                        break;
+                    }
 
-                // The candidate is materialized against its own plan before translation;
-                // the reference bind below is synchronous and cannot defer again.
-                DeviceBindingLoads.BeginAttempt(defer: false);
-                _host.BeginGuestWordReads();
-                try
-                {
-                    materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure);
-                }
-                finally { _host.EndGuestWordReads(); DeviceBindingLoads.EndAttempt(); }
-                var compatibleSamplerImages = materialized && DeviceSamplerImagesCompatible(entry.Plan, specialization);
-                if (compatibleSamplerImages && BackgroundReplan && _host.BackgroundShaderCompilationSupported && committed.Permutations.Count != 0)
-                {
-                    StartSuccessor(source, options, key ??= BuildProgramKey(source), committed, entry, specialization, pushDataCursor, snapshot, request);
-                    entry = committed;
-                    // Existing permutations remain valid, with fresh synchronized resource words.
+                    entry = ReplanWithDeviceBindingLoad(source, options, entry, request);
+                    if (ReferenceEquals(entry, committed)) continue;
+
+                    // The candidate is materialized against its own plan before translation;
+                    // the reference bind below is synchronous and cannot defer again.
                     DeviceBindingLoads.BeginAttempt(defer: false);
                     _host.BeginGuestWordReads();
                     try
@@ -606,79 +689,99 @@ internal sealed class ShaderProgramCache
                         materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure);
                     }
                     finally { _host.EndGuestWordReads(); DeviceBindingLoads.EndAttempt(); }
+                    var compatibleSamplerImages = materialized && DeviceSamplerImagesCompatible(entry.Plan, specialization);
+                    if (compatibleSamplerImages && BackgroundReplan && _host.BackgroundShaderCompilationSupported && committed.Permutations.Count != 0)
+                    {
+                        StartSuccessor(source, options, key ??= BuildProgramKey(source), committed, entry, specialization, pushDataCursor, snapshot, request);
+                        entry = committed;
+                        // Existing permutations remain valid, with fresh synchronized resource words.
+                        DeviceBindingLoads.BeginAttempt(defer: false);
+                        _host.BeginGuestWordReads();
+                        try
+                        {
+                            materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure);
+                        }
+                        finally { _host.EndGuestWordReads(); DeviceBindingLoads.EndAttempt(); }
+                    }
+                    else if (compatibleSamplerImages)
+                    {
+                        _programs[key ??= BuildProgramKey(source)] = entry;
+                    }
+                    else
+                    {
+                        // Even a candidate whose run-time materialization fails must keep the
+                        // known-correct entry. Never publish partial snapshot or specialization.
+                        foreach (var load in entry.Plan.DeviceBindingMemory ?? new HashSet<int>())
+                            if (committed.Plan.DeviceBindingMemory?.Contains(load) != true)
+                                DeviceBindingLoads.Refuse(committed.Plan.DeviceBindingKey, load, notify: false);
+                        DeviceBindingLoads.NotifyChanged(committed.Plan.DeviceBindingKey);
+                        entry = committed;
+                        BindingWaitProvenance.Decision(request, materialized ? "sampler_image_class" : "materialize_failed");
+                        continue;
+                    }
+                    break;
                 }
-                else if (compatibleSamplerImages)
+
+                if (!materialized)
                 {
-                    _programs[key ??= BuildProgramKey(source)] = entry;
+                    var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
+                    if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
+                        throw new ShaderProgramRejectedException(message);
+                    throw GpuFatal.Fatal(message);
                 }
-                else
-                {
-                    // Even a candidate whose run-time materialization fails must keep the
-                    // known-correct entry. Never publish partial snapshot or specialization.
-                    foreach (var load in entry.Plan.DeviceBindingMemory ?? new HashSet<int>())
-                        if (committed.Plan.DeviceBindingMemory?.Contains(load) != true)
-                            DeviceBindingLoads.Refuse(committed.Plan.DeviceBindingKey, load, notify: false);
-                    DeviceBindingLoads.NotifyChanged(committed.Plan.DeviceBindingKey);
-                    entry = committed;
-                    BindingWaitProvenance.Decision(request, materialized ? "sampler_image_class" : "materialize_failed");
-                    continue;
-                }
-                break;
             }
 
-            if (!materialized)
+            // A cached materialization is shared with draws that differ in user-data words its
+            // plan never reads, so the words the binding layout hands the shader come from here.
+            snapshot = snapshot.WithUserData(source.UserData);
+
+            if (hasShaderCalls)
             {
-                var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
-                if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
-                    throw new ShaderProgramRejectedException(message);
-                throw GpuFatal.Fatal(message);
+                ShaderResourcePlan? failedLinkedPlan = null;
+                var captureLinkedImages = CompiledShaderDump.ShouldWrite(source.Address, source.Hash);
+                try
+                {
+                    var caller = entry.Program with { Address = source.Address };
+                    var library = ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _readCleanGuestWord);
+                    var linkedKey = (key ?? throw new InvalidOperationException("The cached shader has no program key."), library.Identity);
+                    if (!_linkedPrograms.TryGetValue(linkedKey, out var linked))
+                    {
+                        var program = Gen5ShaderCallLinker.Link(caller, library.Calls);
+                        var plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase,
+                            (uint)source.UserData.Length,
+                            beforeResourceTracking: captureLinkedImages ? plan => failedLinkedPlan = plan : null,
+                            waveSize: source.Stage == ShaderStage.Mesh
+                                ? options.MeshInfo!.Geometry.WaveSize : options.ComputeInfo?.WaveSize ?? 32u,
+                            // Linking renumbers memory records. Until the learned key names the
+                            // complete library shape, this graph keeps its synchronous reads.
+                            deviceBindingMemory: new HashSet<int>(), deviceDataMemory: new HashSet<int>());
+                        failedLinkedPlan = null;
+                        linked = new ProgramSourceEntry { Program = program, Plan = plan,
+                            HasShaderCalls = program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64"),
+                            HasBitwiseExclusiveOr = program.Instructions.Any(instruction => instruction.Opcode.Contains("Xor", StringComparison.Ordinal)) };
+                        _linkedPrograms.Add(linkedKey, linked);
+                    }
+                    entry = linked;
+                    if (!ResourceMaterializer.Materialize(entry.Plan, inputs.WithReader(inputs.ReadMemory, pendingLoads: false),
+                        ref snapshot, ref specialization, out var linkedFailure))
+                    {
+                        if (linkedFailure == ResourceMaterializationFailure.UnreadableGuestPointer)
+                            RecoverUnreadableTable(source, entry.Plan, inputs, ref snapshot, ref specialization,
+                                ref linkedFailure, ref unreadableRetried);
+                        else throw new InvalidOperationException("The linked shader resources could not be materialized.");
+                    }
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or ResourcePlanException)
+                {
+                    if (failedLinkedPlan is not null) ShaderImageDescriptorDump.Write(source, failedLinkedPlan, inputs);
+                    if (CompiledShaderDump.ShouldWrite(source.Address, source.Hash))
+                        ShaderCallDump.Write(CompiledShaderDump.GetBasePath(source.Label, source.Address, source.Hash),
+                            entry.Program, snapshot, entry.Plan.Memory, _host.TryReadCleanGuestWord, exception as ShaderFunctionReadException);
+                    throw new ShaderProgramRejectedException($"The shader call library cannot be linked: hash=0x{source.Hash:X16} error={exception.Message}");
+                }
             }
         }
-
-        // A cached materialization is shared with draws that differ in user-data words its
-        // plan never reads, so the words the binding layout hands the shader come from here.
-        snapshot = snapshot.WithUserData(source.UserData);
-
-        if (hasShaderCalls)
-        {
-            ShaderResourcePlan? failedLinkedPlan = null;
-            var captureLinkedImages = CompiledShaderDump.ShouldWrite(source.Address, source.Hash);
-            try
-            {
-                var caller = entry.Program with { Address = source.Address };
-                var library = ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _readCleanGuestWord);
-                var linkedKey = (key ?? throw new InvalidOperationException("The cached shader has no program key."), library.Identity);
-                if (!_linkedPrograms.TryGetValue(linkedKey, out var linked))
-                {
-                    var program = Gen5ShaderCallLinker.Link(caller, library.Calls);
-                    var plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase,
-                        (uint)source.UserData.Length,
-                        beforeResourceTracking: captureLinkedImages ? plan => failedLinkedPlan = plan : null,
-                        waveSize: source.Stage == ShaderStage.Mesh
-                            ? options.MeshInfo!.Geometry.WaveSize : options.ComputeInfo?.WaveSize ?? 32u,
-                        // Linking renumbers memory records. Until the learned key names the
-                        // complete library shape, this graph keeps its synchronous reads.
-                        deviceBindingMemory: new HashSet<int>(), deviceDataMemory: new HashSet<int>());
-                    failedLinkedPlan = null;
-                    linked = new ProgramSourceEntry { Program = program, Plan = plan,
-                        HasShaderCalls = program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64"),
-                        HasBitwiseExclusiveOr = program.Instructions.Any(instruction => instruction.Opcode.Contains("Xor", StringComparison.Ordinal)) };
-                    _linkedPrograms.Add(linkedKey, linked);
-                }
-                entry = linked;
-                if (!ResourceMaterializer.Materialize(entry.Plan, inputs.WithReader(inputs.ReadMemory, pendingLoads: false), ref snapshot, ref specialization))
-                    throw new InvalidOperationException("The linked shader resources could not be materialized.");
-            }
-            catch (Exception exception) when (exception is InvalidOperationException or ResourcePlanException)
-            {
-                if (failedLinkedPlan is not null) ShaderImageDescriptorDump.Write(source, failedLinkedPlan, inputs);
-                if (CompiledShaderDump.ShouldWrite(source.Address, source.Hash))
-                    ShaderCallDump.Write(CompiledShaderDump.GetBasePath(source.Label, source.Address, source.Hash),
-                        entry.Program, snapshot, entry.Plan.Memory, _host.TryReadCleanGuestWord, exception as ShaderFunctionReadException);
-                throw new ShaderProgramRejectedException($"The shader call library cannot be linked: hash=0x{source.Hash:X16} error={exception.Message}");
-            }
-        }
-        MaterializingShader.Hash = 0;
+        finally { _captureTableWords = false; MaterializingShader.Hash = 0; }
         _imageDescriptorTrace.Record(source, entry.Plan, snapshot);
 
         if (AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex &&

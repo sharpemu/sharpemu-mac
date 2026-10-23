@@ -116,6 +116,7 @@ public sealed unsafe partial class MetalClearFoldingTests
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
+        rig.Host.FinalGuestTablesEnabled = false;
         RecordRanges(rig, out var addresses, out var lengths, out var offsets, out var recorded);
         rig.AliasAccess = true;
         using (rig.Host.BeginPreparation())

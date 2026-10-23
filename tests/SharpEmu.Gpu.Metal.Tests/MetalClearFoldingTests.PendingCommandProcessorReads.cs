@@ -25,6 +25,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         rig.WriteBacking32(TableAddress, 0x0BAD0BAD);
         using (host.BeginPreparation())
         {

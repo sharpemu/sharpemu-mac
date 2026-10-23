@@ -201,6 +201,9 @@ internal sealed class MetalCompletionQueue : IDisposable
     private readonly bool _handlerBound;
     private ulong _publishedSerial;
     private ulong _drainedSerial;
+    private ulong _runningPublicationSerial;
+    internal static bool WaitForActivePublications { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_ACTIVE_PUBLICATIONS") != "0";
     private long _gpuWaitTicks;
     private long _gpuWaitSamples;
     private long _gpuReadySamples;
@@ -378,7 +381,12 @@ internal sealed class MetalCompletionQueue : IDisposable
         var signalled = System.Diagnostics.Stopwatch.GetTimestamp();
         lock (_gate)
         {
-            while (_drainedSerial < serial && !_stopping && HasWorkAtOrBefore(serial))
+            // Drain removes a callback before executing it. A signaled GPU event is
+            // insufficient while that callback is still publishing guest table bytes,
+            // even if another callback already advanced _drainedSerial to this serial.
+            while (!_stopping && (WaitForActivePublications
+                ? HasWorkAtOrBefore(serial) || (_runningPublicationSerial != 0 && _runningPublicationSerial <= serial)
+                : _drainedSerial < serial && HasWorkAtOrBefore(serial)))
             {
                 Monitor.Wait(_gate, 2);
             }
@@ -602,6 +610,7 @@ internal sealed class MetalCompletionQueue : IDisposable
                 {
                     (serial, work) = _pending[index];
                     _pending.RemoveAt(index);
+                    _runningPublicationSerial = serial;
                 }
                 else
                 {
@@ -627,6 +636,7 @@ internal sealed class MetalCompletionQueue : IDisposable
 
             lock (_gate)
             {
+                _runningPublicationSerial = 0;
                 if (serial > _drainedSerial)
                 {
                     _drainedSerial = serial;

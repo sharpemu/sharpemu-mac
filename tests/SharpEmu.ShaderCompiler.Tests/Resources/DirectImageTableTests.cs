@@ -657,7 +657,7 @@ public sealed class DirectImageTableTests
         }
         Assert.False(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization,
             out var failure));
-        Assert.Equal(incompatible ? ResourceMaterializationFailure.IncompatibleImageCandidates : ResourceMaterializationFailure.Other, failure);
+        Assert.Equal(incompatible ? ResourceMaterializationFailure.IncompatibleImageCandidates : ResourceMaterializationFailure.UnreadableGuestPointer, failure);
         Assert.Same(original, snapshot);
         Assert.Same(originalSpecialization, specialization);
     }

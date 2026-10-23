@@ -424,6 +424,7 @@ public static class DeviceBindingLoads
     /// </summary>
     public static void BeginAttempt(bool defer)
     {
+        UnreadableGuestPointer.BeginAttempt();
         t_request = null;
         _pendingReadReason = null;
         t_deferring = defer && Enabled;

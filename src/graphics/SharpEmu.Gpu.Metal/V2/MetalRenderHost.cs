@@ -1668,6 +1668,7 @@ internal sealed partial class MetalRenderHost :
             switch (OverlayCoverage(address, (ulong)destination.Length))
             {
                 case MetalOverlayCoverage.Full:
+                    LastGuestTableRead = LastGuestTableRead with { Path = "cp-overlay" };
                     _cpOverlay.Apply(address, destination);
                     Interlocked.Increment(ref _overlayReads);
                     return true;
@@ -1677,6 +1678,7 @@ internal sealed partial class MetalRenderHost :
                         return false;
                     }
 
+                    LastGuestTableRead = LastGuestTableRead with { Path = "memory+cp-overlay" };
                     _cpOverlay.Apply(address, destination);
                     Interlocked.Increment(ref _overlayReads);
                     return true;
@@ -1708,6 +1710,7 @@ internal sealed partial class MetalRenderHost :
 
     private bool TryReadGuestCore(ulong address, Span<byte> destination)
     {
+        LastGuestTableRead = LastGuestTableRead with { Path = "memory" };
         // Guest memory is the GPU's memory, so a read only has to wait for work that
         // may still be writing these bytes: an image that owns them, or a recorded
         // store into them. Without that test every command-memory read would stall.
@@ -1723,6 +1726,7 @@ internal sealed partial class MetalRenderHost :
 
         if (TryReadThroughPendingCopy(address, destination))
         {
+            LastGuestTableRead = LastGuestTableRead with { Path = "copy-source" };
             return true;
         }
 

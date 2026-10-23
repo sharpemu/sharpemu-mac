@@ -283,6 +283,7 @@ public sealed class RuntimeValueEvaluator
                 return true;
             }
 
+            UnreadableGuestPointer.Record(address);
             return false;
         }
 

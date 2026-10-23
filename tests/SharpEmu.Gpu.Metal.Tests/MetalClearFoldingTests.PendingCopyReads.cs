@@ -23,6 +23,7 @@ public sealed unsafe partial class MetalClearFoldingTests
     private static ulong RecordPendingCopy(Rig rig)
     {
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         for (var word = 0UL; word < CopyPeriod; word++)
         {
             rig.WriteBacking32(CopySource + word * sizeof(uint), 0xA000u + (uint)word);
@@ -40,6 +41,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         var serial = RecordPendingCopy(rig);
 
         Assert.True(host.TryReadGuestWord(CopyDestination + 6 * sizeof(uint), out var word));
@@ -61,6 +63,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         var serial = RecordPendingCopy(rig);
 
         host.NoteGuestMemoryWrite(CopyDestination + 0x10, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
@@ -76,6 +79,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         RecordPendingCopy(rig);
         var bytes = new byte[16];
         Assert.True(host.TryReadResidentGuestBytes(CopyDestination, bytes, false));

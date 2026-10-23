@@ -25,6 +25,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         for (var word = 0UL; word < 16; word++)
         {
             rig.WriteBacking32(LineTable + word * sizeof(uint), 0xD000u + (uint)word);
@@ -64,6 +65,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         rig.WriteBacking32(LineTable, 0x0BAD0BAD);
         rig.WriteBacking32(LineTable + 0x10, 0x12345678);
         rig.WriteBacking32(PendingLine + 8, 0x87654321);
@@ -110,6 +112,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice() || WideLinesDisabled) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         for (var word = 0UL; word < 64; word++)
         {
             rig.WriteBacking32(LineTable + word * sizeof(uint), 0xC000u + (uint)word);
@@ -135,6 +138,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice() || WideLinesDisabled) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         rig.WriteBacking32(PendingLine + 8, 0x87654321);
         rig.WriteBacking32(PendingLine + 0xF0, 0x0BADF00D);
         var before = host.WordLineCounters;
@@ -164,6 +168,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         const ulong region = LineTable;
         for (var word = 0UL; word < 192; word++)
         {

@@ -120,6 +120,14 @@ public interface IShaderPipelineHost
 
     void EndGuestWordReads() { }
 
+    // Called on the materializer/encoder thread. Commit its outstanding producers and
+    // invalidate speculative reads before the one uncached unreadable-pointer retry.
+    void SynchronizeGuestTables() { }
+
+    // Provenance of the last word/bulk read, captured before any wait retires its writer.
+    GuestTableReadState LastGuestTableRead => new("host", 0, 0, "unknown");
+    string DescribeGuestTable(ulong address) => $"table=0x{address:X16} state=unavailable";
+
     // Waits for recorded GPU work still writing these bytes, before shader code is hashed
     // and decoded out of guest memory: a title that moves its shader code into place with
     // a DMA copy otherwise has the decoder read whatever the bytes held before the copy.

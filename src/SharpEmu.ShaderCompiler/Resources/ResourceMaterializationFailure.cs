@@ -10,4 +10,5 @@ public enum ResourceMaterializationFailure
     IncompatibleImageCandidates,
     ImageCapacityExceeded,
     DeferredPendingLoad,
+    UnreadableGuestPointer,
 }
