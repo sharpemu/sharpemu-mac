@@ -34,6 +34,28 @@ public sealed class ShaderIdentityInternTests
         Assert.Equal(reads, memory.Reads);
     }
 
+    [Fact]
+    public void ProgramAndHeaderInternCountersReportBothHitsAndMisses()
+    {
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(Code, Header, PipelineTestGuest.EndProgram);
+        using var versions = new GuestWriteGenerations();
+        var registry = new ShaderHeaderRegistry(guest.Context, _ => Header, _ => null, versions);
+        var cache = new ShaderIdentityCache(guest.Memory, static (_, _) => { }, versions);
+        var shader = registry.Require(Code, "compute");
+        _ = registry.Require(Code, "compute");
+        _ = cache.Get(shader, "compute");
+        _ = cache.Get(shader, "compute");
+        var report = ProgramInternCounters.TakeReport();
+        Assert.Matches("program_intern_miss=[1-9][0-9]*", report);
+        Assert.Matches("header_intern_miss=[1-9][0-9]*", report);
+        if (ShaderIdentityCache.Enabled)
+        {
+            Assert.Matches("program_intern_hit=[1-9][0-9]*", report);
+            Assert.Matches("header_intern_hit=[1-9][0-9]*", report);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

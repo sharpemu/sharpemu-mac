@@ -67,6 +67,11 @@ public readonly record struct CpuMappingFootprintSegment(
     ulong ProviderPageSize,
     GuestPageProtection GuestAccess);
 
+internal interface ICpuNativeAliasObservation
+{
+    bool ExcludesNativeAliases { get; }
+}
+
 /// <summary>
 /// Opaque owner-bound metadata from a completed owned copy or its exact confirmed
 /// own-publication continuation. Constructed only by
@@ -138,6 +143,11 @@ public sealed class CpuMappedCopyObservation
         SourceByteCount = sourceByteCount;
         Segments = Array.AsReadOnly(owned);
     }
+
+    // Optional provider-owned proof: no guest mapping outside this observed
+    // interval can issue native stores to its physical bytes. A later mapping
+    // effect invalidates the proof. Unknown producers conservatively decline.
+    public bool ExcludesNativeAliases => _ownerIdentity is ICpuNativeAliasObservation native && native.ExcludesNativeAliases;
 
     public ulong FootprintAddress { get; }
     public ulong FootprintByteCount { get; }

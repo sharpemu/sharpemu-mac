@@ -8,6 +8,10 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // released after a first fault, pending GPU writers, aliases and mapping ABA must veto it.
 public enum ResourceDependencyStatus { Current, CpuWrite, GpuWrite, PendingWriter, Mapping, ImageIdentity, Overlay, Unavailable }
 
+public enum ResourceRangeClass { Unknown, GuestBacking, ChunkedBacking, NativeMapped, Staged, Overlay, ImageBacking, Unmapped, Released }
+public enum ResourceCaptureFailure { None, Range, NativeWatch, NativeAlias, Mapping, PhysicalWatch, Changed, PendingWriter, Overlay, ImageBacking, Released, Unsupported }
+public readonly record struct ResourceDependencyFailure(ResourceRangeClass Range, ResourceCaptureFailure Reason);
+
 public abstract class ResourceDependency : IDisposable
 {
     public virtual long RetainedBytes => 256;
@@ -20,6 +24,8 @@ public interface IResourceDependencySource
     // Also needed by stages with no memory reads: their resource identity/overlay epoch
     // can change independently of their roots. Capture must be side-effect free.
     ResourceDependencyEpoch DependencyEpoch { get; }
+
+    ResourceDependencyFailure CaptureFailure => new(ResourceRangeClass.Unknown, ResourceCaptureFailure.Unsupported);
 
     // Capture may allocate; Validate must neither read bytes nor allocate. A failed
     // capture grants no reuse. Implementations own any write-watch bookkeeping.

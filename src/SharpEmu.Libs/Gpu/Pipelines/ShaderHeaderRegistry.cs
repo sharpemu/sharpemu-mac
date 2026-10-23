@@ -111,13 +111,22 @@ public sealed class ShaderHeaderRegistry
 
     public RegisteredShader Require(ulong codeAddress, string label)
     {
-        if (_generations is null) return RequireCore(codeAddress, label);
+        if (_generations is null)
+        {
+            ProgramInternCounters.HeaderMiss();
+            return RequireCore(codeAddress, label);
+        }
         lock (_observations)
         {
             var header = _headerOf(codeAddress);
             var fused = _fusedPartsOf(codeAddress);
             if (_observations.TryGetValue(codeAddress, out var cached) && cached.Header == header && cached.Fused == fused &&
-                cached.HeaderToken.IsCurrent && (cached.ContinuationToken?.IsCurrent ?? true)) return cached.Shader;
+                cached.HeaderToken.IsCurrent && (cached.ContinuationToken?.IsCurrent ?? true))
+            {
+                ProgramInternCounters.HeaderHit();
+                return cached.Shader;
+            }
+            ProgramInternCounters.HeaderMiss();
             if (header == 0) return RequireCore(codeAddress, label);
             _synchronize?.Invoke(header, HeaderReadBytes);
             if (fused is { } continuation) _synchronize?.Invoke(continuation.ContinuationHeaderAddress, HeaderReadBytes);

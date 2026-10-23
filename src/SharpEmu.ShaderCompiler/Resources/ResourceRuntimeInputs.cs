@@ -6,6 +6,8 @@ using System.Collections.Generic;
 namespace SharpEmu.ShaderCompiler.Resources;
 
 // Reads one dword of guest memory; false when the address cannot be read.
+public delegate void ResourceReadObserver(ulong address, ReadOnlySpan<byte> bytes);
+
 public delegate bool GuestWordReader(ulong address, out uint word);
 
 // What one draw supplies to materialise a plan: its user data, the shader base and
@@ -33,6 +35,10 @@ public sealed class ResourceRuntimeInputs
     public bool ReadsClean { get; init; }
 
     public IResourceDependencySource? DependencySource { get; set; }
+
+    // A bypass has already certified these original bytes. Retry logs must retain
+    // the same observations even though no reader/evaluator was called on the hit.
+    public ResourceReadObserver? ObserveCachedRead { get; set; }
 
     // Whether recorded GPU work may still write the dword at this address, asked without
     // waiting. A data-only table word found pending is learned as a device load
