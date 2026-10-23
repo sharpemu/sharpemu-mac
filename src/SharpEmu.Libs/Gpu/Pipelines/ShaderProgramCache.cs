@@ -224,6 +224,7 @@ internal sealed class ShaderProgramCache
     // (~4 % of the Demon's Souls render thread) for a debug dump that is almost never on.
     private readonly bool _spirvDumpEnabled = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV"), "1", StringComparison.Ordinal);
 
+    private readonly IRecipeDiagnosticSink? _recipeDiagnostics;
     private readonly ResourceReadObserver _observeCachedRead;
     private readonly GuestWordReader _readGuestWord;
     private readonly GuestWordReader _readCleanGuestWord;
@@ -238,6 +239,7 @@ internal sealed class ShaderProgramCache
         _context = context;
         _compiler = compiler;
         _host = host;
+        _recipeDiagnostics = host.RecipeDiagnostics;
         _observeCachedRead = (address, bytes) => ReadLog?.Bytes(address, true, bytes);
         _readGuestWord = ReadGuestWord;
         _readCleanGuestWord = ReadCleanGuestWord;
@@ -531,6 +533,7 @@ internal sealed class ShaderProgramCache
         }
 
         MaterializingShader.Hash = source.Hash;
+        using (new RecipeMaterializationTimer(_recipeDiagnostics))
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
         {
             // Failure capture needs the full walk, so a dump run bypasses the cache.
@@ -666,6 +669,7 @@ internal sealed class ShaderProgramCache
                     _linkedPrograms.Add(linkedKey, linked);
                 }
                 entry = linked;
+                using var linkedTimer = new RecipeMaterializationTimer(_recipeDiagnostics);
                 if (!ResourceMaterializer.Materialize(entry.Plan, inputs.WithReader(inputs.ReadMemory, pendingLoads: false), ref snapshot, ref specialization))
                     throw new InvalidOperationException("The linked shader resources could not be materialized.");
             }
@@ -678,6 +682,7 @@ internal sealed class ShaderProgramCache
                 throw new ShaderProgramRejectedException($"The shader call library cannot be linked: hash=0x{source.Hash:X16} error={exception.Message}");
             }
         }
+        _recipeDiagnostics?.Materialized(source, entry.Plan, snapshot);
         MaterializingShader.Hash = 0;
         _imageDescriptorTrace.Record(source, entry.Plan, snapshot);
 

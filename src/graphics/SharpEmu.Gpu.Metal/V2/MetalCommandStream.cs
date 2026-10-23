@@ -117,12 +117,30 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         in IssueProgramIdentities programs, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
     {
         using var entry = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawEntry);
-        _translation!.DrawIssued(queueId, submitId, banks, programs, indexed, indexedArguments, autoArguments);
+        if (_recipes is null)
+        {
+            _translation!.DrawIssued(queueId, submitId, banks, programs, indexed, indexedArguments, autoArguments);
+            return;
+        }
+        RecipeBegin(false, queueId);
+        RecipeDrawArguments(indexed, indexedArguments, autoArguments);
+        try { _translation!.DrawIssued(queueId, submitId, banks, programs, indexed, indexedArguments, autoArguments); }
+        finally { RecipeEnd(); }
     }
 
     void ICommandIssueRenderer.DispatchIssued(int queueId, ulong submitId, SharpEmu.Libs.Gpu.GpuCommands.Registers.RegisterBanks banks,
-        in IssueProgramIdentities programs, uint x, uint y, uint z, uint initiator, ulong indirect) =>
-        _translation!.DispatchIssued(queueId, submitId, banks, programs, x, y, z, initiator, indirect);
+        in IssueProgramIdentities programs, uint x, uint y, uint z, uint initiator, ulong indirect)
+    {
+        if (_recipes is null)
+        {
+            _translation!.DispatchIssued(queueId, submitId, banks, programs, x, y, z, initiator, indirect);
+            return;
+        }
+        RecipeBegin(true, queueId);
+        RecipeDispatchArguments(x, y, z, initiator, indirect);
+        try { _translation!.DispatchIssued(queueId, submitId, banks, programs, x, y, z, initiator, indirect); }
+        finally { RecipeEnd(); }
+    }
 
     void ICommandIssueRenderer.ResetIssuedQueue(int queueId) => _translation!.ResetIssuedQueue(queueId);
 
@@ -1993,6 +2011,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         Interlocked.Increment(ref _flipAttempts);
         Interlocked.Increment(ref FlipsCaptured);
         NoteFlipForCompilingDraws();
+        _recipes?.EndFrame();
         // The one point in the frame that is outside a flush, so the safe place to read
         // back everything the passes since the last flip wrote.
         DrainPendingDumps();

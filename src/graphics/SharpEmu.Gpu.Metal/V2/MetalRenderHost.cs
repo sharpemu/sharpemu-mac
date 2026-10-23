@@ -2212,6 +2212,7 @@ internal sealed partial class MetalRenderHost :
 
         var seconds = (now - _statsTimestamp) / (double)System.Diagnostics.Stopwatch.Frequency;
         _statsTimestamp = now;
+        _recipes?.Report(Console.Error);
         // Read every submission that has finished since the last report, so the GPU
         // time below covers them all and not only the one that happened to be done.
         DrainFinishedSubmissions();

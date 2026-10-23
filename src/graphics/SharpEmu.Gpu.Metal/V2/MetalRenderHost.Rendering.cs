@@ -872,6 +872,7 @@ internal sealed partial class MetalRenderHost
 
     public void BeginRendering(in RenderingState state)
     {
+        if (_recipes is not null) RecipeTargets(state);
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.RenderPassBegin);
         _joinedPipeline = null;
         _joinedVariant = null;
@@ -1359,6 +1360,7 @@ internal sealed partial class MetalRenderHost
 
     public void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input)
     {
+        if (_recipes is not null) RecipeVertexBuffers(bindings, input);
         _ = input;
         var count = Math.Min(bindings.Length, MaxVertexBufferSlots);
         if (bindings.Length > MaxVertexBufferSlots)
@@ -1389,6 +1391,7 @@ internal sealed partial class MetalRenderHost
 
     public void BindIndexBuffer(BufferBinding binding, GpuIndexType type)
     {
+        if (_recipes is not null) RecipeBufferLocation(7, binding, (ulong)type);
         _indexGuestAddress = 0;
         _indexGuestSize = 0;
         _indexBuffer = (nint)binding.Handle;
@@ -1396,10 +1399,15 @@ internal sealed partial class MetalRenderHost
         _indexType = MetalV2Formats.IndexType(type);
     }
 
-    public void SetDynamicState(in DynamicDrawState state) => _dynamicState = state;
+    public void SetDynamicState(in DynamicDrawState state)
+    {
+        _dynamicState = state;
+        if (_recipes is not null) RecipeDynamic(state);
+    }
 
     public void BindPipeline(GpuBindPoint bindPoint, in PipelineHandle pipeline)
     {
+        if (_recipes is not null) RecipePipeline(pipeline);
         var entry = RequirePipelineEntry(in pipeline);
         if (bindPoint == GpuBindPoint.Graphics)
         {
@@ -1694,6 +1702,7 @@ internal sealed partial class MetalRenderHost
 
     public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
     {
+        if (_recipes is not null) RecipeEmission(1, vertexCount, instanceCount, firstVertex, firstInstance);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
@@ -1746,6 +1755,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
     {
+        if (_recipes is not null) RecipeEmission(2, indexCount, instanceCount, firstIndex, unchecked((ulong)vertexOffset), firstInstance);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_indexBuffer == 0)
         {
@@ -1808,6 +1818,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndirect(BufferBinding arguments)
     {
+        if (_recipes is not null) RecipeBufferLocation(3, arguments);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         // The guest's argument layout is (vertexCount, instanceCount, firstVertex,
         // firstInstance), which is exactly MTLDrawPrimitivesIndirectArguments.
@@ -1853,6 +1864,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
     {
+        if (_recipes is not null) RecipeBufferLocation(4, arguments);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_indexBuffer == 0)
         {
@@ -1919,6 +1931,7 @@ internal sealed partial class MetalRenderHost
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
     {
+        if (_recipes is not null) RecipeEmission(5, groupsX, groupsY, groupsZ);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         // A persistent-thread kernel spins on memory other work publishes, which can be what a
         // label copy held for the commit writes: the copy would land only after the kernel had
@@ -1995,6 +2008,7 @@ internal sealed partial class MetalRenderHost
             throw Fatal("An indirect dispatch has no bound Metal compute pipeline state.");
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
+        if (_recipes is not null) RecipeBufferLocation(6, new BufferBinding(unchecked((ulong)range.Buffer), range.Offset));
         OrderComputeDispatch(argumentsAddress, range);
         MetalV2Native.SendDispatchIndirect(
             encoder,
@@ -2294,6 +2308,7 @@ internal sealed partial class MetalRenderHost
 
     private void CountDraw(long startedTicks)
     {
+        if (_recipes is not null && _recipeActive) _recipeEmissions++;
         NoteRecordedWork();
         Interlocked.Increment(ref _drawCount);
         SharpEmu.Libs.VideoOut.PerfOverlay.RecordDraw();

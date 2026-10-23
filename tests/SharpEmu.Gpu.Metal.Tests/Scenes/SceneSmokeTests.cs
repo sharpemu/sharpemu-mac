@@ -11,6 +11,48 @@ public sealed class SceneSmokeTests(ITestOutputHelper output) : SceneTestBase(ou
 {
     private const uint Size = 64;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RecipeDiagnosticsCaptureTheIssuedPrefixOnItsOwner(bool split)
+    {
+        using var rig = CreateRig(split);
+        if (rig is null) return;
+        var enabled = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_RECIPE_CLASSIFIER") == "1";
+        Assert.Equal(enabled, ((SharpEmu.Libs.Gpu.Pipelines.IShaderPipelineHost)rig.Host).RecipeDiagnostics is not null);
+        var target = rig.ColorTarget(Size, Size);
+        var state = new SceneState(Size, Size).ColorTarget(0, target, Size, Size);
+        var buffer = rig.Memory.Allocate(64 * 4, 256);
+        var tape = rig.DrawMesh(new ScenePm4(), state, SceneDraws.Quad(0.5f, 1, 0, 0));
+        rig.Dispatch(tape, ScenePrograms.StoreGlobalId, Descriptors.Buffer(buffer, 4, 64, format: 20), 1);
+        rig.Submit(tape);
+        SharpEmu.Gpu.Metal.V2.RecipeObservation[] capture = [];
+        rig.Host.RunOnIssueConsumer(() => capture = rig.Host.CaptureRecipeIssues());
+        if (!enabled) { Assert.Empty(capture); return; }
+        // A not-ready compute pipeline can reissue the dispatch before emission.
+        // Every attempt is observed, but there must be exactly two actual emissions.
+        var emitted = capture.Where(issue => issue.Emissions != 0).ToArray();
+        Assert.Equal(2, emitted.Length);
+        Assert.Equal(capture.Length, capture.Select(issue => issue.IssueId).Distinct().Count());
+        Assert.All(emitted, issue =>
+        {
+            Assert.Equal(1, issue.Emissions);
+            Assert.NotEqual(default, issue.Signature.Structure);
+        });
+        foreach (var compute in new[] { false, true })
+        {
+            Assert.True(capture.Where(issue => issue.Compute == compute).Sum(issue => issue.Materializations) > 0);
+            Assert.True(capture.Where(issue => issue.Compute == compute).Sum(issue => issue.MaterializationTicks) > 0);
+        }
+        Assert.NotEqual(emitted[0].Signature.Pass, emitted[1].Signature.Pass);
+        var original = capture.ToArray();
+        rig.Submit(tape);
+        Assert.Equal(original, capture); // Later reusable stage/register storage cannot mutate a capture.
+        Assert.Equal(0x5A5Au, rig.Read<uint>(buffer, 64)[0]);
+        Assert.Empty(rig.Fatals);
+    }
+
+
     [Fact]
     public void NativeIssueConsumerAndSerialIssuePathRenderTheSameMixedPm4Tape()
     {
