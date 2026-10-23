@@ -126,10 +126,13 @@ public sealed class KernelSyncOnAddressCompatExportsTests
     {
         var (memory, ctx) = CreateContext();
         WriteUInt32(memory, ValueAddress, 11);
-        WriteUInt32(memory, TimeoutAddress, 1000);
+        // Stage first, then simulate the timer's expiry. A 1 ms deadline can
+        // expire inside first-call JIT before there is a continuation to test.
+        WriteUInt32(memory, TimeoutAddress, 60_000_000);
         var waiter = StageWait32(ctx, threadHandle: 0x807, expected: 11, TimeoutAddress);
 
         WriteUInt32(memory, ValueAddress, 12);
+        Assert.IsAssignableFrom<GuestWaiter>(waiter).Expire();
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, waiter.Resume());
     }
 
@@ -138,9 +141,10 @@ public sealed class KernelSyncOnAddressCompatExportsTests
     {
         var (memory, ctx) = CreateContext();
         WriteUInt32(memory, ValueAddress, 13);
-        WriteUInt32(memory, TimeoutAddress, 1000);
+        WriteUInt32(memory, TimeoutAddress, 60_000_000);
         var waiter = StageWait32(ctx, threadHandle: 0x808, expected: 13, TimeoutAddress);
 
+        Assert.IsAssignableFrom<GuestWaiter>(waiter).Expire();
         Assert.Equal(
             (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT,
             waiter.Resume());
