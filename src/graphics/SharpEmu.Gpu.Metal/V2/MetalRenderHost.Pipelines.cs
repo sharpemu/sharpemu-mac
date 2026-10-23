@@ -533,10 +533,12 @@ internal sealed partial class MetalRenderHost
     {
         error = string.Empty;
         archiveKey = default;
-        if (askArchive && MetalBinaryArchive.For(device) is { } archive)
+        var archive = askArchive ? MetalBinaryArchive.For(device) : null;
+        if (archive is not null)
         {
             archiveKey = MetalBinaryArchive.LibraryKey(source, usesPerVertexInputs);
-            var stored = archive.TryLoadLibrary(archiveKey);
+            var stored = archive.TryLoadLibrary(archiveKey,
+                mipStatistics: source.Contains(Gen5MslShader.MipStatisticsFunctionConstantName, StringComparison.Ordinal));
             if (stored != 0)
             {
                 return stored;
@@ -575,6 +577,11 @@ internal sealed partial class MetalRenderHost
                 if (library == 0)
                 {
                     error = MetalNative.DescribeError(compileError);
+                }
+
+                if (library != 0)
+                {
+                    archive?.CaptureLibrary(archiveKey, library, source, usesPerVertexInputs);
                 }
 
                 return library;
@@ -1155,7 +1162,9 @@ internal sealed partial class MetalRenderHost
                     mesh is null ? MetalBinaryArchive.PipelineKind.Render : MetalBinaryArchive.PipelineKind.Mesh,
                     vertexArchiveKey,
                     pixelArchiveKey,
-                    missed);
+                    pixelModule?.ArchiveKey ?? default,
+                    missed,
+                    pixelLibrary: pixelModule is { Shader.UsesMipStatisticsConstant: true } ? pixelModule.Library : 0);
             }
 
             if (state == 0)

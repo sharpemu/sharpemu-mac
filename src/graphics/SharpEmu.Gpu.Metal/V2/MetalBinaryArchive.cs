@@ -25,13 +25,13 @@ namespace SharpEmu.Gpu.Metal.V2;
 ///
 /// <list type="bullet">
 /// <item>Libraries. Each library the host compiles from MSL gets one archive file, named by
-/// a hash of its source and compile options and written from the first pipeline made from
-/// it. Opened as a library (newLibraryWithURL) its AIR slice stands in for the MSL front end:
+/// a hash of its source and compile options. Compiled libraries are captured even if never
+/// drawn, using static precompile's stub descriptors. Opened as a library (newLibraryWithURL) its AIR slice stands in for the MSL front end:
 /// measured on 159 Demon's Souls compute libraries with the macOS cache cleared, 0.13-0.44 ms
 /// a library against 330-540 ms through newLibraryWithSource. A compute library's file also
 /// holds its pipeline's binary, and opened as an archive (about 6 ms) it stands in for the
-/// back end: 0.12 ms a pipeline against 106-181 ms. The name is the content, so a translator
-/// change only misses the libraries whose MSL it changed.</item>
+/// back end: 0.12 ms a pipeline against 106-181 ms. Translator-stamped library directories
+/// evict stale front-end output at startup; content keys deduplicate within the build.</item>
 /// <item>Render pipelines. Pipelines no loaded archive had are added to a segment
 /// (pipelines-STAMP-SEQ.mtla, a new one every <see cref="SegmentBytes"/>) that is serialized
 /// off the GPU worker, every <see cref="FlushInterval"/> and at shutdown. An open archive is
@@ -54,6 +54,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// The archiver packs a whole archive or none: one pipeline it refuses fails the
 /// serialization of every pipeline in the segment, so a failed segment is searched for the
 /// pipelines it refuses (<see cref="RebuildWithoutRefused"/>) and written without them.
+/// A batch that still fails is split into separately serialized pipelines.
 /// serializeToURL also reports success and writes nothing when an archive is unchanged since
 /// its last serialization, which is what adding a pipeline it already holds leaves it.
 /// </summary>
@@ -86,6 +87,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     // MTLPipelineOptionFailOnBinaryArchiveMiss.
     internal const nuint FailOnBinaryArchiveMiss = 1 << 2;
 
+    // SHARPEMU_METAL_V2_BINARY_ARCHIVE=0 also disables writer leasing, file pinning and
+    // bounded atomic publication; a second writer otherwise falls back to uncached Metal.
     internal static readonly bool Enabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINARY_ARCHIVE") != "0";
 
@@ -104,12 +107,13 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private enum JobKind : byte
     {
         Capture,
+        Library,
         Flush,
     }
 
     private readonly record struct Job(
         JobKind Kind, PipelineKind Pipeline, nint Descriptor, UInt128 Key0, UInt128 Key1, bool AddToSegment,
-        ManualResetEventSlim? Done, ulong Pair = 0);
+        ManualResetEventSlim? Done, ulong Pair = 0, Gen5MslShader? Shader = null, nint PixelLibrary = 0);
 
     // A pipeline of the current segment, retained to search the segment when the archiver
     // refuses one of them.
@@ -127,6 +131,26 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private static MetalBinaryArchive? _current;
     private static int _exitHooked;
 
+    // SHARPEMU_METAL_V2_ARCHIVE_PLAIN_PIXEL_KEY=0 restores counters-key library names and
+    // single-value mip-constant storage/specialization. Default stores both named values.
+    internal static readonly bool PlainPixelKey =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ARCHIVE_PLAIN_PIXEL_KEY") != "0";
+
+    // SHARPEMU_METAL_V2_ARCHIVE_VERSIONED_LIBRARIES=0 keeps the legacy shared library directory.
+    internal static readonly bool VersionedLibraries =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ARCHIVE_VERSIONED_LIBRARIES") != "0";
+
+    // SHARPEMU_METAL_V2_ARCHIVE_CAPTURE_LIBRARIES=0 limits capture to pipelines actually drawn.
+    internal static readonly bool CaptureUnusedLibraries =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ARCHIVE_CAPTURE_LIBRARIES") != "0";
+
+    // SHARPEMU_METAL_V2_ARCHIVE_SPLIT_FAILURES=0 restores dropping an unwriteable batch.
+    internal static readonly bool SplitFailures =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ARCHIVE_SPLIT_FAILURES") != "0";
+
+    private readonly HashSet<string> _usedFiles = new(StringComparer.Ordinal);
+    private FileStream? _writerLease;
+    private int _stores;
     private readonly nint _device;
     private readonly string _root;
     private readonly string _directory;
@@ -165,6 +189,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private readonly HashSet<ulong> _segmentPairs = [];
     private long _lastFlushTicks;
     private long _writtenSinceTrim;
+    private long _diskBytes;
 
     private int _libraryHits;
     private int _libraryMisses;
@@ -187,7 +212,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         _translatorStamp = Hex64(XxHash3.HashToUInt64(MemoryMarshal.AsBytes(translatorStamp.AsSpan())));
         _budget = budget;
         _directory = Path.Combine(root, Hex64(XxHash3.HashToUInt64(MemoryMarshal.AsBytes(DeviceStamp(device).AsSpan()))));
-        _libraries = Path.Combine(_directory, "libraries");
+        _libraries = Path.Combine(_directory, VersionedLibraries ? "libraries-" + _translatorStamp : "libraries");
         _lastFlushTicks = Stopwatch.GetTimestamp();
         _writer = new Thread(RunWriter)
         {
@@ -217,6 +242,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// <summary>The descriptors the archiver is taken to refuse, for tests: the real refusals
     /// cannot be made on demand.</summary>
     internal Func<nint, bool>? RefusedByArchiver { get; set; }
+
+    internal Func<IReadOnlyList<nint>, bool>? RefusedBatchByArchiver { get; set; }
 
     public (int LibraryHits, int LibraryMisses, int Rejected, int LibrariesWritten,
         int PipelineHits, int PipelineMisses, int PipelinesAdded, int LoadedSegments) Counters =>
@@ -293,9 +320,22 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     internal static MetalBinaryArchive Open(string root, nint device, string translatorStamp, long budget)
     {
         var archive = new MetalBinaryArchive(device, root, translatorStamp, budget);
-        archive.Prepare();
-        archive._writer.Start();
-        return archive;
+        try
+        {
+            // One process owns this title's archive tree. In particular startup eviction
+            // must never race another build's captures or readers (including temp files).
+            System.IO.Directory.CreateDirectory(root);
+            archive._writerLease = new FileStream(Path.Combine(root, "writer.lock"), FileMode.OpenOrCreate,
+                FileAccess.ReadWrite, FileShare.None);
+            archive.Prepare();
+            archive._writer.Start();
+            return archive;
+        }
+        catch
+        {
+            archive._writerLease?.Dispose();
+            throw;
+        }
     }
 
     /// <summary>The translators decide the MSL; segments of another stamp hold pipelines of
@@ -331,7 +371,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// The library stored for <paramref name="key"/>, owned by the caller, or zero. A file
     /// that fails its trailer or that Metal will not open is deleted. Any thread.
     /// </summary>
-    public nint TryLoadLibrary(UInt128 key)
+    public nint TryLoadLibrary(UInt128 key, bool mipStatistics = false)
     {
         if (key == default || !_known.ContainsKey(key))
         {
@@ -340,6 +380,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
 
         var path = LibraryPath(key);
+        Protect(path);
         if (!TryVerify(path, out _))
         {
             Reject(key, path);
@@ -357,6 +398,22 @@ internal sealed partial class MetalBinaryArchive : IDisposable
                 return 0;
             }
 
+            if (mipStatistics && PlainPixelKey)
+            {
+                var off = MetalNative.Send(library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString("gen5_ps_sharpemu_mip_off"));
+                var on = MetalNative.Send(library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString("gen5_ps_sharpemu_mip_on"));
+                if (off != 0) MetalNative.SendVoid(off, SelRelease);
+                if (on != 0) MetalNative.SendVoid(on, SelRelease);
+                if (off == 0 || on == 0)
+                {
+                    // Legacy files contain only one baked value. Recompile the source and
+                    // heal them, including when versioned-library eviction is switched off.
+                    MetalNative.SendVoid(library, SelRelease);
+                    Reject(key, path);
+                    return 0;
+                }
+            }
+
             Touch(path);
             Interlocked.Increment(ref _libraryHits);
             return library;
@@ -371,8 +428,12 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// The library file of <paramref name="key"/> opened as an archive, for the compute
     /// pipeline its binary slice holds; owned by the caller, or zero.
     /// </summary>
-    public nint OpenLibraryArchive(UInt128 key) =>
-        key != default && _known.ContainsKey(key) ? OpenArchive(LibraryPath(key)) : 0;
+    public nint OpenLibraryArchive(UInt128 key)
+    {
+        var path = LibraryPath(key);
+        Protect(path);
+        return key != default && _known.ContainsKey(key) ? OpenArchive(path) : 0;
+    }
 
     /// <summary>
     /// The segments holding pipelines of the shader pair as an NSArray for a descriptor's
@@ -462,6 +523,48 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
     }
 
+    // A prewarmed/created module need never be drawn. Capture its already compiled library
+    // behind the same stub descriptors as static precompile, without a second front end.
+    internal void CaptureLibrary(UInt128 key, nint library, string source, bool usesPerVertexInputs)
+    {
+        if (!CaptureUnusedLibraries || library == 0 || !NeedsLibrary(key))
+        {
+            return;
+        }
+
+        var entry = new[] { "gen5_cs", "gen5_ps", "gen5_ms", "gen5_vs" }
+            .FirstOrDefault(name => source.Contains(" " + name + "(", StringComparison.Ordinal));
+        if (entry is null || (entry == "gen5_vs" && source.Contains("[[stage_in]]", StringComparison.Ordinal)))
+        {
+            // Rectangle/tessellation and vertex-fetch descriptors still need the real draw.
+            return;
+        }
+
+        var stage = entry switch
+        {
+            "gen5_cs" => Gen5MslStage.Compute,
+            "gen5_ps" => Gen5MslStage.Pixel,
+            "gen5_ms" => Gen5MslStage.Mesh,
+            _ => Gen5MslStage.Vertex,
+        };
+        var shader = new Gen5MslShader(source, entry, stage, 0)
+        {
+            UsesPerVertexInputs = usesPerVertexInputs,
+            UsesMipStatisticsConstant = source.Contains(Gen5MslShader.MipStatisticsFunctionConstantName, StringComparison.Ordinal),
+        };
+        if (!_pending.TryAdd(key, 0))
+        {
+            return;
+        }
+
+        MetalNative.Send(library, SelRetain);
+        if (!TryEnqueue(new Job(JobKind.Library, default, library, key, default, false, null, Shader: shader)))
+        {
+            MetalNative.SendVoid(library, SelRelease);
+            Forget(key);
+        }
+    }
+
     /// <summary>Whether the library file of <paramref name="key"/> is on disk (or being written).</summary>
     public bool HasLibrary(UInt128 key) => key != default && (_known.ContainsKey(key) || _pending.ContainsKey(key));
 
@@ -473,9 +576,35 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// of them; the runtime's <see cref="TryLoadLibrary"/> then opens the file as the
     /// library. The bytes written, or -1 when the file was there already or failed.
     /// </summary>
-    public long StoreLibrary(UInt128 key, PipelineKind kind, nint descriptor)
+    public long StoreLibrary(UInt128 key, PipelineKind kind, nint descriptor, bool reserved = false, nint alternateDescriptor = 0)
     {
-        if (descriptor == 0 || !NeedsLibrary(key) || !_pending.TryAdd(key, 0))
+        lock (_trimLock)
+        {
+            if (Volatile.Read(ref _disposed) != 0 && !reserved)
+            {
+                return -1;
+            }
+
+            _stores++;
+        }
+
+        try
+        {
+            return StoreLibraryCore(key, kind, descriptor, reserved, alternateDescriptor);
+        }
+        finally
+        {
+            lock (_trimLock)
+            {
+                _stores--;
+                Monitor.PulseAll(_trimLock);
+            }
+        }
+    }
+
+    private long StoreLibraryCore(UInt128 key, PipelineKind kind, nint descriptor, bool reserved, nint alternateDescriptor)
+    {
+        if (descriptor == 0 || (reserved ? _known.ContainsKey(key) : !NeedsLibrary(key) || !_pending.TryAdd(key, 0)))
         {
             return -1;
         }
@@ -484,7 +613,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         var archive = NewArchive(null);
         try
         {
-            if (archive == 0 || !Add(archive, kind, descriptor))
+            if (archive == 0 || !Add(archive, kind, descriptor) ||
+                (alternateDescriptor != 0 && !Add(archive, kind, alternateDescriptor)))
             {
                 return -1;
             }
@@ -515,7 +645,12 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             }
 
             MetalNative.objc_autoreleasePoolPop(pool);
-            Forget(key);
+            if (!reserved)
+            {
+                // A queued capture owns its reservation until Run's finally; releasing it
+                // here too could remove the reservation of a retry queued in between.
+                Forget(key);
+            }
         }
     }
 
@@ -526,7 +661,9 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// the writer is done with it. The two stages' entry points must differ, so each file's
     /// library has one function of the name its module asks for.
     /// </summary>
-    public void NoteRenderPipeline(nint descriptor, PipelineKind kind, UInt128 vertexKey, UInt128 pixelKey, bool missed)
+    public void NoteRenderPipeline(
+        nint descriptor, PipelineKind kind, UInt128 vertexKey, UInt128 pixelKey, UInt128 pixelLibraryKey, bool missed,
+        nint pixelLibrary = 0)
     {
         if (descriptor == 0 || Volatile.Read(ref _disposed) != 0)
         {
@@ -537,16 +674,33 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         // stored twice, and one they do not is stored by a later start.
         missed &= _loaded.IsSet;
         var vertex = NeedsLibrary(vertexKey) && _pending.TryAdd(vertexKey, 0) ? vertexKey : default;
-        var pixel = pixelKey != vertexKey && NeedsLibrary(pixelKey) && _pending.TryAdd(pixelKey, 0) ? pixelKey : default;
+        if (!PlainPixelKey)
+        {
+            pixelLibraryKey = pixelKey;
+        }
+
+        var pixel = pixelLibraryKey != vertexKey && NeedsLibrary(pixelLibraryKey) && _pending.TryAdd(pixelLibraryKey, 0)
+            ? pixelLibraryKey : default;
         if (!missed && vertex == default && pixel == default)
         {
             return;
         }
 
         MetalNative.Send(descriptor, SelRetain);
-        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, PairKey(vertexKey, pixelKey))))
+        if (pixelLibrary != 0)
+        {
+            MetalNative.Send(pixelLibrary, SelRetain);
+        }
+
+        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null,
+                PairKey(vertexKey, pixelKey), PixelLibrary: pixelLibrary)))
         {
             MetalNative.SendVoid(descriptor, SelRelease);
+            if (pixelLibrary != 0)
+            {
+                MetalNative.SendVoid(pixelLibrary, SelRelease);
+            }
+
             Forget(vertex);
             Forget(pixel);
         }
@@ -593,6 +747,17 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             _resident.Clear();
             _residentBytes = 0;
             _segmentsByPair.Clear();
+        }
+
+        lock (_trimLock)
+        {
+            while (_stores != 0)
+            {
+                Monitor.Wait(_trimLock);
+            }
+
+            _writerLease?.Dispose();
+            _writerLease = null;
         }
 
         var (hits, misses, rejected, written, pipelineHits, pipelineMisses, added, segments) = Counters;
@@ -642,8 +807,16 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private void Reject(UInt128 key, string path)
     {
         Interlocked.Increment(ref _rejected);
-        _known.TryRemove(key, out _);
-        TryDelete(path);
+        lock (_trimLock)
+        {
+            _known.TryRemove(key, out _);
+            var bytes = File.Exists(path) ? new FileInfo(path).Length : 0;
+            TryDelete(path);
+            if (!File.Exists(path))
+            {
+                _diskBytes = Math.Max(0, _diskBytes - bytes);
+            }
+        }
     }
 
     // Removes what other devices, OSes and formats wrote and what an interrupted write
@@ -656,6 +829,21 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             if (!string.Equals(Path.GetFullPath(other), Path.GetFullPath(_directory), StringComparison.Ordinal))
             {
                 TryDeleteDirectory(other);
+            }
+        }
+
+        if (VersionedLibraries)
+        {
+            // Libraries are front-end output of this translator/codegen stamp. Keep all
+            // current-build entries; remove only obsolete namespaces under our writer lease.
+            foreach (var directory in System.IO.Directory.EnumerateDirectories(_directory, "libraries*"))
+            {
+                var name = Path.GetFileName(directory);
+                if ((name == "libraries" || name.StartsWith("libraries-", StringComparison.Ordinal)) &&
+                    !string.Equals(directory, _libraries, StringComparison.Ordinal))
+                {
+                    TryDeleteDirectory(directory);
+                }
             }
         }
 
@@ -678,6 +866,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
                 TryDelete(path);
             }
         }
+
+        _diskBytes = DiskBytes();
     }
 
     private void RunWriter()
@@ -750,6 +940,18 @@ internal sealed partial class MetalBinaryArchive : IDisposable
                 return;
             }
 
+            if (job.Kind == JobKind.Library)
+            {
+                MetalStaticPrecompile.Store(this, _device, job.Shader!, job.Key0, out var error,
+                    compiledLibrary: job.Descriptor, reserved: true);
+                if (error is not null)
+                {
+                    MetalV2Diagnostics.Trace($"library capture failed key={job.Key0:x32}: {error}");
+                }
+
+                return;
+            }
+
             if (job.AddToSegment)
             {
                 AddToSegment(job.Pipeline, job.Descriptor, job.Pair);
@@ -757,7 +959,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
             if (job.Key0 != default || job.Key1 != default)
             {
-                WriteLibraries(job.Pipeline, job.Descriptor, job.Key0, job.Key1);
+                WriteLibraries(job.Pipeline, job.Descriptor, job.Key0, job.Key1, job.PixelLibrary);
             }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -769,6 +971,11 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             if (job.Descriptor != 0)
             {
                 MetalNative.SendVoid(job.Descriptor, SelRelease);
+            }
+
+            if (job.PixelLibrary != 0)
+            {
+                MetalNative.SendVoid(job.PixelLibrary, SelRelease);
             }
 
             Forget(job.Key0);
@@ -823,6 +1030,13 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             bytes = RebuildWithoutRefused(path);
         }
 
+        if (bytes < 0 && SplitFailures)
+        {
+            // A set may fail even though every member serializes alone (the driver's
+            // stage-combination failure). Never discard its otherwise valid pipelines.
+            WriteSeparateSegments();
+        }
+
         if (bytes < 0 || bytes >= SegmentBytes)
         {
             // Full (or unwritable): the next pipeline starts the next segment, and this
@@ -862,7 +1076,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     // pipelines it refuses.
     private long WriteSegment(nint archive, List<SegmentEntry> entries, string path)
     {
-        if (RefusedByArchiver is { } refused && entries.Exists(entry => refused(entry.Descriptor)))
+        if ((RefusedByArchiver is { } refused && entries.Exists(entry => refused(entry.Descriptor))) ||
+            RefusedBatchByArchiver?.Invoke(entries.Select(static entry => entry.Descriptor).ToArray()) == true)
         {
             Console.Error.WriteLine("[METAL-V2][ARCHIVE][WARN] An archive could not be written: a pipeline was refused.");
             return -1;
@@ -900,12 +1115,10 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         long bytes = -1;
         if (archive != 0)
         {
-            foreach (var entry in good)
+            if (good.All(entry => Add(archive, entry.Kind, entry.Descriptor)))
             {
-                Add(archive, entry.Kind, entry.Descriptor);
+                bytes = WriteSegment(archive, good, path);
             }
-
-            bytes = WriteSegment(archive, good, path);
         }
 
         if (bytes < 0)
@@ -927,6 +1140,37 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         _segmentPairs.UnionWith(good.Select(static entry => entry.Pair));
         _segmentPipelines = good.Count;
         return bytes;
+    }
+
+    private void WriteSeparateSegments()
+    {
+        foreach (var entry in _segmentEntries)
+        {
+            Console.Error.WriteLine($"[METAL-V2][ARCHIVE] Retrying failed batch separately: {Describe(entry)}");
+            var archive = NewArchive(null);
+            if (archive == 0)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (Add(archive, entry.Kind, entry.Descriptor) &&
+                    WriteSegment(archive, [entry], SegmentPath(_segmentSequence)) is var bytes && bytes >= 0)
+                {
+                    _segmentSequence++;
+                    NoteWritten(bytes);
+                }
+                else
+                {
+                    Console.Error.WriteLine($"[METAL-V2][ARCHIVE][WARN] An isolated pipeline could not be stored: {Describe(entry)}");
+                }
+            }
+            finally
+            {
+                MetalNative.SendVoid(archive, SelRelease);
+            }
+        }
     }
 
     // Narrows entries[start..start + count], which do not archive as a whole, to the ones
@@ -953,7 +1197,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
     private bool Archives(SegmentEntry[] entries, int start, int count, string probe)
     {
-        if (RefusedByArchiver is { } refused && entries.Skip(start).Take(count).Any(entry => refused(entry.Descriptor)))
+        if ((RefusedByArchiver is { } refused && entries.Skip(start).Take(count).Any(entry => refused(entry.Descriptor))) ||
+            RefusedBatchByArchiver?.Invoke(entries.Skip(start).Take(count).Select(static entry => entry.Descriptor).ToArray()) == true)
         {
             return false;
         }
@@ -968,7 +1213,10 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         {
             for (var index = start; index < start + count; index++)
             {
-                Add(archive, entries[index].Kind, entries[index].Descriptor);
+                if (!Add(archive, entries[index].Kind, entries[index].Descriptor))
+                {
+                    return false;
+                }
             }
 
             return Serialize(archive, probe, null, quiet: true) >= 0;
@@ -1010,7 +1258,48 @@ internal sealed partial class MetalBinaryArchive : IDisposable
                $"samples={MetalNative.SendUInteger(descriptor, MetalNative.Selector(entry.Kind == PipelineKind.Mesh ? "rasterSampleCount" : "sampleCount"))}";
     }
 
-    private void WriteLibraries(PipelineKind kind, nint descriptor, UInt128 first, UInt128 second)
+    private void WriteLibraries(PipelineKind kind, nint descriptor, UInt128 first, UInt128 second, nint pixelLibrary)
+    {
+        nint offDescriptor = 0;
+        nint onDescriptor = 0;
+        try
+        {
+            if (PlainPixelKey && pixelLibrary != 0)
+            {
+                // Metal archives specialized AIR, not the original function constant.
+                // Keep both named values in the plain-key library, using the source library.
+                // The pipeline segment still uses the actual draw's specialized descriptor.
+                var off = MetalRenderHost.NewMipStatisticsFunction(pixelLibrary, "gen5_ps", false, out _);
+                var on = MetalRenderHost.NewMipStatisticsFunction(pixelLibrary, "gen5_ps", true, out _);
+                try
+                {
+                    if (off == 0 || on == 0)
+                    {
+                        return;
+                    }
+
+                    offDescriptor = MetalNative.Send(descriptor, MetalNative.Selector("copy"));
+                    onDescriptor = MetalNative.Send(descriptor, MetalNative.Selector("copy"));
+                    MetalNative.SendVoid(offDescriptor, MetalNative.Selector("setFragmentFunction:"), off);
+                    MetalNative.SendVoid(onDescriptor, MetalNative.Selector("setFragmentFunction:"), on);
+                }
+                finally
+                {
+                    if (off != 0) MetalNative.SendVoid(off, SelRelease);
+                    if (on != 0) MetalNative.SendVoid(on, SelRelease);
+                }
+            }
+
+            WriteLibraryFiles(kind, offDescriptor != 0 ? offDescriptor : descriptor, first, second, onDescriptor);
+        }
+        finally
+        {
+            if (offDescriptor != 0) MetalNative.SendVoid(offDescriptor, SelRelease);
+            if (onDescriptor != 0) MetalNative.SendVoid(onDescriptor, SelRelease);
+        }
+    }
+
+    private void WriteLibraryFiles(PipelineKind kind, nint descriptor, UInt128 first, UInt128 second, nint alternateDescriptor)
     {
         if (kind != PipelineKind.Compute && !StageEntryPointsDiffer(kind, descriptor))
         {
@@ -1025,7 +1314,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
         try
         {
-            if (!Add(archive, kind, descriptor))
+            if (!Add(archive, kind, descriptor) ||
+                (alternateDescriptor != 0 && !Add(archive, kind, alternateDescriptor)))
             {
                 return;
             }
@@ -1044,10 +1334,22 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             if (first != default && second != default)
             {
                 var copy = LibraryPath(second);
-                File.Copy(path, copy, overwrite: true);
-                _known.TryAdd(second, 0);
-                Interlocked.Increment(ref _librariesWritten);
-                NoteWritten(bytes);
+                Protect(copy);
+                var temporary = $"{copy}.{Guid.NewGuid():N}.tmp";
+                try
+                {
+                    File.Copy(path, temporary);
+                    if (Publish(temporary, copy) >= 0)
+                    {
+                        _known.TryAdd(second, 0);
+                        Interlocked.Increment(ref _librariesWritten);
+                        NoteWritten(bytes);
+                    }
+                }
+                finally
+                {
+                    TryDelete(temporary);
+                }
             }
         }
         finally
@@ -1183,6 +1485,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
 
         var path = SegmentFile(sequence);
+        Protect(path);
         if (!TryVerify(path, out var length))
         {
             Interlocked.Increment(ref _rejected);
@@ -1261,7 +1564,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
     // Least recently used first: a library's file is touched when it is loaded, a segment
     // when it is written.
-    private void Trim()
+    private void Trim(long incomingBytes = 0)
     {
         var files = new DirectoryInfo(_directory).GetFiles("*" + Extension, SearchOption.AllDirectories);
         var total = 0L;
@@ -1270,7 +1573,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             total += file.Length;
         }
 
-        if (total <= _budget)
+        _diskBytes = total;
+        if (total + incomingBytes <= _budget)
         {
             return;
         }
@@ -1279,24 +1583,28 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         Array.Sort(files, static (left, right) => left.LastWriteTimeUtc.CompareTo(right.LastWriteTimeUtc));
         foreach (var file in files)
         {
-            if (total <= _budget - _budget / 10)
+            if (total <= _budget - Math.Max(_budget / 10, incomingBytes))
             {
                 break;
             }
 
-            if (string.Equals(file.FullName, current, StringComparison.Ordinal))
+            if (string.Equals(file.FullName, current, StringComparison.Ordinal) || _usedFiles.Contains(file.FullName))
             {
                 continue;
             }
 
-            if (UInt128.TryParse(Path.GetFileNameWithoutExtension(file.Name), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var key))
-            {
-                _known.TryRemove(key, out _);
-            }
-
-            total -= file.Length;
             TryDelete(file.FullName);
+            if (!File.Exists(file.FullName))
+            {
+                total -= file.Length;
+                if (UInt128.TryParse(Path.GetFileNameWithoutExtension(file.Name), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var key))
+                {
+                    _known.TryRemove(key, out _);
+                }
+            }
         }
+
+        _diskBytes = total;
     }
 
     private nint NewArchive(string? path)
@@ -1340,6 +1648,10 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     // moves it into place, so a reader never sees a half-written file. The final length, or -1.
     private long Serialize(nint archive, string path, ulong[]? pairs = null, bool quiet = false)
     {
+        Protect(path);
+        // Metal remembers the previous serialization URL. Changing it after moving that
+        // file causes its unchanged-archive copy path to fail with "file doesn't exist".
+        // The writer lease and per-library pending set make this fixed name exclusive.
         var temporary = $"{path}.{Environment.ProcessId.ToString(CultureInfo.InvariantCulture)}.tmp";
         nint error = 0;
         if (!SendBoolError(archive, MetalNative.Selector("serializeToURL:error:"), FileUrl(temporary), ref error))
@@ -1364,14 +1676,47 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         try
         {
             AppendTrailer(temporary, pairs);
-            File.Move(temporary, path, overwrite: true);
-            return new FileInfo(path).Length;
+            return Publish(temporary, path);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             Console.Error.WriteLine($"[METAL-V2][ARCHIVE][WARN] An archive could not be written: {exception.Message}");
             TryDelete(temporary);
             return -1;
+        }
+    }
+
+    // Only completed files enter the cache. Evict idle files before publishing and refuse
+    // growth beyond the budget when this session pins the working set. Concurrent static
+    // precompile writers reserve disk space under the same lock as trimming/publication.
+    private long Publish(string temporary, string path)
+    {
+        lock (_trimLock)
+        {
+            var bytes = new FileInfo(temporary).Length;
+            if (!path.EndsWith(Extension, StringComparison.Ordinal))
+            {
+                // Recovery probes are removed immediately, outside the persistent budget.
+                File.Move(temporary, path, overwrite: true);
+                return bytes;
+            }
+
+            var previous = File.Exists(path) ? new FileInfo(path).Length : 0;
+            var growth = bytes - previous;
+            if (_diskBytes + growth > _budget)
+            {
+                Trim(growth);
+            }
+
+            if (_diskBytes + growth > _budget)
+            {
+                TryDelete(temporary);
+                return -1;
+            }
+
+            File.Move(temporary, path, overwrite: true);
+            _diskBytes += growth;
+            return bytes;
         }
     }
 
@@ -1527,6 +1872,14 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     // Autoreleased.
     private static nint FileUrl(string path) =>
         MetalNative.Send(MetalNative.Class("NSURL"), MetalNative.Selector("fileURLWithPath:"), MetalNative.NsString(path));
+
+    private void Protect(string path)
+    {
+        lock (_trimLock)
+        {
+            _usedFiles.Add(path);
+        }
+    }
 
     private static void Touch(string path)
     {
