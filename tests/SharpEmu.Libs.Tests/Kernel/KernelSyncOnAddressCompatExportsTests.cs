@@ -126,10 +126,14 @@ public sealed class KernelSyncOnAddressCompatExportsTests
     {
         var (memory, ctx) = CreateContext();
         WriteUInt32(memory, ValueAddress, 11);
-        WriteUInt32(memory, TimeoutAddress, 1000);
+        // Stage reliably under Rosetta/load, then explicitly deliver expiry.
+        WriteUInt32(memory, TimeoutAddress, 10_000_000);
         var waiter = StageWait32(ctx, threadHandle: 0x807, expected: 11, TimeoutAddress);
 
         WriteUInt32(memory, ValueAddress, 12);
+        var timed = Assert.IsAssignableFrom<GuestWaiter>(waiter);
+        timed.Expire();
+        Assert.Equal(GuestWaitStatus.TimedOut, timed.Status);
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, waiter.Resume());
     }
 
@@ -138,8 +142,11 @@ public sealed class KernelSyncOnAddressCompatExportsTests
     {
         var (memory, ctx) = CreateContext();
         WriteUInt32(memory, ValueAddress, 13);
-        WriteUInt32(memory, TimeoutAddress, 1000);
+        WriteUInt32(memory, TimeoutAddress, 10_000_000);
         var waiter = StageWait32(ctx, threadHandle: 0x808, expected: 13, TimeoutAddress);
+        var timed = Assert.IsAssignableFrom<GuestWaiter>(waiter);
+        timed.Expire();
+        Assert.Equal(GuestWaitStatus.TimedOut, timed.Status);
 
         Assert.Equal(
             (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT,

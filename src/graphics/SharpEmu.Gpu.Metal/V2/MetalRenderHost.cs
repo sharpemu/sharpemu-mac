@@ -2255,6 +2255,7 @@ internal sealed partial class MetalRenderHost :
                 ? $"dcbhash_checks={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashChecks} dcbhash_mismatches={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashMismatches} "
                 : string.Empty) +
             $"draws={draws} passes={passes} flushes={flushes} flush_by=[{flushBy}] flush_deferred={TakeDeferredStreamFlushes()} " +
+            $"{ResourceMaterializationCache.TakeBypassReport()} " +
             // Page-guard write watches held, and the most one page reached (the guard fails past 127).
             $"page_watches={pageWatches} page_watch_peak={pageWatchPeak} " +
             $"draw_ms={(drawTicks * 1000.0 / frequency).ToString("F1", culture)} " +

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -20,8 +22,86 @@ namespace SharpEmu.Gpu.Metal.V2;
 // land) except through a recorded write, an owed CP write, a host write that forgets owed
 // bytes, or a wait: each of those drops every line. Lines live only between
 // BeginGuestWordReads and EndGuestWordReads on the thread that began them.
-internal sealed partial class MetalRenderHost
+internal sealed partial class MetalRenderHost : IResourceDependencySource
 {
+    // Keep the packet protocol independent of the write-version implementation. Until
+    // a range has complete native protection AND a participating physical-writer watch,
+    // equality of first-write counters cannot certify content. In particular, an
+    // unprotected page may receive arbitrarily many stores after its first fault.
+    ResourceDependencyEpoch IResourceDependencySource.DependencyEpoch => new(
+        _gpuWrites.Version, _cpOverlay.Version, DeviceAddressMappingVersion(), _imageCache.Epochs.Binding, _labelOverlay.Version);
+
+    private byte[] _dependencyCapture = [];
+    private readonly Dictionary<(ulong Address, int Size), WeakReference<WordDependency>> _wordDependencies = new();
+
+    bool IResourceDependencySource.TryCaptureDependency(ulong address, ReadOnlySpan<byte> expected, bool clean,
+        out ResourceDependency? dependency)
+    {
+        dependency = null;
+        if (expected.IsEmpty || expected.Length > 65536 || _labelOverlay.Count != 0 ||
+            _backing.SingleCopy is { ReleasedChunks: > 0 } || _memory is not ICpuMappedReadWatchSource source ||
+            !GuestImageWriteTracker.TryGetProtectedObservedContentToken(address, (ulong)expected.Length, out var before) ||
+            _imageCache.HasGpuModifiedImageBytes(address, (ulong)expected.Length) ||
+            OverlayCoverage(address, (ulong)expected.Length) != MetalOverlayCoverage.None ||
+            (_gpuWrites.MayCover(address, (ulong)expected.Length) && PendingSerialHinted(address, (ulong)expected.Length) != 0))
+            return false;
+
+        var epoch = ((IResourceDependencySource)this).DependencyEpoch;
+        var key = (address, expected.Length);
+        // Share the SAME original observation across stages. Bytes are captured once
+        // per interval/version, rather than re-read as each plan enrolls the interval.
+        if (_wordDependencies.TryGetValue(key, out var weak) && weak.TryGetTarget(out var existing) &&
+            existing.Matches(epoch, expected) && existing.Validate() == ResourceDependencyStatus.Current)
+        {
+            existing.Retain();
+            dependency = existing;
+            return true;
+        }
+
+        // Copy only on enrollment. The observation closes managed before/landed races
+        // on physical aliases; protected tokens close native first-fault/rearm races.
+        if (_dependencyCapture.Length < expected.Length) _dependencyCapture = new byte[expected.Length];
+        var bytes = _dependencyCapture.AsSpan(0, expected.Length);
+        if (source.TryReadMappedCopyWithWriteWatch(address, (ulong)bytes.Length, address, bytes,
+            out var observation) != CpuMappedCopyResult.Copied || observation is null) return false;
+        if (!bytes.SequenceEqual(expected) || !source.IsMappedCopyWriteWatchCurrent(observation) ||
+            !GuestImageWriteTracker.TryGetProtectedObservedContentToken(address, (ulong)bytes.Length, out var after) ||
+            before != after)
+        {
+            source.ReleaseMappedCopyWriteWatch(observation);
+            return false;
+        }
+        var captured = new WordDependency(source, observation, before, epoch, expected.ToArray());
+        if (_wordDependencies.Count >= 2048) _wordDependencies.Clear();
+        _wordDependencies[key] = new(captured);
+        dependency = captured;
+        return true;
+    }
+
+    private sealed class WordDependency(ICpuMappedReadWatchSource source, CpuMappedCopyObservation observation,
+        GuestImageWriteTracker.ContentToken token, ResourceDependencyEpoch epoch, byte[] expected) : ResourceDependency
+    {
+        // References are worker-owned, like the word-line scope and materialization cache.
+        private int _references = 1;
+        public override long RetainedBytes => 512L + expected.Length + observation.Segments.Count * 128L;
+        internal bool Matches(ResourceDependencyEpoch current, ReadOnlySpan<byte> bytes) =>
+            _references != 0 && epoch == current && bytes.SequenceEqual(expected);
+        internal void Retain() => _references++;
+        public override ResourceDependencyStatus Validate()
+        {
+            if (_references == 0) return ResourceDependencyStatus.Unavailable;
+            if (!source.IsMappedCopyObservationCurrent(observation)) return ResourceDependencyStatus.Mapping;
+            if (!source.IsMappedCopyWriteWatchCurrent(observation)) return ResourceDependencyStatus.CpuWrite;
+            return GuestImageWriteTracker.TryGetProtectedObservedContentToken(observation.SourceAddress,
+                observation.SourceByteCount, out var current) && token == current
+                ? ResourceDependencyStatus.Current : ResourceDependencyStatus.CpuWrite;
+        }
+        public override void Dispose()
+        {
+            if (_references != 0 && --_references == 0) source.ReleaseMappedCopyWriteWatch(observation);
+        }
+    }
+
     // SHARPEMU_RESOURCE_WIDE_LINES=0 keeps the 64-byte lines of 16 slots. A line costs the same
     // tests however wide it is, and a descriptor table or pointer ring is read from a few lines.
     private static readonly bool WideLines = SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOURCE_WIDE_LINES");

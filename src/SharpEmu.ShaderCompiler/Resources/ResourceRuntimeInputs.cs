@@ -32,6 +32,8 @@ public sealed class ResourceRuntimeInputs
 
     public bool ReadsClean { get; init; }
 
+    public IResourceDependencySource? DependencySource { get; set; }
+
     // Whether recorded GPU work may still write the dword at this address, asked without
     // waiting. A data-only table word found pending is learned as a device load
     // (DeviceDataLoads); null leaves every data word flattened.
