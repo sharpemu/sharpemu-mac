@@ -2298,7 +2298,7 @@ internal sealed partial class MetalRenderHost :
             // Prewarm threads held back for the game, compiles the starvation limit let
             // through, and prewarm compiles in the driver now.
             $"prewarm_held_ms={scheduler.HeldMilliseconds.ToString("F0", culture)} prewarm_trickle={scheduler.Trickled} " +
-            $"prewarm_inflight={MetalCompileScheduler.Shared.PrewarmInFlight} " +
+            $"prewarm_inflight={MetalCompileScheduler.Shared.PrewarmInFlight} {MetalStaticPrecompile.DescribeState()} " +
             $"compiles={compiles.Started}/{compiles.Finished} compile_waits={compiles.Deduped} " +
             $"compile_ms={compiles.Milliseconds.ToString("F1", culture)} compiling={PipelinesCompiling} " +
             // Draws left out while their pipeline compiled, pipelines the worker waited for

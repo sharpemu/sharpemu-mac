@@ -27,6 +27,10 @@ public enum HostThreadQos
 
     /// <summary>Long-running background work that nobody is waiting on.</summary>
     Utility,
+
+    /// <summary>Work that must stay out of everything else's way: on Apple silicon the
+    /// scheduler keeps it on the efficiency cores. Speculative precompiles.</summary>
+    Background,
 }
 
 /// <summary>
@@ -58,6 +62,7 @@ public static partial class HostThreadQualityOfService
     private const uint QosClassUserInitiated = 0x19;
     private const uint QosClassDefault = 0x15;
     private const uint QosClassUtility = 0x11;
+    private const uint QosClassBackground = 0x09;
 
     /// <summary>
     /// Asks the host to schedule the calling thread at <paramref name="qos"/>.
@@ -100,6 +105,7 @@ public static partial class HostThreadQualityOfService
         HostThreadQos.UserInteractive => QosClassUserInteractive,
         HostThreadQos.UserInitiated => QosClassUserInitiated,
         HostThreadQos.Utility => QosClassUtility,
+        HostThreadQos.Background => QosClassBackground,
         _ => QosClassDefault,
     };
 

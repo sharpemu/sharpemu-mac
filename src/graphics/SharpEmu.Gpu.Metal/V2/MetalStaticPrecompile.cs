@@ -36,6 +36,13 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// prewarm's thread count. A finished unit is listed in static-precompile-&lt;stamp&gt;.done
 /// and not translated again under the same translators.
 ///
+/// The background precompile stays out of the game's way: its threads run at background QoS
+/// (the scheduler keeps them on the efficiency cores of Apple silicon; SHARPEMU_SHADER_PRECOMPILE_QOS=
+/// background|utility|off), at most <see cref="PresentingJobs"/> of them work once the guest
+/// presents frames (SHARPEMU_SHADER_PRECOMPILE_THROTTLE=0 keeps them all), and a library the
+/// frame path needs is built once, by whoever needs it first (<see cref="MetalStaticLibraryClaims"/>;
+/// SHARPEMU_SHADER_PRECOMPILE_DEMAND=0 turns that off).
+///
 /// SHARPEMU_SHADER_CACHE=off turns it off (and the capture of created programs);
 /// SHARPEMU_SHADER_PRECOMPILE_JOBS, SHARPEMU_SHADER_PRECOMPILE_BUDGET and
 /// SHARPEMU_SHADER_SCAN=shaders|all|off tune it, and SHARPEMU_SHADER_PRECOMPILE_COMPUTE=1
@@ -50,6 +57,9 @@ internal static class MetalStaticPrecompile
     internal const string BudgetVariable = "SHARPEMU_SHADER_PRECOMPILE_BUDGET";
     internal const string ScanVariable = "SHARPEMU_SHADER_SCAN";
     internal const string ComputeVariable = "SHARPEMU_SHADER_PRECOMPILE_COMPUTE";
+    internal const string QosVariable = "SHARPEMU_SHADER_PRECOMPILE_QOS";
+    internal const string ThrottleVariable = "SHARPEMU_SHADER_PRECOMPILE_THROTTLE";
+    internal const string DemandVariable = "SHARPEMU_SHADER_PRECOMPILE_DEMAND";
 
     /// <summary>
     /// Compute programs only with SHARPEMU_SHADER_PRECOMPILE_COMPUTE=1: a compute's
@@ -60,6 +70,31 @@ internal static class MetalStaticPrecompile
     /// </summary>
     internal static readonly bool IncludeComputes = Environment.GetEnvironmentVariable(ComputeVariable) == "1";
     internal const int DefaultJobs = 2;
+
+    /// <summary>
+    /// The workers that run once the guest presents frames: the game's 13 job threads and the
+    /// GPU worker need the performance cores, and one background worker is what is left to
+    /// give. While the guest loads (no frame presented yet) all the configured workers run.
+    /// </summary>
+    internal const int PresentingJobs = 1;
+
+    /// <summary>How long the frame path waits for a worker's build of a library it needs before it compiles the library itself.</summary>
+    internal static readonly TimeSpan DemandWait = TimeSpan.FromSeconds(10);
+
+    private const int WorkerStackBytes = 16 * 1024 * 1024;
+
+    /// <summary>
+    /// The class of the background precompile's threads: SHARPEMU_SHADER_PRECOMPILE_QOS
+    /// background (the default; the efficiency cores), utility, or off (the default class).
+    /// The precompile modes that hold the guest ignore it.
+    /// </summary>
+    internal static readonly SharpEmu.HLE.Host.HostThreadQos BackgroundQos = ParseQos(Environment.GetEnvironmentVariable(QosVariable));
+
+    /// <summary>Whether the workers beyond <see cref="PresentingJobs"/> park once the guest presents frames: SHARPEMU_SHADER_PRECOMPILE_THROTTLE, on unless off.</summary>
+    internal static readonly bool ThrottleWhilePresenting = ShaderCacheSwitch(Environment.GetEnvironmentVariable(ThrottleVariable));
+
+    /// <summary>Whether the frame path takes or waits for a library the precompile has in hand: SHARPEMU_SHADER_PRECOMPILE_DEMAND, on unless off.</summary>
+    internal static readonly bool DemandPriority = ShaderCacheSwitch(Environment.GetEnvironmentVariable(DemandVariable));
 
     /// <summary>
     /// New libraries a background start stores at most. A Demon's Souls library file with
@@ -86,13 +121,18 @@ internal static class MetalStaticPrecompile
     private static readonly object _gate = new();
     private static readonly ConcurrentQueue<StaticShaderJob> _created = new();
     private static readonly ConcurrentDictionary<ulong, byte> _done = new();
-    private static readonly ConcurrentDictionary<UInt128, byte> _inFlight = new();
+    private static readonly MetalStaticLibraryClaims _claims = new();
     private static readonly ConcurrentDictionary<string, nint> _stubs = new(StringComparer.Ordinal);
     private static readonly ManualResetEventSlim _finished = new(false);
     private static StaticShaderPlanner? _planner;
     private static FileStream? _doneFile;
     private static List<StaticShaderJob> _plan = [];
-    private static Thread[] _threads = [];
+    private static SharpEmu.HLE.Host.HostBackgroundThread[] _threads = [];
+    private static int _configuredJobs;
+    private static volatile bool _presenting;
+    private static volatile bool _holding;
+    private static int _qosApplied;
+    private static uint _qosClass;
     private static int _next = -1;
     private static bool _started;
     private static volatile bool _stopping;
@@ -157,24 +197,97 @@ internal static class MetalStaticPrecompile
             _started = true;
         }
 
-        new Thread(() =>
-        {
-            try
+        _holding = Precompile.HoldsUntilComplete;
+        _ = SharpEmu.HLE.Host.HostBackgroundThread.Start(
+            "SharpEmu static shader precompile", ThreadQos(_holding), WorkerStackBytes, applied =>
             {
-                Run(device, metalDirectory, stamp, compiler);
-            }
-            catch (Exception exception)
-            {
-                Console.Error.WriteLine($"[LOADER][WARN] Shader precompile (static) stopped: {exception.Message}");
-                _finished.Set();
-            }
-        })
-        {
-            IsBackground = true,
-            Priority = Precompile.HoldsUntilComplete ? ThreadPriority.Normal : ThreadPriority.BelowNormal,
-            Name = "SharpEmu static shader precompile",
-        }.Start();
+                NoteQos(applied);
+                try
+                {
+                    Run(device, metalDirectory, stamp, compiler);
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine($"[LOADER][WARN] Shader precompile (static) stopped: {exception.Message}");
+                    _finished.Set();
+                }
+            });
     }
+
+    /// <summary>
+    /// The guest presented its first frame: from now on at most <see cref="PresentingJobs"/>
+    /// workers run (MetalShaderPrewarm.NoteFirstGuestFrame).
+    /// </summary>
+    public static void NoteGuestPresenting() => _presenting = true;
+
+    /// <summary>The class of a precompile thread: the held modes want the work done, the background mode wants it out of the way.</summary>
+    internal static SharpEmu.HLE.Host.HostThreadQos ThreadQos(bool holding) =>
+        holding ? SharpEmu.HLE.Host.HostThreadQos.UserInitiated : BackgroundQos;
+
+    internal static SharpEmu.HLE.Host.HostThreadQos ParseQos(string? value) =>
+        value?.Trim().ToLowerInvariant() switch
+        {
+            "utility" => SharpEmu.HLE.Host.HostThreadQos.Utility,
+            "0" or "off" or "false" or "no" or "disabled" or "default" => SharpEmu.HLE.Host.HostThreadQos.Default,
+            _ => SharpEmu.HLE.Host.HostThreadQos.Background,
+        };
+
+    /// <summary>The workers allowed to run: all of <paramref name="configured"/> while the guest loads, <see cref="PresentingJobs"/> once it presents.</summary>
+    internal static int AllowedWorkers(int configured, bool presenting, bool holding, bool throttle) =>
+        holding || !throttle || !presenting ? configured : Math.Min(configured, PresentingJobs);
+
+    // What the calling precompile thread runs at, for the log: the class it reads back.
+    private static void NoteQos(bool applied)
+    {
+        if (applied)
+        {
+            Interlocked.Increment(ref _qosApplied);
+        }
+
+        if (SharpEmu.HLE.Host.HostThreadQualityOfService.GetCurrentThreadClassForDiagnostics() is var actual and not 0)
+        {
+            Volatile.Write(ref _qosClass, actual);
+        }
+    }
+
+    /// <summary>
+    /// The precompile's state for the PERF line: workers allowed and configured, jobs done and
+    /// left, the QoS class a thread reads back (and how many threads got the one asked for),
+    /// and what the frame path took or waited for.
+    /// </summary>
+    public static string DescribeState()
+    {
+        if (!Enabled)
+        {
+            return "precompile=off";
+        }
+
+        var configured = Volatile.Read(ref _configuredJobs);
+        var done = Volatile.Read(ref _jobsDone);
+        var remaining = _finished.IsSet ? 0 : Math.Max(0, Volatile.Read(ref _plan).Count - Math.Max(0, Volatile.Read(ref _next) + 1)) + _created.Count;
+        return string.Create(CultureInfo.InvariantCulture,
+            $"precompile=[workers={AllowedWorkers(configured, _presenting, _holding, ThrottleWhilePresenting)}/{configured} done={done} remaining={remaining} " +
+            $"planned={(_planned ? 1 : 0)} finished={(_finished.IsSet ? 1 : 0)} qos={QosName(Volatile.Read(ref _qosClass))}({Volatile.Read(ref _qosApplied)}/{configured + 1}) " +
+            $"demand_taken={_claims.TakenCount} demand_waited={_claims.WaitedCount} demand_timeouts={_claims.TimedOutCount}]");
+    }
+
+    private static string QosName(uint qosClass) => qosClass switch
+    {
+        0 => "unknown",
+        0x09 => "background",
+        0x11 => "utility",
+        0x15 => "default",
+        0x19 => "user-initiated",
+        0x21 => "user-interactive",
+        _ => "0x" + qosClass.ToString("x", CultureInfo.InvariantCulture),
+    };
+
+    /// <summary>
+    /// The frame path needs the library of <paramref name="key"/> and the archive lacks it.
+    /// True when a precompile worker was building it and its file is there now: load the
+    /// archive again. False: compile it (a worker that had not begun leaves it).
+    /// </summary>
+    public static bool DemandLibrary(UInt128 key) => DemandPriority && _claims.Demand(key, DemandWait);
 
     /// <summary>
     /// The precompile modes' last phase: waits for every unit, with the progress on the
@@ -224,9 +337,9 @@ internal static class MetalStaticPrecompile
         _scanCancel.Cancel();
         foreach (var thread in Volatile.Read(ref _threads))
         {
-            if (thread != Thread.CurrentThread)
+            if (!thread.IsCurrentThread)
             {
-                thread.Join(TimeSpan.FromSeconds(10));
+                thread.Join(10_000);
             }
         }
 
@@ -297,35 +410,30 @@ internal static class MetalStaticPrecompile
         var jobs = hold ? MetalShaderPrewarm.WorkerCount : ReadInt(JobsVariable, DefaultJobs, 1, 16);
         // The workers take the created programs while the scan runs; the plan follows it.
         var remaining = jobs;
-        var threads = new Thread[jobs];
+        Volatile.Write(ref _configuredJobs, jobs);
+        var threads = new List<SharpEmu.HLE.Host.HostBackgroundThread>(jobs);
         for (var index = 0; index < jobs; index++)
         {
-            threads[index] = new Thread(() =>
-            {
-                try
+            var worker = index;
+            threads.Add(SharpEmu.HLE.Host.HostBackgroundThread.Start(
+                $"SharpEmu static shader precompile {index}", ThreadQos(hold), WorkerStackBytes, applied =>
                 {
-                    Work(planner, archive, device, compiler, hold);
-                }
-                finally
-                {
-                    if (Interlocked.Decrement(ref remaining) == 0)
+                    NoteQos(applied);
+                    try
                     {
-                        Finish(archive);
+                        Work(planner, archive, device, compiler, hold, worker);
                     }
-                }
-            })
-            {
-                IsBackground = true,
-                Priority = hold ? ThreadPriority.Normal : ThreadPriority.BelowNormal,
-                Name = $"SharpEmu static shader precompile {index}",
-            };
+                    finally
+                    {
+                        if (Interlocked.Decrement(ref remaining) == 0)
+                        {
+                            Finish(archive);
+                        }
+                    }
+                }));
         }
 
-        Volatile.Write(ref _threads, threads);
-        foreach (var thread in threads)
-        {
-            thread.Start();
-        }
+        Volatile.Write(ref _threads, threads.ToArray());
 
         // Behind the game's own start: its first frame's programs and the files it reads then
         // come first.
@@ -405,7 +513,7 @@ internal static class MetalStaticPrecompile
         return records;
     }
 
-    private static void Work(StaticShaderPlanner planner, MetalBinaryArchive archive, nint device, IGuestGpuBackend compiler, bool hold)
+    private static void Work(StaticShaderPlanner planner, MetalBinaryArchive archive, nint device, IGuestGpuBackend compiler, bool hold, int worker)
     {
         // The first frame's programs go first: the guest waits for those.
         while (!hold && !_stopping && MetalShaderPrewarm.Gate.IsHolding)
@@ -420,6 +528,14 @@ internal static class MetalStaticPrecompile
                           _startBytes + Interlocked.Read(ref _storedBytes) >= archive.Budget * ArchiveShare))
             {
                 break;
+            }
+
+            // The guest is presenting: the game's threads need the cores, so only the first
+            // PresentingJobs workers go on.
+            if (worker >= AllowedWorkers(Volatile.Read(ref _configuredJobs), _presenting, hold, ThrottleWhilePresenting))
+            {
+                Thread.Sleep(250);
+                continue;
             }
 
             if (!_created.TryDequeue(out var job))
@@ -493,19 +609,27 @@ internal static class MetalStaticPrecompile
         {
             Interlocked.Increment(ref _translated);
             var key = MetalBinaryArchive.LibraryKey(shader.Source, shader.UsesPerVertexInputs);
-            if (archive.HasLibrary(key) || !_inFlight.TryAdd(key, 0))
+            if (archive.HasLibrary(key) || _claims.Register(key) is not { } claim)
             {
                 Interlocked.Increment(ref _present);
                 continue;
             }
 
-            try
+            using (claim)
             {
                 // Waits while the game compiles, and holds a prewarm slot meanwhile.
                 using var slot = MetalCompileScheduler.Shared.EnterPrewarm(static () => _stopping);
                 if (!slot.Entered)
                 {
                     return;
+                }
+
+                // The game wanted this library while the worker waited: its own compile
+                // (or the file it stored) is the one, and a second would only compete.
+                if (archive.HasLibrary(key) || (DemandPriority && !claim.TryBegin()))
+                {
+                    Interlocked.Increment(ref _present);
+                    continue;
                 }
 
                 var bytes = Store(archive, device, shader, key, out var error);
@@ -518,10 +642,6 @@ internal static class MetalStaticPrecompile
                 {
                     NoteFailure(error);
                 }
-            }
-            finally
-            {
-                _inFlight.TryRemove(key, out _);
             }
         }
     }
