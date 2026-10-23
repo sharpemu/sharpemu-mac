@@ -34,6 +34,37 @@ public sealed class Gen5MslLoadElisionTests
         Assert.Equal([1f, -1f, 1f, 1f], positions[12..16]);
     }
 
+    [Theory]
+    [InlineData(ShaderDepthPlanes.Far)]
+    [InlineData(ShaderDepthPlanes.NearAtZero | ShaderDepthPlanes.Far)]
+    [InlineData(ShaderDepthPlanes.NearAtNegativeW | ShaderDepthPlanes.Far)]
+    public void KnownPassingDepthClipPlanesKeepThePositionProof(ShaderDepthPlanes planes)
+    {
+        var shader = CompileVertex(PresentQuad(), new ShaderClipSpaceTransform { DepthPlanes = planes });
+        Assert.Equal(CompileVertex(PresentQuad()).ConstantPositions, shader.ConstantPositions);
+    }
+
+    [Theory]
+    [InlineData(ShaderDepthPlanes.Far, 2f)]
+    [InlineData(ShaderDepthPlanes.NearAtZero, -0.5f)]
+    [InlineData(ShaderDepthPlanes.NearAtNegativeW, -2f)]
+    public void AFailingGuestDepthPlaneStillRefusesTheProof(ShaderDepthPlanes planes, float z)
+    {
+        var instructions = PresentQuad().Instructions.ToList();
+        var at = instructions.FindIndex(static i => i.Control is Gen5ExportControl { Target: Pos0 });
+        var sources = instructions[at].Sources.ToArray();
+        sources[2] = Gen5Operand.Vector(6);
+        instructions[at] = instructions[at] with { Sources = sources };
+        instructions.Insert(at, Instruction(0, "VMovB32", Gen5ShaderEncoding.Vop1,
+            [Literal(Bits(z))], [Gen5Operand.Vector(6)]));
+        // The proof must test the guest z before a transform could move it back inside.
+        var shader = CompileVertex(Renumber(instructions), new ShaderClipSpaceTransform
+        {
+            DepthPlanes = planes, DepthRemap = true, DepthScale = 0, DepthOffset = 0.5f,
+        });
+        Assert.Null(shader.ConstantPositions);
+    }
+
     [Fact]
     public void HostClipSpaceTransformAppliesToConstantPositions()
     {
