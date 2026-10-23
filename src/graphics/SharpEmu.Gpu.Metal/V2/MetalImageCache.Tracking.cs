@@ -324,18 +324,25 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.Attempts);
         // A writeback still in flight over the page lands first; the store waits for it.
-        var fenced = Volatile.Read(ref _fencedWritebackCount) != 0 && WaitForFencedWritebacks(address, size);
+        var fenceSlow = false;
+        var fenced = Volatile.Read(ref _fencedWritebackCount) != 0 && WaitForFencedWritebacks(address, size, out fenceSlow);
 
         // A cached staged copy over the page is stale from here; the store may land once its watch is gone.
-        var stagedHit = StagedRanges?.OnCpuWrite(address, size) ?? false;
+        var staged = StagedRanges;
+        var mayStage = staged?.MayCover(address, size) ?? false;
+        var stagedHit = mayStage && staged!.OnCpuWrite(address, size);
         var mayOwn = _pageOwners.MayHaveOwners(address, size);
         if (!mayOwn && !MetadataWatchOverlaps(address, size))
         {
+            if (!mayStage && !fenceSlow) MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.FastAdmissions);
             return stagedHit | fenced;
         }
 
         CountLockedCpuWrite(mayOwn);
+        MetalStoreFastPathCounters.Count(mayOwn ? MetalStoreFastPathCounters.Kind.ImageReject : MetalStoreFastPathCounters.Kind.MetadataReject);
+        MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.ImageGate);
         StoreFallback? fallback = null;
         bool hit;
         using (_lock.Hold())
@@ -366,26 +373,30 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.Attempts);
         // A writeback still in flight over these bytes lands first, as it does under a
         // faulting store; this write lands as soon as it returns, not on a retry.
-        if (Volatile.Read(ref _fencedWritebackCount) != 0)
-        {
-            WaitForFencedWritebacksUnder(address, size);
-        }
+        var fenceSlow = Volatile.Read(ref _fencedWritebackCount) != 0 && WaitForFencedWritebacksUnder(address, size);
 
         var stagedHit = false;
-        if (StagedRanges is { } staged && staged.MayCover(address, size))
+        var staged = StagedRanges;
+        var mayStage = staged?.MayCover(address, size) ?? false;
+        if (mayStage)
         {
-            stagedHit = staged.OnPreciseCpuWrite(address, size, _guestMemory.IsBacked(address, size));
+            stagedHit = staged!.OnPreciseCpuWrite(address, size, _guestMemory.IsBacked(address, size));
         }
 
         var mayOwn = _pageOwners.MayHaveOwners(address, size);
         if (!mayOwn && !MetadataWatchOverlaps(address, size))
         {
+            if (!mayStage && !fenceSlow)
+                MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.FastAdmissions);
             return stagedHit;
         }
 
         CountLockedCpuWrite(mayOwn);
+        MetalStoreFastPathCounters.Count(mayOwn ? MetalStoreFastPathCounters.Kind.ImageReject : MetalStoreFastPathCounters.Kind.MetadataReject);
+        MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.ImageGate);
         var backed = mayOwn && _guestMemory.IsBacked(address, size);
         StoreFallback? fallback = null;
         bool hit;

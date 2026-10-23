@@ -211,6 +211,8 @@ internal sealed class MetalStagedRangeCache
     private readonly IStagedRangeBackend _backend;
     private readonly ulong _budget;
     private readonly object _gate = new();
+    private readonly MetalStorePageCounts _storePages = new();
+    internal bool StoreFastPathEnabled { get; set; } = MetalV2Diagnostics.StoreFastPath;
     private readonly Dictionary<(ulong Address, ulong Size), Entry> _entries = new();
     private readonly Dictionary<ulong, List<Entry>> _pages = new();
     private readonly long[] _everPages = new long[MetalImagePageOwners.PageCount / 64];
@@ -302,7 +304,7 @@ internal sealed class MetalStagedRangeCache
     public bool MayCover(ulong address, ulong size) =>
         Volatile.Read(ref _entryCount) != 0 &&
         MetalImagePageOwners.TryGetPageRange(address, size, out var first, out var lastExclusive) &&
-        MayHavePages(first, lastExclusive);
+        (StoreFastPathEnabled ? _storePages.MayOverlap(address, size) : MayHavePages(first, lastExclusive));
 
     public static bool Eligible(ulong size) => size >= MinBytes && size <= MaxBytes;
 
@@ -526,6 +528,7 @@ internal sealed class MetalStagedRangeCache
             {
                 DropWatch(entry);
                 entry.Removed = true;
+                _storePages.Remove(entry.Address, entry.Size);
                 ReleaseBuffer(entry.StagingBuffer);
                 ReleaseBuffer(entry.PristineBuffer);
             }
@@ -560,6 +563,13 @@ internal sealed class MetalStagedRangeCache
             return false;
         }
 
+        if (StoreFastPathEnabled && !_storePages.MayOverlap(address, size))
+        {
+            MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.StagedFast);
+            return false;
+        }
+        MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.StagedReject);
+
         var begin = address;
         var length = size;
         if (pageGranular)
@@ -569,6 +579,7 @@ internal sealed class MetalStagedRangeCache
         }
 
         var found = false;
+        MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.StagedGate);
         lock (_gate)
         {
             foreach (var entry in Collect(first, lastExclusive, begin, length))
@@ -662,6 +673,7 @@ internal sealed class MetalStagedRangeCache
 
     private void Index(Entry entry)
     {
+        _storePages.Add(entry.Address, entry.Size);
         _entries[(entry.Address, entry.Size)] = entry;
         Volatile.Write(ref _entryCount, _entries.Count);
         MetalImagePageOwners.TryGetPageRange(entry.Address, entry.Size, out var first, out var lastExclusive);
@@ -697,6 +709,7 @@ internal sealed class MetalStagedRangeCache
                 }
             }
         }
+        _storePages.Remove(entry.Address, entry.Size);
     }
 
     // Drops an entry from the index and sends its buffers back once the GPU is done with them.
@@ -708,8 +721,8 @@ internal sealed class MetalStagedRangeCache
         }
 
         entry.Removed = true;
-        Unindex(entry);
         DropWatch(entry);
+        Unindex(entry);
         RetireBuffers(entry, entry.LastUseSerial);
     }
 
@@ -880,8 +893,8 @@ internal sealed class MetalStagedRangeCache
         }
 
         victim.Removed = true;
-        Unindex(victim);
         DropWatch(victim);
+        Unindex(victim);
         if (victim.StagingBuffer is { } staging)
         {
             PushFree(staging);

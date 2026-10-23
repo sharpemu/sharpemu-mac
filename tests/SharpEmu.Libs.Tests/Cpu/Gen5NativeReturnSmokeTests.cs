@@ -19,7 +19,10 @@ public sealed class Gen5NativeReturnSmokeTests
 {
     private const ulong CallbackReturnValue = 0xFEDC_BA98_7654_3210UL;
     private const string WorkerEnvironmentVariable = "SHARPEMU_NATIVE_RETURN_SMOKE_WORKER";
-    private static readonly TimeSpan WorkerTimeout = TimeSpan.FromSeconds(30);
+    // Includes a fresh VSTest discovery, Rosetta JIT and framework initializer
+    // warm-up, before the native smoke itself starts. That startup exceeds 30s
+    // under build load; keep an owned-process deadline without killing a healthy worker.
+    private static readonly TimeSpan WorkerTimeout = TimeSpan.FromSeconds(90);
     private const string FaultWorkerReportVariable = "SHARPEMU_NATIVE_FAULT_SMOKE_REPORT";
 
     [Fact]

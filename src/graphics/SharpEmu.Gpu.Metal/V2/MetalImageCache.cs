@@ -172,6 +172,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         MetalBlockCubeDump.Peek ??= guestMemory.TryPeek;
         _pages = pages;
         _backing = backing;
+        MetalStoreFastPathCounters.Initialize();
         InitializeLossy();
         ConfigureMemoryPolicy(
             MetalImageBudgetSettings.FromEnvironment(MetalHostMemory.Physical),
@@ -1508,6 +1509,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             RefreshBeforeWriteback(image);
         }
 
+        var fenceMappingSnapshot = _backing.BackingAliasSnapshot;
         var destination = _guestMemory.ResolveWritable(
             description.Data.Address + aligned, alignedEnd - aligned);
         if (!destination.IsValid || destination.Size < alignedEnd - aligned)
@@ -1518,6 +1520,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         _owner.LandHeldCopies(description.Data.Address + aligned, alignedEnd - aligned);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
+        var fencedSerial = context.SubmissionSerial;
+        FenceWriteback(description.Data.Address + aligned, alignedEnd - aligned, fencedSerial, cause, fenceMappingSnapshot);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         if (!_transfer.EncodeTextureToGuest(
                 context, in description, range, image.Texture, destination, default, aligned, alignedEnd - aligned))
@@ -1530,6 +1534,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (context.WantsEncodedLabels)
         {
             context.ProfileEncoded(ProfileLabel("writeback-run", in description));
+        }
+        if (context.SubmissionSerial != fencedSerial)
+        {
+            FenceWriteback(description.Data.Address + aligned, alignedEnd - aligned,
+                context.SubmissionSerial, cause, fenceMappingSnapshot);
         }
         image.MarkPublished(aligned, alignedEnd);
         NoteOwnGuestWrite(description.Data.Address + aligned, alignedEnd - aligned);
@@ -2354,10 +2363,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         RefreshBeforeWriteback(image);
         ref readonly var description = ref image.Description;
         _owner.LandHeldCopies(description.Data.Address, description.Data.Size);
+        var fenceMappingSnapshot = _backing.BackingAliasSnapshot;
         var destination = description.Data.Size <= TransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
             : default;
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
+        // Reserve before any piece or stencil transfer can be encoded/executed.
+        // Partial/refused encodes keep the conservative fence until completion.
+        var fencedSerial = context.SubmissionSerial;
+        FenceWriteback(description.Data.Address, description.Data.Size, fencedSerial, cause, fenceMappingSnapshot);
+        if (description.HasStencil)
+        {
+            FenceWriteback(description.Stencil.Address, description.Stencil.Size, fencedSerial, cause, fenceMappingSnapshot);
+        }
         ulong written;
         if (destination.IsValid && destination.Size >= description.Data.Size)
         {
@@ -2391,18 +2409,28 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             context.ProfileEncoded(ProfileLabel("writeback", in description));
         }
+        // Profiling or a transfer split can roll the context to a newer
+        // submission. Retain the old post-encode newest-serial guarantee too.
+        if (context.SubmissionSerial != fencedSerial)
+        {
+            FenceWriteback(description.Data.Address, description.Data.Size,
+                context.SubmissionSerial, cause, fenceMappingSnapshot);
+            if (description.HasStencil)
+            {
+                FenceWriteback(description.Stencil.Address, description.Stencil.Size,
+                    context.SubmissionSerial, cause, fenceMappingSnapshot);
+            }
+        }
         image.ClearGpuModified();
         // The retile is a GPU store into guest memory: until it completes the bytes
         // in guest memory are the old ones, so a read of them has to wait for it.
         NoteOwnGuestWrite(description.Data.Address, description.Data.Size);
         // And a guest store into them waits for it too (MetalImageCache.WritebackFence.cs).
-        FenceWriteback(description.Data.Address, description.Data.Size, context.SubmissionSerial, cause);
         if (description.HasStencil)
         {
             // Noted whether or not every piece of the plane found a window: the hazard is
             // that a read sees stale bytes, and over-noting only costs a wait.
             NoteOwnGuestWrite(description.Stencil.Address, description.Stencil.Size);
-            FenceWriteback(description.Stencil.Address, description.Stencil.Size, context.SubmissionSerial, cause);
         }
 
         _writebackCauses[(int)cause]++;
