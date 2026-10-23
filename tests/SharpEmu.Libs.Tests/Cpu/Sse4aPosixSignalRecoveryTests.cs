@@ -388,7 +388,8 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
     /// The bridge only runs the recovery chain when a backend instance is
     /// registered. The tests do not need any of the constructor's state (and must not run
     /// it: it installs process-wide signal handlers), so register an uninitialized
-    /// instance - the SIGILL recovery path only touches static state.
+    /// instance with empty patch tables; the SIGILL recovery path now checks those
+    /// tables before it attempts instruction emulation.
     /// </summary>
     private static void EnsureBridgeBackend()
     {
@@ -398,9 +399,13 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
             (nint)(delegate* managed<void*, int>)&DirectExecutionBackend.SharedFaultRecovery]);
         if (FaultRecoveryBackend.GetValue(null) == null)
         {
-            FaultRecoveryBackend.SetValue(
-                null,
-                RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend)));
+            var backend = RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend));
+            foreach (var name in new[] { "_patchedHotSites", "_hotSiteFaultCounts", "_unpatchableHotSites", "_hotSiteStubPages" })
+            {
+                var field = typeof(DirectExecutionBackend).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!;
+                field.SetValue(backend, Activator.CreateInstance(field.FieldType));
+            }
+            FaultRecoveryBackend.SetValue(null, backend);
         }
     }
 

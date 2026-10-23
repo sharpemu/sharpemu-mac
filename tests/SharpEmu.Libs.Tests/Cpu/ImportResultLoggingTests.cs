@@ -10,8 +10,6 @@ namespace SharpEmu.Libs.Tests.Cpu;
 
 public sealed class ImportResultLoggingTests
 {
-    private delegate bool ImportResultFilter(string nid, OrbisGen2Result result, out int mutexOccurrence);
-
     [NativeX64Fact]
     public void RepeatedImportFailuresAreSampledPerImportAndResult()
     {
@@ -20,7 +18,19 @@ public sealed class ImportResultLoggingTests
         using var backend = new DirectExecutionBackend(modules);
         var method = typeof(DirectExecutionBackend).GetMethod(
             "ShouldLogImportResult", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var filter = method.CreateDelegate<ImportResultFilter>(backend);
+        var entryType = typeof(DirectExecutionBackend).GetNestedType("ImportStubEntry", BindingFlags.NonPublic)!;
+        var entries = new Dictionary<string, object>();
+        // Production precomputes classification in the stub entry, rather than
+        // passing the NID alone to the result filter.
+        bool filter(string nid, OrbisGen2Result result, out int occurrence)
+        {
+            if (!entries.TryGetValue(nid, out var entry))
+                entries.Add(nid, entry = Activator.CreateInstance(entryType, [0UL, nid, null, false, false, false, false, 0UL])!);
+            object?[] arguments = [entry, result, 0];
+            var logged = (bool)method.Invoke(backend, arguments)!;
+            occurrence = (int)arguments[2]!;
+            return logged;
+        }
         bool ShouldLog(string nid, OrbisGen2Result result) => filter(nid, result, out _);
 
         foreach (var nid in new[] { "9UK1vLZQft4", "7H0iTOciTLo" })
