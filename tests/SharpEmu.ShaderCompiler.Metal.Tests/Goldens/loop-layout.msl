@@ -354,6 +354,67 @@ static inline void sharpemu_store_dword(device uint* b, uint bytes, uint addr, u
     }
 }
 
+// N consecutive raw dwords (BUFFER_LOAD_DWORDX2..X4) under one bounds proof. The address
+// truncates to its dword as in sharpemu_load_dword; when the whole run lies inside the
+// binding the dwords are one packed vector load (packed: the binding's alignment is only
+// 4 bytes). index < words rules out a wrapped 32-bit address, so a run that is not wholly
+// inside reads each dword through sharpemu_load_dword with its own check: dwords in range
+// keep their value and the rest read zero, exactly as N separate loads would.
+template <int N>
+static inline uint4 sharpemu_load_dword_run(device uint* b, uint bytes, uint addr)
+{
+    uint index = addr >> 2;
+    uint words = bytes >> 2;
+    if (index < words && (uint)N <= words - index)
+    {
+        device uint* p = b + index;
+        if (N == 2)
+        {
+            return uint4(*(device packed_uint2*)p, 0u, 0u);
+        }
+        if (N == 3)
+        {
+            return uint4(*(device packed_uint3*)p, 0u);
+        }
+        return uint4(*(device packed_uint4*)p);
+    }
+    uint4 result = uint4(0u);
+    for (int i = 0; i < N; i++)
+    {
+        result[i] = sharpemu_load_dword(b, bytes, addr + (uint)(4 * i));
+    }
+    return result;
+}
+
+// The store counterpart: a run wholly inside the binding is one packed vector store;
+// otherwise each dword is stored (or dropped) on its own check.
+template <int N>
+static inline void sharpemu_store_dword_run(device uint* b, uint bytes, uint addr, uint4 value)
+{
+    uint index = addr >> 2;
+    uint words = bytes >> 2;
+    if (index < words && (uint)N <= words - index)
+    {
+        device uint* p = b + index;
+        if (N == 2)
+        {
+            *(device packed_uint2*)p = value.xy;
+            return;
+        }
+        if (N == 3)
+        {
+            *(device packed_uint3*)p = value.xyz;
+            return;
+        }
+        *(device packed_uint4*)p = value;
+        return;
+    }
+    for (int i = 0; i < N; i++)
+    {
+        sharpemu_store_dword(b, bytes, addr + (uint)(4 * i), value[i]);
+    }
+}
+
 // A sub-dword store: the bytes it names, each merged in place.
 static inline void sharpemu_store_bytes(device uint* b, uint bytes, uint addr, uint value, uint count)
 {

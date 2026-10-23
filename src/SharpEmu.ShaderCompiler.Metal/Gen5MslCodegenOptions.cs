@@ -77,6 +77,15 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// guest writes and reads such a record with one instruction, which other CUs see whole; here
 /// each dword is its own access, and UE5's Nanite culling read queue records half written.
 /// <c>SHARPEMU_MSL_PERSISTENT_RECORDS=0</c> accesses them dword by dword.</param>
+/// <param name="DeviceSpanAccess">Resolve the guest address of a vector GLOBAL/FLAT
+/// DWORDX2..X4 load or store once and index its dwords off that pointer, as the scalar
+/// loader already does, instead of walking the page table per dword. A span that leaves
+/// its 16 KB page, or is unmapped, takes the old per-dword path. <c>SHARPEMU_MSL_DEVICESPAN=0</c>
+/// resolves every dword alone.</param>
+/// <param name="RawDwordRuns">Read or write the dwords of a raw BUFFER_LOAD/STORE_DWORDX2..X4
+/// under one bounds proof (<c>sharpemu_load_dword_run</c>), falling back to the per-dword
+/// checks when any dword of the run is out of range. <c>SHARPEMU_MSL_DWORDRUNS=0</c> checks
+/// every dword alone.</param>
 /// <param name="ComputeBatchEntryPoint">Also emit a segmented-grid compute entry with
 /// request-local argument/push pointers and reconstructed group IDs. The Metal V2
 /// host requests this ABI; standalone translator callers retain the ordinary entry.</param>
@@ -96,6 +105,8 @@ public sealed record Gen5MslCodegenOptions(
     bool LaneSpillCopies = true,
     bool PersistentWaitFences = true,
     bool PersistentRecordLocks = true,
+    bool DeviceSpanAccess = true,
+    bool RawDwordRuns = true,
     bool ComputeBatchEntryPoint = false)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
@@ -115,5 +126,7 @@ public sealed record Gen5MslCodegenOptions(
         GraphicsLoopStepCap: Environment.GetEnvironmentVariable("SHARPEMU_SHADER_MAX_STEPS_GRAPHICS") == "1",
         LaneSpillCopies: Environment.GetEnvironmentVariable("SHARPEMU_MSL_SPILLCOPY") != "0",
         PersistentWaitFences: Environment.GetEnvironmentVariable("SHARPEMU_MSL_PERSISTENT_FENCES") != "0",
-        PersistentRecordLocks: Environment.GetEnvironmentVariable("SHARPEMU_MSL_PERSISTENT_RECORDS") != "0");
+        PersistentRecordLocks: Environment.GetEnvironmentVariable("SHARPEMU_MSL_PERSISTENT_RECORDS") != "0",
+        DeviceSpanAccess: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEVICESPAN") != "0",
+        RawDwordRuns: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DWORDRUNS") != "0");
 }
