@@ -471,6 +471,31 @@ public sealed partial class MetalImageBudgetTests
     }
 
     [Fact]
+    public void AStagedWritebackWithNoSelectedSubresourcesDoesNotCopyScratchIntoGuestMemory()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var image = rig.Cache.GetImage(rig.Acquire(GuestBase, ImageRole.ColorTarget));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        var expected = MetalTileOracle.Pattern((int)ImageSize, 0xC3);
+        rig.WriteGuest(GuestBase, expected);
+        var batchType = typeof(MetalImageCache).GetNestedType("WritebackFenceBatch", BindingFlags.NonPublic)!;
+        var batch = Activator.CreateInstance(batchType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            null, new object[] { rig.Cache, rig.Harness, MetalWritebackCause.HostRead }, null)!;
+        var method = typeof(MetalImageCache).GetMethod("WriteBackStaged", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        // Valid destination, empty layer selection: the transfer accepts an empty
+        // operation and never calls the before-encode hook or initialises scratch.
+        var carried = (ulong)method.Invoke(rig.Cache, new object[] { rig.Harness, image,
+            new SubresourceRange(0, 1, 0, 0), 0UL, ImageSize, default(MetalGuestRange), 0UL, batch })!;
+        Assert.Equal(0UL, carried);
+        Assert.Equal(0, rig.Cache.FencedWritebackCount);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        Assert.Equal(expected, rig.ReadGuest(GuestBase, ImageSize));
+    }
+
+    [Fact]
     public void RetiringAWaitedFenceKeepsANewerFenceAndItsWatch()
     {
         if (!RequireDevice()) return;

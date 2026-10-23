@@ -2625,17 +2625,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             carried += guest.Size;
         }
 
+        var encoded = false;
         if (!EncodeWriteback(context, image, range, scratch, stencil, offset, size,
                 stencilAddress, fences, partial: true, scratch: true, beforeEncode: () =>
                 {
+                    encoded = true;
                     // Close stores before even the scratch's preservation read: bytes
                     // not covered by the retile will also be copied back afterwards.
                     foreach (var (at, guest) in pieces) fences.Add(address + at, guest, partial: true);
                     _transfer.EncodeBufferCopies(context, copies);
-                }))
+                }) || !encoded)
         {
-            // The retile encoded nothing: copying the scratch back would only rewrite the
-            // guest's own bytes, and the run is not carried.
+            // A refusal or empty selection encoded no retile. Scratch may still be
+            // uninitialised, so none of it may be copied back to guest memory.
             return 0;
         }
 
