@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Pipelines;
+using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
@@ -89,6 +90,79 @@ public sealed class VertexInputResolverTests : IDisposable
         WriteHalf(DirectOffsets + VertexBufferTableType * 2, bufferRegister);
         WriteHalf(DirectOffsets + VertexAttributeTableType * 2, attributeRegister);
         return new RegisteredShader(ShaderAddress, MemoryBase, 16, 0, UserDataBlock, semanticsAddress, semanticCount, 0, 0);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void DecodedVertexLayoutTracksExactTablesRootsAndGenerations(int mode)
+    {
+        var shader = RegisterTables();
+        WriteWord(Semantics, SemanticWord(0, 3, 4));
+        WriteWord(AttributeTable, AttributeWord(0, 0, 0));
+        WriteBuffer(0, StreamBase, 16, 4);
+        using var generations = new SharpEmu.HLE.GpuMemory.GuestWriteGenerations();
+        var cache = new VertexTableMetadataCache();
+        var synchronization = new List<(ulong, ulong)>();
+        cache.UseWriteGenerations(mode != 0 ? generations : null, (address, size) => synchronization.Add((address, size)));
+        var context = mode == 2 ? new CpuContext(new NativeAliasMemory(_memory), Generation.Gen5) : _context;
+        var roots = new uint[16];
+        roots[8] = unchecked((uint)AttributeTable); roots[9] = (uint)(AttributeTable >> 32);
+        roots[10] = unchecked((uint)BufferTable); roots[11] = (uint)(BufferTable >> 32);
+        VertexInputInfo Resolve(uint export = 0) => VertexInputResolver.ResolveVertexInputs(context, shader, roots,
+            export, metadataCache: cache, codeHash: 1);
+        var first = Resolve();
+        var warm = Resolve(17);
+        Assert.Same(first.Attributes, warm.Attributes);
+        Assert.Same(first.Buffers, warm.Buffers);
+        Assert.Equal(17u, warm.PositionExportControl);
+        Assert.Contains((AttributeTable, 4UL), synchronization);
+        Assert.Contains((BufferTable, 16UL), synchronization);
+        // A payload write is not a descriptor change (different watched page).
+        generations.NoteWrite(StreamBase, 16);
+        Assert.Same(first.Attributes, Resolve().Attributes);
+        generations.NoteWrite(AttributeTable, 4);
+        WriteWord(AttributeTable, AttributeWord(0, 0, 4));
+        var changedAttribute = Resolve();
+        Assert.NotSame(first.Attributes, changedAttribute.Attributes);
+        Assert.Equal(StreamBase + 4, changedAttribute.Attributes[0].Descriptor.Address);
+        generations.NoteWrite(BufferTable, 16);
+        WriteBuffer(0, StreamBase + 128, 32, 8);
+        var changedBuffer = Resolve();
+        Assert.Equal(StreamBase + 132, changedBuffer.Attributes[0].Descriptor.Address);
+        Assert.Equal(32u, changedBuffer.Attributes[0].Descriptor.Stride);
+        // Same bytes after mapping ABA must replace generation-certified arrays.
+        generations.NoteRemap(BufferTable, 16);
+        if (mode != 0) Assert.NotSame(changedBuffer.Attributes, Resolve().Attributes);
+        // A new root is independently observed even with equal descriptor bytes.
+        const ulong other = AttributeTable + 0x800;
+        WriteWord(other, AttributeWord(0, 0, 12));
+        roots[8] = unchecked((uint)other);
+        Assert.Equal(StreamBase + 140, Resolve().Attributes[0].Descriptor.Address);
+        if (mode == 2)
+        {
+            // An alias store has no notification for the observed VA. The byte
+            // proof must still reject the old layout while its VA token is current.
+            WriteBuffer(0, StreamBase + 256, 32, 8);
+            Assert.Equal(StreamBase + 268, Resolve().Attributes[0].Descriptor.Address);
+        }
+    }
+
+    private sealed class NativeAliasMemory(ICpuMemory memory) : ICpuMemory, ICpuMappedReadWatchSource
+    {
+        public bool TryRead(ulong address, Span<byte> bytes) => memory.TryRead(address, bytes);
+        public bool TryWrite(ulong address, ReadOnlySpan<byte> bytes) => memory.TryWrite(address, bytes);
+        public bool CanRead(ulong address, ulong size) => memory.CanRead(address, size);
+        public CpuMappedCopyResult TryReadMappedCopy(ulong address, ulong size, ulong source,
+            Span<byte> bytes, out CpuMappedCopyObservation? observation)
+        { observation = null; return CpuMappedCopyResult.Unavailable; }
+        public CpuMappedCopyResult TryReadMappedCopyWithWriteWatch(ulong address, ulong size, ulong source,
+            Span<byte> bytes, out CpuMappedCopyObservation? observation)
+        { observation = null; return CpuMappedCopyResult.Unavailable; }
+        public bool IsMappedCopyObservationCurrent(CpuMappedCopyObservation observation) => false;
+        public bool IsMappedCopyWriteWatchCurrent(CpuMappedCopyObservation observation) => false;
+        public void ReleaseMappedCopyWriteWatch(CpuMappedCopyObservation observation) { }
     }
 
     [Fact]

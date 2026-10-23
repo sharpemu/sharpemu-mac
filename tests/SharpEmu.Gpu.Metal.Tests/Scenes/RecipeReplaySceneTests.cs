@@ -33,6 +33,32 @@ public sealed class RecipeReplaySceneTests(ITestOutputHelper output) : SceneTest
     }
 
     [Fact]
+    public void ScalarChurnPatchesImmutableArgumentsAndMatchesReferenceOutput()
+    {
+        using var rig = CreateRig(); if (rig is null) return;
+        rig.Host.RecipeReplayEnabled = true;
+        var table = rig.Memory.Upload<uint>(Enumerable.Range(0, 24).Select(i => 0x1000u + (uint)i).ToArray(), 16);
+        var destination = rig.Memory.Allocate(32, 256);
+        var tape = rig.Dispatch(new ScenePm4(), ComputeScenePrograms.ScalarLoadImmediateOffset,
+            [Descriptors.Lo(table), Descriptors.Hi(table), 0, 0, .. Descriptors.Buffer(destination, 4, 8, format: 20)], 1);
+        rig.Submit(tape); rig.Submit(tape);
+        var before = rig.Host.ArgumentDataPatches;
+        for (uint i = 1; i <= 12; i++)
+        {
+            uint[] expected = [i, i * 3, i * 5, i * 7];
+            rig.Memory.Write<uint>(table + 16, expected);
+            rig.Submit(tape);
+            Assert.Equal(expected, rig.Read<uint>(destination, 4));
+        }
+        Assert.True(rig.Host.ArgumentDataPatches >= before + 12,
+            $"Changed scalar arguments did not patch their static template: patches={rig.Host.ArgumentDataPatches - before}");
+        rig.Host.RecipeReplayEnabled = false;
+        rig.Submit(tape);
+        Assert.Equal(new uint[] { 12, 36, 60, 84 }, rig.Read<uint>(destination, 4));
+        Assert.Empty(rig.Fatals);
+    }
+
+    [Fact]
     public void RelocationBeyondTheSnapshotMemoStillReusesSelectionAndWritesEveryCurrentDestination()
     {
         using var rig = CreateRig(); if (rig is null) return;

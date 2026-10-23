@@ -1752,10 +1752,12 @@ internal sealed partial class MetalRenderHost :
 
     public void SynchronizeShaderCode(ulong address, ulong size)
     {
+        if (TryShaderOwnership(address, size)) return;
         if (size != 0 && (_gpuWrites.MayCover(address, size) || _imageCache.MayOwn(address, size)))
         {
             WaitForGuestBytes(address, size);
         }
+        KeepShaderOwnership(address, size);
     }
 
     // Lands every recorded write into the range: an image's writeback, or a store or copy.

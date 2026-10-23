@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -51,6 +52,7 @@ internal sealed partial class MetalRenderHost
     private byte[] _argumentReplayScratch = [];
     private bool _replayTransientPointer;
     private long _argumentBuildGeneration;
+    internal long ArgumentDataPatches { get; private set; }
     private bool _recordingArgumentUses;
     private readonly List<(nint Resource, nuint Usage)> _argumentUses = new();
 
@@ -142,20 +144,26 @@ internal sealed partial class MetalRenderHost
         if (!RecipeReplayEnabled || PpDummyTex || stage.Replay is not { Arguments: { } record } recipe ||
             _replayArena is not { } arena || recipe.ArgumentGeneration != arena.Generation ||
             recipe.Addresses.Length != stage.BufferCount || recipe.TextureIds.Length != stage.ImageCount ||
-            (!ReferenceEquals(recipe.ArgumentFlattenedTable, stage.StageResources.Resources.FlattenedResourceTable) &&
-             !recipe.ArgumentFlattenedTable.AsSpan().SequenceEqual(stage.StageResources.Resources.FlattenedResourceTable)) ||
-            !recipe.ArgumentShaderData.AsSpan().SequenceEqual(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount)) ||
             !recipe.Bindless.AsSpan().SequenceEqual(stage.BindlessTableAddresses)) return false;
         for (var i = 0; i < stage.BufferCount; i++)
             if (recipe.Addresses[i] != stage.Buffers[i].GpuAddress || recipe.Lengths[i] != stage.BufferLengths[i]) return false;
         for (var i = 0; i < stage.ImageCount; i++)
             if (recipe.TextureIds[i] != stage.TextureIds[i] ||
                 !((ReadOnlySpan<ulong>)(recipe.Mips[i] ?? [])).SequenceEqual(stage.MipTextureIds[i] ?? [])) return false;
+        var changedData = (!ReferenceEquals(recipe.ArgumentFlattenedTable, stage.StageResources.Resources.FlattenedResourceTable) &&
+            !recipe.ArgumentFlattenedTable.AsSpan().SequenceEqual(stage.StageResources.Resources.FlattenedResourceTable)) ||
+            !recipe.ArgumentShaderData.AsSpan().SequenceEqual(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount));
+        if (changedData && !HostLookupCounters.Enabled) return false;
         // An indirect pointer can reference a DIFFERENT slab from the bound
         // argument record. Keep every such slab alive through this issue too.
         foreach (var slab in recipe.ReferencedSlabs) slab.LastSerial = Math.Max(slab.LastSerial, _submissionSerial);
-        if (recipe.SerialLocal && recipe.ArgumentSerial != _submissionSerial &&
-            !TryPatchArgumentPointers(stage, recipe, ref record)) return false;
+        if ((changedData || recipe.SerialLocal && recipe.ArgumentSerial != _submissionSerial) &&
+            !TryPatchArgumentPointers(stage, recipe, ref record, changedData)) return false;
+        if (changedData)
+        {
+            ArgumentDataPatches++;
+            HostLookupCounters.Note(HostLookupCounters.Cache.ArgumentPatch, true);
+        }
         record.Use(_submissionSerial);
         var range = record.Range;
         _stageArgumentAddresses[stageIndex] = range.GpuAddress;
@@ -172,13 +180,14 @@ internal sealed partial class MetalRenderHost
     }
 
     private unsafe bool TryPatchArgumentPointers(MetalStageBindings stage, PreparedStageRecipe recipe,
-        ref MetalRecipeArena.Record record)
+        ref MetalRecipeArena.Record record, bool changedData = false)
     {
         var layout = ArgumentPlanOf(stage.Program.Bindings!).Layout;
         // Mip-statistics banks have their own retirement/declaration path.
         if (layout.Fields.Any(field => field.Kind == DescriptorBindingKind.MipStatistics)) return false;
         if (_argumentReplayScratch.Length < record.Length) _argumentReplayScratch = new byte[record.Length];
         var bytes = _argumentReplayScratch.AsSpan(0, record.Length);
+        _replayTransientPointer = false;
         new ReadOnlySpan<byte>((byte*)record.Owner.Contents + record.Offset, record.Length).CopyTo(bytes);
         foreach (var field in layout.Fields)
         {
@@ -186,18 +195,28 @@ internal sealed partial class MetalRenderHost
             if (field.FieldKind == MslArgumentFieldKind.StepReport)
                 System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(destination,
                     StepReportAddress(stage.Program.Hash, StepReportStageName(StageIndexOf(stage.Program.Stage))));
-            else if (field.FieldKind == MslArgumentFieldKind.Pointer && field.Kind is
-                DescriptorBindingKind.DeviceAddressPageTable or DescriptorBindingKind.FaultBuffer)
+            else if (field.FieldKind == MslArgumentFieldKind.Pointer &&
+                (field.Kind is DescriptorBindingKind.DeviceAddressPageTable or DescriptorBindingKind.FaultBuffer ||
+                 changedData && field.Kind is DescriptorBindingKind.ShaderData or DescriptorBindingKind.FlattenedResourceTable))
                 System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(destination, PointerFieldValue(stage, field.Kind));
-            else if (field.FieldKind == MslArgumentFieldKind.Word && field.Kind == DescriptorBindingKind.DeviceAddressPageTable)
+            else if (field.FieldKind == MslArgumentFieldKind.Word &&
+                (field.Kind == DescriptorBindingKind.DeviceAddressPageTable || changedData &&
+                 field.Kind is DescriptorBindingKind.ShaderData or DescriptorBindingKind.FlattenedResourceTable))
                 System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(destination, WordFieldValue(stage, field.Kind));
         }
+        if (_replayTransientPointer) return false;
         var generation = _replayArena!.Generation;
         if (!_replayArena.Intern(bytes, _submissionSerial, CompletedSerialHint, out var current)) return false;
         record = current;
-        recipe.Arguments = generation == _replayArena.Generation ? current : null;
-        recipe.ArgumentGeneration = _replayArena.Generation;
-        recipe.ArgumentSerial = _submissionSerial;
+        // Changed scalar/table pointers belong only to this immutable result. Keep
+        // the original static template and its leases; each later issue patches its
+        // own current data, so scalar churn cannot accumulate stale slab references.
+        if (!changedData)
+        {
+            recipe.Arguments = generation == _replayArena.Generation ? current : null;
+            recipe.ArgumentGeneration = _replayArena.Generation;
+            recipe.ArgumentSerial = _submissionSerial;
+        }
         _replayArgumentPatches++;
         return true;
     }

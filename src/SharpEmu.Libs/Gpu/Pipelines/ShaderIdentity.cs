@@ -166,10 +166,10 @@ public static class ProgramInternCounters
         if (counts is null) Shards.Add(_local = counts = new());
         Volatile.Write(ref counts.Values[index], counts.Values[index] + 1);
     }
-    internal static void CodeHit() => Add(0);
-    internal static void CodeMiss() => Add(1);
-    internal static void HeaderHit() => Add(2);
-    internal static void HeaderMiss() => Add(3);
+    internal static void CodeHit() { Add(0); HostLookupCounters.Note(HostLookupCounters.Cache.ShaderIdentity, true); }
+    internal static void CodeMiss() { Add(1); HostLookupCounters.Note(HostLookupCounters.Cache.ShaderIdentity, false); }
+    internal static void HeaderHit() { Add(2); HostLookupCounters.Note(HostLookupCounters.Cache.ShaderHeader, true); }
+    internal static void HeaderMiss() { Add(3); HostLookupCounters.Note(HostLookupCounters.Cache.ShaderHeader, false); }
     public static string TakeReport()
     {
         lock (ReportGate)

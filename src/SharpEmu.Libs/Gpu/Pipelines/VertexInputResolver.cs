@@ -31,8 +31,8 @@ public sealed class VertexTableMetadataCache
         {
             get
             {
-                if (Token is not null) return Token.IsCurrent;
-                if (Bytes is null) return false;
+                if (Token is not null && !Token.IsCurrent) return false;
+                if (Bytes is null) return Token is not null;
                 // Metadata ranges are bounded by the user-data header, eleven direct
                 // offsets and MaxBuffers semantics. The fallback allocates only on capture.
                 Span<byte> current = stackalloc byte[Bytes.Length];
@@ -50,21 +50,65 @@ public sealed class VertexTableMetadataCache
         _synchronize = synchronize;
     }
 
+    private readonly Dictionary<(VertexTableMetadata Metadata, ulong Attributes, ulong Buffers),
+        (VertexAttributeResource[] Attributes, VertexInputBuffer[] Buffers, Observation[] Observations)> _layouts = new();
+
+    internal Observation ObserveRange(CpuContext context, ulong address, ulong size)
+    {
+        _synchronize?.Invoke(address, size);
+        var token = _generations?.Register(address, size);
+        byte[]? bytes = null;
+        if (token is null)
+        {
+            bytes = new byte[checked((int)size)];
+            if (!context.Memory.TryRead(address, bytes)) bytes = null;
+        }
+        return new(address, size, token, context.Memory, bytes);
+    }
+
+    internal Observation CertifyLayout(Observation observation, ReadOnlySpan<byte> actual)
+    {
+        // A VA generation alone cannot exclude writes through a second native
+        // alias. Native mappings additionally compare the exact bytes decoded;
+        // managed-only memory can use its explicitly notified generation alone.
+        var compare = observation.Token is null || observation.Memory is ICpuMappedReadWatchSource;
+        return observation with { Bytes = compare ? actual.ToArray() : null };
+    }
+
+    internal bool TryLayout(VertexTableMetadata metadata, ulong attributes, ulong buffers,
+        out VertexAttributeResource[] resolvedAttributes, out VertexInputBuffer[] resolvedBuffers)
+    {
+        resolvedAttributes = []; resolvedBuffers = [];
+        if (HostLookupCounters.Enabled && _layouts.TryGetValue((metadata, attributes, buffers), out var cached))
+        {
+            foreach (var observation in cached.Observations) _synchronize?.Invoke(observation.Address, observation.Size);
+            if (Array.TrueForAll(cached.Observations, static observation => observation.IsCurrent))
+            {
+                resolvedAttributes = cached.Attributes; resolvedBuffers = cached.Buffers;
+                HostLookupCounters.Note(HostLookupCounters.Cache.VertexLayout, true);
+                return true;
+            }
+        }
+        HostLookupCounters.Note(HostLookupCounters.Cache.VertexLayout, false);
+        return false;
+    }
+
+    internal void KeepLayout(VertexTableMetadata metadata, ulong attributes, ulong buffers,
+        VertexAttributeResource[] resolvedAttributes, VertexInputBuffer[] resolvedBuffers, Observation[] observations)
+    {
+        if (!HostLookupCounters.Enabled || !Array.TrueForAll(observations, static observation => observation.IsCurrent))
+            return;
+        if (_layouts.Count >= MaxEntries) _layouts.Clear();
+        _layouts[(metadata, attributes, buffers)] = (resolvedAttributes, resolvedBuffers, observations);
+    }
+
     internal Observation[] Observe(CpuContext context, RegisteredShader shader)
     {
         if (shader.UserDataAddress == 0) return [];
         var observations = new List<Observation>(3);
         void ObserveRange(ulong address, ulong size)
         {
-            _synchronize?.Invoke(address, size);
-            var token = _generations?.Register(address, size);
-            byte[]? bytes = null;
-            if (token is null)
-            {
-                bytes = new byte[checked((int)size)];
-                if (!context.Memory.TryRead(address, bytes)) bytes = null;
-            }
-            observations.Add(new(address, size, token, context.Memory, bytes));
+            observations.Add(this.ObserveRange(context, address, size));
         }
         ObserveRange(shader.UserDataAddress, 0x2E);
         if (context.TryReadUInt64(shader.UserDataAddress, out var offsets) && offsets != 0 &&
@@ -156,9 +200,17 @@ public static class VertexInputResolver
             // Per-thread scratch: the list never outlives the call; the draw keeps the array.
             var resources = _attributeScratch ??= new List<VertexAttributeResource>(VertexInputInfo.MaxBuffers);
             resources.Clear();
-            ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress, resources);
-            buffers = MergeBuffers(resources, shader.CodeAddress);
-            attributes = resources.ToArray();
+            if (metadataCache is null || !metadataCache.TryLayout(metadata, attributeTable, bufferTable, out attributes, out buffers))
+            {
+                var observations = HostLookupCounters.Enabled && metadataCache is not null
+                    ? new List<VertexTableMetadataCache.Observation>() : null;
+                ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress, resources,
+                    metadataCache, observations);
+                buffers = MergeBuffers(resources, shader.CodeAddress);
+                attributes = resources.ToArray();
+                if (observations is not null)
+                    metadataCache!.KeepLayout(metadata, attributeTable, bufferTable, attributes, buffers, observations.ToArray());
+            }
             resources.Clear();
         }
 
@@ -349,9 +401,11 @@ public static class VertexInputResolver
         ulong attributeTable,
         ulong bufferTable,
         ulong shaderAddress,
-        List<VertexAttributeResource> resources)
+        List<VertexAttributeResource> resources, VertexTableMetadataCache? cache = null,
+        List<VertexTableMetadataCache.Observation>? observations = null)
     {
         Span<uint> descriptorWords = stackalloc uint[4];
+        Span<byte> attributeBytes = stackalloc byte[4];
         foreach (var word in semantics)
         {
             var semantic = new ShaderInputSemantic(word);
@@ -361,11 +415,17 @@ public static class VertexInputResolver
             }
 
             var attributeAddress = attributeTable + semantic.Semantic * sizeof(uint);
+            var attributeObservation = observations is not null ? cache!.ObserveRange(context, attributeAddress, sizeof(uint)) : default;
             if (!context.TryReadUInt32(attributeAddress, out var attribute))
             {
                 throw GpuFatal.Fatal($"The vertex attribute table is unreadable: shader=0x{shaderAddress:X16} address=0x{attributeAddress:X16}.");
             }
 
+            if (observations is not null)
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(attributeBytes, attribute);
+                observations.Add(cache!.CertifyLayout(attributeObservation, attributeBytes));
+            }
             var index = attribute & 0x1Fu;
             var format = (attribute >> 5) & 0x1FFu;
             var offset = (attribute >> 14) & 0xFFFu;
@@ -381,6 +441,7 @@ public static class VertexInputResolver
             }
 
             var descriptorAddress = bufferTable + index * 16u;
+            var descriptorObservation = observations is not null ? cache!.ObserveRange(context, descriptorAddress, 16) : default;
             for (var component = 0; component < 4; component++)
             {
                 if (!context.TryReadUInt32(descriptorAddress + (ulong)component * sizeof(uint), out descriptorWords[component]))
@@ -389,6 +450,8 @@ public static class VertexInputResolver
                 }
             }
 
+            if (observations is not null)
+                observations.Add(cache!.CertifyLayout(descriptorObservation, System.Runtime.InteropServices.MemoryMarshal.AsBytes(descriptorWords)));
             var descriptor = BufferDescriptorWords.From(descriptorWords);
             if (format != 0)
             {

@@ -53,18 +53,24 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         using var owner = new GuestSpaceOwner(host, BackingSize,
             startupReservation: new HostAddressRange(address, size));
         Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));
+        var originalSnapshot = owner.AliasSnapshot;
+        Assert.True(owner.IsAliasSnapshotCurrent(originalSnapshot));
         Assert.True(owner.AllocatePrivate(address + Page, Page, HostPageProtection.ReadWrite));
         *(ulong*)address = Marker;
         *(ulong*)(address + Page) = Marker;
 
         host.Log.Clear();
         owner.ReleaseAddressRanges();
+        Assert.False(owner.IsAliasSnapshotCurrent(originalSnapshot));
         Assert.DoesNotContain(Op.FreeOwnedRange, host.Log);
         Assert.DoesNotContain(Op.FreeHole, host.Log);
         Assert.True(owner.ContainsFreeRange(address, size));
         Assert.True(PlatformMemory.Query(address, out var region));
         Assert.NotEqual(HostRegionState.Free, region.State);
         Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));
+        Assert.False(owner.IsAliasSnapshotCurrent(originalSnapshot));
+        var remappedSnapshot = owner.AliasSnapshot;
+        Assert.True(owner.IsAliasSnapshotCurrent(remappedSnapshot));
         Assert.Equal(Marker, *(ulong*)address);
         owner.ReleaseAddressRanges();
         owner.ReleaseAddressRanges();
@@ -72,6 +78,8 @@ public sealed unsafe partial class GuestSpaceOwnerTests
 
         host.Log.Clear();
         owner.Dispose();
+        Assert.False(owner.IsAliasSnapshotCurrent(remappedSnapshot));
+        Assert.False(owner.IsAliasSnapshotCurrent(owner.AliasSnapshot));
         Assert.Contains(Op.FreeOwnedRange, host.Log);
         Assert.True(PlatformMemory.Query(address, out region));
         Assert.Equal(HostRegionState.Free, region.State);
