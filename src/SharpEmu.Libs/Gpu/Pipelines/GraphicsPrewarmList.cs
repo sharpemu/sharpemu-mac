@@ -25,7 +25,7 @@ public sealed class GraphicsPrewarmList : IDisposable
     public const int MaxOtherLists = 3;
     private const string FilePrefix = "graphics-prewarm";
     private const uint Magic = 0x50575047;
-    private const uint FormatVersion = 1;
+    private const uint FormatVersion = 2;
     private const byte CodeKind = 1;
     private const byte GraphicsKind = 2;
     private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);

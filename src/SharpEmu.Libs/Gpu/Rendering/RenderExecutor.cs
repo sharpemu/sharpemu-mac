@@ -6,6 +6,7 @@ using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
@@ -473,7 +474,8 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        ResolveShaderPrograms(banks, ref state, indexed: true);
+        ResolveShaderPrograms(banks, ref state, indexed: true,
+            fetchBounds: FetchBoundsOf(banks, arguments));
         if (arguments.IndirectArgumentsAddress != 0 && _host.TakesTargetlessIndirectDrawArguments &&
             MayRetainTargetlessDraw(ref state))
         {
@@ -671,7 +673,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        ResolveShaderPrograms(banks, ref state);
+        ResolveShaderPrograms(banks, ref state, fetchBounds: FetchBoundsOf(banks, arguments));
         if (arguments.IndirectArgumentsAddress != 0 &&
             (_host.TakesTargetlessIndirectDrawArguments
                 ? MayRetainTargetlessDraw(ref state)
@@ -1199,7 +1201,18 @@ public sealed partial class RenderExecutor
         banks.Shader.Vertex.ExportAddress != 0 &&
         (banks.Context.ShaderStages & TessellationStageBits) == 0;
 
-    private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false)
+    public static VertexFetchBounds FetchBoundsOf(RegisterBanks banks, DrawAutoArguments arguments) =>
+        AffineVertexFetchResolver.Enabled && arguments.IndirectArgumentsAddress == 0
+            ? new(unchecked(arguments.FirstVertex + (arguments.OffsetSource == DrawOffsetSource.IndirectArguments ? 0 : banks.UserConfig.IndexOffset)),
+                arguments.VertexCount, arguments.OffsetSource == DrawOffsetSource.IndirectArguments ? arguments.FirstInstance : 0,
+                arguments.InstanceCount, VerticesKnown: true, InstancesKnown: true) : default;
+
+    public static VertexFetchBounds FetchBoundsOf(RegisterBanks banks, DrawIndexedArguments arguments) =>
+        AffineVertexFetchResolver.Enabled && arguments.IndirectArgumentsAddress == 0
+            ? new(0, 0, arguments.OffsetSource == DrawOffsetSource.IndirectArguments ? arguments.FirstInstance : 0,
+                arguments.InstanceCount, InstancesKnown: true) : default;
+
+    private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false, VertexFetchBounds fetchBounds = default)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawProgramResolution);
         var inputs = GraphicsProgramInputs.Create();
@@ -1210,6 +1223,7 @@ public sealed partial class RenderExecutor
         }
 
         inputs.Indexed = indexed;
+        inputs.FetchBounds = fetchBounds;
         inputs.PixelActive = state.PixelActive;
         inputs.TriangleList = AssemblesTriangleList(banks);
         inputs.DepthBound = state.Depth.HasTarget;

@@ -394,7 +394,8 @@ public static partial class AgcExports
             {
                 var snapshot = banks.Snapshot();
                 var pending = new PendingDraw(submitId, state, snapshot, indexed, indexedArguments, autoArguments,
-                    state.CurrentVertexSnapshot, state.CurrentIndexSnapshot, _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0, indexed));
+                    state.CurrentVertexSnapshot, state.CurrentIndexSnapshot, _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0, indexed,
+                        indexed ? RenderExecutor.FetchBoundsOf(snapshot, indexedArguments) : RenderExecutor.FetchBoundsOf(snapshot, autoArguments)));
                 if (producing)
                 {
                     Sink!.EnqueueDeferred(pending, isDraw: true);

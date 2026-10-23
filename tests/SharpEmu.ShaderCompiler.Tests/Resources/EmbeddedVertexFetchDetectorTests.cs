@@ -15,6 +15,90 @@ public sealed class EmbeddedVertexFetchDetectorTests
     private const int AttributeTable = 4;
     private const int BufferTable = 6;
 
+    [Fact]
+    public void GBufferPrologRecognizesPositionButRetainsInstanceMatrixReads()
+    {
+        // The actual instruction shape/PCs of dumped VS 0x8B94AE10B80DDFCD.
+        // The instance add at 0x48 uses SDWA (a 16-bit scalar source): it is
+        // deliberately not treated as an unmodified hardware instance index.
+        var add = Vop2(0x48, "VAddI32", 4, Gen5Operand.Vector(8), Gen5Operand.Scalar(10));
+        var program = Program(
+            add,
+            ScalarLoad(0x50, 8, 106, 2, 16),
+            ScalarLoad(0x58, 8, 16, 4),
+            ScalarLoad(0x64, 106, 20, 4, 16),
+            ScalarLoad(0x6C, 16, 24, 4, 16),
+            BufferAccess(0x88, "BufferLoadDwordx4", 20, 32, 4, 10, true, vectorAddress: 4),
+            BufferAccess(0x90, "BufferLoadDwordx4", 20, 16, 4, 0, true, vectorAddress: 4),
+            BufferAccess(0x98, "BufferLoadDwordx4", 20, 0, 4, 6, true, vectorAddress: 4),
+            BufferAccess(0xA0, "BufferLoadFormatXyz", 24, 0, 3, 14, true, vectorAddress: 5),
+            EndProgram(0x130));
+        var plan = EmbeddedVertexFetchDetector.Detect(program, -2, -2, 8, 16, 32);
+        var position = Assert.Single(plan.AffineLoads);
+        Assert.Equal(0xA0u, position.Pc);
+        Assert.Equal(new AffineVertexIndex(VertexFetchIndex.Vertex), position.Index);
+        Assert.Equal(3u, position.Components);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AffineIndicesUseTheSharedConstantAndLaneSpillDescriptorProof(bool spill)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        uint[] words = [0x200000, 16u << 16, 8, 77u << 12 | 0xFACu];
+        for (uint i = 0; i < 4; i++)
+        {
+            instructions.Add(MoveScalar(pc, 16 + i, words[i])); pc += 4;
+            if (!spill) continue;
+            instructions.Add(WriteLane(pc, 31, 16 + i, i)); pc += 8;
+            instructions.Add(ReadLane(pc, 24 + i, 31, i)); pc += 8;
+        }
+        instructions.Add(Vop2(pc, "VLshrrevB32", 9, Operand(1), Gen5Operand.Vector(8))); pc += 4;
+        instructions.Add(Vop2(pc, "VAddNcU32", 9, Operand(3), Gen5Operand.Vector(9))); pc += 4;
+        instructions.Add(BufferAccess(pc, "BufferLoadFormatXyzw", spill ? 24u : 16u, dwords: 4, indexEnabled: true, vectorAddress: 9));
+        instructions.Add(EndProgram(pc + 8));
+        var program = Program(instructions.ToArray());
+        var fetch = Assert.Single(EmbeddedVertexFetchDetector.Detect(program, -2, -2, 8, 16, 32).AffineLoads);
+        Assert.Equal(new AffineVertexIndex(VertexFetchIndex.Instance, 2, 3), fetch.Index);
+        var resources = ShaderResourcePlan.Extract(program, ShaderStage.Vertex, Hash, 8, 16, waveSize: 32);
+        Assert.False(resources.Memory.Find(fetch.Pc)!.DeviceDescriptor);
+        Assert.Single(resources.Info.Buffers);
+    }
+
+    [Fact]
+    public void MaskedWritesAndBranchesDoNotInventAffineIndices()
+    {
+        var program = Program(
+            MoveScalar(0, 126, 0),
+            Vop1(4, "VMovB32", 9, Gen5Operand.Vector(5)),
+            BufferAccess(8, "BufferLoadFormatX", 16, indexEnabled: true, vectorAddress: 9),
+            Branch(16, "SBranch", 0),
+            BufferAccess(20, "BufferLoadFormatX", 16, indexEnabled: true, vectorAddress: 5),
+            EndProgram(28));
+        Assert.Empty(EmbeddedVertexFetchDetector.Detect(program, -2, -2, 8, 16, 32).AffineLoads);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GenericDescriptorLoadsArePrunedOnlyWhenEveryResultIsUnused(bool shared)
+    {
+        var program = Program(
+            ScalarLoad(0, 8, 16, 4),
+            ScalarLoad(8, 16, 24, 4, 16),
+            BufferAccess(16, "BufferLoadFormatXyz", 24, dwords: 3, vectorData: 14, indexEnabled: true, vectorAddress: 5),
+            shared ? BufferAccess(24, "BufferLoadDword", 24, indexEnabled: true, vectorAddress: 5) : Nop(24),
+            EndProgram(32));
+        var plan = new EmbeddedVertexFetchPlan();
+        plan.Loads.Add(new(16, 0, 3, []));
+        var prepared = plan.RemoveUnusedScalarLoads(program);
+        Assert.Equal(shared ? "SLoadDwordx4" : "SNop", prepared.Instructions[0].Opcode);
+        Assert.Equal(shared ? "SLoadDwordx4" : "SNop", prepared.Instructions[1].Opcode);
+        Assert.Equal(program.Instructions.Select(instruction => instruction.Pc), prepared.Instructions.Select(instruction => instruction.Pc));
+    }
+
     private static Gen5ShaderInstruction FetchLoad(uint pc, uint resourceRegister, uint dwords) =>
         BufferAccess(pc, "BufferLoadFormat" + dwords switch { 1 => "X", 2 => "Xy", 3 => "Xyz", _ => "Xyzw" }, resourceRegister,
             dwords: dwords, vectorData: 4, indexEnabled: true, vectorAddress: 1);

@@ -6,8 +6,8 @@ namespace SharpEmu.ShaderCompiler.Resources;
 /// <summary>
 /// Portable buffers: a program reads each buffer's V# stride, and the format and swizzle
 /// word of a formatted buffer it only reads, from its shader data at run time instead of
-/// baking them in, so one translation serves every draw whatever its vertex layout - and a
-/// program the game has not drawn yet can be compiled ahead of time with the same result.
+/// baking them in. This is the generic/prewarm form. A materialized read-only formatted
+/// descriptor can additionally select a narrow variant that fixes its stride and format.
 /// </summary>
 /// <remarks>
 /// Two dwords per buffer at <see cref="BindingLayout.FirstBufferWordDword"/>: the stride
@@ -22,8 +22,13 @@ public static class PortableBufferWord
 {
     public const int DwordCount = 2;
     public const uint StrideMask = 0x3FFF;
+    // A narrow read-format variant. Stored in the specialization/key, never in a V#.
+    public const uint SpecializedFormat = 1u << 31;
 
     public static bool Enabled { get; set; }
+    public static bool SpecializeReadFormats { get; set; }
+
+    public static bool IsSpecialized(uint packedStride) => (packedStride & SpecializedFormat) != 0;
 
     public static bool ReadsFormatAtRuntime(BufferResource buffer) => buffer.Formatted && !buffer.Written;
 
@@ -33,8 +38,19 @@ public static class PortableBufferWord
 
     /// <summary>A buffer's specialization with what the program reads at run time left out.</summary>
     public static BufferSpecialization Normalize(BufferSpecialization specialization, BufferResource? buffer) =>
+        IsSpecialized(specialization.PackedStride) ? specialization :
         buffer is not null && ReadsFormatAtRuntime(buffer)
             ? new BufferSpecialization(specialization.PackedStride & ~StrideMask, DescriptorConstants.InvalidFormat,
                 DescriptorConstants.IdentityDestinationSelect)
             : specialization with { PackedStride = specialization.PackedStride & ~StrideMask };
+
+    // Default/prewarm specializations remain portable. Only an actual materialized,
+    // read-only formatted descriptor can select this variant; addresses and bounds
+    // remain runtime data and never contribute to its identity.
+    public static BufferSpecialization ForDescriptor(BufferSpecialization specialization, BufferResource buffer, bool? specializeReadFormats = null) =>
+        (specializeReadFormats ?? SpecializeReadFormats) && ReadsFormatAtRuntime(buffer) &&
+        specialization.DescriptorFormat != DescriptorConstants.InvalidFormat &&
+        Gfx10UnifiedFormat.TryDecode(specialization.DescriptorFormat, out var dataFormat, out _) && dataFormat != 0
+            ? specialization with { PackedStride = specialization.PackedStride | SpecializedFormat }
+            : Normalize(specialization, buffer);
 }

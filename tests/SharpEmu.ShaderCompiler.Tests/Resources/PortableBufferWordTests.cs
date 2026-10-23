@@ -11,6 +11,33 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 // keeps once the program reads them.
 public sealed class PortableBufferWordTests
 {
+    [Fact]
+    public void NarrowReadFormatVariantsKeyTheActualLayoutAndKeepPortableDefaults()
+    {
+        var buffer = new BufferResource { Read = true, Formatted = true };
+        var descriptor = new BufferSpecialization(48, 14, 0xFAC);
+        var generic = PortableBufferWord.ForDescriptor(descriptor, buffer, false);
+        var narrow = PortableBufferWord.ForDescriptor(descriptor, buffer, true);
+        Assert.Equal(0u, generic.DescriptorFormat);
+        Assert.Equal(0u, generic.PackedStride);
+        Assert.True(PortableBufferWord.IsSpecialized(narrow.PackedStride));
+        Assert.Equal(48u, narrow.PackedStride & PortableBufferWord.StrideMask);
+        Assert.Equal(14u, narrow.DescriptorFormat);
+        Assert.Equal(narrow, PortableBufferWord.Normalize(narrow, buffer));
+        foreach (var changed in new[] { descriptor with { PackedStride = 16 }, descriptor with { DescriptorFormat = 15 }, descriptor with { DescriptorSwizzle = 0x688 } })
+        {
+            var first = new ResourceSpecialization { Buffers = [narrow] };
+            var second = new ResourceSpecialization { Buffers = [PortableBufferWord.ForDescriptor(changed, buffer, true)] };
+            Assert.NotEqual(first, second);
+            Assert.Equal(first, first.Clone());
+        }
+        var defaults = ResourceSpecialization.Default(new ShaderResourceInfo { Buffers = [buffer] });
+        Assert.False(PortableBufferWord.IsSpecialized(defaults.Buffers[0].PackedStride));
+        Assert.Equal(0u, defaults.Buffers[0].DescriptorFormat);
+        var written = PortableBufferWord.ForDescriptor(descriptor, new BufferResource { Formatted = true, Written = true }, true);
+        Assert.False(PortableBufferWord.IsSpecialized(written.PackedStride));
+        Assert.Equal(14u, written.DescriptorFormat);
+    }
     [Theory]
     [InlineData(0x3FFFu, 4012u)]
     [InlineData(0x2000u, 940u)]

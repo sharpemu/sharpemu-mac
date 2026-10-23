@@ -1442,7 +1442,7 @@ public static partial class ResourceMaterializer
                 packedStride,
                 formatted ? (words[3] >> 12) & 0x7F : DescriptorConstants.InvalidFormat,
                 formatted ? words[3] & 0xFFF : DescriptorConstants.IdentityDestinationSelect);
-            buffers.Add(PortableBufferWord.Enabled ? PortableBufferWord.Normalize(specialized, info.Buffers[index]) : specialized);
+            buffers.Add(PortableBufferWord.Enabled ? PortableBufferWord.ForDescriptor(specialized, info.Buffers[index]) : specialized);
         }
 
         for (var index = 0; index < images.Count; index++)

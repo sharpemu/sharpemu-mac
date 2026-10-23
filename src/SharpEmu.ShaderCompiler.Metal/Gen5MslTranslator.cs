@@ -2113,7 +2113,8 @@ public static partial class Gen5MslTranslator
             var stride = FormatUInt(packedStride & 0x3FFF);
             var descriptorFormat = specialized.DescriptorFormat;
             var descriptorWord3 = FormatUInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
-            if (_request.Bindings is { BufferWordCount: not 0 } portable && (uint)bindingIndex < portable.MemoryOffsetCount)
+            if (!PortableBufferWord.IsSpecialized(packedStride) &&
+                _request.Bindings is { BufferWordCount: not 0 } portable && (uint)bindingIndex < portable.MemoryOffsetCount)
             {
                 // Portable buffers (PortableBufferWord): the V#'s stride, and the format word
                 // of a formatted buffer the program only reads, come from the shader data.
@@ -2425,6 +2426,15 @@ public static partial class Gen5MslTranslator
             uint componentCount,
             FormatD16 d16)
         {
+            if (TryParseUIntLiteral(descriptorWord3, out var literalWord3) &&
+                Gfx10UnifiedFormat.TryDecode((literalWord3 >> 12) & 0x7Fu, out var literalData, out var literalNumber) &&
+                literalData != 0)
+            {
+                EmitLiteralBufferFormatLoad(memory, byteAddress, literalWord3, literalData, literalNumber,
+                    vectorData, componentCount, d16);
+                return;
+            }
+
             // Format and destination swizzle come from descriptor word 3, a register
             // or a specialization constant; the prelude table decodes the unified format.
             var word3 = Temp("uint", descriptorWord3);
@@ -2476,6 +2486,49 @@ public static partial class Gen5MslTranslator
             }
 
             StoreFormatLoadComponents(vectorData, values, d16, numberFormat);
+        }
+
+        // A narrow descriptor variant uses the same memory and bounds rules as the
+        // portable decoder, with the layout and selectors resolved by the translator.
+        // In particular, bounds are shared by all selected components, including
+        // duplicated selectors, while a missing component has no memory access.
+        private void EmitLiteralBufferFormatLoad(
+            FormatMemory memory, BufferAddress address, uint word3, uint data, uint number,
+            uint vectorData, uint count, FormatD16 d16)
+        {
+            var one = $"sharpemu_format_one({number}u)";
+            var canonical = new Dictionary<uint, string>();
+            var bounds = new List<string>();
+            for (uint destination = 0; destination < count; destination++)
+            {
+                var selector = (word3 >> (int)(destination * 3)) & 7u;
+                if (selector < 4 || canonical.ContainsKey(selector)) continue;
+                var component = selector - 4;
+                if (!Gfx10UnifiedFormat.TryGetComponentLayout(data, component, out var offset, out var bit, out var bits) || bits == 0)
+                {
+                    canonical[selector] = component == 3 ? one : "0u";
+                    continue;
+                }
+
+                var bytes = (bit + bits + 7) / 8;
+                var at = address.At($"{offset}u");
+                var fits = memory.ElementInBounds(at, $"{bytes}u");
+                bounds.Add(fits);
+                var packed = Temp("uint", memory.LoadWord(at, $"{bytes}u", fits));
+                var raw = bits == 32 ? packed : $"extract_bits({packed}, {bit}u, {bits}u)";
+                canonical[selector] = Temp("uint", $"sharpemu_format_convert({raw}, {bits}u, {number}u, {data}u)");
+            }
+
+            var inBounds = bounds.Count == 0 ? "true" : Temp("bool", string.Join(" && ", bounds));
+            var values = new string[count];
+            for (uint destination = 0; destination < count; destination++)
+            {
+                var selector = (word3 >> (int)(destination * 3)) & 7u;
+                var constant = selector == 1 ? one : "0u";
+                values[destination] = selector < 4 ? constant : $"{inBounds} ? {canonical[selector]} : {constant}";
+            }
+
+            StoreFormatLoadComponents(vectorData, values, d16, $"{number}u");
         }
 
         private static bool TryParseUIntLiteral(string text, out uint value)
