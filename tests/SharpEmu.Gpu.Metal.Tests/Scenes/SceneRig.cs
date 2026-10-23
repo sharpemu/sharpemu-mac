@@ -56,8 +56,9 @@ internal sealed unsafe class SceneRig : IDisposable
         return address;
     }
 
-    public SceneRig(nint device, bool splitWorker = false)
+    public SceneRig(nint device, bool splitWorker = false, bool useEnvironment = false)
     {
+        if (useEnvironment) splitWorker = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") != "0";
         _splitWorker = splitWorker;
         _savedBackend = BackendFields.Select(field => field.GetValue(null)).ToArray();
         // A loud refusal ends the process in the emulator; here it fails the scene instead.
@@ -90,7 +91,7 @@ internal sealed unsafe class SceneRig : IDisposable
         }
         Host = new MetalRenderHost(device, _queue, Memory, Memory, _pages, _relay);
         if (!splitWorker) _relay.BindCurrentThread();
-        Host.InitializeCommandStream(new FlipTarget(), splitWorker);
+        Host.InitializeCommandStream(new FlipTarget(), useEnvironment ? null : splitWorker);
         if (splitWorker) Host.StartIssueWorker();
     }
 

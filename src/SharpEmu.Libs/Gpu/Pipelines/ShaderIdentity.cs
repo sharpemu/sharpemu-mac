@@ -114,6 +114,12 @@ public sealed class ShaderIdentityCache(ICpuMemory memory, Action<ulong, ulong> 
         // concurrent readers; program compilation remains in the existing compile futures.
         lock (_gate)
         {
+            // A texture can own newer bytes without changing backing generations yet.
+            // Resolve that ownership on the encoding thread before trusting a warm token,
+            // including when this cache belongs to the issue producer.
+            Span<(ulong Address, uint SizeBytes)> ranges = stackalloc (ulong, uint)[RegisteredShader.MaxCodeRanges];
+            ranges = ranges[..shader.CopyCodeRanges(ranges)];
+            foreach (var (address, size) in ranges) synchronize(address, size);
             if (Enabled && generations is not null && _entries.TryGetValue(shader, out var entry) &&
                 entry.Tokens.Length != 0 && Array.TrueForAll(entry.Tokens, static token => token.IsCurrent))
             {
@@ -121,9 +127,6 @@ public sealed class ShaderIdentityCache(ICpuMemory memory, Action<ulong, ulong> 
                 return entry.Identity;
             }
             ProgramInternCounters.CodeMiss();
-            Span<(ulong Address, uint SizeBytes)> ranges = stackalloc (ulong, uint)[RegisteredShader.MaxCodeRanges];
-            ranges = ranges[..shader.CopyCodeRanges(ranges)];
-            foreach (var (address, size) in ranges) synchronize(address, size);
             var tokens = Enabled && generations is not null
                 ? ranges.ToArray().Select(range => generations.Register(range.Address, range.SizeBytes)).ToArray()
                 : [];

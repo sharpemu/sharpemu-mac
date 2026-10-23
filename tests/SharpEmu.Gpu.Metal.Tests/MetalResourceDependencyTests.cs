@@ -149,6 +149,44 @@ public sealed class MetalResourceDependencyTests
         Assert.True(rig.Cache.BypassedCalls > 0);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void IssuedTableWritesPrecedeCaptureAndInvalidateTheOriginalDependency(bool split)
+    {
+        using var rig = new Rig();
+        var ordered = new OrderedCommandStreamHost(rig.Host, split);
+        var consumer = split ? new Thread(() => ordered.Consume()) : null;
+        consumer?.Start();
+        try
+        {
+            ResourceDependency? original = null;
+            ordered.ExecuteGuestMemoryOperation(() =>
+            {
+                original = Capture(rig);
+                rig.Run();
+                rig.Run();
+                Assert.Equal(1, rig.Cache.BypassedCalls);
+            });
+            ordered.RecordCommandProcessorWrite(rig.Address, BitConverter.GetBytes(88u), "TABLE_WRITE");
+            ordered.FlushAndWait();
+            ordered.ExecuteGuestMemoryOperation(() =>
+            {
+                Assert.Equal(ResourceDependencyStatus.CpuWrite, original!.Validate());
+                rig.Run();
+                rig.Run();
+                Assert.Equal(88u, rig.Snapshot.FlattenedResourceTable[0]);
+                Assert.Equal(2, rig.Cache.FullPathCalls);
+                original.Dispose();
+            });
+        }
+        finally
+        {
+            ordered.Stop();
+            if (consumer is not null) Assert.True(consumer.Join(TimeSpan.FromSeconds(10)));
+        }
+    }
+
     private static ResourceDependency Capture(Rig rig)
     {
         Assert.True(((IResourceDependencySource)rig.Host).TryCaptureDependency(rig.Address,

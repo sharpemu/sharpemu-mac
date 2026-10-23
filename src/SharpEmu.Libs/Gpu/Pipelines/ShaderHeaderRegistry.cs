@@ -116,12 +116,16 @@ public sealed class ShaderHeaderRegistry
         if (_generations is null)
         {
             ProgramInternCounters.HeaderMiss();
+            SynchronizeHeaders(_headerOf(codeAddress), _fusedPartsOf(codeAddress));
             return RequireCore(codeAddress, label);
         }
         lock (_observations)
         {
             var header = _headerOf(codeAddress);
             var fused = _fusedPartsOf(codeAddress);
+            // Texture ownership is independent of the backing-page generation. The
+            // producer must ask B to publish it before validating a cached header.
+            SynchronizeHeaders(header, fused);
             if (_observations.TryGetValue(codeAddress, out var cached) && cached.Header == header && cached.Fused == fused &&
                 cached.HeaderToken.IsCurrent && (cached.ContinuationToken?.IsCurrent ?? true))
             {
@@ -130,8 +134,6 @@ public sealed class ShaderHeaderRegistry
             }
             ProgramInternCounters.HeaderMiss();
             if (header == 0) return RequireCore(codeAddress, label);
-            _synchronize?.Invoke(header, HeaderReadBytes);
-            if (fused is { } continuation) _synchronize?.Invoke(continuation.ContinuationHeaderAddress, HeaderReadBytes);
             var token = _generations.Register(header, HeaderReadBytes);
             var continuationToken = fused is { } parts
                 ? _generations.Register(parts.ContinuationHeaderAddress, HeaderReadBytes) : null;
@@ -144,6 +146,12 @@ public sealed class ShaderHeaderRegistry
             }
             return shader;
         }
+    }
+
+    private void SynchronizeHeaders(ulong header, FusedProgramParts? fused)
+    {
+        if (header != 0) _synchronize?.Invoke(header, HeaderReadBytes);
+        if (fused is { } continuation) _synchronize?.Invoke(continuation.ContinuationHeaderAddress, HeaderReadBytes);
     }
 
     private RegisteredShader RequireCore(ulong codeAddress, string label)

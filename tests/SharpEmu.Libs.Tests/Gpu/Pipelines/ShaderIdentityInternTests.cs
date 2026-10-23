@@ -135,6 +135,54 @@ public sealed class ShaderIdentityInternTests
     }
 
     [Fact]
+    public void WarmIdentityResolvesTextureOwnershipBeforeValidatingItsGeneration()
+    {
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(Code, Header, PipelineTestGuest.EndProgram);
+        using var versions = new GuestWriteGenerations();
+        var textureOwnsCode = false;
+        var cache = new ShaderIdentityCache(guest.Memory, (address, size) =>
+        {
+            if (!textureOwnsCode) return;
+            Assert.Equal(Code, address);
+            Assert.Equal(4UL, size);
+            // Texture writes do not touch backing generations until publication.
+            versions.NoteWrite(address, size);
+            guest.WriteWords(Code, 0xBF800000);
+            textureOwnsCode = false;
+        }, versions);
+        var shader = guest.Registry.Require(Code, "compute");
+        var first = cache.Get(shader, "compute");
+        textureOwnsCode = true;
+        Assert.NotEqual(first.ContentHash, cache.Get(shader, "compute").ContentHash);
+        Assert.False(textureOwnsCode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HeaderResolvesOwnershipBeforeCachedOrUncachedReads(bool intern)
+    {
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(Code, Header, PipelineTestGuest.EndProgram);
+        using var versions = new GuestWriteGenerations();
+        var textureOwnsHeader = false;
+        var registry = new ShaderHeaderRegistry(guest.Context, _ => Header, _ => null,
+            intern ? versions : null, (address, size) =>
+            {
+                if (!textureOwnsHeader) return;
+                Assert.Equal(Header, address);
+                versions.NoteWrite(address, size);
+                guest.WriteWords(Header + 0x54, 32);
+                textureOwnsHeader = false;
+            });
+        Assert.Equal(0u, registry.Require(Code, "compute").ScratchDwords);
+        textureOwnsHeader = true;
+        Assert.Equal(32u, registry.Require(Code, "compute").ScratchDwords);
+        Assert.False(textureOwnsHeader);
+    }
+
+    [Fact]
     public void DeclaredHashCannotHideRewrittenCode()
     {
         var guest = new PipelineTestGuest();

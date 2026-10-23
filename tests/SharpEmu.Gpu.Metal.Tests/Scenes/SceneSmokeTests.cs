@@ -46,6 +46,21 @@ public sealed class SceneSmokeTests(ITestOutputHelper output) : SceneTestBase(ou
     }
 
     [Fact]
+    public void EnvironmentSelectsTheConsumerForAComputeTape()
+    {
+        using var rig = CreateRig(useEnvironment: true);
+        if (rig is null) return;
+        var split = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") != "0";
+        Assert.Equal(!split, rig.Relay.IsGpuQueueThread);
+        var buffer = rig.Memory.Allocate(64 * 4, 256);
+        var pm4 = rig.Dispatch(new ScenePm4(), ScenePrograms.StoreGlobalId,
+            Descriptors.Buffer(buffer, 4, 64, format: 20), 1);
+        rig.Submit(pm4);
+        Assert.Equal(Enumerable.Range(0, 64).Select(value => (uint)value ^ 0x5A5Au), rig.Read<uint>(buffer, 64));
+        Assert.Empty(rig.Fatals);
+    }
+
+    [Fact]
     public void ATriangleFromThePacketStreamLandsOnItsPixels()
     {
         using var rig = CreateRig();

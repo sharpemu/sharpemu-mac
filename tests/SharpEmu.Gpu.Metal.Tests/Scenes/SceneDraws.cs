@@ -170,7 +170,7 @@ public abstract class SceneTestBase(ITestOutputHelper output)
 
     private static readonly Lazy<nint> Device = new(MetalNative.MTLCreateSystemDefaultDevice);
 
-    internal SceneRig? CreateRig(bool splitWorker = false)
+    internal SceneRig? CreateRig(bool splitWorker = false, bool useEnvironment = false)
     {
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
         {
@@ -180,6 +180,6 @@ public abstract class SceneTestBase(ITestOutputHelper output)
 
         Assert.True(OperatingSystem.IsMacOS());
         Assert.NotEqual(0, Device.Value);
-        return new SceneRig(Device.Value, splitWorker);
+        return new SceneRig(Device.Value, splitWorker, useEnvironment);
     }
 }

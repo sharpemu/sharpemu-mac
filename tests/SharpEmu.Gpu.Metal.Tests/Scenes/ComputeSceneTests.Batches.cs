@@ -31,18 +31,25 @@ public sealed partial class ComputeSceneTests
     ];
 
     [Theory]
-    [InlineData("resources")]
-    [InlineData("ids")]
-    [InlineData("permuted")]
-    [InlineData("partial")]
-    [InlineData("lds")]
-    [InlineData("wave64")]
-    [InlineData("append")]
-    public void SegmentedDispatchesMatchUnbatchedBytes(string kind)
+    [InlineData("resources", false)]
+    [InlineData("resources", true)]
+    [InlineData("ids", false)]
+    [InlineData("ids", true)]
+    [InlineData("permuted", false)]
+    [InlineData("permuted", true)]
+    [InlineData("partial", false)]
+    [InlineData("partial", true)]
+    [InlineData("lds", false)]
+    [InlineData("lds", true)]
+    [InlineData("wave64", false)]
+    [InlineData("wave64", true)]
+    [InlineData("append", false)]
+    [InlineData("append", true)]
+    public void SegmentedDispatchesMatchUnbatchedBytes(string kind, bool splitWorker)
     {
         byte[]? Run(bool batch)
         {
-            using var rig = CreateRig();
+            using var rig = CreateRig(splitWorker);
             if (rig is null) return null;
             rig.Host.ConcurrentComputeEnabled = true;
             rig.Host.ComputeBatchEnabled = batch;
@@ -142,18 +149,27 @@ public sealed partial class ComputeSceneTests
     }
 
     [Theory]
-    [InlineData("barrier")]
-    [InlineData("acquire")]
-    [InlineData("partial-flush")]
-    [InlineData("cp-write")]
-    [InlineData("dependency")]
-    [InlineData("indirect")]
-    [InlineData("initiator")]
-    [InlineData("label")]
-    [InlineData("transfer")]
-    public void SegmentedDispatchesFlushAtGuestBoundaries(string boundary)
+    [InlineData("barrier", false)]
+    [InlineData("barrier", true)]
+    [InlineData("acquire", false)]
+    [InlineData("acquire", true)]
+    [InlineData("partial-flush", false)]
+    [InlineData("partial-flush", true)]
+    [InlineData("cp-write", false)]
+    [InlineData("cp-write", true)]
+    [InlineData("dependency", false)]
+    [InlineData("dependency", true)]
+    [InlineData("indirect", false)]
+    [InlineData("indirect", true)]
+    [InlineData("initiator", false)]
+    [InlineData("initiator", true)]
+    [InlineData("label", false)]
+    [InlineData("label", true)]
+    [InlineData("transfer", false)]
+    [InlineData("transfer", true)]
+    public void SegmentedDispatchesFlushAtGuestBoundaries(string boundary, bool splitWorker)
     {
-        using var rig = CreateRig();
+        using var rig = CreateRig(splitWorker);
         if (rig is null) return;
         rig.Host.ConcurrentComputeEnabled = true;
         rig.Host.ComputeBatchEnabled = true;
@@ -198,10 +214,59 @@ public sealed partial class ComputeSceneTests
             Assert.All(rig.Read<uint>(outputs[index], 64), value => Assert.Equal(
                 boundary == "dependency" && index == 2 ? 2u : (uint)index + 1, value));
     }
-    [Fact]
-    public void SegmentedDispatchesBoundTheTableAndKeepTheTail()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HostAtomicCutsComputeBatchAtItsRecordPosition(bool splitWorker)
     {
-        using var rig = CreateRig();
+        using var rig = CreateRig(splitWorker);
+        if (rig is null) return;
+        rig.Host.ConcurrentComputeEnabled = true;
+        rig.Host.ComputeBatchEnabled = true;
+        rig.Program(IncrementBuffer);
+        rig.Memory.Allocate(4096, 4096);
+        var input = Fill(rig, 64, 17);
+        var label = Fill(rig, 1, 0);
+        var outputs = Enumerable.Range(0, 4).Select(_ => Fill(rig, 64, 0)).ToArray();
+        var pm4 = new ScenePm4();
+        for (var index = 0; index < outputs.Length; index++)
+        {
+            if (index == 2)
+                pm4.Packet(0x1E, 0x24Fu, (uint)label, (uint)(label >> 32), 1u, 0u, 0u, 0u, 0u);
+            Setup(rig, pm4, IncrementBuffer, [.. Vsharp(input, 4, 64), .. Vsharp(outputs[index], 4, 64)], 64)
+                .DispatchDirect(1, 1, 1);
+        }
+        rig.Submit(pm4); // compile pipelines, then exercise a retained warm batch
+        rig.Memory.Write32(label, 0);
+        var before = rig.Host.ComputeBatches;
+        rig.Submit(pm4);
+        Assert.Equal(2, rig.Host.ComputeBatches - before);
+        Assert.Equal(1u, rig.Read<uint>(label, 1)[0]);
+        foreach (var output in outputs)
+            Assert.All(rig.Read<uint>(output, 64), value => Assert.Equal(18u, value));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HostAtomicWaitsForAnEarlierRecordedStoreBeforeModifyingItsBytes(bool splitWorker)
+    {
+        using var rig = CreateRig(splitWorker);
+        if (rig is null) return;
+        var label = Fill(rig, 1, 0);
+        var pm4 = new ScenePm4();
+        pm4.Packet(ScenePm4.OpWriteData, 5u << 8, (uint)label, (uint)(label >> 32), 40u);
+        pm4.Packet(0x1E, 0x24Fu, (uint)label, (uint)(label >> 32), 1u, 0u, 0u, 0u, 0u);
+        rig.Submit(pm4);
+        Assert.Equal(41u, rig.Read<uint>(label, 1)[0]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SegmentedDispatchesBoundTheTableAndKeepTheTail(bool splitWorker)
+    {
+        using var rig = CreateRig(splitWorker);
         if (rig is null) return;
         rig.Host.ConcurrentComputeEnabled = true;
         rig.Host.ComputeBatchEnabled = true;
@@ -224,10 +289,12 @@ public sealed partial class ComputeSceneTests
             Assert.All(rig.Read<uint>(output, 64), value => Assert.Equal(18u, value));
     }
 
-    [Fact]
-    public void SegmentedDispatchesSplitDifferentLdsSpecializations()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SegmentedDispatchesSplitDifferentLdsSpecializations(bool splitWorker)
     {
-        using var rig = CreateRig();
+        using var rig = CreateRig(splitWorker);
         if (rig is null) return;
         rig.Host.ConcurrentComputeEnabled = true;
         rig.Host.ComputeBatchEnabled = true;

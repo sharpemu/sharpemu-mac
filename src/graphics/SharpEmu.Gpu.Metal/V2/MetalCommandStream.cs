@@ -130,6 +130,21 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
 
     ICpuMemory ICommandStreamHost.Memory => _memory;
 
+    public void ExecuteCommandMemoryOperation(CommandMemoryOperation operation)
+    {
+        // A host memory effect cuts retained launches at its record position. Keep
+        // CP writes asynchronous with GPU readers, but land older writers of these
+        // bytes first: an overlay read alone would let their delayed store overwrite
+        // the CPU read/modify/write after it has returned.
+        FlushComputeBatch("cp-write");
+        if (operation.Kind is CommandMemoryOperation.OperationKind.Write or
+            CommandMemoryOperation.OperationKind.Atomic or
+            CommandMemoryOperation.OperationKind.SemaphoreSignal or
+            CommandMemoryOperation.OperationKind.SemaphoreConsume)
+            WaitForGuestBytes(operation.Address, operation.ByteCount);
+        operation.Execute(this);
+    }
+
     public void RunPendingCommands() => _relay.RunPendingCommands();
 
     public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)

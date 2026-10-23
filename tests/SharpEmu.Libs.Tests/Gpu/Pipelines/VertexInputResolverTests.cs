@@ -121,6 +121,37 @@ public sealed class VertexInputResolverTests : IDisposable
         Assert.Equal(12, third!.VertexBufferRegister);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WarmHeaderMetadataResolvesTextureOwnedSemanticsBeforeCheckingGenerations(bool intern)
+    {
+        var shader = RegisterTables();
+        WriteWord(Semantics, SemanticWord(1, 4, 2));
+        using var generations = new SharpEmu.HLE.GpuMemory.GuestWriteGenerations();
+        var textureOwnsSemantics = false;
+        var cache = new VertexTableMetadataCache();
+        cache.UseWriteGenerations(intern ? generations : null, (address, size) =>
+        {
+            if (!textureOwnsSemantics || address != Semantics) return;
+            generations.NoteWrite(address, size);
+            WriteWord(Semantics, SemanticWord(0, 6, 4));
+            textureOwnsSemantics = false;
+        });
+        var observations = cache.Observe(_context, shader);
+        Assert.True(VertexInputResolver.TryReadTables(_context, shader, 32, out var metadata, out _));
+        cache.Add(shader, 1, metadata, observations);
+        Assert.True(cache.TryGet(shader, 1, out _));
+        textureOwnsSemantics = true;
+        Assert.False(cache.TryGet(shader, 1, out _));
+        Assert.False(textureOwnsSemantics);
+        observations = cache.Observe(_context, shader);
+        Assert.True(VertexInputResolver.TryReadTables(_context, shader, 32, out metadata, out _));
+        cache.Add(shader, 1, metadata, observations);
+        Assert.True(cache.TryGet(shader, 1, out var refreshed));
+        Assert.Equal(new[] { SemanticWord(0, 6, 4) }, refreshed!.InputSemantics);
+    }
+
     [Fact]
     public void TryReadTables_ReadsTheRegistersAndSemanticsFromTheHeader()
     {

@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
@@ -145,6 +146,49 @@ public sealed class OrderedCommandStreamHostTests
         runner.Host.Drain();
         Assert.Contains("draw 0/1 2 32 11", target.Semantics);
         Assert.Contains("draw 0/1 2 32 22", target.Semantics);
+    }
+
+    private sealed class FetchBoundsProbe : IProgramPrefetch
+    {
+        internal readonly List<VertexFetchBounds> Bounds = [];
+        public bool TryTakeGraphics(RegisterBanks banks, in GraphicsProgramInputs inputs, out GraphicsPrograms programs)
+        {
+            Bounds.Add(inputs.FetchBounds);
+            programs = null!;
+            return false;
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void VertexFetchBoundsUseEachIssuedBanksAndPacketSnapshot(bool split)
+    {
+        var previous = AffineVertexFetchResolver.Enabled;
+        AffineVertexFetchResolver.Enabled = true;
+        try
+        {
+            using var fatal = new FatalScope();
+            var target = new EncodedHost(new());
+            var probe = new FetchBoundsProbe();
+            target.Executor.Prefetch = probe;
+            using var runner = new Runner(target, split);
+            var live = runner.Queue.GetInterpreter(0).TypedRegisters;
+            Banks().CopyTo(live);
+            runner.Host.BeginSubmission(0, 1, null);
+            live.UserConfig.IndexOffset = 4;
+            runner.Host.DrawAuto(1, Auto(3, instances: 2, firstVertex: 7));
+            live.UserConfig.IndexOffset = 20;
+            runner.Host.DrawAuto(1, Auto(6, instances: 5, firstVertex: 9));
+            live.Reset();
+            runner.Host.Drain();
+            Assert.Equal(new[]
+            {
+                new VertexFetchBounds(11, 3, 0, 2, VerticesKnown: true, InstancesKnown: true),
+                new VertexFetchBounds(29, 6, 0, 5, VerticesKnown: true, InstancesKnown: true),
+            }, probe.Bounds);
+        }
+        finally { AffineVertexFetchResolver.Enabled = previous; }
     }
 
     [Fact]

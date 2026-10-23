@@ -24,7 +24,23 @@ public sealed class VertexTableMetadataCache
 {
     private const int MaxEntries = 4096;
     private readonly Dictionary<(RegisteredShader Shader, ulong CodeHash), VertexTableMetadata> _entries = new();
-    private readonly Dictionary<(RegisteredShader Shader, ulong CodeHash), SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token[]> _tokens = new();
+    internal readonly record struct Observation(ulong Address, ulong Size,
+        SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token? Token, ICpuMemory Memory, byte[]? Bytes)
+    {
+        internal bool IsCurrent
+        {
+            get
+            {
+                if (Token is not null) return Token.IsCurrent;
+                if (Bytes is null) return false;
+                // Metadata ranges are bounded by the user-data header, eleven direct
+                // offsets and MaxBuffers semantics. The fallback allocates only on capture.
+                Span<byte> current = stackalloc byte[Bytes.Length];
+                return Memory.TryRead(Address, current) && current.SequenceEqual(Bytes);
+            }
+        }
+    }
+    private readonly Dictionary<(RegisteredShader Shader, ulong CodeHash), Observation[]> _observations = new();
     private SharpEmu.HLE.GpuMemory.GuestWriteGenerations? _generations;
     private Action<ulong, ulong>? _synchronize;
 
@@ -34,14 +50,21 @@ public sealed class VertexTableMetadataCache
         _synchronize = synchronize;
     }
 
-    internal SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token[] Observe(CpuContext context, RegisteredShader shader)
+    internal Observation[] Observe(CpuContext context, RegisteredShader shader)
     {
-        if (_generations is null || shader.UserDataAddress == 0) return [];
-        var tokens = new List<SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token>(3);
+        if (shader.UserDataAddress == 0) return [];
+        var observations = new List<Observation>(3);
         void ObserveRange(ulong address, ulong size)
         {
             _synchronize?.Invoke(address, size);
-            tokens.Add(_generations.Register(address, size));
+            var token = _generations?.Register(address, size);
+            byte[]? bytes = null;
+            if (token is null)
+            {
+                bytes = new byte[checked((int)size)];
+                if (!context.Memory.TryRead(address, bytes)) bytes = null;
+            }
+            observations.Add(new(address, size, token, context.Memory, bytes));
         }
         ObserveRange(shader.UserDataAddress, 0x2E);
         if (context.TryReadUInt64(shader.UserDataAddress, out var offsets) && offsets != 0 &&
@@ -53,27 +76,34 @@ public sealed class VertexTableMetadataCache
                 shader.InputSemanticsAddress != 0 && shader.InputSemanticsCount is > 0 and <= VertexInputInfo.MaxBuffers)
                 ObserveRange(shader.InputSemanticsAddress, (ulong)shader.InputSemanticsCount * sizeof(uint));
         }
-        return tokens.ToArray();
+        return observations.ToArray();
     }
 
     internal bool TryGet(RegisteredShader shader, ulong codeHash, out VertexTableMetadata? metadata)
     {
         metadata = null;
         var key = (shader, codeHash);
-        return (!_tokens.TryGetValue(key, out var tokens) || Array.TrueForAll(tokens, static token => token.IsCurrent)) &&
-            _entries.TryGetValue(key, out metadata);
+        if (_observations.TryGetValue(key, out var observations))
+        {
+            // A warm backing token does not rule out newer texture-owned metadata.
+            // Resolve every original range before deciding whether that token is current.
+            foreach (var observation in observations) _synchronize?.Invoke(observation.Address, observation.Size);
+            foreach (var observation in observations)
+                if (!observation.IsCurrent) return false;
+        }
+        return _entries.TryGetValue(key, out metadata);
     }
 
-    internal void Add(RegisteredShader shader, ulong codeHash, VertexTableMetadata metadata, SharpEmu.HLE.GpuMemory.GuestWriteGenerations.Token[]? tokens = null)
+    internal void Add(RegisteredShader shader, ulong codeHash, VertexTableMetadata metadata, Observation[]? observations = null)
     {
-        if (tokens is not null && !Array.TrueForAll(tokens, static token => token.IsCurrent)) return;
+        if (observations is not null && !Array.TrueForAll(observations, static observation => observation.IsCurrent)) return;
         if (_entries.Count >= MaxEntries)
         {
             _entries.Clear();
-            _tokens.Clear();
+            _observations.Clear();
         }
         _entries[(shader, codeHash)] = metadata;
-        if (tokens is { Length: > 0 }) _tokens[(shader, codeHash)] = tokens;
+        if (observations is { Length: > 0 }) _observations[(shader, codeHash)] = observations;
     }
 }
 
