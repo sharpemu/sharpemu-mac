@@ -229,6 +229,8 @@ internal sealed partial class MetalRenderHost
         PortableBufferWord.Enabled = PortableBuffers;
         PortableBufferWord.SpecializeReadFormats =
             Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SPECIALIZE_BUFFER_FORMATS") != "0";
+        SharpEmu.ShaderCompiler.Resources.VertexOutputPruning.Enabled =
+            Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_POSITION_ONLY_VERTEX") != "0";
         SharpEmu.Libs.Gpu.Pipelines.AffineVertexFetchResolver.Enabled =
             Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_VERTEX_FETCH") != "0";
     }
