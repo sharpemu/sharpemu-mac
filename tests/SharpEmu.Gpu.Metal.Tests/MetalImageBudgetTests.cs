@@ -419,7 +419,12 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         public void Dispose() => NativeMemory.AlignedFree(_block);
 
-        private bool Contains(ulong address, ulong length) => address >= GuestBase && address - GuestBase + length <= Size;
+        public ulong MirrorStart { get; set; }
+        private bool Contains(ulong address, ulong length) =>
+            (address >= GuestBase && address - GuestBase <= Size && length <= Size - (address - GuestBase)) ||
+            (MirrorStart != 0 && address >= MirrorStart && address - MirrorStart <= Size && length <= Size - (address - MirrorStart));
+        public object AliasSnapshot { get; set; } = new();
+        public object? BackingAliasSnapshot => AliasSnapshot;
 
         // Guest memory the GPU has no window onto: nothing can be written back into it.
         public bool NoWindows { get; set; }
@@ -438,6 +443,8 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         private ulong Offset(ulong address)
         {
+            if (MirrorStart != 0 && address >= MirrorStart && address - MirrorStart < Size)
+                return address - MirrorStart;
             if (!InScatter(address))
             {
                 return address - GuestBase;
@@ -526,7 +533,11 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
     {
         public nint Device => harness.Device;
         public ulong CurrentSerial => harness.SubmissionSerial;
-        public ulong CompletedSerial => CompletedOverride ?? harness.CompletedSerial;
+        public Action? OnCompletedQuery { get; set; }
+        public ulong CompletedSerial
+        {
+            get { OnCompletedQuery?.Invoke(); return CompletedOverride ?? harness.CompletedSerial; }
+        }
 
         // A GPU running behind: submissions past this serial have not completed yet.
         public ulong? CompletedOverride { get; set; }

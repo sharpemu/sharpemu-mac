@@ -11,6 +11,10 @@ namespace SharpEmu.Gpu.Metal.V2;
 // cannot do exactly is reported once by key, never per draw and never fatally.
 internal static class MetalV2Diagnostics
 {
+    // Range rejection only; observer invalidation and publication stay synchronous.
+    public static readonly bool StoreFastPath =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STORE_FASTPATH") != "0";
+
     private static readonly ConcurrentDictionary<string, byte> _reported = new(StringComparer.Ordinal);
 
     public static readonly bool Verbose =

@@ -44,6 +44,12 @@ internal sealed partial class MetalImageCache
 
     private const int MaxFenceTimeoutReports = 8;
 
+    internal bool StoreFastPathEnabled { get; set; } = MetalV2Diagnostics.StoreFastPath;
+    private readonly MetalFencePageIndex _fenceIndex = new();
+    private int _unindexedFences;
+    private long _fenceCompletionFloor;
+    private long _fenceIndexVersion;
+    private object? _fenceMappingSnapshot;
     private readonly object _fenceGate = new();
     private readonly List<FencedWriteback> _fencedWritebacks = [];
     private MetalPageWatchSet? _fencedPages;
@@ -54,7 +60,82 @@ internal sealed partial class MetalImageCache
     private long _fenceTimeouts;
     private int _fenceTimeoutReports;
 
-    private readonly record struct FencedWriteback(ulong Address, ulong Size, ulong Serial, MetalWritebackCause Cause);
+    private readonly record struct FencedWriteback(
+        ulong Address, ulong Size, ulong Serial, MetalWritebackCause Cause, ulong BackingAddress, bool Indexed);
+
+    // A mapping snapshot change or a scattered/unmapped range is uncertainty, never
+    // a negative answer. The captured backing offset also survives guest VA reuse.
+    private bool TryFenceBackingRange(ulong address, ulong size, out ulong offset) =>
+        MetalFencePageIndex.TryResolveBackingRange(_backing, address, size, out offset);
+
+    private ulong SampleFenceCompletion()
+    {
+        var completed = _owner.CompletedSerial; // Never called with _fenceGate held.
+        if (completed <= long.MaxValue)
+        {
+            var old = Volatile.Read(ref _fenceCompletionFloor);
+            while ((ulong)old < completed)
+            {
+                var seen = Interlocked.CompareExchange(ref _fenceCompletionFloor, (long)completed, old);
+                if (seen == old) break;
+                old = seen;
+            }
+        }
+        return completed;
+    }
+
+    private bool RejectFenceQuery(ulong address, ulong size, bool exact, out ulong backing, out bool resolved, out object? snapshot)
+    {
+        var version = Volatile.Read(ref _fenceIndexVersion);
+        snapshot = _backing.BackingAliasSnapshot;
+        resolved = TryFenceBackingRange(address, size, out backing) &&
+            ReferenceEquals(snapshot, Volatile.Read(ref _fenceMappingSnapshot));
+        if (!StoreFastPathEnabled || size > 8192 || !resolved || (version & 1) != 0 ||
+            Volatile.Read(ref _unindexedFences) != 0)
+        {
+            MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.Fallback);
+            return false;
+        }
+        // Page/fault queries must still remove completed watches. Only the precise
+        // pre-write query may reject against a cached completion floor.
+        var completed = exact ? (ulong)Volatile.Read(ref _fenceCompletionFloor) : 0;
+        if (_fenceIndex.MayOverlap(backing, size, completed))
+        {
+            MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.FenceReject);
+            return false;
+        }
+        // A multi-page scan cannot reject across a concurrent publication or
+        // mapping change. This validates the lookup only, not the later memcpy.
+        if (version != Volatile.Read(ref _fenceIndexVersion) ||
+            !ReferenceEquals(snapshot, _backing.BackingAliasSnapshot))
+        {
+            resolved = false;
+            MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.Fallback);
+            return false;
+        }
+        MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.FenceFast);
+        return true;
+    }
+
+    private static bool FenceOverlaps(FencedWriteback entry, ulong address, ulong size,
+        ulong backing, bool resolved, bool exact)
+    {
+        // Unknown mappings conservatively wait. Otherwise test both VA and backing:
+        // exact managed bytes must not inherit a neighbouring byte's wait, while
+        // native/landed notifications retain tracker-page semantics.
+        if (!resolved || !entry.Indexed) return true;
+        return exact
+            ? GuestRangeOverlap.Bytes(entry.Address, entry.Size, address, size) ||
+                GuestRangeOverlap.Bytes(entry.BackingAddress, entry.Size, backing, size)
+            : GuestRangeOverlap.Pages(entry.Address, entry.Size, address, size) ||
+                GuestRangeOverlap.Pages(entry.BackingAddress, entry.Size, backing, size);
+    }
+
+    private void RetireFenceHint(FencedWriteback entry, ulong completed)
+    {
+        if (entry.Indexed) _fenceIndex.Retire(entry.BackingAddress, entry.Size, entry.Serial, completed);
+        else Interlocked.Decrement(ref _unindexedFences);
+    }
 
     /// <summary>Whether a recorded writeback keeps its guest range watched until it completes.</summary>
     internal bool WritebackFenceEnabled { get; set; } = WritebackFenceDefault;
@@ -106,33 +187,61 @@ internal sealed partial class MetalImageCache
 
     // The writeback of these bytes was just recorded into the submission with this serial.
     // Caller holds the lock, on the GPU worker.
-    private void FenceWriteback(ulong address, ulong size, ulong serial, MetalWritebackCause cause)
+    private void FenceWriteback(ulong address, ulong size, ulong serial, MetalWritebackCause cause, object? mappingSnapshot)
     {
-        if (!WritebackFenceEnabled || _watchingStopped || size == 0 || serial <= _owner.CompletedSerial)
+        if (!WritebackFenceEnabled || _watchingStopped || size == 0 || serial <= (ulong)Volatile.Read(ref _fenceCompletionFloor))
         {
             return;
         }
 
+        var completed = SampleFenceCompletion();
+        if (serial <= completed) return;
+        var resolved = TryFenceBackingRange(address, size, out var backing) &&
+            ReferenceEquals(mappingSnapshot, _backing.BackingAliasSnapshot);
         lock (_fenceGate)
         {
-            PruneFencedWritebacksLocked(_owner.CompletedSerial);
-            // Serials complete in order, so waiting for the newer writeback covers the older.
-            var index = _fencedWritebacks.Count - 1;
-            while (index >= 0 && (_fencedWritebacks[index].Address != address || _fencedWritebacks[index].Size != size))
+            Interlocked.Increment(ref _fenceIndexVersion);
+            try
             {
-                index--;
-            }
+                PruneFencedWritebacksLocked(completed);
+                if (_fencedWritebacks.Count == 0)
+                {
+                    // Captured before resolving any GPU destination. A mapping
+                    // change anywhere through encoding vetoes negative queries
+                    // until this batch retires, even if its old VA was reused.
+                    Volatile.Write(ref _fenceMappingSnapshot, mappingSnapshot);
+                }
+                var index = _fencedWritebacks.Count - 1;
+                while (index >= 0 && (_fencedWritebacks[index].Address != address || _fencedWritebacks[index].Size != size ||
+                    _fencedWritebacks[index].Indexed != resolved ||
+                    (resolved && _fencedWritebacks[index].BackingAddress != backing)))
+                {
+                    index--;
+                }
 
-            if (index >= 0)
-            {
-                var entry = _fencedWritebacks[index];
-                _fencedWritebacks[index] = entry with { Serial = Math.Max(entry.Serial, serial), Cause = cause };
+                // Repeated writebacks in one submission already published these words.
+                // Extending to a newer serial publishes every positive before the list,
+                // watch and live count, and before the caller encodes a GPU store.
+                var indexed = resolved && (index >= 0 && _fencedWritebacks[index].Serial >= serial ||
+                    _fenceIndex.Publish(backing, size, serial));
+                if (index >= 0 && _fencedWritebacks[index].Indexed != indexed) index = -1;
+                if (index >= 0)
+                {
+                    var entry = _fencedWritebacks[index];
+                    _fencedWritebacks[index] = entry with { Serial = Math.Max(entry.Serial, serial), Cause = cause };
+                }
+                else
+                {
+                    // Unknown mapping/capacity/serial must veto rejection before exposure.
+                    if (!indexed) Interlocked.Increment(ref _unindexedFences);
+                    (_fencedPages ??= new MetalPageWatchSet(_pages)).Add(address, size);
+                    _fencedWritebacks.Add(new FencedWriteback(address, size, serial, cause, backing, indexed));
+                    Volatile.Write(ref _fencedWritebackCount, _fencedWritebacks.Count);
+                }
             }
-            else
+            finally
             {
-                (_fencedPages ??= new MetalPageWatchSet(_pages)).Add(address, size);
-                _fencedWritebacks.Add(new FencedWriteback(address, size, serial, cause));
-                Volatile.Write(ref _fencedWritebackCount, _fencedWritebacks.Count);
+                Interlocked.Increment(ref _fenceIndexVersion);
             }
         }
 
@@ -147,9 +256,12 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        var completed = SampleFenceCompletion();
         lock (_fenceGate)
         {
-            PruneFencedWritebacksLocked(_owner.CompletedSerial);
+            Interlocked.Increment(ref _fenceIndexVersion);
+            try { PruneFencedWritebacksLocked(completed); }
+            finally { Interlocked.Increment(ref _fenceIndexVersion); }
         }
     }
 
@@ -162,6 +274,7 @@ internal sealed partial class MetalImageCache
             if (entry.Serial <= completed)
             {
                 _fencedPages!.Remove(entry.Address, entry.Size);
+                RetireFenceHint(entry, completed);
                 continue;
             }
 
@@ -175,23 +288,32 @@ internal sealed partial class MetalImageCache
     // Removes the watches of the fenced writebacks sharing a page with the range that are no
     // newer than the serial the store waited for (or gave up on). One recorded while it waited
     // keeps its watch, and the retried store faults again and waits for that one too.
-    private void ReleaseFencesOverLocked(ulong address, ulong size, ulong upToSerial)
+    private void ReleaseFencesOverLocked(ulong address, ulong size, ulong upToSerial, ulong completed, ulong backing, bool resolved)
     {
-        var kept = 0;
-        for (var index = 0; index < _fencedWritebacks.Count; index++)
+        Interlocked.Increment(ref _fenceIndexVersion);
+        try
         {
-            var entry = _fencedWritebacks[index];
-            if (entry.Serial <= upToSerial && GuestRangeOverlap.Pages(entry.Address, entry.Size, address, size))
+            var kept = 0;
+            for (var index = 0; index < _fencedWritebacks.Count; index++)
             {
-                _fencedPages!.Remove(entry.Address, entry.Size);
-                continue;
+                var entry = _fencedWritebacks[index];
+                if (entry.Serial <= upToSerial && FenceOverlaps(entry, address, size, backing, resolved, exact: false))
+                {
+                    _fencedPages!.Remove(entry.Address, entry.Size);
+                    RetireFenceHint(entry, completed);
+                    continue;
+                }
+
+                _fencedWritebacks[kept++] = entry;
             }
 
-            _fencedWritebacks[kept++] = entry;
+            _fencedWritebacks.RemoveRange(kept, _fencedWritebacks.Count - kept);
+            Volatile.Write(ref _fencedWritebackCount, _fencedWritebacks.Count);
         }
-
-        _fencedWritebacks.RemoveRange(kept, _fencedWritebacks.Count - kept);
-        Volatile.Write(ref _fencedWritebackCount, _fencedWritebacks.Count);
+        finally
+        {
+            Interlocked.Increment(ref _fenceIndexVersion);
+        }
     }
 
     /// <summary>
@@ -200,22 +322,31 @@ internal sealed partial class MetalImageCache
     /// watch. True when a fence covered the page (the store can be retried). Called without the
     /// cache lock.
     /// </summary>
-    private bool WaitForFencedWritebacks(ulong address, ulong size)
+    private bool WaitForFencedWritebacks(ulong address, ulong size, out bool slow)
     {
+        slow = false;
+        if (RejectFenceQuery(address, size, exact: false, out var backing, out var resolved, out var snapshot)) return false;
+        slow = true;
+        var completed = SampleFenceCompletion();
         ulong pending = 0;
         MetalWritebackCause cause = default;
         var covered = false;
+        var byteOverlap = false;
+        MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.FenceGate);
         lock (_fenceGate)
         {
-            var completed = _owner.CompletedSerial;
+            resolved &= ReferenceEquals(snapshot, _backing.BackingAliasSnapshot) &&
+                ReferenceEquals(snapshot, _fenceMappingSnapshot);
             foreach (var entry in _fencedWritebacks)
             {
-                if (!GuestRangeOverlap.Pages(entry.Address, entry.Size, address, size))
+                if (!FenceOverlaps(entry, address, size, backing, resolved, exact: false))
                 {
                     continue;
                 }
 
                 covered = true;
+                if (entry.Serial > completed && resolved && entry.Indexed &&
+                    FenceOverlaps(entry, address, size, backing, resolved, exact: true)) byteOverlap = true;
                 if (entry.Serial > completed && entry.Serial > pending)
                 {
                     pending = entry.Serial;
@@ -230,11 +361,12 @@ internal sealed partial class MetalImageCache
 
             if (pending == 0)
             {
-                ReleaseFencesOverLocked(address, size, completed);
+                ReleaseFencesOverLocked(address, size, completed, completed, backing, resolved);
                 return true;
             }
         }
 
+        if (byteOverlap) MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.TrueOverlap);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var landed = _owner.WaitForSubmissionOffWorker(pending, WritebackFenceTimeoutMilliseconds);
         Interlocked.Add(ref _fenceWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
@@ -251,9 +383,10 @@ internal sealed partial class MetalImageCache
             }
         }
 
+        completed = SampleFenceCompletion();
         lock (_fenceGate)
         {
-            ReleaseFencesOverLocked(address, size, Math.Max(pending, _owner.CompletedSerial));
+            ReleaseFencesOverLocked(address, size, Math.Max(pending, completed), completed, backing, resolved);
         }
 
         return true;
@@ -269,18 +402,24 @@ internal sealed partial class MetalImageCache
     /// for the writeback it records before its own managed write (AwaitStoreRequest). Called
     /// without the cache lock.
     /// </summary>
-    private void WaitForFencedWritebacksUnder(ulong address, ulong size)
+    private bool WaitForFencedWritebacksUnder(ulong address, ulong size)
     {
+        if (RejectFenceQuery(address, size, exact: true, out var backing, out var resolved, out var snapshot)) return false;
+        var completed = SampleFenceCompletion();
+        MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.FenceGate);
         ulong pending = 0;
         MetalWritebackCause cause = default;
+        var byteOverlap = false;
         lock (_fenceGate)
         {
-            var completed = _owner.CompletedSerial;
+            resolved &= ReferenceEquals(snapshot, _backing.BackingAliasSnapshot) &&
+                ReferenceEquals(snapshot, _fenceMappingSnapshot);
             foreach (var entry in _fencedWritebacks)
             {
                 if (entry.Serial > completed && entry.Serial > pending &&
-                    GuestRangeOverlap.Bytes(entry.Address, entry.Size, address, size))
+                    FenceOverlaps(entry, address, size, backing, resolved, exact: true))
                 {
+                    byteOverlap |= resolved && entry.Indexed;
                     pending = entry.Serial;
                     cause = entry.Cause;
                 }
@@ -289,9 +428,10 @@ internal sealed partial class MetalImageCache
 
         if (pending == 0)
         {
-            return;
+            return true;
         }
 
+        if (byteOverlap) MetalStoreFastPathCounters.Count(MetalStoreFastPathCounters.Kind.TrueOverlap);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         bool landed;
         if (_owner.IsWorkerThread)
@@ -317,6 +457,7 @@ internal sealed partial class MetalImageCache
                     $"timeout_ms={WritebackFenceTimeoutMilliseconds}. The writeback may land over the write.");
             }
         }
+        return true;
     }
 
     // Shutdown: the page guard refuses to be freed with a watch outstanding.
@@ -324,9 +465,18 @@ internal sealed partial class MetalImageCache
     {
         lock (_fenceGate)
         {
-            _fencedPages?.Clear();
-            _fencedWritebacks.Clear();
-            Volatile.Write(ref _fencedWritebackCount, 0);
+            Interlocked.Increment(ref _fenceIndexVersion);
+            try
+            {
+                _fencedPages?.Clear();
+                _fencedWritebacks.Clear();
+                Volatile.Write(ref _unindexedFences, 0);
+                Volatile.Write(ref _fencedWritebackCount, 0);
+            }
+            finally
+            {
+                Interlocked.Increment(ref _fenceIndexVersion);
+            }
         }
     }
 }

@@ -172,6 +172,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         MetalBlockCubeDump.Peek ??= guestMemory.TryPeek;
         _pages = pages;
         _backing = backing;
+        MetalStoreFastPathCounters.Initialize();
         InitializeLossy();
         ConfigureMemoryPolicy(
             MetalImageBudgetSettings.FromEnvironment(MetalHostMemory.Physical),
@@ -1508,6 +1509,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             RefreshBeforeWriteback(image);
         }
 
+        var fenceMappingSnapshot = _backing.BackingAliasSnapshot;
         var destination = _guestMemory.ResolveWritable(
             description.Data.Address + aligned, alignedEnd - aligned);
         if (!destination.IsValid || destination.Size < alignedEnd - aligned)
@@ -1518,6 +1520,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         _owner.LandHeldCopies(description.Data.Address + aligned, alignedEnd - aligned);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
+        FenceWriteback(description.Data.Address + aligned, alignedEnd - aligned, context.SubmissionSerial, cause, fenceMappingSnapshot);
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.TransferLayers);
         if (!_transfer.EncodeTextureToGuest(
                 context, in description, range, image.Texture, destination, default, aligned, alignedEnd - aligned))
@@ -2354,10 +2357,18 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         RefreshBeforeWriteback(image);
         ref readonly var description = ref image.Description;
         _owner.LandHeldCopies(description.Data.Address, description.Data.Size);
+        var fenceMappingSnapshot = _backing.BackingAliasSnapshot;
         var destination = description.Data.Size <= TransferPieceBytes
             ? _guestMemory.ResolveWritable(description.Data.Address, description.Data.Size)
             : default;
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, image.Texture);
+        // Reserve before any piece or stencil transfer can be encoded/executed.
+        // Partial/refused encodes keep the conservative fence until completion.
+        FenceWriteback(description.Data.Address, description.Data.Size, context.SubmissionSerial, cause, fenceMappingSnapshot);
+        if (description.HasStencil)
+        {
+            FenceWriteback(description.Stencil.Address, description.Stencil.Size, context.SubmissionSerial, cause, fenceMappingSnapshot);
+        }
         ulong written;
         if (destination.IsValid && destination.Size >= description.Data.Size)
         {
@@ -2396,13 +2407,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // in guest memory are the old ones, so a read of them has to wait for it.
         NoteOwnGuestWrite(description.Data.Address, description.Data.Size);
         // And a guest store into them waits for it too (MetalImageCache.WritebackFence.cs).
-        FenceWriteback(description.Data.Address, description.Data.Size, context.SubmissionSerial, cause);
         if (description.HasStencil)
         {
             // Noted whether or not every piece of the plane found a window: the hazard is
             // that a read sees stale bytes, and over-noting only costs a wait.
             NoteOwnGuestWrite(description.Stencil.Address, description.Stencil.Size);
-            FenceWriteback(description.Stencil.Address, description.Stencil.Size, context.SubmissionSerial, cause);
         }
 
         _writebackCauses[(int)cause]++;

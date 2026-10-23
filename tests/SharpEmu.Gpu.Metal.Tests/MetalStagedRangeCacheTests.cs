@@ -20,6 +20,7 @@ public sealed class MetalStagedRangeCacheTests
         public int Created;
         public int Released;
         public readonly List<(ulong Address, ulong Size)> Watches = new();
+        public Action? BeforeRemoveWatch;
         private nint _next = 0x1000;
 
         public (nint Handle, nint Contents, ulong GpuAddress) CreateBuffer(ulong capacity)
@@ -33,11 +34,71 @@ public sealed class MetalStagedRangeCacheTests
 
         public void AddWatch(ulong address, ulong size) => Watches.Add((address, size));
 
-        public void RemoveWatch(ulong address, ulong size) => Assert.True(Watches.Remove((address, size)));
+        public void RemoveWatch(ulong address, ulong size)
+        {
+            BeforeRemoveWatch?.Invoke();
+            Assert.True(Watches.Remove((address, size)));
+        }
     }
 
     private static MetalStagedRangeCache Cache(FakeBackend backend, ulong budgetMiB = 64) =>
         new(backend, budgetMiB * Mib);
+
+    [Fact]
+    public void RemovalKeepsRejectionPositiveUntilTheWatchIsGone()
+    {
+        var backend = new FakeBackend();
+        var cache = Cache(backend);
+        cache.StoreFastPathEnabled = true;
+        cache.Acquire(Range, Size, written: false, 1, 0, out _);
+        using var removing = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        backend.BeforeRemoveWatch = () =>
+        {
+            removing.Set();
+            Assert.True(release.Wait(TimeSpan.FromSeconds(10)));
+        };
+        var removal = Task.Factory.StartNew(() => cache.OnUnmap(Range, Size),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        try
+        {
+            Assert.True(removing.Wait(TimeSpan.FromSeconds(10)));
+            Assert.True(cache.MayCover(Range, 8));
+        }
+        finally
+        {
+            release.Set();
+            Assert.True(removal.Wait(TimeSpan.FromSeconds(10)));
+            cache.Dispose();
+        }
+        Assert.False(cache.MayCover(Range, 8));
+    }
+
+    [Fact]
+    public void AStoreOnAnUnrelatedPageOfALiveBucketDoesNotTakeTheStagedGate()
+    {
+        var backend = new FakeBackend();
+        var cache = Cache(backend);
+        cache.StoreFastPathEnabled = true;
+        cache.Acquire(Range, Size, written: false, 1, 0, out var entry);
+        var gate = typeof(MetalStagedRangeCache).GetField("_gate",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(cache)!;
+        lock (gate)
+        {
+            var stores = Task.Factory.StartNew(() =>
+            {
+                Assert.False(cache.MayCover(Range + Size, 8));
+                Assert.False(cache.OnPreciseCpuWrite(Range + Size, 8, backed: true));
+                Assert.False(cache.OnCpuWrite(Range + Size, 8));
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            Assert.True(stores.Wait(TimeSpan.FromSeconds(10)));
+        }
+        Assert.Equal(0, entry!.Stale);
+        Assert.Single(backend.Watches);
+        cache.OnUnmap(Range, Size);
+        Assert.False(cache.MayCover(Range, 8));
+        cache.Dispose();
+    }
 
     [Fact]
     public void ASecondBindOfTheSameRangeHitsAndTakesNoBuffer()
