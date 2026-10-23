@@ -1251,6 +1251,42 @@ public static partial class Gen5MslTranslator
             return Temp("uint", $"{found} && {mapped} < {table.CandidateCount}u ? {mapped} : 0u");
         }
 
+        // How many consecutive dwords of a scalar buffer load, from the component, read the
+        // same bound buffer through plain per-component records (at most four, the width of
+        // a run): the run is then one address and one bounds check. A component with a
+        // different binding, a descriptor read on the device, a planning-only record or a
+        // non-scalar destination ends it.
+        private int BoundScalarRunLength(Gen5ShaderInstruction instruction, int start)
+        {
+            var request = _request;
+            if (!request.Memory.TryGetIndex(instruction.Pc, (uint)start, out var firstIndex))
+            {
+                return 0;
+            }
+
+            var resource = request.Memory[firstIndex].Resource;
+            var length = 0;
+            for (var component = start; component < instruction.Destinations.Count && length < 4; component++)
+            {
+                if (instruction.Destinations[component].Kind != Gen5OperandKind.ScalarRegister ||
+                    !request.Memory.TryGetIndex(instruction.Pc, (uint)component, out var memoryIndex))
+                {
+                    break;
+                }
+
+                var entry = request.Memory[memoryIndex];
+                if (entry.PlanningOnly || entry.Kind != MemoryResourceKind.ScalarBuffer || entry.DeviceDescriptor ||
+                    entry.Resource == MemoryAccessInfo.NoResource || entry.Resource != resource)
+                {
+                    break;
+                }
+
+                length++;
+            }
+
+            return length;
+        }
+
         private bool TryEmitLayoutScalarMemory(Gen5ShaderInstruction instruction, Gen5ScalarMemoryControl control, out string error)
         {
             error = string.Empty;
@@ -1268,6 +1304,11 @@ public static partial class Gen5MslTranslator
             string? deviceAddress = null;
             string? deviceSpan = null;
             string? deviceSpanValid = null;
+            // S_BUFFER_LOAD_DWORDX2..X16 from a bound buffer: up to four consecutive
+            // dwords at a time are one run under a single bounds check (RawDwordRuns).
+            string? boundRun = null;
+            var boundRunStart = 0;
+            var boundRunLength = 0;
             for (var component = 0; component < instruction.Destinations.Count; component++)
             {
                 var destination = instruction.Destinations[component];
@@ -1334,15 +1375,46 @@ public static partial class Gen5MslTranslator
                 {
                     var bindingIndex = (int)entry.Resource;
                     var byteOffset = unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint)));
-                    var address = Temp("uint", ApplyByteBias(bindingIndex, $"({dynamicOffset} + {FormatUInt(byteOffset)})"));
-                    // A GLC scalar load misses the scalar cache (gfx10 SMEM GLC) and reads
-                    // the device-coherent value, as a GLC vector load does.
-                    _usesCoherentLoads |= control.Glc;
-                    value = Temp(
-                        "uint",
-                        control.Glc
-                            ? $"sharpemu_load_dword_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address})"
-                            : LoadDword(bindingIndex, address));
+                    if (boundRun is null || component >= boundRunStart + boundRunLength)
+                    {
+                        boundRun = null;
+                        if (_options.RawDwordRuns && _options.RawDwordAccess && instruction.Destinations.Count >= 2)
+                        {
+                            var length = BoundScalarRunLength(instruction, component);
+                            if (length >= 2 && control.Glc)
+                            {
+                                // A GLC load keeps its per-dword coherent reads.
+                                Statistics.NoteRunRefused(placed: false);
+                            }
+                            else if (length >= 2)
+                            {
+                                Statistics.NoteRunSite((uint)length);
+                                var runAddress = Temp("uint", ApplyByteBias(bindingIndex, $"({dynamicOffset} + {FormatUInt(byteOffset)})"));
+                                boundRun = Temp(
+                                    "uint4",
+                                    $"sharpemu_load_dword_run<{length}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {runAddress})");
+                                boundRunStart = component;
+                                boundRunLength = length;
+                            }
+                        }
+                    }
+
+                    if (boundRun is not null)
+                    {
+                        value = Temp("uint", $"{boundRun}[{component - boundRunStart}]");
+                    }
+                    else
+                    {
+                        var address = Temp("uint", ApplyByteBias(bindingIndex, $"({dynamicOffset} + {FormatUInt(byteOffset)})"));
+                        // A GLC scalar load misses the scalar cache (gfx10 SMEM GLC) and reads
+                        // the device-coherent value, as a GLC vector load does.
+                        _usesCoherentLoads |= control.Glc;
+                        value = Temp(
+                            "uint",
+                            control.Glc
+                                ? $"sharpemu_load_dword_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address})"
+                                : LoadDword(bindingIndex, address));
+                    }
                 }
                 else
                 {
@@ -1516,6 +1588,37 @@ public static partial class Gen5MslTranslator
                         : $"(v[{control.SourceVectorRegister}] >> {sourceShift})";
                     Line($"sharpemu_store_device_bytes({DeviceArguments}, {address}, {source}, {byteCount}u);");
                 }
+                else if (control.DwordCount >= 2 && _options.DeviceSpanAccess)
+                {
+                    // One page-table walk for the whole record, then plain stores off the
+                    // pointer; a span that leaves its page or is unmapped is stored dword by
+                    // dword, which is what every dword cost before.
+                    Statistics.NoteSpanSite(control.DwordCount);
+                    var spanValid = Temp("bool", "false");
+                    var span = Temp(
+                        "device uint*",
+                        $"sharpemu_resolve_device_span({DeviceArguments}, {address}, {control.DwordCount * sizeof(uint)}u, {spanValid})");
+                    Line($"if ({spanValid})");
+                    Line("{");
+                    _indent++;
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        Line($"{span}[{index}] = v[{control.SourceVectorRegister + index}];");
+                    }
+
+                    _indent--;
+                    Line("}");
+                    Line("else");
+                    Line("{");
+                    _indent++;
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        Line($"sharpemu_store_device_dword({DeviceArguments}, {address} + {index * sizeof(uint)}ul, v[{control.SourceVectorRegister + index}]);");
+                    }
+
+                    _indent--;
+                    Line("}");
+                }
                 else
                 {
                     for (uint index = 0; index < control.DwordCount; index++)
@@ -1554,9 +1657,36 @@ public static partial class Gen5MslTranslator
             var aligned = Temp("ulong", $"{address} & ~3ul");
             if (control.Glc && control.DwordCount == 2)
             {
+                Statistics.NoteSpanRefusedPair();
                 StorePairLoad(
                     control.DestinationVectorRegister,
                     $"sharpemu_load_device_pair_coherent({DeviceArguments}, {aligned}, true, {aligned} + 4ul, true, {PairLockArguments})");
+                return true;
+            }
+
+            if (control.DwordCount >= 2 && _options.DeviceSpanAccess)
+            {
+                // A GLC DWORDX2 took the pair snapshot above; every other wide load resolves
+                // the span once. The walk runs only for an active lane, as each dword's did.
+                Statistics.NoteSpanSite(control.DwordCount);
+                BeginExecGuard();
+                var spanValid = Temp("bool", "false");
+                var span = Temp(
+                    "device uint*",
+                    $"sharpemu_resolve_device_span({DeviceArguments}, {aligned}, {control.DwordCount * sizeof(uint)}u, {spanValid})");
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    var componentAddress = index == 0 ? aligned : $"{aligned} + {index * sizeof(uint)}ul";
+                    var spanWord = control.Glc
+                        ? $"atomic_load_explicit((device atomic_uint*)({span} + {index}), memory_order_relaxed)"
+                        : $"{span}[{index}]";
+                    StoreVector(
+                        control.DestinationVectorRegister + index,
+                        $"{spanValid} ? {spanWord} : sharpemu_load_device_dword{coherent}({DeviceArguments}, {componentAddress})",
+                        guardWithExec: false);
+                }
+
+                EndExecGuard();
                 return true;
             }
 

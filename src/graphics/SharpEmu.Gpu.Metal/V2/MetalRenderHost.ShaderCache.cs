@@ -360,6 +360,15 @@ internal sealed partial class MetalRenderHost
         Interlocked.Increment(ref _pipelineRebuilds);
     }
 
+    // The PERF line's view of the translator's shared-proof memory rewrites (cumulative).
+    private static string DescribeMslMemoryRewrites()
+    {
+        var r = ShaderCompiler.Metal.Gen5MslTranslator.Statistics.MemoryRewrites;
+        return $"msl_span_sites={r.SpanSites} msl_span_dwords={r.SpanDwords} msl_span_refused_pair={r.SpanRefusedPair} " +
+            $"msl_run_sites={r.RunSites} msl_run_dwords={r.RunDwords} " +
+            $"msl_run_refused_placed={r.RunRefusedPlaced} msl_run_refused_coherent={r.RunRefusedCoherent}";
+    }
+
     // The [MEM] metal section's and the PERF line's view of the bound.
     private string DescribeShaderCache()
     {

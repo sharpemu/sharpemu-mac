@@ -17,7 +17,14 @@ public sealed class GlobalMemoryRegisterTests
     {
         var source = Compile(opcode);
         for (var component = 0; component < componentCount; component++)
-            Assert.Contains($"v{8 + component} = sharpemu_load_device_dword", source);
+        {
+            // A wide load resolves its span once and reads each dword off it, falling back
+            // to the per-dword walk when the span leaves its page (DeviceSpanAccess).
+            if (componentCount == 1)
+                Assert.Contains($"v{8 + component} = sharpemu_load_device_dword", source);
+            else
+                Assert.Matches($@"v{8 + component} = t\d+ \? t\d+\[{component}\] : sharpemu_load_device_dword", source);
+        }
         Assert.DoesNotMatch(@"(?m)^\s*(if \(exec\) \{ )?v3 = ", source);
     }
 

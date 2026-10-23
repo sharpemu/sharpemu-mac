@@ -162,6 +162,43 @@ public static partial class Gen5MslTranslator
         {
             Interlocked.Increment(ref structured ? ref _structured : ref _dispatcher);
         }
+
+        // Vector memory accesses rewritten to share one proof (counted when a shader is
+        // translated, so one count is one site in one compiled shader). Span: a global
+        // DWORDX2..X4 resolved through the page table once (Gen5MslCodegenOptions.DeviceSpanAccess);
+        // run: a raw buffer DWORDX2..X4 under one bounds check (RawDwordRuns). Refused sites
+        // kept their per-dword form: a GLC DWORDX2 is one atomic snapshot of its pair, a
+        // swizzled or descriptor-placed buffer access has no single address, and a
+        // persistent-kernel or GLC buffer record keeps its coherent/locked path.
+        private static long _spanSites;
+        private static long _spanDwords;
+        private static long _spanRefusedPair;
+        private static long _runSites;
+        private static long _runDwords;
+        private static long _runRefusedPlaced;
+        private static long _runRefusedCoherent;
+
+        public static (long SpanSites, long SpanDwords, long SpanRefusedPair, long RunSites, long RunDwords, long RunRefusedPlaced, long RunRefusedCoherent) MemoryRewrites =>
+            (Interlocked.Read(ref _spanSites), Interlocked.Read(ref _spanDwords), Interlocked.Read(ref _spanRefusedPair),
+             Interlocked.Read(ref _runSites), Interlocked.Read(ref _runDwords),
+             Interlocked.Read(ref _runRefusedPlaced), Interlocked.Read(ref _runRefusedCoherent));
+
+        internal static void NoteSpanSite(uint dwords)
+        {
+            Interlocked.Increment(ref _spanSites);
+            Interlocked.Add(ref _spanDwords, dwords);
+        }
+
+        internal static void NoteSpanRefusedPair() => Interlocked.Increment(ref _spanRefusedPair);
+
+        internal static void NoteRunSite(uint dwords)
+        {
+            Interlocked.Increment(ref _runSites);
+            Interlocked.Add(ref _runDwords, dwords);
+        }
+
+        internal static void NoteRunRefused(bool placed) =>
+            Interlocked.Increment(ref placed ? ref _runRefusedPlaced : ref _runRefusedCoherent);
     }
 
     private sealed partial class CompilationContext
@@ -3829,6 +3866,7 @@ public static partial class Gen5MslTranslator
                 else if (dwordCount >= 2 && byteAddress.Contiguous && LocksPersistentRecords)
                 {
                     // One record to other workgroups (Gen5MslCodegenOptions.PersistentRecordLocks).
+                    Statistics.NoteRunRefused(placed: false);
                     EmitPairLocked($"b{bindingIndex} + (({byteAddress.Base}) >> 2)", () =>
                     {
                         for (uint index = 0; index < dwordCount; index++)
@@ -3837,8 +3875,21 @@ public static partial class Gen5MslTranslator
                         }
                     });
                 }
+                else if (dwordCount >= 2 && _options.RawDwordRuns && _options.RawDwordAccess && byteAddress.Contiguous)
+                {
+                    Statistics.NoteRunSite(dwordCount);
+                    var sources = string.Join(
+                        ", ",
+                        Enumerable.Range(0, 4).Select(index => index < dwordCount ? $"v[{sourceVectorRegister + index}]" : "0u"));
+                    Line($"sharpemu_store_dword_run<{dwordCount}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress.Base}, uint4({sources}));");
+                }
                 else
                 {
+                    if (dwordCount >= 2 && _options.RawDwordRuns && _options.RawDwordAccess)
+                    {
+                        Statistics.NoteRunRefused(placed: true);
+                    }
+
                     for (uint index = 0; index < dwordCount; index++)
                     {
                         Line(StoreDwordStatement(
@@ -3893,6 +3944,7 @@ public static partial class Gen5MslTranslator
                 {
                     // One snapshot of the record (Gen5MslCodegenOptions.PersistentRecordLocks).
                     _usesPairLocks = true;
+                    Statistics.NoteRunRefused(placed: false);
                     var record = Temp("uint4", "uint4(0u)");
                     var load = $"sharpemu_load_record_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {DwordAddress(0)}, {dwordCount}u, {PairLockArguments})";
                     Line(!_execKnownFull ? $"if (exec) {{ {record} = {load}; }}" : $"{record} = {load};");
@@ -3902,6 +3954,31 @@ public static partial class Gen5MslTranslator
                     }
 
                     return true;
+                }
+
+                if (dwordCount >= 2 && _options.RawDwordRuns && _options.RawDwordAccess)
+                {
+                    if (!byteAddress.Contiguous || glc)
+                    {
+                        Statistics.NoteRunRefused(placed: !byteAddress.Contiguous);
+                    }
+                    else
+                    {
+                        // One bounds proof for the run; any dword past the end falls back to
+                        // the per-dword check, so a partly valid run keeps its valid dwords.
+                        Statistics.NoteRunSite(dwordCount);
+                        BeginExecGuard();
+                        var run = Temp(
+                            "uint4",
+                            $"sharpemu_load_dword_run<{dwordCount}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress.Base})");
+                        for (uint index = 0; index < dwordCount; index++)
+                        {
+                            StoreVector(destinationVectorRegister + index, $"{run}[{index}]", guardWithExec: false);
+                        }
+
+                        EndExecGuard();
+                        return true;
+                    }
                 }
 
                 for (uint index = 0; index < dwordCount; index++)

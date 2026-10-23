@@ -2306,6 +2306,11 @@ internal sealed partial class MetalRenderHost :
             // the first thing to look at when GPU time will not come down.
             $"msl_structured={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Structured} " +
             $"msl_dispatcher={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Dispatcher} " +
+            // Vector memory accesses rewritten to share one proof, per compiled shader site:
+            // span = global DWORDX2..X4 resolved once; run = raw buffer DWORDX2..X4 under one
+            // bounds check. The refused counts kept the per-dword form (a GLC pair snapshot;
+            // a swizzled/placed buffer access; a coherent or locked persistent-kernel record).
+            $"{DescribeMslMemoryRewrites()} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed} " +
             (_meshletCache?.TakeCounters() ?? "meshlet_draws=0") + " " + TakeIndirectCounters());
         _slowWaitReports = 0;
