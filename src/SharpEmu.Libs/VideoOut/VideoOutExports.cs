@@ -1811,7 +1811,7 @@ public static partial class VideoOutExports
         Environment.GetEnvironmentVariable("SHARPEMU_NO_FLIP_PACING"),
         "1",
         StringComparison.Ordinal);
-    private static Thread? _vblankThread;
+    private static SharpEmu.HLE.Host.HostBackgroundThread? _vblankThread;
     private static readonly object _vblankThreadGate = new();
 
     /// <summary>
@@ -1834,25 +1834,18 @@ public static partial class VideoOutExports
                 return;
             }
 
-            var thread = new Thread(VblankTickLoop)
-            {
-                IsBackground = true,
-                Name = "SharpEmu-Vblank",
-            };
-            _vblankThread = thread;
-            thread.Start();
+            _vblankThread = SharpEmu.HLE.Host.HostBackgroundThread.Start(
+                "SharpEmu-Vblank", SharpEmu.HLE.Host.HostThreadQos.UserInteractive, 1024 * 1024, VblankTickLoop);
         }
     }
 
-    private static void VblankTickLoop()
+    private static void VblankTickLoop(bool qosApplied)
     {
         // This loop *is* the guest's frame clock: titles that park their main or
         // render loop on a vblank equeue advance only when it fires. Timer
         // coalescing on a non-user-interactive thread would smear those wakeups
-        // across tens of milliseconds and show up directly as judder, so it asks
-        // for the one QoS class macOS exempts from coalescing.
-        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
-            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        // across tens of milliseconds and show up directly as judder, so the
+        // thread is created at the one QoS class macOS exempts from coalescing.
         var pending = new List<(ulong Equeue, ulong Ident, ulong DataHint, ulong UserData)>();
         while (Volatile.Read(ref _vblankStopRequested) == 0)
         {

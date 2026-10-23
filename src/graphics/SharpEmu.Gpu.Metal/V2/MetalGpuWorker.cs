@@ -196,7 +196,7 @@ internal sealed class MetalCompletionQueue : IDisposable
     private readonly object _gate = new();
     private readonly object _wakeGate = new();
     private readonly List<(ulong Serial, Action Work)> _pending = new();
-    private readonly Thread _thread;
+    private readonly SharpEmu.HLE.Host.HostBackgroundThread _thread;
     private readonly Action _wakeHandler;
     private readonly bool _handlerBound;
     private ulong _publishedSerial;
@@ -218,12 +218,9 @@ internal sealed class MetalCompletionQueue : IDisposable
             _handlerBound
                 ? "[METAL-V2][INFO] Submission completions wake the host through a command-buffer handler."
                 : "[METAL-V2][INFO] Submission completions are polled on the shared event.");
-        _thread = new Thread(Run)
-        {
-            IsBackground = true,
-            Name = "SharpEmu Metal completion",
-        };
-        _thread.Start();
+        // Native, so the UserInteractive class asked for in Run takes effect.
+        _thread = SharpEmu.HLE.Host.HostBackgroundThread.Start(
+            "SharpEmu Metal completion", SharpEmu.HLE.Host.HostThreadQos.UserInteractive, 1024 * 1024, Run);
     }
 
     /// <summary>Whether a committed command buffer should carry the wakeup handler.</summary>
@@ -407,12 +404,11 @@ internal sealed class MetalCompletionQueue : IDisposable
         return false;
     }
 
-    private void Run()
+    private void Run(bool qosApplied)
     {
         // A completion carries a flip and an interrupt the guest is waiting on, so
-        // the thread is a frame-deadline thread like the worker and the presenter.
-        var qosApplied = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
-            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        // the thread is a frame-deadline thread like the worker and the presenter
+        // (UserInteractive, applied by the thread's creation).
         if (DsTrace.On)
         {
             DsTrace.RegisterThread(3, 0, Thread.CurrentThread.Name ?? "MetalCompletion", qosApplied ? 1 : 0);
@@ -654,7 +650,7 @@ internal sealed class MetalCompletionQueue : IDisposable
             Monitor.PulseAll(_wakeGate);
         }
 
-        _thread.Join(TimeSpan.FromSeconds(2));
+        _thread.Join(2000);
     }
 }
 
