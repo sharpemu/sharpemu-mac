@@ -953,12 +953,11 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
 
     private static void WaitForCompletions(MetalRenderHost host)
     {
-        var deadline = Environment.TickCount64 + 10_000;
-        while (host.Completions.PendingCount != 0)
-        {
-            Assert.True(Environment.TickCount64 < deadline, "The held completions did not drain.");
-            Thread.Sleep(1);
-        }
+        // Drain removes a callback before invoking it. A zero pending count can
+        // therefore precede its guest write; a trailing callback observes its end.
+        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Completions.Enqueue(host.LastWorkSerial, () => drained.SetResult());
+        Assert.True(drained.Task.Wait(TimeSpan.FromSeconds(10)), "The held completions did not drain.");
     }
 
     private sealed class AddressSpace : IGuestAddressSpace
