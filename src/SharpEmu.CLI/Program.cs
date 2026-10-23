@@ -134,32 +134,32 @@ internal static partial class Program
             // event ownership. Emulation remains on a worker thread.
             var exitCode = 0;
             HostMainThread.Enable();
-            var emulation = new Thread(() =>
-            {
-                // This thread runs the guest's main thread: it drives the ELF
-                // entry point and everything the title does before it spawns a
-                // pthread of its own. Frame deadlines live here, so it asks for
-                // the same QoS class as the presenter. Guest pthreads inherit
-                // their class from whoever creates them and are deliberately
-                // left alone — a title with thirty worker threads must not have
-                // all of them outranking the presenter.
-                SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
-                    SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
-                try
+            var emulation = SharpEmu.HLE.Host.HostBackgroundThread.Start(
+                "SharpEmu Emulation",
+                SharpEmu.HLE.Host.HostThreadQos.UserInteractive,
+                32 * 1024 * 1024,
+                _ =>
                 {
-                    exitCode = RunEmulator(args, isMitigatedChild);
-                }
-                finally
-                {
-                    HostMainThread.Shutdown();
-                }
-            }, 32 * 1024 * 1024)
-            {
-                Name = "SharpEmu Emulation",
-            };
-            emulation.Start();
+                    // This thread runs the guest's main thread: it drives the ELF
+                    // entry point and everything the title does before it spawns a
+                    // pthread of its own. Frame deadlines live here, so it is created
+                    // at the same QoS class as the presenter (natively: the class
+                    // cannot be changed on a runtime-created thread). Guest pthreads
+                    // inherit their class from whoever creates them and are
+                    // deliberately left alone: a title with thirty worker threads must
+                    // not have all of them outranking the presenter.
+                    try
+                    {
+                        exitCode = RunEmulator(args, isMitigatedChild);
+                    }
+                    finally
+                    {
+                        HostMainThread.Shutdown();
+                    }
+                },
+                background: false);
             HostMainThread.Pump();
-            emulation.Join();
+            emulation.Join(Timeout.Infinite);
             return exitCode;
         }
 

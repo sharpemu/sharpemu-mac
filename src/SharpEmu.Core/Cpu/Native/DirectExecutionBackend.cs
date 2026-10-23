@@ -1039,6 +1039,18 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 	private Thread? _readyDispatchThread;
 
+	// SHARPEMU_READY_TARGETED_WAKE=0 pulses every waiter on the guest thread gate for each
+	// ready-enqueue again (the dispatcher, joiners, nested-callback waiters), as before.
+	private static readonly bool ReadyTargetedWake =
+		!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_READY_TARGETED_WAKE"), "0", StringComparison.Ordinal);
+
+	// The ready dispatcher's own wake; its parked flag and the ready queue share _guestThreadGate.
+	private readonly ReadyDispatchSignal _readyDispatchSignal = new();
+
+	// Nested-callback waiters (WaitForNestedCallbackOwner-style loop) asleep on the gate; they
+	// wait for their owner's ready transition, which pulses them. Guarded by _guestThreadGate.
+	private int _gateReadyWaiters;
+
 	private GCHandle _selfHandle;
 
 	private nint _selfHandlePtr;
@@ -4876,7 +4888,15 @@ public sealed unsafe partial class DirectExecutionBackend :
 					else
 					{
 						// Every ready transition pulses this gate; the bound only re-checks forced exit.
-						Monitor.Wait(_guestThreadGate, 100);
+						_gateReadyWaiters++;
+						try
+						{
+							Monitor.Wait(_guestThreadGate, 100);
+						}
+						finally
+						{
+							_gateReadyWaiters--;
+						}
 					}
 				}
 
@@ -6384,7 +6404,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 		if (thread.State == GuestThreadRunState.Ready)
 		{
 			// A wake can arrive before the previous executor releases this thread.
-			Monitor.PulseAll(_guestThreadGate);
+			WakeReadyWaitersLocked();
 		}
 		if (thread.State == GuestThreadRunState.Blocked &&
 			!thread.ExceptionDeliveryActive &&
@@ -7491,11 +7511,16 @@ public sealed unsafe partial class DirectExecutionBackend :
 			StringComparison.Ordinal);
 		var nextSnapshotTimestamp = Stopwatch.GetTimestamp() + Stopwatch.Frequency;
 		_readyDispatchStop = false;
+		lock (_guestThreadGate)
+		{
+			_readyDispatchSignal.ResetLocked();
+		}
 		_readyDispatchThread = new Thread(new ThreadStart(delegate
 		{
 			while (!_readyDispatchStop)
 			{
 				GuestThreadState? readyThread;
+				var parked = false;
 				lock (_guestThreadGate)
 				{
 					if (_readyDispatchStop) break;
@@ -7503,7 +7528,25 @@ public sealed unsafe partial class DirectExecutionBackend :
 					{
 						// Queue checks and notifications share this gate to prevent lost wakes.
 						// A timed wait is needed only for the optional diagnostic snapshots.
-						Monitor.Wait(_guestThreadGate, logSnapshots ? 1000 : Timeout.Infinite);
+						if (ReadyTargetedWake)
+						{
+							_readyDispatchSignal.MarkParkedLocked();
+							parked = true;
+						}
+						else
+						{
+							Monitor.Wait(_guestThreadGate, logSnapshots ? 1000 : Timeout.Infinite);
+						}
+					}
+				}
+				if (parked)
+				{
+					// Parked on the dispatcher's own event: an enqueue under the gate saw the flag
+					// above and signalled it, even if that happened before this wait began.
+					_ = _readyDispatchSignal.Park(logSnapshots ? 1000 : Timeout.Infinite);
+					lock (_guestThreadGate)
+					{
+						_readyDispatchSignal.ClearParkedLocked();
 					}
 				}
 				if (readyThread is not null)
@@ -7547,6 +7590,7 @@ public sealed unsafe partial class DirectExecutionBackend :
 			_readyDispatchStop = true;
 			Monitor.PulseAll(_guestThreadGate);
 		}
+		_readyDispatchSignal.SignalAlways();
 		Thread? readyDispatchThread = _readyDispatchThread;
 		if (readyDispatchThread == null)
 		{
@@ -7570,7 +7614,26 @@ public sealed unsafe partial class DirectExecutionBackend :
 		ProfileGuestThreadReady(thread, source);
 		_readyGuestThreads.Enqueue(thread);
 		Interlocked.Increment(ref _readyGuestThreadCount);
-		Monitor.PulseAll(_guestThreadGate);
+		WakeReadyWaitersLocked();
+	}
+
+	// Caller holds _guestThreadGate, after making a thread ready. The dispatcher is woken through
+	// its own event; the gate is pulsed only while a nested-callback waiter sleeps on it, because
+	// it waits for exactly this transition. Joiners wait for exit and fault, which pulse the gate
+	// themselves. SHARPEMU_READY_TARGETED_WAKE=0 pulses everything.
+	private void WakeReadyWaitersLocked()
+	{
+		if (!ReadyTargetedWake)
+		{
+			Monitor.PulseAll(_guestThreadGate);
+			return;
+		}
+
+		_ = _readyDispatchSignal.TrySignalLocked();
+		if (_gateReadyWaiters != 0)
+		{
+			Monitor.PulseAll(_guestThreadGate);
+		}
 	}
 
 	// Dequeue every currently-ready guest thread and start a native thread for

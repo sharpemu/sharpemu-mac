@@ -26,16 +26,12 @@ internal sealed class MetalScheduleNudge : IDisposable
     private static readonly nint SelRelease = MetalNative.Selector("release");
 
     private readonly BlockingCollection<nint> _buffers = new(new ConcurrentQueue<nint>());
-    private readonly Thread _thread;
+    private readonly SharpEmu.HLE.Host.HostBackgroundThread _thread;
 
     public MetalScheduleNudge()
     {
-        _thread = new Thread(Run)
-        {
-            IsBackground = true,
-            Name = "SharpEmu Metal v2 schedule nudge",
-        };
-        _thread.Start();
+        _thread = SharpEmu.HLE.Host.HostBackgroundThread.Start(
+            "SharpEmu Metal v2 schedule nudge", SharpEmu.HLE.Host.HostThreadQos.UserInteractive, 1024 * 1024, Run);
     }
 
     /// <summary>Asks the driver to schedule a committed command buffer, without waiting.</summary>
@@ -57,10 +53,8 @@ internal sealed class MetalScheduleNudge : IDisposable
         MetalNative.SendVoid(commandBuffer, SelRelease);
     }
 
-    private void Run()
+    private void Run(bool qosApplied)
     {
-        _ = SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
-            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
         foreach (var buffer in _buffers.GetConsumingEnumerable())
         {
             // The wait autoreleases driver temporaries on a thread that has no pool.
@@ -73,6 +67,6 @@ internal sealed class MetalScheduleNudge : IDisposable
     public void Dispose()
     {
         _buffers.CompleteAdding();
-        _ = _thread.Join(TimeSpan.FromSeconds(1));
+        _ = _thread.Join(1000);
     }
 }

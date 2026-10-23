@@ -106,4 +106,58 @@ public sealed class CommandStreamQueueWatchTests
         Assert.Equal(skipped + 1, queue.TargetedWakesSkipped);
         Assert.Equal(SliceResult.AllBlocked, queue.ProcessOne());
     }
+
+    [Fact]
+    public void AGpuCompletionSignalWakesAParkedWatchedWaitWithoutTheWatchTick()
+    {
+        var host = new RecordingCommandStreamHost();
+        var queue = new CommandStreamQueue(host) { WatchIntervalOverrideMilliseconds = 30_000 };
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, 1, WaitEqual(Label, 1), Instances(5));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+
+        // Nothing is parked yet: the callback costs nothing and signals nothing.
+        queue.NotifyGpuCompletionObserved();
+        Assert.Equal(0, queue.GpuCompletionWakes);
+
+        var parked = Task.Run(() => queue.WaitForWork(60_000));
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        while (!queue.ParkedOnWatch && stopwatch.Elapsed < TimeSpan.FromSeconds(20))
+        {
+            Thread.Sleep(1);
+        }
+
+        Assert.True(queue.ParkedOnWatch);
+        // Let it get from raising the flag to sleeping: a label that lands during its first read
+        // would end the wait without any signal, which is the other path.
+        Thread.Sleep(200);
+        Assert.False(parked.IsCompleted);
+
+        // The label lands while the worker sleeps, then the completion callback fires.
+        host.WriteDword(Label, 1);
+        queue.NotifyGpuCompletionObserved();
+
+        Assert.True(parked.Wait(TimeSpan.FromSeconds(20)), "the parked wait never woke: only the 30 s watch tick was left");
+        Assert.True(parked.Result);
+        Assert.Equal(1, queue.GpuCompletionWakes);
+        Assert.False(queue.ParkedOnWatch);
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+    }
+
+    [Fact]
+    public void ACompletionThatLandedBeforeTheWaitParkedIsSeenByTheFirstRead()
+    {
+        var host = new RecordingCommandStreamHost();
+        var queue = new CommandStreamQueue(host) { WatchIntervalOverrideMilliseconds = 30_000 };
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, 1, WaitEqual(Label, 1), Instances(5));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+
+        // The callback found the worker still running and signalled nothing; the label is already there.
+        host.WriteDword(Label, 1);
+        queue.NotifyGpuCompletionObserved();
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        Assert.True(queue.WaitForWork(60_000));
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5));
+    }
 }

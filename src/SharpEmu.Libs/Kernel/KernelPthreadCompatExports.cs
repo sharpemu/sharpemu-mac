@@ -333,7 +333,8 @@ public static class KernelPthreadCompatExports
     // A guest that polls with sched_yield / scePthreadYield burns a core exactly like a short-usleep
     // poller. Same streak policy as KernelRuntimeCompatExports.ShortUsleep: yields less than 2 ms
     // apart form a streak; once a thread has yielded continuously for SHARPEMU_USLEEP_NAP_AFTER_US
-    // (default 500 us) each further yield sleeps SHARPEMU_USLEEP_NAP_US (default 250 us) instead.
+    // (default 500 us) each further yield sleeps a nap that ramps up to SHARPEMU_USLEEP_NAP_US
+    // (default 250 us, see NapRamp) instead.
     // SHARPEMU_YIELD_NAP=0 restores the bare Thread.Yield().
     private static readonly bool _yieldNapEnabled =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_YIELD_NAP"), "0", StringComparison.Ordinal) &&
@@ -369,9 +370,13 @@ public static class KernelPthreadCompatExports
     public static int PthreadYield(CpuContext ctx)
     {
         _ = ctx;
-        if (_yieldNapEnabled && YieldNapStreak(Stopwatch.GetTimestamp()))
+        var now = Stopwatch.GetTimestamp();
+        if (_yieldNapEnabled && YieldNapStreak(now))
         {
-            HostTiming.SleepMicroseconds(KernelRuntimeCompatExports.UsleepNapMicroseconds);
+            HostTiming.SleepMicroseconds(SharpEmu.HLE.Host.NapRamp.Microseconds(
+                now - _yieldStreakStart,
+                KernelRuntimeCompatExports._usleepNapAfterTicks,
+                KernelRuntimeCompatExports.UsleepNapMicroseconds));
             _lastYield = Stopwatch.GetTimestamp();
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }

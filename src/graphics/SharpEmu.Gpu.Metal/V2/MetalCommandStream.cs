@@ -46,6 +46,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         _flipTarget = flipTarget;
         ApplyTranslationSwitches();
         _commandStream = new CommandStreamQueue(this);
+        if (CommandStreamQueue.GpuCompletionWakeEnabled)
+        {
+            _completions.SetCompletionObserver(_commandStream.NotifyGpuCompletionObserved);
+        }
+
         _translation = AgcBackendServices.CreateCommandStreamTranslation(_memory, this);
         _lastProgressTicks = System.Diagnostics.Stopwatch.GetTimestamp();
     }
