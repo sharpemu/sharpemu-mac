@@ -404,8 +404,8 @@ internal sealed unsafe class ShmScatteredBacking : IGuestBackedSpace, ICpuMemory
             throw new InvalidOperationException($"ftruncate failed: errno={Marshal.GetLastPInvokeError()}");
         }
 
-        _alias = mmap(0, (nuint)backingBytes, ProtRead | ProtWrite, MapShared, _descriptor, 0);
-        Base = (ulong)mmap(0, (nuint)viewBytes, ProtNone, MapPrivate | MapAnon, -1, 0);
+        _alias = MapAligned(backingBytes, ProtRead | ProtWrite, MapShared, _descriptor);
+        Base = (ulong)MapAligned(viewBytes, ProtNone, MapPrivate | MapAnon, -1);
         if (_alias == -1 || Base == ulong.MaxValue)
         {
             throw new InvalidOperationException("mmap failed.");
@@ -420,6 +420,27 @@ internal sealed unsafe class ShmScatteredBacking : IGuestBackedSpace, ICpuMemory
             // neighbours are neighbours in the backing.
             Remap((int)piece, (piece * 7919 + 13) % backingPieces * Piece);
         }
+    }
+
+    // Guest views round to 16 KiB host pages. Rosetta mmap can return only
+    // 4 KiB alignment; padding outside the fixture mapping would then be unbacked.
+    private static nint MapAligned(ulong bytes, int protection, int flags, int descriptor)
+    {
+        const ulong alignment = 16384;
+        var reservedBytes = bytes + alignment;
+        var reserved = mmap(0, (nuint)reservedBytes, ProtNone, MapPrivate | MapAnon, -1, 0);
+        if (reserved == -1) return -1;
+        var aligned = ((ulong)reserved + alignment - 1) & ~(alignment - 1);
+        if (mmap((nint)aligned, (nuint)bytes, protection, flags | MapFixed, descriptor, 0) != (nint)aligned)
+        {
+            munmap(reserved, (nuint)reservedBytes);
+            return -1;
+        }
+        var prefix = aligned - (ulong)reserved;
+        var suffix = reservedBytes - prefix - bytes;
+        if (prefix != 0) munmap(reserved, (nuint)prefix);
+        if (suffix != 0) munmap((nint)(aligned + bytes), (nuint)suffix);
+        return (nint)aligned;
     }
 
     /// <summary>Where the guest sees the scattered pages; the host maps them at the same address.</summary>

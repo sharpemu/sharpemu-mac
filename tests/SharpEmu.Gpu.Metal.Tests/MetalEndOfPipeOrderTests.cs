@@ -670,23 +670,34 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     public void AnEndOfPipeGdsStoreLandsWithItsSubmission(ulong destination)
     {
         if (!RequireDevice()) return;
+        using var hold = new ManualResetEventSlim(false);
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
         Assert.True(host.WritesGdsAtEndOfPipe);
         BinaryPrimitives.WriteUInt32LittleEndian(host.GuestMemory.GdsWords()[8..], 0xC0DE_0001);
         BinaryPrimitives.WriteUInt32LittleEndian(host.GuestMemory.GdsWords()[12..], 0xC0DE_0002);
 
-        // Work ahead of it, so the store has something to wait for.
-        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, LaterLabel, 1));
-        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, 1, destination, GdsWordOffset: 2, GdsWordCount: 2));
-        Assert.Equal(0UL, rig.Backing.Read64(destination));
+        try
+        {
+            // The unwindowed store commits itself. Hold its completion so the
+            // initial assertion cannot race a fast GPU/completion thread.
+            host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, LaterLabel, 1));
+            host.Completions.Enqueue(host.SubmissionSerial, () => hold.Wait(TimeSpan.FromSeconds(10)));
+            host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, 1, destination, GdsWordOffset: 2, GdsWordCount: 2));
+            Assert.Equal(0UL, rig.Backing.Read64(destination));
 
-        host.FlushCommandBuffer();
-        WaitForGpu(host, host.LastWorkSerial);
-        WaitForCompletions(host);
-        WaitUntil(() => rig.Backing.Read64(destination) != 0);
-        Assert.Equal(0xC0DE_0001u, rig.Backing.Read32(destination));
-        Assert.Equal(0xC0DE_0002u, rig.Backing.Read32(destination + 4));
+            host.FlushCommandBuffer();
+            WaitForGpu(host, host.LastWorkSerial);
+            hold.Set();
+            WaitForCompletions(host);
+            WaitUntil(() => rig.Backing.Read64(destination) != 0);
+            Assert.Equal(0xC0DE_0001u, rig.Backing.Read32(destination));
+            Assert.Equal(0xC0DE_0002u, rig.Backing.Read32(destination + 4));
+        }
+        finally
+        {
+            hold.Set();
+        }
     }
 
     /// <summary>RELEASE_MEM data select 7: the add lands from the completion, once.</summary>
