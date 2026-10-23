@@ -346,7 +346,7 @@ internal sealed class MetalCompletionQueue : IDisposable
     }
 
     /// <summary>Blocks until the GPU finished the serial and its completions ran.</summary>
-    public MetalCompletionWait WaitFor(ulong serial)
+    public MetalCompletionWait WaitFor(ulong serial, bool publications = true)
     {
         if (serial == 0)
         {
@@ -379,7 +379,7 @@ internal sealed class MetalCompletionQueue : IDisposable
         }
 
         var signalled = System.Diagnostics.Stopwatch.GetTimestamp();
-        lock (_gate)
+        if (publications) lock (_gate)
         {
             // Drain removes a callback before executing it. A signaled GPU event is
             // insufficient while that callback is still publishing guest table bytes,

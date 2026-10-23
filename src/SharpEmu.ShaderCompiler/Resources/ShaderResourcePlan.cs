@@ -280,6 +280,7 @@ public sealed class ShaderResourcePlan
     // read it: a host may leave them to the device (DeviceDataLoads) without changing
     // anything it evaluates itself.
     public IReadOnlyDictionary<int, int[]> DeviceDataSlots { get; private set; } = new Dictionary<int, int[]>();
+    public IReadOnlySet<int> DeviceControlSlots { get; private set; } = new HashSet<int>();
 
     private Dictionary<int, int[]> FindDeviceDataSlots()
     {
@@ -315,11 +316,11 @@ public sealed class ShaderResourcePlan
             if (access is null) continue;
             Push(access.Handle);
             Push(access.SamplerHandle);
-            if (!FullReadOnlyByteBuffer(index)) Push(access.Offset);
+            if (!FullBoundByteBuffer(index)) Push(access.Offset);
             Push(access.Active);
             if (access.Read is { } read)
             {
-                if (FullReadOnlyByteBuffer(index)) Push(read.Operands[0]);
+                if (FullBoundByteBuffer(index)) Push(read.Operands[0]);
                 else foreach (var operand in read.Operands) Push(operand);
             }
         }
@@ -357,19 +358,42 @@ public sealed class ShaderResourcePlan
             result[slot] = [.. indices];
         }
 
+        var controlSlots = new HashSet<int>();
+        for (var index = 0; index < Accesses.Length; index++)
+        {
+            if (Memory[index].Access is not (MemoryAccess.Write or MemoryAccess.Atomic) || !FullBoundByteBuffer(index)) continue;
+            Push(Accesses[index]?.Offset);
+        }
+        visited.Clear();
+        while (pending.TryPop(out var value))
+        {
+            if (!visited.Add(value)) continue;
+            if (value.Kind == ScalarValueKind.ResourceTableWord && result.ContainsKey((int)value.Payload))
+                controlSlots.Add((int)value.Payload);
+            else foreach (var operand in value.Operands) Push(operand);
+        }
+        DeviceControlSlots = controlSlots;
         return result;
     }
 
     // A raw byte buffer's host binding covers its complete constant V#. Runtime
     // offsets are bounded by that descriptor in the emitter and cannot select another
-    // resource. Keep every formatted, swizzled, large, writable or runtime V# rooted.
-    private bool FullReadOnlyByteBuffer(int index)
+    // resource. A store/atomic uses the same complete host binding and write range;
+    // its offset is GPU control data too. Keep every formatted, swizzled, large or
+    // runtime V# rooted. The active predicate remains host-required.
+    public static string DeviceLoadCompilerIdentity =>
+        AssemblyCodeIdentity.Of(typeof(ShaderResourcePlan).Assembly) + (DeviceControlWords ? "|control-words=1" : "|control-words=0");
+
+    public static bool DeviceControlWords { get; set; } =
+        PerfSwitches.Enabled("SHARPEMU_GPU_CONTROL_WORDS");
+    private bool FullBoundByteBuffer(int index)
     {
         var memory = Memory[index];
-        if (memory.Kind != MemoryResourceKind.Buffer || memory.Access != MemoryAccess.Read || memory.Typed || memory.Formatted ||
+        if (memory.Kind != MemoryResourceKind.Buffer ||
+            (!DeviceControlWords && memory.Access != MemoryAccess.Read) || memory.Typed || memory.Formatted ||
             memory.DeviceDescriptor || memory.Resource >= Info.Buffers.Count) return false;
         var resource = Info.Buffers[(int)memory.Resource];
-        if (resource.Written || resource.Atomic || resource.Source >= DescriptorSources.Count) return false;
+        if ((!DeviceControlWords && (resource.Written || resource.Atomic)) || resource.Source >= DescriptorSources.Count) return false;
         var words = DescriptorSources[(int)resource.Source].Dwords;
         return words.Length == 4 && words.All(word => word.IsConstant) &&
             ((uint)words[1].Payload & 0xFFFF0000u) == 0 &&

@@ -101,6 +101,69 @@ public sealed class DeviceBindingLoadTests(ITestOutputHelper output)
         finally { MetalNative.ReleaseCollisionLibrary(library); }
     }
 
+    [Theory]
+    [InlineData(false, false, 16u)]
+    [InlineData(false, true, 16u)]
+    [InlineData(true, false, 16u)]
+    [InlineData(true, true, 16u)]
+    [InlineData(false, false, 64u)]
+    [InlineData(true, false, 64u)]
+    public void GpuProducedStoreAndAtomicOffsetsPreserveTheBoundWriteRange(bool atomic, bool completeFirst, uint offset)
+    {
+        static Gen5ShaderInstruction Move(uint pc, uint register, uint value) =>
+            new(pc, Gen5ShaderEncoding.Sop1, "SMovB32", [0u], [Gen5Operand.Source(255, value)],
+                [Gen5Operand.Scalar(register)], null);
+        var program = new Gen5ShaderProgram(0x100000, [
+            Move(0, 8, 0x200000), Move(4, 9, 0), Move(8, 10, 64), Move(12, 11, 0),
+            new Gen5ShaderInstruction(16, Gen5ShaderEncoding.Smem, "SLoadDword", [0u, 0u],
+                [Gen5Operand.Scalar(0), Gen5Operand.Source(125)], [Gen5Operand.Scalar(16)], new Gen5ScalarMemoryControl(1, 0, null)),
+            new Gen5ShaderInstruction(24, Gen5ShaderEncoding.Vop1, "VMovB32", [0u], [Gen5Operand.Scalar(16)], [Gen5Operand.Vector(0)], null),
+            new Gen5ShaderInstruction(28, Gen5ShaderEncoding.Vop1, "VMovB32", [0u], [Gen5Operand.Source(129)], [Gen5Operand.Vector(4)], null),
+            new Gen5ShaderInstruction(32, Gen5ShaderEncoding.Mubuf, atomic ? "BufferAtomicAdd" : "BufferStoreDword", [0u, 0u],
+                [Gen5Operand.Vector(0), Gen5Operand.Scalar(8), Gen5Operand.Source(125), Gen5Operand.Vector(4)], [],
+                new Gen5BufferMemoryControl(1, 0, 4, 8, 0, false, true, false, false)),
+            new Gen5ShaderInstruction(40, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null),
+        ]);
+        var hash = 0xB2C00000u + (atomic ? 1u : 0u);
+        var hostPlan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, 0, 2);
+        var control = Assert.Single(hostPlan.DeviceDataSlots);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, 0, 2, deviceDataMemory: control.Value.ToHashSet());
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var user = new uint[] { unchecked((uint)GuestBase), (uint)(GuestBase >> 32) };
+        Assert.True(ResourceMaterializer.Materialize(plan, new ResourceRuntimeInputs
+        {
+            UserData = user,
+            ReadMemory = (ulong at, out uint value) => throw new InvalidOperationException($"Host consumed GPU offset {at:X}"),
+        }, ref snapshot, ref specialization));
+        Assert.True(Assert.Single(plan.Info.Buffers).Written);
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 2), false,
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false, 0);
+        var request = new ShaderCompileRequest(plan, resources, layout) { WaveSize = 32, LocalSizeX = 1 };
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1") return;
+        var bytes = new byte[1 << DeviceAddressPaging.PageBits];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(1024), offset);
+        var (tables, _) = MetalNative.CreateGuestMapping(GuestBase, bytes, 4096);
+        void Writer(nint command) => MetalNative.CopyBindingWords(command, tables[0].Residents[0], 1024, 0, 4);
+        if (completeFirst) MetalNative.CompleteBindingWriter(Writer);
+        var push = new byte[PushData.ByteSize];
+        for (var i = 0; i < layout.UserDataRegisters.Count; i++)
+            BinaryPrimitives.WriteUInt32LittleEndian(push.AsSpan((int)(layout.PushDataStartDword + i) * 4), user[layout.UserDataRegisters[i]]);
+        Assert.True(MetalNative.TryCompileLibrary(shader!.Source, out var library, out var compileError), compileError);
+        try
+        {
+            var initial = Enumerable.Repeat((byte)0x11, 64).ToArray();
+            Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, initial, push, shader.ArgumentLayout!, 1,
+                out var result, out _, out var runError, tables: tables, beforeCompute: completeFirst ? null : Writer), runError);
+            var expected = initial.ToArray();
+            if (offset < 64) BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan((int)offset), atomic ? 0x11111112u : 1u);
+            Assert.Equal(expected, result);
+        }
+        finally { MetalNative.ReleaseCollisionLibrary(library); }
+    }
+
     private static Gen5ShaderInstruction Load(uint pc, uint source, uint destination, uint count) =>
         new(pc, Gen5ShaderEncoding.Smem, $"SLoadDwordx{count}", [0u, 0u], [Gen5Operand.Scalar(source), Gen5Operand.Source(125)],
             Enumerable.Range((int)destination, (int)count).Select(index => Gen5Operand.Scalar((uint)index)).ToArray(),

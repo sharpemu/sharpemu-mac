@@ -1018,7 +1018,7 @@ internal sealed partial class MetalRenderHost :
     /// needs that submission and nothing else, and on a tile-based GPU committing the
     /// open pass instead would store and reload the whole framebuffer.
     /// </summary>
-    private void WaitForCommittedSerial(ulong serial, MetalWaitReason reason)
+    private void WaitForCommittedSerial(ulong serial, MetalWaitReason reason, bool gpuBytesOnly = false)
     {
         if (serial > _previousSerial)
         {
@@ -1033,7 +1033,9 @@ internal sealed partial class MetalRenderHost :
         using var waitProfile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandGpuWait);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var profile = _completions.WaitFor(serial);
+        var eventOnly = gpuBytesOnly && GpuWordsEnabled;
+        if (eventOnly) _gpuByteWaits++;
+        var profile = _completions.WaitFor(serial, publications: !eventOnly);
         if (DsTrace.Gpu && DsTrace.Armed)
         {
             // DSTRACE §4.7 RRW: a partial wait for one committed submission. The read
@@ -1252,6 +1254,12 @@ internal sealed partial class MetalRenderHost :
     }
 
     void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu(MetalWaitReason.ImageCache);
+
+    void IMetalImageCacheOwner.WaitForSubmission(ulong serial)
+    {
+        if (GpuWordsEnabled) WaitForCommittedSerial(serial, MetalWaitReason.ImageCache);
+        else FlushAndWaitForGpu(MetalWaitReason.ImageCache);
+    }
 
     // The image cache asks per DCC slice per lookup, thousands of times a frame: the completed
     // serial's message send (CompletedSerial) made this 8% of Black Myth: Wukong's GPU worker, so
@@ -1722,6 +1730,7 @@ internal sealed partial class MetalRenderHost :
         // may still be writing these bytes: an image that owns them, or a recorded
         // store into them. Without that test every command-memory read would stall.
         var size = (ulong)destination.Length;
+        WaitForHostPublication(address, size);
         // The command stream reads a packet out of guest memory for every packet it
         // runs, and almost none of them land anywhere the GPU has written. Two
         // comparisons answer that, and skipping the full test keeps a message send
@@ -1754,12 +1763,22 @@ internal sealed partial class MetalRenderHost :
     {
         _lastReadAddress = address;
         _lastReadSize = size;
+        WaitForHostPublication(address, size);
         if (_imageCache.HasGpuModifiedImageBytes(address, size))
         {
             // The writeback is recorded into the buffer being built, so this one has
             // to be committed before the bytes can be read.
             FlushGpuWrites(address, size, MetalWritebackCause.HostRead);
-            FlushAndWaitForGpu(MetalWaitReason.ReadImage);
+            if (GpuWordsEnabled)
+            {
+                var writer = _gpuWrites.PendingSerial(address, size, CompletedSerial);
+                // Writeback can be partial or use a staging transfer: the current
+                // serial is the conservative boundary for newly encoded work.
+                if (writer == 0) writer = _commandBuffer != 0 ? _submissionSerial : _previousSerial;
+                WaitForCommittedSerial(writer, MetalWaitReason.ReadImage, gpuBytesOnly: true);
+                _preciseImageWaits++;
+            }
+            else FlushAndWaitForGpu(MetalWaitReason.ReadImage);
             return;
         }
 
@@ -1767,18 +1786,20 @@ internal sealed partial class MetalRenderHost :
         if (pending != 0)
         {
             _bindingReadWriter = _gpuWrites.LastMatch;
+            var reason = _gpuWrites.LastMatch.Origin == MetalGpuWriteOrigin.Unbounded
+                ? MetalWaitReason.UnknownWriter : MetalWaitReason.ReadRange;
             if (size <= SmallReadWaitBytes)
             {
                 ReportSmallReadWaitSite(address, size);
             }
 
-            if (_commandBuffer != 0 && pending >= _submissionSerial)
+            if (!GpuWordsEnabled && _commandBuffer != 0 && pending >= _submissionSerial)
             {
-                FlushAndWaitForGpu(MetalWaitReason.ReadRange);
+                FlushAndWaitForGpu(reason);
             }
             else
             {
-                WaitForCommittedSerial(pending, MetalWaitReason.ReadRange);
+                WaitForCommittedSerial(pending, reason, gpuBytesOnly: true);
             }
         }
     }
@@ -2382,6 +2403,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" resident_reads_pending=").Append(Interlocked.Exchange(ref _residentReadsPending, 0))
             .Append(" inline_eop=").Append(TakeInlineCompletions())
             .Append(" gpu_labels=").Append(labels.GpuTimed)
+            .Append(TakeGpuWordCounters())
             .Append(" host_labels=").Append(labels.WithoutWindow)
             .Append(" ordered_labels=").Append(TakeOrderedHostLabels())
             .Append(" clock_labels=").Append(clocks.Completion)
@@ -2407,6 +2429,7 @@ internal sealed partial class MetalRenderHost :
             .Append(BindingWaitProvenance.TakeReport())
             .Append(" data_slots_device=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.LearnedSlots)
             .Append(" data_replans=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.Replans)
+            .Append(" control_words_device=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.ControlWords)
             .Append(" resident=").Append(_guestMemory.ResidentBuffers.Length)
             .Append(" windows_touched=").Append(_guestMemory.TouchedWindows.Count);
         Console.Error.WriteLine($"[METAL-V2][WAITS]{reasons}{MetalStoreFastPathCounters.Take()}");

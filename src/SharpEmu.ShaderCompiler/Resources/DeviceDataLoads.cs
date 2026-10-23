@@ -32,6 +32,9 @@ public static class DeviceDataLoads
     private static long _slots;
     private static long _seeded;
     private static long _replans;
+    private static long _controlWords;
+    public static long ControlWords => Interlocked.Read(ref _controlWords);
+    internal static void CountControlWord() => Interlocked.Increment(ref _controlWords);
 
     /// <summary>A shader learned new device loads: its hash and every load it now holds.</summary>
     public static event Action<ulong, int[]>? Learned;

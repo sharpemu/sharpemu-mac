@@ -158,6 +158,12 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
     private long _aCpuNs;
     private long _bCpuNs;
     private long _watermarkStalls;
+    private long _tokenInvalidations;
+    private long _writerPrefixTicks;
+    // A token check observes no guest bytes. An unresolved writer invalidates its
+    // snapshot; only the subsequent memory read needs to resolve the issue prefix.
+    public bool InvalidateUnknownWriterTokens { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_GPU_WRITER_TOKENS") != "0";
     private bool _dispatchResultPending;
     private CommandReadToken _completedReadToken;
 
@@ -242,8 +248,10 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
     {
         if (_writerIntent <= _resolvedWriter) return;
         Interlocked.Increment(ref _watermarkStalls);
+        var started = Stopwatch.GetTimestamp();
         Publish();
         WaitForPrefix(_writerIntent, Operation.WriterPrefix);
+        Interlocked.Add(ref _writerPrefixTicks, Stopwatch.GetTimestamp() - started);
     }
 
     private static void ReleaseBytes(Issue issue)
@@ -365,7 +373,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
             var requests = Volatile.Read(ref _ackRequests[index]);
             if (requests != 0) acknowledgements.Append($" ack_{(Operation)index}={requests}/{Volatile.Read(ref _ackStalls[index])}");
         }
-        return FormattableString.Invariant($"worker_split={(_split ? 1 : 0)} worker_a_ms={Ms(Interlocked.Read(ref _aTicks)):F2} worker_b_ms={Ms(_split ? Interlocked.Read(ref _bTicks) : 0):F2} issue_apply_ms={Ms(Interlocked.Read(ref _bTicks)):F2} worker_a_cpu_ms={Interlocked.Read(ref _aCpuNs) / 1000000.0:F2} worker_b_cpu_ms={(_split ? Interlocked.Read(ref _bCpuNs) : 0) / 1000000.0:F2} a_waits_b_ms={Ms(Interlocked.Read(ref _ring.AcknowledgementWaitTicks) + Interlocked.Read(ref _ring.FullWaitTicks)):F2} b_waits_a_ms={Ms(Interlocked.Read(ref _ring.EmptyWaitTicks)):F2} issue_blocks={Interlocked.Read(ref _ring.PublishedBlocks)} issue_records={Interlocked.Read(ref _ring.PublishedItems)} issue_wakes={Interlocked.Read(ref _ring.Wakeups)} issue_full_stalls={Interlocked.Read(ref _ring.FullStalls)} issue_sync_stalls={Interlocked.Read(ref _ring.SyncStalls)} unresolved_writer_stalls={Interlocked.Read(ref _watermarkStalls)}{acknowledgements}");
+        return FormattableString.Invariant($"worker_split={(_split ? 1 : 0)} worker_a_ms={Ms(Interlocked.Read(ref _aTicks)):F2} worker_b_ms={Ms(_split ? Interlocked.Read(ref _bTicks) : 0):F2} issue_apply_ms={Ms(Interlocked.Read(ref _bTicks)):F2} worker_a_cpu_ms={Interlocked.Read(ref _aCpuNs) / 1000000.0:F2} worker_b_cpu_ms={(_split ? Interlocked.Read(ref _bCpuNs) : 0) / 1000000.0:F2} a_waits_b_ms={Ms(Interlocked.Read(ref _ring.AcknowledgementWaitTicks) + Interlocked.Read(ref _ring.FullWaitTicks)):F2} b_waits_a_ms={Ms(Interlocked.Read(ref _ring.EmptyWaitTicks)):F2} issue_blocks={Interlocked.Read(ref _ring.PublishedBlocks)} issue_records={Interlocked.Read(ref _ring.PublishedItems)} issue_wakes={Interlocked.Read(ref _ring.Wakeups)} issue_full_stalls={Interlocked.Read(ref _ring.FullStalls)} issue_sync_stalls={Interlocked.Read(ref _ring.SyncStalls)} unresolved_writer_stalls={Interlocked.Read(ref _watermarkStalls)} writer_token_invalidations={Interlocked.Read(ref _tokenInvalidations)} writer_prefix_ms={Ms(Interlocked.Read(ref _writerPrefixTicks)):F2}{acknowledgements}");
     }
 
 
@@ -412,6 +420,11 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         // No B work may change it until A publishes another operation/writer intent.
         if (_target is ICommandIssueReadTokenSource)
         {
+            if (InvalidateUnknownWriterTokens && _writerIntent > _resolvedWriter)
+            {
+                Interlocked.Increment(ref _tokenInvalidations);
+                return false;
+            }
             ResolveWriters();
             return token == _completedReadToken;
         }

@@ -7,6 +7,34 @@ namespace SharpEmu.Gpu.Metal.V2;
 
 internal sealed partial class MetalRenderHost
 {
+    internal bool GpuWordsEnabled { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GPU_WORDS") != "0";
+    private readonly MetalHostPublications _hostPublications = new();
+    private long _publicationDisjoint, _gpuByteWaits, _preciseImageWaits;
+
+    private bool HostPublicationPending(ulong address, ulong size) =>
+        Volatile.Read(ref _owedHostLabels) != 0 &&
+        (!GpuWordsEnabled || _hostPublications.Pending(address, size, _backing) != 0);
+
+    private void WaitForHostPublication(ulong address, ulong size)
+    {
+        if (Volatile.Read(ref _owedHostLabels) == 0) return;
+        if (!GpuWordsEnabled) { SynchronizeGuestTables(); return; }
+        var serial = _hostPublications.Pending(address, size, _backing);
+        if (serial != 0) WaitForCommittedSerial(serial, MetalWaitReason.HostPublication);
+        else _publicationDisjoint++;
+    }
+
+    private string TakeGpuWordCounters() =>
+        $" gpu_words={(GpuWordsEnabled ? 1 : 0)} publication_disjoint={Interlocked.Exchange(ref _publicationDisjoint, 0)}" +
+        $" publication_alias_fallbacks={_hostPublications.AliasFallbacks}" +
+        $" gpu_bytes_event_waits={Interlocked.Exchange(ref _gpuByteWaits, 0)}" +
+        $" gds_gpu_fills={Interlocked.Exchange(ref _gdsGpuFills, 0)} gds_gpu_copies={Interlocked.Exchange(ref _gdsGpuCopies, 0)}" +
+        $" gds_host_fallbacks={Interlocked.Exchange(ref _gdsHostFallbacks, 0)}" +
+        $" gds_fallback_align={Interlocked.Exchange(ref _gdsAlignmentFallbacks, 0)} gds_fallback_backing={Interlocked.Exchange(ref _gdsBackingFallbacks, 0)}" +
+        $" gds_fallback_disabled={Interlocked.Exchange(ref _gdsDisabledFallbacks, 0)} gds_snapshot_waits={Interlocked.Exchange(ref _gdsSnapshotWaits, 0)}" +
+        $" image_serial_waits={Interlocked.Exchange(ref _preciseImageWaits, 0)}";
+
     // No live-source copy substitution, speculative labels or cached CPU word lines.
     // =0 restores all previous shortcuts and their individual kill switches.
     internal bool FinalGuestTablesEnabled { get; set; } =
@@ -28,7 +56,7 @@ internal sealed partial class MetalRenderHost
     }
 
     private bool GuestTableNotReady(ulong address, ulong size) =>
-        Volatile.Read(ref _owedHostLabels) != 0 ||
+        HostPublicationPending(address, size) ||
         _imageCache.HasGpuModifiedImageBytes(address, size) ||
         (_gpuWrites.MayCover(address, size) && PendingSerialHinted(address, size) != 0) ||
         (_cpOverlay.Count != 0 && OverlayCoverageHinted(address, size) != MetalOverlayCoverage.None) ||

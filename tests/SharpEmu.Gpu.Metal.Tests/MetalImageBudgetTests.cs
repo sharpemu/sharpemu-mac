@@ -557,8 +557,14 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         public void NoteGuestWrite(ulong address, ulong size) { }
         // What the GPU worker's commit-and-wait does; a test supplies it.
         public Action? OnWaitForGpu { get; set; }
+        public Action<ulong>? OnWaitForSubmission { get; set; }
 
         public void WaitForGpu() => OnWaitForGpu?.Invoke();
+        public void WaitForSubmission(ulong serial)
+        {
+            if (OnWaitForSubmission is { } wait) wait(serial);
+            else WaitForGpu();
+        }
         public void ClearTextureColor(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height, in GpuClearColor color) { }
 
         public void ClearTextureDepthStencil(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height,

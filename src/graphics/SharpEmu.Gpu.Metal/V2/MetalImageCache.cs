@@ -54,6 +54,9 @@ internal interface IMetalImageCacheOwner
     // Finishes every recorded command buffer so the CPU sees the GPU's writes.
     void WaitForGpu();
 
+    // The exact writeback a managed store overlaps; legacy owners may drain.
+    void WaitForSubmission(ulong serial) => WaitForGpu();
+
     // Blocks a thread other than the GPU worker until the submission with this serial has
     // completed, asking the worker to commit it if it is still being recorded. False when it
     // did not complete in time, or when called on the worker, which would wait for itself.

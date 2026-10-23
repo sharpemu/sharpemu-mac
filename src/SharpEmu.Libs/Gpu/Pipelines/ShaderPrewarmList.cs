@@ -144,7 +144,7 @@ public sealed class ComputePrewarmRecord
     public int[]? DeviceBindingMemory { get; init; }
     public int[]? DeviceDataMemory { get; init; }
     public ulong ExcludedUserDataRegisters { get; init; }
-    public string DeviceLoadCompiler { get; init; } = AssemblyCodeIdentity.Of(typeof(ShaderResourcePlan).Assembly);
+    public string DeviceLoadCompiler { get; init; } = ShaderResourcePlan.DeviceLoadCompilerIdentity;
 
     public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
         (Hash, CodeSize, Address, ContinuationAddressOffset);

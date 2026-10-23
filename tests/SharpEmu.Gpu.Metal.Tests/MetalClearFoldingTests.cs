@@ -194,6 +194,7 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
         // Off unless a test turns it on: whether the backing admits an access through its alias, and
         // an address at which one view ends and the next begins, so no alias spans it.
         public bool AliasAccess { get; set; }
+        public object? BackingAliasSnapshot { get; set; }
         public ulong ViewBoundary { get; set; }
 
         public bool TryEnterBackingAliasAccess() => AliasAccess;
@@ -243,6 +244,7 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
         public MetalRenderHost Host { get; }
 
         public bool AliasAccess { set => _backing.AliasAccess = value; }
+        public void EnableStablePublicationAliases() => _backing.BackingAliasSnapshot = _backing;
 
         public ulong ViewBoundary { set => _backing.ViewBoundary = value; }
 

@@ -185,8 +185,10 @@ public sealed partial class MetalImageBudgetTests
         var offWorker = 0;
         var gpuWaits = 0;
         rig.CacheOwner.WaitOffWorker = (_, _) => { offWorker++; return false; };
-        rig.CacheOwner.OnWaitForGpu = () =>
+        var writebackSerial = rig.Harness.SubmissionSerial;
+        rig.CacheOwner.OnWaitForSubmission = serial =>
         {
+            Assert.Equal(writebackSerial, serial);
             gpuWaits++;
             rig.Harness.Submit();
             rig.Harness.Begin();

@@ -707,6 +707,7 @@ internal static class MetalShaderPrewarm
     private static string Stamp(IGuestGpuBackend compiler, nint device) =>
         string.Join(
             '|',
+            ShaderResourcePlan.DeviceLoadCompilerIdentity,
             StampPart(typeof(Gen5ShaderTranslator)),
             StampPart(typeof(Gen5MslTranslator)),
             compiler.GetType().FullName,

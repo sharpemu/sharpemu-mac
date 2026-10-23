@@ -47,7 +47,7 @@ public sealed record ShaderCorpusRecord
     // replay plans with exactly these. Null (older records): with the learned ones.
     public int[]? DeviceBindingMemory { get; init; }
     public int[]? DeviceDataMemory { get; init; }
-    public string DeviceLoadCompiler { get; init; } = AssemblyCodeIdentity.Of(typeof(ShaderResourcePlan).Assembly);
+    public string DeviceLoadCompiler { get; init; } = ShaderResourcePlan.DeviceLoadCompilerIdentity;
     public uint PushDataCursor { get; init; }
     public ShaderCorpusHostFlags Host { get; init; } = new();
     public string? DecodeError { get; init; }

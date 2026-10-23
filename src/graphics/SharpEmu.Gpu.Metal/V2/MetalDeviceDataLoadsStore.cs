@@ -37,7 +37,7 @@ internal static class MetalDeviceDataLoadsStore
     internal static string FileName(string stamp) =>
         string.Create(
             CultureInfo.InvariantCulture,
-            $"{FilePrefix}-{(uint)XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(stamp + SharpEmu.ShaderCompiler.AssemblyCodeIdentity.Of(typeof(DeviceDataLoads).Assembly))):x8}.txt");
+            $"{FilePrefix}-{(uint)XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(stamp + ShaderResourcePlan.DeviceLoadCompilerIdentity)):x8}.txt");
 
     /// <summary>Seeds what earlier starts of this build learned and records what this one learns.</summary>
     public static void Open(string directory, string stamp)
