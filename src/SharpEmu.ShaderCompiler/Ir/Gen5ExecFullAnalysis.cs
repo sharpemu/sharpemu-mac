@@ -9,7 +9,7 @@ namespace SharpEmu.ShaderCompiler.Ir;
 // and a join is full only when every path into it is. A backend can skip the EXEC guard of
 // a vector register write there: no lane keeps its old value, so the old value need not
 // stay live until the write.
-public static class Gen5ExecFullAnalysis
+public static partial class Gen5ExecFullAnalysis
 {
     private const uint ExecLow = 126;
     private const uint ExecHigh = 127;
@@ -31,7 +31,16 @@ public static class Gen5ExecFullAnalysis
     }
 
     // Pcs of the instructions that start with a full EXEC.
-    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32)
+    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32, bool reconvergence = false, bool clampExecHigh = false)
+    {
+        // Clamped graphics/narrow targets have no upper-half lanes; their saved
+        // EXEC_HI is zero and cannot carry a full-mask copy fact into EXEC_LO.
+        wave32 |= clampExecHigh;
+        var full = AnalyzeFullMask(program, wave32);
+        return reconvergence ? AnalyzeEntryIdentities(program, wave32, clampExecHigh, full) : full;
+    }
+
+    private static IReadOnlySet<uint> AnalyzeFullMask(Gen5ShaderProgram program, bool wave32)
     {
         var instructions = program.Instructions;
         var result = new HashSet<uint>();
@@ -140,11 +149,9 @@ public static class Gen5ExecFullAnalysis
                 continue;
             }
 
-            written |= Bit(destination.Value);
-            if (wide)
-            {
-                written |= Bit(destination.Value + 1);
-            }
+            var width = instruction.Control is Gen5ScalarMemoryControl memory
+                ? memory.DestinationCount : instruction.DestinationWidth;
+            for (var part = 0u; part < width; part++) written |= Bit(destination.Value + part);
         }
 
         // GFX10 V_CMPX changes EXEC and ignores the legacy scalar destination.
@@ -202,11 +209,11 @@ public static class Gen5ExecFullAnalysis
                         nextExecFull = execFull;
                         break;
                     case "SMovB64" or "SMovB32" when sources.Count == 1:
-                        nextExecFull = IsFullCopy(sources[0], copies, execFull, wide);
+                        nextExecFull = IsFullCopy(sources[0], copies, execFull, wide, wave32);
                         break;
                     case "SOrB64" or "SOrB32" when sources.Count == 2:
-                        nextExecFull = IsFullCopy(sources[0], copies, execFull, wide) ||
-                            IsFullCopy(sources[1], copies, execFull, wide);
+                        nextExecFull = IsFullCopy(sources[0], copies, execFull, wide, wave32) ||
+                            IsFullCopy(sources[1], copies, execFull, wide, wave32);
                         break;
                 }
             }
@@ -216,7 +223,7 @@ public static class Gen5ExecFullAnalysis
         {
             // A saved copy of the full EXEC.
             nextCopies |= Bit(destinations[0].Value);
-            if (wide)
+            if (wide && !wave32)
             {
                 nextCopies |= Bit(destinations[0].Value + 1);
             }
@@ -227,7 +234,7 @@ public static class Gen5ExecFullAnalysis
         {
             // The saved destination receives the (full) EXEC from before the instruction.
             nextCopies |= Bit(destinations[0].Value);
-            if (wide)
+            if (wide && !wave32)
             {
                 nextCopies |= Bit(destinations[0].Value + 1);
             }
@@ -240,7 +247,7 @@ public static class Gen5ExecFullAnalysis
         operand.Kind == Gen5OperandKind.ScalarRegister && operand.Value == ExecLow;
 
     // True when the operand is a full EXEC or a saved copy of one.
-    private static bool IsFullCopy(Gen5Operand operand, UInt128 copies, bool execFull, bool wide)
+    private static bool IsFullCopy(Gen5Operand operand, UInt128 copies, bool execFull, bool wide, bool wave32)
     {
         if (operand.Kind != Gen5OperandKind.ScalarRegister)
         {
@@ -252,7 +259,7 @@ public static class Gen5ExecFullAnalysis
             return execFull;
         }
 
-        var mask = Bit(operand.Value) | (wide ? Bit(operand.Value + 1) : 0);
+        var mask = Bit(operand.Value) | (wide && !wave32 ? Bit(operand.Value + 1) : 0);
         return (copies & mask) == mask;
     }
 

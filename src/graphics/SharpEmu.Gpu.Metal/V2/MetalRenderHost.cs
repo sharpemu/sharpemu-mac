@@ -2327,6 +2327,7 @@ internal sealed partial class MetalRenderHost :
             // the first thing to look at when GPU time will not come down.
             $"msl_structured={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Structured} " +
             $"msl_dispatcher={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Dispatcher} " +
+            $"{ShaderCompiler.Metal.Gen5MslTranslator.Statistics.OptimizationReport} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed} " +
             (_meshletCache?.TakeCounters() ?? "meshlet_draws=0") + " " + TakeIndirectCounters());
         _slowWaitReports = 0;

@@ -79,6 +79,30 @@ public static partial class Gen5MslTranslator
         /// latches and picks a loop body's joins by reachability (see
         /// <see cref="TryBuildStructuredBody"/>).</summary>
         private bool _relaxedStructure;
+        private bool _splitAcyclicStructure;
+        private int _splitCharacters;
+        private int _splitBudget;
+
+        // Node splitting needs no PC when the graph is acyclic: each copy executes only
+        // on its incoming path. Bound total duplication to avoid exponential source growth.
+        private bool IsAcyclicGraph()
+        {
+            var incoming = new int[_successors.Length];
+            foreach (var edges in _successors)
+                foreach (var target in edges)
+                    if (target >= 0) incoming[target]++;
+            var ready = new Queue<int>();
+            for (var i = 0; i < incoming.Length; i++)
+                if (incoming[i] == 0) ready.Enqueue(i);
+            var visited = 0;
+            while (ready.TryDequeue(out var node))
+            {
+                visited++;
+                foreach (var target in _successors[node])
+                    if (target >= 0 && --incoming[target] == 0) ready.Enqueue(target);
+            }
+            return visited == incoming.Length;
+        }
 
         /// <summary>The most block text a latch may carry and still be copied to every
         /// place that jumps to it.</summary>
@@ -113,6 +137,7 @@ public static partial class Gen5MslTranslator
             [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out StringBuilder? body)
         {
             var built = TryBuildStructuredBodyCore(blocks, out body);
+            if (!built) Statistics.NoteStructureRefusal(!IsAcyclicGraph());
             if (!built && StructureReport)
             {
                 Console.Error.WriteLine(
@@ -151,10 +176,26 @@ public static partial class Gen5MslTranslator
                     _structureFailure = $"{_structureFailure ?? "unrecorded shape"} (first attempt: {strictFailure ?? "unrecorded shape"})";
                 }
 
+                if (!built && _options.AcyclicStructure && _stage != Gen5MslStage.Mesh && IsAcyclicGraph())
+                {
+                    var earlierFailures = _structureFailure;
+                    _structureFailure = null;
+                    _splitAcyclicStructure = true;
+                    _splitCharacters = 0;
+                    _splitBudget = Math.Max(8192, _blockText.Sum(static text => text.Length) * 2);
+                    built = TryAssembleStructuredBody(blocks, out body);
+                    if (!built)
+                    {
+                        _structureFailure = $"{_structureFailure ?? "unrecorded shape"} (earlier retries: {earlierFailures})";
+                    }
+                    Statistics.NoteStructureSplit(built);
+                }
+
                 return built;
             }
             finally
             {
+                _splitAcyclicStructure = false;
                 _relaxedStructure = false;
             }
         }
@@ -266,6 +307,10 @@ public static partial class Gen5MslTranslator
             var first = true;
             while (true)
             {
+                if (_splitAcyclicStructure && text.Length > _splitBudget * 2)
+                {
+                    FailStructure("acyclic node-splitting text budget exceeded");
+                }
                 if (_structureFailed)
                 {
                     return false;
@@ -547,6 +592,18 @@ public static partial class Gen5MslTranslator
                     FailStructure($"edge to an outer loop's {(node == loop.Header ? "header" : "exit")}: block {node} (loop at {loop.Header})");
                     return false;
                 }
+            }
+
+            if (_structureEmitted[node] && _splitAcyclicStructure)
+            {
+                _splitCharacters += _blockText[node].Length + 64;
+                if (_splitCharacters <= _splitBudget)
+                {
+                    return true;
+                }
+
+                FailStructure("acyclic node-splitting budget exceeded");
+                return false;
             }
 
             if (_structureEmitted[node])

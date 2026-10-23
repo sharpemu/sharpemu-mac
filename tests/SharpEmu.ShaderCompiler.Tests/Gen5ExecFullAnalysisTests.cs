@@ -113,6 +113,89 @@ public sealed class Gen5ExecFullAnalysisTests
         Assert.DoesNotContain(afterRestore, full);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ComplementarySavedRegionsReconvergeAtEntryMask(bool wave32)
+    {
+        Scalar("SMovB64", 20, Gen5Operand.Scalar(Exec));
+        Add("VCmpEqU32", Gen5ShaderEncoding.Vopc, [], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)]);
+        Scalar("SAndB64", Exec, Gen5Operand.Scalar(20), Gen5Operand.Scalar(106));
+        Scalar("SMovB64", 22, Gen5Operand.Scalar(Exec));
+        Scalar("SAndn2B64", Exec, Gen5Operand.Scalar(20), Gen5Operand.Scalar(106));
+        var masked = VectorAdd();
+        Scalar("SOrB64", Exec, Gen5Operand.Scalar(Exec), Gen5Operand.Scalar(22));
+        var joined = VectorAdd();
+        var program = new Gen5ShaderProgram(0x1000, _program);
+        var full = Gen5ExecFullAnalysis.Analyze(program, wave32, reconvergence: true);
+        Assert.DoesNotContain(masked, full);
+        Assert.Contains(joined, full);
+        Assert.DoesNotContain(joined, Gen5ExecFullAnalysis.Analyze(program, wave32));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AJoinRequiresEntryOnBothIncomingPaths(bool restoresOtherPath)
+    {
+        Scalar("SMovB64", 20, Gen5Operand.Scalar(Exec));
+        var branch = Branch("SCbranchScc0");
+        Scalar("SAndSaveexecB64", 22, Gen5Operand.Scalar(106));
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(20));
+        var skip = Branch("SBranch");
+        var other = Scalar("SMovB64", Exec, restoresOtherPath
+            ? Gen5Operand.Scalar(20) : new Gen5Operand(Gen5OperandKind.EncodedConstant, 128));
+        var joined = VectorAdd();
+        PointBranch(branch, other);
+        PointBranch(skip, joined);
+        Assert.Equal(restoresOtherPath, Gen5ExecFullAnalysis.Analyze(
+            new Gen5ShaderProgram(0x1000, _program), false, reconvergence: true).Contains(joined));
+    }
+
+    [Fact]
+    public void ALoopCarriedMaskCannotAliasANewCompareAtTheSamePc()
+    {
+        Scalar("SMovB64", 20, Gen5Operand.Scalar(Exec));
+        var header = Add("VCmpEqU32", Gen5ShaderEncoding.Vopc, [], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)]);
+        Scalar("SAndB64", Exec, Gen5Operand.Scalar(20), Gen5Operand.Scalar(106));
+        Scalar("SOrB64", Exec, Gen5Operand.Scalar(Exec), Gen5Operand.Scalar(22));
+        var observed = VectorAdd();
+        Scalar("SAndn2B64", 22, Gen5Operand.Scalar(20), Gen5Operand.Scalar(106));
+        var back = Branch("SCbranchScc0");
+        PointBranch(back, header);
+        Assert.DoesNotContain(observed, Gen5ExecFullAnalysis.Analyze(
+            new Gen5ShaderProgram(0x1000, _program), false, reconvergence: true));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void AClampedHighHalfCannotRestoreLowExec(bool reconvergence, bool wave32)
+    {
+        Scalar("SMovB64", 20, Gen5Operand.Scalar(Exec));
+        Scalar("SMovB32", Exec, Gen5Operand.Scalar(21));
+        var masked = VectorAdd();
+        Assert.DoesNotContain(masked, Gen5ExecFullAnalysis.Analyze(
+            new Gen5ShaderProgram(0x1000, _program), wave32, reconvergence, clampExecHigh: true));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void LiteralDwordAndInlineMinusOneHaveDifferentHighHalves(bool wave32, bool inline)
+    {
+        Kill();
+        Scalar("SMovB64", Exec, inline ? Gen5Operand.Source(193)
+            : new Gen5Operand(Gen5OperandKind.LiteralConstant, uint.MaxValue));
+        var after = VectorAdd();
+        var full = Gen5ExecFullAnalysis.Analyze(new Gen5ShaderProgram(0x1000, _program), wave32, reconvergence: true);
+        Assert.Equal(wave32 || inline, full.Contains(after));
+    }
+
     private static Gen5InstructionControl CompareControl(bool useVop3, uint scalarDestination) =>
         useVop3
             ? new Gen5Vop3Control(0, 0, 0, false, 0, scalarDestination)

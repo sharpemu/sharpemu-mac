@@ -43,6 +43,7 @@ public static partial class Gen5MslTranslator
         /// <summary>Marks a wave64 mask ballot: the low register of the pair and the
         /// condition. Resolved by <see cref="ResolveMaskBallots"/>.</summary>
         private const string MaskBallotMarker = "SHARPEMU_BALLOT";
+        private const string MaskBallot32Marker = "SHARPEMU_BALLOT32";
 
         /// <summary>Marks a 64-bit mask op that has a lane form and a pair form (see
         /// Gen5MslTranslator.LaneMasks.cs); the argument indexes <c>_maskOps</c>.</summary>
@@ -51,6 +52,7 @@ public static partial class Gen5MslTranslator
         /// <summary>Marks SCC = "the mask pair written by the op is non-zero"; the argument is
         /// the pair's low register. It reads the pair only if SCC is read afterwards.</summary>
         private const string SccAnyMarker = "SHARPEMU_SCCANY";
+        private const string SccAny32Marker = "SHARPEMU_SCCANY32";
 
         /// <summary>The slot of SCC in the liveness arrays, after the scalar registers.</summary>
         private const int SccSlot = (int)ScalarRegisterFileCount;
@@ -92,6 +94,7 @@ public static partial class Gen5MslTranslator
             public bool DefinesScc { get; init; }
 
             public uint Lo { get; init; }
+            public bool LowOnly { get; init; }
 
             public string Condition { get; init; } = string.Empty;
 
@@ -116,7 +119,7 @@ public static partial class Gen5MslTranslator
         private MaskLine ParseMaskLine(ReadOnlySpan<char> line, string? text, int start, int depth)
         {
             var trimmed = line.Trim();
-            if (TryReadBallotMarker(trimmed, out var loRegister, out var condition))
+            if (TryReadBallotMarker(trimmed, out var loRegister, out var condition, out var lowOnly))
             {
                 return new MaskLine
                 {
@@ -125,12 +128,15 @@ public static partial class Gen5MslTranslator
                     Depth = depth,
                     Lo = loRegister,
                     Condition = condition,
+                    LowOnly = lowOnly,
                 };
             }
 
-            if (TryReadMarkerArgument(trimmed, SccAnyMarker, out var sccLo))
+            var sccLowOnly = TryReadMarkerArgument(trimmed, SccAny32Marker, out var sccLo);
+            if (sccLowOnly || TryReadMarkerArgument(trimmed, SccAnyMarker, out sccLo))
             {
-                return new MaskLine { Text = text ?? line.ToString(), Kind = MaskLineKind.SccAny, Depth = depth, Lo = sccLo };
+                return new MaskLine { Text = text ?? line.ToString(), Kind = MaskLineKind.SccAny,
+                    Depth = depth, Lo = sccLo, LowOnly = sccLowOnly };
             }
 
             if (TryReadMarkerArgument(trimmed, MaskOpMarker, out var id))
@@ -277,6 +283,7 @@ public static partial class Gen5MslTranslator
                 }
             }
 
+            if (_maskScalarDynamic) Statistics.NoteMaskDynamic();
             ResolveLaneBits(count);
 
             var lines = new List<MaskLine>[count];
@@ -452,10 +459,11 @@ public static partial class Gen5MslTranslator
                 {
                     var lo = (int)line.Lo;
                     var hi = lo + 1;
-                    var hasHigh = hi < (int)ScalarRegisterFileCount;
+                    var hasHigh = !line.LowOnly && hi < (int)ScalarRegisterFileCount;
                     var needed = !IsTrackedSlot(lo) || (hasHigh && !IsTrackedSlot(hi)) ||
                         live[lo] || (hasHigh && live[hi]);
-                    resolved?.Add(needed ? ExpandMaskBallot(line.Text!, line.Lo, line.Condition) : null);
+                    resolved?.Add(needed ? ExpandMaskBallot(line.Text!, line.Lo, line.Condition, line.LowOnly) : null);
+                    if (decide) Statistics.NoteBallot(needed, _stage == Gen5MslStage.Pixel);
                     live[lo] = false;
                     if (hasHigh)
                     {
@@ -475,16 +483,23 @@ public static partial class Gen5MslTranslator
 
                     var lo = (int)line.Lo;
                     var indent = line.Text!.Length - line.Text.AsSpan().TrimStart().Length;
-                    resolved?.Add($"{line.Text[..indent]}scc = ((s[{lo}] | s[{lo + 1}]) != 0u);");
+                    var mask = line.LowOnly ? $"s[{lo}]" : $"(s[{lo}] | s[{lo + 1}])";
+                    resolved?.Add($"{line.Text[..indent]}scc = ({mask} != 0u);");
                     live[SccSlot] = false;
                     live[lo] = true;
-                    live[lo + 1] = true;
+                    if (!line.LowOnly) live[lo + 1] = true;
                     return;
                 }
 
                 case MaskLineKind.MaskOp:
                 {
-                    var pair = decide && PrefersPairForm(line.Op!, live);
+                    var op = line.Op!;
+                    var scalarObserved = op.PreserveScalarBits &&
+                        (op.Dests.Any(register => live[register]) || (op.SetsScc && live[SccSlot]));
+                    // This choice also participates in the liveness fixed point: pair
+                    // reads can reach predecessors and must retain their producers.
+                    var pair = scalarObserved || (decide && PrefersPairForm(op, live));
+                    if (decide && scalarObserved) Statistics.NoteMaskPairObserved();
                     var sub = pair ? line.PairLines : line.LaneLines;
                     var parts = new List<string?>[sub.Length];
                     for (var at = sub.Length - 1; at >= 0; at--)
@@ -556,11 +571,22 @@ public static partial class Gen5MslTranslator
         }
 
         /// <summary>The cross-simdgroup exchange, at the marker's own indentation.</summary>
-        private string ExpandMaskBallot(string markerLine, uint loRegister, string condition)
+        private string ExpandMaskBallot(string markerLine, uint loRegister, string condition, bool lowOnly)
         {
             var indent = markerLine.Length - markerLine.AsSpan().TrimStart().Length;
             var pad = markerLine[..indent];
             var text = new StringBuilder();
+
+            if (!IsWave64)
+            {
+                text.Append($"{pad}s[{loRegister}] = sharpemu_ballot({condition});");
+                if (!lowOnly && loRegister + 1 < ScalarRegisterFileCount)
+                {
+                    text.AppendLine();
+                    text.Append($"{pad}s[{loRegister + 1}] = 0u;");
+                }
+                return text.ToString();
+            }
 
             foreach (var statement in WaveBallotExchange(condition))
             {
@@ -577,8 +603,9 @@ public static partial class Gen5MslTranslator
             return text.ToString();
         }
 
-        private static bool TryReadBallotMarker(ReadOnlySpan<char> trimmed, out uint loRegister, out string condition)
+        private static bool TryReadBallotMarker(ReadOnlySpan<char> trimmed, out uint loRegister, out string condition, out bool lowOnly)
         {
+            lowOnly = trimmed.StartsWith(MaskBallot32Marker, StringComparison.Ordinal);
             loRegister = 0;
             condition = string.Empty;
             if (!trimmed.StartsWith(MaskBallotMarker, StringComparison.Ordinal))
@@ -586,7 +613,7 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            var open = MaskBallotMarker.Length;
+            var open = lowOnly ? MaskBallot32Marker.Length : MaskBallotMarker.Length;
             var close = trimmed.LastIndexOf(')');
             if (open >= trimmed.Length || trimmed[open] != '(' || close <= open)
             {

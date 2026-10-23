@@ -155,6 +155,39 @@ public static partial class Gen5MslTranslator
     {
         private static long _structured;
         private static long _dispatcher;
+        private static long _guardsRemoved, _guardsKept, _ballotsRemoved, _ballotsKept;
+        private static long _execRegions, _splitRecovered, _splitRefused;
+        private static long _maskPairObserved, _maskDynamic, _structureCyclic, _structureShape;
+        private static long _fragmentBallotsRemoved, _fragmentBallotsKept;
+
+        internal static void NoteMaskPairObserved() => Interlocked.Increment(ref _maskPairObserved);
+        internal static void NoteMaskDynamic() => Interlocked.Increment(ref _maskDynamic);
+        internal static void NoteStructureRefusal(bool cyclic) =>
+            Interlocked.Increment(ref cyclic ? ref _structureCyclic : ref _structureShape);
+
+        internal static void NoteGuard(bool removed) =>
+            Interlocked.Increment(ref removed ? ref _guardsRemoved : ref _guardsKept);
+        internal static void NoteBallot(bool kept, bool fragment)
+        {
+            Interlocked.Increment(ref kept ? ref _ballotsKept : ref _ballotsRemoved);
+            if (fragment) Interlocked.Increment(ref kept ? ref _fragmentBallotsKept : ref _fragmentBallotsRemoved);
+        }
+        internal static void NoteExecRegion()
+        {
+            Interlocked.Increment(ref _execRegions);
+            Interlocked.Increment(ref _guardsKept);
+        }
+        internal static void NoteStructureSplit(bool recovered) =>
+            Interlocked.Increment(ref recovered ? ref _splitRecovered : ref _splitRefused);
+
+        public static string OptimizationReport =>
+            $"msl_guards_removed={Interlocked.Read(ref _guardsRemoved)} msl_guards_kept={Interlocked.Read(ref _guardsKept)} " +
+            $"msl_ballots_removed={Interlocked.Read(ref _ballotsRemoved)} msl_ballots_kept={Interlocked.Read(ref _ballotsKept)} " +
+            $"msl_fragment_ballots_removed={Interlocked.Read(ref _fragmentBallotsRemoved)} msl_fragment_ballots_kept={Interlocked.Read(ref _fragmentBallotsKept)} " +
+            $"msl_exec_regions={Interlocked.Read(ref _execRegions)} msl_split_recovered={Interlocked.Read(ref _splitRecovered)} " +
+            $"msl_split_refused={Interlocked.Read(ref _splitRefused)} " +
+            $"msl_mask_pair_observed={Interlocked.Read(ref _maskPairObserved)} msl_mask_dynamic_refused={Interlocked.Read(ref _maskDynamic)} " +
+            $"msl_structure_cyclic_refused={Interlocked.Read(ref _structureCyclic)} msl_structure_shape_refused={Interlocked.Read(ref _structureShape)}";
 
         public static (long Structured, long Dispatcher) ControlFlowForms =>
             (Interlocked.Read(ref _structured), Interlocked.Read(ref _dispatcher));
@@ -1416,6 +1449,7 @@ public static partial class Gen5MslTranslator
         {
             _ldsPhase = LdsPhase.None;
             var emitted = TryEmitBlockBodyCore(blocks, blockIndex, out terminator, out error);
+            EndPredicatedRegion();
             // Without a flow analysis the phase rule orders only within a block, so the
             // block hands over with no half's LDS access still in flight.
             if (emitted && _ldsPhase != LdsPhase.None && !(terminator.Kind == TerminatorKind.Jump && terminator.TrueTarget == ExitTarget))
@@ -1515,6 +1549,18 @@ public static partial class Gen5MslTranslator
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = instructions[index];
+                var shareGuard = CanShareExecGuard(instruction);
+                if (!shareGuard) EndPredicatedRegion();
+                if (shareGuard && !_insidePredicatedRegion && index + 1 < block.EndIndex &&
+                    CanShareExecGuard(instructions[index + 1]))
+                {
+                    Line("if (exec)");
+                    Line("{");
+                    _indent++;
+                    _insidePredicatedRegion = true;
+                    _predicatedGuardCounted = false;
+                    Statistics.NoteExecRegion();
+                }
                 var isTerminator = index == block.EndIndex - 1;
                 // Comments cost nothing in the compiled library and are the only way
                 // to read a dumped MSL body against the guest program it came from.
@@ -3954,6 +4000,7 @@ public static partial class Gen5MslTranslator
                     _usesPairLocks = true;
                     var record = Temp("uint4", "uint4(0u)");
                     var load = $"sharpemu_load_record_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {DwordAddress(0)}, {dwordCount}u, {PairLockArguments})";
+                    NoteExecGuard();
                     Line(!_execKnownFull ? $"if (exec) {{ {record} = {load}; }}" : $"{record} = {load};");
                     for (uint index = 0; index < dwordCount; index++)
                     {
@@ -4092,13 +4139,13 @@ public static partial class Gen5MslTranslator
         /// is kept in step with the pair), so the high dword is not read: a pair whose last
         /// ballot nothing else reads can stay unexchanged (Gen5MslTranslator.LaneMasks.cs).</summary>
         private string LowHalfWriteBit(string low, string view, string high) =>
-            LaneMasksEnabled
+            LaneMasksEnabled && IsWave64
                 ? $"sharpemu_lane < 32u ? (((({low}) >> (sharpemu_lane & 31u)) & 1u) != 0u) : {view}"
                 : LaneBit(low, high);
 
         /// <summary>The same for a write of the high dword.</summary>
         private string HighHalfWriteBit(string low, string high, string view) =>
-            LaneMasksEnabled
+            LaneMasksEnabled && IsWave64
                 ? $"sharpemu_lane < 32u ? {view} : (((({high}) >> (sharpemu_lane & 31u)) & 1u) != 0u)"
                 : LaneBit(low, high);
 
@@ -4202,6 +4249,7 @@ public static partial class Gen5MslTranslator
                 return;
             }
 
+            if (guardWithExec) NoteExecGuard();
             if (guardWithExec && !_execKnownFull)
             {
                 Line($"if (exec) {{ v[{register}] = {expression}; }}");

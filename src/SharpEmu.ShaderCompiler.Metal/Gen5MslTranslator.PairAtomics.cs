@@ -73,6 +73,7 @@ public static partial class Gen5MslTranslator
         {
             _usesPairLocks = true;
             var pair = Temp("uint2", "uint2(0u)");
+            if (guardWithExec) NoteExecGuard();
             Line(guardWithExec && !_execKnownFull
                 ? $"if (exec) {{ {pair} = {pairExpression}; }}"
                 : $"{pair} = {pairExpression};");
