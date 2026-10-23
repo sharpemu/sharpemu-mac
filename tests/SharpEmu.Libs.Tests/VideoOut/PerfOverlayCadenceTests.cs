@@ -81,6 +81,7 @@ public sealed class PerfOverlayCadenceTests
                 Field(name).SetValue(null, 0L);
             Field("_trackPresentedGuestFrames").SetValue(null, false);
             Field("_fpsAverage").SetValue(null, Activator.CreateInstance(Field("_fpsAverage").FieldType));
+            Field("_drawsAverage").SetValue(null, Activator.CreateInstance(Field("_drawsAverage").FieldType));
             Field("_gpuUsage").SetValue(null, null);
         }
 

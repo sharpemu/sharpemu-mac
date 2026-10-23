@@ -90,7 +90,7 @@ public sealed class ApplicationSettings
     public string GuestDisplayResolution { get; set; } = "1080p";
 
     public bool OverlayEnabled { get; set; } = true;
-    public string OverlayCorner { get; set; } = "TopRight";
+    public string OverlayCorner { get; set; } = "BottomRight";
     public string OverlayMode { get; set; } = "Full";
 
     /// <summary>Names of SHARPEMU_* switches set to "1" in the emulator's environment at launch.</summary>
@@ -203,7 +203,7 @@ public sealed class ApplicationSettings
         settings.GuestDisplayResolution = NormalizeChoice(
             settings.GuestDisplayResolution, "1080p", "720p", "1440p", "2160p");
         settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Guest", "Host", "Skip");
-        settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
+        settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "BottomRight", "TopLeft", "TopRight", "BottomLeft");
         settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "Full", "Minimal", "TitleBar");
         settings.DisplayIndex = Math.Max(0, settings.DisplayIndex);
         settings.RefreshRate = Math.Clamp(settings.RefreshRate, 0, 1000);

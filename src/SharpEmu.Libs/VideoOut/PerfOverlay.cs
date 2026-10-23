@@ -41,6 +41,11 @@ public static class PerfOverlay
     private static long _guestImageCacheBytes;
     private static int _liveDeviceAllocations;
     private static int _peakDeviceAllocations;
+    // A backend that cannot count device allocations (Metal) reports the device's
+    // allocated bytes instead; the panel then shows memory in place of the counts.
+    private static volatile bool _reportDeviceMemory;
+    private static long _deviceMemoryBytes;
+    private static long _peakDeviceMemoryBytes;
 
     // Refreshed once per second so per-frame fills never allocate.
     private static long _statsWindowStart = Stopwatch.GetTimestamp();
@@ -49,6 +54,7 @@ public static class PerfOverlay
     // The host display timer can refresh the same guest frame at 120 Hz.
     private static double _fps;
     private static FrameRateAverage _fpsAverage = new();
+    private static FrameRateAverage _drawsAverage = new();
     private static double _presentFps;
     private static double _drawsPerSecond;
     private static double _averageFrameMs;
@@ -177,6 +183,20 @@ public static class PerfOverlay
         Interlocked.Exchange(ref _peakDeviceAllocations, peakDeviceAllocations);
     }
 
+    /// <summary>Reports the bytes the graphics device has allocated, for backends with no allocation count.</summary>
+    public static void SetDeviceMemoryStatistics(ulong allocatedBytes)
+    {
+        var bytes = checked((long)allocatedBytes);
+        Interlocked.Exchange(ref _deviceMemoryBytes, bytes);
+        long peak;
+        while (bytes > (peak = Interlocked.Read(ref _peakDeviceMemoryBytes)) &&
+               Interlocked.CompareExchange(ref _peakDeviceMemoryBytes, bytes, peak) != peak)
+        {
+        }
+
+        _reportDeviceMemory = true;
+    }
+
     /// <summary>
     /// Rasterizes the panel into a BGRA byte span of PixelBufferWidth x PixelBufferHeight.
     /// Runs on the render thread.
@@ -232,7 +252,7 @@ public static class PerfOverlay
             // at, so the published value is averaged over the last few windows.
             _fps = _fpsAverage.Add(windowFrames, seconds);
             _presentFps = Interlocked.Exchange(ref _presentedInWindow, 0) / seconds;
-            _drawsPerSecond = Interlocked.Exchange(ref _drawsInWindow, 0) / seconds;
+            _drawsPerSecond = _drawsAverage.Add(Interlocked.Exchange(ref _drawsInWindow, 0), seconds);
 
             var allocated = GC.GetTotalAllocatedBytes(precise: false);
             _allocatedMbPerSecond = (allocated - _lastAllocatedBytes) / seconds / (1024.0 * 1024.0);
@@ -288,7 +308,7 @@ public static class PerfOverlay
                 Environment.ProcessorCount;
             _lastCpuTime = cpuTime;
 
-            var drawsPerFrame = windowFrames > 0 ? _drawsPerSecond * seconds / windowFrames : 0;
+            var drawsPerFrame = _fps > 0 ? _drawsPerSecond / _fps : 0;
             var sessionStart = Interlocked.Read(ref _sessionStartTimestamp);
             var elapsedSeconds = sessionStart == 0
                 ? 0L
@@ -310,7 +330,10 @@ public static class PerfOverlay
             var timeLabel = $"{elapsedHours:00}:{elapsedMinutes:00}:{elapsedRemainingSeconds:00}";
             _line4 = $"MEM {heapMb}M BUF {guestBufferMb}M IMG {guestImageMemoryInMiB}M";
             _line5 = $"CPU {_cpuPercent:0}%  GPU {gpuLabel}";
-            _line6 = $"TIME {timeLabel}  GPUALLOC {liveAllocations}/{peakAllocations}";
+            _line6 = _reportDeviceMemory
+                ? $"TIME {timeLabel} GPUMEM {FormatGigabytes(Interlocked.Read(ref _deviceMemoryBytes))}/" +
+                  FormatGigabytes(Interlocked.Read(ref _peakDeviceMemoryBytes))
+                : $"TIME {timeLabel}  GPUALLOC {liveAllocations}/{peakAllocations}";
             _minimalLine1 = $"FPS {_fps:0.0}  CPU {_cpuPercent:0}%";
             _minimalLine2 = $"GPU {gpuLabel}  TIME {timeLabel}";
             _minimalSummary = $"FPS {_fps:0.0} | CPU {_cpuPercent:0}% | GPU {gpuLabel} | TIME {timeLabel}";
@@ -343,6 +366,10 @@ public static class PerfOverlay
         }
     }
 
+    internal static string FormatGigabytes(long bytes) =>
+        string.Create(
+            System.Globalization.CultureInfo.InvariantCulture, $"{bytes / (1024.0 * 1024.0 * 1024.0):0.0}G");
+
     internal static string FormatUsage(double percent) =>
         double.IsFinite(percent) ? $"{Math.Clamp(percent, 0, 100):0}%" : "N/A";
 
@@ -352,6 +379,22 @@ public static class PerfOverlay
         return usage.UserTime + usage.PrivilegedTime;
     }
 
+    private static readonly double[] GraphScalesMilliseconds = [40, 80, 160, 330, 660, 1000, 2000, 5000, 10000];
+
+    /// <summary>The graph's full height in milliseconds: the smallest step that holds the slowest frame shown.</summary>
+    internal static double ChooseGraphScale(double peakMilliseconds)
+    {
+        foreach (var scale in GraphScalesMilliseconds)
+        {
+            if (peakMilliseconds <= scale)
+            {
+                return scale;
+            }
+        }
+
+        return GraphScalesMilliseconds[^1];
+    }
+
     private static void DrawFrameGraph(Span<byte> bgra, int x, int y, int width, int height)
     {
         if (height < 8)
@@ -359,10 +402,26 @@ public static class PerfOverlay
             return;
         }
 
-        // Reference lines at 16.7ms and 33.3ms of a 40ms-tall scale.
-        const double maxMs = 40.0;
-        DrawHorizontalLine(bgra, x, y + height - (int)(16.7 / maxMs * height), width, 0x30, 0x60, 0x30);
-        DrawHorizontalLine(bgra, x, y + height - (int)(33.3 / maxMs * height), width, 0x30, 0x30, 0x60);
+        // A fixed 40 ms scale turned every bar into a full-height block at the one or
+        // two frames a second a heavy title runs at, so the scale follows the slowest
+        // frame in the history and is printed in the corner.
+        var peak = 0.0;
+        for (var i = 0; i < FrameHistorySize; i++)
+        {
+            peak = Math.Max(peak, _frameMilliseconds[i]);
+        }
+
+        var maxMs = ChooseGraphScale(peak);
+        if (maxMs <= 80)
+        {
+            // Reference lines at 16.7 ms and 33.3 ms.
+            DrawHorizontalLine(bgra, x, y + height - (int)(16.7 / maxMs * height), width, 0x30, 0x60, 0x30);
+            DrawHorizontalLine(bgra, x, y + height - (int)(33.3 / maxMs * height), width, 0x30, 0x30, 0x60);
+        }
+        else
+        {
+            DrawHorizontalLine(bgra, x, y + height / 2, width, 0x30, 0x30, 0x60);
+        }
 
         var barWidth = Math.Max(1, width / FrameHistorySize);
         for (var i = 0; i < FrameHistorySize; i++)
@@ -403,6 +462,9 @@ public static class PerfOverlay
                 }
             }
         }
+
+        var scaleLabel = $"{maxMs:0}MS";
+        DrawString(bgra, x + width - scaleLabel.Length * CellWidth, y + 1, scaleLabel, 0x90, 0x90, 0x90);
     }
 
     private static void DrawHorizontalLine(Span<byte> bgra, int x, int y, int width, byte r, byte g, byte b)

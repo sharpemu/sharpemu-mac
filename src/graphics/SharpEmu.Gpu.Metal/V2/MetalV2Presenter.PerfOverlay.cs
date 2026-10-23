@@ -62,7 +62,8 @@ internal static partial class MetalV2Presenter
             (now - _overlayFilledAt) * 1000 >= OverlayRefreshMilliseconds * Stopwatch.Frequency)
         {
             _overlayPixels ??= new byte[PerfOverlay.PixelBufferWidth * PerfOverlay.PixelBufferHeight * 4];
-            PerfOverlay.Fill(_overlayPixels, 0, 0);
+            var (pending, inFlight) = Volatile.Read(ref _host)?.PublishOverlayStatistics() ?? (0, 0);
+            PerfOverlay.Fill(_overlayPixels, pending, inFlight);
             fixed (byte* pixels = _overlayPixels)
             {
                 MetalNative.SendReplaceRegion(
