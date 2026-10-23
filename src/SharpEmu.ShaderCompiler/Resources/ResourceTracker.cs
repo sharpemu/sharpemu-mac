@@ -505,6 +505,21 @@ public sealed partial class ResourceTracker
         return hasLaneValue && merges.All(grounded.Contains);
     }
 
+    private bool DependsOnDeviceBindingLoad(ScalarValue value)
+    {
+        var pending = new Stack<ScalarValue>();
+        var seen = new HashSet<ScalarValue>();
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            if (!seen.Add(current)) continue;
+            if (current.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord &&
+                _plan.DeviceBindingMemory?.Contains(current.MemoryIndex) == true) return true;
+            foreach (var operand in current.Operands) pending.Push(operand);
+        }
+        return false;
+    }
+
     private bool DependsOnScalarMemoryWord(ScalarValue value)
     {
         var pending = new Stack<ScalarValue>();
@@ -890,18 +905,18 @@ public sealed partial class ResourceTracker
     public static bool Is64BitImageAtomic(string opcode, uint dmask) =>
         opcode is "ImageAtomicCmpswap" or "ImageAtomicFcmpswap" ? dmask == 0xF : dmask == 0x3;
 
-    private uint AddSampler(uint source, uint pc)
+    private uint AddSampler(uint source, uint pc, bool device = false)
     {
         for (var index = 0; index < _info.Samplers.Count; index++)
         {
-            if (_info.Samplers[index].Source == source)
+            if (_info.Samplers[index].Source == source && _info.Samplers[index].Device == device)
             {
                 _info.Samplers[index].FirstUsePc = Math.Min(_info.Samplers[index].FirstUsePc, pc);
                 return (uint)index;
             }
         }
 
-        _info.Samplers.Add(new SamplerResource { Source = source, FirstUsePc = pc });
+        _info.Samplers.Add(new SamplerResource { Source = source, FirstUsePc = pc, Device = device });
         return (uint)(_info.Samplers.Count - 1);
     }
 
@@ -1200,8 +1215,15 @@ public sealed partial class ResourceTracker
             }
 
             var sampleAdjust = (memory.ImageSampleFlags & ImageSampleFlags.Adjust) != 0;
-            var samplerSource = GetHandleSource(access.SamplerHandle, ScalarValueKind.SamplerHandle, 4, memory.Pc, sampler: true, sampleAdjust);
-            sampler = AddSampler(samplerSource, memory.Pc);
+            var deviceSampler = memory.Opcode == "ImageSampleLz" &&
+                memory.ImageDimension is ImageDimension.Dim2D or ImageDimension.Dim3D && !memory.ImageCube &&
+                access.SamplerHandle.Operands.All(word => _plan.ValidateRuntimeValue(word) ||
+                    word.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord) &&
+                access.SamplerHandle.Operands.Any(DependsOnDeviceBindingLoad);
+            var samplerSource = deviceSampler
+                ? InternSource(new DescriptorSource { Dwords = Enumerable.Repeat(_graph.Constant(0u), 4).ToArray() })
+                : GetHandleSource(access.SamplerHandle, ScalarValueKind.SamplerHandle, 4, memory.Pc, sampler: true, sampleAdjust);
+            sampler = AddSampler(samplerSource, memory.Pc, deviceSampler);
             if (sampler == DescriptorConstants.NoIndex)
             {
                 throw Failure(memory.Pc, "sampler resource limit exceeded");

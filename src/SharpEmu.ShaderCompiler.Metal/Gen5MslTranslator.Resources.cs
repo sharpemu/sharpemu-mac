@@ -2114,6 +2114,19 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
+                samplerInfo = info.Samplers[(int)samplerIndex];
+                if (samplerInfo.Device)
+                {
+                    if (instruction.Opcode != "ImageSampleLz" || imageClass.Cube || imageClass.Arrayed ||
+                        imageClass.DepthCompare || imageClass.ComponentKind != "float" ||
+                        imageClass.SpatialComponents is not (2 or 3))
+                    {
+                        error = "device S# requires a float 2D/3D zero-LOD sample";
+                        return false;
+                    }
+                    dstSelect = imageInfo.ShaderSwizzle;
+                    return true;
+                }
                 var samplerElement = request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources.ToList()
                     .IndexOf(info.SamplerBinding(samplerIndex));
                 samplerName = Temp("sampler", $"{ResourcesName}.samplers[{samplerElement}]");

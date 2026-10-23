@@ -561,6 +561,21 @@ internal sealed class ShaderProgramCache
 
                 if (deferred is not { } request)
                 {
+                    if (materialized && !DeviceSamplerImagesCompatible(entry.Plan, specialization))
+                    {
+                        // A later bind (or a persisted first bind) can specialize the same
+                        // T# source to a different texture class. Restore a synchronized
+                        // host plan before encoding any work with an unsupported class.
+                        foreach (var load in entry.Plan.DeviceBindingMemory ?? new HashSet<int>())
+                        {
+                            DeviceBindingLoads.Refuse(entry.Plan.DeviceBindingKey, load, notify: false);
+                            BindingWaitProvenance.Decision(new(entry.Plan.DeviceBindingKey, load, ScalarValueKind.Undefined), "sampler_image_class");
+                        }
+                        DeviceBindingLoads.NotifyChanged(entry.Plan.DeviceBindingKey);
+                        entry = committed = CreateEntry(source, options.Detached(), new HashSet<int>());
+                        _programs[key ??= BuildProgramKey(source)] = entry;
+                        continue;
+                    }
                     break;
                 }
 
@@ -576,7 +591,8 @@ internal sealed class ShaderProgramCache
                     materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure);
                 }
                 finally { _host.EndGuestWordReads(); DeviceBindingLoads.EndAttempt(); }
-                if (materialized && BackgroundReplan && _host.BackgroundShaderCompilationSupported && committed.Permutations.Count != 0)
+                var compatibleSamplerImages = materialized && DeviceSamplerImagesCompatible(entry.Plan, specialization);
+                if (compatibleSamplerImages && BackgroundReplan && _host.BackgroundShaderCompilationSupported && committed.Permutations.Count != 0)
                 {
                     StartSuccessor(source, options, key ??= BuildProgramKey(source), committed, entry, specialization, pushDataCursor, snapshot, request);
                     entry = committed;
@@ -589,7 +605,7 @@ internal sealed class ShaderProgramCache
                     }
                     finally { _host.EndGuestWordReads(); DeviceBindingLoads.EndAttempt(); }
                 }
-                else if (materialized)
+                else if (compatibleSamplerImages)
                 {
                     _programs[key ??= BuildProgramKey(source)] = entry;
                 }
@@ -602,7 +618,7 @@ internal sealed class ShaderProgramCache
                             DeviceBindingLoads.Refuse(committed.Plan.DeviceBindingKey, load, notify: false);
                     DeviceBindingLoads.NotifyChanged(committed.Plan.DeviceBindingKey);
                     entry = committed;
-                    BindingWaitProvenance.Decision(request, "materialize_failed");
+                    BindingWaitProvenance.Decision(request, materialized ? "sampler_image_class" : "materialize_failed");
                     continue;
                 }
                 break;
@@ -695,6 +711,19 @@ internal sealed class ShaderProgramCache
         return permutation.Handle;
     }
 
+    private static bool DeviceSamplerImagesCompatible(ShaderResourcePlan plan, ResourceSpecialization specialization)
+    {
+        foreach (var pair in plan.Info.SampledPairs)
+        {
+            if (!plan.Info.Samplers[(int)pair.Sampler].Device) continue;
+            var image = specialization.Images[(int)pair.Image];
+            if (image.NumericClass != ImageNumericClass.Float || image.Cube ||
+                image.Dimension is not (ImageDimension.Dim2D or ImageDimension.Dim3D) ||
+                plan.Info.Images[(int)pair.Image].DepthCompare) return false;
+        }
+        return true;
+    }
+
     // Keep the closure on this cold path. A lambda capturing source in GetOrCompileCore
     // allocates a display class even on every cached draw.
     private void StartSuccessor(ShaderSource source, StageCompileOptions options, ProgramKey key, ProgramSourceEntry committed,
@@ -742,11 +771,11 @@ internal sealed class ShaderProgramCache
         if (candidate is null)
         {
             DeviceBindingLoads.Refuse(key, request.MemoryIndex);
-            if (reason == "plan_failed") DeviceBindingLoads.CountPlanFailure();
+            if (reason?.StartsWith("plan_failed", StringComparison.Ordinal) == true) DeviceBindingLoads.CountPlanFailure();
             BindingWaitProvenance.Decision(request, reason ?? "plan_failed");
             return entry;
         }
-        foreach (var index in learned) DeviceBindingLoads.Learn(key, index, notify: false);
+        foreach (var index in candidate.Plan.DeviceBindingMemory ?? learned) DeviceBindingLoads.Learn(key, index, notify: false);
         DeviceBindingLoads.NotifyChanged(key);
         DeviceBindingLoads.NoteRebuild(key, out _);
         DeviceBindingLoads.CountReplan(request.Kind);
@@ -761,7 +790,14 @@ internal sealed class ShaderProgramCache
                 var next = CreateEntry(source, options.Detached(), loads);
                 return DeviceBindingLoads.Accepts(entry.Plan, next.Plan, out reason) ? next : null;
             }
-            catch (ShaderProgramRejectedException) { return null; }
+            catch (ShaderProgramRejectedException exception)
+            {
+                // Retain the exact planner check, including its PC and descriptor dword.
+                // Keep provenance a single token and independent of graph allocation IDs.
+                reason = "plan_failed:" + exception.Message.Split(" (value:")[0]
+                    .Replace(' ', '_').Replace('\r', '_').Replace('\n', '_');
+                return null;
+            }
         }
     }
 

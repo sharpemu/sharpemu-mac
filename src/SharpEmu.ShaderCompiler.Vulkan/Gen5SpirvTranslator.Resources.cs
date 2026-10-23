@@ -26,6 +26,11 @@ public static partial class Gen5SpirvTranslator
         out string error, ref ShaderTranslationProfile.Scope profile)
     {
         shader = default!;
+        if (request.Resources.Info.Samplers.Any(sampler => sampler.Device))
+        {
+            error = "device S# sampling is not supported by the SPIR-V backend";
+            return false;
+        }
         try
         {
             BindingLayoutValidator.Validate(

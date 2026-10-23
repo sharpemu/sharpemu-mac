@@ -149,4 +149,33 @@ public sealed partial class DeviceBindingLoadTests
         else Assert.Single(plan.DeviceDataSlots);
     }
 
+    [Fact]
+    public void ARepeatedPlanFailureCountsTheHostReadAndKeepsCumulativeAttempts()
+    {
+        var hash = BaseHash + 0x700;
+        var plan = Plan(AddressBoundBufferLoad(), hash);
+        var read = plan.TableReads[0].Value;
+        var request = new DeviceBindingLoads.Request(plan.DeviceBindingKey, read.MemoryIndex, read.Kind,
+            ShaderHash: hash, Pc: plan.Memory[read.MemoryIndex].Pc);
+        var memory = new PendingMemory { Memory = new TestWordMemory { Base = TableBase, Words = [0x2000, 0, 256, 0] } };
+        memory.Pending.Add(TableBase);
+        try
+        {
+            DeviceBindingLoads.Refuse(plan.DeviceBindingKey, read.MemoryIndex);
+            DeviceBindingLoads.CountPlanFailure();
+            BindingWaitProvenance.Decision(request, "plan_failed:SamplerHandle_dword_0");
+            var attempted = DeviceBindingLoads.TakeReport();
+            Assert.Contains("words_replans_total=[", attempted);
+            var (materialized, deferred, snapshot) = Attempt(plan, memory.Inputs([(uint)TableBase, 0]), defer: false);
+            Assert.True(materialized);
+            Assert.Null(deferred);
+            Assert.Equal(new uint[] { 0x2000, 0, 256, 0 }, Assert.Single(snapshot.Buffers));
+            var nextInterval = DeviceBindingLoads.TakeReport();
+            Assert.Contains("words_replans=[ok=0 refused=0 plan_failed=0", nextInterval);
+            Assert.Contains("words_refused_reads=[plan_failed=1]", nextInterval);
+            Assert.Contains("plan_failed:SamplerHandle_dword_0", BindingWaitProvenance.TakeReport());
+        }
+        finally { DeviceBindingLoads.Forget(plan.DeviceBindingKey); }
+    }
+
 }

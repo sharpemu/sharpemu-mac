@@ -384,6 +384,14 @@ public static partial class Gen5MslTranslator
             // The S# LOD_BIAS adds to every LOD the sampler computes or is given (_L), before the
             // _CL and MIN/MAX_LOD clamps; _LZ forces level 0 and unnormalized coordinates force
             // mip 0, so neither is biased.
+            if (samplerInfo?.Device == true)
+            {
+                var words = Temp("uint4", $"uint4({string.Join(", ", Enumerable.Range(0, 4).Select(i => ScalarExpression(image.ScalarSampler + (uint)i)))})");
+                var coords = SampleCoordinates(image, address, imageClass);
+                sampled = Temp("float4", $"sharpemu_device_sample_lz({texture}, {coords}, {words}, {(image.Unorm ? "true" : "false")})");
+                return true;
+            }
+
             var samplerLodBias = samplerInfo?.LodBias ?? 0;
             var samplerBias = samplerLodBias != 0 && !unorm && !hasZeroLod ? SamplerLodBiasLiteral(samplerLodBias) : null;
             if (samplerBias is not null && !hasGradients && !hasLod && _stage == Gen5MslStage.Pixel)
