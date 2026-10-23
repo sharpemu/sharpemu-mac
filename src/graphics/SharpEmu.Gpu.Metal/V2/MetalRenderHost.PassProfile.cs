@@ -51,6 +51,8 @@ internal sealed partial class MetalRenderHost
         public long StoreBytes;
         public int Draws;
         public int Joins;
+        public long JoinLoadAvoidedBytes;
+        public long LoadElidedBytes;
         public ulong Groups;
         public Dictionary<string, int>? Shaders;
         public string End = string.Empty;
@@ -357,12 +359,13 @@ internal sealed partial class MetalRenderHost
         record.Shaders[key] = record.Shaders.TryGetValue(key, out var count) ? count + 1 : 1;
     }
 
-    /// <summary>A depth-only draw joined the open pass; its draw and shader are counted as any other's.</summary>
-    private void PassProfileNoteJoin()
+    /// <summary>A subset draw joined the open pass; its draw and shader are counted as any other's.</summary>
+    private void PassProfileNoteJoin(long loadAvoidedBytes = 0)
     {
         if (_ppOpen is not null)
         {
             _ppOpen.Joins++;
+            _ppOpen.JoinLoadAvoidedBytes += loadAvoidedBytes;
         }
     }
 
@@ -533,7 +536,7 @@ internal sealed partial class MetalRenderHost
                 $"us={microseconds:F0} gap_us={gap:F0} {stages}draws={record.Draws} tg={record.Groups} " +
                 $"ld_mb={record.LoadBytes / 1048576.0:F1} st_mb={record.StoreBytes / 1048576.0:F1} " +
                 $"end={(record.End.Length == 0 ? "?" : record.End)} a=[{record.Shape}] sh=[{shaders}] " +
-                $"after=[{after}] n_after={record.After?.Count ?? 0} joins={record.Joins}")).Append('\n');
+                $"after=[{after}] n_after={record.After?.Count ?? 0} joins={record.Joins} join_load_avoided_mb={record.JoinLoadAvoidedBytes / 1048576.0:F1} load_elided_mb={record.LoadElidedBytes / 1048576.0:F1}")).Append('\n');
         }
 
         var span = lastEnd > firstStart && firstStart != ulong.MaxValue

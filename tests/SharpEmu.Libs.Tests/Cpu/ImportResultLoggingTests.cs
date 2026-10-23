@@ -20,7 +20,21 @@ public sealed class ImportResultLoggingTests
         using var backend = new DirectExecutionBackend(modules);
         var method = typeof(DirectExecutionBackend).GetMethod(
             "ShouldLogImportResult", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var filter = method.CreateDelegate<ImportResultFilter>(backend);
+        var entryType = typeof(DirectExecutionBackend).GetNestedType("ImportStubEntry", BindingFlags.NonPublic)!;
+        var entries = new Dictionary<string, object>();
+        // Classification is now cached in the import entry, rather than passed as a NID.
+        ImportResultFilter filter = (string nid, OrbisGen2Result result, out int occurrence) =>
+        {
+            if (!entries.TryGetValue(nid, out var entry))
+            {
+                entry = Activator.CreateInstance(entryType, [0UL, nid, null, false, false, false, false, 0UL])!;
+                entries.Add(nid, entry);
+            }
+            object?[] arguments = [entry, result, 0];
+            var logged = (bool)method.Invoke(backend, arguments)!;
+            occurrence = (int)arguments[2]!;
+            return logged;
+        };
         bool ShouldLog(string nid, OrbisGen2Result result) => filter(nid, result, out _);
 
         foreach (var nid in new[] { "9UK1vLZQft4", "7H0iTOciTLo" })

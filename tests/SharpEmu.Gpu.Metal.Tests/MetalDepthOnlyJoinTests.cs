@@ -166,6 +166,145 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         Assert.Equal(GpuPrimitiveTopology.TriangleList, joined.StaticParameters.Topology);
     }
 
+    [Fact]
+    public void SubsetDescriptionPreservesTheDrawMasksAndBlends()
+    {
+        var parameters = new PipelineStaticParameters { ColorCount = 5, Samples = 1 };
+        var rendering = new PipelineRenderingState { ColorCount = 5 };
+        var open = new RenderingState { ColorAttachmentCount = 6 };
+        for (var index = 0; index < 6; index++)
+        {
+            parameters.SetColorMask(index, (uint)index + 1);
+            parameters.SetBlendEnable(index, true);
+            rendering.ColorFormats[index] = GpuFormat.R8G8B8A8Unorm;
+            open.ColorAttachments[index] = new RenderingAttachment(new GpuImageHandle((ulong)index + 1),
+                GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
+                0, 0, 0, 0, false, false, false, false, false);
+        }
+        var description = new GraphicsPipelineDescription
+        {
+            Rendering = rendering, StaticParameters = parameters, VertexProgram = new ShaderProgram(1, 1),
+            VertexInput = new PipelineVertexInputState(), VertexInfo = new VertexInputInfo(),
+            VertexStage = new ShaderProgramInfo { Stage = ShaderStageKind.Vertex },
+        };
+        var joined = MetalRenderHost.JoinedDescription(description, in open);
+        for (var index = 0; index < 5; index++)
+        {
+            Assert.Equal((uint)index + 1, joined.StaticParameters.GetColorMask(index));
+            Assert.True(joined.StaticParameters.GetBlendEnable(index));
+        }
+        Assert.Equal(0u, joined.StaticParameters.GetColorMask(5));
+        Assert.False(joined.StaticParameters.GetBlendEnable(5));
+        Assert.Equal(6u, joined.Rendering.ColorCount);
+        Assert.Equal(GpuFormat.R8G8B8A8Unorm, joined.Rendering.ColorFormats[5]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SixFiveSixTargetsPreserveEveryAttachment(bool sampleOmittedAttachment)
+    {
+        if (!RequireDevice()) return;
+        var joined = RunSubset(forceEnd: false, sampleOmittedAttachment);
+        var separate = RunSubset(forceEnd: true, sampleOmittedAttachment: false);
+        Assert.Equal(3L, separate.Passes);
+        var joins = !sampleOmittedAttachment && MetalV2Diagnostics.JoinSubsetDraws;
+        Assert.Equal(joins ? 1L : 3L, joined.Passes);
+        Assert.Equal(joins ? 2L : 0L, joined.Joins);
+        // The raw native depth used by this rig has no image-cache traffic metadata.
+        Assert.Equal(joins ? (5 + 6) * (long)ImageBytes : 0L, joined.Bytes);
+        for (var index = 0; index < 6; index++)
+        {
+            Assert.Equal(separate.Pixels[index], joined.Pixels[index]);
+            for (var y = 0u; y < Height; y++)
+            for (var x = 0u; x < Width; x++)
+            {
+                var offset = (int)(y * Width + x) * 4;
+                var expected = x >= Width / 2 ? new byte[] { 0, 0, 255, 255 }
+                    : index == 5 ? new byte[] { 255, 0, 0, 255 } : new byte[] { 0, 255, 0, 255 };
+                Assert.Equal(expected, joined.Pixels[index].AsSpan(offset, 4).ToArray());
+            }
+        }
+    }
+
+    [Fact]
+    public void ReturningFromASubsetLandsCopiesBeforeTheDrawBindsTheirBytes()
+    {
+        if (!RequireDevice()) return;
+        var result = RunSubset(forceEnd: false, sampleOmittedAttachment: false, copyOnReturn: true);
+        var separate = RunSubset(forceEnd: true, sampleOmittedAttachment: false);
+        Assert.Equal(MetalV2Diagnostics.JoinSubsetDraws ? 2L : 3L, result.Passes);
+        Assert.Equal(MetalV2Diagnostics.JoinSubsetDraws ? 1L : 0L, result.Joins);
+        for (var index = 0; index < 6; index++) Assert.Equal(separate.Pixels[index], result.Pixels[index]);
+    }
+
+    private (byte[][] Pixels, long Passes, long Joins, long Bytes) RunSubset(bool forceEnd, bool sampleOmittedAttachment, bool copyOnReturn = false)
+    {
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.AsynchronousGraphics = false;
+        var red = rig.Pipeline(11, -1, 0.5f, "float4(1, 0, 0, 1)", colors: 6);
+        var green = rig.Pipeline(12, -1, 0.5f, "float4(0, 1, 0, 1)", right: 0, colors: 5);
+        var blue = rig.Pipeline(13, 0, 0.5f, "float4(0, 0, 1, 1)", colors: 6);
+        var firstPass = host.RenderPassSerial;
+        using (host.BeginPreparation())
+        {
+            var targets = Enumerable.Range(0, 6).Select(i => rig.Target(TargetAddress + (ulong)i * 0x4000)).ToArray();
+            rig.DrawTargets(red, targets, depthClear: true);
+            var omitted = rig.LastColour;
+            if (forceEnd) host.EndRendering();
+            rig.DrawTargets(green, targets[..5], sample: sampleOmittedAttachment ? omitted : default);
+            // Repeated draws with the same subset do not count as another avoided pass.
+            if (!sampleOmittedAttachment) rig.DrawTargets(green, targets[..5]);
+            if (forceEnd) host.EndRendering();
+            if (copyOnReturn) host.RecordCommandProcessorWrite(LabelAddress, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
+            rig.DrawTargets(blue, targets, bindsCopy: copyOnReturn);
+            // This rig names the synthetic binding for the join guard. Without a join,
+            // ordinary pass changes keep these copies deferred to the commit.
+            if (copyOnReturn) Assert.Equal(MetalV2Diagnostics.JoinSubsetDraws ? 0 : 1, host.DeferredLabelCopyCount);
+            host.EndRendering();
+        }
+        var passes = host.RenderPassSerial - firstPass;
+        var (joins, bytes) = host.TakeSubsetJoins();
+        host.FlushCommandBuffer();
+        if (copyOnReturn) Assert.Equal(0, host.DeferredLabelCopyCount);
+        var pixels = Enumerable.Range(0, 6).Select(i => rig.Read(TargetAddress + (ulong)i * 0x4000)).ToArray();
+        output.WriteLine($"subset forceEnd={forceEnd} sample={sampleOmittedAttachment}: passes={passes} joins={joins} avoided={bytes}");
+        return (pixels, passes, joins, bytes);
+    }
+
+    [Theory]
+    [InlineData(false, false, true, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, false, false, true)]
+    public void IndexedCoverageElidesOnlyAProvenFullOverwrite(bool indirect, bool degenerate, bool elides, bool sampleMask)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var pipeline = rig.Pipeline(21, -1, 0.5f, "float4(1, 0, 0, 1)", depth: false, sampleMask: sampleMask);
+        using (rig.Host.BeginPreparation())
+        {
+            rig.DrawIndexed(pipeline, indirect, degenerate);
+            rig.Host.EndRendering();
+        }
+        var (attachments, bytes) = rig.Host.TakeElidedLoads();
+        elides &= MetalV2Diagnostics.ElideLoads && MetalV2Diagnostics.ElideIndexedLoads;
+        Assert.Equal(elides ? 1L : 0L, attachments);
+        Assert.Equal(elides ? (long)ImageBytes : 0L, bytes);
+        rig.Host.FlushCommandBuffer();
+        var pixels = rig.Read(TargetAddress);
+        if (!degenerate)
+        {
+            for (var i = 0; i < pixels.Length; i += 4)
+                Assert.Equal(new byte[] { 255, 0, 0, 255 }, pixels.AsSpan(i, 4).ToArray());
+        }
+        else
+        {
+            Assert.Contains(GuestPattern, pixels);
+        }
+    }
+
     private Outcome Run(Scene scene)
     {
         using var rig = new Rig(Device.Value);
@@ -401,11 +540,66 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
                 attachment.View, GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
                 0, 0, 0, 0, false, false, false, false, false);
             state.DepthStencilAttachment = DepthAttachment(depthClear);
+            host.SetDynamicState(Dynamic(depthTest, colorWrites: 1));
             host.NoteUpcomingDraw(in pipeline, 6, 0);
             host.BeginRendering(in state);
             host.BindPipeline(GpuBindPoint.Graphics, pipeline);
-            host.SetDynamicState(Dynamic(depthTest, colorWrites: 1));
             host.Draw(6, 1, 0, 0);
+        }
+
+        public void DrawTargets(PipelineHandle pipeline, ColorTargetState[] targets, bool depthClear = false,
+            GpuImageHandle sample = default, bool bindsCopy = false)
+        {
+            Host.ResetBindings();
+            var state = new RenderingState { Width = Width, Height = Height, Layers = 1,
+                ColorAttachmentCount = (uint)targets.Length, Samples = 1 };
+            for (var index = 0; index < targets.Length; index++)
+            {
+                var attachment = ((IRenderHost)Host).AcquireColorAttachment(in targets[index]);
+                LastColour = attachment.View;
+                state.ColorAttachments[index] = new RenderingAttachment(attachment.View,
+                    GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
+                    0, 0, 0, 0, false, false, false, false, false);
+            }
+            state.DepthStencilAttachment = DepthAttachment(depthClear);
+            var stage = sample.Handle != 0 ? Stage(textures: [(nint)sample.Handle])
+                : bindsCopy ? Stage(buffers: [Host.GuestMemory.ResolveWritable(LabelAddress, 64)]) : null;
+            Host.NoteJoinStages(stage is null ? ReadOnlySpan<IPreparedBindings>.Empty : new IPreparedBindings[] { stage });
+            Host.SetDynamicState(Dynamic(GpuCompareOp.Always, (uint)((1 << targets.Length) - 1)));
+            Host.NoteUpcomingDraw(in pipeline, 6, 0);
+            Host.BeginRendering(in state);
+            Host.BindPipeline(GpuBindPoint.Graphics, pipeline);
+            Host.Draw(6, 1, 0, 0);
+        }
+
+        public void DrawIndexed(PipelineHandle pipeline, bool indirect, bool degenerate)
+        {
+            uint[] indices = degenerate ? [0, 1, 2, 0, 1, 2] : [3, 4, 5, 0, 1, 2];
+            Host.ResetBindings();
+            var indexBinding = Host.UploadTransient(MemoryMarshal.AsBytes(indices.AsSpan()), 4);
+            Host.BindIndexBuffer(indexBinding, GpuIndexType.Uint32);
+            var target = Target(TargetAddress);
+            var attachment = ((IRenderHost)Host).AcquireColorAttachment(in target);
+            var state = new RenderingState { Width = Width, Height = Height, Layers = 1, ColorAttachmentCount = 1, Samples = 1 };
+            state.ColorAttachments[0] = new RenderingAttachment(attachment.View,
+                GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
+                0, 0, 0, 0, false, false, false, false, false);
+            Host.SetDynamicState(Dynamic(GpuCompareOp.Always, 1));
+            BufferBinding arguments = default;
+            if (indirect)
+            {
+                uint[] counts = [6, 1, 0, 0, 0];
+                arguments = Host.UploadTransient(MemoryMarshal.AsBytes(counts.AsSpan()), 4);
+                Host.NoteUpcomingDraw(in pipeline, 0, 0);
+            }
+            else
+            {
+                Host.NoteUpcomingIndexedDraw(in pipeline, indices);
+            }
+            Host.BeginRendering(in state);
+            Host.BindPipeline(GpuBindPoint.Graphics, pipeline);
+            if (indirect) ((IRenderHost)Host).DrawIndexedIndirect(arguments);
+            else ((IRenderHost)Host).DrawIndexed(6, 1, 0, 0, 0);
         }
 
         public void DrawDepthOnly(PipelineHandle pipeline)
@@ -413,10 +607,10 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
             var host = Host;
             var state = new RenderingState { Width = Width, Height = Height, Layers = 1, ColorAttachmentCount = 0, Samples = 1 };
             state.DepthStencilAttachment = DepthAttachment(clear: false);
+            host.SetDynamicState(Dynamic(GpuCompareOp.Always, colorWrites: 0));
             host.NoteUpcomingDraw(in pipeline, 6, 0);
             host.BeginRendering(in state);
             host.BindPipeline(GpuBindPoint.Graphics, pipeline);
-            host.SetDynamicState(Dynamic(GpuCompareOp.Always, colorWrites: 0));
             host.Draw(6, 1, 0, 0);
         }
 
@@ -428,7 +622,7 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         // A quad from x = left to x = right (the right edge by default) at depth z. A pipeline
         // with a colour expression writes it to the target; one without has no pixel program
         // and no colour target.
-        public PipelineHandle Pipeline(ulong id, float left, float z, string? colour, float right = 1f)
+        public PipelineHandle Pipeline(ulong id, float left, float z, string? colour, float right = 1f, uint colors = 1, bool depth = true, bool sampleMask = false)
         {
             var vertexSource = $$"""
                 #include <metal_stdlib>
@@ -449,20 +643,26 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
                 }
                 """;
             var vertex = new ShaderProgram(id, Host.CreateShaderModule(
-                new MetalCompiledGuestShader(new Gen5MslShader(vertexSource, "gen5_vs", Gen5MslStage.Vertex, 1)),
+                new MetalCompiledGuestShader(new Gen5MslShader(vertexSource, "gen5_vs", Gen5MslStage.Vertex, 1)
+                {
+                    ConstantPositions = [left, -1, z, 1, right, -1, z, 1, left, 1, z, 1,
+                        left, 1, z, 1, right, -1, z, 1, right, 1, z, 1],
+                }),
                 ShaderStage.Vertex, id, id));
             var parameters = new PipelineStaticParameters
             {
-                ColorCount = colour is null ? 0u : 1u,
+                ColorCount = colour is null ? 0u : colors,
                 Topology = GpuPrimitiveTopology.TriangleList,
                 Samples = 1,
                 DepthClipEnable = true,
             };
-            var rendering = new PipelineRenderingState { ColorCount = colour is null ? 0u : 1u, DepthFormat = GpuFormat.D32Sfloat };
+            var rendering = new PipelineRenderingState { ColorCount = colour is null ? 0u : colors, DepthFormat = depth ? GpuFormat.D32Sfloat : GpuFormat.Undefined };
             ShaderProgram pixel = default;
             ShaderProgramInfo? pixelStage = null;
             if (colour is not null)
             {
+                var fields = string.Join("\n", Enumerable.Range(0, (int)colors).Select(i => $"float4 c{i} [[color({i})]];"));
+                var assignments = string.Join("\n", Enumerable.Range(0, (int)colors).Select(i => $"result.c{i} = {colour};"));
                 var pixelSource = $$"""
                     #include <metal_stdlib>
                     using namespace metal;
@@ -471,15 +671,25 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
                         float4 position [[position]];
                     };
 
-                    fragment float4 fill_fs(PixelIn in [[stage_in]])
+                    struct PixelOut { {{fields}} };
+                    fragment PixelOut fill_fs(PixelIn in [[stage_in]])
                     {
-                        return {{colour}};
+                        PixelOut result;
+                        {{assignments}}
+                        return result;
                     }
                     """;
-                parameters.SetColorMask(0, 0xF);
-                rendering.ColorFormats[0] = GpuFormat.R8G8B8A8Unorm;
+                for (var index = 0; index < colors; index++)
+                {
+                    parameters.SetColorMask(index, 0xF);
+                    rendering.ColorFormats[index] = GpuFormat.R8G8B8A8Unorm;
+                }
                 pixel = new ShaderProgram(id + 100, Host.CreateShaderModule(
-                    new MetalCompiledGuestShader(new Gen5MslShader(pixelSource, "fill_fs", Gen5MslStage.Pixel, 1)),
+                    new MetalCompiledGuestShader(new Gen5MslShader(pixelSource, "fill_fs", Gen5MslStage.Pixel, 1)
+                    {
+                        CannotDiscard = true,
+                        ColorOutputMask = (1u << (int)colors) - 1,
+                    }),
                     ShaderStage.Pixel, id + 100, id + 100));
                 pixelStage = new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, Hash = id + 100 };
             }
@@ -492,6 +702,7 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
                 VertexProgram = vertex,
                 VertexStage = new ShaderProgramInfo { Stage = ShaderStageKind.Vertex, Hash = id },
                 PixelProgram = pixel,
+                PixelInfo = new PixelInputInfo { SampleMaskExportEnable = sampleMask },
                 PixelStage = pixelStage,
                 StaticParameters = parameters,
             };

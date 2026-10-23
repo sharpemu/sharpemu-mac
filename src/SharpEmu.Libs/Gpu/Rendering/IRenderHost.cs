@@ -230,9 +230,13 @@ public interface IRenderHost
 
     // The first host draw call the next BeginRendering is for, so a host can choose its
     // render pass's load actions from what that draw covers: its pipeline and, for a direct
-    // non-indexed draw, the vertices it draws. vertexCount is zero when the draw is indexed
-    // or indirect and its vertices are not known here.
+    // non-indexed draw, the vertices it draws. Unknown and indirect draws report zero;
+    // a small proven direct index list uses NoteUpcomingIndexedDraw instead.
     void NoteUpcomingDraw(in PipelineHandle pipeline, uint vertexCount, uint firstVertex) { }
+    // Only request a CPU read of a small index list when the host has a coverage proof to use it with.
+    bool NeedsIndexedDrawCoverage(in PipelineHandle pipeline) => false;
+    void NoteUpcomingIndexedDraw(in PipelineHandle pipeline, ReadOnlySpan<uint> vertexIndices) =>
+        NoteUpcomingDraw(in pipeline, 0, 0);
 
     void BindPipeline(GpuBindPoint bindPoint, in PipelineHandle pipeline);
 

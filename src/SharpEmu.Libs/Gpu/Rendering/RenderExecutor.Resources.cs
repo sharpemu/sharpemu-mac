@@ -619,8 +619,7 @@ public sealed partial class RenderExecutor
                 in pipeline, emission.IndirectArgumentsAddress, indirectArguments, emission.Indexed, emission.IndirectIndexLimit);
         }
 
-        var (upcomingCount, upcomingFirst) = UpcomingVertices(banks.UserConfig, in draw, in emission);
-        _host.NoteUpcomingDraw(in pipeline, upcomingCount, upcomingFirst);
+        NoteUpcomingDraw(in pipeline, banks.UserConfig, in draw, in emission, in indexSource, primitiveRestart);
         _host.BeginRendering(in state.Rendering);
         if (MeshDrawTrace.Active) MeshDrawTrace.Write("rendering", $"width={state.Rendering.Width} height={state.Rendering.Height} layers={state.Rendering.Layers} colors={state.ColorCount}");
         _host.BindPipeline(GpuBindPoint.Graphics, in pipeline);
@@ -734,21 +733,63 @@ public sealed partial class RenderExecutor
 
     private const ulong IndexedIndirectArgumentsSize = 20;
 
-    // The vertices of the first host draw call EmitDraw makes; a zero count for an indexed or
-    // indirect draw, whose vertices are not known before it runs.
-    private static (uint Count, uint First) UpcomingVertices(
-        UserConfigRegisters userConfig, in DrawCall draw, in DrawEmission emission)
+    // Preserve the actual index order: max(index)+1 alone does not prove which
+    // triangles are drawn. Never read indirect arguments to guess GPU-produced counts.
+    private void NoteUpcomingDraw(in PipelineHandle pipeline, UserConfigRegisters userConfig,
+        in DrawCall draw, in DrawEmission emission, in IndexSource source, bool primitiveRestart)
     {
-        if (emission.Indexed || emission.IndirectArgumentsAddress != 0)
+        _host.NoteUpcomingDraw(in pipeline, 0, 0);
+        if (emission.IndirectArgumentsAddress != 0 || draw.InstanceCount == 0)
         {
-            return (0, 0);
+            return;
         }
-
-        return (GuestPrimitiveType)userConfig.PrimitiveType switch
+        if (!emission.Indexed)
         {
-            GuestPrimitiveType.QuadListLegacy => (4, emission.FirstVertex),
-            _ => (draw.Count, emission.FirstVertex),
-        };
+            var count = (GuestPrimitiveType)userConfig.PrimitiveType == GuestPrimitiveType.QuadListLegacy ? 4u : draw.Count;
+            _host.NoteUpcomingDraw(in pipeline, count, emission.FirstVertex);
+            return;
+        }
+        if (!_host.NeedsIndexedDrawCoverage(in pipeline) || primitiveRestart)
+        {
+            return;
+        }
+        var indexCount = emission.TriangleListIndices != 0 ? emission.TriangleListIndices : draw.Count;
+        if ((GuestPrimitiveType)userConfig.PrimitiveType == GuestPrimitiveType.QuadListLegacy)
+        {
+            indexCount = 4;
+        }
+        if (indexCount is 0 or > 6)
+        {
+            return;
+        }
+        var stride = source.Type == GpuIndexType.Uint16 ? 2 : 4;
+        var byteCount = (int)indexCount * stride;
+        if (source.Size < (ulong)byteCount)
+        {
+            return;
+        }
+        Span<byte> bytes = stackalloc byte[6 * sizeof(uint)];
+        bytes = bytes[..byteCount];
+        if (source.HostData is { } data)
+        {
+            if (data.Length < byteCount) return;
+            data.AsSpan(0, byteCount).CopyTo(bytes);
+        }
+        else if (!_host.TryReadGuest(source.Address, bytes))
+        {
+            return;
+        }
+        Span<uint> vertices = stackalloc uint[(int)indexCount];
+        for (var index = 0; index < vertices.Length; index++)
+        {
+            var value = stride == 2
+                ? System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes[(index * stride)..])
+                : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(index * stride)..]);
+            var vertex = (long)value + emission.VertexOffset;
+            if (vertex is < 0 or >= 6) return;
+            vertices[index] = (uint)vertex;
+        }
+        _host.NoteUpcomingIndexedDraw(in pipeline, vertices);
     }
 
     private void EmitDraw(UserConfigRegisters userConfig, VertexInputInfo vertexInput, in DrawCall draw, in DrawEmission emission)
