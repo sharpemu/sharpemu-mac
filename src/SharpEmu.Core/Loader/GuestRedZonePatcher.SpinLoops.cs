@@ -636,15 +636,30 @@ internal static partial class GuestRedZonePatcher
         }
 
         var relocated = writer.ToArray();
+
+        // A span that starts at the pause borrows the instructions after it up to five bytes, and the
+        // shifted core ends at the last memory access. Whatever the span holds after that access
+        // (a `test al,al` that feeds the loop's branch, say) runs after the shift is undone: dropping
+        // it would leave the displaced instruction out of the trampoline and the loop reading stale flags.
+        byte[]? suffix = null;
+        var suffixStart = site.CoreStart + site.CoreCount;
+        var suffixAddress = codeBase + (ulong)prefixLength + 5 + (ulong)relocated.Length + 8;
+        if (site.CoreStart > 0 && suffixStart < site.Instructions.Count &&
+            !TryEncodeSegment(site.Instructions, suffixStart, site.Instructions.Count - suffixStart, suffixAddress, out suffix))
+        {
+            return false;
+        }
+
+        var suffixLength = suffix?.Length ?? 0;
         byte[]? branch = null;
         if (site.TerminalBranch is { } terminalBranch &&
-            !TryEncodeSegment([terminalBranch], 0, 1, codeBase + (ulong)prefixLength + 5 + (ulong)relocated.Length + 8, out branch))
+            !TryEncodeSegment([terminalBranch], 0, 1, suffixAddress + (ulong)suffixLength, out branch))
         {
             return false;
         }
 
         var branchLength = branch?.Length ?? 0;
-        var trampolineLength = checked(leadLength + prefixLength + 5 + relocated.Length + 8 + branchLength + 5);
+        var trampolineLength = checked(leadLength + prefixLength + 5 + relocated.Length + 8 + suffixLength + branchLength + 5);
         if (trampolineCursor > trampolineEnd || (ulong)trampolineLength > trampolineEnd - trampolineCursor)
         {
             return false;
@@ -681,8 +696,9 @@ internal static partial class GuestRedZonePatcher
         trampoline[restoreOffset + 5] = 0;
         trampoline[restoreOffset + 6] = 0;
         trampoline[restoreOffset + 7] = 0;
-        branch?.CopyTo(trampoline, restoreOffset + 8);
-        var returnJumpOffset = restoreOffset + 8 + branchLength;
+        suffix?.CopyTo(trampoline, restoreOffset + 8);
+        branch?.CopyTo(trampoline, restoreOffset + 8 + suffixLength);
+        var returnJumpOffset = restoreOffset + 8 + suffixLength + branchLength;
         if (!TryWriteRelativeJump(
                 trampoline.AsSpan(returnJumpOffset, 5),
                 trampolineCursor + (ulong)returnJumpOffset,
