@@ -30,7 +30,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
     private OrderedCommandStreamHost? _issues;
     private SharpEmu.HLE.Host.HostBackgroundThread? _issueWorker;
     private bool _splitIssueWorker;
-    private static readonly bool SplitWorker = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") != "0";
+    // Opt-in: in Demon's Souls the interpreter waited on the encoder for ~95 % of each frame
+    // (~23k synchronous hand-offs per frame), 16 % slower than one worker (integ7-run.md).
+    private static readonly bool SplitWorker = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") == "1";
     private AgcExports.CommandStreamTranslation? _translation;
     private IMetalFlipTarget? _flipTarget;
     private long _lastProgressTicks;
