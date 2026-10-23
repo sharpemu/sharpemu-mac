@@ -8,6 +8,13 @@ namespace SharpEmu.Libs.Gpu.GpuCommands.Registers;
 // its live banks immediately after this copy, and the consumer may retain a clone.
 internal static class RegisterBankCopy
 {
+    private static void CopyChanged<T>(T[] source, T[] destination) where T : struct
+    {
+        // Byte comparison preserves NaN payloads and signed zero in register structs.
+        if (!System.Runtime.InteropServices.MemoryMarshal.AsBytes(source.AsSpan()).SequenceEqual(
+            System.Runtime.InteropServices.MemoryMarshal.AsBytes(destination.AsSpan()))) source.AsSpan().CopyTo(destination);
+    }
+
     internal static void CopyTo(this RegisterBanks source, RegisterBanks destination)
     {
         source.Context.CopyTo(destination.Context);
@@ -21,12 +28,12 @@ internal static class RegisterBankCopy
     private static void CopyTo(this SampleLocationRegisters source, SampleLocationRegisters destination)
     {
         destination.CentroidPriority = source.CentroidPriority;
-        source.Locations.AsSpan().CopyTo(destination.Locations);
+        CopyChanged(source.Locations, destination.Locations);
     }
 
     private static void CopyTo(this ScreenViewportRegisters source, ScreenViewportRegisters destination)
     {
-        source.Viewports.AsSpan().CopyTo(destination.Viewports);
+        CopyChanged(source.Viewports, destination.Viewports);
         destination.TransformControl = source.TransformControl;
         destination.ScreenScissorLeft = source.ScreenScissorLeft;
         destination.ScreenScissorTop = source.ScreenScissorTop;
@@ -51,11 +58,11 @@ internal static class RegisterBankCopy
         destination.GuardBandHorizontalDiscard = source.GuardBandHorizontalDiscard;
         destination.GuardBandVerticalDiscard = source.GuardBandVerticalDiscard;
         destination.ClipRectangleRule = source.ClipRectangleRule;
-        source.ClipRectangleLeft.AsSpan().CopyTo(destination.ClipRectangleLeft);
-        source.ClipRectangleTop.AsSpan().CopyTo(destination.ClipRectangleTop);
-        source.ClipRectangleRight.AsSpan().CopyTo(destination.ClipRectangleRight);
-        source.ClipRectangleBottom.AsSpan().CopyTo(destination.ClipRectangleBottom);
-        source.ClipRectangleWindowOffsetEnable.AsSpan().CopyTo(destination.ClipRectangleWindowOffsetEnable);
+        CopyChanged(source.ClipRectangleLeft, destination.ClipRectangleLeft);
+        CopyChanged(source.ClipRectangleTop, destination.ClipRectangleTop);
+        CopyChanged(source.ClipRectangleRight, destination.ClipRectangleRight);
+        CopyChanged(source.ClipRectangleBottom, destination.ClipRectangleBottom);
+        CopyChanged(source.ClipRectangleWindowOffsetEnable, destination.ClipRectangleWindowOffsetEnable);
     }
 
     private static void CopyTo(this ContextRegisters source, ContextRegisters destination)
@@ -63,11 +70,11 @@ internal static class RegisterBankCopy
         destination.LineWidth = source.LineWidth;
         destination.PrimitiveResetIndex = source.PrimitiveResetIndex;
         destination.DepthCountControl = source.DepthCountControl;
-        source.BlendControls.AsSpan().CopyTo(destination.BlendControls);
+        CopyChanged(source.BlendControls, destination.BlendControls);
         destination.BlendColor = source.BlendColor;
-        source.ColorTargets.AsSpan().CopyTo(destination.ColorTargets);
-        source.ColorClearWord1.AsSpan().CopyTo(destination.ColorClearWord1);
-        source.UserClipPlanes.AsSpan().CopyTo(destination.UserClipPlanes);
+        CopyChanged(source.ColorTargets, destination.ColorTargets);
+        CopyChanged(source.ColorClearWord1, destination.ColorClearWord1);
+        CopyChanged(source.UserClipPlanes, destination.UserClipPlanes);
         destination.RenderTargetMask = source.RenderTargetMask;
         destination.AlphaToMask = source.AlphaToMask;
         source.ScreenViewport.CopyTo(destination.ScreenViewport);
@@ -82,8 +89,16 @@ internal static class RegisterBankCopy
         destination.ReservedDepthRegister = source.ReservedDepthRegister;
         destination.ReservedDepthRegister1 = source.ReservedDepthRegister1;
         destination.ReservedDepthRegister3 = source.ReservedDepthRegister3;
-        destination.UnmodeledTableRegisters.Clear();
-        foreach (var pair in source.UnmodeledTableRegisters) destination.UnmodeledTableRegisters.Add(pair.Key, pair.Value);
+        var sameTable = source.UnmodeledTableRegisters.Count == destination.UnmodeledTableRegisters.Count;
+        if (sameTable)
+            foreach (var pair in source.UnmodeledTableRegisters)
+                if (!destination.UnmodeledTableRegisters.TryGetValue(pair.Key, out var value) || value != pair.Value)
+                { sameTable = false; break; }
+        if (!sameTable)
+        {
+            destination.UnmodeledTableRegisters.Clear();
+            foreach (var pair in source.UnmodeledTableRegisters) destination.UnmodeledTableRegisters.Add(pair.Key, pair.Value);
+        }
         destination.DepthClearValue = source.DepthClearValue;
         destination.DepthBoundsMin = source.DepthBoundsMin;
         destination.DepthBoundsMax = source.DepthBoundsMax;
@@ -98,8 +113,8 @@ internal static class RegisterBankCopy
 
     private static void CopyTo(this UserScalarRegisters source, UserScalarRegisters destination)
     {
-        source.Values.AsSpan().CopyTo(destination.Values);
-        source.Kinds.AsSpan().CopyTo(destination.Kinds);
+        CopyChanged(source.Values, destination.Values);
+        CopyChanged(source.Kinds, destination.Kinds);
         destination.Count = source.Count;
     }
 
@@ -176,7 +191,7 @@ internal static class RegisterBankCopy
         destination.VertexOutputConfiguration = source.VertexOutputConfiguration;
         destination.PositionExportFormat = source.PositionExportFormat;
         destination.VertexOutputControl = source.VertexOutputControl;
-        source.PixelInterpolatorSettings.AsSpan().CopyTo(destination.PixelInterpolatorSettings);
+        CopyChanged(source.PixelInterpolatorSettings, destination.PixelInterpolatorSettings);
         destination.PixelInterpolatorWritten = source.PixelInterpolatorWritten;
         destination.IndexExportFormat = source.IndexExportFormat;
         destination.PrimitiveShaderSubgroupControl = source.PrimitiveShaderSubgroupControl;
@@ -194,7 +209,7 @@ internal static class RegisterBankCopy
         destination.LocalHullConfiguration = source.LocalHullConfiguration;
         destination.TessellationFactorParameter = source.TessellationFactorParameter;
         destination.DepthExportFormat = source.DepthExportFormat;
-        source.TargetOutputModes.AsSpan().CopyTo(destination.TargetOutputModes);
+        CopyChanged(source.TargetOutputModes, destination.TargetOutputModes);
         destination.PixelInputEnable = source.PixelInputEnable;
         destination.PixelInputAddress = source.PixelInputAddress;
         destination.PixelInputControl = source.PixelInputControl;
@@ -207,7 +222,7 @@ internal static class RegisterBankCopy
     private static void CopyTo(this OrderedAppendRegisters source, OrderedAppendRegisters destination)
     {
         destination.Control = source.Control;
-        source.Counters.AsSpan().CopyTo(destination.Counters);
+        CopyChanged(source.Counters, destination.Counters);
     }
 
     private static void CopyTo(this UserConfigRegisters source, UserConfigRegisters destination)

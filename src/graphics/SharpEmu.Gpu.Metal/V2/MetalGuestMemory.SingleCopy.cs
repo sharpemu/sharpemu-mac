@@ -85,7 +85,7 @@ internal sealed partial class MetalGuestMemory
     {
         get
         {
-            lock (_windowLock)
+            using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
             {
                 return (_holePunches, _holeFills, _windowRenewals, _staleRefusals, _holeCount);
             }
@@ -147,7 +147,7 @@ internal sealed partial class MetalGuestMemory
                 return 0;
             }
 
-            lock (_windowLock)
+            using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
             {
                 return _trapVersion;
             }
@@ -161,7 +161,7 @@ internal sealed partial class MetalGuestMemory
             return 0;
         }
 
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             var count = Math.Min(chunks.Length, holes.Length);
             holes.AsSpan(0, count).CopyTo(chunks);
@@ -189,7 +189,7 @@ internal sealed partial class MetalGuestMemory
     /// <summary>Punches a released chunk out of the GPU alias as the next submission begins.</summary>
     internal void QueueSingleCopyPunch(int chunk, ulong address)
     {
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             _pendingPunches.Add((chunk, address));
         }
@@ -212,7 +212,7 @@ internal sealed partial class MetalGuestMemory
             return;
         }
 
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             DrainFillsLocked();
             RetireReplaced();
@@ -229,7 +229,7 @@ internal sealed partial class MetalGuestMemory
                 return false;
             }
 
-            lock (_windowLock)
+            using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
             {
                 return _staleWindows.Count != 0;
             }
@@ -239,7 +239,7 @@ internal sealed partial class MetalGuestMemory
     /// <summary>Whether backing bytes [offset, offset + size) lie under such a window.</summary>
     internal bool IsStaleSingleCopyRange(ulong offset, ulong size)
     {
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             foreach (var ranges in _staleWindows.Values)
             {
@@ -261,7 +261,7 @@ internal sealed partial class MetalGuestMemory
     /// <summary>Whether the GPU alias maps the dummy over a chunk now.</summary>
     internal bool IsSingleCopyHole(int chunk)
     {
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             return _holes is { } holes && (uint)chunk < (uint)holes.Length && holes[chunk] != 0;
         }

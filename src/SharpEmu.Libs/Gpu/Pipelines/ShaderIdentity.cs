@@ -112,7 +112,7 @@ public sealed class ShaderIdentityCache(ICpuMemory memory, Action<ulong, ulong> 
     {
         // Identity capture contains no compilation. A short capture gate also single-flights
         // concurrent readers; program compilation remains in the existing compile futures.
-        lock (_gate)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_gate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.ShaderIdentity))
         {
             // A texture can own newer bytes without changing backing generations yet.
             // Resolve that ownership on the encoding thread before trusting a warm token,

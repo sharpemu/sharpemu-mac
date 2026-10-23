@@ -1445,15 +1445,7 @@ internal sealed partial class MetalRenderHost
             _commandBufferReachWindows.UnionWith(named);
         }
 
-        _deviceAddressBuffers.Clear();
-        foreach (var id in named)
-        {
-            var window = _guestMemory.WindowBuffer(id);
-            if (window != 0)
-            {
-                _deviceAddressBuffers.Add(window);
-            }
-        }
+        _guestMemory.CopyWindowBuffers(named, _deviceAddressBuffers);
 
         NameResidentBuffers(encoder, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deviceAddressBuffers), stages);
     }

@@ -340,7 +340,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     {
         get
         {
-            lock (_windowLock)
+            using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
             {
                 return ((int)(_windowsCreated - _windowsReleased), _windowsCreated, _windowsReleased,
                     (ulong)_windowBytesMapped);
@@ -357,7 +357,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     {
         get
         {
-            lock (_windowLock)
+            using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
             {
                 return (_windowMoves, _windowConflicts, _partition.Windows.Count);
             }
@@ -369,7 +369,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     {
         get
         {
-            lock (_windowLock)
+            using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
             {
                 return _partition.Version;
             }
@@ -407,7 +407,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         // range through it, never by every submission after.
         _touchedWindows.Clear();
         _residentDirty = true;
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             _pinnedWindows.Clear();
             foreach (var (start, end) in _pendingPlacements)
@@ -444,9 +444,24 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     /// <summary>The buffer of one window, created if it has none; zero when no window has the id.</summary>
     public nint WindowBuffer(int id)
     {
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             return _partition.ById(id) is { } window ? EnsureBuffer(window) : 0;
+        }
+    }
+
+    // B collects one submission's pinned directory under one gate, instead of
+    // entering the fault-facing placement lock for every named window.
+    internal void CopyWindowBuffers(MetalWindowSet windows, List<nint> destination)
+    {
+        destination.Clear();
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
+        {
+            foreach (var id in windows)
+            {
+                if (_partition.ById(id) is { } window && EnsureBuffer(window) is var buffer && buffer != 0)
+                    destination.Add(buffer);
+            }
         }
     }
 
@@ -459,7 +474,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     /// </summary>
     public void PinWindows(MetalWindowSet windows)
     {
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             _pinnedWindows.UnionWith(windows);
             foreach (var id in windows)
@@ -478,7 +493,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     /// </summary>
     public void AddCoveredGranules(MetalWindowSet windowIds, MetalWindowSet granules)
     {
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             foreach (var id in windowIds)
             {
@@ -507,7 +522,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     /// <summary>The backing offset each window of a set starts at, and its size.</summary>
     public void ForEachWindow(MetalWindowSet windowIds, Action<ulong, ulong> visit)
     {
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             foreach (var id in windowIds)
             {
@@ -549,7 +564,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     {
         _completedSerial = Math.Max(_completedSerial, completedSerial);
         TrimIdleRings();
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             ReleaseRetired();
         }
@@ -814,7 +829,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
         // Otherwise what the window holding the first byte holds, as the backing is cut now.
         ulong windowEnd;
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             windowEnd = _partition.At(offset).End;
         }
@@ -893,7 +908,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     /// </summary>
     public (int Id, ulong End, ulong GpuAddress) WindowAt(ulong backingOffset)
     {
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             var window = _partition.At(backingOffset);
             EnsureBuffer(window);
@@ -996,7 +1011,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             return $"backed at offset 0x{offset:X}, larger than the largest window 0x{_maxWindowBytes:X}";
         }
 
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             var window = _partition.At(offset);
             return offset + size <= window.End
@@ -1051,7 +1066,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         // A released chunk gets its bytes back before any window names it (single-copy textures).
         RestoreSingleCopyRange(offset, size);
         MetalWindowPartition.Window window;
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             FillSingleCopyHolesLocked(offset, size);
             switch (_partition.Place(offset, offset + size, _pinnedWindows, _retiredScratch, out window))
@@ -1612,7 +1627,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             {
                 _residentDirty = false;
                 _submissionResidentCount = 0;
-                lock (_windowLock)
+                using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
                 {
                     foreach (var id in _touchedWindows)
                     {
@@ -1692,7 +1707,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
 
         _rings.Clear();
-        lock (_windowLock)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_windowLock, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Windows))
         {
             foreach (var window in _partition.Windows)
             {

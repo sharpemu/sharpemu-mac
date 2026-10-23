@@ -13,6 +13,9 @@ public readonly record struct IssueProgramIdentities(IssueProgramIdentity Vertex
 
 public interface ICommandIssueRenderer
 {
+    // Such a renderer retains a dispatch while its pipeline compiles on B. A can
+    // continue issuing without a result round trip or replaying the PM4 packet.
+    bool EncodesDispatchWithoutProducerRetry => false;
     void BeginIssuedSubmission(int queueId, ulong submitId);
     void DrawIssued(int queueId, ulong submitId, RegisterBanks banks, in IssueProgramIdentities programs,
         bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments);
@@ -21,8 +24,8 @@ public interface ICommandIssueRenderer
     void ResetIssuedQueue(int queueId);
 }
 
-// A owns this planner. Memory observations are admitted by the ordered host, which
-// resolves every earlier writer intent first; no mutable Metal cache is queried here.
+// B owns these capture caches. Its direct ownership callback runs at the issue
+// position, never as a producer acknowledgement. Captured identities are immutable.
 internal sealed class CommandIssueProgramPlanner
 {
     private sealed class UnavailableIdentity(string message) : Exception(message);

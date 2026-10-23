@@ -120,9 +120,26 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         _translation!.DrawIssued(queueId, submitId, banks, programs, indexed, indexedArguments, autoArguments);
     }
 
+    bool ICommandIssueRenderer.EncodesDispatchWithoutProducerRetry => _splitIssueWorker;
+
     void ICommandIssueRenderer.DispatchIssued(int queueId, ulong submitId, SharpEmu.Libs.Gpu.GpuCommands.Registers.RegisterBanks banks,
-        in IssueProgramIdentities programs, uint x, uint y, uint z, uint initiator, ulong indirect) =>
-        _translation!.DispatchIssued(queueId, submitId, banks, programs, x, y, z, initiator, indirect);
+        in IssueProgramIdentities programs, uint x, uint y, uint z, uint initiator, ulong indirect)
+    {
+        for (;;)
+        {
+            _translation!.DispatchIssued(queueId, submitId, banks, programs, x, y, z, initiator, indirect);
+            if (!_splitIssueWorker || !_pipelineNotReady) return;
+            // The executor left preparation without encoding the dispatch. Retain
+            // this immutable issue and resume it here; A can fill later blocks.
+            // Service only urgent stores, not relays ordered after accepted work.
+            _pipelineNotReady = false;
+            using var wait = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputePipelineWait);
+            _imageCache.ServiceStoreRequests();
+            if (HostSessionControl.IsShutdownRequested)
+                throw new OperationCanceledException("The issued dispatch stopped while waiting for its pipeline.");
+            Thread.Sleep(1);
+        }
+    }
 
     void ICommandIssueRenderer.ResetIssuedQueue(int queueId) => _translation!.ResetIssuedQueue(queueId);
 

@@ -15,7 +15,7 @@ internal sealed partial class ShaderPipelineCache
     {
         var address = banks.Shader.Vertex.ExportAddress;
         if (!CompiledShaderDump.ShouldWrite(address, null)) return;
-        lock (_gate)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_gate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Programs))
         {
             if (_rejectedDumpKeys.Count >= 64 ||
                 !_rejectedDumpKeys.Add((address, banks.Context.ShaderStages, autoDraw))) return;

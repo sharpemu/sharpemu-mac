@@ -209,7 +209,7 @@ internal sealed partial class MetalRenderHost
         var idle = limits.ModuleIdleSeconds > 0 ? now - SecondsToTicks(limits.ModuleIdleSeconds) : long.MinValue;
         List<MetalShaderModule>? expired = null;
         List<MetalShaderModule>? oldest = null;
-        lock (_modules)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_modules, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Modules))
         {
             foreach (var module in _modules)
             {
@@ -367,7 +367,7 @@ internal sealed partial class MetalRenderHost
     {
         const double Mb = 1048576.0;
         int modules;
-        lock (_modules)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_modules, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Modules))
         {
             modules = _modules.Count;
         }

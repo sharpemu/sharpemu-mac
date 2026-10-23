@@ -32,7 +32,7 @@ internal sealed partial class ShaderPipelineCache
             if (Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SKIPPED_GRAPHICS") != "1") return;
             var directory = CompiledShaderDump.GetDirectory();
             captureDirectory = directory;
-            lock (_gate)
+            using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_gate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Programs))
             {
                 if (_diagnosedSkippedExports.Count >= 8 || !_diagnosedSkippedExports.Add(vertex.ExportAddress)) return;
                 if (!_registry.TryGetDiagnosticCodeRanges(vertex.ExportAddress, out var ranges))
@@ -112,7 +112,7 @@ internal sealed partial class ShaderPipelineCache
                 try
                 {
                     RejectedDrawInputCapture inputs;
-                    lock (_gate) inputs = _rejectedDrawInputs ??= new();
+                    using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_gate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Programs)) inputs = _rejectedDrawInputs ??= new();
                     inputs.TryCapture(_context.Memory, vertex, context, userConfig, in capturedDraw,
                         originalIndirectIndexedDraw, captureDirectory);
                 }

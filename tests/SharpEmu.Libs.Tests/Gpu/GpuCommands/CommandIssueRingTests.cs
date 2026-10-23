@@ -76,6 +76,39 @@ public sealed class CommandIssueRingTests
     }
 
     [Fact]
+    public void PublishingWhileConsumerIsBusyDoesNotWakeItPerBlock()
+    {
+        var ring = new CommandIssueRing<Item>(4, 16, () => new());
+        // No consumer is parked. The release/acquire indices are sufficient.
+        for (var index = 0; index < 4; index++)
+        {
+            var block = ring.Acquire();
+            block.Count = 16;
+            block.LastSequence = (index + 1) * 16;
+            ring.Publish(block);
+        }
+        Assert.Equal(4, ring.PublishedBlocks);
+        Assert.Equal(0, ring.Wakeups);
+        for (var index = 0; index < 4; index++) ring.Release(ring.Take()!);
+        Assert.False(ring.WaitFor(64));
+        ring.Stop();
+    }
+
+    [Fact]
+    public void StopReleasesAProducerBlockedOnTheFullRing()
+    {
+        var ring = new CommandIssueRing<Item>(2, 1, () => new());
+        for (var index = 0; index < 2; index++)
+        {
+            var block = ring.Acquire(); block.Count = 1; block.LastSequence = index + 1; ring.Publish(block);
+        }
+        var producer = Task.Run(() => Assert.Throws<OperationCanceledException>(() => ring.Acquire()));
+        Assert.True(SpinWait.SpinUntil(() => Interlocked.Read(ref ring.FullStalls) != 0, TimeSpan.FromSeconds(5)));
+        ring.Stop();
+        Assert.True(producer.Wait(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
     public void FailureReleasesPrefixAndBackpressureWaitersWithTheOriginalCause()
     {
         var ring = new CommandIssueRing<Item>(2, 1, () => new());

@@ -126,6 +126,51 @@ public sealed class OrderedCommandStreamHostTests
     }
 
     [Fact]
+    public void ProducerCanFillAnotherBlockWhileConsumerIsInsideADraw()
+    {
+        using var fatal = new FatalScope();
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var target = new EncodedHost(new());
+        target.BeforeDraw = () => { entered.Set(); Assert.True(release.Wait(TimeSpan.FromSeconds(10))); };
+        using var runner = new Runner(target, true, 16);
+        Banks().CopyTo(runner.Queue.GetInterpreter(0).TypedRegisters);
+        try
+        {
+            for (var i = 0; i < 16; i++) runner.Host.DrawAuto(1, Auto(3));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+            for (var i = 0; i < 16; i++) runner.Host.DrawAuto(1, Auto(6));
+            Assert.Contains("issue_blocks=2", runner.Host.FormatProfile());
+            Assert.Contains("issue_sync_stalls=0", runner.Host.FormatProfile());
+        }
+        finally { release.Set(); }
+        for (var i = 0; i < 4096; i++) runner.Host.DrawAuto(1, Auto(3));
+        runner.Host.Drain();
+        Assert.Equal(4128, target.Semantics.Count(s => s.StartsWith("draw ")));
+        Assert.Contains("ack_Sync=1/", runner.Host.FormatProfile());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AsynchronousCommandProcessorWritesOwnLargePayloadsUntilConsumption(bool split)
+    {
+        using var fatal = new FatalScope();
+        var target = new EncodedHost(new());
+        using var runner = new Runner(target, split, 16);
+        const ulong address = RecordingRenderHost.MemoryBase + 0x900000;
+        var bytes = Enumerable.Range(0, 2048).Select(i => (byte)i).ToArray();
+        var expected = bytes.ToArray();
+        runner.Host.RecordCommandProcessorWrite(address, bytes, "owned-payload");
+        Array.Fill(bytes, (byte)99);
+        runner.Host.Drain();
+        var read = new byte[expected.Length];
+        Assert.True(target.Memory.TryRead(address, read));
+        Assert.Equal(expected, read);
+        Assert.DoesNotContain("ack_RecordCommandProcessorWrite=", runner.Host.FormatProfile());
+    }
+
+    [Fact]
     public void QueuedBanksStayIndependentOfNestedWritesResetAndPushPop()
     {
         using var fatal = new FatalScope();
@@ -343,6 +388,6 @@ public sealed class OrderedCommandStreamHostTests
         Assert.Contains("issue_blocks=0", runner.Host.FormatProfile());
         runner.Host.Drain();
         Assert.Contains("issue_blocks=1", runner.Host.FormatProfile());
-        Assert.Contains("issue_wakes=1", runner.Host.FormatProfile());
+        Assert.Contains("issue_wakes=0", runner.Host.FormatProfile());
     }
 }

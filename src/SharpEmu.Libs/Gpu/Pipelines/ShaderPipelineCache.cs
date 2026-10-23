@@ -276,7 +276,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             var key = (context.ShaderStages, userConfig.PrimitiveType,
                 shaderInterface.MaxOutputPerSubgroup, shaderInterface.GeometryMaxVerticesOut);
-            lock (_gate)
+            using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_gate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Programs))
             {
                 if (_reportedMeshSkips.Add(key))
                 {
@@ -310,7 +310,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         MeshDrawConfiguration? mesh, VertexFetchBounds fetchBounds = default)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
-        lock (_resolveGate)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_resolveGate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Resolve))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return ResolveGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
@@ -421,7 +421,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderStageResources vertexStage;
         ShaderStageResources pixelStage = default;
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
-        lock (_gate)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_gate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Programs))
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
             using var lockedScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrepareLocked);
@@ -899,7 +899,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionZ)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_resolveGate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Resolve))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null);
@@ -919,7 +919,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ComputeProgramRetry retry)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_resolveGate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Resolve))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry);
@@ -954,7 +954,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         if (_skipRayTracing)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
-            lock (_gate)
+            using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_gate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Programs))
             {
                 profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
                 if (!_rayTracingComputePrograms.TryGetValue(program, out var usesRayTracing))
@@ -985,7 +985,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderProgram handle;
         ShaderStageResources stage;
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
-        lock (_gate)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_gate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Programs))
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
             using var lockedScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrepareLocked);
@@ -1508,7 +1508,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     public Task? GetComputePipelineCompletion(ShaderProgram program)
     {
-        lock (_gate)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_gate, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Programs))
         {
             return _host.GetComputePipelineCompletion(program);
         }

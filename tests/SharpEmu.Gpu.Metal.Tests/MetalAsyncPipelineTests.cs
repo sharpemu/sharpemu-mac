@@ -354,6 +354,41 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
         Assert.Empty(rig.Fatals);
     }
     [Fact]
+    public void SplitProducerReturnsWhileTheIssuedDispatchKeepsItsCompilerSuspensionOnB()
+    {
+        using var rig = CreateRig(splitWorker: true);
+        if (rig is null || !rig.Host.SupportsPipelineSuspend) return;
+        using var gate = new ManualResetEventSlim(false);
+        using var returned = new ManualResetEventSlim(false);
+        rig.Host.PipelineCompiler.Gate = gate;
+        var buffer = rig.Memory.Allocate(64 * 4, 256);
+        rig.Enqueue(rig.Dispatch(new ScenePm4(), ScenePrograms.StoreGlobalId,
+            Descriptors.Buffer(buffer, 4, 64, format: 20), 1).ToArray());
+        Exception? failure = null;
+        var producer = new Thread(() =>
+        {
+            try { rig.Host.RunIssueRelays(); rig.Host.RunCommandStreamSlices(64); }
+            catch (Exception error) { failure = error; }
+            finally { returned.Set(); }
+        });
+        producer.Start();
+        try
+        {
+            Assert.True(returned.Wait(Patience), "A waited for B's held pipeline.");
+            Assert.True(SpinWait.SpinUntil(() => rig.Host.PipelinesCompiling == 1, Patience));
+        }
+        finally
+        {
+            gate.Set();
+            Assert.True(producer.Join(Patience));
+        }
+        Assert.Null(failure);
+        rig.Drain();
+        Assert.Equal(Enumerable.Range(0, 64).Select(value => (uint)value ^ 0x5A5Au), rig.Read<uint>(buffer, 64));
+        Assert.Empty(rig.Fatals);
+    }
+
+    [Fact]
     public void ASuccessorCompileIsReadyOnlyWhenItsResultCanBeTakenWithoutStartingAnotherBuild()
     {
         using var gate = new ManualResetEventSlim(false);

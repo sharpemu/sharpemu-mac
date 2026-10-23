@@ -119,7 +119,7 @@ public sealed class ShaderHeaderRegistry
             SynchronizeHeaders(_headerOf(codeAddress), _fusedPartsOf(codeAddress));
             return RequireCore(codeAddress, label);
         }
-        lock (_observations)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_observations, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.ShaderHeaders))
         {
             var header = _headerOf(codeAddress);
             var fused = _fusedPartsOf(codeAddress);
@@ -210,7 +210,7 @@ public sealed class ShaderHeaderRegistry
         // Every draw resolves its shaders again, so an unchanged header hands back the record
         // it made last time instead of a new one. The header is still read and compared above
         // and here, so a guest that rewrites it gets a fresh record as before.
-        lock (_recent)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_recent, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.ShaderHeaders))
         {
             if (_recent.TryGetValue(codeAddress, out var recent) &&
                 recent.HeaderAddress == headerAddress && recent.CodeSizeBytes == codeSize &&

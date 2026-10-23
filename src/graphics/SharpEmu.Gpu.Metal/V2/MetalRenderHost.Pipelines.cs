@@ -147,6 +147,33 @@ internal sealed partial class MetalRenderHost
 
     private readonly Dictionary<ulong, MetalPipelineEntry> _pipelineEntries = new();
     private readonly List<MetalShaderModule> _modules = new();
+    // Append-only handle directory. Readers never contend with compiler publication
+    // or trimming; module lifetime is still managed by the existing serial fences.
+    private MetalShaderModule?[][] _modulePages = new MetalShaderModule?[4][];
+    private const int ModulePageSize = 256;
+
+    private void PublishModule(MetalShaderModule module, int index)
+    {
+        var pages = _modulePages;
+        var pageIndex = index / ModulePageSize;
+        if (pageIndex >= pages.Length)
+        {
+            Array.Resize(ref pages, Math.Max(pageIndex + 1, pages.Length * 2));
+            Volatile.Write(ref _modulePages, pages);
+        }
+        var page = Volatile.Read(ref pages[pageIndex]);
+        if (page is null) Volatile.Write(ref pages[pageIndex], page = new MetalShaderModule?[ModulePageSize]);
+        Volatile.Write(ref page[index % ModulePageSize], module);
+    }
+
+    private MetalShaderModule? PublishedModule(ulong handle)
+    {
+        if (handle == 0 || handle > int.MaxValue) return null;
+        var index = (int)handle - 1;
+        var pages = Volatile.Read(ref _modulePages);
+        return index / ModulePageSize < pages.Length && Volatile.Read(ref pages[index / ModulePageSize]) is { } page
+            ? Volatile.Read(ref page[index % ModulePageSize]) : null;
+    }
     private readonly Dictionary<ulong, nint> _depthStencilStates = new();
     private ulong _nextPipelineId;
 
@@ -277,10 +304,11 @@ internal sealed partial class MetalRenderHost
         int index;
         // Module creation can reach the host from the shader cache's own threads,
         // while RequireModule runs on the GPU worker; the list is shared state.
-        lock (_modules)
+        using (SharpEmu.Libs.VideoOut.GpuLockProfile.Enter(_modules, SharpEmu.Libs.VideoOut.GpuLockProfile.Gate.Modules))
         {
             _modules.Add(module);
             index = _modules.Count;
+            PublishModule(module, index - 1);
         }
 
         Interlocked.Increment(ref _shaderCompilations);
@@ -600,19 +628,8 @@ internal sealed partial class MetalRenderHost
 
     // The module of a program, as it is: its reflection is there from the start, its library
     // and function may still be compiling or released.
-    private MetalShaderModule LookupModule(in ShaderProgram program)
-    {
-        lock (_modules)
-        {
-            var index = (int)program.Module - 1;
-            if (index < 0 || index >= _modules.Count)
-            {
-                throw Fatal($"The shader module handle is unknown: module={program.Module} program={program.Id}.");
-            }
-
-            return _modules[index];
-        }
-    }
+    private MetalShaderModule LookupModule(in ShaderProgram program) =>
+        PublishedModule(program.Module) ?? throw Fatal($"The shader module handle is unknown: module={program.Module} program={program.Id}.");
 
     // The module with its library and function, waiting for a compile still on the pool. A
     // pipeline compiler thread asks too (onWorker false); its waits are not the worker's.
@@ -2157,6 +2174,7 @@ internal sealed partial class MetalRenderHost
         }
 
         _modules.Clear();
+        Volatile.Write(ref _modulePages, new MetalShaderModule?[4][]);
         foreach (var sampler in _samplers.Values)
         {
             MetalNative.SendVoid(sampler.Handle, SelRelease);

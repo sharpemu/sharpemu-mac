@@ -4,6 +4,7 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.VideoOut;
@@ -13,7 +14,7 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 /// <summary>Streaming ordered issue protocol shared by the split and serial Metal workers.</summary>
 public sealed class OrderedCommandStreamHost : ICommandStreamHost
 {
-    private enum Operation { DrawIndexed, DrawAuto, Dispatch, Sync, TryRecordLodStatistics, TryReadGuest, TryReadCommandBlock, IsCommandBlockCurrent, TryReadGuestOperand, TryReadGuestWaitOperand, CommitPendingOperandWrite, TryWriteGuest, ExecuteGuestMemoryOperation, ExecuteCommandMemoryOperation, RunPendingCommands, BeginSubmission, Flush, FlushFrame, FlushAndWait, SynchronizeGpu, RunGarbageCollector, EmitGlobalBarrier, ReleaseShaderWrites, FillBuffer, CopyBuffer, TraceGuestWrite, TraceWritersOf, ReadGds, DefersEndOfPipeLabel, TryReadOcclusionCounter, ResetOcclusionCounter, DumpOcclusionCounter, HasPendingPublications, HasPendingMemoryPublication, TryDeferOrderedWrite, MustHoldForCrossQueueOrder, TryReadDeferredLabel, TryDeferEndOfPipe, RecordEndOfPipe, RecordCommandProcessorWrite, RecordCommandProcessorQwords, FillBufferInOrder, CopyBufferInOrder, TriggerInterrupt, HasFlipSlot, PrepareFlip, PrepareFlip2, IsFlipDone, PrepareCpuFlip, ConsumePipelineNotReady, HasPendingGpuWrite, NoteIndirectArgumentsReadOnCpu, OnQueueReset, GetPendingLabelTick, SynchronizeShaderCode, Maintenance }
+    private enum Operation { DrawIndexed, DrawAuto, Dispatch, Sync, WriterPrefix, TryRecordLodStatistics, TryReadGuest, TryReadCommandBlock, IsCommandBlockCurrent, TryReadGuestOperand, TryReadGuestWaitOperand, CommitPendingOperandWrite, TryWriteGuest, ExecuteGuestMemoryOperation, ExecuteCommandMemoryOperation, RunPendingCommands, BeginSubmission, Flush, FlushFrame, FlushAndWait, SynchronizeGpu, RunGarbageCollector, EmitGlobalBarrier, ReleaseShaderWrites, FillBuffer, CopyBuffer, TraceGuestWrite, TraceWritersOf, ReadGds, DefersEndOfPipeLabel, TryReadOcclusionCounter, ResetOcclusionCounter, DumpOcclusionCounter, HasPendingPublications, HasPendingMemoryPublication, TryDeferOrderedWrite, MustHoldForCrossQueueOrder, TryReadDeferredLabel, TryDeferEndOfPipe, RecordEndOfPipe, RecordCommandProcessorWrite, RecordCommandProcessorQwords, FillBufferInOrder, CopyBufferInOrder, TriggerInterrupt, HasFlipSlot, PrepareFlip, PrepareFlip2, IsFlipDone, PrepareCpuFlip, ConsumePipelineNotReady, HasPendingGpuWrite, NoteIndirectArgumentsReadOnCpu, OnQueueReset, GetPendingLabelTick, Maintenance }
     private sealed class Issue
     {
         internal Operation Operation;
@@ -21,7 +22,6 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         internal int Queue;
         internal ulong Submit;
         internal readonly RegisterBanks Banks;
-        internal IssueProgramIdentities Programs;
         internal DrawIndexedArguments Indexed;
         internal DrawAutoArguments Auto;
         internal uint X, Y, Z, Initiator;
@@ -32,6 +32,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         internal byte[] Bytes;
         internal int ByteCount;
         internal bool Rented;
+        internal bool ReleasePayloadOnConsume;
         internal Issue(Func<string, Exception> fatal)
         {
             Banks = new(fatal);
@@ -134,8 +135,6 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         internal ulong NoteIndirectArgumentsReadOnCpu_address;
         internal ulong NoteIndirectArgumentsReadOnCpu_size;
         internal int OnQueueReset_queueId;
-        internal ulong SynchronizeShaderCode_address;
-        internal ulong SynchronizeShaderCode_size;
     }
 
     private readonly ICommandStreamHost _target;
@@ -144,8 +143,9 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
     private readonly bool _split;
     private readonly Func<bool> _hasRelay;
     private readonly Action? _maintenance;
-    private readonly Action<ulong, ulong>? _synchronizeCode;
     private readonly CommandIssueProgramPlanner? _planner;
+    private readonly long[] _ackRequests = new long[Enum.GetValues<Operation>().Length];
+    private readonly long[] _ackStalls = new long[Enum.GetValues<Operation>().Length];
     private CommandIssueRing<Issue>.Block? _building;
     private CommandStreamQueue? _queue;
     private int _currentQueue;
@@ -169,10 +169,9 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         _split = split;
         _hasRelay = hasRelay ?? (() => false);
         _maintenance = maintenance;
-        _synchronizeCode = synchronizeCode;
         _ring = new(blocks, itemsPerBlock, () => new Issue(target.Fatal));
         if (_renderer is not null && synchronizeCode is not null)
-            _planner = new(target.Memory, SynchronizeShaderCode);
+            _planner = new(target.Memory, synchronizeCode);
     }
 
     public void AttachQueue(CommandStreamQueue queue) => _queue = queue;
@@ -203,6 +202,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         issue.Queue = _currentQueue;
         issue.Submit = _currentSubmit;
         issue.ByteCount = 0;
+        issue.ReleasePayloadOnConsume = false;
         _building.LastSequence = issue.Sequence;
         return issue;
     }
@@ -217,10 +217,22 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     private void Finish(Issue issue, bool synchronize = true)
     {
-        if (!synchronize) { _writerIntent = issue.Sequence; return; }
+        if (!synchronize)
+        {
+            _writerIntent = issue.Sequence;
+            issue.ReleasePayloadOnConsume = true;
+            if (_building is { } block && block.Count == block.Items.Length) Publish();
+            return;
+        }
         Publish();
+        WaitForPrefix(issue.Sequence, issue.Operation);
+    }
+
+    private void WaitForPrefix(long sequence, Operation reason)
+    {
+        _ackRequests[(int)reason]++;
         using var wait = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.WorkerAWaitsForB);
-        _ring.WaitFor(issue.Sequence);
+        if (_ring.WaitFor(sequence)) _ackStalls[(int)reason]++;
         _resolvedWriter = _writerIntent;
     }
 
@@ -230,7 +242,8 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
     {
         if (_writerIntent <= _resolvedWriter) return;
         Interlocked.Increment(ref _watermarkStalls);
-        Finish(Next(Operation.Sync));
+        Publish();
+        WaitForPrefix(_writerIntent, Operation.WriterPrefix);
     }
 
     private static void ReleaseBytes(Issue issue)
@@ -254,10 +267,8 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
     {
-        var programs = arguments.IndexCount == 0 && arguments.IndirectArgumentsAddress == 0 ? default : CapturePrograms(false);
         var issue = Next(Operation.DrawIndexed);
         CaptureBanks(issue);
-        issue.Programs = programs;
         issue.Submit = submitId;
         issue.Indexed = arguments;
         Finish(issue, synchronize: false);
@@ -265,10 +276,8 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
     {
-        var programs = arguments.VertexCount == 0 && arguments.IndirectArgumentsAddress == 0 ? default : CapturePrograms(false);
         var issue = Next(Operation.DrawAuto);
         CaptureBanks(issue);
-        issue.Programs = programs;
         issue.Submit = submitId;
         issue.Auto = arguments;
         Finish(issue, synchronize: false);
@@ -276,27 +285,18 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     public void DispatchDirect(ulong submitId, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
-        var programs = CapturePrograms(true);
         var issue = Next(Operation.Dispatch);
         CaptureBanks(issue);
-        issue.Programs = programs;
         issue.Submit = submitId;
         issue.X = groupsX; issue.Y = groupsY; issue.Z = groupsZ;
         issue.Initiator = dispatchInitiator; issue.Indirect = indirectArgumentsAddress;
-        _dispatchResultPending = true;
+        _dispatchResultPending = !(_renderer?.EncodesDispatchWithoutProducerRetry ?? false);
         Finish(issue, synchronize: false);
     }
 
     private void CaptureBanks(Issue issue)
     {
         if (_queue is not null) _queue.GetInterpreter(_currentQueue).TypedRegisters.CopyTo(issue.Banks);
-    }
-
-    private IssueProgramIdentities CapturePrograms(bool compute)
-    {
-        if (_planner is null || _queue is null) return default;
-        ResolveWriters();
-        return _planner.Capture(_queue.GetInterpreter(_currentQueue).TypedRegisters, compute);
     }
 
     public void Drain() => Finish(Next(Operation.Sync));
@@ -336,7 +336,12 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         using var profile = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.WorkerApply);
         try
         {
-            for (var index = 0; index < block.Count; index++) Execute(block.Items[index]);
+            for (var index = 0; index < block.Count; index++)
+            {
+                var issue = block.Items[index];
+                Execute(issue);
+                if (issue.ReleasePayloadOnConsume) ReleaseBytes(issue);
+            }
             if (_target is ICommandIssueReadTokenSource source) _completedReadToken = source.IssueReadToken;
             _ring.Release(block);
         }
@@ -354,7 +359,13 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
     public string FormatProfile()
     {
         static double Ms(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
-        return FormattableString.Invariant($"worker_split={(_split ? 1 : 0)} worker_a_ms={Ms(Interlocked.Read(ref _aTicks)):F2} worker_b_ms={Ms(_split ? Interlocked.Read(ref _bTicks) : 0):F2} issue_apply_ms={Ms(Interlocked.Read(ref _bTicks)):F2} worker_a_cpu_ms={Interlocked.Read(ref _aCpuNs) / 1000000.0:F2} worker_b_cpu_ms={(_split ? Interlocked.Read(ref _bCpuNs) : 0) / 1000000.0:F2} a_waits_b_ms={Ms(Interlocked.Read(ref _ring.AcknowledgementWaitTicks) + Interlocked.Read(ref _ring.FullWaitTicks)):F2} b_waits_a_ms={Ms(Interlocked.Read(ref _ring.EmptyWaitTicks)):F2} issue_blocks={Interlocked.Read(ref _ring.PublishedBlocks)} issue_records={Interlocked.Read(ref _ring.PublishedItems)} issue_wakes={Interlocked.Read(ref _ring.Wakeups)} issue_full_stalls={Interlocked.Read(ref _ring.FullStalls)} issue_sync_stalls={Interlocked.Read(ref _ring.SyncStalls)} unresolved_writer_stalls={Interlocked.Read(ref _watermarkStalls)}");
+        var acknowledgements = new StringBuilder();
+        for (var index = 0; index < _ackRequests.Length; index++)
+        {
+            var requests = Volatile.Read(ref _ackRequests[index]);
+            if (requests != 0) acknowledgements.Append($" ack_{(Operation)index}={requests}/{Volatile.Read(ref _ackStalls[index])}");
+        }
+        return FormattableString.Invariant($"worker_split={(_split ? 1 : 0)} worker_a_ms={Ms(Interlocked.Read(ref _aTicks)):F2} worker_b_ms={Ms(_split ? Interlocked.Read(ref _bTicks) : 0):F2} issue_apply_ms={Ms(Interlocked.Read(ref _bTicks)):F2} worker_a_cpu_ms={Interlocked.Read(ref _aCpuNs) / 1000000.0:F2} worker_b_cpu_ms={(_split ? Interlocked.Read(ref _bCpuNs) : 0) / 1000000.0:F2} a_waits_b_ms={Ms(Interlocked.Read(ref _ring.AcknowledgementWaitTicks) + Interlocked.Read(ref _ring.FullWaitTicks)):F2} b_waits_a_ms={Ms(Interlocked.Read(ref _ring.EmptyWaitTicks)):F2} issue_blocks={Interlocked.Read(ref _ring.PublishedBlocks)} issue_records={Interlocked.Read(ref _ring.PublishedItems)} issue_wakes={Interlocked.Read(ref _ring.Wakeups)} issue_full_stalls={Interlocked.Read(ref _ring.FullStalls)} issue_sync_stalls={Interlocked.Read(ref _ring.SyncStalls)} unresolved_writer_stalls={Interlocked.Read(ref _watermarkStalls)}{acknowledgements}");
     }
 
 
@@ -372,7 +383,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     public bool TryReadGuest(ulong address, Span<byte> destination)
     {
-        ResolveWriters();
+        if (_writerIntent > _resolvedWriter) Interlocked.Increment(ref _watermarkStalls);
         var issue = Next(Operation.TryReadGuest);
         issue.TryReadGuest_address = address;
         ReserveBytes(issue, destination.Length);
@@ -384,7 +395,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     public bool TryReadCommandBlock(ulong address, Span<byte> block, out CommandReadToken token)
     {
-        ResolveWriters();
+        if (_writerIntent > _resolvedWriter) Interlocked.Increment(ref _watermarkStalls);
         var issue = Next(Operation.TryReadCommandBlock);
         issue.TryReadCommandBlock_address = address;
         ReserveBytes(issue, block.Length);
@@ -397,10 +408,14 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     public bool IsCommandBlockCurrent(in CommandReadToken token)
     {
-        ResolveWriters();
         // The ownership token was copied on B before it acknowledged the prefix.
         // No B work may change it until A publishes another operation/writer intent.
-        if (_target is ICommandIssueReadTokenSource) return token == _completedReadToken;
+        if (_target is ICommandIssueReadTokenSource)
+        {
+            ResolveWriters();
+            return token == _completedReadToken;
+        }
+        if (_writerIntent > _resolvedWriter) Interlocked.Increment(ref _watermarkStalls);
         var issue = Next(Operation.IsCommandBlockCurrent);
         issue.IsCommandBlockCurrent_token = token;
         Finish(issue, synchronize: true);
@@ -409,7 +424,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     public bool TryReadGuestOperand(ulong address, Span<byte> destination)
     {
-        ResolveWriters();
+        if (_writerIntent > _resolvedWriter) Interlocked.Increment(ref _watermarkStalls);
         var issue = Next(Operation.TryReadGuestOperand);
         issue.TryReadGuestOperand_address = address;
         ReserveBytes(issue, destination.Length);
@@ -421,7 +436,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination, bool commitPendingWrite)
     {
-        ResolveWriters();
+        if (_writerIntent > _resolvedWriter) Interlocked.Increment(ref _watermarkStalls);
         var issue = Next(Operation.TryReadGuestWaitOperand);
         issue.TryReadGuestWaitOperand_address = address;
         ReserveBytes(issue, destination.Length);
@@ -434,7 +449,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     public bool CommitPendingOperandWrite(ulong address, ulong size)
     {
-        ResolveWriters();
+        if (_writerIntent > _resolvedWriter) Interlocked.Increment(ref _watermarkStalls);
         var issue = Next(Operation.CommitPendingOperandWrite);
         issue.CommitPendingOperandWrite_address = address;
         issue.CommitPendingOperandWrite_size = size;
@@ -469,7 +484,9 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
     {
         var issue = Next(Operation.ExecuteCommandMemoryOperation);
         issue.ExecuteCommandMemoryOperation_operation = operation;
-        Finish(issue, synchronize: true);
+        // Atomics and semaphore consumes return values to PM4 immediately.
+        Finish(issue, synchronize: operation.Kind is CommandMemoryOperation.OperationKind.Atomic or
+            CommandMemoryOperation.OperationKind.SemaphoreConsume);
     }
 
     public void RunPendingCommands()
@@ -516,7 +533,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
     public void RunGarbageCollector()
     {
         var issue = Next(Operation.RunGarbageCollector);
-        Finish(issue, synchronize: true);
+        Finish(issue, synchronize: false);
     }
 
     public void EmitGlobalBarrier()
@@ -558,7 +575,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         issue.TraceGuestWrite_operation = operation;
         issue.TraceGuestWrite_address = address;
         issue.TraceGuestWrite_size = size;
-        Finish(issue, synchronize: true);
+        Finish(issue, synchronize: false);
     }
 
     public void TraceWritersOf(string subject, ulong address, ulong size)
@@ -567,7 +584,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         issue.TraceWritersOf_subject = subject;
         issue.TraceWritersOf_address = address;
         issue.TraceWritersOf_size = size;
-        Finish(issue, synchronize: true);
+        Finish(issue, synchronize: false);
     }
 
     public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount)
@@ -581,13 +598,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         ReleaseBytes(issue);
     }
 
-    public bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind)
-    {
-        var issue = Next(Operation.DefersEndOfPipeLabel);
-        issue.DefersEndOfPipeLabel_kind = kind;
-        Finish(issue, synchronize: true);
-        return issue.BooleanResult;
-    }
+    public bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) => _target.DefersEndOfPipeLabel(kind);
 
     public bool TryReadOcclusionCounter(int queueId, out ulong value)
     {
@@ -689,8 +700,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         ReserveBytes(issue, source.Length);
         source.CopyTo(issue.Bytes);
         issue.RecordCommandProcessorWrite_kind = kind;
-        Finish(issue, synchronize: true);
-        ReleaseBytes(issue);
+        Finish(issue, synchronize: false);
     }
 
     public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
@@ -789,7 +799,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
 
     public bool HasPendingGpuWrite(ulong address, ulong size)
     {
-        ResolveWriters();
+        if (_writerIntent > _resolvedWriter) Interlocked.Increment(ref _watermarkStalls);
         var issue = Next(Operation.HasPendingGpuWrite);
         issue.HasPendingGpuWrite_address = address;
         issue.HasPendingGpuWrite_size = size;
@@ -802,7 +812,7 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         var issue = Next(Operation.NoteIndirectArgumentsReadOnCpu);
         issue.NoteIndirectArgumentsReadOnCpu_address = address;
         issue.NoteIndirectArgumentsReadOnCpu_size = size;
-        Finish(issue, synchronize: true);
+        Finish(issue, synchronize: false);
     }
 
     public void OnQueueReset(int queueId)
@@ -819,18 +829,11 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
         return issue.UlongResult;
     }
 
-    private void SynchronizeShaderCode(ulong address, ulong size)
-    {
-        var issue = Next(Operation.SynchronizeShaderCode);
-        issue.SynchronizeShaderCode_address = address;
-        issue.SynchronizeShaderCode_size = size;
-        Finish(issue, synchronize: true);
-    }
-
     public void Maintenance()
     {
         var issue = Next(Operation.Maintenance);
-        Finish(issue, synchronize: true);
+        Finish(issue, synchronize: false);
+        Publish();
     }
 
     private void BeginIssued(Issue issue)
@@ -852,15 +855,29 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
             case Operation.Sync: break;
             case Operation.DrawIndexed:
                 if (_renderer is null) _target.DrawIndexed(issue.Submit, issue.Indexed);
-                else _renderer.DrawIssued(issue.Queue, issue.Submit, issue.Banks, issue.Programs, true, issue.Indexed, default);
+                else
+                {
+                    var programs = issue.Indexed.IndexCount == 0 && issue.Indexed.IndirectArgumentsAddress == 0
+                        ? default : _planner?.Capture(issue.Banks, compute: false) ?? default;
+                    _renderer.DrawIssued(issue.Queue, issue.Submit, issue.Banks, programs, true, issue.Indexed, default);
+                }
                 break;
             case Operation.DrawAuto:
                 if (_renderer is null) _target.DrawAuto(issue.Submit, issue.Auto);
-                else _renderer.DrawIssued(issue.Queue, issue.Submit, issue.Banks, issue.Programs, false, default, issue.Auto);
+                else
+                {
+                    var programs = issue.Auto.VertexCount == 0 && issue.Auto.IndirectArgumentsAddress == 0
+                        ? default : _planner?.Capture(issue.Banks, compute: false) ?? default;
+                    _renderer.DrawIssued(issue.Queue, issue.Submit, issue.Banks, programs, false, default, issue.Auto);
+                }
                 break;
             case Operation.Dispatch:
                 if (_renderer is null) _target.DispatchDirect(issue.Submit, issue.X, issue.Y, issue.Z, issue.Initiator, issue.Indirect);
-                else _renderer.DispatchIssued(issue.Queue, issue.Submit, issue.Banks, issue.Programs, issue.X, issue.Y, issue.Z, issue.Initiator, issue.Indirect);
+                else
+                {
+                    var programs = _planner?.Capture(issue.Banks, compute: true) ?? default;
+                    _renderer.DispatchIssued(issue.Queue, issue.Submit, issue.Banks, programs, issue.X, issue.Y, issue.Z, issue.Initiator, issue.Indirect);
+                }
                 break;
             case Operation.TryRecordLodStatistics: issue.BooleanResult = _target.TryRecordLodStatistics(issue.TryRecordLodStatistics_destination, issue.TryRecordLodStatistics_size, issue.TryRecordLodStatistics_resetCounters); break;
             case Operation.TryReadGuest: issue.BooleanResult = _target.TryReadGuest(issue.TryReadGuest_address, issue.Bytes.AsSpan(0, issue.ByteCount)); break;
@@ -912,7 +929,6 @@ public sealed class OrderedCommandStreamHost : ICommandStreamHost
             case Operation.NoteIndirectArgumentsReadOnCpu: _target.NoteIndirectArgumentsReadOnCpu(issue.NoteIndirectArgumentsReadOnCpu_address, issue.NoteIndirectArgumentsReadOnCpu_size); break;
             case Operation.OnQueueReset: ResetIssued(issue); break;
             case Operation.GetPendingLabelTick: issue.UlongResult = _target.PendingLabelTick; break;
-            case Operation.SynchronizeShaderCode: _synchronizeCode?.Invoke(issue.SynchronizeShaderCode_address, issue.SynchronizeShaderCode_size); break;
             case Operation.Maintenance: _maintenance?.Invoke(); break;
         }
     }
