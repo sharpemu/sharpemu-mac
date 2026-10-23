@@ -10,7 +10,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 internal enum MetalComputeAddressSpace { Guest, Backing, Buffer, Device, Texture }
 
 internal readonly record struct MetalComputeAccess(
-    MetalComputeAddressSpace Space, ulong Resource, ulong Start, ulong Size, bool Written)
+    MetalComputeAddressSpace Space, ulong Resource, ulong Start, ulong Size, bool Written, nint NativeResource = 0)
 {
     internal bool Conflicts(in MetalComputeAccess other) =>
         (Written || other.Written) && Space == other.Space && Resource == other.Resource &&
@@ -61,20 +61,60 @@ internal sealed class MetalComputeDependencies
     private bool _hasWrite;
     internal bool HasDispatch => _hasDispatch;
 
-    internal bool NeedsBarrier(MetalComputeFootprint next)
+    internal string BarrierReason(MetalComputeFootprint next)
     {
-        if (!_hasDispatch) return false;
-        if (_epoch.Count + next.Accesses.Count > EpochCapacity ||
-            _unknownWrite || next.UnknownWrite ||
-            (next.UnknownRead && _hasWrite) || (_unknownRead && HasWrite(next))) return true;
+        if (!_hasDispatch) return "none";
+        if (_epoch.Count + next.Accesses.Count > EpochCapacity) return "capacity";
+        if (_unknownWrite || next.UnknownWrite ||
+            (next.UnknownRead && _hasWrite) || (_unknownRead && HasWrite(next))) return "unknown";
+        foreach (ref readonly var access in CollectionsMarshal.AsSpan(next.Accesses))
+        foreach (ref readonly var previous in CollectionsMarshal.AsSpan(_epoch))
+            if (access.Conflicts(previous)) return "overlap";
+        return "none";
+    }
+
+    // Both sides matter: two Metal objects can alias the same guest/backing bytes.
+    // A resource barrier publishes only these objects. Keep every other access in
+    // the epoch so a later consumer still gets its own visibility barrier.
+    internal bool TryBarrierResources(MetalComputeFootprint next, Span<nint> resources, out int count)
+    {
+        count = 0;
+        if (BarrierReason(next) != "overlap") return false;
         foreach (ref readonly var access in CollectionsMarshal.AsSpan(next.Accesses))
         foreach (ref readonly var previous in CollectionsMarshal.AsSpan(_epoch))
         {
-            if (access.Conflicts(previous)) return true;
+            if (!access.Conflicts(previous)) continue;
+            if (!Add(access.NativeResource, resources, ref count) ||
+                !Add(previous.NativeResource, resources, ref count)) return false;
         }
-
-        return false;
+        return count != 0;
     }
+
+    private static bool Add(nint resource, Span<nint> resources, ref int count)
+    {
+        if (resource == 0) return false;
+        if (resources[..count].Contains(resource)) return true;
+        if (count == resources.Length) return false;
+        resources[count++] = resource;
+        return true;
+    }
+
+    internal void RetireResources(ReadOnlySpan<nint> resources)
+    {
+        var retained = 0;
+        _hasWrite = _unknownWrite;
+        for (var index = 0; index < _epoch.Count; index++)
+        {
+            var access = _epoch[index];
+            if (resources.Contains(access.NativeResource)) continue;
+            _epoch[retained++] = access;
+            _hasWrite |= access.Written;
+        }
+        _epoch.RemoveRange(retained, _epoch.Count - retained);
+    }
+
+    internal bool NeedsBarrier(MetalComputeFootprint next)
+        => BarrierReason(next) != "none";
 
     internal void Record(MetalComputeFootprint next)
     {

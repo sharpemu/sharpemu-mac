@@ -447,7 +447,7 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
-        ComputeScopeBarrier();
+        ComputeScopeBarrier(force: true);
         // The tiler bound its own pipeline; the next dispatch binds the guest's again.
         // Its buffers are bound per dispatch already (ApplyStageBindings).
         _boundComputePipeline = 0;
@@ -508,7 +508,7 @@ internal sealed partial class MetalRenderHost :
     }
 
     /// <summary>Ends whatever encoder is open; the next record opens the one it needs.</summary>
-    private void EndEncoders(PassEndCause cause)
+    private void EndEncoders(PassEndCause cause, string? computeReason = null)
     {
         _transferSharesCompute = false;
         if (_renderEncoder != 0)
@@ -530,7 +530,7 @@ internal sealed partial class MetalRenderHost :
         {
             _encodersInBuffer++;
             PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
-            EndComputeEncoder();
+            EndComputeEncoder(computeReason ?? (cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant()));
         }
 
         EncodeStagedStores();
@@ -2261,7 +2261,7 @@ internal sealed partial class MetalRenderHost :
         var (pageWatches, pageWatchPeak) = _imageCache.TakePageWatchCounters();
         Console.Error.WriteLine(
             $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
-            ComputeBatchCounters() +
+            ComputeBatchCounters() + ComputeChainCounters() +
             $"{_issues?.FormatProfile()} {SharpEmu.Libs.VideoOut.GpuLockProfile.Format()} " +
             // Colour loads a full-screen first draw made dead (MetalPassLoads).
             $"load_elided={loadsElided} load_elided_mb={(loadElidedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
@@ -2622,6 +2622,7 @@ internal sealed partial class MetalRenderHost :
         _completions.Dispose();
         DisposeHostMovie();
         DisposeBindlessImages();
+        if (_computeCopyPipeline != 0) MetalNative.SendVoid(_computeCopyPipeline, SelRelease);
         DisposePipelines();
         (_transfer as IDisposable)?.Dispose();
         // The guest has gone: released chunks are not restored on the way out.

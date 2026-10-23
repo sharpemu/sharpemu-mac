@@ -190,6 +190,8 @@ public sealed class DeviceAddressRangePlannerTests
         Assert.Equal(2, range.MemoryIndices.Count);
         var evaluated = Assert.Single(DeviceAddressRangePlanner.Evaluate(plan, Inputs([0x1000, 0])));
         Assert.True(evaluated.Planned);
+        Assert.True(evaluated.Bounded);
+        Assert.True(plan.Info.DeviceAddressRangesComplete);
         Assert.Equal(0x1008ul, evaluated.Base);
         Assert.Equal(40ul, evaluated.Size);
     }
@@ -238,6 +240,7 @@ public sealed class DeviceAddressRangePlannerTests
         var evaluated = Assert.Single(DeviceAddressRangePlanner.Evaluate(plan, Inputs([0x1000, 0])));
         Assert.True(evaluated.Planned);
         Assert.Equal(DeviceAddressRangePlanner.MaxRangeBytes, evaluated.Size);
+        Assert.False(evaluated.Bounded);
     }
 
     [Fact]

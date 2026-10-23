@@ -967,7 +967,7 @@ internal sealed partial class MetalRenderHost
         }
 
         EndRenderingBefore(in state);
-        EndComputeEncoder();
+        EndComputeEncoder("render");
         EncodeStagedStores();
         EncodeDeferredLabelCopies();
         MaterializePendingClears();
@@ -1281,7 +1281,7 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    private void EndComputeEncoder()
+    private void EndComputeEncoder(string reason = "other")
     {
         FlushComputeBatch("encoder");
         if (_computeEncoder == 0)
@@ -1290,6 +1290,7 @@ internal sealed partial class MetalRenderHost
         }
 
         _transferSharesCompute = false;
+        _computeEncoderEnds[reason] = _computeEncoderEnds.GetValueOrDefault(reason) + 1;
         EndAndReleaseEncoder(_computeEncoder);
         _computeEncoder = 0;
         _boundComputePipeline = 0;

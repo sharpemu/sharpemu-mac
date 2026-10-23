@@ -445,6 +445,9 @@ internal static partial class MetalV2Native
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendMemoryBarrierScope(nint receiver, nint selector, nuint scope);
 
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendComputeResourceBarrier(nint receiver, nint selector, nint resources, nuint count);
+
     // -useResources:count:usage:stages: and -useResources:count:usage:
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendUseResources(

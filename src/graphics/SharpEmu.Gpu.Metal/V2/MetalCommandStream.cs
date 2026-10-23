@@ -946,7 +946,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
 
         source.CopyTo(payload);
         var copy = new DeferredLabelCopy(
-            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length, address);
+            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length, address,
+            CommandProcessor: true);
         var serial = EncodeOrderedCopy(in copy, address, GpuClobberDiagnostics.Enabled ? "landed:" + kind : null,
             FirstValue(source), MetalGpuWriteOrigin.Copy, "cp write", kind, size);
 
@@ -1031,7 +1032,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
             }
 
             copies[index] = new DeferredLabelCopy(
-                0, 0, destination.Buffer, destination.Offset, sizeof(ulong), address + (ulong)index * strideBytes);
+                0, 0, destination.Buffer, destination.Offset, sizeof(ulong), address + (ulong)index * strideBytes,
+                CommandProcessor: true);
         }
 
         var staging = _guestMemory.Allocate((ulong)count * sizeof(ulong), sizeof(ulong), out var payload);
@@ -1224,7 +1226,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         nint DestinationBuffer,
         ulong DestinationOffset,
         int Bytes,
-        ulong GuestAddress);
+        ulong GuestAddress,
+        bool CommandProcessor = false);
 
     private readonly List<DeferredLabelCopy> _deferredLabelCopies = [];
     private bool _encodingDeferredLabels;
@@ -1489,10 +1492,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
 
         // Held to the commit, a copy whose bytes this work binds lands here instead: the work
         // reads or writes them, and must see the copy, or overwrite it, in stream order.
+        if (TryEncodeComputeCommandProcessorCopies()) return;
         _landDeferredLabels = true;
         if (_computeEncoder != 0 || _renderEncoder != 0)
         {
-            EndEncoders(PassEndCause.Other);
+            EndEncoders(PassEndCause.Other, computeReason: "labels");
         }
 
         EncodeDeferredLabelCopies();

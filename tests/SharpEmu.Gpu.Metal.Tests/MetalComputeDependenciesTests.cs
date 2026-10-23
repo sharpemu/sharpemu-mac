@@ -8,6 +8,39 @@ namespace SharpEmu.Gpu.Metal.Tests;
 
 public sealed class MetalComputeDependenciesTests
 {
+    [Fact]
+    public void ResourceBarrierRetiresBothAliasesAndRetainsOtherDependencies()
+    {
+        var tracker = new MetalComputeDependencies();
+        var first = new MetalComputeFootprint();
+        first.Accesses.Add(new(MetalComputeAddressSpace.Backing, 0, 0x1000, 16, true, 11));
+        first.Accesses.Add(new(MetalComputeAddressSpace.Backing, 0, 0x2000, 16, true, 22));
+        tracker.Record(first);
+        var next = new MetalComputeFootprint();
+        next.Accesses.Add(new(MetalComputeAddressSpace.Backing, 0, 0x1008, 4, false, 33));
+        Span<nint> resources = stackalloc nint[8];
+        Assert.True(tracker.TryBarrierResources(next, resources, out var count));
+        Assert.Equal(new nint[] { 33, 11 }, resources[..count].ToArray());
+        tracker.RetireResources(resources[..count]);
+        Assert.False(tracker.NeedsBarrier(next));
+        next.Accesses[0] = next.Accesses[0] with { Start = 0x2008 };
+        Assert.True(tracker.NeedsBarrier(next));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void UnknownOrUnnameableAliasesRequireTheScopeFallback(bool unknown)
+    {
+        var tracker = new MetalComputeDependencies();
+        tracker.Record(Range(0x1000, 16, true));
+        var next = Range(0x1000, 4, false);
+        next.UnknownRead = unknown;
+        Span<nint> resources = stackalloc nint[8];
+        Assert.False(tracker.TryBarrierResources(next, resources, out _));
+        Assert.Equal(unknown ? "unknown" : "overlap", tracker.BarrierReason(next));
+    }
+
     private static MetalComputeFootprint Range(ulong start, ulong size, bool written)
     {
         var footprint = new MetalComputeFootprint();

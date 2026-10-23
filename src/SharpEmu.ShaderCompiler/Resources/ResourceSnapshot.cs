@@ -65,4 +65,5 @@ public sealed class BindlessImageTable
 }
 
 // One device-address handle's evaluated base and bounded extent for this draw.
-public readonly record struct DeviceAddressRange(uint Handle, ulong Base, ulong Size, bool Planned, bool Written);
+public readonly record struct DeviceAddressRange(uint Handle, ulong Base, ulong Size, bool Planned, bool Written,
+    bool Bounded = false);

@@ -219,14 +219,17 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
 
     // A copy waiting for the open compute encoder to end lands after every dispatch recorded
     // into it. A dispatch binding its bytes - GTA V's bounds pass over the table its
-    // WRITE_DATA has just initialised - ends the encoder first so the copy lands before it;
-    // a dispatch over other bytes leaves the encoder open.
-    [Fact]
-    public void ADispatchBindingBytesACopyStillOwesEndsTheComputeEncoderFirst()
+    // WRITE_DATA has just initialised - lands the copy before it; with compute chains
+    // enabled it shares the encoder, and the opt-out keeps the old boundary.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ADispatchBindingHeldCpBytesLandsThemBeforeTheConsumer(bool computeChain)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.ComputeChainEnabled = computeChain;
         Assert.True(host.DefersCopiesInCompute);
 
         _ = host.EnsureComputeEncoder();
@@ -238,7 +241,8 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(1, host.DeferredLabelCopyCount);
 
         host.OrderAfterDeferredCopies(LaterLabel + 4, 0x40);
-        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(computeChain, host.ComputeEncoderOpen);
+        Assert.Equal(computeChain ? 1 : 0, host.ComputeCommandProcessorCopies);
         Assert.Equal(0, host.DeferredLabelCopyCount);
 
         host.FlushCommandBuffer();
@@ -250,12 +254,15 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     // The held copies' span only spares the scan: a binding between two of them that touches
     // neither keeps the encoder open, and once they land the span starts over, so bytes only
     // an earlier copy covered no longer count.
-    [Fact]
-    public void ABindingBetweenTwoHeldCopiesTouchesNeitherAndTheSpanStartsOverWhenTheyLand()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ABindingBetweenTwoHeldCopiesTouchesNeitherAndTheSpanStartsOverWhenTheyLand(bool computeChain)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.ComputeChainEnabled = computeChain;
         Assert.True(host.DefersCopiesInCompute);
 
         _ = host.EnsureComputeEncoder();
@@ -268,7 +275,8 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(2, host.DeferredLabelCopyCount);
 
         host.OrderAfterDeferredCopies(LaterLabel + 0x1000, 8);
-        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(computeChain, host.ComputeEncoderOpen);
+        Assert.Equal(computeChain ? 2 : 0, host.ComputeCommandProcessorCopies);
         Assert.Equal(0, host.DeferredLabelCopyCount);
 
         _ = host.EnsureComputeEncoder();
