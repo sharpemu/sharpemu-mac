@@ -493,7 +493,13 @@ public static class KernelRuntimeCompatExports
             var after = (long)(DiagProcessTimeScaleAfterSeconds * Stopwatch.Frequency);
             if (elapsedTicks > after)
             {
+                var real = elapsedTicks;
                 elapsedTicks = after + (long)((elapsedTicks - after) * DiagProcessTimeScale);
+                if (Interlocked.Increment(ref _diagProcessTimeReads) % 200_000 == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[DIAG][PTIME] reads={_diagProcessTimeReads} real_s={real / (double)Stopwatch.Frequency:F2} guest_s={elapsedTicks / (double)Stopwatch.Frequency:F2}");
+                }
             }
         }
 
@@ -528,6 +534,8 @@ public static class KernelRuntimeCompatExports
         double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_PROCESS_TIME_SCALE"),
             System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture,
             out var scale) && scale > 0 ? scale : 1.0;
+
+    private static long _diagProcessTimeReads;
 
     // SHARPEMU_DIAG_PROCESS_TIME_SCALE_AFTER=<seconds>: the scale applies from then on.
     internal static readonly double DiagProcessTimeScaleAfterSeconds =
