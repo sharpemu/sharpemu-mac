@@ -47,6 +47,7 @@ public sealed class StageCompileOptions
 {
     public VertexInputInfo? VertexInfo { get; set; }
     public int RequiredVertexOutputCount { get; set; }
+    public bool PositionOnlyVertex { get; set; }
 
     // The ShaderStage.Mesh inputs: the output locations the paired pixel program reads, and
     // the draw configuration of the mesh workgroup.
@@ -184,6 +185,7 @@ internal sealed class ProgramSourceEntry
     public BoundedFill? BoundedFill { get; init; }
     public BoundedCopy? BoundedCopy { get; init; }
     public EmbeddedVertexFetchPlan? EmbeddedFetch { get; init; }
+    public bool PositionOnlyVertex { get; init; }
     public ShaderVertexInput[] VertexInputs { get; init; } = [];
     public IReadOnlyList<AffineVertexFetchLoad> AffineFetches { get; init; } = [];
     public List<ProgramPermutation> Permutations { get; } = new(8);
@@ -792,23 +794,43 @@ internal sealed class ShaderProgramCache
         if (AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex &&
             options.VertexInfo is { Attributes.Length: 0, FetchEmbedded: false } affineInfo &&
             ShaderCompileRequest.AllowsEmbeddedVertexFetch(entry.Program, options.PrimitiveShader, options.MeshPerVertexParameterMask) &&
-            !entry.Plan.Info.WritesDeviceAddresses && !entry.Plan.Info.Buffers.Any(buffer => buffer.Written))
+            !entry.Plan.Info.WritesDeviceAddresses && !entry.Plan.Info.Buffers.Any(buffer => buffer.Written) &&
+            !entry.Plan.Info.Images.Any(image => image.Written))
         {
             List<VertexAttributeResource>? attributes = null;
             List<VertexInputBuffer>? buffers = null;
             List<uint>? pcs = null;
+            if (entry.AffineFetches.Count == 0) VertexFetchCounters.Refuse(VertexFetchRefusal.NoAffineIndex);
             foreach (var load in entry.AffineFetches)
             {
                 var access = entry.Plan.Memory.Find(load.Pc);
-                if ((attributes?.Count ?? 0) >= Math.Min(VertexInputInfo.MaxBuffers, _host.MaxFixedFunctionVertexBuffers) ||
-                    access is null || access.DeviceDescriptor ||
+                if ((attributes?.Count ?? 0) >= Math.Min(VertexInputInfo.MaxBuffers, _host.MaxFixedFunctionVertexBuffers))
+                { VertexFetchCounters.Refuse(VertexFetchRefusal.Capacity); continue; }
+                if (access is null || access.DeviceDescriptor ||
                     access.Resource >= snapshot.Buffers.Length ||
                     access.BufferDescriptor?.ChooseStrategy(false, !load.Raw, false) == BufferLoweringStrategy.BoundedCandidateTable)
-                    continue;
+                { VertexFetchCounters.Refuse(VertexFetchRefusal.Resource); continue; }
                 var words = snapshot.Buffers[access.Resource];
-                if (words.Length < 4 || !AffineVertexFetchResolver.TryResolve(load, BufferDescriptorWords.From(words),
-                        affineInfo.FetchBounds, out var buffer, out var attribute)) continue;
-                if (!_host.VertexFetchRangeIsMapped(buffer.Address, buffer.Size)) continue;
+                if (words.Length < 4) { VertexFetchCounters.Refuse(VertexFetchRefusal.Descriptor); continue; }
+                var resolvedLoad = load;
+                if (load.Index.BiasScalarRegister is >= 0 and var scalar)
+                {
+                    var word = scalar - (int)source.UserDataBase;
+                    if ((uint)word >= source.UserData.Length ||
+                        (scalar < 64 && (source.ExcludedUserDataRegisters & (1ul << scalar)) != 0))
+                    { VertexFetchCounters.Refuse(VertexFetchRefusal.Index); continue; }
+                    resolvedLoad = load with { Index = load.Index with
+                    {
+                        Bias = unchecked(load.Index.Bias + (source.UserData[word] & load.Index.BiasMask)),
+                        BiasScalarRegister = -1,
+                    }};
+                }
+                if (!AffineVertexFetchResolver.TryResolve(resolvedLoad, BufferDescriptorWords.From(words),
+                        affineInfo.FetchBounds, out var buffer, out var attribute, out var refusal))
+                { VertexFetchCounters.Refuse(refusal); continue; }
+                if (!_host.VertexFetchRangeIsMapped(buffer.Address, buffer.Size))
+                { VertexFetchCounters.Refuse(VertexFetchRefusal.Mapping); continue; }
+                VertexFetchCounters.Replaced();
                 var location = attributes?.Count ?? 0;
                 (attributes ??= []).Add(attribute with { AttributeId = location, BufferIndex = location });
                 (buffers ??= []).Add(buffer);
@@ -824,6 +846,9 @@ internal sealed class ShaderProgramCache
                 return GetOrCompileCore(source, options, ref pushDataCursor, out stage);
             }
         }
+        else if (AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex &&
+            options.VertexInfo is { Attributes.Length: 0, FetchEmbedded: false })
+            VertexFetchCounters.Refuse(VertexFetchRefusal.Eligibility);
 
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
         {
@@ -971,6 +996,7 @@ internal sealed class ShaderProgramCache
             case ShaderStage.Vertex:
                 StageStaticKey.Build(options.VertexInfo ?? throw new ArgumentException("The vertex lookup has no vertex input info."),
                     options.RequiredVertexOutputCount, options.PrimitiveShader, _staticState);
+                _staticState.Add(options.PositionOnlyVertex ? 1u : 0u);
                 _staticState.Add(options.MeshPerVertexParameterMask);
                 _staticState.Add((uint)options.VertexInterpolants.Count);
                 // Indexed: a foreach over the interface boxed an enumerator on every draw.
@@ -1026,6 +1052,12 @@ internal sealed class ShaderProgramCache
 
         var dumpPlanning = CompiledShaderDump.ShouldWrite(source.Address, source.Hash);
         if (dumpPlanning) ShaderPlanningDump.WriteInput(source, program);
+        if (source.Stage == ShaderStage.Vertex && options.PositionOnlyVertex)
+        {
+            // Leave every position/auxiliary export and every arithmetic operation in
+            // exactly the same order. The native compiler eliminates pure dead chains.
+            program = VertexOutputPruning.PositionOnly(program);
+        }
         EmbeddedVertexFetchPlan? fetch = null;
         ShaderVertexInput[] vertexInputs = [];
         if (source.Stage == ShaderStage.Vertex && options.VertexInfo is { AffineFetchPcs.Length: > 0 } affineInfo)
@@ -1096,6 +1128,7 @@ internal sealed class ShaderProgramCache
             BoundedFill = source.Stage == ShaderStage.Compute ? BoundedFillDetector.Detect(program) : null,
             BoundedCopy = source.Stage == ShaderStage.Compute ? BoundedFillDetector.DetectCopy(program) : null,
             EmbeddedFetch = fetch,
+            PositionOnlyVertex = options.PositionOnlyVertex,
             VertexInputs = vertexInputs,
             AffineFetches = AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex
                 ? EmbeddedVertexFetchDetector.Detect(program, -2, -2, source.UserDataBase, (uint)source.UserData.Length, 32).AffineLoads : [],
@@ -1363,6 +1396,7 @@ internal sealed class ShaderProgramCache
             CompiledShaderDump.Write(source.Label, source.Address, source.Hash, compiled, program);
             var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
             var info = CreateProgramInfo(source, entry, resources, layout, request, compiled.InputLocationMask);
+            if (entry.PositionOnlyVertex) VertexFetchCounters.PositionOnly();
             if (source.Stage != ShaderStage.Compute &&
                 graphicsPrewarm is not null && capturedCode is { } graphicsCapture)
             {
@@ -1852,6 +1886,7 @@ internal sealed class ShaderProgramCache
             UserDataBase = source.UserDataBase,
             UserDataCount = (uint)source.UserData.Length,
             ParameterExportMask = entry.Program.ParameterExportMask,
+            PositionOnlyVertex = entry.PositionOnlyVertex,
             InputLocationMask = inputLocationMask,
             PixelColorExportMasks = entry.Program.PixelColorExportMasks,
             VertexOffsetScalarRegister = entry.EmbeddedFetch?.VertexOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,

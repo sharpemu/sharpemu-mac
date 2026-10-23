@@ -448,6 +448,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var vertexOptions = _vertexOptions;
             vertexOptions.VertexInfo = vertexInfo;
             vertexOptions.RequiredVertexOutputCount = (int)attributeCount;
+            // attributeCount comes from the decoded pixel program's actual interpolation
+            // reads and resolved parameter mappings, rather than the declared input count.
+            vertexOptions.PositionOnlyVertex = VertexOutputPruning.Enabled &&
+                mesh is null && perVertexParameters == 0 && depthBound && pixelOutputs.Length == 0 && attributeCount == 0;
             vertexOptions.PrimitiveShader = primitiveShader;
             vertexOptions.MeshPerVertexParameterMask = perVertexParameters;
             vertexOptions.VertexInterpolants = manualInterpolation is null ? [] : EncodedInterpolantsOf(manualInterpolation);

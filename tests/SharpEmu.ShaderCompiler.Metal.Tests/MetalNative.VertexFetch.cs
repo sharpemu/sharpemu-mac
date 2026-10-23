@@ -19,13 +19,13 @@ internal static partial class MetalNative
     // raster/interpolation/float render-target conversion. Every output bit counts.
     public static bool TryCaptureVertexFetch(Gen5MslShader shader, byte[] data, uint nativeFormat,
         uint stride, bool instance, uint divisor, uint firstVertex, uint baseInstance, bool indexed,
-        out byte[] result, out string error)
+        out byte[] result, out string error, uint nativeBufferOffset = 0, bool capturePosition = false)
     {
         result = [];
         var source = shader.Source.Replace("    uint sharpemu_vertex_id [[vertex_id]],",
             "    device uint4* captured [[buffer(4)]],\n    uint sharpemu_vertex_id [[vertex_id]],", StringComparison.Ordinal)
             .Replace("return sharpemu_out;",
-                "captured[sharpemu_instance_id * 32u + sharpemu_vertex_id] = as_type<uint4>(sharpemu_out.param0);\n    return;",
+                $"captured[sharpemu_instance_id * 32u + sharpemu_vertex_id] = as_type<uint4>(sharpemu_out.{(capturePosition ? "sharpemu_position" : "param0")});\n    return;",
                 StringComparison.Ordinal)
             .Replace("vertex Gen5VsOut ", "vertex void ", StringComparison.Ordinal);
         if (!TryCompileLibrary(source, out var library, out error)) return false;
@@ -69,7 +69,7 @@ internal static partial class MetalNative
             var encoder = Send(command, Selector("renderCommandEncoderWithDescriptor:"), pass);
             SendVoid(encoder, Selector("setRenderPipelineState:"), pipeline);
             foreach (var (buffer, slot) in new[] { (argumentBuffer, 0u), (push, 1u), (input, 2u), (captured, 4u) })
-                SendSetBuffer(encoder, Selector("setVertexBuffer:offset:atIndex:"), buffer, 0, slot);
+                SendSetBuffer(encoder, Selector("setVertexBuffer:offset:atIndex:"), buffer, slot == 2 ? nativeBufferOffset : 0, slot);
             SendUseResource(encoder, Selector("useResource:usage:"), input, 1);
             SendUseResource(encoder, Selector("useResource:usage:"), step, 3);
             if (indexed)

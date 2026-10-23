@@ -1207,10 +1207,24 @@ public sealed partial class RenderExecutor
                 arguments.VertexCount, arguments.OffsetSource == DrawOffsetSource.IndirectArguments ? arguments.FirstInstance : 0,
                 arguments.InstanceCount, VerticesKnown: true, InstancesKnown: true) : default;
 
-    public static VertexFetchBounds FetchBoundsOf(RegisterBanks banks, DrawIndexedArguments arguments) =>
-        AffineVertexFetchResolver.Enabled && arguments.IndirectArgumentsAddress == 0
-            ? new(0, 0, arguments.OffsetSource == DrawOffsetSource.IndirectArguments ? arguments.FirstInstance : 0,
-                arguments.InstanceCount, InstancesKnown: true) : default;
+    public static VertexFetchBounds FetchBoundsOf(RegisterBanks banks, DrawIndexedArguments arguments)
+    {
+        if (!AffineVertexFetchResolver.Enabled || arguments.IndirectArgumentsAddress != 0) return default;
+        var offset = arguments.OffsetSource == DrawOffsetSource.IndirectArguments
+            ? arguments.BaseVertex : unchecked((int)banks.UserConfig.IndexOffset + arguments.BaseVertex);
+        // Prove the whole 8/16-bit domain. This includes restart indices and avoids
+        // reading/scanning an index buffer that may still be owned by the GPU.
+        var domain = (GuestIndexType)arguments.IndexTypeAndSize switch
+        {
+            GuestIndexType.Index8 => 256u,
+            GuestIndexType.Index16 => 65536u,
+            _ => 0u,
+        };
+        var known = domain != 0 && offset >= 0 && (ulong)(uint)offset + domain - 1 <= uint.MaxValue;
+        return new(known ? (uint)offset : 0, known ? domain : 0,
+            arguments.OffsetSource == DrawOffsetSource.IndirectArguments ? arguments.FirstInstance : 0,
+            arguments.InstanceCount, VerticesKnown: known, InstancesKnown: true);
+    }
 
     private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false, VertexFetchBounds fetchBounds = default)
     {

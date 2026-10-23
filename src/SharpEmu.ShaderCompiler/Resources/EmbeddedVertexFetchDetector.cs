@@ -181,7 +181,7 @@ public static partial class EmbeddedVertexFetchDetector
         // Unknown targets can enter any instruction. Do not rewrite a program with unresolved transfers.
         if (program.Instructions.Any(instruction => instruction.Opcode is
             "SSetpcB64" or "SSwappcB64" or "SRfeB64" or "SCallB64")) return plan;
-        plan.AffineLoads.AddRange(DetectAffine(program));
+        plan.AffineLoads.AddRange(DetectAffine(program, userDataBase, userDataCount));
         var graph = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
         if (graph.Blocks.Count == 0) return plan;
         var initial = new TrackingState();

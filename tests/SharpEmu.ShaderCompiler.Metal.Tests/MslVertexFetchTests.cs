@@ -57,7 +57,29 @@ public sealed class MslVertexFetchTests
         }
     }
 
-    private static Gen5MslShader Compile(uint format, uint stride, bool instance, uint divisor, uint swizzle, bool fixedFetch)
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SdwaBiasedInstanceFetchAndPositionOnlyExportMatchEveryOutputBit(bool indexed)
+    {
+        if (!MetalNative.IsAvailable) return;
+        var bytes = new byte[1024];
+        // Exact finite float positions; compare position bits, including signed zero.
+        for (var i = 0; i < bytes.Length / 4; i++)
+            BitConverter.TryWriteBytes(bytes.AsSpan(i * 4), (i % 4) == 3 ? 1f : (i % 17 - 8) * 0.125f);
+        var portable = Compile(77, 64, true, 1, 0xFAC, false, bias: true);
+        var native = Compile(77, 64, true, 1, 0xFAC, true, bias: true, positionOnly: true);
+        Assert.DoesNotContain("param0", native.Source);
+        Assert.Contains("[[position, invariant]]", native.Source);
+        Assert.True(MetalNative.TryCaptureVertexFetch(portable, bytes, 0, 64, true, 1, 2, 3, indexed,
+            out var shaderResult, out var error, capturePosition: true), error);
+        Assert.True(MetalNative.TryCaptureVertexFetch(native, bytes, 31, 64, true, 1, 2, 3, indexed,
+            out var nativeResult, out error, nativeBufferOffset: 64, capturePosition: true), error);
+        Assert.Equal(shaderResult, nativeResult);
+        Assert.Contains(nativeResult, b => b != 0);
+    }
+
+    private static Gen5MslShader Compile(uint format, uint stride, bool instance, uint divisor, uint swizzle, bool fixedFetch, bool bias = false, bool positionOnly = false)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0;
@@ -75,15 +97,38 @@ public sealed class MslVertexFetchTests
             Add("VLshrrevB32", Gen5ShaderEncoding.Vop2, [new(Gen5OperandKind.LiteralConstant, 1), Gen5Operand.Vector(address)], [Gen5Operand.Vector(9)]);
             address = 9;
         }
+        if (bias)
+        {
+            Add("SMovB32", Gen5ShaderEncoding.Sop1, [new(Gen5OperandKind.LiteralConstant, 0xFFFF0001)], [Gen5Operand.Scalar(12)]);
+            Add("VAddI32", Gen5ShaderEncoding.Vop2, [Gen5Operand.Vector(address), Gen5Operand.Scalar(12)],
+                [Gen5Operand.Vector(9)], new Gen5SdwaControl(6, 0, 6, 4, false, false, 0, 0, 0, false, null));
+            address = 9;
+        }
         var fetchPc = pc;
         Add("BufferLoadFormatXyzw", Gen5ShaderEncoding.Mubuf,
             [Gen5Operand.Vector(address), Gen5Operand.Scalar(8), new(Gen5OperandKind.EncodedConstant, 128)],
             Enumerable.Range(10, 4).Select(i => Gen5Operand.Vector((uint)i)).ToArray(),
             new Gen5BufferMemoryControl(4, address, 10, 8, 0, true, false, false, false));
+        var position = Enumerable.Range(10, 4).Select(i => Gen5Operand.Vector((uint)i)).ToArray();
+        if (bias)
+        {
+            // Preserve the same interdependent multiply/add chain when removing
+            // parameters, as in an instanced position transform and projection.
+            Add("VMadF32", Gen5ShaderEncoding.Vop3,
+                [Gen5Operand.Vector(10), new(Gen5OperandKind.LiteralConstant, 0x3F000000), Gen5Operand.Vector(11)], [Gen5Operand.Vector(20)]);
+            Add("VMacF32", Gen5ShaderEncoding.Vop2,
+                [Gen5Operand.Vector(12), new(Gen5OperandKind.LiteralConstant, 0x3E800000)], [Gen5Operand.Vector(20)]);
+            Add("VMadF32", Gen5ShaderEncoding.Vop3,
+                [Gen5Operand.Vector(13), new(Gen5OperandKind.LiteralConstant, 0x3E000000), Gen5Operand.Vector(20)], [Gen5Operand.Vector(21)]);
+            position = [Gen5Operand.Vector(20), Gen5Operand.Vector(21), Gen5Operand.Vector(12), Gen5Operand.Vector(13)];
+        }
+        Add("Exp", Gen5ShaderEncoding.Exp, position, [],
+            new Gen5ExportControl(12, 15, false, true, false));
         Add("Exp", Gen5ShaderEncoding.Exp, Enumerable.Range(10, 4).Select(i => Gen5Operand.Vector((uint)i)).ToArray(), [],
             new Gen5ExportControl(32, 15, false, true, false));
         Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], []);
         var program = new Gen5ShaderProgram(0x100000, instructions);
+        if (positionOnly) program = VertexOutputPruning.PositionOnly(program);
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Vertex, 1, 0, 0,
             fixedFunctionVertexLoads: fixedFetch ? new HashSet<uint> { fetchPc } : null);
         var specialization = ResourceSpecialization.Default(plan.Info);
@@ -94,7 +139,7 @@ public sealed class MslVertexFetchTests
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
             WaveSize = 32,
-            RequiredVertexOutputCount = 1,
+            RequiredVertexOutputCount = positionOnly ? 0 : 1,
             VertexInputs = fixedFetch ? [new ShaderVertexInput(fetchPc, 0, 4, 4, number, swizzle, instance, [])] : [],
         };
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);

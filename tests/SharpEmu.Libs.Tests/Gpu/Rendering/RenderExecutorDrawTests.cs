@@ -18,6 +18,30 @@ namespace SharpEmu.Libs.Tests.Gpu.Rendering;
 [Collection(SchedulingStateCollection.Name)]
 public sealed class RenderExecutorDrawTests : IDisposable
 {
+    [Theory]
+    [InlineData(0u, 65536u)]
+    [InlineData(1u, 0u)]
+    [InlineData(2u, 256u)]
+    public void IndexedFetchBoundsProveTheWholeIndexDomainWithoutReadingIndices(uint type, uint domain)
+    {
+        var enabled = SharpEmu.Libs.Gpu.Pipelines.AffineVertexFetchResolver.Enabled;
+        SharpEmu.Libs.Gpu.Pipelines.AffineVertexFetchResolver.Enabled = true;
+        try
+        {
+            var banks = Banks();
+            banks.UserConfig.IndexOffset = 7;
+            var arguments = Indexed(3, instances: 2, indexType: type, baseVertex: 5);
+            var bounds = RenderExecutor.FetchBoundsOf(banks, arguments);
+            Assert.Equal(domain != 0, bounds.VerticesKnown);
+            Assert.Equal(domain != 0 ? 12u : 0u, bounds.FirstVertex);
+            Assert.Equal(domain, bounds.VertexCount);
+            Assert.True(bounds.InstancesKnown);
+            Assert.False(RenderExecutor.FetchBoundsOf(banks, arguments with { BaseVertex = -8 }).VerticesKnown);
+            Assert.Equal(default, RenderExecutor.FetchBoundsOf(banks, arguments with { IndirectArgumentsAddress = 0x1000 }));
+        }
+        finally { SharpEmu.Libs.Gpu.Pipelines.AffineVertexFetchResolver.Enabled = enabled; }
+    }
+
     private readonly RecordingRenderHost _host = new();
     private readonly FakePipelineProvider _pipelines = new();
     private readonly RenderExecutor _executor;

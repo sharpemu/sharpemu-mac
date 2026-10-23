@@ -16,13 +16,15 @@ public sealed class EmbeddedVertexFetchDetectorTests
     private const int BufferTable = 6;
 
     [Fact]
-    public void GBufferPrologRecognizesPositionButRetainsInstanceMatrixReads()
+    public void DepthPrologRecognizesPositionAndSdwaInstanceMatrixReads()
     {
         // The actual instruction shape/PCs of dumped VS 0x8B94AE10B80DDFCD.
-        // The instance add at 0x48 uses SDWA (a 16-bit scalar source): it is
-        // deliberately not treated as an unmodified hardware instance index.
-        var add = Vop2(0x48, "VAddI32", 4, Gen5Operand.Vector(8), Gen5Operand.Scalar(10));
+        // The instance add uses the low 16 bits of user s10, even when EXEC
+        // was narrowed by the preceding NGG vertex/primitive split.
+        var add = Vop2(0x48, "VAddI32", 4, Gen5Operand.Vector(8), Gen5Operand.Scalar(10)) with
+        { Control = new Gen5SdwaControl(6, 0, 6, 4, false, false, 0, 0, 0, false, null) };
         var program = Program(
+            MoveScalar(0, 126, 1),
             add,
             ScalarLoad(0x50, 8, 106, 2, 16),
             ScalarLoad(0x58, 8, 16, 4),
@@ -34,7 +36,13 @@ public sealed class EmbeddedVertexFetchDetectorTests
             BufferAccess(0xA0, "BufferLoadFormatXyz", 24, 0, 3, 14, true, vectorAddress: 5),
             EndProgram(0x130));
         var plan = EmbeddedVertexFetchDetector.Detect(program, -2, -2, 8, 16, 32);
-        var position = Assert.Single(plan.AffineLoads);
+        Assert.Equal(new uint[] { 0x88, 0x90, 0x98, 0xA0 }, plan.AffineLoads.Select(l => l.Pc));
+        foreach (var matrix in plan.AffineLoads.Take(3))
+        {
+            Assert.True(matrix.Raw);
+            Assert.Equal(new AffineVertexIndex(VertexFetchIndex.Instance, BiasScalarRegister: 10, BiasMask: 0xFFFF), matrix.Index);
+        }
+        var position = plan.AffineLoads[3];
         Assert.Equal(0xA0u, position.Pc);
         Assert.Equal(new AffineVertexIndex(VertexFetchIndex.Vertex), position.Index);
         Assert.Equal(3u, position.Components);
@@ -68,12 +76,31 @@ public sealed class EmbeddedVertexFetchDetectorTests
     }
 
     [Fact]
+    public void PositionOnlyPruningPreservesEveryNonParameterInstructionAndPc()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        foreach (var target in new uint[] { 12, 13, 14, 15, 20, 32, 63 })
+            instructions.Add(new((uint)instructions.Count * 8, Gen5ShaderEncoding.Exp, "Exp", [0u, 0u],
+                [Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2), Gen5Operand.Vector(3)], [],
+                new Gen5ExportControl(target, 15, false, true, false)));
+        instructions.Add(BufferAccess(56, "BufferStoreDword", 16, indexEnabled: true, vectorAddress: 5));
+        instructions.Add(EndProgram(64));
+        var program = Program(instructions.ToArray());
+        var pruned = VertexOutputPruning.PositionOnly(program);
+        Assert.Equal(program.Instructions.Select(i => i.Pc), pruned.Instructions.Select(i => i.Pc));
+        Assert.Equal(program.Instructions.Where(i => i.Control is not Gen5ExportControl { Target: >= 32 and < 64 }),
+            pruned.Instructions.Where(i => i.Opcode != "SNop"));
+        Assert.Equal(0u, pruned.ParameterExportMask);
+    }
+
+    [Fact]
     public void MaskedWritesAndBranchesDoNotInventAffineIndices()
     {
         var program = Program(
             MoveScalar(0, 126, 0),
             Vop1(4, "VMovB32", 9, Gen5Operand.Vector(5)),
-            BufferAccess(8, "BufferLoadFormatX", 16, indexEnabled: true, vectorAddress: 9),
+            MoveScalar(8, 126, uint.MaxValue), // widens EXEC after a masked definition
+            BufferAccess(12, "BufferLoadFormatX", 16, indexEnabled: true, vectorAddress: 9),
             Branch(16, "SBranch", 0),
             BufferAccess(20, "BufferLoadFormatX", 16, indexEnabled: true, vectorAddress: 5),
             EndProgram(28));

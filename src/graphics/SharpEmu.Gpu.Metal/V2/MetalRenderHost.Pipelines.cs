@@ -75,6 +75,7 @@ internal sealed partial class MetalRenderHost
         // program fetches makes every vertex the same one, and the draw then rasterises
         // nothing at all while looking perfectly ordinary from the outside.
         public string? VertexLayout;
+        public bool PositionOnlyVertex;
         public bool FixedFunctionVertexFetch;
         public bool ShaderVertexFetch;
 
@@ -936,6 +937,7 @@ internal sealed partial class MetalRenderHost
             Profile = ProfileLabelFor(vertexModule, pixelModule, mesh),
             VertexHash = vertexModule.Hash,
             VertexLayout = compiled.VertexLayout,
+            PositionOnlyVertex = description.VertexStage.PositionOnlyVertex,
             FixedFunctionVertexFetch = description.VertexStage.VertexFetchComponents.Any(components => components != 0),
             ShaderVertexFetch = description.VertexStage.Buffers.Any(buffer => buffer.Read && !buffer.Scalar) ||
                 description.VertexStage.UsesDeviceAddresses,
