@@ -207,6 +207,7 @@ internal sealed class MetalCompletionQueue : IDisposable
     private long _wakeWaitTicks;
     private long _handlerWakeups;
     private volatile bool _stopping;
+    private Action? _completionObserver;
 
     public MetalCompletionQueue(nint sharedEvent)
     {
@@ -230,6 +231,13 @@ internal sealed class MetalCompletionQueue : IDisposable
 
     public long HandlerWakeups => Interlocked.Read(ref _handlerWakeups);
 
+    /// <summary>
+    /// Runs on the Metal callback thread for every completed command buffer, after the
+    /// shared event is read. Must not allocate or block for long: the command stream's
+    /// worker uses it to leave a parked label wait at once.
+    /// </summary>
+    public void SetCompletionObserver(Action? observer) => Volatile.Write(ref _completionObserver, observer);
+
     // Metal finished a command buffer: everyone watching the shared event looks again.
     private void OnGpuCompleted()
     {
@@ -240,6 +248,8 @@ internal sealed class MetalCompletionQueue : IDisposable
         {
             Monitor.PulseAll(_wakeGate);
         }
+
+        Volatile.Read(ref _completionObserver)?.Invoke();
 
         // A frame waiting for this submission can be promoted now; the pacer used to
         // find out by polling every millisecond.

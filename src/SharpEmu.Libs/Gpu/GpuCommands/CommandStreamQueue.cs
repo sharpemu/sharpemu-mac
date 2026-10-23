@@ -68,6 +68,53 @@ public sealed class CommandStreamQueue
             : 1;
     }
 
+    /// <summary>
+    /// Whether a host's GPU completion callback may cut a parked watched wait short.
+    /// SHARPEMU_CP_GPU_COMPLETION_WAKE=0 leaves the wait to the watch interval alone.
+    /// </summary>
+    /// <remarks>
+    /// A label the GPU writes is in guest memory before the command buffer that wrote it
+    /// reports completion, and the watch only finds that out on its next tick, up to a
+    /// millisecond and a timer overshoot later. The completion callback signals instead.
+    /// </remarks>
+    public static readonly bool GpuCompletionWakeEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_CP_GPU_COMPLETION_WAKE") != "0";
+
+    // 1 while the worker sleeps in a watched wait; the completion callback signals only then.
+    private int _parkedOnWatch;
+    private long _gpuCompletionWakes;
+
+    // Lets a test stretch the watch tick so a wake that arrives early can only be a signal.
+    internal int? WatchIntervalOverrideMilliseconds { get; set; }
+
+    internal bool ParkedOnWatch => Volatile.Read(ref _parkedOnWatch) != 0;
+
+    /// <summary>Parked watched waits a GPU completion callback signalled.</summary>
+    public long GpuCompletionWakes => Volatile.Read(ref _gpuCompletionWakes);
+
+    /// <summary>
+    /// Called from the host's GPU completion callback: cuts the worker's watched wait short so
+    /// it re-reads its labels now. Costs one volatile read unless the worker is parked on one.
+    /// </summary>
+    public void NotifyGpuCompletionObserved()
+    {
+        if (Volatile.Read(ref _parkedOnWatch) == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_parkedOnWatch == 0)
+            {
+                return;
+            }
+
+            _gpuCompletionWakes++;
+            Monitor.PulseAll(_gate);
+        }
+    }
+
     /// <summary>Watched waits re-read since startup.</summary>
     public ulong WatchRechecks { get; private set; }
 
@@ -561,18 +608,41 @@ public sealed class CommandStreamQueue
         }
 
         var deadline = Environment.TickCount64 + timeoutMilliseconds;
-        while (!HasRunnableWorkLocked() && !_stopping)
+        var signalled = GpuCompletionWakeEnabled;
+        if (signalled)
         {
-            var remaining = deadline - Environment.TickCount64;
-            if (remaining <= 0)
+            // Raised before the first read: a completion that finds it clear wrote its label
+            // before this read, and one that finds it set pulses once the wait below releases the gate.
+            Interlocked.Exchange(ref _parkedOnWatch, 1);
+        }
+
+        try
+        {
+            if (signalled && RecheckWatchedLocked())
             {
                 return;
             }
 
-            Monitor.Wait(_gate, (int)Math.Min(remaining, WatchIntervalMilliseconds));
-            if (RecheckWatchedLocked())
+            while (!HasRunnableWorkLocked() && !_stopping)
             {
-                return;
+                var remaining = deadline - Environment.TickCount64;
+                if (remaining <= 0)
+                {
+                    return;
+                }
+
+                Monitor.Wait(_gate, (int)Math.Min(remaining, WatchIntervalOverrideMilliseconds ?? WatchIntervalMilliseconds));
+                if (RecheckWatchedLocked())
+                {
+                    return;
+                }
+            }
+        }
+        finally
+        {
+            if (signalled)
+            {
+                Volatile.Write(ref _parkedOnWatch, 0);
             }
         }
     }
