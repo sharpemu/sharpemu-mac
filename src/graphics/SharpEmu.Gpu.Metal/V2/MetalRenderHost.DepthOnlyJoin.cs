@@ -6,23 +6,12 @@ using SharpEmu.Libs.Gpu.Rendering;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
-// A depth-only draw into the depth attachment of the open pass stays in that pass.
-//
-// Deferred decals and stencil masks alternate one draw into depth and stencil alone (the
-// stencil mark) with one draw into a set of colour targets over the same depth (the decal
-// that tests it). On the guest a target change between the two costs nothing; here each is a
-// render pass of its own, and Silent Hill: The Short Message's cutscenes do it about four
-// hundred times a frame, every pass paying a pass start, a store and a reload of the whole
-// attachment set for one draw. A Metal pass cannot drop colour attachments for a draw, but a
-// pipeline can leave them unwritten: the depth-only draw is drawn with a pipeline made for the
-// pass's colour formats and a zero write mask on every one, so the pass ends only when the
-// colour targets do change.
-//
-// Only what keeps the result the same joins: the same depth (and stencil) subresource, render
-// area, layers and samples, no clear, no colour output from the pixel program, and nothing
-// the draw samples is one of the pass's colour attachments - in its own pass it would read
-// them as stored, here it would read memory the pass has not stored yet.
-// SHARPEMU_METAL_V2_JOIN_DEPTH_ONLY=0 turns it off.
+// A draw with a slot-preserving subset of the open pass's colour attachments can
+// stay in tile memory. Its pipeline keeps the pass's formats, preserves the draw's
+// masks/blends, and disables writes in the extra slots. Compacted/reordered subsets
+// cannot join: the fragment outputs would address different attachments.
+// Clears, render-area/subresource changes and reads of any open attachment still
+// need a boundary, as do copies whose destination the draw binds.
 internal sealed partial class MetalRenderHost
 {
     // The graphics stages the next draw committed, for the sampling check.
@@ -33,7 +22,7 @@ internal sealed partial class MetalRenderHost
     private MetalPipelineEntry? _joinedPipeline;
     private MetalPipelineEntry? _joinedVariant;
 
-    // Variant pipelines by depth-only pipeline and the colour formats of the pass.
+    // Variant pipelines by draw pipeline and the colour formats of the pass.
     private readonly Dictionary<(ulong Pipeline, int Formats), ulong> _joinVariants = new();
 
     private long _depthOnlyJoins;
@@ -52,18 +41,20 @@ internal sealed partial class MetalRenderHost
     }
 
     /// <summary>
-    /// Whether a depth-only draw is drawn inside the open pass rather than in one of its own.
+    /// Whether a subset draw is drawn inside the open pass rather than in one of its own.
     /// On true the open pass stays as it is and the draw's pipeline is swapped at BindPipeline.
     /// </summary>
-    private bool TryJoinDepthOnly(in RenderingState state, MetalPipelineEntry? upcoming)
+    private bool TryJoinSubset(in RenderingState state, MetalPipelineEntry? upcoming)
     {
-        if (!MetalV2Diagnostics.JoinDepthOnlyDraws || upcoming is null || !_renderingActive || _renderEncoder == 0)
+        var enabled = state.ColorAttachmentCount == 0
+            ? MetalV2Diagnostics.JoinDepthOnlyDraws : MetalV2Diagnostics.JoinSubsetDraws;
+        if (!enabled || upcoming is null || !_renderingActive || _renderEncoder == 0)
         {
             return false;
         }
 
         ref readonly var open = ref _renderingState;
-        if (state.ColorAttachmentCount != 0 || open.ColorAttachmentCount == 0 ||
+        if (state.ColorAttachmentCount >= open.ColorAttachmentCount || open.ColorAttachmentCount == 0 ||
             open.ColorAttachmentCount > MaxColorAttachments || _passAttachmentCount != open.ColorAttachmentCount ||
             state.Width != open.Width || state.Height != open.Height ||
             state.Layers != open.Layers || state.Samples != open.Samples)
@@ -73,31 +64,74 @@ internal sealed partial class MetalRenderHost
 
         ref readonly var depth = ref state.DepthStencilAttachment;
         ref readonly var openDepth = ref open.DepthStencilAttachment;
-        if (depth.View.Handle == 0 || depth.View.Handle != openDepth.View.Handle ||
+        if (depth.View.Handle != openDepth.View.Handle ||
             depth.DepthClear || depth.StencilClear || depth.Format != openDepth.Format ||
             depth.HasDepth != openDepth.HasDepth || depth.HasStencil != openDepth.HasStencil ||
-            _depthAttachmentLevel != _passDepthLevel || _depthAttachmentSlice != _passDepthSlice)
+            (depth.View.Handle != 0 && (_depthAttachmentLevel != _passDepthLevel || _depthAttachmentSlice != _passDepthSlice)))
         {
             return false;
         }
 
         if (upcoming.Mesh is not null || upcoming.RectangleStates is not null ||
-            upcoming.GraphicsDescription is not { } description || description.Rendering.ColorCount != 0 ||
+            upcoming.GraphicsDescription is not { } description || description.Rendering.ColorCount != state.ColorAttachmentCount ||
             description.StaticParameters.Samples != open.Samples)
         {
             return false;
         }
 
         if (description.PixelStage is not null && description.PixelProgram.IsValid &&
-            LookupModule(description.PixelProgram).Shader.ColorOutputMask != 0)
+            (LookupModule(description.PixelProgram).Shader.ColorOutputMask >> (int)state.ColorAttachmentCount) != 0)
         {
             return false;
         }
 
-        if (SamplesOpenColorAttachment())
+        for (var index = 0; index < state.ColorAttachmentCount; index++)
         {
-            _depthOnlyJoinsSampled++;
+            ref readonly var next = ref state.ColorAttachments[index];
+            ref readonly var previous = ref open.ColorAttachments[index];
+            if (next.IsClear || next.View.Handle != previous.View.Handle || next.Format != previous.Format ||
+                index >= _attachmentCount || _attachmentLevels[index] != _passLevels[index] ||
+                _attachmentSlices[index] != _passSlices[index] ||
+                _attachmentDepthPlanes[index] != _passDepthPlanes[index] ||
+                _attachmentWidths[index] != _passWidths[index] || _attachmentHeights[index] != _passHeights[index])
+            {
+                return false;
+            }
+        }
+
+        if (JoinBindingsNeedBoundary(state.ColorAttachmentCount == 0))
+        {
             return false;
+        }
+
+        var variant = SubsetJoinVariant(upcoming, description, in open);
+        if (variant is null)
+        {
+            return false;
+        }
+
+        _joinedPipeline = upcoming;
+        _joinedVariant = variant;
+        if (state.ColorAttachmentCount == 0)
+        {
+            _depthOnlyJoins++;
+            PassProfileNoteJoin();
+        }
+        else
+        {
+            NoteSubsetTransition(in state);
+        }
+        return true;
+    }
+
+    // Returning from a subset to the full set also skips a boundary the old path
+    // would have made. Apply the same sampling and deferred-copy guards there.
+    private bool JoinBindingsNeedBoundary(bool depthOnly)
+    {
+        if (SamplesOpenAttachment())
+        {
+            if (depthOnly) _depthOnlyJoinsSampled++;
+            return true;
         }
 
         // A copy deferred to the next encoder boundary lands there. Beginning a pass of its own
@@ -106,21 +140,47 @@ internal sealed partial class MetalRenderHost
         {
             // The pass this begins is the boundary the copies land at, even when they wait for the commit.
             _landDeferredLabels = true;
-            _depthOnlyJoinsDeferredCopies++;
-            return false;
+            if (depthOnly) _depthOnlyJoinsDeferredCopies++;
+            return true;
         }
 
-        var variant = DepthOnlyJoinVariant(upcoming, description, in open);
-        if (variant is null)
+        return false;
+    }
+
+    private uint _lastDrawColorCount;
+    private long _subsetJoins;
+    private long _subsetLoadAvoidedBytes;
+
+    internal (long Joined, long Bytes) TakeSubsetJoins() =>
+        (Interlocked.Exchange(ref _subsetJoins, 0), Interlocked.Exchange(ref _subsetLoadAvoidedBytes, 0));
+
+    // Count avoided pass openings, rather than every draw using the subset variant.
+    private void NoteSubsetTransition(in RenderingState state)
+    {
+        if (state.ColorAttachmentCount == _lastDrawColorCount)
         {
-            return false;
+            return;
         }
-
-        _joinedPipeline = upcoming;
-        _joinedVariant = variant;
-        _depthOnlyJoins++;
-        PassProfileNoteJoin();
-        return true;
+        _lastDrawColorCount = state.ColorAttachmentCount;
+        _subsetJoins++;
+        long bytes = 0;
+        for (var index = 0; index < state.ColorAttachmentCount; index++)
+        {
+            bytes += AttachmentBytes(in state, _passTexelBytes[index]);
+        }
+        if (state.DepthStencilAttachment.View.Handle != 0)
+        {
+            if (state.DepthStencilAttachment.HasDepth)
+            {
+                bytes += AttachmentBytes(in state, _passDepthTexelBytes);
+            }
+            if (state.DepthStencilAttachment.HasStencil)
+            {
+                bytes += AttachmentBytes(in state, 1);
+            }
+        }
+        _subsetLoadAvoidedBytes += bytes;
+        PassProfileNoteJoin(bytes);
     }
 
     // Whether the draw reads a buffer a deferred copy writes. A program that reaches guest
@@ -151,9 +211,9 @@ internal sealed partial class MetalRenderHost
         return false;
     }
 
-    // Whether a texture the draw binds is one of the open pass's colour attachments, or a
+    // Whether a texture the draw binds is one of the open pass's attachments, or a
     // view of one. A program that reaches images through bindless tables could reach any.
-    private bool SamplesOpenColorAttachment()
+    private bool SamplesOpenAttachment()
     {
         foreach (var stage in _joinStages)
         {
@@ -169,7 +229,7 @@ internal sealed partial class MetalRenderHost
 
             for (var index = 0; index < stage.ImageCount; index++)
             {
-                if (IsOpenColorAttachment(stage.Textures[index]))
+                if (IsOpenAttachment(stage.Textures[index]))
                 {
                     return true;
                 }
@@ -178,7 +238,7 @@ internal sealed partial class MetalRenderHost
                 {
                     foreach (var mip in mips)
                     {
-                        if (IsOpenColorAttachment(mip))
+                        if (IsOpenAttachment(mip))
                         {
                             return true;
                         }
@@ -190,7 +250,7 @@ internal sealed partial class MetalRenderHost
         return false;
     }
 
-    private bool IsOpenColorAttachment(nint texture)
+    private bool IsOpenAttachment(nint texture)
     {
         if (texture == 0)
         {
@@ -198,6 +258,12 @@ internal sealed partial class MetalRenderHost
         }
 
         var parent = MetalNative.Send(texture, SelParentTexture);
+        var depth = (nint)_renderingState.DepthStencilAttachment.View.Handle;
+        if (depth != 0 && (texture == depth || texture == _passDepthTexture ||
+            (parent != 0 && (parent == depth || parent == _passDepthTexture))))
+        {
+            return true;
+        }
         for (var index = 0; index < _renderingState.ColorAttachmentCount; index++)
         {
             var attachment = (nint)_renderingState.ColorAttachments[index].View.Handle;
@@ -212,9 +278,9 @@ internal sealed partial class MetalRenderHost
         return false;
     }
 
-    // The depth-only pipeline remade for the open pass's colour formats, writing none of them;
+    // The draw's pipeline remade for the open pass's formats, writing only its own slots;
     // null while it compiles (the draw then opens its own pass, as before).
-    private MetalPipelineEntry? DepthOnlyJoinVariant(
+    private MetalPipelineEntry? SubsetJoinVariant(
         MetalPipelineEntry entry, GraphicsPipelineDescription description, in RenderingState open)
     {
         var formats = new HashCode();
@@ -289,7 +355,7 @@ internal sealed partial class MetalRenderHost
 
         var parameters = PipelineStaticParameters.FromBytes(description.StaticParameters.Bytes);
         parameters.ColorCount = open.ColorAttachmentCount;
-        for (var index = 0; index < PipelineStaticParameters.ColorAttachmentCount; index++)
+        for (var index = (int)description.Rendering.ColorCount; index < PipelineStaticParameters.ColorAttachmentCount; index++)
         {
             parameters.SetColorMask(index, 0);
             parameters.SetBlendEnable(index, false);

@@ -123,6 +123,43 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains("create_graphics_pipeline colors=1 depth=False topology=TriangleList restart=False", _pipelines.Calls);
     }
 
+    [Theory]
+    [InlineData(0u, -2)]
+    [InlineData(1u, 1)]
+    public void IndexedCoverageUsesDrawOrderAndBaseVertex(uint indexType, int baseVertex)
+    {
+        _host.WantsIndexedCoverage = true;
+        _pipelines.Graphics = Programs();
+        uint[] expected = baseVertex < 0 ? [3, 4, 5, 0, 1, 2] : [4, 5, 3, 1, 2, 3];
+        var stride = indexType == 0 ? 2 : 4;
+        var bytes = new byte[expected.Length * stride];
+        for (var i = 0; i < expected.Length; i++)
+        {
+            var index = (uint)(expected[i] - baseVertex);
+            if (stride == 2) BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(i * stride), (ushort)index);
+            else BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(i * stride), index);
+        }
+        _host.WriteGuest(IndexBase, bytes);
+        _executor.DrawIndexed(7, Banks(), Indexed(6, indexType: indexType, baseVertex: baseVertex));
+        Assert.Equal(expected, _host.UpcomingIndices);
+    }
+
+    [Theory]
+    [InlineData(6u, 6, false)]
+    [InlineData(7u, 0, false)]
+    [InlineData(6u, 0, true)]
+    public void IndexedCoverageRefusesUnknownIndicesLargeDrawsAndIndirectCounts(uint count, int baseVertex, bool indirect)
+    {
+        _host.WantsIndexedCoverage = true;
+        _pipelines.Graphics = Programs();
+        var arguments = Indexed(count, baseVertex: baseVertex,
+            source: indirect ? DrawOffsetSource.IndirectArguments : DrawOffsetSource.Packet);
+        if (indirect) arguments = arguments with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawIndexed(7, Banks(), arguments);
+        Assert.Null(_host.UpcomingIndices);
+        Assert.Equal((0u, 0u), _host.UpcomingVertices);
+    }
+
     private const ulong IndirectArguments = RecordingRenderHost.MemoryBase + 0x60_0000;
 
     private void WriteIndirectArguments(params uint[] words)

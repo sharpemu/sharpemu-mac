@@ -150,6 +150,14 @@ internal static class MetalV2Diagnostics
     public static readonly bool JoinDepthOnlyDraws =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_JOIN_DEPTH_ONLY"), "0", StringComparison.Ordinal);
 
+    // Keep a slot-preserving colour subset in the open pass, masking the extra slots.
+    public static readonly bool JoinSubsetDraws =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_JOIN_SUBSETS"), "0", StringComparison.Ordinal);
+
+    // Read small direct index lists only when constant positions can prove an overwrite.
+    public static readonly bool ElideIndexedLoads =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ELIDE_INDEXED_LOADS"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_DCC_CLAIM_FIRST=1 settles a DCC slice whose claim stands from the
     // claim alone (MetalImageCache.Tracking.cs) instead of querying pending writes and reading
     // the slice first. Off by default: with it on, SH renders its dark room and everything
