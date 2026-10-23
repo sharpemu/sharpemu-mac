@@ -25,7 +25,7 @@ internal enum MetalTileDirection
 // element sizes cost one newFunctionWithName:constantValues: each. Emitting every kind
 // into a single library would compile ~1200 lines of MSL before the first transfer; a
 // library per element size would be a hundred compiles instead.
-internal static class MetalTilerShaders
+internal static partial class MetalTilerShaders
 {
     // The 14 dwords every block-copy kernel reads, and the subset the conversions use:
     // the 13 the Vulkan tiler shares, and then baseY for a transfer cut down to a run of

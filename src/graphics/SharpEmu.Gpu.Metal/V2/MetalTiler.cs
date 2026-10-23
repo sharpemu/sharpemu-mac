@@ -72,7 +72,7 @@ internal struct MetalRepackArguments
 // Runs the tiling, detiling, depth conversion, channel swap and row repack compute
 // passes, and owns the staging buffers they stage through. The Metal twin of the Vulkan
 // backend's GpuTiler: same arguments, same per-element addressing, no descriptor sets.
-internal sealed unsafe class MetalTiler : IDisposable
+internal sealed unsafe partial class MetalTiler : IDisposable
 {
     private const uint KindCount = 10;
     private const uint ElementSizeCount = 5;

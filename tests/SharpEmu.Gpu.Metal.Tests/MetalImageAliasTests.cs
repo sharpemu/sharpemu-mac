@@ -21,7 +21,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// target re-uploaded because a smaller surface overlapping its tail was drawn to.
 /// Device work is behind the exclusive device gate.
 /// </summary>
-public sealed unsafe class MetalImageAliasTests(ITestOutputHelper output)
+public sealed unsafe partial class MetalImageAliasTests(ITestOutputHelper output)
 {
     private const ulong GuestBase = 0x2_0000_0000;
     private const ulong ImageAddress = GuestBase + 0x10000;
