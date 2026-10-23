@@ -595,6 +595,7 @@ internal sealed partial class MetalRenderHost :
         PassProfileCommit(serial, cause == PassEndCause.Present);
         if (cause == PassEndCause.Present)
         {
+            _perfPresentId++;
             _imageCache.MarkFrame();
         }
 
@@ -680,6 +681,8 @@ internal sealed partial class MetalRenderHost :
 
     private int _slowWaitReports;
     private double _previousCommitTime;
+    private ulong _perfPresentId;
+    private ulong _lastPerfPresentId;
     private ulong _lastReadAddress;
     private ulong _lastReadSize;
     private readonly long[] _waitsByReason = new long[MetalWaitReasons.Count];
@@ -2428,11 +2431,18 @@ internal sealed partial class MetalRenderHost :
         var (clearPasses, clearDepthPasses, clearPixels) = TakeClearPasses();
         var (foldedClears, encodedClears) = TakeClearFolding();
         var (depthJoins, depthJoinsSampled, depthJoinsCopies) = TakeDepthOnlyJoins();
+        var frames = _perfPresentId - _lastPerfPresentId;
+        _lastPerfPresentId = _perfPresentId;
+        string PerFrame(double value) => frames == 0 ? "n/a" : (value / frames).ToString("F2", culture);
         Console.Error.WriteLine(
             $"[METAL-V2][TBDR] passes={passes} empty={emptyPasses} returned={returnedPasses} " +
+            $"frames={frames} passes_per_frame={PerFrame(passes + clearPasses)} " +
+            $"subset_joins_per_frame={PerFrame(subsetJoins)} depth_joins_per_frame={PerFrame(depthJoins)} " +
+            $"load_elided_mb_per_frame={PerFrame(loadElidedBytes / 1048576.0)} discarded_mb_per_frame={PerFrame(discardedBytes / 1048576.0)} " +
             $"load_mb={(loadBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"store_mb={((storeBytes - discardedBytes) / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"discarded_mb={(discardedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
+            $"store_decisions=[{TakeStoreDecisions()}] " +
             $"cleared_mb={(clearedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"end_clear={endClearCount} end_target={endTargetCount} end_transfer={endTransferCount} " +
             $"end_compute={endComputeCount} end_flush={endFlushCount} end_present={endPresentCount} " +

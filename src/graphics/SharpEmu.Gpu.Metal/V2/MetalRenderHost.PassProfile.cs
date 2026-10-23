@@ -49,6 +49,8 @@ internal sealed partial class MetalRenderHost
         public string Shape = string.Empty;
         public long LoadBytes;
         public long StoreBytes;
+        public long DiscardedBytes;
+        public long[]? StoreDecisions;
         public int Draws;
         public int Joins;
         public long JoinLoadAvoidedBytes;
@@ -534,7 +536,7 @@ internal sealed partial class MetalRenderHost
                 culture,
                 $"[METAL-V2][PASS-PROF] f={submission.Frame} s={serial} i={record.Index} k={record.Kind} " +
                 $"us={microseconds:F0} gap_us={gap:F0} {stages}draws={record.Draws} tg={record.Groups} " +
-                $"ld_mb={record.LoadBytes / 1048576.0:F1} st_mb={record.StoreBytes / 1048576.0:F1} " +
+                $"ld_mb={record.LoadBytes / 1048576.0:F1} st_mb={(record.StoreBytes - record.DiscardedBytes) / 1048576.0:F1} discarded_mb={record.DiscardedBytes / 1048576.0:F1} store_decisions=[{FormatRefusals<StoreDecision>(record.StoreDecisions)}] " +
                 $"end={(record.End.Length == 0 ? "?" : record.End)} a=[{record.Shape}] sh=[{shaders}] " +
                 $"after=[{after}] n_after={record.After?.Count ?? 0} joins={record.Joins} join_load_avoided_mb={record.JoinLoadAvoidedBytes / 1048576.0:F1} load_elided_mb={record.LoadElidedBytes / 1048576.0:F1} join_refused=[{FormatRefusals<JoinRefusal>(record.JoinRefusals)}] load_refused=[{FormatRefusals<LoadRefusal>(record.LoadRefusals)}]")).Append('\n');
         }

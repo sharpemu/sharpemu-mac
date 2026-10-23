@@ -35,7 +35,6 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
     private const uint Height = 8;
     private const ulong ImageBytes = Width * Height * 4;
     private const nint PixelFormatRgba8Unorm = 70;
-    private const nuint PixelFormatDepth32Float = 252;
     private const byte GuestPattern = 0x11;
 
     // Red over everything at depth 0.5; the depth-only draw lowers the left half to 0.25;
@@ -211,8 +210,8 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         var joins = !sampleOmittedAttachment && MetalV2Diagnostics.JoinSubsetDraws;
         Assert.Equal(joins ? 1L : 3L, joined.Passes);
         Assert.Equal(joins ? 2L : 0L, joined.Joins);
-        // The raw native depth used by this rig has no image-cache traffic metadata.
-        Assert.Equal(joins ? (5 + 6) * (long)ImageBytes : 0L, joined.Bytes);
+        // Five then six colours, with D32 on both avoided pass openings.
+        Assert.Equal(joins ? (5 + 6 + 2) * (long)ImageBytes : 0L, joined.Bytes);
         for (var index = 0; index < 6; index++)
         {
             Assert.Equal(separate.Pixels[index], joined.Pixels[index]);
@@ -239,24 +238,32 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void LoggedGbufferShapeJoinsVertexAndMeshSubsetsByteExactly(bool meshSubset)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void LoggedGbufferShapeJoinsVertexAndMeshSubsetsByteExactly(bool meshSubset, bool clearTransitions)
     {
         if (!RequireDevice()) return;
-        var joined = RunGbuffer(forceEnd: false, meshSubset);
-        var separate = RunGbuffer(forceEnd: true, meshSubset);
-        Assert.Equal(3L, separate.Passes);
-        Assert.Equal(MetalV2Diagnostics.JoinSubsetDraws ? 1L : 3L, joined.Passes);
-        Assert.Equal(MetalV2Diagnostics.JoinSubsetDraws ? 2L : 0L, joined.Joins);
-        for (var slot = 0; slot < 6; slot++)
+        var joined = RunGbuffer(forceEnd: false, meshSubset, clearTransitions);
+        var separate = RunGbuffer(forceEnd: true, meshSubset, clearTransitions);
+        Assert.Equal(8L, separate.Passes);
+        var joins = MetalV2Diagnostics.JoinSubsetDraws && !clearTransitions;
+        Assert.Equal(joins ? 1L : 8L, joined.Passes);
+        Assert.Equal(joins ? 7L : 0L, joined.Joins);
+        // The next clear covers the five shared colours (20 B/px), D32 and stencil
+        // (5 B/px). The omitted sixth colour must still be stored, then loaded on return.
+        Assert.Equal(MetalV2Diagnostics.DeferStoreActions && clearTransitions ? 7L * 1920 * 1080 * 25 : 0, joined.Discarded);
+        Assert.Equal(0, separate.Discarded);
+        if (MetalV2Diagnostics.DeferStoreActions && clearTransitions)
+            Assert.Contains("stencilclear:7", joined.Decisions);
+        for (var slot = 0; slot < joined.Pixels.Length; slot++)
         {
             Assert.Equal(separate.Pixels[slot], joined.Pixels[slot]);
-            Assert.DoesNotContain(GuestPattern, joined.Pixels[slot]);
+            if (slot < 6) Assert.DoesNotContain(GuestPattern, joined.Pixels[slot]);
         }
     }
 
-    private (byte[][] Pixels, long Passes, long Joins) RunGbuffer(bool forceEnd, bool meshSubset)
+    private (byte[][] Pixels, long Passes, long Joins, long Discarded, string Decisions) RunGbuffer(bool forceEnd, bool meshSubset, bool clearTransitions)
     {
         // PASS-PROF f=1170/s=14206: four R32Uint, RG16F, RGBA16F,
         // D32S8 with stencil loaded, all 1920x1080 at one sample. The fifth
@@ -273,18 +280,23 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         {
             var targets = Enumerable.Range(0, 6).Select(i => rig.Target(TargetAddress + (ulong)i * stride, i)).ToArray();
             rig.DrawTargets(full, targets, depthClear: true);
-            if (forceEnd) host.EndRendering();
-            rig.DrawTargets(subset, targets[..5]);
-            if (forceEnd) host.EndRendering();
-            rig.DrawTargets(finish, targets);
+            for (var pass = 1; pass < 8; pass++)
+            {
+                if (forceEnd) host.EndRendering();
+                if ((pass & 1) != 0) rig.DrawTargets(subset, targets[..5], depthClear: clearTransitions, clearColors: clearTransitions);
+                else rig.DrawTargets(finish, targets, depthClear: clearTransitions, clearColors: clearTransitions);
+            }
             host.EndRendering();
         }
         var passes = host.RenderPassSerial - first;
         var (joins, _) = host.TakeSubsetJoins();
+        var discarded = host.TakeAttachmentBandwidth().Discarded;
+        var decisions = host.TakeStoreDecisions();
         host.FlushCommandBuffer();
-        var pixels = Enumerable.Range(0, 6).Select(i => rig.Read(TargetAddress + (ulong)i * stride, i)).ToArray();
-        output.WriteLine($"gbuffer mesh={meshSubset} forceEnd={forceEnd}: passes={passes} joins={joins}");
-        return (pixels, passes, joins);
+        byte[][] pixels = [.. Enumerable.Range(0, 6).Select(i => rig.Read(TargetAddress + (ulong)i * stride, i)),
+            rig.ReadDepth(), rig.ReadDepth(stencil: true)];
+        output.WriteLine($"gbuffer mesh={meshSubset} forceEnd={forceEnd} clear={clearTransitions}: passes={passes} joins={joins} discarded={discarded} decisions={decisions}");
+        return (pixels, passes, joins, discarded, decisions);
     }
 
     private (byte[][] Pixels, long Passes, long Joins, long Bytes) RunSubset(bool forceEnd, bool sampleOmittedAttachment, bool copyOnReturn = false)
@@ -325,6 +337,110 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         var pixels = Enumerable.Range(0, 6).Select(i => rig.Read(TargetAddress + (ulong)i * 0x4000)).ToArray();
         output.WriteLine($"subset forceEnd={forceEnd} sample={sampleOmittedAttachment}: passes={passes} joins={joins} avoided={bytes}");
         return (pixels, passes, joins, bytes);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public void DeferredStoresDiscardOnlyBeforeACompleteClear(bool clear, bool partial)
+    {
+        if (!RequireDevice()) return;
+        var deferred = RunStoreClear(forceEnd: false, clear, partial);
+        var stored = RunStoreClear(forceEnd: true, clear, partial);
+        Assert.Equal(stored.Pixels, deferred.Pixels);
+        var discards = MetalV2Diagnostics.DeferStoreActions && clear && !partial;
+        // Two RGBA8 colours and D32, each the whole 64x8 subresource.
+        Assert.Equal(discards ? 3 * (long)ImageBytes : 0, deferred.Discarded);
+        Assert.Equal(0, stored.Discarded);
+        if (discards)
+        {
+            Assert.Contains("colorclear:2", deferred.Decisions);
+            Assert.Contains("depthclear:1", deferred.Decisions);
+        }
+        else if (MetalV2Diagnostics.DeferStoreActions)
+        {
+            Assert.Contains(clear ? "nofullclear:3" : "unknownsuccessor:3", deferred.Decisions);
+        }
+        else Assert.Contains("disabled:", deferred.Decisions);
+    }
+
+    private (byte[] Pixels, long Discarded, string Decisions) RunStoreClear(bool forceEnd, bool clear, bool partial)
+    {
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.AsynchronousGraphics = false;
+        var red = rig.Pipeline(41, -1, 0.5f, "float4(1, 0, 0, 1)", colors: 2);
+        var green = rig.Pipeline(42, -1, 0.5f, "float4(0, 1, 0, 1)", colors: 2);
+        using (host.BeginPreparation())
+        {
+            var targets = new[] { rig.Target(TargetAddress), rig.Target(OtherAddress) };
+            rig.DrawTargets(red, targets, depthClear: true);
+            if (forceEnd) host.EndRendering();
+            rig.DrawTargets(green, targets, depthClear: clear, clearColors: clear,
+                renderWidth: partial ? Width / 2 : Width);
+            host.EndRendering();
+        }
+        var discarded = host.TakeAttachmentBandwidth().Discarded;
+        var decisions = host.TakeStoreDecisions();
+        Assert.Equal("-", host.TakeStoreDecisions());
+        host.FlushCommandBuffer();
+        var pixels = rig.Read(TargetAddress);
+        Assert.Equal(pixels, rig.Read(OtherAddress));
+        for (var y = 0; y < Height; y++)
+        for (var x = 0; x < Width; x++)
+        {
+            var offset = (int)((y * Width + x) * 4);
+            var greenPixel = !partial || x < Width / 2;
+            // A load clear initializes the attachment outside the reduced draw area
+            // too. Without a clear, the partial draw must preserve the prior red.
+            var expected = greenPixel ? new byte[] { 0, 255, 0, 255 }
+                : clear ? new byte[] { 0, 0, 0, 0 } : new byte[] { 255, 0, 0, 255 };
+            Assert.Equal(expected, pixels[offset..(offset + 4)]);
+        }
+        output.WriteLine($"store forceEnd={forceEnd} clear={clear} partial={partial}: discarded={discarded} decisions={decisions}");
+        return (pixels, discarded, decisions);
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(3u)]
+    [InlineData(6u)]
+    public void IndirectDrawCanFollowAProvenIndexedOverwriteWithoutAnotherLoad(uint indirectCount)
+    {
+        if (!RequireDevice()) return;
+        var joined = Run(forceEnd: false);
+        var separate = Run(forceEnd: true);
+        Assert.Equal(1L, joined.Passes);
+        Assert.Equal(2L, separate.Passes);
+        Assert.Equal(separate.Pixels, joined.Pixels);
+        var elides = MetalV2Diagnostics.ElideLoads && MetalV2Diagnostics.ElideIndexedLoads;
+        Assert.Equal(elides ? 1L : 0L, joined.Elided);
+        Assert.All(Enumerable.Range(0, (int)(Width * Height)), pixel =>
+            Assert.Equal(new byte[] { 0, 255, 0, 255 }, joined.Pixels[(pixel * 4)..(pixel * 4 + 4)]));
+
+        (byte[] Pixels, long Passes, long Elided) Run(bool forceEnd)
+        {
+            using var rig = new Rig(Device.Value);
+            var host = rig.Host;
+            host.AsynchronousGraphics = false;
+            var pipeline = rig.Pipeline(51, -1, 0.5f, "float4(0, 1, 0, 1)", depth: false);
+            var first = host.RenderPassSerial;
+            using (host.BeginPreparation())
+            {
+                rig.DrawIndexed(pipeline, indirect: false, degenerate: false);
+                if (forceEnd) host.EndRendering();
+                // The GPU may execute no triangles, one triangle, or the whole quad.
+                // Coverage came from the first draw; no CPU argument read is needed.
+                rig.DrawIndexed(pipeline, indirect: true, degenerate: false, indirectCount);
+                host.EndRendering();
+            }
+            var passes = host.RenderPassSerial - first;
+            var (elided, _) = host.TakeElidedLoads();
+            host.FlushCommandBuffer();
+            return (rig.Read(TargetAddress), passes, elided);
+        }
     }
 
     [Theory]
@@ -517,11 +633,21 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         private readonly AddressSpace _space = new();
         private readonly PageGuard _pages;
         private readonly Backing _backing;
-        private readonly nint _depth;
         private readonly bool _gbuffer;
         private uint Width => _gbuffer ? 1920u : MetalDepthOnlyJoinTests.Width;
         private uint Height => _gbuffer ? 1080u : MetalDepthOnlyJoinTests.Height;
         private ulong ImageBytes => (ulong)Width * Height * 4;
+        private ulong DepthAddress => GuestBase + (_gbuffer ? 112UL * 1024 * 1024 : 3UL * 1024 * 1024);
+        private (ulong Depth, ulong Stencil) DepthSizes
+        {
+            get
+            {
+                if (!_gbuffer) return (ImageBytes, 0);
+                Assert.True(TileGeometry.TryGetDepthSize(Width, Height, 0, GuestDepthFormat.Z32Float,
+                    GuestStencilFormat.Stencil8UInt, false, out var stencil, out _, out var depth));
+                return (depth.Size, stencil.Size);
+            }
+        }
         private GpuFormat DepthFormat => _gbuffer ? GpuFormat.D32SfloatS8Uint : GpuFormat.D32Sfloat;
         private GpuFormat ColorFormat(int slot) => !_gbuffer ? GpuFormat.R8G8B8A8Unorm
             : slot < 4 ? GpuFormat.R32Uint : slot == 4 ? GpuFormat.R16G16Sfloat : GpuFormat.R16G16B16A16Sfloat;
@@ -533,14 +659,6 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
             _queue = MetalNative.Send(device, MetalNative.Selector("newCommandQueue"));
             _pages = new PageGuard(_space);
             Host = new MetalRenderHost(device, _queue, _backing, _backing, _pages, new MetalGpuWorkerRelay(static () => { }));
-            var descriptor = MetalNative.SendTextureDescriptor(
-                MetalNative.Class("MTLTextureDescriptor"),
-                MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
-                _gbuffer ? 260u : PixelFormatDepth32Float, Width, Height, mipmapped: false);
-            MetalNative.Send(descriptor, MetalNative.Selector("setUsage:"), (nint)4);
-            MetalNative.Send(descriptor, MetalNative.Selector("setStorageMode:"), (nint)2);
-            _depth = MetalNative.Send(device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
-            Assert.NotEqual(0, _depth);
         }
 
         public MetalRenderHost Host { get; }
@@ -597,6 +715,13 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
             return bytes;
         }
 
+        public byte[] ReadDepth(bool stencil = false)
+        {
+            var bytes = new byte[stencil ? DepthSizes.Stencil : DepthSizes.Depth];
+            Assert.True(Host.TryReadGuest(stencil ? DepthAddress + 12 * 1024 * 1024 : DepthAddress, bytes));
+            return bytes;
+        }
+
         // A stage that binds what the join looks at: textures and buffers.
         public static MetalRenderHost.MetalStageBindings Stage(nint[]? textures = null, MetalGuestRange[]? buffers = null) =>
             new()
@@ -609,9 +734,41 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
                 BufferCount = buffers?.Length ?? 0,
             };
 
-        private RenderingAttachment DepthAttachment(bool clear) => new(
-            new GpuImageHandle((ulong)_depth), GpuImageLayout.DepthStencilAttachmentOptimal, DepthFormat,
-            BitConverter.SingleToUInt32Bits(1f), 0, 0, 0, false, true, clear, _gbuffer, clear && _gbuffer);
+        private RenderingAttachment DepthAttachment(bool clear)
+        {
+            // Use the production acquisition path: store proofs need the real texture,
+            // level/layer and dimensions, which a manually attached native texture lacks.
+            var description = Request(DepthAddress).Description;
+            description.PixelFormat = DepthFormat;
+            description.GuestFormat = GuestPixelFormat.Bits32Float;
+            description.Data = new GuestSpan(DepthAddress, DepthSizes.Depth);
+            description.Stencil = _gbuffer ? new GuestSpan(DepthAddress + 12 * 1024 * 1024, DepthSizes.Stencil) : default;
+            description.TileMode = _gbuffer ? GuestTileMode.Depth : GuestTileMode.Linear;
+            description.Pitch = _gbuffer ? TileGeometry.DepthPitch(Width, 4) : Width;
+            description.MipLayout[0] = new MipLevelLayout
+            { Offset = 0, Size = description.Data.Size, Pitch = description.Pitch, Height = Height };
+            var view = ImageViewDescription.Default with
+            {
+                Format = DepthFormat, Type = GpuImageViewType.Type2D,
+                Aspect = ViewFormatRules.DepthAspects(DepthFormat), LayerCount = 1,
+                Usage = GpuImageUsage.DepthStencilAttachmentBit,
+            };
+            var request = new ImageRequest(description, view, ImageRole.DepthTarget);
+            var resolution = new DepthTargetResolution(request, DepthFormat, Width, Height, 1, _gbuffer, false,
+                DepthAddress, description.Data.Size, description.Stencil.Address, description.Stencil.Size,
+                0, 0, clear, clear && _gbuffer, false, false);
+            var state = default(DepthStencilState) with
+            {
+                DepthClearEnabled = clear, DepthClearValue = 1, DepthTestEnabled = true,
+                DepthWriteEnabled = true, DepthCompare = GpuCompareOp.Always,
+                StencilClearEnabled = clear && _gbuffer,
+            };
+            var target = new DepthTargetState(resolution, state);
+            var depth = new DepthAttachmentState(target, Host.ImageCache.FindImage(ref request));
+            var acquired = ((IRenderHost)Host).AcquireDepthAttachment(in depth);
+            return new RenderingAttachment(acquired.View, GpuImageLayout.DepthStencilAttachmentOptimal, DepthFormat,
+                BitConverter.SingleToUInt32Bits(1f), 0, 0, 0, false, true, clear, _gbuffer, clear && _gbuffer);
+        }
 
         // The way an executor begins a draw: bindings reset, the target acquired, the pass
         // begun for the draw, then its pipeline and state.
@@ -634,10 +791,10 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         }
 
         public void DrawTargets(PipelineHandle pipeline, ColorTargetState[] targets, bool depthClear = false,
-            GpuImageHandle sample = default, bool bindsCopy = false)
+            GpuImageHandle sample = default, bool bindsCopy = false, bool clearColors = false, uint? renderWidth = null)
         {
             Host.ResetBindings();
-            var state = new RenderingState { Width = Width, Height = Height, Layers = 1,
+            var state = new RenderingState { Width = renderWidth ?? Width, Height = Height, Layers = 1,
                 ColorAttachmentCount = (uint)targets.Length, Samples = 1 };
             for (var index = 0; index < targets.Length; index++)
             {
@@ -645,7 +802,7 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
                 LastColour = attachment.View;
                 state.ColorAttachments[index] = new RenderingAttachment(attachment.View,
                     GpuImageLayout.ColorAttachmentOptimal, ColorFormat(index),
-                    0, 0, 0, 0, false, false, false, false, false);
+                    0, 0, 0, 0, clearColors, false, false, false, false);
             }
             state.DepthStencilAttachment = DepthAttachment(depthClear);
             var stage = sample.Handle != 0 ? Stage(textures: [(nint)sample.Handle])
@@ -658,7 +815,7 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
             Host.Draw(6, 1, 0, 0);
         }
 
-        public void DrawIndexed(PipelineHandle pipeline, bool indirect, bool degenerate)
+        public void DrawIndexed(PipelineHandle pipeline, bool indirect, bool degenerate, uint indirectCount = 6)
         {
             uint[] indices = degenerate ? [0, 1, 2, 0, 1, 2] : [3, 4, 5, 0, 1, 2];
             Host.ResetBindings();
@@ -674,7 +831,7 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
             BufferBinding arguments = default;
             if (indirect)
             {
-                uint[] counts = [6, 1, 0, 0, 0];
+                uint[] counts = [indirectCount, 1, 0, 0, 0];
                 arguments = Host.UploadTransient(MemoryMarshal.AsBytes(counts.AsSpan()), 4);
                 Host.NoteUpcomingDraw(in pipeline, 0, 0);
             }
@@ -825,7 +982,6 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         {
             Host.ImageCache.StopWatching();
             Host.Dispose();
-            MetalNative.SendVoid(_depth, MetalNative.Selector("release"));
             _pages.Dispose();
             _backing.Dispose();
             MetalNative.SendVoid(_queue, MetalNative.Selector("release"));

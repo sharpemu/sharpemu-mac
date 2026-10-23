@@ -556,11 +556,8 @@ internal sealed partial class MetalRenderHost
                 SelSetColorStoreAction,
                 discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore,
                 (nuint)index);
-            if (discard)
-            {
-                _discardedBytes += AttachmentBytes(
-                    in open, index < MaxColorAttachments ? _passTexelBytes[index] : 0);
-            }
+            NoteStoreDecision(discard, StoreDecision.ColorClear, hasNext,
+                AttachmentBytes(in open, index < MaxColorAttachments ? _passTexelBytes[index] : 0));
         }
 
         ref readonly var openDepth = ref open.DepthStencilAttachment;
@@ -575,10 +572,7 @@ internal sealed partial class MetalRenderHost
                 _renderEncoder,
                 SelSetDepthStoreAction,
                 discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore);
-            if (discard)
-            {
-                _discardedBytes += AttachmentBytes(in open, _passDepthTexelBytes);
-            }
+            NoteStoreDecision(discard, StoreDecision.DepthClear, hasNext, AttachmentBytes(in open, _passDepthTexelBytes));
         }
 
         if (openDepth.HasStencil && openDepth.View.Handle != 0)
@@ -592,10 +586,7 @@ internal sealed partial class MetalRenderHost
                 _renderEncoder,
                 SelSetStencilStoreAction,
                 discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore);
-            if (discard)
-            {
-                _discardedBytes += AttachmentBytes(in open, 1);
-            }
+            NoteStoreDecision(discard, StoreDecision.StencilClear, hasNext, AttachmentBytes(in open, 1));
         }
 
         ForgetNotedClear();
@@ -1228,6 +1219,16 @@ internal sealed partial class MetalRenderHost
             if (MetalV2Diagnostics.DeferStoreActions)
             {
                 ResolveStoreActions(in next, hasNext);
+            }
+            else
+            {
+                for (var index = 0; index < _renderingState.ColorAttachmentCount; index++)
+                    NoteStoreDecision(false, StoreDecision.ColorClear, hasNext, 0);
+                if (_renderingState.DepthStencilAttachment is { View.Handle: not 0 } depth)
+                {
+                    if (depth.HasDepth) NoteStoreDecision(false, StoreDecision.DepthClear, hasNext, 0);
+                    if (depth.HasStencil) NoteStoreDecision(false, StoreDecision.StencilClear, hasNext, 0);
+                }
             }
 
             EndAndReleaseEncoder(_renderEncoder);

@@ -22,7 +22,26 @@ internal sealed partial class MetalRenderHost
 
     private readonly long[] _joinRefusals = new long[(int)JoinRefusal.Count];
     private readonly long[] _loadRefusals = new long[(int)LoadRefusal.Count];
+    private enum StoreDecision { ColorClear, DepthClear, StencilClear, NoFullClear, UnknownSuccessor, Disabled, Count }
+    private readonly long[] _storeDecisions = new long[(int)StoreDecision.Count];
     private long[]? _passLoadRefusals;
+
+    private void NoteStoreDecision(bool discard, StoreDecision clearedPlane, bool hasNext, long bytes)
+    {
+        var reason = !MetalV2Diagnostics.DeferStoreActions ? StoreDecision.Disabled
+            : discard ? clearedPlane
+            : hasNext || _clearedTexture != 0 ? StoreDecision.NoFullClear : StoreDecision.UnknownSuccessor;
+        _storeDecisions[(int)reason]++;
+        if (_ppOpen is { } pass)
+        {
+            pass.StoreDecisions ??= new long[(int)StoreDecision.Count];
+            pass.StoreDecisions[(int)reason]++;
+            if (discard) pass.DiscardedBytes += bytes;
+        }
+        if (discard) _discardedBytes += bytes;
+    }
+
+    internal string TakeStoreDecisions() => FormatRefusals<StoreDecision>(_storeDecisions, take: true);
 
     private bool RefuseJoin(JoinRefusal reason)
     {
