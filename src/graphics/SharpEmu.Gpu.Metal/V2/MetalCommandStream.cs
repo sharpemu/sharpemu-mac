@@ -117,6 +117,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         in IssueProgramIdentities programs, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
     {
         using var entry = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawEntry);
+        using var replay = ReplayBeginIssue(false);
         if (_recipes is null)
         {
             _translation!.DrawIssued(queueId, submitId, banks, programs, indexed, indexedArguments, autoArguments);
@@ -133,6 +134,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
     void ICommandIssueRenderer.DispatchIssued(int queueId, ulong submitId, SharpEmu.Libs.Gpu.GpuCommands.Registers.RegisterBanks banks,
         in IssueProgramIdentities programs, uint x, uint y, uint z, uint initiator, ulong indirect)
     {
+        using var replay = ReplayBeginIssue(true);
         if (_recipes is null)
         {
             DispatchIssuedUntilReady(queueId, submitId, banks, programs, x, y, z, initiator, indirect);
@@ -2040,6 +2042,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         Interlocked.Increment(ref FlipsCaptured);
         NoteFlipForCompilingDraws();
         _recipes?.EndFrame();
+        ReplayEndFrame();
         // The one point in the frame that is outside a flush, so the safe place to read
         // back everything the passes since the last flip wrote.
         DrainPendingDumps();

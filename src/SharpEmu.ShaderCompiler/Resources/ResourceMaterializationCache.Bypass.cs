@@ -14,6 +14,9 @@ public sealed partial class ResourceMaterializationCache
     private readonly long _packetByteBudget;
     private readonly record struct BypassKey(ShaderResourcePlan Plan, ulong ShaderBase, ComputeSelectorState? Compute);
     private long _packetBytes;
+    // Set only by a successful observation in the immediately preceding Materialize.
+    public ResourceReplayValidation? ReplayValidation { get; private set; }
+    public bool CaptureReplayValidation { get; set; }
     public long ByteValidatedCalls { get; private set; }
     public long BypassedCalls { get; private set; }
     public long PatchedCalls { get; private set; }
@@ -67,6 +70,7 @@ public sealed partial class ResourceMaterializationCache
         // rings; a new scalar value needs its own shell under ResourceSnapshot's owned ABI.
         public readonly Dictionary<ulong, ResourceSnapshot> Patches = new();
         public long Bytes;
+        public ResourceReplayValidation? Replay;
 
         public void Dispose()
         {
@@ -163,6 +167,7 @@ public sealed partial class ResourceMaterializationCache
                 Interlocked.Increment(ref _bypassCalls);
             }
             specialization = packet.Specialization;
+            ReplayValidation = packet.Replay;
             if (packet.ByteValidated)
             {
                 ByteValidatedCalls++;
@@ -216,7 +221,11 @@ public sealed partial class ResourceMaterializationCache
             captured.Readers.ReadsClean == inputs.ReadsClean &&
             captured.Epoch.Mapping == epoch.Mapping && captured.Epoch.Images == epoch.Images &&
             captured.Plan.Matches(captured.Snapshot.UserData, inputs.UserData, captured.UsedUserData, out var patched) &&
-            (!patched || captured.Plan.CanPatch(captured.Snapshot, inputs.UserData))) return;
+            (!patched || captured.Plan.CanPatch(captured.Snapshot, inputs.UserData)))
+        {
+            ReplayValidation = captured.Replay;
+            return;
+        }
         var key = new BypassKey(entry.Plan, inputs.ShaderBase, inputs.ComputeState);
         var byteValidated = source.UsesDependencyByteValidation && entry.RangeAddresses.Length != 0;
         var size = entry.EstimatedBytes + (byteValidated ? 0 : entry.RangeAddresses.Length * 256L) +
@@ -294,6 +303,10 @@ public sealed partial class ResourceMaterializationCache
                 Next = previous, Bytes = size,
             };
             _packetBytes += packet.Bytes;
+            if (CaptureReplayValidation)
+                packet.Replay = new ResourceReplayValidation(source, epoch, entry.Plan, packet.UsedUserData,
+                    packet.ReadAddresses, packet.ReadLengths, packet.ReadOffsets, packet.ReadBytes, packet.Snapshot);
+            ReplayValidation = packet.Replay;
             _packets[key] = packet;
             entry.CapturedPacket = new(packet);
             entry.CaptureRefusal = null;

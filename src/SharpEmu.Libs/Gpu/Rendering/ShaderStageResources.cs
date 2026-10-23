@@ -40,6 +40,8 @@ public readonly record struct ImageResourceInfo(ImageResourceClass Class, bool W
 // The immutable part of a compiled program the executor and the hosts read.
 public class ShaderProgramInfo
 {
+    // A ready compute handle belongs to this cache-local immutable permutation.
+    internal PipelineHandle ReplayComputePipeline;
     public const int NoScalarRegister = -1;
 
     public ShaderStageKind Stage { get; init; }

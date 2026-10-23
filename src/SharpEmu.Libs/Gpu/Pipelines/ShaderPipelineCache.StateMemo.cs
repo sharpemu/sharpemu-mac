@@ -113,4 +113,5 @@ internal sealed partial class ShaderPipelineCache
     private static ShaderPipelineCache? _stateMemoOwner;
     [ThreadStatic]
     private static PipelineStateMemo? _stateMemo;
+    private readonly Dictionary<(ulong Vertex, ulong Pixel), PipelineStateMemo> _recipePipelineStates = new();
 }
