@@ -196,6 +196,50 @@ public sealed class Gen5MslPixelWaveTests(ITestOutputHelper output)
         Assert.Equal(1u, r >> 28);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void LazyFragmentMasksMatchScalarMasksWithHelpersAndDiscard(bool partialQuad, bool discard)
+    {
+        uint[] words = [
+            0xD7650000, 0x000100C1, // lane -> v0
+            0xBE8E047E,             // save entry EXEC s14:15
+            0xBEFE0A7E,             // WQM
+            0x7E040287, 0x7E060287, 0x7E080287, // v2,v3,v4=7
+            0x36020081,             // v1=lane & 1
+            0x7D8A0280,             // compare v1 != 0 -> VCC_LO
+            0xBE843C6A,             // s_and_saveexec_b32 s4,vcc_lo
+            0x7E04028B, 0x7E06028D, 0x7E08028F, // masked local ALU run
+            0xBEFE040E,             // restore entry EXEC
+            .. (discard ? new uint[] { 0xBEFE036A } : []),
+            0xF800180F, 0x00040302, // export v2,v3,v4,lane with VM
+            0xBF810000 ];
+        var optimized = Compile(true, true, true, words).Source;
+        var baseline = Compile(true, true, false, words).Source;
+        Assert.DoesNotContain("SHARPEMU_BALLOT", optimized, StringComparison.Ordinal);
+        Assert.True(optimized.Count(c => c == '\n') < baseline.Count(c => c == '\n'));
+        if (SkipWithoutMetalDevice("fragment mask differential execution")) return;
+        var triangle = partialQuad
+            ? new[] { -0.8f, 0.8f, -0.4f, 0.8f, -0.8f, 0.4f }
+            : new[] { -1f, -1f, 3f, -1f, -1f, 3f };
+        var expected = RenderOrThrow(false, triangle, false, words);
+        var actual = RenderOrThrow(true, triangle, true, words);
+        Assert.Equal(expected, actual);
+        for (uint y = 0; y < TargetSize; y++)
+            for (uint x = 0; x < TargetSize; x++)
+            {
+                var (r, g, b, lane) = Texel(actual, x, y);
+                if (partialQuad && (x != 1 || y != 1)) continue;
+                if (discard && r == 0) continue;
+                var active = (lane & 1u) != 0;
+                Assert.Equal(active ? 11u : 7u, r);
+                Assert.Equal(active ? 13u : 7u, g);
+                Assert.Equal(active ? 15u : 7u, b);
+            }
+    }
+
     /// <summary>Checks one fragment's exports against the guest semantics of
     /// <see cref="CrossLaneWords"/> over the lanes its wave reported running.</summary>
     private static void AssertGuestSemantics(byte[] texels, uint x, uint y, string where)
@@ -246,9 +290,9 @@ public sealed class Gen5MslPixelWaveTests(ITestOutputHelper output)
 
     private static uint Value(uint lane) => (3 * lane) + 7;
 
-    private byte[] RenderOrThrow(bool structured, float[] triangle)
+    private byte[] RenderOrThrow(bool structured, float[] triangle, bool fragmentMasks = true, uint[]? words = null)
     {
-        var shader = Compile(enableGraphicsSubgroupOperations: true, structured);
+        var shader = Compile(enableGraphicsSubgroupOperations: true, structured, fragmentMasks, words);
         Assert.True(
             MetalNative.TryCompileLibrary(shader.Source + VertexSource, out var library, out var error),
             $"Metal rejected the pixel wave MSL: {error}\n{shader.Source}");
@@ -273,15 +317,16 @@ public sealed class Gen5MslPixelWaveTests(ITestOutputHelper output)
         return texels;
     }
 
-    private static Gen5MslShader Compile(bool enableGraphicsSubgroupOperations, bool structured)
+    private static Gen5MslShader Compile(bool enableGraphicsSubgroupOperations, bool structured,
+        bool fragmentMasks = true, uint[]? words = null)
     {
-        var program = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("pixel-wave", CrossLaneWords, 0, 0));
+        var program = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("pixel-wave", words ?? CrossLaneWords, 0, 0));
         var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Pixel,
             pixelOutputs: [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Uint)],
             enableGraphicsSubgroupOperations: enableGraphicsSubgroupOperations);
         Assert.True(
             Gen5MslTranslator.TryCompileProgram(
-                request, out var shader, out var error, new Gen5MslCodegenOptions(StructuredControlFlow: structured)),
+                request, out var shader, out var error, new Gen5MslCodegenOptions(StructuredControlFlow: structured, FragmentLaneMasks: fragmentMasks)),
             error);
         return shader;
     }

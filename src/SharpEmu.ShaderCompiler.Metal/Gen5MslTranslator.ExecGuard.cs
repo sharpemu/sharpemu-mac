@@ -39,7 +39,7 @@ public static partial class Gen5MslTranslator
 
         private void BeginInstruction(Gen5ShaderInstruction instruction)
         {
-            _execKnownFull = IsExecKnownFull(instruction.Pc);
+            _execKnownFull = _insidePredicatedRegion || IsExecKnownFull(instruction.Pc);
         }
 
         private bool IsExecKnownFull(uint pc)
@@ -51,19 +51,25 @@ public static partial class Gen5MslTranslator
 
             _execFullPcs ??= Ir.Gen5ExecFullAnalysis.Analyze(
                 _request.Program,
-                wave32: _waveLaneCount == 32);
+                wave32: _waveLaneCount == 32 || _stage == Gen5MslStage.Pixel,
+                reconvergence: _options.ExecReconvergence,
+                clampExecHigh: ClampsExecToLanes || IsNarrowWave64);
             return _execFullPcs.Contains(pc);
         }
 
         /// <summary>One statement behind the per-lane EXEC guard, or the statement alone
         /// where every lane is provably set.</summary>
-        private string ExecGuarded(string statement) =>
-            _execKnownFull ? statement : $"if (exec) {{ {statement} }}";
+        private string ExecGuarded(string statement)
+        {
+            NoteExecGuard();
+            return _execKnownFull ? statement : $"if (exec) {{ {statement} }}";
+        }
 
         /// <summary>Opens a multi-statement EXEC guard, or nothing where every lane is
         /// provably set. Paired with <see cref="EndExecGuard"/>.</summary>
         private void BeginExecGuard()
         {
+            NoteExecGuard();
             if (_execKnownFull)
             {
                 return;
@@ -87,12 +93,53 @@ public static partial class Gen5MslTranslator
 
         /// <summary>The EXEC term of a condition that also guards on something else, as a
         /// prefix that disappears when every lane is provably set.</summary>
-        private string ExecCondition(string rest) =>
-            _execKnownFull ? rest : $"exec && {rest}";
+        private string ExecCondition(string rest)
+        {
+            NoteExecGuard();
+            return _execKnownFull ? rest : $"exec && {rest}";
+        }
 
         /// <summary>A value that survives only where EXEC has the lane set — the form an
         /// export or a stage output takes, since those assign unconditionally.</summary>
-        private string ExecSelect(string value, string previous) =>
-            _execKnownFull ? value : $"exec ? {value} : {previous}";
+        private string ExecSelect(string value, string previous)
+        {
+            NoteExecGuard();
+            return _execKnownFull ? value : $"exec ? {value} : {previous}";
+        }
+
+        private bool _insidePredicatedRegion;
+        private bool _predicatedGuardCounted;
+
+        private void NoteExecGuard()
+        {
+            // The first guarded site is replaced by the region's one outer guard.
+            // Later sites are removed. Do not subtract before any site is counted.
+            if (_insidePredicatedRegion && !_predicatedGuardCounted)
+            {
+                _predicatedGuardCounted = true;
+                return;
+            }
+            Statistics.NoteGuard(_execKnownFull);
+        }
+
+        // Only local, pure vector ALU. Scalar instructions, mask/carry results, DPP,
+        // subgroup operations, memory, samples and derivatives end a region. Nothing
+        // moves across them, and inactive lanes keep every previous VGPR value.
+        private bool CanShareExecGuard(Gen5ShaderInstruction instruction) =>
+            _options.ExecReconvergence && _options.ExecGuardElision && _request.EnableExecGuardElision &&
+            !IsExecKnownFull(instruction.Pc) &&
+            instruction.Control is null or Gen5Vop3Control { ScalarDestination: null } &&
+            instruction.Opcode is "VMovB32" or "VAddF32" or "VSubF32" or "VSubrevF32" or
+                "VMulF32" or "VFmaF32" or "VFmacF32" or "VMacF32" or "VMinF32" or "VMaxF32" or
+                "VAddU32" or "VSubU32" or "VSubrevU32" or "VAndB32" or "VOrB32" or "VXorB32" or
+                "VLshlrevB32" or "VLshrrevB32" or "VAshrrevI32" or "VCndmaskB32";
+
+        private void EndPredicatedRegion()
+        {
+            if (!_insidePredicatedRegion) return;
+            _insidePredicatedRegion = false;
+            _indent--;
+            Line("}");
+        }
     }
 }
