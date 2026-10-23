@@ -10,7 +10,7 @@ public sealed partial class ResourceMaterializationCache
     private readonly bool _dependencyBypass;
     private readonly bool _verifyDependencyBypass;
     private readonly Dictionary<BypassKey, DependencyPacket> _packets = new();
-    private readonly HashSet<BypassKey> _uncertified = new();
+    private readonly Dictionary<BypassKey, ResourceDependencyFailure> _uncertified = new();
     private readonly long _packetByteBudget;
     private readonly record struct BypassKey(ShaderResourcePlan Plan, ulong ShaderBase, ComputeSelectorState? Compute);
     private long _packetBytes;
@@ -21,6 +21,11 @@ public sealed partial class ResourceMaterializationCache
 
     private enum FullReason { Disabled, NoSource, Cold, Inputs, CpuWrite, GpuWrite, PendingWriter, Mapping, ImageIdentity, Overlay, Unavailable, Count }
     private static readonly long[] FullReasons = new long[(int)FullReason.Count];
+    private const int CaptureFailureCount = (int)ResourceCaptureFailure.Unsupported + 1;
+    private static readonly long[] RangeMisses = new long[((int)ResourceRangeClass.Released + 1) * CaptureFailureCount];
+    private static void CountRangeMiss(ResourceDependencyFailure failure) =>
+        Interlocked.Increment(ref RangeMisses[(int)failure.Range * CaptureFailureCount + (int)failure.Reason]);
+
     private static long _bypassCalls;
     private static long _patchedCalls;
 
@@ -30,7 +35,12 @@ public sealed partial class ResourceMaterializationCache
     {
         var reasons = string.Join(',', Enumerable.Range(0, (int)FullReason.Count).Select(index =>
             $"{(FullReason)index}:{Interlocked.Exchange(ref FullReasons[index], 0)}"));
-        return $"resmat_bypassed={Interlocked.Exchange(ref _bypassCalls, 0)} resmat_patched={Interlocked.Exchange(ref _patchedCalls, 0)} resmat_full=[{reasons}]";
+        var ranges = string.Join(',', Enumerable.Range(0, RangeMisses.Length).Select(index =>
+        {
+            var count = Interlocked.Exchange(ref RangeMisses[index], 0);
+            return count == 0 ? null : $"{(ResourceRangeClass)(index / CaptureFailureCount)}/{(ResourceCaptureFailure)(index % CaptureFailureCount)}:{count}";
+        }).Where(item => item is not null));
+        return $"resmat_range_miss=[{ranges}] resmat_bypassed={Interlocked.Exchange(ref _bypassCalls, 0)} resmat_patched={Interlocked.Exchange(ref _patchedCalls, 0)} resmat_full=[{reasons}]";
     }
 
     private sealed class DependencyPacket
@@ -44,6 +54,9 @@ public sealed partial class ResourceMaterializationCache
         public required ulong[] UsedUserData;
         public required int[] DynamicWords;
         public required ResourceSpecialization Specialization;
+        public required ulong[] ReadAddresses;
+        public required int[] ReadOffsets, ReadLengths;
+        public required byte[] ReadBytes;
         public DependencyPacket? Next;
         // Published snapshots stay immutable. A bounded memo avoids allocating on repeated
         // rings; a new scalar value needs its own shell under ResourceSnapshot's owned ABI.
@@ -64,7 +77,11 @@ public sealed partial class ResourceMaterializationCache
         var key = new BypassKey(plan, inputs.ShaderBase, inputs.ComputeState);
         if (!_packets.TryGetValue(key, out var head))
         {
-            if (_uncertified.Contains(key)) reason = FullReason.Unavailable;
+            if (_uncertified.TryGetValue(key, out var failure))
+            {
+                reason = FullReason.Unavailable;
+                CountRangeMiss(failure);
+            }
             return false;
         }
         reason = FullReason.Inputs;
@@ -92,6 +109,11 @@ public sealed partial class ResourceMaterializationCache
             // A writer/overlay transition during validation cannot certify a packet.
             if (reason != FullReason.Cold || source.DependencyEpoch != epoch) continue;
 
+            if (inputs.ObserveCachedRead is { } observe)
+            {
+                for (var range = 0; range < packet.ReadAddresses.Length; range++)
+                    observe(packet.ReadAddresses[range], packet.ReadBytes.AsSpan(packet.ReadOffsets[range], packet.ReadLengths[range]));
+            }
             snapshot = packet.Snapshot;
             if (patched)
             {
@@ -168,7 +190,7 @@ public sealed partial class ResourceMaterializationCache
                 {
                     dependency?.Dispose();
                     if (_uncertified.Count >= 2048) _uncertified.Clear();
-                    _uncertified.Add(key);
+                    _uncertified[key] = source.CaptureFailure;
                     return;
                 }
                 // Most unsupported ranges refuse at the first token. Keep that ordinary
@@ -197,7 +219,8 @@ public sealed partial class ResourceMaterializationCache
                 if (!IsUsed(entry.UsedUserData, word) || patchPlan.IsPatchable(word)) dynamicWords.Add(word);
             var packet = new DependencyPacket
             {
-                Plan = patchPlan,
+                Plan = patchPlan, ReadAddresses = entry.RangeAddresses, ReadOffsets = entry.RangeOffsets,
+                ReadLengths = entry.RangeLengths, ReadBytes = entry.Bytes,
                 UsedUserData = entry.UsedUserData,
                 DynamicWords = dynamicWords.ToArray(),
                 Source = source, Epoch = epoch, Dependencies = dependencies,

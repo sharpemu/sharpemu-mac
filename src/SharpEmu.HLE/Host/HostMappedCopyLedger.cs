@@ -17,14 +17,22 @@ public sealed unsafe partial class HostMappedCopyLedger
     {
         internal readonly HostAddressRange Range = range;
         internal int ReleaseState; // 0 active, 1 pending, 2 consumed/unknown
+        internal long NativeMappingVersion;
+        internal int NativeAliasUnavailable;
     }
     private readonly Dictionary<HostBackingObject, Alias> aliases = new();
-    private sealed class Capture
+    private sealed class Capture : ICpuNativeAliasObservation
     {
         internal readonly HostMappedCopyLedger Owner;
         internal readonly View[] States;
         internal readonly long[] Incarnations;
         internal long WriterRevision = -1;
+        internal Alias? NativeAlias;
+        internal long NativeAliasVersion;
+        public bool ExcludesNativeAliases => NativeAlias is { } alias &&
+            NativeAliasVersion == Volatile.Read(ref alias.NativeMappingVersion) &&
+            Volatile.Read(ref alias.ReleaseState) == 0 && Volatile.Read(ref alias.NativeAliasUnavailable) == 0 &&
+            !Volatile.Read(ref Owner.unknownAlias);
         internal ReadWatchOwnership? WatchOwnership;
         internal HostManagedWriteIntervals.ReadWatch? ReadWatch => WatchOwnership?.Watch;
         internal void ReleaseWatch() => WatchOwnership?.Release();
@@ -113,13 +121,27 @@ public sealed unsafe partial class HostMappedCopyLedger
     {
         RequireGate();
         var access = AccessOf(protection);
+        var alias = aliases.GetValueOrDefault(backing);
+        if (alias is not null)
+        {
+            // Even an unpublishable view can be placed by a provider. Expire
+            // old proofs before its kernel effect, and quarantine unknown geometry.
+            if (alias.NativeMappingVersion == long.MaxValue) Volatile.Write(ref alias.NativeAliasUnavailable, 1);
+            else Volatile.Write(ref alias.NativeMappingVersion, alias.NativeMappingVersion + 1);
+        }
         if (unknownAlias || !aliases.ContainsKey(backing) || backing.IsClosing || backing.IsDisposed ||
             !HostViewMemory.IsValidRange(address, size) || address % pageSize != 0 || size % pageSize != 0 ||
             offset % pageSize != 0 || offset > backing.Size || size > backing.Size - offset ||
             access == GuestPageProtection.None || HasOverlappingPublicationLocked(address, size) || views.Count >= MaximumMappings)
+        {
+            if (alias is not null) Volatile.Write(ref alias.NativeAliasUnavailable, 1);
             return null;
+        }
         if (nextIncarnation == long.MaxValue)
-        { RevokeAll(); return null; } // No process-local wrap/reuse.
+        {
+            if (alias is not null) Volatile.Write(ref alias.NativeAliasUnavailable, 1);
+            RevokeAll(); return null;
+        } // No process-local wrap/reuse.
         if (views.Capacity < views.Count + 1)
             views.Capacity = Math.Min(MaximumMappings, Math.Max(4, views.Capacity * 2));
         return new(this, backing, address, size, offset, access, ++nextIncarnation);
@@ -261,7 +283,13 @@ public sealed unsafe partial class HostMappedCopyLedger
                     cursor += bytes;
                 }
                 selected = states.ToArray();
-                captured = new(new Capture(this, selected), footprintAddress, footprintByteCount, sourceAddress,
+                var identity = new Capture(this, selected);
+                if (withWriteWatch && NativeAliasesCovered(backing, selected, sourceAddress, (ulong)destination.Length))
+                {
+                    identity.NativeAlias = aliases[backing];
+                    identity.NativeAliasVersion = identity.NativeAlias.NativeMappingVersion;
+                }
+                captured = new(identity, footprintAddress, footprintByteCount, sourceAddress,
                     (ulong)destination.Length, segments.ToArray());
             }
             ownedCapture = (Capture)captured.OwnerIdentity;
@@ -393,6 +421,33 @@ public sealed unsafe partial class HostMappedCopyLedger
                     backing.ManagedWrites?.FirstCoverageLoss ?? 0, backing.ManagedWrites?.HistoryRecordLosses ?? 0);
             return result;
         }
+    }
+
+    // Cold enrollment under Gate. Managed aliases have a participating physical
+    // writer veto; native aliases additionally need protection at every reachable VA.
+    // Refuse an alias outside the observed interval rather than assuming that one
+    // VA's page guard protects every mapping of the same physical bytes.
+    private bool NativeAliasesCovered(HostBackingObject backing, View[] selected, ulong source, ulong size)
+    {
+        foreach (var original in selected)
+        {
+            var start = Math.Max(source, original.Address);
+            var end = Math.Min(source + size, original.Address + original.Size);
+            if (start >= end) continue;
+            var physicalStart = original.Offset + start - original.Address;
+            var physicalEnd = physicalStart + end - start;
+            foreach (var candidate in views.Values)
+            {
+                if (!ReferenceEquals(candidate.Backing, backing)) continue;
+                var overlapStart = Math.Max(physicalStart, candidate.Offset);
+                var overlapEnd = Math.Min(physicalEnd, candidate.Offset + candidate.Size);
+                if (overlapStart >= overlapEnd) continue;
+                var virtualStart = candidate.Address + overlapStart - candidate.Offset;
+                if (virtualStart < source || virtualStart - source > size ||
+                    overlapEnd - overlapStart > size - (virtualStart - source)) return false;
+            }
+        }
+        return true;
     }
 
     // Bounded scalar validation, without taking Gate or consulting native state.

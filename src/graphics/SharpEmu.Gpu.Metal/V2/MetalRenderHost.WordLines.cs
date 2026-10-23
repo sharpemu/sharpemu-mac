@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Gpu.Metal.V2;
@@ -24,76 +25,133 @@ namespace SharpEmu.Gpu.Metal.V2;
 // BeginGuestWordReads and EndGuestWordReads on the thread that began them.
 internal sealed partial class MetalRenderHost : IResourceDependencySource
 {
-    // Keep the packet protocol independent of the write-version implementation. Until
-    // a range has complete native protection AND a participating physical-writer watch,
-    // equality of first-write counters cannot certify content. In particular, an
-    // unprotected page may receive arbitrarily many stores after its first fault.
     ResourceDependencyEpoch IResourceDependencySource.DependencyEpoch => new(
         _gpuWrites.Version, _cpOverlay.Version, DeviceAddressMappingVersion(), _imageCache.Epochs.Binding, _labelOverlay.Version);
 
+    // Kill switch retains the original protected-image-token enrollment policy.
+    internal bool ResourceGenerationsEnabled { get; set; } = SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOURCE_GENERATIONS");
+    private ResourceDependencyFailure _dependencyFailure;
+    ResourceDependencyFailure IResourceDependencySource.CaptureFailure => _dependencyFailure;
+    private readonly long[,] _dependencyCaptures = new long[(int)ResourceRangeClass.Released + 1, (int)ResourceCaptureFailure.Unsupported + 1];
     private byte[] _dependencyCapture = [];
     private readonly Dictionary<(ulong Address, int Size), WeakReference<WordDependency>> _wordDependencies = new();
+
+    internal string TakeDependencyCaptureReport()
+    {
+        var counts = new List<string>();
+        for (var range = 0; range < _dependencyCaptures.GetLength(0); range++)
+            for (var reason = 0; reason < _dependencyCaptures.GetLength(1); reason++)
+            {
+                var count = Interlocked.Exchange(ref _dependencyCaptures[range, reason], 0);
+                if (count != 0) counts.Add($"{(ResourceRangeClass)range}/{(ResourceCaptureFailure)reason}:{count}");
+            }
+        return $"resmat_capture=[{string.Join(',', counts)}]";
+    }
+
+    private bool DependencyRefused(ResourceRangeClass range, ResourceCaptureFailure reason)
+    {
+        _dependencyFailure = new(range, reason);
+        Interlocked.Increment(ref _dependencyCaptures[(int)range, (int)reason]);
+        return false;
+    }
 
     bool IResourceDependencySource.TryCaptureDependency(ulong address, ReadOnlySpan<byte> expected, bool clean,
         out ResourceDependency? dependency)
     {
         dependency = null;
-        if (expected.IsEmpty || expected.Length > 65536 || _labelOverlay.Count != 0 ||
-            _backing.SingleCopy is { ReleasedChunks: > 0 } || _memory is not ICpuMappedReadWatchSource source ||
-            !GuestImageWriteTracker.TryGetProtectedObservedContentToken(address, (ulong)expected.Length, out var before) ||
-            _imageCache.HasGpuModifiedImageBytes(address, (ulong)expected.Length) ||
-            OverlayCoverage(address, (ulong)expected.Length) != MetalOverlayCoverage.None ||
-            (_gpuWrites.MayCover(address, (ulong)expected.Length) && PendingSerialHinted(address, (ulong)expected.Length) != 0))
-            return false;
+        var size = (ulong)expected.Length;
+        if (expected.IsEmpty || expected.Length > 65536 || !new GuestSpan(address, size).IsValid)
+            return DependencyRefused(ResourceRangeClass.Unmapped, ResourceCaptureFailure.Range);
+        var range = _stagedRanges?.MayCover(address, size) == true ? ResourceRangeClass.Staged :
+            _backing.IsBackedRange(address, size)
+                ? (_backing.BackingChunkBytes != 0 ? ResourceRangeClass.ChunkedBacking : ResourceRangeClass.GuestBacking)
+                : _memory.CanRead(address, size) ? ResourceRangeClass.NativeMapped : ResourceRangeClass.Unmapped;
+        if (_labelOverlay.Coverage(address, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None ||
+            OverlayCoverage(address, size) != MetalOverlayCoverage.None)
+            return DependencyRefused(ResourceRangeClass.Overlay, ResourceCaptureFailure.Overlay);
+        if (DependencyRangeReleased(address, size))
+            return DependencyRefused(ResourceRangeClass.Released, ResourceCaptureFailure.Released);
+        if (_imageCache.HasGpuModifiedImageBytes(address, size))
+            return DependencyRefused(ResourceRangeClass.ImageBacking, ResourceCaptureFailure.ImageBacking);
+        if (_gpuWrites.MayCover(address, size) && PendingSerialHinted(address, size) != 0)
+            return DependencyRefused(range, ResourceCaptureFailure.PendingWriter);
+        if (_memory is not ICpuMappedReadWatchSource source)
+            return DependencyRefused(range, ResourceCaptureFailure.PhysicalWatch);
 
         var epoch = ((IResourceDependencySource)this).DependencyEpoch;
         var key = (address, expected.Length);
-        // Share the SAME original observation across stages. Bytes are captured once
-        // per interval/version, rather than re-read as each plan enrolls the interval.
+        // Share the SAME original observation across stages, never re-certify an old
+        // snapshot with a new token. Global packet epochs do not expire an original
+        // physical watch: the exact-range guards above and Validate decide whether
+        // it can be shared. This also avoids exhausting the finite watch ledger.
+        // Native faults must re-arm BEFORE copying bytes.
         if (_wordDependencies.TryGetValue(key, out var weak) && weak.TryGetTarget(out var existing) &&
-            existing.Matches(epoch, expected) && existing.Validate() == ResourceDependencyStatus.Current)
+            existing.Matches(expected) && existing.Validate() == ResourceDependencyStatus.Current)
         {
             existing.Retain();
             dependency = existing;
+            Interlocked.Increment(ref _dependencyCaptures[(int)range, 0]);
             return true;
         }
 
-        // Copy only on enrollment. The observation closes managed before/landed races
-        // on physical aliases; protected tokens close native first-fault/rearm races.
+        GuestWriteGenerations.Token? generation = null;
+        var protectedToken = default(GuestImageWriteTracker.ContentToken);
+        if (ResourceGenerationsEnabled && GuestGpuMemoryHook.Current is { } manager && manager.Covers(address, size))
+            generation = manager.WriteGenerations.Register(address, size);
+        else if (!GuestImageWriteTracker.TryGetProtectedObservedContentToken(address, size, out protectedToken))
+            return DependencyRefused(range, ResourceCaptureFailure.NativeWatch);
+
+        // Physical watches exclude managed writes admitted before capture, including
+        // alias writes. Generation/native tokens close first-fault and released-page races.
         if (_dependencyCapture.Length < expected.Length) _dependencyCapture = new byte[expected.Length];
         var bytes = _dependencyCapture.AsSpan(0, expected.Length);
-        if (source.TryReadMappedCopyWithWriteWatch(address, (ulong)bytes.Length, address, bytes,
-            out var observation) != CpuMappedCopyResult.Copied || observation is null) return false;
-        if (!bytes.SequenceEqual(expected) || !source.IsMappedCopyWriteWatchCurrent(observation) ||
-            !GuestImageWriteTracker.TryGetProtectedObservedContentToken(address, (ulong)bytes.Length, out var after) ||
-            before != after)
+        if (source.TryReadMappedCopyWithWriteWatch(address, size, address, bytes,
+            out var observation) != CpuMappedCopyResult.Copied || observation is null)
+            return DependencyRefused(range, ResourceCaptureFailure.PhysicalWatch);
+        if (!observation.ExcludesNativeAliases)
         {
             source.ReleaseMappedCopyWriteWatch(observation);
-            return false;
+            return DependencyRefused(range, ResourceCaptureFailure.NativeAlias);
         }
-        var captured = new WordDependency(source, observation, before, epoch, expected.ToArray());
+        if (!bytes.SequenceEqual(expected) || !source.IsMappedCopyWriteWatchCurrent(observation) ||
+            !(generation?.IsCurrent ?? (GuestImageWriteTracker.TryGetProtectedObservedContentToken(address, size, out var after) && protectedToken == after)) ||
+            ((IResourceDependencySource)this).DependencyEpoch != epoch || DependencyRangeReleased(address, size))
+        {
+            source.ReleaseMappedCopyWriteWatch(observation);
+            return DependencyRefused(range, ResourceCaptureFailure.Changed);
+        }
+        var captured = new WordDependency(source, observation, generation, protectedToken, expected.ToArray());
         if (_wordDependencies.Count >= 2048) _wordDependencies.Clear();
         _wordDependencies[key] = new(captured);
         dependency = captured;
+        Interlocked.Increment(ref _dependencyCaptures[(int)range, 0]);
         return true;
     }
 
-    private sealed class WordDependency(ICpuMappedReadWatchSource source, CpuMappedCopyObservation observation,
-        GuestImageWriteTracker.ContentToken token, ResourceDependencyEpoch epoch, byte[] expected) : ResourceDependency
+    private bool DependencyRangeReleased(ulong address, ulong size)
     {
-        // References are worker-owned, like the word-line scope and materialization cache.
+        if (_backing.SingleCopy is not { ReleasedChunks: > 0 } single) return false;
+        var (aliasBase, _) = _backing.BackingAliasRange;
+        // An uncertain resolution must decline; unrelated released chunks no longer
+        // veto every descriptor in the process.
+        return !_backing.TryResolveBackingAlias(address, size, out var alias) || alias < aliasBase ||
+            single.AnyReleased(alias - aliasBase, size);
+    }
+
+    private sealed class WordDependency(ICpuMappedReadWatchSource source, CpuMappedCopyObservation observation,
+        GuestWriteGenerations.Token? generation, GuestImageWriteTracker.ContentToken token, byte[] expected) : ResourceDependency
+    {
         private int _references = 1;
-        public override long RetainedBytes => 512L + expected.Length + observation.Segments.Count * 128L;
-        internal bool Matches(ResourceDependencyEpoch current, ReadOnlySpan<byte> bytes) =>
-            _references != 0 && epoch == current && bytes.SequenceEqual(expected);
+        public override long RetainedBytes => 512L + (generation?.RetainedBytes ?? 0) + expected.Length + observation.Segments.Count * 128L;
+        internal bool Matches(ReadOnlySpan<byte> bytes) => _references != 0 && bytes.SequenceEqual(expected);
         internal void Retain() => _references++;
         public override ResourceDependencyStatus Validate()
         {
             if (_references == 0) return ResourceDependencyStatus.Unavailable;
-            if (!source.IsMappedCopyObservationCurrent(observation)) return ResourceDependencyStatus.Mapping;
+            if (!source.IsMappedCopyObservationCurrent(observation) || !observation.ExcludesNativeAliases) return ResourceDependencyStatus.Mapping;
             if (!source.IsMappedCopyWriteWatchCurrent(observation)) return ResourceDependencyStatus.CpuWrite;
-            return GuestImageWriteTracker.TryGetProtectedObservedContentToken(observation.SourceAddress,
-                observation.SourceByteCount, out var current) && token == current
+            return (generation?.IsCurrent ?? (GuestImageWriteTracker.TryGetProtectedObservedContentToken(observation.SourceAddress,
+                observation.SourceByteCount, out var current) && token == current))
                 ? ResourceDependencyStatus.Current : ResourceDependencyStatus.CpuWrite;
         }
         public override void Dispose()

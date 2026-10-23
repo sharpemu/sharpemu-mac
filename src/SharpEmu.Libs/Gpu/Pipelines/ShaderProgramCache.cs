@@ -223,6 +223,7 @@ internal sealed class ShaderProgramCache
     // (~4 % of the Demon's Souls render thread) for a debug dump that is almost never on.
     private readonly bool _spirvDumpEnabled = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV"), "1", StringComparison.Ordinal);
 
+    private readonly ResourceReadObserver _observeCachedRead;
     private readonly GuestWordReader _readGuestWord;
     private readonly GuestWordReader _readCleanGuestWord;
     private readonly ResidentGuestBytesReader _readResidentGuestBytes;
@@ -236,6 +237,7 @@ internal sealed class ShaderProgramCache
         _context = context;
         _compiler = compiler;
         _host = host;
+        _observeCachedRead = (address, bytes) => ReadLog?.Bytes(address, true, bytes);
         _readGuestWord = ReadGuestWord;
         _readCleanGuestWord = ReadCleanGuestWord;
         _readResidentGuestBytes = ReadResidentGuestBytes;
@@ -469,9 +471,8 @@ internal sealed class ShaderProgramCache
         _materializingHash = source.Hash;
         inputs.UserData = source.UserData;
         inputs.ShaderBase = source.Address;
-        // ReadLog needs actual read observations for ComputeProgramRetry. A dependency
-        // bypass would supply no bytes to that log, so keep its existing full path.
-        inputs.DependencySource = ReadLog is null ? _host as IResourceDependencySource : null;
+        inputs.DependencySource = _host as IResourceDependencySource;
+        inputs.ObserveCachedRead = ReadLog is null ? null : _observeCachedRead;
         inputs.ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
             ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
                 Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,

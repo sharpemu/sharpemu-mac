@@ -115,7 +115,12 @@ public sealed class ShaderIdentityCache(ICpuMemory memory, Action<ulong, ulong> 
         lock (_gate)
         {
             if (Enabled && generations is not null && _entries.TryGetValue(shader, out var entry) &&
-                entry.Tokens.Length != 0 && Array.TrueForAll(entry.Tokens, static token => token.IsCurrent)) return entry.Identity;
+                entry.Tokens.Length != 0 && Array.TrueForAll(entry.Tokens, static token => token.IsCurrent))
+            {
+                ProgramInternCounters.CodeHit();
+                return entry.Identity;
+            }
+            ProgramInternCounters.CodeMiss();
             Span<(ulong Address, uint SizeBytes)> ranges = stackalloc (ulong, uint)[RegisteredShader.MaxCodeRanges];
             ranges = ranges[..shader.CopyCodeRanges(ranges)];
             foreach (var (address, size) in ranges) synchronize(address, size);
@@ -137,4 +142,17 @@ public sealed class ShaderIdentityCache(ICpuMemory memory, Action<ulong, ulong> 
             return identity;
         }
     }
+}
+
+// Interval counts are drained alongside materialization counters in Metal's PERF line.
+public static class ProgramInternCounters
+{
+    private static long _codeHits, _codeMisses, _headerHits, _headerMisses;
+    internal static void CodeHit() => Interlocked.Increment(ref _codeHits);
+    internal static void CodeMiss() => Interlocked.Increment(ref _codeMisses);
+    internal static void HeaderHit() => Interlocked.Increment(ref _headerHits);
+    internal static void HeaderMiss() => Interlocked.Increment(ref _headerMisses);
+    public static string TakeReport() =>
+        $"program_intern_hit={Interlocked.Exchange(ref _codeHits, 0)} program_intern_miss={Interlocked.Exchange(ref _codeMisses, 0)} " +
+        $"header_intern_hit={Interlocked.Exchange(ref _headerHits, 0)} header_intern_miss={Interlocked.Exchange(ref _headerMisses, 0)}";
 }

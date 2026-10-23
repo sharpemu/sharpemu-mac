@@ -12,6 +12,7 @@
   <ItemGroup>
     <!-- Compile the existing synthetic guest-program and device helpers in this
          test assembly; no production friend or dependency on another test assembly. -->
+    <Compile Include="../SharpEmu.ShaderCompiler.Tests/Resources/ResourceTestProgram.cs" Link="Fixtures/ResourceTestProgram.cs" />
     <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/Gen5ImageFixtures.cs" Link="Fixtures/Gen5ImageFixtures.cs" />
     <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/Gen5ComputeFixtures.cs" Link="Fixtures/Gen5ComputeFixtures.cs" />
     <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/FakeGuestMemory.cs" Link="Fixtures/FakeGuestMemory.cs" />

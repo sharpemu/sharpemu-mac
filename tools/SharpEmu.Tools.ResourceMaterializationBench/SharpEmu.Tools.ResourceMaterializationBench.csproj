@@ -7,6 +7,7 @@
     <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../src/SharpEmu.HLE/SharpEmu.HLE.csproj" />
     <ProjectReference Include="../../src/SharpEmu.ShaderCompiler/SharpEmu.ShaderCompiler.csproj" />
     <Compile Include="../../tests/SharpEmu.ShaderCompiler.Tests/Resources/ResourceTestProgram.cs" Link="ResourceTestProgram.cs" />
   </ItemGroup>

@@ -72,4 +72,90 @@ public sealed class GuestWriteGenerationsTests
         generations.NoteWrite(0x1000, 4);
         Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
     }
+    [Fact]
+    public void BulkWriteInvalidatesOnlyWatchedPagesInsideItsExactPageFootprint()
+    {
+        using var generations = new GuestWriteGenerations();
+        var first = generations.Register(0x1FF000, 1);
+        var middle = generations.Register(0x400000, 1);
+        var last = generations.Register(0x600000, 1);
+        var outside = generations.Register(0x601000, 1);
+        generations.NoteWrite(0x1FFFFF, 0x400002);
+        Assert.False(first.IsCurrent);
+        Assert.False(middle.IsCurrent);
+        Assert.False(last.IsCurrent);
+        Assert.True(outside.IsCurrent);
+        var recaptured = generations.Register(0x400000, 1);
+        generations.NoteWrite(0x400000, 8 * 1024 * 1024);
+        Assert.False(recaptured.IsCurrent);
+    }
+
+    [Fact]
+    public void UnwatchedBulkWritesDoNotAllocateOrInvalidateDisjointTokens()
+    {
+        using var generations = new GuestWriteGenerations();
+        var token = generations.Register(0x1000, 4);
+        generations.NoteWrite(0x2000, 16 * 1024 * 1024);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 1000; i++) generations.NoteWrite(0x2000, 16 * 1024 * 1024);
+        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+        Assert.True(token.IsCurrent);
+        var later = generations.Register(0x400000, 4);
+        Assert.True(later.IsCurrent);
+        generations.NoteWrite(0x400000, 4);
+        Assert.False(later.IsCurrent);
+    }
+
+    [Theory]
+    [InlineData(0UL, 268435456UL)]
+    [InlineData(ulong.MaxValue, 2UL)]
+    public void HugeOrInvalidRangesConservativelyVetoTokens(ulong address, ulong size)
+    {
+        using var generations = new GuestWriteGenerations();
+        var token = generations.Register(0x1000, 4);
+        generations.NoteWrite(address, size);
+        Assert.False(token.IsCurrent);
+    }
+
+    [Fact]
+    public void RemapInvalidatesBothPreviouslyWatchedAndNewlyEnrolledPages()
+    {
+        using var generations = new GuestWriteGenerations();
+        var token = generations.Register(0x1000, 4);
+        generations.NoteRemap(0x1000, 4096);
+        Assert.False(token.IsCurrent);
+        var next = generations.Register(0x1000, 4);
+        Assert.True(next.IsCurrent);
+        generations.NoteWrite(0x1000, 4096);
+        Assert.False(next.IsCurrent);
+    }
+    [Fact]
+    public void FarAwayUnwatchedPagesDoNotCollideWithRegisteredPages()
+    {
+        using var generations = new GuestWriteGenerations();
+        var token = generations.Register(0x1000, 4);
+        generations.NoteWrite(0x10001000, 4);
+        Assert.True(token.IsCurrent);
+    }
+
+    [Fact]
+    public void StoreNotificationDoesNotWaitForNativeEnrollmentGate()
+    {
+        using var guard = new PageGuard(new RecordingAddressSpace());
+        guard.Permissions.Set(0x1000, 4096, GuestPageProtection.Read | GuestPageProtection.Write);
+        using var generations = new GuestWriteGenerations(guard);
+        var token = generations.Register(0x1000, 4);
+        var pages = (Array)typeof(GuestWriteGenerations.Token).GetField("_pages",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(token)!;
+        var watch = pages.GetValue(0)!;
+        var gate = watch.GetType().GetField("Gate")!;
+        gate.SetValue(watch, 1);
+        try
+        {
+            var store = Task.Run(() => generations.NoteWrite(0x1000, 16 * 1024 * 1024));
+            Assert.True(store.Wait(TimeSpan.FromSeconds(10)));
+            Assert.False(token.IsCurrent);
+        }
+        finally { gate.SetValue(watch, 0); }
+    }
 }

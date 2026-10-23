@@ -328,4 +328,28 @@ public sealed class ResourceDependencyBypassTests
         Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
         Assert.Equal(1, stream.Cache.FullPathCalls);
     }
+    [Fact]
+    public void BypassesReplayEveryCertifiedReadForRetryLogsIncludingScalarPatches()
+    {
+        var memory = TableMemory();
+        var stream = new Stream(TablePlan(), memory, verify: false);
+        stream.Run(Roots());
+        var observed = new Dictionary<ulong, byte[]>();
+        stream.Inputs.ObserveCachedRead = (address, bytes) => observed[address] = bytes.ToArray();
+        var reads = memory.Reads;
+        stream.Run(Roots());
+        Assert.Equal(1, stream.Cache.BypassedCalls);
+        Assert.Equal(reads, memory.Reads);
+        Assert.NotEmpty(observed);
+        foreach (var (address, bytes) in observed)
+            for (var offset = 0; offset < bytes.Length; offset += 4)
+                Assert.Equal(memory.Words[address + (ulong)offset], BitConverter.ToUInt32(bytes, offset));
+        Assert.Contains(observed, item => item.Key <= 0x1040 && item.Key + (ulong)item.Value.Length > 0x1040);
+        observed.Clear();
+        stream.Run(Roots(0x11000));
+        Assert.Equal(1, stream.Cache.PatchedCalls);
+        Assert.NotEmpty(observed);
+        Assert.Equal(reads, memory.Reads);
+        stream.EqualFull();
+    }
 }
