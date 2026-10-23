@@ -769,7 +769,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
             // still only ever says that the work before it has finished. A compute
             // encoder is held open the same way: ending it per copy split each frame
             // into ~114 encoders, and the gaps between them outcost the dispatches.
-            HoldLabelCopies(copies);
+            HoldLabelCopies(copies, origin != MetalGpuWriteOrigin.Copy);
             Interlocked.Add(ref _deferredLabelWrites, copies.Length);
             NoteRecordedWork();
             serial = SubmissionSerial;
@@ -1239,8 +1239,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
     private ulong _deferredLabelDestinationLow = ulong.MaxValue;
     private ulong _deferredLabelDestinationHigh;
 
-    private void HoldLabelCopies(ReadOnlySpan<DeferredLabelCopy> copies)
+    private bool _heldCopiesRequireCpuBarrier;
+
+    private void HoldLabelCopies(ReadOnlySpan<DeferredLabelCopy> copies, bool requiresCpuBarrier)
     {
+        _heldCopiesRequireCpuBarrier |= requiresCpuBarrier;
         foreach (ref readonly var copy in copies)
         {
             _deferredLabelLow = Math.Min(_deferredLabelLow, copy.GuestAddress);
@@ -1257,6 +1260,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
     private void ClearHeldLabelCopies()
     {
         _deferredLabelCopies.Clear();
+        _heldCopiesRequireCpuBarrier = false;
         _deferredLabelLow = ulong.MaxValue;
         _deferredLabelHigh = 0;
         _deferredLabelBuffer = 0;
@@ -1395,6 +1399,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
     {
         using var encodeScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandLabelEncode);
+        CountLabelLanding(copies.Length);
         EncodeLabelBarrier(commandBuffer);
         var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
@@ -1476,8 +1481,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
     /// <summary>
     /// A dispatch about to bind these guest bytes runs after the command-processor writes
     /// recorded before it: one still waiting for the open compute encoder to end would land
-    /// after the dispatch instead, so the encoder ends here and the copies are encoded at
-    /// that boundary. Draws need nothing here; beginning a pass ends the compute encoder.
+    /// after the dispatch instead. CP-only copies use the current compute encoder; a label
+    /// promising CPU visibility still needs the shared-event boundary. Draws begin a pass.
     /// </summary>
     internal void OrderAfterDeferredCopies(ulong address, ulong size)
     {
@@ -1486,6 +1491,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         {
             return;
         }
+
+        if (TryLandCopiesInCompute()) return;
 
         // Held to the commit, a copy whose bytes this work binds lands here instead: the work
         // reads or writes them, and must see the copy, or overwrite it, in stream order.

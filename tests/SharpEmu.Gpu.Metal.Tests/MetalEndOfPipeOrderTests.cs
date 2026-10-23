@@ -26,7 +26,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// gap between the GPU finishing and the host publishing is as wide as it is in a slow
 /// frame. Device work is behind the exclusive device gate.
 /// </summary>
-public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
+public sealed unsafe partial class MetalEndOfPipeOrderTests(ITestOutputHelper output)
 {
     private const ulong GuestBase = 0x2_0000_0000;
     private const ulong WindowedLabel = GuestBase + 0x1000;
@@ -219,14 +219,17 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
 
     // A copy waiting for the open compute encoder to end lands after every dispatch recorded
     // into it. A dispatch binding its bytes - GTA V's bounds pass over the table its
-    // WRITE_DATA has just initialised - ends the encoder first so the copy lands before it;
-    // a dispatch over other bytes leaves the encoder open.
-    [Fact]
-    public void ADispatchBindingBytesACopyStillOwesEndsTheComputeEncoderFirst()
+    // WRITE_DATA has just initialised - lands it before the dispatch, using a boundary
+    // only when the in-encoder path is disabled. Unrelated bytes leave it held.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ADispatchBindingBytesACopyStillOwesLandsItBeforeTheDispatch(bool inEncoder)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.LabelsInEncoder = inEncoder;
         Assert.True(host.DefersCopiesInCompute);
 
         _ = host.EnsureComputeEncoder();
@@ -238,7 +241,7 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(1, host.DeferredLabelCopyCount);
 
         host.OrderAfterDeferredCopies(LaterLabel + 4, 0x40);
-        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(inEncoder, host.ComputeEncoderOpen);
         Assert.Equal(0, host.DeferredLabelCopyCount);
 
         host.FlushCommandBuffer();
@@ -250,12 +253,15 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     // The held copies' span only spares the scan: a binding between two of them that touches
     // neither keeps the encoder open, and once they land the span starts over, so bytes only
     // an earlier copy covered no longer count.
-    [Fact]
-    public void ABindingBetweenTwoHeldCopiesTouchesNeitherAndTheSpanStartsOverWhenTheyLand()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ABindingBetweenTwoHeldCopiesTouchesNeitherAndTheSpanStartsOverWhenTheyLand(bool inEncoder)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.LabelsInEncoder = inEncoder;
         Assert.True(host.DefersCopiesInCompute);
 
         _ = host.EnsureComputeEncoder();
@@ -268,7 +274,7 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(2, host.DeferredLabelCopyCount);
 
         host.OrderAfterDeferredCopies(LaterLabel + 0x1000, 8);
-        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(inEncoder, host.ComputeEncoderOpen);
         Assert.Equal(0, host.DeferredLabelCopyCount);
 
         _ = host.EnsureComputeEncoder();
@@ -309,8 +315,10 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     // A tiled image upload and writeback the one-pass tiler encodes are dispatches alone, so
     // they are recorded into the open compute encoder instead of ending it, and land the same
     // bytes as the same round trip in encoders of their own.
-    [Fact]
-    public void AKernelOnlyImageTransferIsEncodedIntoTheOpenComputeEncoder()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AKernelOnlyImageTransferIsEncodedIntoTheOpenComputeEncoder(bool cpLanding)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
@@ -339,6 +347,12 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
             guest[index] = (byte)(index * 7 + 3);
         }
 
+        host.LabelsInEncoder = true;
+        if (cpLanding)
+        {
+            Assert.True(rig.Backing.TryWrite(description.Data.Address, guest));
+            BinaryPrimitives.WriteUInt64LittleEndian(guest, 0x55UL);
+        }
         var source = harness.Buffer(guest);
         var texture = harness.Texture(harness.Transfer.ShapeFor(description));
 
@@ -356,11 +370,21 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         {
             var actual = harness.Buffer(size);
             var inEncoder = host.TransfersInEncoder;
-            _ = host.EnsureComputeEncoder();
+            var encoder = host.EnsureComputeEncoder();
+            var sourceRange = cpLanding
+                ? host.GuestMemory.ResolveWritable(description.Data.Address, size)
+                : new MetalGuestRange(source, 0, size, 0);
+            if (cpLanding)
+                host.RecordCommandProcessorWrite(description.Data.Address, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
             var upload = ((IMetalImageCacheOwner)host).BeginTransfer(MetalTransferCause.Upload, texture);
             Assert.True(host.ComputeEncoderOpen);
             shared.EncodeGuestToTexture(upload, description, range,
-                new MetalGuestRange(source, 0, size, 0), default, texture, 0, size);
+                sourceRange, default, texture, 0, size);
+            if (cpLanding)
+            {
+                Assert.Equal(encoder, host.EnsureComputeEncoder());
+                Assert.Equal(1, host.InEncoderLabelWrites);
+            }
             var writeback = ((IMetalImageCacheOwner)host).BeginTransfer(MetalTransferCause.Writeback, texture);
             shared.EncodeTextureToGuest(writeback, description, range, texture,
                 new MetalGuestRange(actual, 0, size, 0), default, 0, size);
