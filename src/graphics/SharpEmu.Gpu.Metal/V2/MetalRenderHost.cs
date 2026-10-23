@@ -94,6 +94,8 @@ internal sealed partial class MetalRenderHost :
     private static readonly bool WaitOnCommandBuffer =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_ON_COMMAND_BUFFER") == "1";
     private long _drawCount;
+    private long _fixedFunctionFetchDraws;
+    private long _shaderFetchDraws;
     private long _drawTicks;
     private long _pipelineCreations;
     // How long the driver spent turning functions into GPU binaries, on this thread.
@@ -2097,6 +2099,12 @@ internal sealed partial class MetalRenderHost :
         return clamped;
     }
 
+    public bool VertexFetchRangeIsMapped(ulong address, ulong size) =>
+        size != 0 && ClampMappedSize(address, size) == size;
+    // Keep the rectangle-list draw/rebase slots available too; excess attributes
+    // retain their shader fetch rather than making that draw unrepresentable.
+    public uint MaxFixedFunctionVertexBuffers => RectangleRebaseFirstSlot - VertexBufferSlotBase;
+
     public BufferBinding NullBuffer => new((ulong)_guestMemory.NullBuffer, 0);
 
     public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
@@ -2195,6 +2203,8 @@ internal sealed partial class MetalRenderHost :
         // time below covers them all and not only the one that happened to be done.
         DrainFinishedSubmissions();
         var draws = Interlocked.Exchange(ref _drawCount, 0);
+        var fixedFetch = Interlocked.Exchange(ref _fixedFunctionFetchDraws, 0);
+        var shaderFetch = Interlocked.Exchange(ref _shaderFetchDraws, 0);
         var drawTicks = Interlocked.Exchange(ref _drawTicks, 0);
         var flushes = Interlocked.Exchange(ref _flushes, 0);
         var flushBy = string.Join(' ', Enum.GetValues<MetalFlushCause>()
@@ -2243,7 +2253,8 @@ internal sealed partial class MetalRenderHost :
             (SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.DcbHashEnabled
                 ? $"dcbhash_checks={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashChecks} dcbhash_mismatches={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashMismatches} "
                 : string.Empty) +
-            $"draws={draws} passes={passes} flushes={flushes} flush_by=[{flushBy}] flush_deferred={TakeDeferredStreamFlushes()} " +
+            $"draws={draws} vertex_fetch_fixed_draws={fixedFetch} vertex_fetch_shader_draws={shaderFetch} " +
+            $"passes={passes} flushes={flushes} flush_by=[{flushBy}] flush_deferred={TakeDeferredStreamFlushes()} " +
             // Page-guard write watches held, and the most one page reached (the guard fails past 127).
             $"page_watches={pageWatches} page_watch_peak={pageWatchPeak} " +
             $"draw_ms={(drawTicks * 1000.0 / frequency).ToString("F1", culture)} " +

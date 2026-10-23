@@ -23,6 +23,62 @@ public sealed class ShaderProgramCacheTests : IDisposable
     private const uint Format32x4Float = 77;
 
     [Fact]
+    public void AffineAttributeLimitRetainsTheRemainingShaderLoad()
+    {
+        var previous = AffineVertexFetchResolver.Enabled;
+        AffineVertexFetchResolver.Enabled = true;
+        try
+        {
+            _guest.Host.MaxFixedFunctionVertexBuffers = 1;
+            _guest.RegisterProgram(CodeA, HeaderA, [0xE00C2000, 0x80020A05, 0xE00C2000, 0x80020E05, 0xBF810000]);
+            var userData = new uint[16];
+            PipelineTestGuest.BufferDescriptor(DataBase, 16, 8, Format32x4Float).CopyTo(userData, 8);
+            var source = _guest.Source(CodeA, ShaderStage.Vertex, userData);
+            var info = new VertexInputInfo { FetchBounds = new(2, 4, 0, 1, true, true) };
+            var cursor = 0u;
+            _ = _guest.Programs.GetOrCompile(source, new StageCompileOptions { VertexInfo = info }, ref cursor, out _);
+            var request = Assert.Single(_guest.Compiler.Requests);
+            Assert.Single(info.Attributes);
+            Assert.Single(request.VertexInputs);
+            Assert.DoesNotContain(request.Memory.Entries, access => access.Pc == 0);
+            Assert.Contains(request.Memory.Entries, access => access.Pc == 8);
+        }
+        finally { AffineVertexFetchResolver.Enabled = previous; }
+    }
+
+    [Fact]
+    public void AffineFetchLayoutsAndPortableFallbackHaveIndependentProgramIdentities()
+    {
+        var previous = AffineVertexFetchResolver.Enabled;
+        AffineVertexFetchResolver.Enabled = true;
+        try
+        {
+            _guest.RegisterProgram(CodeA, HeaderA, [0xE00C2000, 0x80020A05, 0xBF810000]);
+            var userData = new uint[16];
+            PipelineTestGuest.BufferDescriptor(DataBase, 16, 8, Format32x4Float).CopyTo(userData, 8);
+            var source = _guest.Source(CodeA, ShaderStage.Vertex, userData);
+            ShaderProgram Compile(VertexFetchBounds bounds, out VertexInputInfo info)
+            {
+                info = new VertexInputInfo { FetchBounds = bounds };
+                var cursor = 0u;
+                return _guest.Programs.GetOrCompile(source, new StageCompileOptions { VertexInfo = info }, ref cursor, out _);
+            }
+            var bounded = Compile(new(2, 4, 0, 1, true, true), out var native);
+            Assert.Single(native.Attributes);
+            Assert.Single(Assert.Single(_guest.Compiler.Requests).VertexInputs);
+            Assert.DoesNotContain(_guest.Compiler.Requests[0].Memory.Entries, memory => memory.Pc == 0);
+            Assert.Equal(bounded, Compile(new(0, 2, 0, 1, true, true), out _));
+            var fallback = Compile(default, out var shader);
+            Assert.Empty(shader.Attributes);
+            Assert.NotEqual(bounded, fallback);
+            Assert.Equal(2, _guest.Compiler.Requests.Count);
+            Assert.Empty(_guest.Compiler.Requests[1].VertexInputs);
+            Assert.Contains(_guest.Compiler.Requests[1].Memory.Entries, memory => memory.Pc == 0);
+        }
+        finally { AffineVertexFetchResolver.Enabled = previous; }
+    }
+
+    [Fact]
     public void EmbeddedFetchIsReplacedBeforeTheProgramRequestsResourceTables()
     {
         _guest.RegisterProgram(CodeA, HeaderA,

@@ -498,7 +498,9 @@ public sealed partial class RenderExecutor
 
     // A portable program (PortableBufferWord) keeps only the stride's flags; it reads the stride.
     private static bool SameStride(uint specialized, uint descriptor) =>
-        specialized == (PortableBufferWord.Enabled ? descriptor & ~PortableBufferWord.StrideMask : descriptor);
+        (specialized & ~PortableBufferWord.SpecializedFormat) ==
+        (PortableBufferWord.Enabled && !PortableBufferWord.IsSpecialized(specialized)
+            ? descriptor & ~PortableBufferWord.StrideMask : descriptor);
 
     private ComputeImageClear? TryDecodeUserDataFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
     {

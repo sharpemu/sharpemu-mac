@@ -291,6 +291,7 @@ internal static class MetalV2Formats
             63 => (MtlVertexFormat.Int2, 2u),
             62 => (MtlVertexFormat.UInt2, 2u),
             60 => (MtlVertexFormat.UChar4, 4u),
+            61 => (MtlVertexFormat.Char4, 4u),
             59 => (MtlVertexFormat.Char4, 4u),
             58 => (MtlVertexFormat.UChar4, 4u),
             57 => (MtlVertexFormat.Char4Normalized, 4u),

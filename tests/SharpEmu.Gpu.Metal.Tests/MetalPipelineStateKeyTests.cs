@@ -15,6 +15,13 @@ namespace SharpEmu.Gpu.Metal.Tests;
 // state Metal sets at encode time stays out, everything the descriptor holds stays in.
 public sealed class MetalPipelineStateKeyTests
 {
+    [Fact]
+    public void InstanceDivisorsChangeTheNativePipelineIdentity()
+    {
+        var first = Description(vertexInput: input => input.Bindings[0] = new(8, true, 1), attribute: true);
+        var second = Description(vertexInput: input => input.Bindings[0] = new(8, true, 2), attribute: true);
+        Assert.NotEqual(Key(first), Key(second));
+    }
     private static readonly UInt128 Vertex = new(0, 0x11);
     private static readonly UInt128 Pixel = new(0, 0x22);
     private const uint Float2Format = 64;

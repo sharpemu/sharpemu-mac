@@ -29,6 +29,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
     // VGT_PRIMITIVE_TYPE is a triangle list (see IShaderPipelineProvider.GetGraphicsPrograms).
     public bool TriangleList;
     public bool Indexed;
+    public VertexFetchBounds FetchBounds;
 
     public static GraphicsProgramInputs Create()
     {
@@ -40,6 +41,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
     public readonly bool Equals(GraphicsProgramInputs other) =>
         PixelActive == other.PixelActive && DepthBound == other.DepthBound && DepthAspectBound == other.DepthAspectBound &&
         StencilAspectBound == other.StencilAspectBound && TriangleList == other.TriangleList && Indexed == other.Indexed &&
+        FetchBounds == other.FetchBounds &&
         ((ReadOnlySpan<ColorComponentMap>)Mapping).SequenceEqual(other.Mapping);
 
     public override readonly bool Equals(object? obj) => obj is GraphicsProgramInputs other && Equals(other);
@@ -58,6 +60,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
         hash.Add(StencilAspectBound);
         hash.Add(TriangleList);
         hash.Add(Indexed);
+        hash.Add(FetchBounds);
         return hash.ToHashCode();
     }
 }
@@ -149,7 +152,8 @@ public sealed partial class RenderExecutor
             inputs.DepthBound,
             inputs.DepthAspectBound,
             inputs.StencilAspectBound,
-            inputs.TriangleList);
+            inputs.TriangleList,
+            inputs.FetchBounds);
     }
 
     private static bool AssemblesTriangleList(RegisterBanks banks) =>

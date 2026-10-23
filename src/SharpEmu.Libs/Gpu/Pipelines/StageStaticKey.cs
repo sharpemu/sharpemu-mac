@@ -11,7 +11,7 @@ public static class StageStaticKey
 {
     // The nine trailing words are the NGG primitive-shader state (see the vertex key).
     // The clip-space part adds up to two depth-remap words and the user clip planes.
-    public const int MaxWords = 16 + 2 + 1 + (SharpEmu.Libs.Gpu.GpuCommands.Registers.ContextRegisters.UserClipPlaneCount * 4) + 9 + VertexInputInfo.MaxBuffers * 13;
+    public const int MaxWords = 17 + 2 + 1 + (SharpEmu.Libs.Gpu.GpuCommands.Registers.ContextRegisters.UserClipPlaneCount * 4) + 9 + VertexInputInfo.MaxBuffers * 15;
 
     private static uint Bits(float value) => BitConverter.SingleToUInt32Bits(value);
 
@@ -32,6 +32,8 @@ public static class StageStaticKey
     {
         key.Clear();
         key.Add(Bit(info.FetchEmbedded));
+        key.Add((uint)info.AffineFetchPcs.Length);
+        foreach (var pc in info.AffineFetchPcs) key.Add(pc);
         key.Add((uint)info.FetchAttributeRegister);
         key.Add((uint)info.FetchBufferRegister);
         key.Add((uint)info.Attributes.Length);
@@ -75,6 +77,7 @@ public static class StageStaticKey
             key.Add(descriptor.OutOfBounds);
             key.Add(Bit(descriptor.AddThreadId));
         }
+        foreach (var buffer in info.Buffers) key.Add(buffer.Divisor);
     }
 
     public static void Build(PixelInputInfo info, List<uint> key)

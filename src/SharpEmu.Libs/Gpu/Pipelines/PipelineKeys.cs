@@ -185,7 +185,7 @@ public sealed class PipelineRenderingState : IEquatable<PipelineRenderingState>
     }
 }
 
-public readonly record struct PipelineVertexBinding(uint Stride, bool Instance);
+public readonly record struct PipelineVertexBinding(uint Stride, bool Instance, uint Divisor = 1);
 
 public readonly record struct PipelineVertexAttribute(uint Offset, byte Binding);
 
