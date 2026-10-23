@@ -516,7 +516,7 @@ internal sealed partial class MetalRenderHost
         ref readonly var openDepth = ref _renderingState.DepthStencilAttachment;
         if (nextDepth.DepthClear || nextDepth.StencilClear ||
             nextDepth.View.Handle != openDepth.View.Handle ||
-            nextDepth.HasDepth != openDepth.HasDepth || nextDepth.HasStencil != openDepth.HasStencil)
+            nextDepth.Format != openDepth.Format || nextDepth.HasDepth != openDepth.HasDepth || nextDepth.HasStencil != openDepth.HasStencil)
         {
             return false;
         }
@@ -662,6 +662,8 @@ internal sealed partial class MetalRenderHost
     private MetalPipelineEntry? _upcomingPipeline;
     private uint _upcomingVertexCount;
     private uint _upcomingFirstVertex;
+    private readonly uint[] _upcomingIndices = new uint[6];
+    private int _upcomingIndexCount;
 
     // The colour attachments of the pass being opened whose load became DontCare, and the
     // attachments and bytes that saved since the last report.
@@ -674,8 +676,26 @@ internal sealed partial class MetalRenderHost
         _upcomingPipeline = _pipelineEntries.TryGetValue(pipeline.Pipeline, out var entry) && entry.Graphics
             ? entry
             : null;
+        _upcomingIndexCount = 0;
         _upcomingVertexCount = vertexCount;
         _upcomingFirstVertex = firstVertex;
+    }
+
+    public bool NeedsIndexedDrawCoverage(in PipelineHandle pipeline) =>
+        MetalV2Diagnostics.ElideLoads && MetalV2Diagnostics.ElideIndexedLoads &&
+        _pipelineEntries.TryGetValue(pipeline.Pipeline, out var entry) &&
+        entry.ConstantPositions is not null && entry.OverwriteMask != 0 && entry.Mesh is null;
+
+    public void NoteUpcomingIndexedDraw(in PipelineHandle pipeline, ReadOnlySpan<uint> vertexIndices)
+    {
+        NoteUpcomingDraw(in pipeline, 0, 0);
+        if (!NeedsIndexedDrawCoverage(in pipeline) || vertexIndices.Length is 0 or > 6)
+        {
+            return;
+        }
+        vertexIndices.CopyTo(_upcomingIndices);
+        _upcomingIndexCount = vertexIndices.Length;
+        _upcomingVertexCount = (uint)vertexIndices.Length;
     }
 
     internal (long Attachments, long Bytes) TakeElidedLoads() =>
@@ -692,11 +712,14 @@ internal sealed partial class MetalRenderHost
         in RenderingState state,
         MetalPipelineEntry? entry,
         uint vertexCount,
-        uint firstVertex)
+        uint firstVertex,
+        ReadOnlySpan<uint> vertexIndices)
     {
         Array.Clear(_elidedLoads);
         if (!MetalV2Diagnostics.ElideLoads || entry is null || entry.ConstantPositions is null ||
-            entry.OverwriteMask == 0 || entry.Mesh is not null || entry.CullsEverything || vertexCount == 0)
+            entry.OverwriteMask == 0 || entry.Mesh is not null || entry.CullsEverything || vertexCount == 0 ||
+            entry.GraphicsDescription is { } description &&
+                (description.StaticParameters.AlphaToCoverageEnable || description.PixelInfo?.SampleMaskExportEnable == true))
         {
             return;
         }
@@ -724,8 +747,14 @@ internal sealed partial class MetalRenderHost
             (depthAttached && depthStencil.HasStencil && _dynamicState.StencilTestEnabled);
         var viewport = HostViewport(in _dynamicState);
         var scissor = _dynamicState.Scissor;
+        var positions = entry.ConstantPositions;
+        if (!vertexIndices.IsEmpty)
+        {
+            positions = MetalPassLoads.IndexedPositions(positions, vertexIndices);
+            if (positions is null) return;
+        }
         var draw = new MetalPassLoads.Draw(
-            entry.ConstantPositions,
+            positions,
             entry.PrimitiveType,
             entry.RectangleStates is not null,
             vertexCount,
@@ -845,14 +874,19 @@ internal sealed partial class MetalRenderHost
         // An attachment still waiting for its upload was not the open pass's target when
         // that pass began, so the pass cannot be continued: it is resolved below instead.
         var continues = !foldedClear && _pendingClears.Count == 0 && !_imageCache.HasDeferredRefreshes &&
-            CanContinuePass(in state);
+            CanContinuePass(in state) &&
+            (_lastDrawColorCount == state.ColorAttachmentCount || !JoinBindingsNeedBoundary(depthOnly: false));
         if (continues && (launch is not { } requested || TryTakePreparedLaunch(requested)))
         {
+            if (_lastDrawColorCount != 0 && state.ColorAttachmentCount != 0)
+            {
+                NoteSubsetTransition(in state);
+            }
             return;
         }
 
         if (!continues && launch is null && !foldedClear && _pendingClears.Count == 0 &&
-            !_imageCache.HasDeferredRefreshes && TryJoinDepthOnly(in state, upcoming))
+            !_imageCache.HasDeferredRefreshes && TryJoinSubset(in state, upcoming))
         {
             return;
         }
@@ -897,7 +931,8 @@ internal sealed partial class MetalRenderHost
             EncodeIndirectLaunches(pending);
         }
 
-        ChooseElidedLoads(in state, upcoming, upcomingVertexCount, upcomingFirstVertex);
+        ChooseElidedLoads(in state, upcoming, upcomingVertexCount, upcomingFirstVertex,
+            _upcomingIndices.AsSpan(0, _upcomingIndexCount));
         ResolveDeferredRefreshes(in state);
         var commandBuffer = EnsureCommandBuffer();
         var descriptor = MetalNative.Send(
@@ -1041,13 +1076,16 @@ internal sealed partial class MetalRenderHost
             WaitForIndirectLaunches();
         }
 
+        _lastDrawColorCount = state.ColorAttachmentCount;
         _renderPasses++;
         var loadBefore = _loadBytes;
         var storeBefore = _storeBytes;
+        var elidedBefore = _loadElidedBytes;
         NoteAttachmentTraffic(in state);
         if (PassProfileEnabled)
         {
             PassProfileDescribe(in state, _loadBytes - loadBefore, _storeBytes - storeBefore);
+            if (_ppOpen is not null) _ppOpen.LoadElidedBytes = _loadElidedBytes - elidedBefore;
         }
         NotePassIdentity(in state);
         if (MetalV2Diagnostics.Verbose || _renderPasses < 4096)

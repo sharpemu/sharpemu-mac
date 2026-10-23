@@ -104,6 +104,24 @@ internal static class MetalPassLoads
         return CoversRectangle(in draw, width, height);
     }
 
+    // ConstantPositions is indexed by the effective vertex id (including base vertex).
+    // Reorder the proof in draw order, including duplicates; unknown/restart indices fail.
+    internal static float[]? IndexedPositions(float[] positions, ReadOnlySpan<uint> indices)
+    {
+        if (indices.Length is 0 or > Gen5MslShader.ConstantPositionVertexCount ||
+            positions.Length < Gen5MslShader.ConstantPositionVertexCount * 4)
+        {
+            return null;
+        }
+        var ordered = new float[Gen5MslShader.ConstantPositionVertexCount * 4];
+        for (var index = 0; index < indices.Length; index++)
+        {
+            if (indices[index] >= Gen5MslShader.ConstantPositionVertexCount) return null;
+            positions.AsSpan((int)indices[index] * 4, 4).CopyTo(ordered.AsSpan(index * 4));
+        }
+        return ordered;
+    }
+
     /// <summary>Whether the draw's primitives together cover the window rectangle
     /// [0, width] x [0, height].</summary>
     public static bool CoversRectangle(in Draw draw, uint width, uint height)
