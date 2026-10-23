@@ -1004,6 +1004,7 @@ internal sealed partial class MetalRenderHost
         {
             if (mesh is null)
             {
+                MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setSupportIndirectCommandBuffers:"), !rectangleList);
                 MetalNative.SendVoid(
                     descriptor,
                     MetalNative.Selector("setVertexFunction:"),
@@ -1280,6 +1281,7 @@ internal sealed partial class MetalRenderHost
             .Add(pixelSource ?? default)
             .Add(lodStatistics)
             .Add(rectangleList)
+            .Add(!rectangleList) // supportIndirectCommandBuffers (ordinary render descriptors)
             .Add(rectangleList ? controlPointIndexType : 0)
             .Add(Math.Max(parameters.Samples, 1))
             .Add(layered ? MetalV2Formats.TopologyClass(parameters.Topology) : ulong.MaxValue)

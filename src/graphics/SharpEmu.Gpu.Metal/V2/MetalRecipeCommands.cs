@@ -6,7 +6,7 @@ using SharpEmu.Libs.Gpu.Rendering;
 namespace SharpEmu.Gpu.Metal.V2;
 
 internal enum MetalRecipeOperation { None, Draw, DrawIndexed, DrawIndirect, DrawIndexedIndirect, Dispatch, DispatchIndirect }
-internal readonly record struct MetalRecipeBuffer(int Stage, int Index, nint Buffer, ulong Offset);
+internal readonly record struct MetalRecipeBuffer(int Stage, int Index, nint Buffer, ulong Offset, uint ByteSize = 0);
 internal readonly record struct MetalRecipeCommand(ulong Serial, long Pass, bool Compute, nint Pipeline,
     MetalRecipeOperation Operation, ulong A, ulong B, ulong C, ulong D, ulong E,
     int FirstBinding, int BindingCount, nint IndexBuffer, ulong IndexOffset, nuint IndexType,

@@ -83,29 +83,34 @@ internal sealed partial class MetalRenderHost : IRecipeReplaySink
 
     private void ReplayOperation(MetalRecipeOperation operation, ulong a = 0, ulong b = 0, ulong c = 0, ulong d = 0, ulong e = 0)
     {
-        if (!RecipeReplayEnabled && !CaptureReferenceCommands) return;
+        if (!RecipeReplayEnabled && !CaptureReferenceCommands && !IcbEnabled) return;
         _replayOperation = operation; _replayA = a; _replayB = b; _replayC = c; _replayD = d; _replayE = e;
     }
     private void ReplayRecordEmission()
     {
         if ((!RecipeReplayEnabled && !CaptureReferenceCommands) || !_replayIssue) return;
         _replayEmissions++;
-        var sequence = _replayCommands!;
+        AppendRecipeCommand(_replayCommands!, _replayCompute);
+    }
+    private void AppendRecipeCommand(MetalRecipeCommands sequence, bool compute)
+    {
         if (sequence.Commands.Count >= 65536 || sequence.Bindings.Count >= 1024 * 1024) { sequence.Dropped++; return; }
         var first = sequence.Bindings.Count;
-        if (!_replayCompute)
+        if (!compute)
             for (var i = 0; i < _vertexBufferCount; i++) sequence.Bindings.Add(new(0, i + VertexBufferSlotBase, _vertexBuffers[i], _vertexOffsets[i]));
         for (var stage = 0; stage < StageCount; stage++)
         {
-            if (_replayCompute != (stage == StageCompute)) continue;
-            if (_stageArgumentValid[stage]) sequence.Bindings.Add(new(stage, 0, _stageArgumentBuffers[stage], _stageArgumentOffsets[stage]));
-            if (_hasPushData) sequence.Bindings.Add(new(stage, 1, _pushBuffer, _pushOffset));
+            if (compute != (stage == StageCompute)) continue;
+            if (_stageArgumentValid[stage]) sequence.Bindings.Add(new(stage, 0, _stageArgumentBuffers[stage], _stageArgumentOffsets[stage],
+                Math.Max(ArgumentPlanOf(_stageBindings[stage].Program.Bindings!).Layout.ByteSize, 16u)));
+            if (_hasPushData && (_preparedStageMask & (1 << stage)) != 0)
+                sequence.Bindings.Add(new(stage, 1, _pushBuffer, _pushOffset, PushData.ByteSize));
         }
-        var pipeline = _replayCompute ? _pendingComputePipeline : _boundGraphicsPipeline;
+        var pipeline = compute ? _pendingComputePipeline : _boundGraphicsPipeline;
         var native = pipeline is not null && pipeline.Mesh is null && pipeline.RectangleStates is null &&
-            (_replayCompute || FacePassCount(pipeline) == 1) && _replayOperation is MetalRecipeOperation.Draw or MetalRecipeOperation.DrawIndexed;
-        sequence.Commands.Add(new(_submissionSerial, _replayCompute ? ComputeEncoders : _renderPassSerial,
-            _replayCompute, pipeline?.State ?? 0, _replayOperation, _replayA, _replayB, _replayC, _replayD, _replayE,
+            (compute || FacePassCount(pipeline) == 1) && _replayOperation is MetalRecipeOperation.Draw or MetalRecipeOperation.DrawIndexed;
+        sequence.Commands.Add(new(_submissionSerial, compute ? ComputeEncoders : _renderPassSerial,
+            compute, pipeline?.State ?? 0, _replayOperation, _replayA, _replayB, _replayC, _replayD, _replayE,
             first, sequence.Bindings.Count - first, _indexBuffer, _indexOffset, _indexType, _dynamicState,
             pipeline?.PrimitiveType ?? 0, pipeline?.ThreadsPerThreadgroup ?? default, native));
     }

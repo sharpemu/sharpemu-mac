@@ -2271,6 +2271,7 @@ internal sealed partial class MetalRenderHost :
         Console.Error.WriteLine(
             $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
             ComputeBatchCounters() + ComputeChainCounters() + TakeLabelLandingCounters() + " " +
+            $"icb_on={(IcbEnabled ? 1 : 0)} icb_draws_total={_totalIcbDraws} icb_built_total={_totalIcbBuilt} icb_reused_total={_totalIcbReused} " +
             $"{_issues?.FormatProfile()} {SharpEmu.Libs.VideoOut.GpuLockProfile.Format()} " +
             // Colour loads a full-screen first draw made dead (MetalPassLoads).
             $"load_elided={loadsElided} load_elided_mb={(loadElidedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
@@ -2640,6 +2641,8 @@ internal sealed partial class MetalRenderHost :
         _completions.Dispose();
         DisposeHostMovie();
         DisposeBindlessImages();
+        _icbCache?.Dispose();
+        if (_icbPatchPipeline != 0) MetalNative.SendVoid(_icbPatchPipeline, SelRelease);
         _replayArena?.Dispose();
         DisposePipelines();
         (_transfer as IDisposable)?.Dispose();
