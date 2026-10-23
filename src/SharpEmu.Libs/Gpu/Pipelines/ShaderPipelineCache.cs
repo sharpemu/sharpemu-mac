@@ -1028,7 +1028,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             var tag = source.Stage == ShaderStage.Compute ? "COMPUTE_SKIPPED" : "DRAW_SKIPPED";
             Console.Error.WriteLine($"[GPU][WARN][{tag}] {rejection} " +
-                "The operation was not executed. Images and FPS can be incorrect. Set SHARPEMU_STRICT_COMPUTE=1 to stop on this failure.");
+                "The operation was not executed. Images and FPS can be incorrect. Set SHARPEMU_STRICT_COMPUTE=1 to stop on compilation failures, or SHARPEMU_GPU_MATERIALIZE_FATAL=1 for unreadable pointers.");
         }
         return false;
     }

@@ -114,7 +114,9 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private bool TryReadThroughPendingCopy(ulong address, Span<byte> destination)
     {
-        if (!MetalV2Diagnostics.CopyReadThrough)
+        // Current source bytes are not a snapshot of what the queued GPU copy will
+        // read. CPU recycling and later GPU writers can change them before execution.
+        if (FinalGuestTablesEnabled || !MetalV2Diagnostics.CopyReadThrough)
         {
             return false;
         }

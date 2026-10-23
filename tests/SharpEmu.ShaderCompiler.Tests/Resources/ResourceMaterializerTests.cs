@@ -271,7 +271,14 @@ public sealed class ResourceMaterializerTests
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
 
-        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failure));
+        Assert.Equal(ResourceMaterializationFailure.UnreadableGuestPointer, failure);
+        Assert.Equal(0xFE0040000UL, UnreadableGuestPointer.Address);
+        // A fresh attempt must not inherit the failed pointer (including null loads).
+        var nullInputs = Inputs([0, 0, 0, 0, 0, 0], readMemory: (ulong address, out uint word) => { word = 0; return false; });
+        Assert.True(ResourceMaterializer.Materialize(plan, nullInputs, ref snapshot, ref specialization, out failure));
+        Assert.Equal(ResourceMaterializationFailure.None, failure);
+        Assert.Null(UnreadableGuestPointer.Address);
     }
 
     [Fact]

@@ -1799,14 +1799,32 @@ internal sealed partial class MetalRenderHost
     public bool TryReadGuestWord(ulong address, out uint word)
     {
         _wordReads++;
+        CaptureGuestTableRead(address, sizeof(uint), FinalGuestTablesEnabled ? "memory-final" : "legacy-word");
+        if (FinalGuestTablesEnabled)
+        {
+            // Resolve prior writers before consulting overlays. B owns the recording
+            // command buffer, so this can commit retained batches and deferred copies.
+            var observed = LastGuestTableRead;
+            if (Volatile.Read(ref _owedHostLabels) != 0)
+                SynchronizeGuestTables();
+            if (_gpuWrites.MayCover(address, sizeof(uint)) || _imageCache.MayOwn(address, sizeof(uint)))
+                WaitForGuestBytes(address, sizeof(uint));
+            LastGuestTableRead = observed;
+            Span<byte> finalBytes = stackalloc byte[sizeof(uint)];
+            var read = _memory.TryRead(address, finalBytes);
+            word = read ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(finalBytes) : 0;
+            return read;
+        }
         if (_labelOverlay.Count != 0 && TryReadPendingLabelWord(address, out word))
         {
             // A label the GPU has yet to land, read as written (MetalRenderHost.LabelOverlay).
+            LastGuestTableRead = LastGuestTableRead with { Path = "label-overlay" };
             return true;
         }
 
         if (_wordLineThread == Environment.CurrentManagedThreadId && TryReadWordFromLine(address, out word))
         {
+            LastGuestTableRead = LastGuestTableRead with { Path = "word-line" };
             return true;
         }
 
@@ -1824,6 +1842,8 @@ internal sealed partial class MetalRenderHost
     public bool TryReadCleanGuestWord(ulong address, out uint word)
     {
         word = 0;
+        CaptureGuestTableRead(address, sizeof(uint), "clean-backing");
+        if (FinalGuestTablesEnabled && GuestTableNotReady(address, sizeof(uint))) return false;
         if (_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)) || IsResidentRangePending(address, sizeof(uint)))
         {
             return false;
@@ -1851,6 +1871,8 @@ internal sealed partial class MetalRenderHost
 
     public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
     {
+        CaptureGuestTableRead(address, (ulong)destination.Length, "resident-backing");
+        if (FinalGuestTablesEnabled && GuestTableNotReady(address, (ulong)destination.Length)) return false;
         if (destination.IsEmpty)
         {
             return true;
@@ -1864,7 +1886,11 @@ internal sealed partial class MetalRenderHost
         // A recorded store still writing these bytes: TryReadGuestWord would wait for it (or the
         // word is deferred to the device), so the caller reads the words one at a time rather
         // than seeding last frame's bytes. The clean reader does not wait, so neither does this.
-        if (TryReadThroughPendingCopy(address, destination)) return true;
+        if (TryReadThroughPendingCopy(address, destination))
+        {
+            LastGuestTableRead = LastGuestTableRead with { Path = "resident-copy-source" };
+            return true;
+        }
 
         if (IsResidentRangePending(address, (ulong)destination.Length))
         {
@@ -1906,6 +1932,11 @@ internal sealed partial class MetalRenderHost
     // test WaitForGuestBytes waits on. Counted as resident_reads_pending on the WAITS line.
     private bool IsResidentRangePending(ulong address, ulong size)
     {
+        if (FinalGuestTablesEnabled && GuestTableNotReady(address, size))
+        {
+            Interlocked.Increment(ref _residentReadsPending);
+            return true;
+        }
         if (!MetalV2Diagnostics.ResidentReadPending || !_gpuWrites.MayCover(address, size) ||
             PendingSerialHinted(address, size) == 0)
         {
@@ -2056,6 +2087,7 @@ internal sealed partial class MetalRenderHost
 
     private bool HasKnownBindingWord(ulong address)
     {
+        if (FinalGuestTablesEnabled) return false;
         if (_cpOverlay.Count != 0 && OverlayCoverage(address, sizeof(uint)) == MetalOverlayCoverage.Full) return true;
         Span<byte> value = stackalloc byte[sizeof(uint)];
         return TryReadThroughPendingCopy(address, value);

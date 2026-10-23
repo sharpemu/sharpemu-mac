@@ -74,6 +74,7 @@ public sealed partial class ResourceMaterializationCache
     {
         reason = !_dependencyBypass ? FullReason.Disabled : inputs.DependencySource is null ? FullReason.NoSource : FullReason.Cold;
         if (!_dependencyBypass || inputs.DependencySource is not { } source || DeviceBindingLoads.Deferred) return false;
+        if (!source.DependencyReadsReady) { reason = FullReason.PendingWriter; return false; }
         var key = new BypassKey(plan, inputs.ShaderBase, inputs.ComputeState);
         if (!_packets.TryGetValue(key, out var head))
         {
@@ -107,7 +108,7 @@ public sealed partial class ResourceMaterializationCache
                 break;
             }
             // A writer/overlay transition during validation cannot certify a packet.
-            if (reason != FullReason.Cold || source.DependencyEpoch != epoch) continue;
+            if (reason != FullReason.Cold || !source.DependencyReadsReady || source.DependencyEpoch != epoch) continue;
 
             if (inputs.ObserveCachedRead is { } observe)
             {
@@ -169,7 +170,8 @@ public sealed partial class ResourceMaterializationCache
 
     private void CapturePacket(Entry entry, ResourceRuntimeInputs inputs, ResourceSnapshot? observed = null)
     {
-        if (!_dependencyBypass || inputs.DependencySource is not { } source || entry.MovedReads || DeviceBindingLoads.Deferred) return;
+        if (!_dependencyBypass || inputs.DependencySource is not { } source || !source.DependencyReadsReady ||
+            entry.MovedReads || DeviceBindingLoads.Deferred) return;
         for (var word = 0; word < entry.UserData.Length; word++)
             if (IsUsed(entry.UsedUserData, word) && entry.UserData[word] != inputs.UserData[word]) return;
         var key = new BypassKey(entry.Plan, inputs.ShaderBase, inputs.ComputeState);
@@ -204,7 +206,7 @@ public sealed partial class ResourceMaterializationCache
                 size += Math.Max(0, dependency.RetainedBytes - 256);
             }
             if (size > _packetByteBudget) return;
-            if (source.DependencyEpoch != epoch) return;
+            if (!source.DependencyReadsReady || source.DependencyEpoch != epoch) return;
 
             // Independent byte/count bounds: a packet retains the snapshot and may outlive
             // its legacy cache entry. Clearing drops only optimization state.

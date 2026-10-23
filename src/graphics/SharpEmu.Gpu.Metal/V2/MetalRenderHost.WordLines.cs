@@ -28,6 +28,9 @@ internal sealed partial class MetalRenderHost : IResourceDependencySource
     ResourceDependencyEpoch IResourceDependencySource.DependencyEpoch => new(
         _gpuWrites.Version, _cpOverlay.Version, DeviceAddressMappingVersion(), _imageCache.Epochs.Binding, _labelOverlay.Version);
 
+    bool IResourceDependencySource.DependencyReadsReady =>
+        !FinalGuestTablesEnabled || Volatile.Read(ref _owedHostLabels) == 0;
+
     // Kill switch retains the original protected-image-token enrollment policy.
     internal bool ResourceGenerationsEnabled { get; set; } = SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOURCE_GENERATIONS");
     private ResourceDependencyFailure _dependencyFailure;
@@ -60,6 +63,8 @@ internal sealed partial class MetalRenderHost : IResourceDependencySource
     {
         dependency = null;
         var size = (ulong)expected.Length;
+        if (!((IResourceDependencySource)this).DependencyReadsReady)
+            return DependencyRefused(ResourceRangeClass.Unknown, ResourceCaptureFailure.PendingWriter);
         if (expected.IsEmpty || expected.Length > 65536 || !new GuestSpan(address, size).IsValid)
             return DependencyRefused(ResourceRangeClass.Unmapped, ResourceCaptureFailure.Range);
         var range = _stagedRanges?.MayCover(address, size) == true ? ResourceRangeClass.Staged :

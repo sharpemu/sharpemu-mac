@@ -50,6 +50,28 @@ public sealed class GraphicsRejectionPolicyTests
         }
     }
 
+    [Fact]
+    public void UnreadablePixelTableUsesTheUnavailableGraphicsPath()
+    {
+        using var fatal = new FatalScope();
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(VertexAddress, PipelineTestGuest.MemoryBase + 0x8000, PipelineTestGuest.EndProgram,
+            userDataAddress: PipelineTestGuest.MemoryBase + 0x9000);
+        guest.RegisterProgram(PixelAddress, PipelineTestGuest.MemoryBase + 0x8100,
+            [0xF4080000, 0xFA000000, 0xE0000000, 0x80000000, 0xBF810000],
+            userDataAddress: PipelineTestGuest.MemoryBase + 0xA000);
+        var vertex = new VertexStageRegisters { ExportAddress = VertexAddress };
+        var pixel = new PixelStageRegisters { Address = PixelAddress, Resource2 = new PixelResource2 { UserScalarCount = 2 } };
+        pixel.UserScalars.Set(0, 0x3F000000, UserScalarKind.Unknown);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var result = cache.GetGraphicsPrograms(vertex, pixel, new ShaderInterfaceRegisters(),
+            new ContextRegisters(), [], pixelActive: true, depthBound: false, depthAspectBound: false);
+        Assert.False(result.Available);
+        Assert.Equal(1, guest.Host.TableSynchronizations);
+        Assert.Empty(guest.Host.GraphicsPipelines);
+        Assert.Empty(guest.Compiler.Requests);
+    }
+
     [Theory]
     [InlineData(null, false)]
     [InlineData("0", false)]

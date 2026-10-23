@@ -25,6 +25,10 @@ public interface IResourceDependencySource
     // can change independently of their roots. Capture must be side-effect free.
     ResourceDependencyEpoch DependencyEpoch { get; }
 
+    // Host completion publications may owe bytes without a recorded GPU range.
+    // Such an intent vetoes even a certificate that would call no memory reader.
+    bool DependencyReadsReady => true;
+
     ResourceDependencyFailure CaptureFailure => new(ResourceRangeClass.Unknown, ResourceCaptureFailure.Unsupported);
 
     // Capture may allocate; Validate must neither read bytes nor allocate. A failed

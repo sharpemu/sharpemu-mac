@@ -17,7 +17,8 @@ public sealed class ResourceDependencyBypassTests
         private readonly List<Token> _tokens = [];
         internal int Reads, ResidentReads, Captures;
         internal ResourceDependencyEpoch Epoch;
-        internal bool RefuseCapture, CorruptCapture, Pending;
+        internal bool RefuseCapture, CorruptCapture, Pending, PublicationsPending;
+        public bool DependencyReadsReady => !PublicationsPending;
         public ResourceDependencyEpoch DependencyEpoch => Epoch;
 
         internal bool Read(ulong address, out uint word) { Reads++; return Words.TryGetValue(address, out word); }
@@ -130,6 +131,32 @@ public sealed class ResourceDependencyBypassTests
         Assert.Equal(0x10000u, previous.Buffers[0][0]); // Published output was not patched in place.
         stream.EqualFull();
         Assert.Equal(1, stream.Cache.FullPathCalls);
+    }
+
+    [Fact]
+    public void PendingHostPublicationsVetoCertificatesWithoutChangingTheGpuEpoch()
+    {
+        var memory = TableMemory();
+        var stream = new Stream(TablePlan(), memory, verify: false);
+        var roots = Roots();
+        stream.Run(roots);
+        stream.Run(roots);
+        Assert.Equal(1, stream.Cache.BypassedCalls);
+        var epoch = memory.Epoch;
+        var reads = memory.Reads;
+        memory.PublicationsPending = true;
+        stream.Run(roots);
+        stream.Run(roots);
+        Assert.Equal(epoch, memory.Epoch);
+        Assert.Equal(1, stream.Cache.BypassedCalls);
+        Assert.Equal(3, stream.Cache.FullPathCalls);
+        Assert.True(memory.Reads > reads);
+        memory.Write(0x1040, 77);
+        memory.PublicationsPending = false;
+        stream.Run(roots);
+        stream.Run(roots);
+        Assert.Equal(2, stream.Cache.BypassedCalls);
+        stream.EqualFull();
     }
 
     [Theory]

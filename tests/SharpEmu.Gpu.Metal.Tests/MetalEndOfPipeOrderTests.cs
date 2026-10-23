@@ -815,6 +815,7 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         host.RecordEndOfPipe(new EndOfPipeWrite(kind, 1, WindowedLabel, value));
         Assert.Equal(1, host.PendingLabelOverlayEntries);
         var completed = host.CompletedSerial;
@@ -857,6 +858,7 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
 
         // The newest label in record order wins.
         host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 1));
@@ -895,6 +897,7 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 0x1234));
         Assert.Equal(1, host.PendingLabelOverlayEntries);
 
@@ -917,6 +920,7 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.FinalGuestTablesEnabled = false;
         host.LabelOverlayEnabled = false;
         host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, WindowedLabel, 0x1234));
         Assert.Equal(0, host.PendingLabelOverlayEntries);

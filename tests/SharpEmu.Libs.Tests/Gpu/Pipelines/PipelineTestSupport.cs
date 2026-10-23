@@ -70,8 +70,20 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
         return true;
     }
 
+    public Action? SynchronizeTables { get; set; }
+    public int TableSynchronizations { get; private set; }
+    public int TableSynchronizationThread { get; private set; }
+    public Func<ulong, bool>? RefuseTableRead { get; set; }
+    public void SynchronizeGuestTables()
+    {
+        TableSynchronizations++;
+        TableSynchronizationThread = Environment.CurrentManagedThreadId;
+        SynchronizeTables?.Invoke();
+    }
+
     public bool TryReadGuestWord(ulong address, out uint word)
     {
+        if (RefuseTableRead?.Invoke(address) == true) { word = 0; return false; }
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (!memory.TryRead(address, bytes))
         {

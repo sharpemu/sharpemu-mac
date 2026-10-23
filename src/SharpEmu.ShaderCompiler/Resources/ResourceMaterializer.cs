@@ -96,10 +96,12 @@ public static partial class ResourceMaterializer
         out ResourceMaterializationFailure failure,
         Action<IndirectImageFailure>? captureIndirectImageFailure = null)
     {
+        UnreadableGuestPointer.BeginAttempt();
         using var totalProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Total);
         if (!MaterializeSnapshot(plan, inputs, captureIndirectImageFailure is not null, out var materialized, out failure))
         {
             if (DeviceBindingLoads.Deferred) failure = ResourceMaterializationFailure.DeferredPendingLoad;
+            else if (UnreadableGuestPointer.Address.HasValue) failure = ResourceMaterializationFailure.UnreadableGuestPointer;
             return false;
         }
 
@@ -199,6 +201,12 @@ public static partial class ResourceMaterializer
             evaluateTable: true, out var values, out var table, out var activeSources,
             additionalTableWords: checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount)))
         {
+            // Capture before the diagnostic walk, which can issue additional reads.
+            if (UnreadableGuestPointer.Address.HasValue)
+            {
+                failure = ResourceMaterializationFailure.UnreadableGuestPointer;
+                return false;
+            }
             // A word read as unknown for a re-plan is no failure, and diagnosing it would read
             // (and wait for) that word (DeviceBindingLoads).
             if (!DeviceBindingLoads.Deferred)
@@ -687,10 +695,11 @@ public static partial class ResourceMaterializer
         var baseAddress = ((descriptor[0] | ((ulong)descriptor[1] << 32)) & AddressMask) & ~3ul;
         if (aligned > AddressMask - baseAddress)
         {
+            UnreadableGuestPointer.Record(baseAddress);
             return false;
         }
 
-        return inputs.ReadCleanMemory is not null && inputs.ReadCleanMemory(baseAddress + aligned, out word);
+        return ReadRequiredCleanWord(baseAddress + aligned, inputs, out word);
     }
 
     // Enumerates every material key that can pass the table's bounds and reads the
@@ -830,8 +839,12 @@ public static partial class ResourceMaterializer
             for (uint dword = 0; dword < 8; dword++)
             {
                 var relative = entry + dword * sizeof(uint);
-                if (relative > AddressMask || baseAddress > AddressMask - relative ||
-                    !inputs.ReadCleanMemory(baseAddress + relative, out candidate[dword]))
+                if (relative > AddressMask || baseAddress > AddressMask - relative)
+                {
+                    UnreadableGuestPointer.Record(baseAddress);
+                    return false;
+                }
+                if (!ReadRequiredCleanWord(baseAddress + relative, inputs, out candidate[dword]))
                     return false;
             }
 
@@ -905,7 +918,7 @@ public static partial class ResourceMaterializer
                 for (var word = 0; word < readableWords; word++)
                 {
                     if (!unreadable[word >> 3] &&
-                        !TryReadCleanWord(tableAddress, (ulong)word * sizeof(uint), inputs, out table[word]))
+                        !TryReadCleanWord(tableAddress, (ulong)word * sizeof(uint), inputs, out table[word], required: false))
                         unreadable[word >> 3] = true;
                 }
             }
@@ -1014,10 +1027,27 @@ public static partial class ResourceMaterializer
         return FinishIndirectImage(probed, offsets, out result, out failure);
     }
 
-    private static bool TryReadCleanWord(ulong baseAddress, ulong offset, ResourceRuntimeInputs inputs, out uint word)
+    private static bool ReadRequiredCleanWord(ulong address, ResourceRuntimeInputs inputs, out uint word)
     {
         word = 0;
-        return offset <= AddressMask && baseAddress <= AddressMask - offset &&
+        if (inputs.ReadCleanMemory is not { } reader) return false;
+        if (reader(address, out word)) return true;
+        UnreadableGuestPointer.Record(address);
+        return false;
+    }
+
+    private static bool TryReadCleanWord(ulong baseAddress, ulong offset, ResourceRuntimeInputs inputs, out uint word,
+        bool required = true)
+    {
+        word = 0;
+        if (offset > AddressMask || baseAddress > AddressMask - offset)
+        {
+            if (required) UnreadableGuestPointer.Record(baseAddress);
+            return false;
+        }
+        // Bindless heaps deliberately turn inaccessible optional entries into null;
+        // a required selector/descriptor instead rejects the complete materialization.
+        return required ? ReadRequiredCleanWord(baseAddress + offset, inputs, out word) :
             inputs.ReadCleanMemory is not null && inputs.ReadCleanMemory(baseAddress + offset, out word);
     }
 

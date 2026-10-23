@@ -84,21 +84,100 @@ public sealed class ComputeRejectionPolicyTests
         }
     }
 
-    [Fact]
-    public void FailedResourceReadsRemainFatalWithSkippingEnabled()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void UnreadableTablesDrainOnceThenRetryOrSkipEvenInStrictMode(bool strict, bool repaired)
     {
         using var fatal = new FatalScope();
         var guest = new PipelineTestGuest();
         guest.RegisterProgram(CodeAddress, HeaderAddress,
             [0xF4080000, 0xFA000000, 0xE0000000, 0x80000000, 0xBF810000]);
-        // The descriptor pointer is mapped nowhere. A null pointer would not do: reads through
-        // a null base are evaluated as zero, because shaders branch around them.
-        var source = guest.Source(CodeAddress, ShaderStage.Compute, [0u, 2u]);
+        var table = PipelineTestGuest.MemoryBase + 0x40000;
+        guest.WriteWords(table, 0x1000u, 4u << 16, 16, 0x21014FAC);
+        var pending = true;
+        guest.Host.RefuseTableRead = address => address >= table && address < table + 16 && pending;
+        guest.Host.SynchronizeTables = () => { if (repaired) pending = false; };
+        var source = guest.Source(CodeAddress, ShaderStage.Compute, [(uint)table, (uint)(table >> 32)]);
         var cursor = 0u;
-        var failure = Assert.Throws<SchedulerFatalException>(() => guest.Programs.TryGetProgram(
-            source, PipelineTestGuest.ComputeOptions(1), false, ref cursor, out _, out _, out _));
-        Assert.Contains("could not be materialized", failure.Message);
+        var result = guest.Programs.TryGetProgram(source, PipelineTestGuest.ComputeOptions(1), strict,
+            ref cursor, out var program, out _, out var rejection);
+        Assert.Equal(repaired, result);
+        Assert.Equal(repaired, program.IsValid);
+        Assert.Equal(1, guest.Host.TableSynchronizations);
+        Assert.Equal(Environment.CurrentManagedThreadId, guest.Host.TableSynchronizationThread);
+        Assert.Equal(repaired ? 0 : 1, guest.Programs.UnreadablePointerSkips);
+        if (!repaired)
+        {
+            Assert.Contains("UnreadableGuestPointer", rejection);
+            Assert.Empty(guest.Compiler.Requests);
+            // No permanent shader rejection: a later bind can recover.
+            pending = false;
+            Assert.True(guest.Programs.TryGetProgram(source, PipelineTestGuest.ComputeOptions(1), strict,
+                ref cursor, out _, out _, out _));
+            Assert.Equal(1, guest.Host.TableSynchronizations);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnUnmappedNonNullPointerIsSkippedAfterOneDrain(bool strict)
+    {
+        using var fatal = new FatalScope();
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(CodeAddress, HeaderAddress,
+            [0xF4080000, 0xFA000000, 0xE0000000, 0x80000000, 0xBF810000]);
+        var source = guest.Source(CodeAddress, ShaderStage.Compute, [0x3F000000u, 0u]);
+        var cursor = 0u;
+        Assert.False(guest.Programs.TryGetProgram(source, PipelineTestGuest.ComputeOptions(1), strict,
+            ref cursor, out _, out _, out var rejection));
+        Assert.Contains("UnreadableGuestPointer", rejection);
+        Assert.Equal(1, guest.Host.TableSynchronizations);
+        Assert.Equal(0u, cursor);
         Assert.Empty(guest.Compiler.Requests);
+    }
+
+    [Fact]
+    public void UnreadableComputeTableUsesTheUnavailableProgramPath()
+    {
+        using var fatal = new FatalScope();
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(CodeAddress, HeaderAddress,
+            [0xF4080000, 0xFA000000, 0xE0000000, 0x80000000, 0xBF810000]);
+        var registers = Registers();
+        registers.UserScalars.Set(0, 0x3F000000, UserScalarKind.Unknown);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var result = cache.GetComputeProgram(registers, new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
+        Assert.False(result.Available);
+        Assert.False(result.Consumed);
+        Assert.False(result.Program.IsValid);
+        Assert.Equal(1, guest.Host.TableSynchronizations);
+        Assert.Empty(guest.Host.ComputePipelines);
+        Assert.Empty(guest.Compiler.Requests);
+    }
+
+    [Fact]
+    public void UnreadablePointerFatalDebugSwitchRestoresTheOldPolicy()
+    {
+        const string variable = "SHARPEMU_GPU_MATERIALIZE_FATAL";
+        var previous = Environment.GetEnvironmentVariable(variable);
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, "1");
+            using var fatal = new FatalScope();
+            var guest = new PipelineTestGuest();
+            guest.RegisterProgram(CodeAddress, HeaderAddress,
+                [0xF4080000, 0xFA000000, 0xE0000000, 0x80000000, 0xBF810000]);
+            var source = guest.Source(CodeAddress, ShaderStage.Compute, [0x3F000000u, 0u]);
+            var cursor = 0u;
+            Assert.Throws<SchedulerFatalException>(() => guest.Programs.TryGetProgram(source,
+                PipelineTestGuest.ComputeOptions(1), false, ref cursor, out _, out _, out _));
+            Assert.Equal(0, guest.Host.TableSynchronizations);
+        }
+        finally { Environment.SetEnvironmentVariable(variable, previous); }
     }
 
     [Fact]

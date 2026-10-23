@@ -323,7 +323,13 @@ internal sealed class CompiledResourceTransaction
         try
         {
             using (ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.CompiledWordRead))
-                if (reader is null || !reader(address, out word)) return (addressBase & ~3UL) == 0 || (absolute && reader is not null && !clean && !inputs.ReadsClean);
+                if (reader is null || !reader(address, out word))
+                {
+                    if ((addressBase & ~3UL) == 0 || (absolute && reader is not null && !clean && !inputs.ReadsClean))
+                        return true;
+                    if (reader is not null) UnreadableGuestPointer.Record(address);
+                    return false;
+                }
             BindingWaitProvenance.Consumed(word);
         }
         finally { MaterializingShader.EndRead(); }
