@@ -49,6 +49,8 @@ internal sealed partial class MetalRenderHost
         public string Shape = string.Empty;
         public long LoadBytes;
         public long StoreBytes;
+        public long DiscardedBytes;
+        public long[]? StoreDecisions;
         public int Draws;
         public int BatchedDispatches;
         public int Batches;
@@ -544,7 +546,7 @@ internal sealed partial class MetalRenderHost
                 $"batched_dispatches={record.BatchedDispatches} batches={record.Batches} " +
                 $"avg_batch={(record.Batches == 0 ? 0 : (double)record.BatchedDispatches / record.Batches):F2} " +
                 $"batch_flush=[{(record.BatchFlushReasons is null ? string.Empty : string.Join(',', record.BatchFlushReasons.Select(pair => $"{pair.Key}:{pair.Value}")))}] " +
-                $"ld_mb={record.LoadBytes / 1048576.0:F1} st_mb={record.StoreBytes / 1048576.0:F1} " +
+                $"ld_mb={record.LoadBytes / 1048576.0:F1} st_mb={(record.StoreBytes - record.DiscardedBytes) / 1048576.0:F1} discarded_mb={record.DiscardedBytes / 1048576.0:F1} store_decisions=[{FormatRefusals<StoreDecision>(record.StoreDecisions)}] " +
                 $"end={(record.End.Length == 0 ? "?" : record.End)} a=[{record.Shape}] sh=[{shaders}] " +
                 $"after=[{after}] n_after={record.After?.Count ?? 0} joins={record.Joins} join_load_avoided_mb={record.JoinLoadAvoidedBytes / 1048576.0:F1} load_elided_mb={record.LoadElidedBytes / 1048576.0:F1} join_refused=[{FormatRefusals<JoinRefusal>(record.JoinRefusals)}] load_refused=[{FormatRefusals<LoadRefusal>(record.LoadRefusals)}]")).Append('\n');
         }
