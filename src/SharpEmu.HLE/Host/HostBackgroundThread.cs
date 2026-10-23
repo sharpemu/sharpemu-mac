@@ -26,6 +26,9 @@ public sealed class HostBackgroundThread
     /// <summary>Whether the thread was created with its class in its attributes.</summary>
     public bool IsNative => _native is not null;
 
+    /// <summary>Whether the caller is this thread.</summary>
+    public bool IsCurrentThread => _native is not null ? _native.IsCurrentThread : ReferenceEquals(Thread.CurrentThread, _managed);
+
     public bool Join(int milliseconds) => _native is not null ? _native.Join(milliseconds) : _managed!.Join(milliseconds);
 
     /// <summary>

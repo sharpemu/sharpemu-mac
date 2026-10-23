@@ -661,6 +661,7 @@ internal static class MetalShaderPrewarm
     /// <summary>The guest presented its first frame: what it created until now is what the next start holds it for.</summary>
     public static void NoteFirstGuestFrame()
     {
+        MetalStaticPrecompile.NoteGuestPresenting();
         List?.WriteFirstFrameComputes();
         Graphics?.WriteFirstFrame();
     }

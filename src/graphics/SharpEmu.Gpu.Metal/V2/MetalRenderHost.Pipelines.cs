@@ -572,6 +572,15 @@ internal sealed partial class MetalRenderHost
             {
                 return stored;
             }
+
+            // A library the static precompile has begun is waited for rather than built a
+            // second time; one it has only queued is taken from it (MetalStaticLibraryClaims).
+            if (MetalStaticPrecompile.DemandLibrary(archiveKey) &&
+                archive.TryLoadLibrary(archiveKey,
+                    mipStatistics: source.Contains(Gen5MslShader.MipStatisticsFunctionConstantName, StringComparison.Ordinal)) is var built and not 0)
+            {
+                return built;
+            }
         }
 
         var pool = MetalNative.objc_autoreleasePoolPush();
