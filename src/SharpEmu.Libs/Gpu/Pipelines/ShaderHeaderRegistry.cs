@@ -62,13 +62,15 @@ public sealed class ShaderHeaderRegistry
     private const int HeaderReadBytes = (int)ScratchDwordsPerThreadOffset + sizeof(ushort);
 
     private readonly CpuContext _context;
+    private readonly Func<string, Exception> _invalid;
     private readonly Func<ulong, ulong> _headerOf;
     private readonly Func<ulong, FusedProgramParts?> _fusedPartsOf;
 
     public ShaderHeaderRegistry(CpuContext context, Func<ulong, ulong> headerOf, Func<ulong, FusedProgramParts?> fusedPartsOf,
-        SharpEmu.HLE.GpuMemory.GuestWriteGenerations? generations = null, Action<ulong, ulong>? synchronize = null)
+        SharpEmu.HLE.GpuMemory.GuestWriteGenerations? generations = null, Action<ulong, ulong>? synchronize = null, Func<string, Exception>? invalid = null)
     {
         _context = context;
+        _invalid = invalid ?? GpuFatal.Fatal;
         _headerOf = headerOf;
         _fusedPartsOf = fusedPartsOf;
         _generations = ShaderIdentityCache.Enabled ? generations : null;
@@ -150,7 +152,7 @@ public sealed class ShaderHeaderRegistry
         var headerAddress = _headerOf(codeAddress);
         if (headerAddress == 0)
         {
-            throw GpuFatal.Fatal($"The shader has no registered header: label={label} shader=0x{codeAddress:X16}.");
+            throw _invalid($"The shader has no registered header: label={label} shader=0x{codeAddress:X16}.");
         }
 
         // The fields the record needs, read as one block: every draw resolves its shaders again,
@@ -179,7 +181,7 @@ public sealed class ShaderHeaderRegistry
                 !_context.TryReadUInt64(headerAddress + InputSemanticsOffset, out inputSemanticsAddress) ||
                 !_context.TryReadUInt32(headerAddress + InputSemanticsCountOffset, out inputSemanticsCount))
             {
-                throw GpuFatal.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
+                throw _invalid($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
             }
         }
 
@@ -193,7 +195,7 @@ public sealed class ShaderHeaderRegistry
             if (!_context.TryReadUInt16(parts.ContinuationHeaderAddress + ScratchDwordsPerThreadOffset,
                     out continuationScratchDwords))
             {
-                throw GpuFatal.Fatal($"The continuation shader scratch size is unreadable: label={label} shader=0x{parts.ContinuationAddress:X16}.");
+                throw _invalid($"The continuation shader scratch size is unreadable: label={label} shader=0x{parts.ContinuationAddress:X16}.");
             }
         }
 
@@ -267,17 +269,17 @@ public sealed class ShaderHeaderRegistry
     {
         if (!_context.TryReadUInt32(headerAddress + ShaderSizeOffset, out var codeSize))
         {
-            throw GpuFatal.Fatal($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
+            throw _invalid($"The shader header is unreadable: label={label} shader=0x{codeAddress:X16} header=0x{headerAddress:X16}.");
         }
 
         return ValidCodeSize(codeSize, codeAddress, label);
     }
 
-    private static uint ValidCodeSize(uint codeSize, ulong codeAddress, string label)
+    private uint ValidCodeSize(uint codeSize, ulong codeAddress, string label)
     {
         if (codeSize == 0 || codeSize % sizeof(uint) != 0)
         {
-            throw GpuFatal.Fatal($"The shader header carries an invalid code size: label={label} shader=0x{codeAddress:X16} size=0x{codeSize:X8}.");
+            throw _invalid($"The shader header carries an invalid code size: label={label} shader=0x{codeAddress:X16} size=0x{codeSize:X8}.");
         }
 
         return codeSize;

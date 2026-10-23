@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -170,12 +171,18 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return previous = words.ToArray();
     }
 
+    internal IssueProgramIdentities IssuedPrograms { get; set; }
+
     private ShaderSource PrepareSource(ulong codeAddress, ShaderStage stage, string label, UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, uint userDataBase, ref uint[]? userDataMemo,
         ulong geometryPointer = 0)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
-        var registered = _registry.Require(codeAddress, label);
-        var identity = _identities.Get(registered, label);
+        var captured = stage == ShaderStage.Compute ? IssuedPrograms.Compute
+            : stage == ShaderStage.Pixel ? IssuedPrograms.Pixel : IssuedPrograms.Vertex;
+        var registered = captured.Shader is { } ready && ready.CodeAddress == codeAddress
+            ? ready : _registry.Require(codeAddress, label);
+        var identity = ReferenceEquals(registered, captured.Shader) && captured.Identity is { } capturedIdentity
+            ? capturedIdentity : _identities.Get(registered, label);
         var hash = identity.Hash;
         var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label, ref userDataMemo);
         if (stage == ShaderStage.Mesh && registered.IsFused)

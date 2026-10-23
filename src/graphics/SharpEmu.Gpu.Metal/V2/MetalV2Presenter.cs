@@ -372,7 +372,11 @@ internal static partial class MetalV2Presenter
         }
     }
 
-    private static void Wake() => _host?.CommandStream.Wake();
+    private static void Wake()
+    {
+        _host?.CommandStream.Wake();
+        _host?.WakeIssueWorker();
+    }
 
     // ---- the GPU worker ----
 
@@ -381,7 +385,7 @@ internal static partial class MetalV2Presenter
     // slot, and reserving that flip after the unregister is a fatal InvalidIndex.
     // The relay alone only orders work before the next slice, not behind the queue.
     private static bool TryEnqueueControlBarrier(Action work, Action cancel) =>
-        _host is { } host && host.CommandStream.TryEnqueueControlBarrier(work, cancel);
+        _host is { } host && host.CommandStream.TryEnqueueControlBarrier(() => host.RunOnIssueConsumer(work), cancel);
 
     /// <summary>
     /// One pass of the worker: the relay's commands, a budget of command-stream slices and
@@ -394,21 +398,16 @@ internal static partial class MetalV2Presenter
     /// <returns>True when nothing is runnable and the worker should park.</returns>
     internal static bool RunWorkerStep(MetalRenderHost host, MetalGpuWorkerRelay relay)
     {
-        using var pool = MetalAutoreleasePool.Enter();
-        host.RunPendingCommands();
-        host.RunCommandStreamSlices(64);
-        host.ReportCounters();
-        if (host.CommandStream.HasUnblockedPending || relay.HasPendingCommands)
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var cpuStarted = DsTrace.SelfCpuNs();
+        try
         {
-            return false;
+            using var pool = MetalAutoreleasePool.Enter();
+            host.RunIssueRelays();
+            host.RunCommandStreamSlices(64);
+            return !host.CommandStream.HasUnblockedPending && !relay.HasPendingCommands;
         }
-
-        // A buffer a coalesced Stream flush left open goes out before the park:
-        // nothing else would commit it until the guest submits again.
-        host.CommitCoalescedFlush();
-        host.PollGpuCompletions();
-        host.KeepQueueWarmIfIdle();
-        return true;
+        finally { host.NoteIssueProducerTicks(System.Diagnostics.Stopwatch.GetTimestamp() - started, (long)(DsTrace.SelfCpuNs() - cpuStarted)); }
     }
 
     private static void RunWorker()
@@ -422,12 +421,13 @@ internal static partial class MetalV2Presenter
         {
             DsTrace.RegisterThread(2, 0, Thread.CurrentThread.Name ?? "MetalV2Worker", qosApplied ? 1 : 0);
         }
-        _relay!.BindCurrentThread();
+        RenderPhaseProfile.SetWorker(RenderPhaseProfile.Worker.A);
+        host.StartIssueWorker();
         try
         {
             while (!Volatile.Read(ref _closeRequested) && !HostSessionControl.IsShutdownRequested)
             {
-                if (RunWorkerStep(host, _relay))
+                if (RunWorkerStep(host, _relay!))
                 {
                     var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                     var dsIdle = DsTrace.Gpu && DsTrace.Armed;
@@ -495,9 +495,14 @@ internal static partial class MetalV2Presenter
         try
         {
             _relay?.StopAcceptingWork();
-            host.ImageCache.StopWatching();
-            host.FlushAndWaitForGpu();
-            host.ImageCache.Shutdown();
+            host.RunOnIssueConsumer(() =>
+            {
+                host.RunPendingCommands();
+                host.ImageCache.StopWatching();
+                host.FlushAndWaitForGpu();
+                host.ImageCache.Shutdown();
+            });
+            host.StopIssueWorker();
         }
         catch (Exception exception)
         {

@@ -24,9 +24,13 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// a committed command buffer signals its serial, and the completion thread runs
 /// the interrupts and flip completions of that submission in order.
 /// </summary>
-internal sealed partial class MetalRenderHost : ICommandStreamHost
+internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssueRenderer, ICommandIssueReadTokenSource
 {
     private CommandStreamQueue? _commandStream;
+    private OrderedCommandStreamHost? _issues;
+    private SharpEmu.HLE.Host.HostBackgroundThread? _issueWorker;
+    private bool _splitIssueWorker;
+    private static readonly bool SplitWorker = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") != "0";
     private AgcExports.CommandStreamTranslation? _translation;
     private IMetalFlipTarget? _flipTarget;
     private long _lastProgressTicks;
@@ -41,11 +45,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         _commandStream ?? throw Fatal("The Metal command stream has not been created.");
 
     /// <summary>Creates the interpreter queue and the draw translation over this host.</summary>
-    public void InitializeCommandStream(IMetalFlipTarget flipTarget)
+    public void InitializeCommandStream(IMetalFlipTarget flipTarget, bool? splitWorker = null)
     {
         _flipTarget = flipTarget;
         ApplyTranslationSwitches();
-        _commandStream = new CommandStreamQueue(this);
+        _splitIssueWorker = splitWorker ?? SplitWorker;
+        _issues = new OrderedCommandStreamHost(this, _splitIssueWorker, () => _relay.HasPendingCommands,
+            MaintainIssueConsumer, SynchronizeShaderCode,
+            blocks: IssueLimit("SHARPEMU_METAL_V2_ISSUE_BLOCKS", 4, 2, 8),
+            itemsPerBlock: IssueLimit("SHARPEMU_METAL_V2_ISSUE_BLOCK_ITEMS", 64, 16, 128));
+        _commandStream = new CommandStreamQueue(_issues);
+        _issues.AttachQueue(_commandStream);
         if (CommandStreamQueue.GpuCompletionWakeEnabled)
         {
             _completions.SetCompletionObserver(_commandStream.NotifyGpuCompletionObserved);
@@ -54,6 +64,69 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         _translation = AgcBackendServices.CreateCommandStreamTranslation(_memory, this);
         _lastProgressTicks = System.Diagnostics.Stopwatch.GetTimestamp();
     }
+
+    private static int IssueLimit(string name, int fallback, int minimum, int maximum) =>
+        int.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? Math.Clamp(value, minimum, maximum) : fallback;
+
+    internal void StartIssueWorker()
+    {
+        if (!_splitIssueWorker) { _relay.BindCurrentThread(); return; }
+        if (_issueWorker is not null) return;
+        _issueWorker = SharpEmu.HLE.Host.HostBackgroundThread.Start(
+            "SharpEmu Metal v2 issue consumer", SharpEmu.HLE.Host.HostThreadQos.UserInteractive,
+            16 * 1024 * 1024, qos =>
+            {
+                SharpEmu.HLE.Host.HostThreadPrecedence.TryBoostCurrentThread("Metal v2 issue consumer");
+                Console.Error.WriteLine($"[METAL-V2][INFO] Issue consumer native QoS applied={qos}.");
+                RenderPhaseProfile.SetWorker(RenderPhaseProfile.Worker.B);
+                _issues!.Consume(_relay.BindCurrentThread, () => MetalAutoreleasePool.Enter());
+            });
+    }
+
+    internal void RunIssueRelays() => _issues!.RunPendingCommands();
+    internal void WakeIssueWorker() => _issues?.WakeConsumer();
+    internal void NoteIssueProducerTicks(long ticks, long cpuNanoseconds) => _issues?.NoteProducerTicks(ticks, cpuNanoseconds);
+    internal void RunOnIssueConsumer(Action action) => _issues!.ExecuteGuestMemoryOperation(action);
+    internal void StopIssueWorker()
+    {
+        _issues!.Stop();
+        if (_issueWorker is { } worker && !worker.Join(5000))
+            throw new TimeoutException("The Metal issue consumer did not stop.");
+        _issueWorker = null;
+    }
+
+    private void MaintainIssueConsumer()
+    {
+        CommitCoalescedFlush();
+        FlushPendingLabelWrites();
+        PollGpuCompletions();
+        KeepQueueWarmIfIdle();
+        ReportCounters();
+        RenderPhaseProfile.RecordProgress();
+    }
+
+    void ICommandIssueRenderer.BeginIssuedSubmission(int queueId, ulong submitId)
+    {
+        _submissionsStarted++;
+        CommitCoalescedIfOverdue();
+        _ = EnsureCommandBuffer();
+        _translation!.BeginIssuedSubmission(queueId, submitId);
+    }
+
+    void ICommandIssueRenderer.DrawIssued(int queueId, ulong submitId, SharpEmu.Libs.Gpu.GpuCommands.Registers.RegisterBanks banks,
+        in IssueProgramIdentities programs, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
+    {
+        using var entry = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawEntry);
+        _translation!.DrawIssued(queueId, submitId, banks, programs, indexed, indexedArguments, autoArguments);
+    }
+
+    void ICommandIssueRenderer.DispatchIssued(int queueId, ulong submitId, SharpEmu.Libs.Gpu.GpuCommands.Registers.RegisterBanks banks,
+        in IssueProgramIdentities programs, uint x, uint y, uint z, uint initiator, ulong indirect) =>
+        _translation!.DispatchIssued(queueId, submitId, banks, programs, x, y, z, initiator, indirect);
+
+    void ICommandIssueRenderer.ResetIssuedQueue(int queueId) => _translation!.ResetIssuedQueue(queueId);
+
+    CommandReadToken ICommandIssueReadTokenSource.IssueReadToken => CurrentCommandReadToken();
 
     ICpuMemory ICommandStreamHost.Memory => _memory;
 
@@ -2097,10 +2170,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public void RunCommandStreamSlices(int maxSlices)
     {
+        RunCommandStreamSlicesCore(maxSlices);
+        _issues!.Maintenance();
+    }
+
+    private void RunCommandStreamSlicesCore(int maxSlices)
+    {
         var stream = CommandStream;
         // A title stuck before its first flip never reaches the frame boundary below, and
         // that is the title whose breakdown is wanted: the report is driven from here too.
-        SharpEmu.Libs.VideoOut.RenderPhaseProfile.RecordProgress();
+
         for (var slice = 0; slice < maxSlices; slice++)
         {
             // A stopping session gets its teardown now, not after the rest of the budget:
@@ -2122,20 +2201,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             switch (result)
             {
                 case SliceResult.NoWork:
-                    CommitCoalescedFlush();
-                    FlushPendingLabelWrites();
                     return;
                 case SliceResult.AllBlocked:
                     RetryBlockedIfDue();
-                    CommitCoalescedFlush();
-                    FlushPendingLabelWrites();
                     return;
                 case SliceResult.BlockedWithoutProgress:
                     if (!stream.HasUnblockedPending)
                     {
                         RetryBlockedIfDue();
-                        CommitCoalescedFlush();
-                        FlushPendingLabelWrites();
                         return;
                     }
 
@@ -2151,8 +2224,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // command buffer at that point is one the GPU never writes and the guest waits
         // for: Quake's engine gave up and called abort. A deferred Stream flush is held
         // only while more work is runnable; the worker commits it before it parks.
-        CommitCoalescedIfOverdue();
-        FlushPendingLabelWrites();
     }
 
     // The presenter freed the flip slot: retry suspended heads now instead of at the

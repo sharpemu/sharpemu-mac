@@ -18,6 +18,37 @@ public sealed class ShaderHeaderRegistryTests : IDisposable
     public void Dispose() => _fatal.Dispose();
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void IssuePlanningLeavesMalformedOrUnreadableBoundProgramsToTheOrderedExecutor(bool unreadableCode)
+    {
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(Code, Header, PipelineTestGuest.EndProgram);
+        var address = unreadableCode ? PipelineTestGuest.MemoryBase + PipelineTestGuest.MemorySize + 0x1000 : Code;
+        if (!unreadableCode) guest.WriteWords(Header + 0x44, 0);
+        var field = typeof(SharpEmu.Libs.Agc.AgcExports).GetField("_shaderHeadersByCode",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var headers = (System.Collections.Concurrent.ConcurrentDictionary<ulong, ulong>)field.GetValue(null)!;
+        var hadPrevious = headers.TryGetValue(address, out var previous);
+        headers[address] = Header;
+        try
+        {
+            var planner = new SharpEmu.Libs.Gpu.GpuCommands.CommandIssueProgramPlanner(guest.Memory, static (_, _) => { });
+            var banks = RenderExecutorFixtures.Banks();
+            banks.Shader.Compute.Address = address;
+            Assert.Null(planner.Capture(banks, compute: true).Compute.Shader);
+            Assert.Empty(_fatal.Messages);
+            if (!unreadableCode)
+                Assert.Throws<SchedulerFatalException>(() => guest.Registry.Require(Code, "required by executor"));
+        }
+        finally
+        {
+            if (hadPrevious) headers[address] = previous;
+            else headers.TryRemove(address, out _);
+        }
+    }
+
+    [Theory]
     [InlineData(3, 19)]
     [InlineData(19, 3)]
     [InlineData(0, 65535)]

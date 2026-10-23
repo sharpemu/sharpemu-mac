@@ -42,6 +42,7 @@ internal sealed unsafe class SceneRig : IDisposable
     private readonly List<ulong> _registeredShaders = [];
     private readonly Dictionary<uint[], ulong> _programs = new(ReferenceEqualityComparer.Instance);
     private ulong _submissionId = 1;
+    private readonly bool _splitWorker;
 
     /// <summary>The registered copy of a program, placed on first use.</summary>
     public ulong Program(uint[] code)
@@ -55,8 +56,9 @@ internal sealed unsafe class SceneRig : IDisposable
         return address;
     }
 
-    public SceneRig(nint device)
+    public SceneRig(nint device, bool splitWorker = false)
     {
+        _splitWorker = splitWorker;
         _savedBackend = BackendFields.Select(field => field.GetValue(null)).ToArray();
         // A loud refusal ends the process in the emulator; here it fails the scene instead.
         _savedFatal = FatalHook.GetValue(null);
@@ -87,8 +89,9 @@ internal sealed unsafe class SceneRig : IDisposable
             }
         }
         Host = new MetalRenderHost(device, _queue, Memory, Memory, _pages, _relay);
-        _relay.BindCurrentThread();
-        Host.InitializeCommandStream(new FlipTarget());
+        if (!splitWorker) _relay.BindCurrentThread();
+        Host.InitializeCommandStream(new FlipTarget(), splitWorker);
+        if (splitWorker) Host.StartIssueWorker();
     }
 
     public SceneMemory Memory { get; } = new();
@@ -158,16 +161,21 @@ internal sealed unsafe class SceneRig : IDisposable
         var deadline = DateTime.UtcNow.AddSeconds(30);
         while (true)
         {
-            Host.RunPendingCommands();
+            Host.RunIssueRelays();
             Host.RunCommandStreamSlices(64);
             if (Host.CommandStream.HasUnblockedPending || _relay.HasPendingCommands)
             {
                 continue;
             }
 
-            Host.CommitCoalescedFlush();
-            Host.FlushAndWaitForGpu();
-            Host.PollGpuCompletions();
+            void CompletePrefix()
+            {
+                Host.CommitCoalescedFlush();
+                Host.FlushAndWaitForGpu();
+                Host.PollGpuCompletions();
+            }
+            if (_splitWorker) Host.RunOnIssueConsumer(CompletePrefix);
+            else CompletePrefix();
             if (!Host.CommandStream.HasPending)
             {
                 return;
@@ -186,7 +194,10 @@ internal sealed unsafe class SceneRig : IDisposable
     public byte[] Read(ulong address, int length)
     {
         var bytes = new byte[length];
-        if (!Host.TryReadGuest(address, bytes))
+        var success = false;
+        if (_splitWorker) Host.RunOnIssueConsumer(() => success = Host.TryReadGuest(address, bytes));
+        else success = Host.TryReadGuest(address, bytes);
+        if (!success)
         {
             throw new InvalidOperationException($"The scene read failed: 0x{address:X16}+0x{length:X}.");
         }
@@ -201,7 +212,8 @@ internal sealed unsafe class SceneRig : IDisposable
     {
         try
         {
-            Host.ImageCache.StopWatching();
+            if (_splitWorker) Host.RunOnIssueConsumer(Host.ImageCache.StopWatching);
+            else Host.ImageCache.StopWatching();
             Host.Dispose();
         }
         finally
