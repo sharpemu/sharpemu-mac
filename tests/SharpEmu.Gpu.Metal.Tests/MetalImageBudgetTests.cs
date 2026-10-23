@@ -420,6 +420,7 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         public void Dispose() => NativeMemory.AlignedFree(_block);
 
         public ulong MirrorStart { get; set; }
+        public ulong RemapOffset { get; set; }
         private bool Contains(ulong address, ulong length) =>
             (address >= GuestBase && address - GuestBase <= Size && length <= Size - (address - GuestBase)) ||
             (MirrorStart != 0 && address >= MirrorStart && address - MirrorStart <= Size && length <= Size - (address - MirrorStart));
@@ -447,7 +448,7 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
                 return address - MirrorStart;
             if (!InScatter(address))
             {
-                return address - GuestBase;
+                return address - GuestBase + RemapOffset;
             }
 
             var relative = address - ScatterStart;
@@ -674,7 +675,7 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
             return bytes;
         }
 
-        public ResourceSlotIdentifier Acquire(ulong address, ImageRole role)
+        public ResourceSlotIdentifier Acquire(ulong address, ImageRole role, uint samples = 1)
         {
             var description = ImageDescription.Create();
             description.Data = new GuestSpan(address, ImageSize);
@@ -685,7 +686,7 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
             description.Resources = new SubresourceCount(1, 1);
             description.Pitch = Side;
             description.BytesPerBlock = 4;
-            description.Samples = 1;
+            description.Samples = samples;
             description.TileMode = GuestTileMode.Linear;
             description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = ImageSize, Pitch = Side, Height = Side };
             var view = ImageViewDescription.Default with

@@ -771,7 +771,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
     public bool EncodeTextureToGuest(IMetalSubmissionContext context, in ImageDescription description,
         SubresourceRange range, nint texture, MetalGuestRange destination, MetalGuestRange stencilDestination,
-        ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0)
+        ulong guestBase, ulong pieceSize, uint textureFirstLevel = 0, Action? beforeEncode = null)
     {
         if (!Ready(context, description, destination, texture, guestBase, pieceSize))
         {
@@ -788,6 +788,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                     $"address=0x{description.Data.Address:X16}.");
             }
 
+            if (DepthLayers(plan, range, guestBase, pieceSize).Count == 0) return true;
+            beforeEncode?.Invoke();
             EncodeDepthDownload(context, description, plan, range, texture, destination, stencilDestination, guestBase, pieceSize);
             return true;
         }
@@ -798,6 +800,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             return true;
         }
 
+        beforeEncode?.Invoke();
         if (TryEncodeTextureTiles(context, plan, texture, description.Data.Address + guestBase,
                 new MetalBufferSpan(destination.Buffer, destination.Offset, pieceSize), MetalTileDirection.Tile))
         {
