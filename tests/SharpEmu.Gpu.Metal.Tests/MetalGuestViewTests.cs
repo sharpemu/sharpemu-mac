@@ -404,9 +404,12 @@ internal sealed unsafe class ShmScatteredBacking : IGuestBackedSpace, ICpuMemory
             throw new InvalidOperationException($"ftruncate failed: errno={Marshal.GetLastPInvokeError()}");
         }
 
-        _alias = mmap(0, (nuint)backingBytes, ProtRead | ProtWrite, MapShared, _descriptor, 0);
-        Base = (ulong)mmap(0, (nuint)viewBytes, ProtNone, MapPrivate | MapAnon, -1, 0);
-        if (_alias == -1 || Base == ulong.MaxValue)
+        // Rosetta mmap may return only 4 KB alignment. Metal guest views round
+        // ranges to 16 KB; reserve aligned spans so rounding cannot leave the
+        // fixture's mapping or make a no-copy canonical alias unaligned.
+        _alias = ReserveAligned(backingBytes);
+        Base = (ulong)ReserveAligned(viewBytes);
+        if (mmap(_alias, (nuint)backingBytes, ProtRead | ProtWrite, MapShared | MapFixed, _descriptor, 0) != _alias)
         {
             throw new InvalidOperationException("mmap failed.");
         }
@@ -420,6 +423,19 @@ internal sealed unsafe class ShmScatteredBacking : IGuestBackedSpace, ICpuMemory
             // neighbours are neighbours in the backing.
             Remap((int)piece, (piece * 7919 + 13) % backingPieces * Piece);
         }
+    }
+
+    private static nint ReserveAligned(ulong size)
+    {
+        const ulong Alignment = 16384;
+        var reserved = mmap(0, (nuint)(size + Alignment), ProtNone, MapPrivate | MapAnon, -1, 0);
+        if (reserved == -1) throw new InvalidOperationException("aligned mmap reservation failed.");
+        var aligned = ((ulong)reserved + Alignment - 1) & ~(Alignment - 1);
+        var prefix = aligned - (ulong)reserved;
+        var suffix = Alignment - prefix;
+        if (prefix != 0) munmap(reserved, (nuint)prefix);
+        if (suffix != 0) munmap((nint)(aligned + size), (nuint)suffix);
+        return (nint)aligned;
     }
 
     /// <summary>Where the guest sees the scattered pages; the host maps them at the same address.</summary>
