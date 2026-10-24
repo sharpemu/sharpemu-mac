@@ -1,0 +1,11 @@
+{
+  "step": "test-ordering3",
+  "command": [
+    "python3",
+    "artifacts/ds-fps/bench/arch-parallel/validate.py",
+    "ordering"
+  ],
+  "cwd": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel",
+  "seconds": 4.826689004898071,
+  "rc": 0
+}

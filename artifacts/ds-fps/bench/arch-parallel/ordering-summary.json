@@ -1,6 +1,6 @@
 {
   "rc": 0,
-  "sourceSha256": "3929f87e750903e303c11e9b166b7ec370e0cdcf75efb4863d2540fec0dd2f5a",
+  "sourceSha256": "86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0",
   "command": [
     "/Users/xnetcat/.dotnet-x64/dotnet",
     "test",
@@ -14,7 +14,7 @@
     "--blame-hang-dump-type",
     "mini",
     "--results-directory",
-    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/ordering/20261024T143608607727Z",
+    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/ordering/20261024T195203656878Z",
     "--logger",
     "trx;LogFileName=ordering.trx",
     "-p:RestorePackagesPath=/Users/xnetcat/.nuget/sharpemu-shared",
@@ -24,11 +24,11 @@
     "FullyQualifiedName~MetalParallelBatchTests|FullyQualifiedName~ParallelEncodeSceneTests"
   ],
   "requireDevice": "1",
-  "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/ordering/20261024T143608607727Z/ordering.trx",
+  "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/ordering/20261024T195203656878Z/ordering.trx",
   "counters": {
-    "total": "24",
-    "executed": "24",
-    "passed": "24",
+    "total": "25",
+    "executed": "25",
+    "passed": "25",
     "failed": "0",
     "error": "0",
     "timeout": "0",

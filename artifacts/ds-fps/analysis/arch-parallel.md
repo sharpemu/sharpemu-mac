@@ -520,3 +520,12 @@ pixels to serial, and requires64 actual child creations rather than192. A
 pending a fresh build, focused ordering tests, all four full suites and a new
 signed bundle; old validation does not cover the revised source. The original
 signed751c2b9cf bundle is preserved at`artifacts/parallel-initial-macos/SharpEmu.app`.
+
+
+The small-batch revision at`118999b12` built successfully:234 warnings,zero
+errors,98.39 seconds MSBuild time (99.855 seconds wrapper), source content
+SHA-256`86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0`. All25 focused device/ordering cases passed
+with zero skips. The new64-singleton-pass case observed exactly64 native
+children and pixel equality to serial. Full Metal/Libs/ShaderCompiler/MSL suites
+are queued sequentially against this revised signature; the original full-suite
+results remain historical until these finish.
