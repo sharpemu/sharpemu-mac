@@ -1,0 +1,19 @@
+{
+  "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-222328-ds-arch-parallel-base2",
+  "source": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+  "screenshot": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-222328-ds-arch-parallel-base2/shot-mark-end.png",
+  "screenshotSha256": "e1360a991d8cfab72ef22987636023c89286580c7b68c468039185bd6dad2e1e",
+  "inspected": true,
+  "observation": "Expected knight/armour/tunnel/foliage/exit lighting and same HUD layout, consistent with basecheck and revised opt1; no structural difference observed.",
+  "acceptedLoadSamples": 8,
+  "acceptedBuildTestAlerts": 0,
+  "acceptedMemorySamples": 5,
+  "peakAcceptedFootprintMiB": 13052.808906555176,
+  "graphicsIokitResidentAndSwappedMiB": [
+    550.86328125,
+    558.69140625,
+    539.37890625,
+    550.72265625,
+    583.94140625
+  ]
+}

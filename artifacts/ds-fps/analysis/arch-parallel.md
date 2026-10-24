@@ -607,3 +607,18 @@ matched main control's earlier552MiB near-HUD sample. Accepted peak footprint
 was13,891.5MiB. The new device test proves bounded child allocations for small
 passes; these runtime observations do not prove the cause of the earlier OOMs.
 The second control and optimized arm remain pending before an A/B verdict.
+
+
+The second exact-main control `base2` completed:
+`20261024-222328-ds-arch-parallel-base2`, actual HUD179.990 seconds, full
+120-second in-world window and graceful stop. The wrapper also waited for load
+to drop before launch, so directory timestamp and wrapper duration do not equal
+actual gameplay launch/duration. Skip40 captured127 entries over79.292967
+seconds:1.601655fps, p50 526.479006ms, p95 1486.330986ms, p99 2107.867002ms.
+All8 accepted load samples had zero build/test activity. The end screenshot was
+opened and showed the same expected scene/HUD layout as basecheck and opt1.
+Accepted peak footprint was13,052.8MiB; unique resident+swapped graphics_iokit
+samples were539-584MiB, lower than revised opt1's1,419-1,698MiB. The controls
+span1.472-1.602fps; the first optimized1.531fps lies within that variation.
+A performance verdict awaits the final optimized arm, which is queued/running
+with the same settings and load-wait policy.

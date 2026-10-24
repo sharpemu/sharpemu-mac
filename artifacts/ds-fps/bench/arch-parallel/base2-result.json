@@ -1,0 +1,11 @@
+{
+  "step": "base2",
+  "command": [
+    "python3",
+    "artifacts/ds-fps/bench/arch-parallel/game.py",
+    "base2"
+  ],
+  "cwd": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel",
+  "seconds": 386.0822913646698,
+  "rc": 0
+}
