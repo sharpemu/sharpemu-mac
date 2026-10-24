@@ -1,6 +1,6 @@
 {
   "rc": 1,
-  "sourceSha256": "3929f87e750903e303c11e9b166b7ec370e0cdcf75efb4863d2540fec0dd2f5a",
+  "sourceSha256": "86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0",
   "command": [
     "/Users/xnetcat/.dotnet-x64/dotnet",
     "test",
@@ -14,7 +14,7 @@
     "--blame-hang-dump-type",
     "mini",
     "--results-directory",
-    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/libs/20261024T143722803582Z",
+    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/libs/20261024T195428053959Z",
     "--logger",
     "trx;LogFileName=libs.trx",
     "-p:RestorePackagesPath=/Users/xnetcat/.nuget/sharpemu-shared",
@@ -22,7 +22,7 @@
     "-p:UseSharedCompilation=false"
   ],
   "requireDevice": null,
-  "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/libs/20261024T143722803582Z/libs.trx",
+  "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/libs/20261024T195428053959Z/libs.trx",
   "counters": {
     "total": "8629",
     "executed": "8624",
@@ -43,32 +43,12 @@
   },
   "nonpassing": [
     {
-      "test": "SharpEmu.Libs.Tests.Cpu.ImportResultLoggingTests.RepeatedImportFailuresAreSampledPerImportAndResult",
+      "test": "SharpEmu.Libs.Tests.Loader.RosettaVectorStorePatchTests.RosettaSplitsStoresWithoutRedZoneUseAndPreservesAllBytes",
       "outcome": "Failed",
-      "message": "System.ArgumentException : Cannot bind to the target method because its signature is not compatible with that of the delegate type."
-    },
-    {
-      "test": "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.InsertqSigillReadsSourceXmmThroughTheBridge",
-      "outcome": "Failed",
-      "message": "System.NullReferenceException : Object reference not set to an instance of an object."
-    },
-    {
-      "test": "SharpEmu.Libs.Tests.Audio.AjmOpusDecoderTests.GaplessSkipsLeadInAndHonorsSampleLimit",
-      "outcome": "NotExecuted",
-      "message": "Native FFmpeg libraries are not present in the test output's plugins directory."
-    },
-    {
-      "test": "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.InsertInstructionPreservesOtherVectorRegisters",
-      "outcome": "Failed",
-      "message": "System.NullReferenceException : Object reference not set to an instance of an object."
+      "message": "Assert.Equal() Failure: Values differ\nExpected: 2\nActual:   1"
     },
     {
       "test": "SharpEmu.Libs.Tests.Audio.AjmOpusDecoderTests.ResamplingChangesOutputDurationAndFlushesTheTail",
-      "outcome": "NotExecuted",
-      "message": "Native FFmpeg libraries are not present in the test output's plugins directory."
-    },
-    {
-      "test": "SharpEmu.Libs.Tests.Audio.AjmExportsTests.OpusDecodeExportProducesGuestPcmAndWritesStreamResult",
       "outcome": "NotExecuted",
       "message": "Native FFmpeg libraries are not present in the test output's plugins directory."
     },
@@ -78,17 +58,37 @@
       "message": "Native FFmpeg libraries are not present in the test output's plugins directory."
     },
     {
-      "test": "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.ExtractSignalPreservesLivePointerAndOtherVectorRegisters",
+      "test": "SharpEmu.Libs.Tests.Cpu.ImportResultLoggingTests.RepeatedImportFailuresAreSampledPerImportAndResult",
+      "outcome": "Failed",
+      "message": "System.ArgumentException : Cannot bind to the target method because its signature is not compatible with that of the delegate type."
+    },
+    {
+      "test": "SharpEmu.Libs.Tests.Audio.AjmExportsTests.OpusDecodeExportProducesGuestPcmAndWritesStreamResult",
+      "outcome": "NotExecuted",
+      "message": "Native FFmpeg libraries are not present in the test output's plugins directory."
+    },
+    {
+      "test": "SharpEmu.Libs.Tests.Audio.AjmOpusDecoderTests.GaplessSkipsLeadInAndHonorsSampleLimit",
+      "outcome": "NotExecuted",
+      "message": "Native FFmpeg libraries are not present in the test output's plugins directory."
+    },
+    {
+      "test": "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.ExtrqSigillRoundTripsXmmThroughTheBridge",
       "outcome": "Failed",
       "message": "System.NullReferenceException : Object reference not set to an instance of an object."
     },
     {
-      "test": "SharpEmu.Libs.Tests.Loader.RosettaVectorStorePatchTests.RosettaSplitsStoresWithoutRedZoneUseAndPreservesAllBytes",
+      "test": "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.InsertqSigillReadsSourceXmmThroughTheBridge",
       "outcome": "Failed",
-      "message": "Assert.Equal() Failure: Values differ\nExpected: 2\nActual:   1"
+      "message": "System.NullReferenceException : Object reference not set to an instance of an object."
     },
     {
-      "test": "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.ExtrqSigillRoundTripsXmmThroughTheBridge",
+      "test": "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.InsertInstructionPreservesOtherVectorRegisters",
+      "outcome": "Failed",
+      "message": "System.NullReferenceException : Object reference not set to an instance of an object."
+    },
+    {
+      "test": "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.ExtractSignalPreservesLivePointerAndOtherVectorRegisters",
       "outcome": "Failed",
       "message": "System.NullReferenceException : Object reference not set to an instance of an object."
     },

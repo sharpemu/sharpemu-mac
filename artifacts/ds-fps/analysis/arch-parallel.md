@@ -4,10 +4,12 @@ Branch: `ds-fps-arch-parallel`. Base: `main` / `bdc7ea28c8e7df0b8753966d8ba1881f
 Worktree: `/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel`.
 
 Phase1 dependency analysis and the base-path in-world batch census are complete.
-The opt-in native-encoding prototype builds and passes all 24 focused device/ordering
-tests. All four full suites completed, with the base failures listed below. Game A/B
-and the final verdict remain pending. No measured prototype speedup is claimed.
-Guest preparation remains ordered in this prototype.
+The revised opt-in native-encoding prototype builds, passes 25 focused device/
+ordering cases, and completes all four suites with only the base failures below.
+Its signed measurement bundle is ready; the revised game A/B remains pending.
+Guest interpretation/materialization stays ordered: the complete requested raw
+recorder and parallel resource-preparation pipeline is not implemented. No measured
+prototype speedup or completed in-game rendering-equivalence result is claimed.
 
 ## Hard limits and proposed partition
 
@@ -540,3 +542,38 @@ Packaging now requires all five focused/full summary signatures and records a
 verified `app-ready.json` marker. Optimized game jobs require that exact ready
 marker, build signature and bundle revision. The next alternating series starts
 from the successful recent `basecheck` control, then revised opt1/base2/opt2.
+
+
+## Revised validation and signed measurement snapshot
+
+Final implementation change:`118999b12`; signed bundle source:
+`c9598a26304da5db2d5a73c813986ac39864161c`, clean osx-x64 ReadyToRun.
+Source content SHA-256:
+`86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0`.
+The normal-FIFO app build took74.042 seconds, succeeded with
+`SHARPEMU_MAC_GET_TASK_ALLOW=1`, and passed deep/strict code-signature verification.
+Get-task-allow is true;255 payload hashes are saved in`prototype-bundle.json`.
+The original751c2b9cf bundle is retained separately for failure reproduction.
+
+| Revised-source suite | Passed | Failed | Skipped |
+|---|---:|---:|---:|
+| Focused device/ordering | 25 | 0 | 0 |
+| Metal | 1,428 | 1 | 7 |
+| Libs | 8,618 | 6 | 5 |
+| ShaderCompiler | 2,134 | 0 | 1 |
+| ShaderCompiler.Metal | 3,162 | 0 | 0 |
+
+The remaining Metal failure is the exact base lossy-texture assertion. Libs has
+the six exact documented base failures. All five result signatures match the
+built source; no run aborted and no unexpected failure was accepted. Device
+flags, serial shader settings and blame120s/mini options are retained in the
+per-suite summaries/TRX paths. Own `artifacts/bin`, `artifacts/obj` were removed
+after this second full validation/package; no `.packages` existed. Signed bundles
+and runtime evidence remain available.
+
+The queued formal alternating series is the successful recent exact-main
+`basecheck`, revised K4 `opt1`, exact-main `base2`, revised K4 `opt2`. Both arms
+use budget0 and overlay1; no renderer quality/memory setting was reduced.
+All-suite signature and successful signed-bundle markers gate the optimized
+runs, while predecessor success gates each arm. Runtime measurements and end
+screenshot inspections still remain to complete.

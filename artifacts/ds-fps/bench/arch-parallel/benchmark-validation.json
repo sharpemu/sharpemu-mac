@@ -1,11 +1,11 @@
 {
-  "sourceSha256": "3929f87e750903e303c11e9b166b7ec370e0cdcf75efb4863d2540fec0dd2f5a",
+  "sourceSha256": "86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0",
   "suites": {
     "ordering": {
       "counters": {
-        "total": "24",
-        "executed": "24",
-        "passed": "24",
+        "total": "25",
+        "executed": "25",
+        "passed": "25",
         "failed": "0",
         "error": "0",
         "timeout": "0",
@@ -21,14 +21,14 @@
         "pending": "0"
       },
       "knownBaseFailures": [],
-      "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/ordering/20261024T143608607727Z/ordering.trx"
+      "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/ordering/20261024T195203656878Z/ordering.trx"
     },
     "metal": {
       "counters": {
-        "total": "1435",
-        "executed": "1428",
-        "passed": "1424",
-        "failed": "4",
+        "total": "1436",
+        "executed": "1429",
+        "passed": "1428",
+        "failed": "1",
         "error": "0",
         "timeout": "0",
         "aborted": "0",
@@ -43,12 +43,9 @@
         "pending": "0"
       },
       "knownBaseFailures": [
-        "SharpEmu.Gpu.Metal.Tests.MetalGuestViewTests.AScatteredRangePastTheRingCapIsReadWholeThroughAGuestView",
-        "SharpEmu.Gpu.Metal.Tests.MetalGuestViewTests.AnUnmapDropsTheViewAndTheNextBindReadsTheNewMapping",
-        "SharpEmu.Gpu.Metal.Tests.MetalGuestViewTests.ScatteredReadsLeaveTheStagedCacheAndTheRingEmpty",
         "SharpEmu.Gpu.Metal.Tests.MetalLossyTextureTests.ASampledImageIsExactByDefaultAndLossyWithTheFlagOn"
       ],
-      "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/metal/20261024T143617550564Z/metal.trx"
+      "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/metal/20261024T195335772075Z/metal.trx"
     },
     "libs": {
       "counters": {
@@ -77,7 +74,7 @@
         "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.InsertqSigillReadsSourceXmmThroughTheBridge",
         "SharpEmu.Libs.Tests.Loader.RosettaVectorStorePatchTests.RosettaSplitsStoresWithoutRedZoneUseAndPreservesAllBytes"
       ],
-      "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/libs/20261024T143722803582Z/libs.trx"
+      "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/libs/20261024T195428053959Z/libs.trx"
     },
     "shader": {
       "counters": {
@@ -99,7 +96,7 @@
         "pending": "0"
       },
       "knownBaseFailures": [],
-      "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/shader/20261024T143818888779Z/shader.trx"
+      "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/shader/20261024T201104660443Z/shader.trx"
     },
     "msl": {
       "counters": {
@@ -121,7 +118,7 @@
         "pending": "0"
       },
       "knownBaseFailures": [],
-      "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/msl/20261024T143844337277Z/msl.trx"
+      "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/msl/20261024T201248078397Z/msl.trx"
     }
   }
 }

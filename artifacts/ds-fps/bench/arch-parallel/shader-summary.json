@@ -1,6 +1,6 @@
 {
   "rc": 0,
-  "sourceSha256": "3929f87e750903e303c11e9b166b7ec370e0cdcf75efb4863d2540fec0dd2f5a",
+  "sourceSha256": "86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0",
   "command": [
     "/Users/xnetcat/.dotnet-x64/dotnet",
     "test",
@@ -14,7 +14,7 @@
     "--blame-hang-dump-type",
     "mini",
     "--results-directory",
-    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/shader/20261024T143818888779Z",
+    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/shader/20261024T201104660443Z",
     "--logger",
     "trx;LogFileName=shader.trx",
     "-p:RestorePackagesPath=/Users/xnetcat/.nuget/sharpemu-shared",
@@ -24,7 +24,7 @@
     "/Users/xnetcat/Projects/sharpemu/sharpemu-mac/artifacts/ds-fps/shader-serial.runsettings"
   ],
   "requireDevice": null,
-  "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/shader/20261024T143818888779Z/shader.trx",
+  "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/shader/20261024T201104660443Z/shader.trx",
   "counters": {
     "total": "2135",
     "executed": "2134",

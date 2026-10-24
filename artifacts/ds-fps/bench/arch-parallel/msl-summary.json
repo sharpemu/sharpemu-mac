@@ -1,6 +1,6 @@
 {
   "rc": 0,
-  "sourceSha256": "3929f87e750903e303c11e9b166b7ec370e0cdcf75efb4863d2540fec0dd2f5a",
+  "sourceSha256": "86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0",
   "command": [
     "/Users/xnetcat/.dotnet-x64/dotnet",
     "test",
@@ -14,7 +14,7 @@
     "--blame-hang-dump-type",
     "mini",
     "--results-directory",
-    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/msl/20261024T143844337277Z",
+    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/msl/20261024T201248078397Z",
     "--logger",
     "trx;LogFileName=msl.trx",
     "-p:RestorePackagesPath=/Users/xnetcat/.nuget/sharpemu-shared",
@@ -22,7 +22,7 @@
     "-p:UseSharedCompilation=false"
   ],
   "requireDevice": "1",
-  "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/msl/20261024T143844337277Z/msl.trx",
+  "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/msl/20261024T201248078397Z/msl.trx",
   "counters": {
     "total": "3162",
     "executed": "3162",

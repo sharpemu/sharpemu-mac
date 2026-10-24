@@ -1,0 +1,10 @@
+{
+  "step": "app-prototype3",
+  "command": [
+    "python3",
+    "artifacts/ds-fps/bench/arch-parallel/prototype-app.py"
+  ],
+  "cwd": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel",
+  "seconds": 74.04196119308472,
+  "rc": 0
+}
