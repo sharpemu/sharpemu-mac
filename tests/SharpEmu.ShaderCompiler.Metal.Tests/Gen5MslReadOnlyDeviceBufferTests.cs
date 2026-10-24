@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
@@ -91,5 +92,77 @@ public sealed class Gen5MslReadOnlyDeviceBufferTests
         Assert.NotEmpty(plan.Info.Buffers);
         Assert.False(plan.Info.ReadOnlyDeviceBuffers);
         Assert.Contains(plan.Info.Buffers, buffer => buffer.Written);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ADescriptorLoadedFromAPointerTableUsesTheCapturedWords(bool enabled)
+    {
+        var program = new Gen5ShaderProgram(0x2000, [
+            new(0, Gen5ShaderEncoding.Smem, "SLoadDwordx4", [0u, 0u],
+                [Gen5Operand.Scalar(0), Gen5Operand.Source(125)],
+                [Gen5Operand.Scalar(8), Gen5Operand.Scalar(9), Gen5Operand.Scalar(10), Gen5Operand.Scalar(11)],
+                new Gen5ScalarMemoryControl(4, 0, null)),
+            new(8, Gen5ShaderEncoding.Smem, "SBufferLoadDword", [0u, 0u],
+                [Gen5Operand.Scalar(8), Gen5Operand.Source(125)], [Gen5Operand.Scalar(20)],
+                new Gen5ScalarMemoryControl(1, 0, null)),
+            new(16, Gen5ShaderEncoding.Vop1, "VMovB32", [0u], [Gen5Operand.Scalar(20)], [Gen5Operand.Vector(1)], null),
+            new(20, Gen5ShaderEncoding.Vop1, "VMovB32", [0u], [Gen5Operand.Source(128)], [Gen5Operand.Vector(2)], null),
+            new(24, Gen5ShaderEncoding.Ds, "DsWriteB32", [0u],
+                [Gen5Operand.Vector(2), Gen5Operand.Vector(1)], [], new Gen5DataShareControl(0, 0, true)),
+            new(28, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000u], [], [], null),
+        ]);
+        var data = new byte[1 << 14];
+        BinaryPrimitives.WriteUInt32LittleEndian(data, 0x12345678u);
+        uint[] descriptor = [(uint)GuestBase, 0, 8, DescriptorConstants.IdentityDestinationSelect | (20u << 12) | (3u << 28)];
+        MemoryMarshal.AsBytes(descriptor.AsSpan()).CopyTo(data.AsSpan(0x100));
+        var words = new uint[16];
+        words[0] = (uint)GuestBase + 0x100;
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address < GuestBase || address - GuestBase > (ulong)data.Length - 4) return false;
+            word = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan((int)(address - GuestBase)));
+            return true;
+        }
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 0xB1ADCAFE, 0, 16, readOnlyDeviceBuffers: enabled);
+        var inputs = new ResourceRuntimeInputs { UserData = words, ReadMemory = Read };
+        var specialization = ResourceSpecialization.Default(plan.Info);
+        ResourceSnapshot snapshot = null!;
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.Equal(descriptor, snapshot.Buffers[0]);
+        Assert.NotEmpty(snapshot.FlattenedResourceTable);
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 16),
+            true, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false, 0);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, WaveSize = 32 };
+        Assert.Equal(enabled, resources.Info.ReadOnlyDeviceBuffers);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        if (!MetalNative.IsAvailable)
+        {
+            Assert.NotEqual("1", Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE"));
+            return;
+        }
+        // The later live table no longer describes the captured issue. Neither path may
+        // observe it: the descriptor comes from the immutable flattened table instead.
+        data.AsSpan(0x100, 16).Clear();
+        var (mapping, _) = MetalNative.CreateGuestMapping(GuestBase, data, 8);
+        var flat = MetalNative.CreateTable(DescriptorBindingKind.FlattenedResourceTable,
+            MemoryMarshal.AsBytes(snapshot.FlattenedResourceTable.AsSpan()).ToArray(), (uint)snapshot.FlattenedResourceTable.Length);
+        var output = MetalNative.CreateTable(DescriptorBindingKind.GlobalDataShare, new byte[16], 4);
+        var push = new byte[PushData.ByteSize];
+        for (var i = 0; i < layout.UserDataRegisters.Count; i++)
+            BinaryPrimitives.WriteUInt32LittleEndian(push.AsSpan((int)(layout.PushDataStartDword + i) * 4), words[layout.UserDataRegisters[i]]);
+        if (enabled)
+            BinaryPrimitives.WriteUInt32LittleEndian(push.AsSpan((int)(layout.PushDataStartDword + layout.FirstBufferWordDword()) * 4), 8);
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out error), error);
+        try
+        {
+            Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, data[..8], push,
+                shader.ArgumentLayout!, 1, out _, out _, out error, tables: [.. mapping, flat, output]), error);
+            Assert.Equal(0x12345678u, MetalNative.ReadWords(output.Buffer, 1)[0]);
+        }
+        finally { MetalNative.ReleaseCollisionLibrary(library); }
     }
 }

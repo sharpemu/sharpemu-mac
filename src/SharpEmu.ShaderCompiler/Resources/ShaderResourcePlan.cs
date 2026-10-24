@@ -184,7 +184,7 @@ public sealed class ShaderResourcePlan
         // with any buffer store retains the complete ordinary binding path.
         if (readOnlyDeviceBuffers && plan.Info.Buffers.Count != 0 &&
             plan.Info.Buffers.All(buffer => !buffer.Written) && plan.BufferCandidateTables.Count == 0 &&
-            program.FunctionBufferAccesses.Count == 0)
+            program.FunctionBufferAccesses.Count == 0 && plan.BufferDescriptorLoadsAreEmitted())
         {
             plan.Info.ReadOnlyDeviceBuffers = true;
             plan.Info.UsesDeviceAddresses = true;
@@ -263,6 +263,24 @@ public sealed class ShaderResourcePlan
         plan.WrittenRangeSlotByHandle = writtenSlots;
         plan.DeviceDataSlots = plan.FindDeviceDataSlots();
         return plan;
+    }
+
+    private bool BufferDescriptorLoadsAreEmitted()
+    {
+        var pending = new Stack<ScalarValue>();
+        foreach (var buffer in Info.Buffers)
+            foreach (var dword in DescriptorSources[(int)buffer.Source].Dwords) pending.Push(dword);
+        var seen = new HashSet<ScalarValue>(ReferenceEqualityComparer.Instance);
+        while (pending.TryPop(out var value))
+        {
+            if (!seen.Add(value)) continue;
+            // A flattened slot is assigned into the original load's SGPR by codegen.
+            if (value.Kind == ScalarValueKind.ResourceTableWord) continue;
+            if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord &&
+                (value.MemoryIndex >= Memory.Count || Memory[value.MemoryIndex].PlanningOnly)) return false;
+            foreach (var operand in value.Operands) pending.Push(operand);
+        }
+        return true;
     }
 
     // The first flattened slot no descriptor depends on (ResourceTableReadPlanner's data reads).
