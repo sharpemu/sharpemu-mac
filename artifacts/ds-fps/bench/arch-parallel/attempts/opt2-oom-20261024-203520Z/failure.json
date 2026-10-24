@@ -1,0 +1,18 @@
+{
+  "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-222955-ds-arch-parallel-opt2",
+  "source": "c9598a26304da5db2d5a73c813986ac39864161c",
+  "excludedFromAB": true,
+  "reason": "OOM guard killed PID14903 at local22:35:20 after two consecutive5percent-free samples; HUD173.15s,only~77s in-world,no end marker.",
+  "guardEvidence": [
+    "22:35:18 pid=14903 level=2 free=5% swap_used=8268M",
+    "22:35:20 pid=14903 level=2 free=5% swap_used=8311M",
+    "22:35:20 KILL pid=14903"
+  ],
+  "peakFootprintMb": 14153,
+  "actualGameLoadSamples": 25,
+  "actualGameBuildTestAlerts": 0,
+  "lastScreenshot": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-222955-ds-arch-parallel-opt2/shot-0245.png",
+  "lastScreenshotSha256": "1114165caa1c6fd6df29a7d0474f78cd5881f82204e49172090ceacef1eb6a2d",
+  "inspected": true,
+  "observation": "Expected scene, armour, tunnel, foliage, lighting and HUD. No completed end-window comparison. Small-batch correction did not eliminate the optimized memory-pressure termination."
+}

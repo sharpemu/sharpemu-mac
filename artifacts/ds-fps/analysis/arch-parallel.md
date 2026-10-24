@@ -622,3 +622,20 @@ samples were539-584MiB, lower than revised opt1's1,419-1,698MiB. The controls
 span1.472-1.602fps; the first optimized1.531fps lies within that variation.
 A performance verdict awaits the final optimized arm, which is queued/running
 with the same settings and load-wait policy.
+
+
+The revised `opt2` attempt (`20261024-222955-ds-arch-parallel-opt2`) failed
+the OOM guard at local22:35:20, PID14903, after two consecutive5%-free samples.
+Actual HUD was173.15 seconds and only~77 seconds in-world completed, so there is
+no end marker/full measurement window. Peak footprint14,153MB; app137/wrapper3.
+Its last screenshot (`shot-0245.png`) was opened and showed the expected scene
+and HUD. This attempt is excluded from the complete-window timing comparison
+and preserved in`attempts/opt2-oom-20261024-203520Z`; its failure is retained as
+a reliability/memory result. The small-batch correction demonstrably did not
+eliminate the memory-pressure failure. Owner and child autorelease pools and
+retains/releases were checked without finding an unbalanced ownership path;
+the source of the additional graphics-object charge is unresolved.
+
+An unchanged final-arm retry is queued after pressure recovery to obtain the
+required second complete optimized sample. No settings/worker count/source
+changes are made, the guard remains active, and default-off is retained.
