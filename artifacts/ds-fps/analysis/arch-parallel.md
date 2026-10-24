@@ -436,3 +436,11 @@ skip40 analysis. Their live FIFO entries are preserved behind the user's
 `int3-user-gui` lock. They must not launch while that lock remains held.
 No optimization FPS, A/B conclusion or rendering-equivalence claim is available
 until those runs complete and their final screenshots have been inspected.
+
+
+Completed validation outputs `artifacts/bin`, `artifacts/obj` and the isolated
+base's corresponding directories were removed after saving the results. There
+was no `.packages` directory. Signed game bundles, own data root and evidence
+remain available to the queued runs. Their helper saves skip40 summaries after
+each successful run; final screenshot inspection and A/B interpretation remain
+required.

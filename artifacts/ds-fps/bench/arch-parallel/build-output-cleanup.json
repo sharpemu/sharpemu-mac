@@ -1,0 +1,10 @@
+{
+  "atUtc": "2026-10-24T14:43:09.314029+00:00",
+  "removedOwnedPaths": [
+    "artifacts/bin",
+    "artifacts/obj",
+    "artifacts/arch-parallel-base-validation/artifacts/bin",
+    "artifacts/arch-parallel-base-validation/artifacts/obj"
+  ],
+  "preserved": "signed game bundles, data root, logs, summaries, TRX files and active game-run waiters"
+}

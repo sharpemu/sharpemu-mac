@@ -77,5 +77,12 @@ while p.poll() is None:
     time.sleep(2)
 rc=p.wait()
 if run is None or not (run/'markers.tsv').exists() or '\tend' not in (run/'markers.tsv').read_text():rc=3
+if rc==0:
+    summary=subprocess.run([sys.executable,str(OUT/'summarize.py'),str(run),'40'],cwd=WT,text=True,capture_output=True)
+    if summary.returncode==0:
+        (OUT/(arm+'-summary.json')).write_text(summary.stdout)
+    else:
+        print('Invalid skip40 measurement:',summary.stderr,flush=True)
+        rc=4
 print('RUN',str(run),'RC',rc,flush=True)
 sys.exit(rc)
