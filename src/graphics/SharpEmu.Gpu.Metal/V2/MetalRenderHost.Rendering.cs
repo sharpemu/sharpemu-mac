@@ -556,6 +556,10 @@ internal sealed partial class MetalRenderHost
                 SelSetColorStoreAction,
                 discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore,
                 (nuint)index);
+            if (PassProfileEnabled && PassDetailPath is not null)
+            {
+                DetailStoreAction($"c{index}", discard);
+            }
             if (discard)
             {
                 _discardedBytes += AttachmentBytes(
@@ -575,6 +579,10 @@ internal sealed partial class MetalRenderHost
                 _renderEncoder,
                 SelSetDepthStoreAction,
                 discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore);
+            if (PassProfileEnabled && PassDetailPath is not null)
+            {
+                DetailStoreAction("depth", discard);
+            }
             if (discard)
             {
                 _discardedBytes += AttachmentBytes(in open, _passDepthTexelBytes);
@@ -592,6 +600,10 @@ internal sealed partial class MetalRenderHost
                 _renderEncoder,
                 SelSetStencilStoreAction,
                 discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore);
+            if (PassProfileEnabled && PassDetailPath is not null)
+            {
+                DetailStoreAction("stencil", discard);
+            }
             if (discard)
             {
                 _discardedBytes += AttachmentBytes(in open, 1);

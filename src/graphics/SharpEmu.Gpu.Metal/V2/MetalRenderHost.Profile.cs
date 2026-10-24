@@ -61,6 +61,14 @@ internal sealed partial class MetalRenderHost
             NoteDispatchState(entry, kind, shape);
         }
 
+        if (MetalShaderProfile.Enabled && MetalShaderProfile.SplitEncoders && MetalShaderProfile.Active)
+        {
+            // Stage timestamps now enclose one work item, without per-item command
+            // buffer commits or waits. Render attachment traffic is still inflated.
+            EndEncoders(PassEndCause.Other);
+            return;
+        }
+
         ProfileCommandBuffer(kind, entry.Profile ?? "stage=?", shape);
     }
 
@@ -153,7 +161,7 @@ internal sealed partial class MetalRenderHost
 
     private void ProfileCommandBuffer(string kind, string label, WorkShape shape)
     {
-        if (!MetalShaderProfile.Enabled)
+        if (!MetalShaderProfile.Enabled || !MetalShaderProfile.Active || MetalShaderProfile.SplitEncoders)
         {
             return;
         }
@@ -192,6 +200,11 @@ internal sealed partial class MetalRenderHost
         var start = MetalNative.SendDouble(buffer, SelGpuStartTime);
         var end = MetalNative.SendDouble(buffer, SelGpuEndTime);
         MetalShaderProfile.Note(key, detail, Math.Max(end - start, 0.0));
+        if (PassDetailPath is not null)
+        {
+            WritePassDetail(new { type = "work", frame = _ppFrame, key, shape = detail, start, end,
+                milliseconds = Math.Max(end - start, 0.0) * 1000.0 });
+        }
     }
 
     private long _profileTransfers;
@@ -200,7 +213,7 @@ internal sealed partial class MetalRenderHost
     /// so a slow sample can be told apart from a slow tiler run sharing the buffer.</summary>
     private void NoteProfileTransfer()
     {
-        if (MetalShaderProfile.Enabled)
+        if (MetalShaderProfile.Enabled && MetalShaderProfile.Active)
         {
             Interlocked.Increment(ref _profileTransfers);
         }
@@ -227,8 +240,43 @@ internal static class MetalShaderProfile
     private static bool _exitHooked;
     private static int _failureDetails;
 
-    public static readonly bool Enabled = string.Equals(
+    private static readonly string? Trigger =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PROFILE_SHADERS_TRIGGER");
+    private static readonly int CaptureFrames = int.TryParse(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PROFILE_SHADERS_FRAMES"), out var frames)
+        && frames > 0 ? frames : 4;
+    public static readonly bool Enabled = Trigger is not null || string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PROFILE_SHADERS"), "1", StringComparison.Ordinal);
+    public static readonly bool SplitEncoders = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PROFILE_SHADER_ENCODERS"), "1", StringComparison.Ordinal)
+        && MetalRenderHost.PassProfileEnabled;
+    public static bool Active { get; private set; } = Enabled && Trigger is null;
+    private static int _framesLeft;
+    private static bool _triggered;
+
+    // Poll once per presented frame, never on the default draw path. Activation and
+    // completion are at frame boundaries so cumulative reports have exact windows.
+    public static void OnPresent(int nextFrame)
+    {
+        if (Trigger is null)
+        {
+            return;
+        }
+
+        if (Active && --_framesLeft == 0)
+        {
+            Active = false;
+            Report("window-end");
+            Console.Error.WriteLine($"[METAL-V2][SHADER-WINDOW] end next_f={nextFrame}");
+        }
+        else if (!_triggered && File.Exists(Trigger))
+        {
+            _triggered = true;
+            Active = true;
+            _framesLeft = CaptureFrames;
+            Console.Error.WriteLine($"[METAL-V2][SHADER-WINDOW] start f={nextFrame} frames={CaptureFrames} mode={(SplitEncoders ? "encoder" : "command-buffer")}");
+        }
+    }
 
     /// <summary>How many entries one report prints (SHARPEMU_METAL_V2_PROFILE_TOP).</summary>
     private static readonly int _topCount =

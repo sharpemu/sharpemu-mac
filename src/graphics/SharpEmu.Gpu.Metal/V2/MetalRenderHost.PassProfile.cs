@@ -58,6 +58,8 @@ internal sealed partial class MetalRenderHost
         public int Buffer;
         public int FirstSample;
         public int SampleCount;
+        public bool Isolated;
+        public List<PassAttachment>? Attachments;
     }
 
     private sealed class PassSubmission
@@ -130,6 +132,21 @@ internal sealed partial class MetalRenderHost
             _ppUnavailable = true;
             Console.Error.WriteLine("[METAL-V2][PASS-PROF] the device has no timestamp counter set.");
             return false;
+        }
+
+        if (PassDetailPath is not null)
+        {
+            var names = new List<string>();
+            for (nuint index = 0; index < count; index++)
+            {
+                var set = MetalNative.SendAtIndex(sets, SelObjectAtIndex, index);
+                var name = MetalNative.Send(set, MetalNative.Selector("name"));
+                names.Add(Marshal.PtrToStringUTF8(MetalNative.Send(name, MetalNative.Selector("UTF8String"))) ?? "?");
+            }
+
+            WritePassDetail(new { type = "capabilities", counterSets = names,
+                samplingPoints = Enumerable.Range(0, 5).Select(point =>
+                    MetalNative.SendBool(_device, MetalNative.Selector("supportsCounterSampling:"), (nint)point)).ToArray() });
         }
 
         PassProfileCalibrate();
@@ -228,6 +245,7 @@ internal sealed partial class MetalRenderHost
             Buffer = _ppCursorBuffer,
             FirstSample = _ppNextSample,
             SampleCount = samples,
+            Isolated = MetalShaderProfile.Active,
         };
         _ppNextSample += samples;
         _ppOutstanding[_ppCursorBuffer]++;
@@ -312,6 +330,10 @@ internal sealed partial class MetalRenderHost
         record.Shape = builder.ToString();
         record.LoadBytes = loadBytes;
         record.StoreBytes = storeBytes;
+        if (PassDetailPath is not null)
+        {
+            DescribePassAttachments(record, in state);
+        }
     }
 
     /// <summary>Opens a sampled compute encoder, or returns 0 to let the caller open a plain one.</summary>
@@ -412,6 +434,11 @@ internal sealed partial class MetalRenderHost
     /// <summary>The submission is being committed; its records wait for it to complete.</summary>
     private void PassProfileCommit(ulong serial, bool present)
     {
+        if (present && MetalShaderProfile.Enabled)
+        {
+            MetalShaderProfile.OnPresent(_ppFrame + 1);
+        }
+
         if (!PassProfileEnabled)
         {
             return;
@@ -449,16 +476,6 @@ internal sealed partial class MetalRenderHost
         if (!completed)
         {
             // Not finished: its sample buffers may still be written, so they are not reused.
-            return;
-        }
-
-        if (!completed)
-        {
-            foreach (var record in submission.Records)
-            {
-                _ppOutstanding[record.Buffer]--;
-            }
-
             return;
         }
 
@@ -514,6 +531,18 @@ internal sealed partial class MetalRenderHost
             {
                 firstStart = Math.Min(firstStart, start);
                 lastEnd = Math.Max(lastEnd, end);
+            }
+
+            if (PassDetailPath is not null)
+            {
+                WritePassDetail(new { type = "encoder", frame = record.Frame, serial, index = record.Index,
+                    kind = record.Kind, isolated = record.Isolated, microseconds,
+                    vertexMicroseconds = record.SampleCount == 4 ? StageMicroseconds(values[0], values[1]) : 0,
+                    fragmentMicroseconds = record.SampleCount == 4 ? StageMicroseconds(values[2], values[3]) : 0,
+                    timestamps = values.Take(record.SampleCount).ToArray(), nsPerTick = _ppNsPerTick,
+                    valid = end > start && start != ulong.MaxValue, draws = record.Draws, groups = record.Groups,
+                    shape = record.Shape, end = record.End, shaders = record.Shaders,
+                    attachments = record.Attachments, after = record.After });
             }
 
             sum += microseconds;
