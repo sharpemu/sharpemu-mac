@@ -57,7 +57,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private bool TryJoinDepthOnly(in RenderingState state, MetalPipelineEntry? upcoming)
     {
-        if (!MetalV2Diagnostics.JoinDepthOnlyDraws || upcoming is null || !_renderingActive || _renderEncoder == 0)
+        if (_parallelRenderEncoder != 0 || !MetalV2Diagnostics.JoinDepthOnlyDraws || upcoming is null || !_renderingActive || _renderEncoder == 0)
         {
             return false;
         }

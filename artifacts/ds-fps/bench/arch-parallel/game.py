@@ -2,6 +2,13 @@ import os,sys,json,subprocess,pathlib,time,re
 WT=pathlib.Path(__file__).resolve().parents[4]
 OUT=WT/'artifacts/ds-fps/bench/arch-parallel'
 arm=sys.argv[1]
+previous={'opt1':'base1','base2':'opt1','opt2':'base2'}.get(arm)
+if previous:
+    prior=json.loads((OUT/(previous+'-result.json')).read_text())
+    assert prior['rc']==0,'A/B requires the previous arm to complete successfully.'
+if arm in ('opt1','base2','opt2'):
+    from benchmark_validation import require_ready
+    require_ready(OUT)
 bundle=WT/('artifacts/base-macos/SharpEmu.app' if arm.startswith('base') else f'artifacts/{arm}-macos/SharpEmu.app' if arm.startswith('census') else 'artifacts/macos/SharpEmu.app')
 if arm.startswith('census') and not bundle.exists():
     expected=(OUT/(arm+'-source.txt')).read_text().strip()

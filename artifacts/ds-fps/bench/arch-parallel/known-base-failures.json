@@ -1,0 +1,19 @@
+{
+  "base": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+  "evidence": "/Users/xnetcat/Projects/sharpemu/sharpemu-mac/artifacts/ds-fps/analysis/v3-resmat.md#verification-and-exact-base-failures",
+  "failures": {
+    "metal": [
+      "SharpEmu.Gpu.Metal.Tests.MetalLossyTextureTests.ASampledImageIsExactByDefaultAndLossyWithTheFlagOn"
+    ],
+    "libs": [
+      "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.InsertInstructionPreservesOtherVectorRegisters",
+      "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.ExtrqSigillRoundTripsXmmThroughTheBridge",
+      "SharpEmu.Libs.Tests.Cpu.ImportResultLoggingTests.RepeatedImportFailuresAreSampledPerImportAndResult",
+      "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.ExtractSignalPreservesLivePointerAndOtherVectorRegisters",
+      "SharpEmu.Libs.Tests.Cpu.Sse4aPosixSignalRecoveryTests.InsertqSigillReadsSourceXmmThroughTheBridge",
+      "SharpEmu.Libs.Tests.Loader.RosettaVectorStorePatchTests.RosettaSplitsStoresWithoutRedZoneUseAndPreservesAllBytes"
+    ],
+    "shader": [],
+    "msl": []
+  }
+}

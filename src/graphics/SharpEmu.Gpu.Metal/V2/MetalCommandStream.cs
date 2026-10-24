@@ -52,8 +52,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     ICpuMemory ICommandStreamHost.Memory => _memory;
 
+    public void ExecuteGuestMemoryOperation(Action operation, string kind = "MEMORY_OPERATION",
+        ulong address = 0, ulong bytes = 0, ulong value = 0)
+    {
+        FlushParallelDraws();
+        operation();
+    }
+
     public void RunPendingCommands()
     {
+        if (_relay.HasPendingCommands) FlushParallelDraws();
         if (_batchCensus is not null && _relay.HasPendingCommands)
         {
             _batchCensus.Close(MetalBatchCensus.Cut.Relay);
@@ -63,6 +71,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
     {
+        FlushParallelDraws();
         _batchCensus?.Close(MetalBatchCensus.Cut.Submission);
         _submissionsStarted++;
         CommitCoalescedIfOverdue();
@@ -273,6 +282,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // the label whenever the GPU could not write it.
     public void RecordEndOfPipe(in EndOfPipeWrite write)
     {
+        FlushParallelDraws();
         using var endOfPipeScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandEndOfPipe);
         _endOfPipeRecords++;
@@ -745,6 +755,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
     {
+        FlushParallelDraws();
         if (source.IsEmpty)
         {
             return;
@@ -989,6 +1000,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source, string kind = "WRITE_BYTES")
     {
+        FlushParallelDraws();
         _ = kind;
         _cpOverlay.Forget(address, (ulong)source.Length);
         _labelOverlay.Forget(address, (ulong)source.Length);
@@ -1011,6 +1023,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <summary>A DMA fill of guest memory that lands in record order with the labels.</summary>
     public void FillBufferInOrder(ulong address, ulong size, uint value)
     {
+        FlushParallelDraws();
         if (size == 0)
         {
             return;
@@ -1031,6 +1044,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <summary>A DMA copy between guest ranges that lands in record order with the labels.</summary>
     public void CopyBufferInOrder(ulong destination, ulong source, ulong size)
     {
+        FlushParallelDraws();
         if (size != 0)
         {
             CopyGuestMemory(destination, source, size, allowHost: false);
@@ -1875,6 +1889,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         try
         {
             CaptureFlip(handle, index, requestId, flipMode, flipArgument);
+            ReportParallelEncode();
         }
         catch
         {

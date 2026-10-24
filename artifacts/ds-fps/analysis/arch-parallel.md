@@ -4,8 +4,9 @@ Branch: `ds-fps-arch-parallel`. Base: `main` / `bdc7ea28c8e7df0b8753966d8ba1881f
 Worktree: `/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel`.
 
 Phase1 dependency analysis and the base-path in-world batch census are complete.
-The opt-in native-encoding prototype is applied but unbuilt/unvalidated; game A/B
-and the final verdict remain pending. No measured prototype speedup is claimed.
+The opt-in native-encoding prototype builds and passes all 24 focused device/ordering
+tests. The full suites, game A/B and final verdict are in progress. No measured
+prototype speedup is claimed. Guest preparation remains ordered in this prototype.
 
 ## Hard limits and proposed partition
 
@@ -332,3 +333,43 @@ showed the GPU worker waiting for GC; it does not establish the cause of the
 stall. The final PERF interval instead charged 202,889 ms of its 203 seconds to
 worker idle, so it is not evidence of a 203-second worker GC pause. All 27 process-sampler windows had no detected competing build/test activity, and its last screenshot was black with the overlay title bar present. The second diagnostic adds a separate symbolic-table opportunity census
 at clean source `888a006c2` (including separate graphics/compute histograms and nonempty-cut counts).
+
+
+## Implemented prototype boundary and ordering validation
+
+`MetalRenderHost.ParallelEncode.cs` captures at most 64 fully prepared native draws,
+retains their native resources, and partitions them into contiguous chunks. It
+creates `MTLParallelRenderCommandEncoder` children in guest order before waking
+K persistent workers. Each child owns its encoder and declares the captured union
+of resource residency. Every chunk joins before input reuse, parent completion or
+exception propagation. Capacity batches with at least `min(8*K,64)` draws use K
+workers; smaller batches run on the owner. The existing owner still interprets
+guest memory, materializes resources, allocates argument/push storage and resolves
+pipelines. Compute remains ordered. This is a working prototype of the native
+encoding portion, **not the complete requested parallel resource-preparation
+pipeline**. The dependencies above remain prerequisites for that larger change.
+
+Eligibility rejects unbounded device-address stores, writable/atomic buffers,
+storage images, GDS, scratch, mesh/rectangle launch variants and unsupported
+dynamic depth/bias behavior. Mip-statistics min/add atomics are private and
+commutative. Barriers end the whole parent pass: ordering child creation does not
+replace an interstage memory barrier. CP writes, DMA/fills, labels/EOP, submission
+changes, relay work, arbitrary guest-memory callbacks and CPU-visible wait polls
+drain queued native work before their effects. Shader/image/materialization caches
+and staging allocation remain owned by the original thread; they are not shared
+unsafely or wrapped in new worker-wide locks.
+
+`MetalParallelBatchTests` checks contiguous partitions, actual overlap, join-before-
+reuse, failure propagation and reuse after failure, readonly eligibility and census
+cut classification. `ParallelEncodeSceneTests` compares all pixels against the
+serial path after 257 draws with changing scissors, colors and textures, while
+deliberately holding the first child until the last child ends. A second device
+scene checks draws, a cache barrier, compute buffer writes, an EOP label and a CPU
+wait, then more draws. Both require actual parallel batches; a silent fallback
+cannot satisfy the assertions. All 24 focused cases passed with
+`SHARPEMU_TEST_REQUIRE_DEVICE=1`.
+
+The user's later queue exception allows sequential builds and unit tests while
+`int3-user-gui` holds the lock. It does not allow game launches. Obsolete own
+build/test/package waiters were canceled; opt1/base2/opt2 game tags remain queued.
+The GUI process and its lock were left untouched.

@@ -21,8 +21,10 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// command translation layer requires one object for all three, which is why this
 /// type spans those files, exactly as the Vulkan <c>Presenter</c> does.
 ///
-/// Everything records on the GPU worker thread straight into the current
-/// MTLCommandBuffer. Metal binds resources per encoder while the shared executor
+/// The default path records on the GPU worker straight into the current command
+/// buffer. Experimental parallel encoding hands frozen native draw inputs to
+/// separate child encoders; guest reads, ownership, caches and allocation remain
+/// on this owner. Metal binds resources per encoder while the shared executor
 /// records them before the render pass opens, so the host buffers the pending draw
 /// state in fixed fields and applies it to the encoder at draw time. No hot path
 /// allocates.
@@ -1621,7 +1623,11 @@ internal sealed partial class MetalRenderHost :
     public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause) =>
         _imageCache.FlushGpuWrites(address, size, cause);
 
-    public void RunPendingOperations() => _relay.RunPendingCommands();
+    public void RunPendingOperations()
+    {
+        if (_relay.HasPendingCommands) FlushParallelDraws();
+        _relay.RunPendingCommands();
+    }
 
     public void SetDebugInformation(
         RecordedOperation operation,
@@ -1826,6 +1832,7 @@ internal sealed partial class MetalRenderHost :
 
     public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination, bool commitPendingWrite)
     {
+        FlushParallelDraws();
         if (destination.IsEmpty)
         {
             return true;
@@ -2560,6 +2567,7 @@ internal sealed partial class MetalRenderHost :
             _labelBarrierEvent = 0;
         }
 
+        _parallelWorkers?.Dispose();
         _completions.Dispose();
         DisposeHostMovie();
         DisposeBindlessImages();

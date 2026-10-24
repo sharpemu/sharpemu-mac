@@ -1,0 +1,10 @@
+{
+  "userInstruction": "While int3-user-gui holds the lock, build and unit-test steps may run without the lock, one step at a time; no game launches; preserve game queue entries and GUI process.",
+  "observedLock": "int3-user-gui pid=56825",
+  "buildLog": "artifacts/ds-fps/bench/arch-parallel/exception-build2.log",
+  "buildExitCode": 0,
+  "buildWarnings": 197,
+  "buildErrors": 0,
+  "buildElapsedSeconds": 30.57,
+  "recordedUtc": "2026-10-24T14:37:58.020529+00:00"
+}

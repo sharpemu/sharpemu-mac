@@ -552,7 +552,7 @@ internal sealed partial class MetalRenderHost
                     _passWidths[index],
                     _passHeights[index]);
             MetalV2Native.SendSetStoreActionAtIndex(
-                _renderEncoder,
+                StoreActionEncoder,
                 SelSetColorStoreAction,
                 discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore,
                 (nuint)index);
@@ -572,7 +572,7 @@ internal sealed partial class MetalRenderHost
                     _passDepthTexture, _passDepthRealLevel, _passDepthRealLayer,
                     _passDepthWidth, _passDepthHeight);
             MetalV2Native.SendVoidValue(
-                _renderEncoder,
+                StoreActionEncoder,
                 SelSetDepthStoreAction,
                 discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore);
             if (discard)
@@ -589,7 +589,7 @@ internal sealed partial class MetalRenderHost
                     _passDepthTexture, _passDepthRealLevel, _passDepthRealLayer,
                     _passDepthWidth, _passDepthHeight);
             MetalV2Native.SendVoidValue(
-                _renderEncoder,
+                StoreActionEncoder,
                 SelSetStencilStoreAction,
                 discard ? Mtl.StoreActionDontCare : Mtl.StoreActionStore);
             if (discard)
@@ -845,7 +845,7 @@ internal sealed partial class MetalRenderHost
         // An attachment still waiting for its upload was not the open pass's target when
         // that pass began, so the pass cannot be continued: it is resolved below instead.
         var continues = !foldedClear && _pendingClears.Count == 0 && !_imageCache.HasDeferredRefreshes &&
-            CanContinuePass(in state);
+            CanContinuePass(in state) && (_parallelRenderEncoder == 0 || CanParallelPipeline(upcoming));
         if (continues && (launch is not { } requested || TryTakePreparedLaunch(requested)))
         {
             return;
@@ -1018,7 +1018,7 @@ internal sealed partial class MetalRenderHost
                 PassProfileAttachRender(descriptor);
             }
 
-            _renderEncoder = RetainEncoder(MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor));
+            _renderEncoder = RetainEncoder(NewRenderEncoder(commandBuffer, descriptor, upcoming));
             MetalMemoryTelemetry.RenderEncoders.Add();
             if (_renderEncoder == 0)
             {
@@ -1142,15 +1142,14 @@ internal sealed partial class MetalRenderHost
 
         var ending = _renderingState;
         _batchCensus?.Close(MetalBatchCensus.Cut.Pass);
-        if (_renderEncoder != 0)
+        if (_parallelRenderEncoder != 0) FlushParallelDraws(createTail: false);
+        if (_renderEncoder != 0 || _parallelRenderEncoder != 0)
         {
-            if (MetalV2Diagnostics.DeferStoreActions)
-            {
-                ResolveStoreActions(in next, hasNext);
-            }
-
-            EndAndReleaseEncoder(_renderEncoder);
+            if (MetalV2Diagnostics.DeferStoreActions) ResolveStoreActions(in next, hasNext);
+            if (_renderEncoder != 0) EndAndReleaseEncoder(_renderEncoder);
             _renderEncoder = 0;
+            if (_parallelRenderEncoder != 0) EndAndReleaseEncoder(_parallelRenderEncoder);
+            _parallelRenderEncoder = 0;
             PassProfileClose();
         }
 
@@ -1607,6 +1606,12 @@ internal sealed partial class MetalRenderHost
     public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (TryQueueParallelDraw(false, vertexCount, instanceCount, firstVertex, 0, firstInstance))
+        {
+            CountDraw(started);
+            ProfileWork(_pendingGraphicsPipeline!, "draw", WorkShape.Vertices(vertexCount, instanceCount));
+            return;
+        }
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
         if (entry.Mesh is { } mesh)
@@ -1664,6 +1669,12 @@ internal sealed partial class MetalRenderHost
             throw Fatal("An indexed draw has no bound index buffer.");
         }
 
+        if (TryQueueParallelDraw(true, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance))
+        {
+            CountDraw(started);
+            ProfileWork(_pendingGraphicsPipeline!, "draw-indexed", WorkShape.Indices(indexCount, instanceCount));
+            return;
+        }
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
         if (entry.Mesh is { } mesh)
@@ -1723,6 +1734,13 @@ internal sealed partial class MetalRenderHost
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         // The guest's argument layout is (vertexCount, instanceCount, firstVertex,
         // firstInstance), which is exactly MTLDrawPrimitivesIndirectArguments.
+        if (TryQueueParallelDraw(false, 0, 0, 0, 0, 0, arguments))
+        {
+            Interlocked.Increment(ref _indirectGpuDraws);
+            CountDraw(started);
+            ProfileWork(_pendingGraphicsPipeline!, "draw-indirect", "indirect");
+            return;
+        }
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
         if (entry.Mesh is { } mesh)
@@ -1773,6 +1791,13 @@ internal sealed partial class MetalRenderHost
 
         // The guest's argument layout is (indexCount, instanceCount, firstIndex,
         // vertexOffset, firstInstance), which is exactly MTLDrawIndexedPrimitivesIndirectArguments.
+        if (TryQueueParallelDraw(true, 0, 0, 0, 0, 0, arguments))
+        {
+            Interlocked.Increment(ref _indirectGpuDraws);
+            CountDraw(started);
+            ProfileWork(_pendingGraphicsPipeline!, "draw-indexed-indirect", "indirect");
+            return;
+        }
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
         if (entry.Mesh is { } mesh)
@@ -2232,6 +2257,13 @@ internal sealed partial class MetalRenderHost
 
     private void RecordMemoryBarrier(nuint afterStages)
     {
+        // Intrapass barriers are not fences between parallel children. Finish the
+        // whole parent, so the existing cross-pass resource ordering remains exact.
+        if (_parallelRenderEncoder != 0)
+        {
+            _parallelBarrierPassEnds++;
+            EndRendering();
+        }
         const nuint scope = Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures | Mtl.BarrierScopeRenderTargets;
         if (_renderEncoder != 0)
         {

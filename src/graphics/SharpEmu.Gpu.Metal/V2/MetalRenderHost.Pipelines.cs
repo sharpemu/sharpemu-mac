@@ -22,6 +22,7 @@ internal sealed partial class MetalRenderHost
         public ulong Id;
         public nint State;
         public bool Graphics;
+        public bool? ParallelDrawCompatible;
 
         /// <summary>See <see cref="Gen5MslShader.PersistentThreads"/>.</summary>
         public bool PersistentThreads;
