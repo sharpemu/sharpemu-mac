@@ -244,7 +244,7 @@ public sealed partial class ComputeSceneTests
     {
         using var rig = CreateRig();
         if (rig is null) return;
-        Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CONCURRENT_COMPUTE") != "0",
+        Assert.Equal(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CONCURRENT_COMPUTE") == "1",
             rig.Host.TracksComputeDependencies);
         rig.Host.ConcurrentComputeEnabled = concurrent;
         var encoder = rig.Host.EnsureComputeEncoder();

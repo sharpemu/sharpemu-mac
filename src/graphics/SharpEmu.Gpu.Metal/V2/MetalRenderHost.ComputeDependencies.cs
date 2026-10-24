@@ -10,9 +10,10 @@ namespace SharpEmu.Gpu.Metal.V2;
 
 internal sealed partial class MetalRenderHost
 {
-    // 0 restores the serial encoder and the executor's original pre/post barriers.
+    // Off by default: it measured slower in game (analysis/v3a-run.md). 1 opts in to the
+    // concurrent encoder; otherwise the serial encoder keeps the original pre/post barriers.
     internal bool ConcurrentComputeEnabled { get; set; } =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CONCURRENT_COMPUTE") != "0";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CONCURRENT_COMPUTE") == "1";
 
     public bool TracksComputeDependencies => ConcurrentComputeEnabled;
 
