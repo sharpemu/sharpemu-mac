@@ -91,6 +91,8 @@ internal sealed partial class MetalRenderHost
         }
 
         _guestMemory.PinWindows(_deviceAddressNamedWindows);
+        if (DeviceAddressBufferReuse)
+            ResolveDeviceAddressBuffers();
     }
 
     /// <summary>The windows an encoder that runs a device-address program names.</summary>
@@ -102,7 +104,10 @@ internal sealed partial class MetalRenderHost
         return string.Create(
             CultureInfo.InvariantCulture,
             $" da_misses={misses} da_learned={learned} da_named={_deviceAddressNamedWindows.Count} " +
-            $"da_named_mb={_guestMemory.WindowSetBytes(_deviceAddressNamedWindows) >> 20}");
+            $"da_named_mb={_guestMemory.WindowSetBytes(_deviceAddressNamedWindows) >> 20} " +
+            $"da_buffer_builds={Interlocked.Exchange(ref _deviceAddressBufferBuilds, 0)} " +
+            $"da_buffer_reuses={Interlocked.Exchange(ref _deviceAddressBufferReuses, 0)} " +
+            $"da_buffer_lookups={Interlocked.Exchange(ref _deviceAddressBufferLookups, 0)}");
     }
 
     // The device-address side of the [MEM] singlecopy section: the table's trap entries and the

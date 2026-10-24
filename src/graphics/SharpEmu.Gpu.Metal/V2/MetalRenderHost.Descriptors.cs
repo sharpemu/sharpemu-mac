@@ -1434,20 +1434,36 @@ internal sealed partial class MetalRenderHost
             _commandBufferReachWindows.UnionWith(named);
         }
 
-        _deviceAddressBuffers.Clear();
-        foreach (var id in named)
-        {
-            var window = _guestMemory.WindowBuffer(id);
-            if (window != 0)
-            {
-                _deviceAddressBuffers.Add(window);
-            }
-        }
+        if (DeviceAddressBufferReuse)
+            _deviceAddressBufferReuses++;
+        else
+            ResolveDeviceAddressBuffers();
 
         NameResidentBuffers(encoder, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deviceAddressBuffers), stages);
     }
 
+    // BeginDeviceAddressReach pins the table's window cuts for this submission.
+    // Resolve their buffers there once; encoder residency still accounts for every stage.
+    private static readonly bool DeviceAddressBufferReuse =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_DA_BUFFER_REUSE");
+    private long _deviceAddressBufferBuilds;
+    private long _deviceAddressBufferReuses;
+    private long _deviceAddressBufferLookups;
     private readonly List<nint> _deviceAddressBuffers = new();
+
+    private void ResolveDeviceAddressBuffers()
+    {
+        _deviceAddressBufferBuilds++;
+        _deviceAddressBuffers.Clear();
+        foreach (var id in DeviceAddressNamedWindows())
+        {
+            _deviceAddressBufferLookups++;
+            var buffer = _guestMemory.WindowBuffer(id);
+            if (buffer != 0)
+                _deviceAddressBuffers.Add(buffer);
+        }
+    }
+
     private nint[] _useResourcesScratch = new nint[64];
 
     // Names guest windows and resident shared buffers read-write on an encoder, those it has

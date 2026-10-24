@@ -327,7 +327,9 @@ internal sealed class MetalPendingWriteOverlay
     }
 
     // False only when no entry overlaps the range; true may be a collision or a long range.
-    private bool MayOverlap(ulong address, ulong size)
+    // A negative answer proves no overlay bytes are in this range without retiring
+    // entries or reading their baselines. A positive answer still needs the locked path.
+    public bool MayOverlap(ulong address, ulong size)
     {
         if (_pageFilter is null)
         {

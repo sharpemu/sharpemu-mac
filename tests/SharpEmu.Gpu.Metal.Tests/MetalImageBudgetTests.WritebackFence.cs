@@ -20,6 +20,45 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// </summary>
 public sealed partial class MetalImageBudgetTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UnrelatedStoresDoNotWaitBehindTheFenceMetadataGate(bool precise)
+    {
+        if (!RequireDevice() || Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FENCE_PAGE_FILTER") == "0") return;
+        using var rig = new Rig(Device.Value);
+        ReleaseAGpuWrittenImage(rig);
+        Assert.Equal(1, rig.Cache.FencedWritebackCount);
+        var gate = typeof(MetalImageCache).GetField("_fenceGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(rig.Cache)!;
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holder = Task.Run(() =>
+        {
+            lock (gate)
+            {
+                entered.Set();
+                Assert.True(release.Wait(TimeSpan.FromSeconds(10)));
+            }
+        });
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
+        Task<bool>? store = null;
+        try
+        {
+            store = Task.Run(() => precise
+                ? ((IGuestImageStore)rig.Cache).MarkPreciseCpuWrite(GuestBase + 0x40000, 8)
+                : ((IGuestImageStore)rig.Cache).MarkCpuWrite(GuestBase + 0x40000, 8));
+            Assert.True(store.Wait(TimeSpan.FromSeconds(2)));
+            Assert.False(store.Result);
+            Assert.Equal(1, rig.Cache.FencedWritebackCount);
+        }
+        finally
+        {
+            release.Set();
+            Assert.True(holder.Wait(TimeSpan.FromSeconds(10)));
+            if (store is not null) Assert.True(store.Wait(TimeSpan.FromSeconds(10)));
+        }
+    }
+
     [Fact]
     public void AReleasedImagesWritebackKeepsItsRangeWatchedUntilItsSubmissionCompletes()
     {

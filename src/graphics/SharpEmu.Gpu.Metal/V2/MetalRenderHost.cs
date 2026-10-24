@@ -131,6 +131,7 @@ internal sealed partial class MetalRenderHost :
         _device = device;
         _queue = queue;
         _memory = memory;
+        _labelBaselineReader = memory.TryRead;
         _backing = backing;
         _relay = relay;
         PerVertexPixelInputsSupported = SupportsApple10Features(device);
@@ -2340,8 +2341,10 @@ internal sealed partial class MetalRenderHost :
             .Append(" host_cp_writes=").Append(cpWrites.Host)
             .Append(" cp_overlay_reads=").Append(TakeOverlayReads())
             .Append(" label_overlay_hits=").Append(TakeLabelOverlayHits())
+            .Append(TakeLabelReaderCounters())
             .Append(" cp_overlay=").Append(_cpOverlay.Count)
             .Append(TakeWordLineCounters())
+            .Append(TakeResidentCompareCounters())
             .Append(" poll_flushes=").Append(TakePollFlushes())
             .Append(" transient_commits=").Append(TakeTransientCommits())
             .Append(" transient_ring_mb=").Append(Interlocked.Exchange(ref _transientCommitRingBytes, 0) / (1024 * 1024))

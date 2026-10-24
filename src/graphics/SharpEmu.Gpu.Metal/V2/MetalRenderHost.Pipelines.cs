@@ -1781,24 +1781,55 @@ internal sealed partial class MetalRenderHost
     // Ranges closer than this share one ownership and overlay test in TryCompareResidentGuestBytes.
     private const ulong CompareClusterGapBytes = 16 * 1024;
 
+    // Labels elsewhere do not affect these bytes. Keep the ordinary reader for any
+    // cluster whose pages may hold one, including page-filter collisions.
+    internal bool CompareLabelRangesEnabled { get; set; } =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOURCE_COMPARE_LABEL_RANGES");
+    private long _residentCompareCalls;
+    private long _residentCompareHits;
+    private long _residentCompareLabelSafe;
+    private long _residentCompareLabelRefused;
+    private long _residentCompareOwnershipRefused;
+    private long _residentCompareAliasRefused;
+    private long _residentCompareChanged;
+    private long _residentCompareInvalid;
+    private long _residentCompareReleased;
+
+    private string TakeResidentCompareCounters() =>
+        $" rescmp_calls={Interlocked.Exchange(ref _residentCompareCalls, 0)}" +
+        $" rescmp_hits={Interlocked.Exchange(ref _residentCompareHits, 0)}" +
+        $" rescmp_label_safe={Interlocked.Exchange(ref _residentCompareLabelSafe, 0)}" +
+        $" rescmp_label_refused={Interlocked.Exchange(ref _residentCompareLabelRefused, 0)}" +
+        $" rescmp_owner_refused={Interlocked.Exchange(ref _residentCompareOwnershipRefused, 0)}" +
+        $" rescmp_alias_refused={Interlocked.Exchange(ref _residentCompareAliasRefused, 0)}" +
+        $" rescmp_changed={Interlocked.Exchange(ref _residentCompareChanged, 0)}" +
+        $" rescmp_invalid={Interlocked.Exchange(ref _residentCompareInvalid, 0)}" +
+        $" rescmp_released={Interlocked.Exchange(ref _residentCompareReleased, 0)}";
+
     // TryReadResidentGuestBytes for each range, compared where it lies. The same refusals apply
     // (a GPU-modified image over a byte, a pending command-processor write), tested once for each
     // run of nearby ranges rather than for each range, and a refusal answers false for the
-    // caller to read the ranges itself. So do the cases this does not model: pending label
-    // bytes (reading them retires entries), a released single-copy chunk (reading restores it),
+    // caller to read the ranges itself. So do the cases this does not model: possibly overlapping
+    // label bytes (reading them retires entries), a released single-copy chunk (reading restores it),
     // a range that is not one backed view, and an alias access the backing will not admit.
     public unsafe bool TryCompareResidentGuestBytes(
         ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets, ReadOnlySpan<byte> recorded)
     {
+        _residentCompareCalls++;
         var count = addresses.Length;
         if (count == 0)
         {
             return true;
         }
 
-        if (lengths.Length != count || offsets.Length != count || _labelOverlay.Count != 0 ||
-            _backing.SingleCopy is { ReleasedChunks: > 0 })
+        if (lengths.Length != count || offsets.Length != count)
         {
+            _residentCompareInvalid++;
+            return false;
+        }
+        if (_backing.SingleCopy is { ReleasedChunks: > 0 })
+        {
+            _residentCompareReleased++;
             return false;
         }
 
@@ -1815,6 +1846,7 @@ internal sealed partial class MetalRenderHost
                 var offset = offsets[end];
                 if (length <= 0 || offset < 0 || offset > recorded.Length - length || ulong.MaxValue - address < (ulong)length)
                 {
+                    _residentCompareInvalid++;
                     return false;
                 }
 
@@ -1828,10 +1860,20 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = high - low;
+            if (_labelOverlay.Count != 0)
+            {
+                if (!CompareLabelRangesEnabled || _labelOverlay.MayOverlap(low, size))
+                {
+                    _residentCompareLabelRefused++;
+                    return false;
+                }
+                _residentCompareLabelSafe++;
+            }
             if (_imageCache.HasGpuModifiedImageBytes(low, size) ||
                 (_cpOverlay.Count != 0 &&
                  _cpOverlay.Coverage(low, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None))
             {
+                _residentCompareOwnershipRefused++;
                 return false;
             }
 
@@ -1840,6 +1882,7 @@ internal sealed partial class MetalRenderHost
 
         if (!_backing.TryEnterBackingAliasAccess())
         {
+            _residentCompareAliasRefused++;
             return false;
         }
 
@@ -1848,9 +1891,14 @@ internal sealed partial class MetalRenderHost
             for (var index = 0; index < count; index++)
             {
                 var length = lengths[index];
-                if (!_backing.TryResolveBackingAlias(addresses[index], (ulong)length, out var alias) ||
-                    !new ReadOnlySpan<byte>((void*)alias, length).SequenceEqual(recorded.Slice(offsets[index], length)))
+                if (!_backing.TryResolveBackingAlias(addresses[index], (ulong)length, out var alias))
                 {
+                    _residentCompareAliasRefused++;
+                    return false;
+                }
+                if (!new ReadOnlySpan<byte>((void*)alias, length).SequenceEqual(recorded.Slice(offsets[index], length)))
+                {
+                    _residentCompareChanged++;
                     return false;
                 }
             }
@@ -1859,7 +1907,7 @@ internal sealed partial class MetalRenderHost
         {
             _backing.ExitBackingAliasAccess();
         }
-
+        _residentCompareHits++;
         return true;
     }
 

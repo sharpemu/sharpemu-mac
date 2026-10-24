@@ -53,6 +53,47 @@ internal sealed partial class MetalImageCache
     private long _fenceWaitTicks;
     private long _fenceTimeouts;
     private int _fenceTimeoutReports;
+    // A negative page-filter answer avoids the monitor on unrelated guest stores.
+    // Counts are published before installing a watch, and removed after dropping it.
+    // Collisions and large queries take the original locked path.
+    private const int FenceFilterBits = 14;
+    private readonly int[]? _fencePageCounts =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_FENCE_PAGE_FILTER")
+            ? new int[1 << FenceFilterBits] : null;
+    private long _fenceFilterSkipped;
+    private long _fenceFilterChecked;
+
+    private static int FenceFilterSlot(ulong page) =>
+        (int)((page * 0x9E3779B97F4A7C15UL) >> (64 - FenceFilterBits));
+
+    private void UpdateFenceFilter(ulong address, ulong size, int delta)
+    {
+        if (_fencePageCounts is not { } counts) return;
+        var last = (address + size - 1) >> 12;
+        for (var page = address >> 12; page <= last; page++)
+            Interlocked.Add(ref counts[FenceFilterSlot(page)], delta);
+    }
+
+    private bool MayOverlapFence(ulong address, ulong size)
+    {
+        if (_fencePageCounts is not { } counts || size == 0 || size > ulong.MaxValue - address)
+            return true;
+        var first = address >> 12;
+        var last = (address + size - 1) >> 12;
+        if (last - first < 64)
+        {
+            for (var page = first; page <= last; page++)
+                if (Volatile.Read(ref counts[FenceFilterSlot(page)]) != 0)
+                {
+                    Interlocked.Increment(ref _fenceFilterChecked);
+                    return true;
+                }
+            Interlocked.Increment(ref _fenceFilterSkipped);
+            return false;
+        }
+        Interlocked.Increment(ref _fenceFilterChecked);
+        return true;
+    }
 
     private readonly record struct FencedWriteback(ulong Address, ulong Size, ulong Serial, MetalWritebackCause Cause);
 
@@ -101,7 +142,10 @@ internal sealed partial class MetalImageCache
             $"wb_staged_runs_total={Interlocked.Read(ref _stagedWritebackRuns)} " +
             $"wb_partial_total={Interlocked.Read(ref _shortWritebacks)} " +
             $"wb_unrecorded_total={Interlocked.Read(ref _unrecordedWritebacks)} " +
-            $"upload_refused_total={Interlocked.Read(ref _refusedUploads)}" + StorePublishCounterText();
+            $"upload_refused_total={Interlocked.Read(ref _refusedUploads)} " +
+            $"wb_fence_filter_skip={Interlocked.Exchange(ref _fenceFilterSkipped, 0)} " +
+            $"wb_fence_filter_check={Interlocked.Exchange(ref _fenceFilterChecked, 0)}" +
+            StorePublishCounterText() + TakeFenceHoldReport();
     }
 
     // The writeback of these bytes was just recorded into the submission with this serial.
@@ -115,6 +159,7 @@ internal sealed partial class MetalImageCache
 
         lock (_fenceGate)
         {
+            using var fenceHold = MeasureFenceHold();
             PruneFencedWritebacksLocked(_owner.CompletedSerial);
             // Serials complete in order, so waiting for the newer writeback covers the older.
             var index = _fencedWritebacks.Count - 1;
@@ -130,6 +175,7 @@ internal sealed partial class MetalImageCache
             }
             else
             {
+                UpdateFenceFilter(address, size, 1);
                 (_fencedPages ??= new MetalPageWatchSet(_pages)).Add(address, size);
                 _fencedWritebacks.Add(new FencedWriteback(address, size, serial, cause));
                 Volatile.Write(ref _fencedWritebackCount, _fencedWritebacks.Count);
@@ -149,6 +195,7 @@ internal sealed partial class MetalImageCache
 
         lock (_fenceGate)
         {
+            using var fenceHold = MeasureFenceHold();
             PruneFencedWritebacksLocked(_owner.CompletedSerial);
         }
     }
@@ -162,6 +209,7 @@ internal sealed partial class MetalImageCache
             if (entry.Serial <= completed)
             {
                 _fencedPages!.Remove(entry.Address, entry.Size);
+                UpdateFenceFilter(entry.Address, entry.Size, -1);
                 continue;
             }
 
@@ -184,6 +232,7 @@ internal sealed partial class MetalImageCache
             if (entry.Serial <= upToSerial && GuestRangeOverlap.Pages(entry.Address, entry.Size, address, size))
             {
                 _fencedPages!.Remove(entry.Address, entry.Size);
+                UpdateFenceFilter(entry.Address, entry.Size, -1);
                 continue;
             }
 
@@ -202,11 +251,13 @@ internal sealed partial class MetalImageCache
     /// </summary>
     private bool WaitForFencedWritebacks(ulong address, ulong size)
     {
+        if (!MayOverlapFence(address, size)) return false;
         ulong pending = 0;
         MetalWritebackCause cause = default;
         var covered = false;
         lock (_fenceGate)
         {
+            using var fenceHold = MeasureFenceHold();
             var completed = _owner.CompletedSerial;
             foreach (var entry in _fencedWritebacks)
             {
@@ -253,6 +304,7 @@ internal sealed partial class MetalImageCache
 
         lock (_fenceGate)
         {
+            using var fenceHold = MeasureFenceHold();
             ReleaseFencesOverLocked(address, size, Math.Max(pending, _owner.CompletedSerial));
         }
 
@@ -271,10 +323,12 @@ internal sealed partial class MetalImageCache
     /// </summary>
     private void WaitForFencedWritebacksUnder(ulong address, ulong size)
     {
+        if (!MayOverlapFence(address, size)) return;
         ulong pending = 0;
         MetalWritebackCause cause = default;
         lock (_fenceGate)
         {
+            using var fenceHold = MeasureFenceHold();
             var completed = _owner.CompletedSerial;
             foreach (var entry in _fencedWritebacks)
             {
@@ -324,9 +378,11 @@ internal sealed partial class MetalImageCache
     {
         lock (_fenceGate)
         {
+            using var fenceHold = MeasureFenceHold();
             _fencedPages?.Clear();
             _fencedWritebacks.Clear();
             Volatile.Write(ref _fencedWritebackCount, 0);
+            if (_fencePageCounts is { } counts) Array.Clear(counts);
         }
     }
 }

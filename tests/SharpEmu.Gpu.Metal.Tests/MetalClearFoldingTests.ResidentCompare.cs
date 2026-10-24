@@ -3,6 +3,7 @@
 
 using SharpEmu.Gpu.Metal.V2;
 using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Rendering;
 using Xunit;
 
@@ -76,6 +77,52 @@ public sealed unsafe partial class MetalClearFoldingTests
         var reread = new byte[16];
         Assert.True(rig.Host.TryReadResidentGuestBytes(CompareBase + 0xFF8, reread, clean: false));
         Assert.False(reread.AsSpan().SequenceEqual(recorded.AsSpan(offsets[2], 16)));
+    }
+
+    [Fact]
+    public void LabelsOnOtherPagesDoNotPreventComparingUnchangedRanges()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        RecordRanges(rig, out var addresses, out var lengths, out var offsets, out var recorded);
+        rig.AliasAccess = true;
+        var host = rig.Host;
+        host.LabelOverlayEnabled = true;
+        host.CompareLabelRangesEnabled = true;
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, CompareBase + 0x50000, 0x1234));
+        Assert.Equal(1, host.PendingLabelOverlayEntries);
+        Assert.True(host.TryCompareResidentGuestBytes(addresses, lengths, offsets, recorded));
+        Assert.Equal(1, host.PendingLabelOverlayEntries); // The comparison retires no labels.
+
+        host.CompareLabelRangesEnabled = false;
+        Assert.False(host.TryCompareResidentGuestBytes(addresses, lengths, offsets, recorded));
+        host.CompareLabelRangesEnabled = true;
+        rig.WriteBacking32(addresses[1], 0xDEADBEEF);
+        Assert.False(host.TryCompareResidentGuestBytes(addresses, lengths, offsets, recorded));
+    }
+
+    [Theory]
+    [InlineData(0x480UL)] // Recorded bytes.
+    [InlineData(0x4A0UL)] // A gap in the same cluster/page.
+    public void ALabelThatMayOverlapStillUsesTheReader(ulong offset)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        RecordRanges(rig, out var addresses, out var lengths, out var offsets, out var recorded);
+        rig.AliasAccess = true;
+        var host = rig.Host;
+        host.LabelOverlayEnabled = true;
+        host.CompareLabelRangesEnabled = true;
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write32, 1, CompareBase + offset, 0x1234));
+        Assert.Equal(1, host.PendingLabelOverlayEntries);
+        Assert.False(host.TryCompareResidentGuestBytes(addresses, lengths, offsets, recorded));
+        Assert.Equal(1, host.PendingLabelOverlayEntries);
+        if (offset == 0x480)
+        {
+            var current = new byte[8];
+            Assert.True(host.TryReadResidentGuestBytes(addresses[1], current, clean: false));
+            Assert.Equal(0x1234u, BitConverter.ToUInt32(current));
+        }
     }
 
     [Fact]
