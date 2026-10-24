@@ -42,13 +42,15 @@ internal sealed class MetalBatchCensus
             $"{name}_cuts={string.Join(',', Cuts.Select((n, i) => (n, i)).Where(x => x.n != 0).Select(x => $"{(Cut)x.i}:{x.n}"))}";
     }
 
-    internal enum Cut { Capacity, Pass, Kind, Barrier, Label, Wait, Dma, Operand, Submission, Frame, CommandRead, Other, HostWait, Relay }
+    internal enum Cut { Capacity, Pass, Kind, Barrier, Label, Wait, Dma, Operand, Submission, Frame, CommandRead, Other, HostWait, Relay, RegisterTable }
     internal readonly Distribution Coarse = new();
     internal readonly Distribution Strict = new();
+    internal readonly Distribution Symbolic = new();
     private bool? _compute;
     private long _draws;
     private long _dispatches;
     private long _frame;
+    private long _symbolicTables;
     private readonly long[] _opcodes = new long[256];
 
     internal void Work(bool compute)
@@ -59,12 +61,24 @@ internal sealed class MetalBatchCensus
         Strict.Add();
     }
 
-    internal void Encoded() => Coarse.Add();
+    internal void Encoded()
+    {
+        Coarse.Add();
+        Symbolic.Add();
+    }
 
     internal void Close(Cut reason)
     {
         Coarse.Close(reason);
         Strict.Close(reason);
+        if (reason == Cut.RegisterTable)
+        {
+            // A proposed recorder can own this table-load operation as a symbolic
+            // register delta. This is an optimistic opportunity census: it does
+            // not certify that the later read is free of an earlier GPU writer.
+            _symbolicTables++;
+        }
+        else Symbolic.Close(reason);
     }
 
     internal static Cut? PacketCut(uint header)
@@ -79,7 +93,7 @@ internal sealed class MetalBatchCensus
                     PacketCustomCode.IndexCount => null,
                 PacketCustomCode.WaitMemory32 or PacketCustomCode.WaitMemory64 or PacketCustomCode.WaitFlipDone => Cut.Wait,
                 PacketCustomCode.ShaderRegisterTable or PacketCustomCode.ContextRegisterTable or
-                    PacketCustomCode.UserConfigRegisterTable => Cut.Operand,
+                    PacketCustomCode.UserConfigRegisterTable => Cut.RegisterTable,
                 PacketCustomCode.AcquireMemory => Cut.Barrier,
                 PacketCustomCode.WriteData or PacketCustomCode.ReleaseMemory => Cut.Label,
                 PacketCustomCode.DmaData => Cut.Dma,
@@ -98,7 +112,8 @@ internal sealed class MetalBatchCensus
             PacketOpcode.SurfaceSync or PacketOpcode.AcquireMemory or PacketOpcode.PfpSyncMe or
                 PacketOpcode.EventWrite => Cut.Barrier,
             PacketOpcode.SetShaderRegisterIndirect or PacketOpcode.SetContextRegisterIndirect or
-                PacketOpcode.SetUserConfigRegisterIndirect or PacketOpcode.IndexAttributesIndirect or
+                PacketOpcode.SetUserConfigRegisterIndirect => Cut.RegisterTable,
+            PacketOpcode.IndexAttributesIndirect or
                 PacketOpcode.ConditionalExecute or PacketOpcode.SetPredication or
                 PacketOpcode.IndirectBuffer or PacketOpcode.IndirectBufferConstant or PacketOpcode.GetLodStats => Cut.Operand,
             _ => null,
@@ -115,11 +130,14 @@ internal sealed class MetalBatchCensus
     {
         Close(Cut.Frame);
         Console.Error.WriteLine($"[METAL-V2][BATCH-CENSUS] frame={++_frame} draws={_draws} dispatches={_dispatches} " +
-            Coarse.Format("coarse") + " " + Strict.Format("strict") + " packets=" +
+            Coarse.Format("coarse") + " " + Strict.Format("strict") + " " + Symbolic.Format("symbolic") +
+            $" deferred_register_tables={_symbolicTables} packets=" +
             string.Join(',', _opcodes.Select((n, i) => (n, i)).Where(x => x.n != 0).Select(x => $"{PacketOpcodeNames.Of((uint)x.i)}:{x.n}")));
         _draws = _dispatches = 0;
+        _symbolicTables = 0;
         Reset(Coarse);
         Reset(Strict);
+        Reset(Symbolic);
         Array.Clear(_opcodes);
     }
 
