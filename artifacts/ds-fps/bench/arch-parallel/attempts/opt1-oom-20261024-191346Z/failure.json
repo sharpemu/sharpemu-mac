@@ -1,0 +1,18 @@
+{
+  "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-210909-ds-arch-parallel-opt1",
+  "source": "751c2b9cfd45a34209f097079a1c0a0f1dd8ea23",
+  "excludedFromAB": true,
+  "reason": "OOM guard killed PID11149 local21:13:46 after free-memory5percent two consecutive samples; HUD246.51seconds; only30seconds in-world, no skip40 or end marker.",
+  "guardEvidence": [
+    "21:13:43 pid=11149 level=2 free=5% swap_used=8441M",
+    "21:13:46 pid=11149 level=2 free=5% swap_used=8465M",
+    "21:13:46 KILL pid=11149"
+  ],
+  "peakFootprintMb": 14106,
+  "peakMetalMb": 14863,
+  "nextDiagnostic": "Exact-main basecheck control under unchanged current host conditions, budget0, overlay1 and same private save/data root.",
+  "loadSamplerActualGameSamples": 27,
+  "loadSamplerActualGameBuildTestAlerts": 0,
+  "lastScreenshot": "shot-0265.png",
+  "inspection": "Opened: knight/tunnel/foliage/HUD retain expected layout, with startup fog/soul animation and Outpost Passage title still visible. No completed end-window comparison."
+}

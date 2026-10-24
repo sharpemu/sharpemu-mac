@@ -472,3 +472,23 @@ invalid `opt2` suffix waiter was canceled before acquisition, its queue line alo
 was removed while another reservation held the queue stable, and fresh
 opt1/base2/opt2 jobs were appended in that order. The failed logs/result/guard
 evidence are preserved under `bench/arch-parallel/attempts/opt1-oom-20261024-184104Z`.
+
+
+The second unchanged-binary opt1 attempt
+(`20261024-210909-ds-arch-parallel-opt1`) also failed the OOM guard, PID11149,
+local21:13:46 after two 5%-free samples. HUD was at246.51 seconds; it survived
+only30 seconds in-world, so it never entered skip40. The wrapper returned3,
+app137; peaks were14,106MB footprint and14,863MB Metal allocation. All27 process
+sampler windows from actual launch through exit had zero build/test activity.
+Its last screenshot (`shot-0265.png`) was opened: expected knight/tunnel/foliage
+and HUD, with early fog/soul animation and title still visible. It is excluded
+from FPS and final rendering-equivalence claims. The archive is
+`attempts/opt1-oom-20261024-191346Z`.
+
+Rather than repeatedly launch the failing optimized arm, an exact-main
+`basecheck` control is queued under the same current host conditions and settings.
+This distinguishes a general memory constraint from prototype-specific growth
+before another optimized retry. Existing dependent base2/opt2 jobs retain their
+failed-predecessor guards. Sampler logs now start fresh per attempt; older
+attempt logs were archived first, and their actual launch timestamps bound
+all reported load checks.

@@ -50,6 +50,8 @@ def process_times():
 try:previous=process_times()
 except Exception:previous={}
 sampled=time.time()
+# Each attempt owns a fresh sampler log; failed-attempt logs are archived before retries.
+(OUT/(arm+'-system.jsonl')).write_text('')
 p=subprocess.Popen(args,cwd=WT,env=env)
 run=None
 while p.poll() is None:
