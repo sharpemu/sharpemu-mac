@@ -1,0 +1,285 @@
+{
+  "status": "Stopped at user request after one complete revised K4 sample and two exact-main controls; no further game runs queued.",
+  "defaultParallelEncode": false,
+  "scope": "Frozen native render encoding only; interpreter/resource preparation/pipeline lookup and compute remain ordered. Full raw recorder and parallel materialization are not implemented.",
+  "sampleRequirement": "Original two-complete-runs-per-arm requirement not met for optimized arm; user explicitly requested reporting available evidence and stopping.",
+  "units": "MiB (2^20 bytes); footprint_mb in raw metrics is produced by scripts/macos/footprint.py using divisor1048576. Footprint is kernel charge, including compression/shared mapping accounting, not unique resident RAM.",
+  "completedRuns": [
+    {
+      "arm": "basecheck",
+      "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-211738-ds-arch-parallel-basecheck",
+      "source": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+      "dirtySource": false,
+      "summary": {
+        "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-211738-ds-arch-parallel-basecheck",
+        "hudSeconds": 289.80000019073486,
+        "skip": 40.0,
+        "frames": 117,
+        "seconds": 79.49111008644104,
+        "fps": 1.4718627010337466,
+        "intervalFps": 1.459282677947988,
+        "p50": 552.483081817627,
+        "p95": 1752.2320747375488,
+        "p99": 2163.5241508483887,
+        "max": 3819.4830417633057,
+        "censusReports": 0,
+        "windowStart": 1792869788.084,
+        "windowEnd": 1792869868.142
+      },
+      "wholeRunPeakFootprintMiB": 13346,
+      "wholeRunPeakMetalAllocationMiB": 14881,
+      "acceptedMemorySamples": 6,
+      "acceptedPeakTaskFootprintMiB": 13351.579490661621,
+      "acceptedGraphicsIokitUniqueResidentAndSwappedMiB": [
+        546.05078125,
+        520.59765625,
+        533.69140625,
+        590.61328125,
+        577.72265625,
+        548.64453125
+      ],
+      "acceptedLoadSamples": 8,
+      "acceptedBuildTestAlerts": 0,
+      "endScreenshot": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-211738-ds-arch-parallel-basecheck/shot-mark-end.png",
+      "endScreenshotSha256": "42cc417de823ed548de7ef9680514e9b3cf070234d6028debfb54aaf680ee475",
+      "inspected": true,
+      "renderingObservation": "Expected knight, armour, tunnel, foliage, bright exit and same HUD layout; no structural difference observed. Animation differs; not a bitwise equivalence proof.",
+      "commonEnvironment": {
+        "SHARPEMU_SHADER_PRECOMPILE_BUDGET": "0",
+        "SHARPEMU_OVERLAY": "1",
+        "SHARPEMU_KEEP_BUILD_SERVERS": "1",
+        "SHARPEMU_METAL_V2_PARALLEL_WORKERS": "4"
+      },
+      "parallelEncode": "0"
+    },
+    {
+      "arm": "opt1",
+      "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-221738-ds-arch-parallel-opt1",
+      "source": "c9598a26304da5db2d5a73c813986ac39864161c",
+      "dirtySource": false,
+      "summary": {
+        "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-221738-ds-arch-parallel-opt1",
+        "hudSeconds": 217.9539999961853,
+        "skip": 40.0,
+        "frames": 122,
+        "seconds": 79.70367193222046,
+        "fps": 1.5306697551368535,
+        "intervalFps": 1.5181232817340924,
+        "p50": 549.4470596313477,
+        "p95": 1598.1450080871582,
+        "p99": 1856.400966644287,
+        "max": 2075.376033782959,
+        "censusReports": 0,
+        "windowStart": 1792873316.977,
+        "windowEnd": 1792873397.021,
+        "parallel": {
+          "reports": 122,
+          "first": {
+            "workers": 4,
+            "queued": 409804,
+            "batches": 5326,
+            "chunks": 48251,
+            "small_batches": 26947,
+            "refused": 68507,
+            "native_children": 51739,
+            "native_qos_workers": 3,
+            "refused_writer": 14612,
+            "refused_shape": 2815,
+            "refused_dynamic": 26992,
+            "refused_pass": 24088,
+            "barrier_pass_ends": 17481,
+            "capture_wall_ms": 1364.111,
+            "native_wall_ms": 2265.298,
+            "join_wall_ms": 3135.422,
+            "guest_prepare": "ordered",
+            "frozen_native_encode": 1,
+            "compute": "ordered"
+          },
+          "last": {
+            "workers": 4,
+            "queued": 1052837,
+            "batches": 15006,
+            "chunks": 94302,
+            "small_batches": 34278,
+            "refused": 191723,
+            "native_children": 105898,
+            "native_qos_workers": 3,
+            "refused_writer": 39566,
+            "refused_shape": 4362,
+            "refused_dynamic": 79528,
+            "refused_pass": 68267,
+            "barrier_pass_ends": 20419,
+            "capture_wall_ms": 3990.99,
+            "native_wall_ms": 5645.036,
+            "join_wall_ms": 7621.369,
+            "guest_prepare": "ordered",
+            "frozen_native_encode": 1,
+            "compute": "ordered"
+          },
+          "counterDelta": {
+            "queued": 643033,
+            "batches": 9680,
+            "chunks": 46051,
+            "small_batches": 7331,
+            "refused": 123216,
+            "native_children": 54159,
+            "refused_writer": 24954,
+            "refused_shape": 1547,
+            "refused_dynamic": 52536,
+            "refused_pass": 44179,
+            "barrier_pass_ends": 2938,
+            "capture_wall_ms": 2626.879,
+            "native_wall_ms": 3379.7380000000003,
+            "join_wall_ms": 4485.947,
+            "frozen_native_encode": 0
+          },
+          "perReportInterval": {
+            "queued": 5314.322314049587,
+            "batches": 80.0,
+            "chunks": 380.58677685950414,
+            "small_batches": 60.586776859504134,
+            "refused": 1018.3140495867768,
+            "native_children": 447.59504132231405,
+            "refused_writer": 206.23140495867767,
+            "refused_shape": 12.785123966942148,
+            "refused_dynamic": 434.1818181818182,
+            "refused_pass": 365.11570247933884,
+            "barrier_pass_ends": 24.28099173553719,
+            "capture_wall_ms": 21.70974380165289,
+            "native_wall_ms": 27.931719008264466,
+            "join_wall_ms": 37.07394214876033,
+            "frozen_native_encode": 0.0
+          }
+        }
+      },
+      "wholeRunPeakFootprintMiB": 13965,
+      "wholeRunPeakMetalAllocationMiB": 13770,
+      "acceptedMemorySamples": 5,
+      "acceptedPeakTaskFootprintMiB": 13891.505264282227,
+      "acceptedGraphicsIokitUniqueResidentAndSwappedMiB": [
+        1613.48828125,
+        1418.98828125,
+        1628.75390625,
+        1664.14453125,
+        1698.14453125
+      ],
+      "acceptedLoadSamples": 8,
+      "acceptedBuildTestAlerts": 0,
+      "endScreenshot": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-221738-ds-arch-parallel-opt1/shot-mark-end.png",
+      "endScreenshotSha256": "0217b15cfee7db112f71c0acb75c2c02cd2d7ccfee81c3c3200f551dc016a76e",
+      "inspected": true,
+      "renderingObservation": "Expected knight, armour, tunnel, foliage, bright exit and same HUD layout; no structural difference observed. Animation differs; not a bitwise equivalence proof.",
+      "commonEnvironment": {
+        "SHARPEMU_SHADER_PRECOMPILE_BUDGET": "0",
+        "SHARPEMU_OVERLAY": "1",
+        "SHARPEMU_KEEP_BUILD_SERVERS": "1",
+        "SHARPEMU_METAL_V2_PARALLEL_WORKERS": "4"
+      },
+      "parallelEncode": "1"
+    },
+    {
+      "arm": "base2",
+      "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-222328-ds-arch-parallel-base2",
+      "source": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+      "dirtySource": false,
+      "summary": {
+        "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-222328-ds-arch-parallel-base2",
+        "hudSeconds": 179.99000000953674,
+        "skip": 40.0,
+        "frames": 127,
+        "seconds": 79.29296708106995,
+        "fps": 1.6016552876644645,
+        "intervalFps": 1.5890438287064765,
+        "p50": 526.4790058135986,
+        "p95": 1486.3309860229492,
+        "p99": 2107.8670024871826,
+        "max": 2140.9878730773926,
+        "censusReports": 0,
+        "windowStart": 1792873704.236,
+        "windowEnd": 1792873784.256
+      },
+      "wholeRunPeakFootprintMiB": 13067,
+      "wholeRunPeakMetalAllocationMiB": 13009,
+      "acceptedMemorySamples": 5,
+      "acceptedPeakTaskFootprintMiB": 13052.808906555176,
+      "acceptedGraphicsIokitUniqueResidentAndSwappedMiB": [
+        550.86328125,
+        558.69140625,
+        539.37890625,
+        550.72265625,
+        583.94140625
+      ],
+      "acceptedLoadSamples": 8,
+      "acceptedBuildTestAlerts": 0,
+      "endScreenshot": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-222328-ds-arch-parallel-base2/shot-mark-end.png",
+      "endScreenshotSha256": "e1360a991d8cfab72ef22987636023c89286580c7b68c468039185bd6dad2e1e",
+      "inspected": true,
+      "renderingObservation": "Expected knight, armour, tunnel, foliage, bright exit and same HUD layout; no structural difference observed. Animation differs; not a bitwise equivalence proof.",
+      "commonEnvironment": {
+        "SHARPEMU_SHADER_PRECOMPILE_BUDGET": "0",
+        "SHARPEMU_OVERLAY": "1",
+        "SHARPEMU_KEEP_BUILD_SERVERS": "1",
+        "SHARPEMU_METAL_V2_PARALLEL_WORKERS": "4"
+      },
+      "parallelEncode": "0"
+    }
+  ],
+  "failedRevisedK4Attempts": [
+    {
+      "attempt": "opt2-oom-20261024-203520Z",
+      "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-222955-ds-arch-parallel-opt2",
+      "source": "c9598a26304da5db2d5a73c813986ac39864161c",
+      "wholeRunPeakFootprintMiB": 14153,
+      "wholeRunPeakMetalAllocationMiB": 14358,
+      "hudSeconds": 173.15499997138977,
+      "endMarkerPresent": false,
+      "guardEvidence": [
+        "22:35:18 pid=14903 level=2 free=5% swap_used=8268M",
+        "22:35:20 pid=14903 level=2 free=5% swap_used=8311M",
+        "22:35:20 KILL pid=14903"
+      ],
+      "excludedFromTiming": true,
+      "screenshotInspected": true,
+      "failureReceipt": "artifacts/ds-fps/bench/arch-parallel/attempts/opt2-oom-20261024-203520Z/failure.json"
+    },
+    {
+      "attempt": "opt2-oom-20261024-204349Z",
+      "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-223948-ds-arch-parallel-opt2",
+      "source": "c9598a26304da5db2d5a73c813986ac39864161c",
+      "wholeRunPeakFootprintMiB": 14154,
+      "wholeRunPeakMetalAllocationMiB": 14878,
+      "hudSeconds": 195.5569999217987,
+      "endMarkerPresent": false,
+      "guardEvidence": [
+        "22:43:47 pid=49153 level=2 free=5% swap_used=8703M",
+        "22:43:49 pid=49153 level=2 free=5% swap_used=8827M",
+        "22:43:49 KILL pid=49153"
+      ],
+      "excludedFromTiming": true,
+      "screenshotInspected": true,
+      "failureReceipt": "artifacts/ds-fps/bench/arch-parallel/attempts/opt2-oom-20261024-204349Z/failure.json"
+    }
+  ],
+  "comparison": {
+    "controlsWeightedEntriesPerSecond": 1.5366780117542236,
+    "optimizedEntriesPerSecond": 1.5306697551368535,
+    "optimizedVsWeightedControlPercent": -0.3909899517929083,
+    "optimizedVsFirstControlPercent": 3.995417103905452,
+    "optimizedVsSecondControlPercent": -4.432010625152816,
+    "successfulK4PeakMinusControlMiB": [
+      619,
+      898
+    ],
+    "failedK4PeakMinusControlsMiB": [
+      [
+        807,
+        1086
+      ],
+      [
+        808,
+        1087
+      ]
+    ]
+  },
+  "conclusion": "No established speedup; memory pressure regression observed; keep default off. Two guard kills are reliability results, not FPS samples or Metal exception crashes."
+}

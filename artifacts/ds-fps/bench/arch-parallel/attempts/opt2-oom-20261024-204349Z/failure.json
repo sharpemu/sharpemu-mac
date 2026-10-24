@@ -1,0 +1,18 @@
+{
+  "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-223948-ds-arch-parallel-opt2",
+  "source": "c9598a26304da5db2d5a73c813986ac39864161c",
+  "excludedFromAB": true,
+  "reason": "OOM guard killed PID49153 at local22:43:49 after two consecutive5percent-free samples; HUD195.56s,only~45s in-world,no end marker.",
+  "guardEvidence": [
+    "22:43:47 pid=49153 level=2 free=5% swap_used=8703M",
+    "22:43:49 pid=49153 level=2 free=5% swap_used=8827M",
+    "22:43:49 KILL pid=49153"
+  ],
+  "peakFootprintMiB": 14154,
+  "actualGameLoadSamples": 23,
+  "actualGameBuildTestAlerts": 0,
+  "lastScreenshot": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-223948-ds-arch-parallel-opt2/shot-0231.png",
+  "lastScreenshotSha256": "cae16e5957f0904203fe6aa06e1c2d42111f4a8fb4d09cb0f043096c3de3f3d3",
+  "inspected": true,
+  "observation": "Expected knight, armour, tunnel, foliage, lighting and HUD; Outpost Passage title still visible. No completed end-window equivalence comparison. This repeats the memory-pressure failure on the revised K4 source."
+}

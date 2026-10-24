@@ -1,0 +1,20 @@
+{
+  "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-211738-ds-arch-parallel-basecheck",
+  "source": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+  "screenshot": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-211738-ds-arch-parallel-basecheck/shot-mark-end.png",
+  "screenshotSha256": "42cc417de823ed548de7ef9680514e9b3cf070234d6028debfb54aaf680ee475",
+  "inspected": true,
+  "observation": "Expected knight, armour, tunnel, foliage, bright exit and same HUD layout; no structural difference observed. Animation differs; not a bitwise equivalence proof.",
+  "acceptedLoadSamples": 8,
+  "acceptedBuildTestAlerts": 0,
+  "acceptedMemorySamples": 6,
+  "peakAcceptedFootprintMiB": 13351.579490661621,
+  "graphicsIokitResidentAndSwappedMiB": [
+    546.05078125,
+    520.59765625,
+    533.69140625,
+    590.61328125,
+    577.72265625,
+    548.64453125
+  ]
+}

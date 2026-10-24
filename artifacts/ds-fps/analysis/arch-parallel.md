@@ -1,15 +1,248 @@
-# Parallel Metal preparation and encoding experiment
+# Parallel Metal preparation and encoding experiment — final report
 
-Branch: `ds-fps-arch-parallel`. Base: `main` / `bdc7ea28c8e7df0b8753966d8ba1881f60e5e764`.
+Branch: `ds-fps-arch-parallel`, from exact main
+`bdc7ea28c8e7df0b8753966d8ba1881f60e5e764`.
 Worktree: `/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel`.
+Phase 1 design/census commit: `587b282b1`; initial prototype: `e616f4a81`;
+final implementation change: `118999b12b4023b7cfa56c978e1521e11272278b`.
+The measured, signed prototype bundle is clean source
+`c9598a26304da5db2d5a73c813986ac39864161c`; later commits contain evidence/reporting.
 
-Phase1 dependency analysis and the base-path in-world batch census are complete.
-The revised opt-in native-encoding prototype builds, passes 25 focused device/
-ordering cases, and completes all four suites with only the base failures below.
-Its signed measurement bundle is ready; the revised game A/B remains pending.
-Guest interpretation/materialization stays ordered: the complete requested raw
-recorder and parallel resource-preparation pipeline is not implemented. No measured
-prototype speedup or completed in-game rendering-equivalence result is claimed.
+**Verdict: keep `SHARPEMU_METAL_V2_PARALLEL_ENCODE` default OFF.** One complete
+K4 run shows no established speedup against two main controls, raises measured
+peak footprint by 619–898 MiB, and the two subsequent revised K4 attempts were
+killed by the unchanged OOM guard. No further games are queued. The user explicitly
+requested reporting these available samples and stopping so PR validation can use
+the shared queue; the original two-complete-runs-per-arm requirement is therefore
+not satisfied for K4 and no longer being pursued in this task.
+
+The delivered prototype batches **fully prepared native render draws** and encodes
+contiguous chunks on four threads. Guest reads, resource materialization, argument
+buffer writes, pipeline lookup and compute remain ordered on the original owner.
+The full requested raw-register recorder plus parallel resource preparation is
+**not implemented**. The dependency analysis below identifies the missing immutable
+read-domain / writer-classification or transactional-rollback proof. Removing the
+old split's prefix observation waits without that replacement would change guest
+semantics. This is a negative native-encoding experiment, not a 60 fps solution.
+
+## Completed game comparison
+
+All three completed arms used the same private warm data root cloned from main
+with `cp -cR`, the same save/idle Outpost Passage scene, 1080p, overlay enabled,
+`SHARPEMU_SHADER_PRECOMPILE_BUDGET=0`, render/pass/census profiling off, and
+`SHARPEMU_KEEP_BUILD_SERVERS=1`. The last option prevents the shared harness from
+signalling another agent's build servers. Main was the frozen exact `bdc7ea28c`
+bundle; optimized was the verified c9598a263 bundle with the flag set to 1 and
+`SHARPEMU_METAL_V2_PARALLEL_WORKERS=4`. Each run used normal FIFO acquisition,
+load-wait policy, the active OOM guard, HUD detection, and a full HUD+120-second
+in-world window. No graphics quality or memory limit was reduced.
+
+Accepted order was main `basecheck` → K4 `opt1` → main `base2`. Two K4 `opt2`
+attempts followed but did not complete. Frame statistics discard the first 40
+in-world seconds and stop at the end marker. FPS is presented entries divided by
+first-to-last presentation span; the interval-count convention is also retained
+in each JSON. p50/p95 are presentation intervals, not exclusive worker timings.
+
+| Arm / run directory under `artifacts/runs/` | Entries / measured span | Skip40 fps | p50 ms | p95 ms | HUD after actual launch |
+|---|---:|---:|---:|---:|---:|
+| Main `20261024-211738-ds-arch-parallel-basecheck` | 117 /79.491110 s | 1.471863 | 552.483 | 1,752.232 | 289.800 s |
+| K4 `20261024-221738-ds-arch-parallel-opt1` | 122 /79.703672 s | 1.530670 | 549.447 | 1,598.145 | 217.954 s |
+| Main `20261024-222328-ds-arch-parallel-base2` | 127 /79.292967 s | 1.601655 | 526.479 | 1,486.331 | 179.990 s |
+
+The two controls span 1.472–1.602fps. K4 is +4.00% against the first and −4.43%
+against the second. Pooled control entries/span give 1.536678fps; the single K4
+sample is 0.39% below that descriptive value. This is not a confidence estimate or
+proof of equivalence: there is only one completed K4 sample and the main controls
+already vary. No worker-time saving or GPU-time improvement was established.
+All 8 accepted process-sampler windows in each completed run had zero detected
+build/test activity. Other user/OS activity and paging remained present; these
+are qualified observations on this host, not measurements on an otherwise empty
+machine. Directory timestamps/wrapper durations can include load waits and must
+not be substituted for actual game launch times.
+
+All three end screenshots were opened and compared. They show the expected
+knight/armour, vaulted tunnel, foliage, bright exit and the same HUD layout; no
+structural rendering difference was observed. Idle animation and foliage differ,
+so this does not establish bitwise game-image equivalence. End image SHA-256,
+source, load and memory observations are in `basecheck-inspection.json`,
+`opt1-inspection.json`, `base2-inspection.json`, and the consolidated
+[`final-runtime-summary.json`](../bench/arch-parallel/final-runtime-summary.json).
+Raw runs, screenshots, metrics, logs, TRXs and signed bundles remain local.
+
+## Memory pressure and the two revised K4 guard kills
+
+**Yes: K4 raised observed peak footprint against both main controls.** The
+whole-run one-second `proc_pid_rusage` samples give:
+
+| Arm | Outcome | Peak kernel footprint, MiB | Difference to main controls, MiB |
+|---|---|---:|---:|
+| Main basecheck | full window, graceful stop | 13,346 | — |
+| Main base2 | full window, graceful stop | 13,067 | — |
+| Revised K4 opt1 | full window, graceful stop | 13,965 | +619 /+898 |
+| Revised K4 opt2, `20261024-222955` | guard kill | 14,153 | +807 /+1,086 |
+| Revised K4 opt2 retry, `20261024-223948` | guard kill | 14,154 | +808 /+1,087 |
+
+Raw field names say `footprint_mb`, but `scripts/macos/footprint.py:28` divides by
+1,048,576: these are **MiB**, not decimal MB. Kernel footprint includes compressed
+pages and shared-mapping charges; it is not unique resident RAM, nor should RSS,
+Metal allocation and footprint be added. Kill-truncated runs do not bound how high
+K4 would have grown without the guard.
+
+The independently sampled skip40-window `task.phys_footprint` peaks were
+13,351.6 and 13,052.8 MiB on main versus 13,891.5 MiB for completed K4: an increase
+of 539.9–838.7 MiB in the comparable accepted windows. Unique resident+swapped
+`graphics_iokit` objects in those windows were 520.6–590.6 MiB and 539.4–583.9 MiB
+on main, versus 1,419.0–1,698.1 MiB for K4. Samples come from different instants and
+kernel query APIs, so the one-second and object-walk peaks need not coincide.
+The reported whole-run Metal-allocation peaks did not increase consistently
+(main 14,881 /13,009 MiB, completed K4 13,770 MiB), so that separate counter is
+not a substitute for kernel footprint or unique-object accounting.
+This supports a native graphics-memory/pressure regression. It does not isolate a
+leak or prove that every additional byte comes from the child encoder objects.
+
+| Revised failure | Guard evidence, local Europe/Warsaw time | Progress | Result |
+|---|---|---|---|
+| `20261024-222955-ds-arch-parallel-opt2`, PID14903 | 22:35:18 free5%, swap8268MiB;22:35:20 free5%, swap8311MiB; kill22:35:20 | HUD173.15 s;~77 s in-world; no end marker | app137 /wrapper3 |
+| `20261024-223948-ds-arch-parallel-opt2`, PID49153 | 22:43:47 free5%, swap8703MiB;22:43:49 free5%, swap8827MiB; kill22:43:49 | HUD195.56 s;~45 s in-world; no end marker | app137 /wrapper3 |
+
+Both failures used the same revised c9598a263 source and K4 configuration as the
+completed opt1 run. Actual-game process sampling found zero build/test alerts
+(25 and23 windows respectively). Both last screenshots were opened: the expected
+scene/HUD remained present, but neither is an end-window rendering comparison.
+No incomplete-window FPS is accepted. These are external OOM-guard terminations,
+not Metal exception crashes; they remain reliability findings rather than being
+discarded as timing noise. Receipts and guard excerpts are preserved in
+`bench/arch-parallel/attempts/opt2-oom-20261024-203520Z` and
+`.../opt2-oom-20261024-204349Z`.
+
+An earlier prototype at 751c2b9cf also failed the guard twice (14,418 and14,106 MiB;
+archives `opt1-oom-20261024-184104Z` and`opt1-oom-20261024-191346Z`). Investigation
+found that singleton batches unnecessarily created a child plus replacement tail.
+Final implementation 118999b12 reuses the open serial child for those small batches;
+a device regression proves 64 singleton passes create 64 children rather than 192
+while matching serial pixels. That correction did **not** eliminate the revised
+runtime memory-pressure failures. Owner/child autorelease pools and native retain/
+release paths were inspected without identifying an unbalanced ownership path.
+The remaining graphics charge has no established root cause. No more retries,
+quality reductions, OOM-guard changes or user-app closures will be made.
+
+## Implemented prototype, counters and ordering tests
+
+`MetalRenderHost.ParallelEncode.cs` captures at most 64 fully prepared native draw
+records, retains their native resources and partitions them into contiguous ranges.
+It creates `MTLParallelRenderCommandEncoder` children in guest order before waking
+K persistent workers. The owner executes range 0; K−1 helpers use native
+UserInteractive QoS threads (managed-thread fallback), each with an autorelease
+pool. One wake per helper and one batch join replace per-draw hand-offs; there is
+no spin loop. Every chunk joins before record reuse, parent completion or exception
+propagation. Batches of at least `min(8*K,64)` draws use K workers; smaller batches
+encode on the owner into the existing open child. K defaults to 4 and clamps to 1–10.
+
+Records copy dynamic state, buffer offsets, argument/push bindings, native
+pipeline/depth state and draw arguments. Native handles stay retained through
+encoding, while existing command-buffer/ring retirement retains GPU lifetimes.
+Each child gets complete state and the captured union of resource residency;
+previous-child/parent bindings are not inherited. Existing caches and image
+ownership remain single-owner, so this prototype adds no cache-wide parallel lock
+and does not expose mutable materialization state to helpers.
+
+Eligibility rejects unbounded device-address stores, written/atomic buffers,
+storage images, GDS, scratch, mesh/rectangle variants, unsupported depth/bias
+behavior, tiny and profiled passes. Private mip-statistics min/add atomics are
+commutative and reset/pack in ordered compute. Attachment effects retain child
+creation order. A shader barrier ends the **entire parent pass**: child creation
+order is not substituted for an interstage memory barrier. CP writes, DMA/fills,
+labels/EOP, submissions, relay work, arbitrary guest-memory callbacks, CPU-visible
+wait polls, compute and pass endings drain the prefix before their effects.
+The existing synthetic occlusion policy is retained. Metal 3.2 APIs only; no new
+title/hash checks or title-dependent rendering policy.
+
+`[METAL-V2][PARALLEL]` proves application and refusal reasons. In the completed
+K4 run,121 report intervals averaged:
+
+| Counter | Per presented-frame report interval |
+|---|---:|
+| queued draws | 5,314.32 |
+| K4 batches /small batches | 80.00 /60.59 |
+| native children | 447.60 |
+| refused draws | 1,018.31 |
+| refused writer /shape /dynamic /pass | 206.23 /12.79 /434.18 /365.12 |
+| additional barrier parent-pass ends | 24.28 |
+| capture wall time | 21.710 ms |
+| summed native worker wall time | 27.932 ms |
+| owner join-region wall time | 37.074 ms |
+
+Three native QoS helpers were active. Native worker time overlaps the join region;
+these counters must not be added as disjoint CPU phases. The log explicitly says
+`guest_prepare=ordered frozen_native_encode=1 compute=ordered`.
+
+This leaves the dominant descriptor/table and materialization work serial. Base
+phase reports put GraphicsStateApply around 29 ms/frame and ArgumentBufferWrite
+around 9 ms/frame, with the latter still serial here. Perfect K4 scaling of 29 ms
+could save at most 22 ms, about 5% of the supplied 430–470 ms worker budget, before
+capture/retention/extra state/scheduling and extra pass ends. Capture plus the
+owner join region alone measured ~58.8 ms/frame; those are added prototype regions,
+not proof of a net 58.8 ms regression. No net gain was established by game FPS.
+
+All 25 focused cases passed with `SHARPEMU_TEST_REQUIRE_DEVICE=1`:
+
+- Contiguous partitions, real overlap, join before reuse, exception propagation
+  after joining all chunks, and safe reuse following failure.
+- Read-only eligibility and separate semantic/capacity/census cut classification.
+- Device pixel comparison after 257 draws with changed scissors, colors and
+  textures, batch rollover, and first-child completion deliberately delayed until
+  the last child finishes. Actual parallel batch counts are asserted.
+- Draw → barrier → compute write → EOP label → CPU wait → draw ordering, compared
+  with serial execution, again requiring parallel batches.
+- 64 singleton passes across two targets, exact pixels and exactly 64 native children.
+
+## Final-source build, complete suites and signed bundle
+
+Built/tested C# source SHA-256:
+`86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0`.
+Final full Release solution build succeeded: 234 warnings, 0 errors,98.39 s
+MSBuild time (99.855 s wrapper). All four suites then ran sequentially, with
+`--no-build --no-restore --blame-hang-timeout 120s --blame-hang-dump-type mini`.
+ShaderCompiler used the BATCH3 serial runsettings; device gating was limited to
+focused/Metal/MSL. Exact commands, source signatures, case results and TRX paths
+are in the per-suite JSON summaries under `bench/arch-parallel/`.
+
+| Revised-source suite | Passed | Failed | Skipped | Device required |
+|---|---:|---:|---:|---|
+| Focused ordering/device subset | 25 | 0 | 0 | yes |
+| Metal | 1,428 | 1 | 7 | yes |
+| Libs | 8,618 | 6 | 5 | no |
+| ShaderCompiler | 2,134 | 0 | 1 | no |
+| ShaderCompiler.Metal | 3,162 | 0 | 0 | yes |
+
+The four full suites total 15,342 passed, 7 failed, 13 skipped; focused cases are a
+subset, not additional unique full-suite coverage. The Metal failure is
+`MetalLossyTextureTests.ASampledImageIsExactByDefaultAndLossyWithTheFlagOn`.
+Libs failures are the four SSE4a POSIX signal bridge cases, import-result sampling
+and Rosetta vector-store preservation. Exact names/messages are retained in
+`known-base-failures.json` and the suite summaries. These are baseline failures,
+not a claim that the suites are all green. No run aborted and no unexpected
+failure was accepted by `benchmark_validation.require_ready`.
+
+Earlier full Metal validation also failed three guest-view cases. They were
+independently reproduced with the lossy-texture case in a freshly built exact-base
+`git archive bdc7ea28c...`, with every archived file checked against its git blob:
+17 filtered cases, 13 passed, 4 identical failures. All three guest-view cases
+passed in final validation; the change does not modify their code, so no causal
+fix is claimed. Base evidence is retained in `base-guest-views-*-summary.json`.
+
+The signed prototype app was built with
+`SHARPEMU_MAC_GET_TASK_ALLOW=1 scripts/macos/build-app.sh` at clean c9598a263,
+osx-x64 ReadyToRun,74.042 s. Deep/strict codesign verification passed and
+get-task-allow is true. `prototype-bundle.json` records 255 payload hashes;
+`app-ready.json` binds the bundle to the tested source signature. The original
+751c2b9cf bundle remains APFS-cloned separately for reproducing historical failures.
+
+The final source build, focused/full tests, packaging and all post-GUI game runs
+used the normal BATCH3 FIFO, one step per acquisition. An earlier source's
+sequential build/unit-test runs used only the user's explicit `int3-user-gui`
+exception; no game launched under that lock and the user's GUI was never signalled.
+No further build/test is needed for this report-only change.
 
 ## Hard limits and proposed partition
 
@@ -139,7 +372,7 @@ window naming and indirect-resource residency. Parent/previous-child residency i
 not inherited. Union residency once per chunk where possible; retain referenced
 objects even if an image/pipeline cache evicts them while a batch is pending.
 
-## Measurements and prototype
+## Base-path in-game batch census
 
 Measured on the base rendering path with only the optional passive counters,
 clean source **888a006c20e20cdc37757cebb9f7f75e4a95aa30**. Signed x64 bundle
@@ -150,8 +383,8 @@ APFS-cloned (`cp -cR`). Overlay on, 1080p, shader precompile budget0, render/pas
 profilers off. FIFO acquisition/release was enforced for both build and run.
 
 Run: `artifacts/runs/20261024-134426-ds-arch-parallel-census2`, completed at the
-script's stop marker, graceful exit. HUD at232.415 s; measured HUD+40 through
-HUD+120. **121 census reports /121 presented frames**, over79.496 s between the
+script's stop marker, graceful exit. HUD at 232.415 s; measured HUD+40 through
+HUD+120. **121 census reports /121 presented frames**, over 79.496 s between the
 first/last selected presentation. Raw issued work averaged6,376.54 draws and
 2,751.07 dispatches/frame; encoded work averaged6,330.91 draws and2,690.95
  dispatches/frame. Skipped/retried translation work explains why raw and encoded
@@ -161,8 +394,8 @@ counts, cut counts and bounds; `summarize.py RUN 40` reproduces it.
 The end screenshot was opened and inspected: knight from behind in the vaulted
 Outpost Passage tunnel, bright exit, foliage/ivy, armour detail, HUD and overlay;
 no black/missing/garbled regions observed. The initial HUD screenshot also showed
-the expected Outpost Passage entry animation. This diagnostic's1.522 fps,
-p50 485.327 ms andp95 1,827.172 ms are **not** an uninstrumented A/B control.
+the expected Outpost Passage entry animation. This diagnostic's 1.522 fps,
+p50 485.327 ms and p95 1,827.172 ms are **not** an uninstrumented A/B control.
 Process sampling found no competing build/test activity in the accepted window.
 One pre-window alert was `triald`, falsely matched by an unanchored `ld$` pattern;
 the sampler now matches exact build-tool names. Other OS/UI/inference load remains
@@ -188,10 +421,10 @@ optimistic opportunity measurement, **not** permission to defer reads.
 | coarse | 822.16 | 3.273 | 1 /14 | 2359.08 |
 | symbolic | 297.22 | 9.054 | 1 /64 | 451.81 |
 
-The strict policy achieves1.003x atK4 for graphics and1.000x for compute: widening
+The strict policy achieves 1.003x at K4 for graphics and 1.000x for compute: widening
 that existing split without a new read/effect proof does not create useful chunks.
-Keeping table operations symbolic exposes substantial potential:94.21% of graphics
-work is in batches of at least32, with3.905x ideal graphics and3.642x all-work K4
+Keeping table operations symbolic exposes substantial potential: 94.21% of graphics
+work is in batches of at least 32, with 3.905x ideal graphics and3.642x all-work K4
 bounds. These bounds assume identical cost per item, perfect scheduling and no
 coordinator, validation, memory, compilation or capture cost; they are not measured
 CPU speedups. They also omit P/E-core asymmetry and guest-core competition.
@@ -215,59 +448,19 @@ CPU speedups. They also omit P/E-core asymmetry and guest-core competition.
 
 Event counters include empty boundaries and different observers of one semantic
 point; their sum is not a unique stall count. Nonempty-cut columns identify the
-single reason that closed each nonempty batch. Frame cuts report2.00/frame because
+single reason that closed each nonempty batch. Frame cuts report 2.00/frame because
 both the wrapped flip packet and reporting hook close; no nonempty frame cut
-remained. Register-table count is5,500.56/frame under both policies, but symbolic
-records them instead of closing. Strict additionally observes39,126.50 packet-read
-boundaries/frame;9,054.02 of those close a nonempty strict batch. None of these
+remained. Register-table count is 5,500.56/frame under both policies, but symbolic
+records them instead of closing. Strict additionally observes 39,126.50 packet-read
+boundaries/frame; 9,054.02 of those close a nonempty strict batch. None of these
 simulated cuts is a measured thread wait.
 
-For all work, the optimistic symbolic equal-item bounds are1.940x (K2),3.642x (K4),
-6.460x (K8) and7.284x (K10). Applying them illustratively to360-400 ms of nonwaiting
-worker work plus70 ms serial wait gives about256-276,169-180,126-132 and119-125
+For all work, the optimistic symbolic equal-item bounds are 1.940x (K2),3.642x (K4),
+6.460x (K8) and7.284x (K10). Applying them illustratively to 360-400 ms of nonwaiting
+worker work plus 70 ms serial wait gives about 256-276,169-180,126-132 and119-125
 ms respectively, before actual serial work and overhead. With the unchanged
 ~200 ms GPU service time, K4 would already approach the GPU floor in this idealized
-model. It is not a route to60 fps by itself.
-
-## Safe native-encoding experiment being prepared separately
-
-The bounded prototype under preparation uses the immutable native-input boundary,
-where all guest reads and image ownership decisions have already happened in guest
-order. It deliberately does not claim to implement the raw-register recording /
-parallel descriptor-materialization stage above. It can test whether parallel
-native binding and draw encoding pays for its capture/retention cost, while leaving
-that missing prerequisite explicit.
-
-It admits ordinary vertex/fragment pipelines with no device-address stores,
-written/atomic buffers, storage images or GDS. Attachment writes retain Metal's
-child-creation order. Mip-statistics atomics are commutative; their pack/reset is a
-separate ordered compute pass. Mesh/tessellation special paths, unsupported dynamic
-state and profiled passes use the current path. The backend's existing synthetic occlusion policy is retained. A compute dispatch also uses the
-current path. A shader barrier ends the entire parallel parent: an intrapass
-barrier on one child is not treated as proof about another child's stores. Apple
-explicitly says fences synchronize *different passes* and recommends intrapass
-barriers for stages in one pass ([updateFence documentation](https://developer.apple.com/documentation/metal/mtlrendercommandencoder/updatefence(_:after:))).
-
-Each frozen record owns copied dynamic state, buffer offsets, argument/push buffer
-bindings, native pipeline/depth state and native draw arguments. Resources are
-retained before the interpreter continues. Native children get full initial state
-and their own residency declarations. A bounded 64-record batch is split into K
-contiguous ranges when the batch contains at least `min(8*K, 64)` records; short batches encode
-on the owner without waking workers. Relay work, submission boundaries, barriers,
-transfers, compute and pass/command-buffer endings drain the prefix. Persistent
-workers receive one chunk, finish it and join once per batch. A failed chunk still
-joins all other chunks before any input storage can be reused.
-
-This boundary leaves the dominant descriptor/table and materialization work
-serial. Using the supplied ~200 ms prep/binding/encode aggregate as if all of it
-moved would overstate its benefit. The base phase reports put GraphicsStateApply
-around 29 ms/frame and ArgumentBufferWrite around 9 ms/frame, with the latter
-still serial in this prototype. Perfect K=4 scaling of 29 ms saves at most 22 ms,
-before capture, lifetime retention, extra child state and scheduling. That is only
-about five percent of the 430-470 ms worker budget. Actual per-batch cut frequency
-can make the gain much smaller or negative. The switch will stay default off
-unless repeated warm measurements establish a gain and matching rendering.
-
+model. It is not a route to 60 fps by itself.
 
 ## Additional source findings for a complete raw recorder
 
@@ -327,315 +520,38 @@ native-encoding experiment:
   ordered ring reservation and mutable submission residency. The frozen-native
   experiment retains these on the original owner.
 
-The first diagnostic attempt (`20261024-122606-ds-arch-parallel-census`,
-clean source `68edc60754acbaf0235209b27a891a87c0a7174e`) stopped at the
-pre-HUD stall watchdog after 270 seconds. Its last flip was during loading at
-66.49 seconds. It has no HUD/end marker and contributes no in-world histogram,
-performance number or rendering comparison. A short native sample near shutdown
-showed the GPU worker waiting for GC; it does not establish the cause of the
-stall. The final PERF interval instead charged 202,889 ms of its 203 seconds to
-worker idle, so it is not evidence of a 203-second worker GC pause. All 27 process-sampler windows had no detected competing build/test activity, and its last screenshot was black with the overlay title bar present. The second diagnostic adds a separate symbolic-table opportunity census
-at clean source `888a006c2` (including separate graphics/compute histograms and nonempty-cut counts).
 
+## Implementation locations and evidence handoff
 
-## Implemented prototype boundary and ordering validation
+| File:line | Change |
+|---|---|
+| `src/SharpEmu.Libs/Gpu/GpuCommands/GpuCommandInterpreter.cs:37`, `:454` | Opt-in passive packet/operand census; static flag bypasses observer work when disabled. |
+| `src/SharpEmu.Libs/Gpu/GpuCommands/ICommandBatchObserver.cs:7` | Diagnostic observer contract. |
+| `src/graphics/SharpEmu.Gpu.Metal/V2/MetalBatchCensus.cs:11` | Strict/coarse/symbolic contiguous batch distributions, cut reasons and graphics/compute histograms. |
+| `src/graphics/SharpEmu.Gpu.Metal/V2/MetalRenderHost.BatchCensus.cs:10` | Host observer, opt-in only. |
+| `src/graphics/SharpEmu.Gpu.Metal/V2/MetalRenderHost.ParallelEncode.cs:17`, `:102`, `:192`, `:265` | Default-off switch, immutable native capture, ordered child creation/drain, complete child bindings. |
+| `src/graphics/SharpEmu.Gpu.Metal/V2/MetalParallelBatchWorkers.cs:60`, `:88` | Persistent batch wake/join, exception-safe completion and contiguous partition. |
+| `src/graphics/SharpEmu.Gpu.Metal/V2/MetalRenderHost.Rendering.cs:1021`, `:1145`, `:2262` | Parent/child pass creation and completion; barriers end the whole parallel parent. |
+| `src/graphics/SharpEmu.Gpu.Metal/V2/MetalCommandStream.cs:58`, `:758`, `:1003`, `:1026`, `:1047`, `:1892` | Submission/CPU-visible effects drain queued work; PERF reporting. |
+| `src/graphics/SharpEmu.Gpu.Metal/V2/MetalRenderHost.cs:1628`, `:1835`, `:2570` | Relay/read boundaries and worker disposal. |
+| `src/graphics/SharpEmu.Gpu.Metal/V2/MetalRenderHost.Pipelines.cs:25`, `MetalRenderHost.DepthOnlyJoin.cs:60` | Owner-only eligibility memo; parallel parent excluded from depth-only joining. |
+| `tests/SharpEmu.Gpu.Metal.Tests/MetalParallelBatchTests.cs:16`, `:31`, `:59` | Partition, overlap/lifetime and failure tests. |
+| `tests/SharpEmu.Gpu.Metal.Tests/Scenes/ParallelEncodeSceneTests.cs:13`, `:48`, `:108` | Small-pass allocation, reverse-completion pixels, and barrier/compute/EOP/CPU-wait ordering. |
 
-`MetalRenderHost.ParallelEncode.cs` captures at most 64 fully prepared native draws,
-retains their native resources, and partitions them into contiguous chunks. It
-creates `MTLParallelRenderCommandEncoder` children in guest order before waking
-K persistent workers. Each child owns its encoder and declares the captured union
-of resource residency. Every chunk joins before input reuse, parent completion or
-exception propagation. Capacity batches with at least `min(8*K,64)` draws use K
-workers; smaller batches run on the owner. The existing owner still interprets
-guest memory, materializes resources, allocates argument/push storage and resolves
-pipelines. Compute remains ordered. This is a working prototype of the native
-encoding portion, **not the complete requested parallel resource-preparation
-pipeline**. The dependencies above remain prerequisites for that larger change.
+A first census attempt (`20261024-122606-ds-arch-parallel-census`, source `68edc6075`)
+stopped at the pre-HUD watchdog, with no HUD/end marker. It contributes no in-world
+histogram or FPS. The successful census above supersedes it. An earlier exact-main
+control (`20261024-140403-ds-arch-parallel-base1`) completed at 1.409826fps but is
+historical, not pooled into the recent comparison. Incomplete game runs and
+failed-predecessor preflight refusals are not accepted samples.
 
-Eligibility rejects unbounded device-address stores, writable/atomic buffers,
-storage images, GDS, scratch, mesh/rectangle launch variants and unsupported
-dynamic depth/bias behavior. Mip-statistics min/add atomics are private and
-commutative. Barriers end the whole parent pass: ordering child creation does not
-replace an interstage memory barrier. CP writes, DMA/fills, labels/EOP, submission
-changes, relay work, arbitrary guest-memory callbacks and CPU-visible wait polls
-drain queued native work before their effects. Shader/image/materialization caches
-and staging allocation remain owned by the original thread; they are not shared
-unsafely or wrapped in new worker-wide locks.
-
-`MetalParallelBatchTests` checks contiguous partitions, actual overlap, join-before-
-reuse, failure propagation and reuse after failure, readonly eligibility and census
-cut classification. `ParallelEncodeSceneTests` compares all pixels against the
-serial path after 257 draws with changing scissors, colors and textures, while
-deliberately holding the first child until the last child ends. A second device
-scene checks draws, a cache barrier, compute buffer writes, an EOP label and a CPU
-wait, then more draws. Both require actual parallel batches; a silent fallback
-cannot satisfy the assertions. All 24 focused cases passed with
-`SHARPEMU_TEST_REQUIRE_DEVICE=1`.
-
-The user's later queue exception allows sequential builds and unit tests while
-`int3-user-gui` holds the lock. It does not allow game launches. Obsolete own
-build/test/package waiters were canceled; opt1/base2/opt2 game tags remain queued.
-The GUI process and its lock were left untouched.
-
-
-## Prototype build and complete suite results
-
-Implementation commit: `e616f4a81`. Successfully built/tested source content
-SHA-256: `3929f87e750903e303c11e9b166b7ec370e0cdcf75efb4863d2540fec0dd2f5a`.
-The final Release solution build completed in 30.57 seconds with 197 warnings and
-zero errors. Commands and per-case results are preserved under
-`artifacts/ds-fps/bench/arch-parallel/`; `validate.py` records the exact command,
-source signature, device flag and TRX path for each suite. All used `--no-build`,
-`--blame-hang-timeout 120s --blame-hang-dump-type mini`; ShaderCompiler also used
-the required serial runsettings. Suites ran sequentially under the user's GUI-lock
-build/unit-test exception, without launching any game.
-
-| Suite | Passed | Failed | Skipped | Device required |
-|---|---:|---:|---:|---|
-| Focused ordering | 24 | 0 | 0 | yes |
-| Metal | 1,424 | 4 | 7 | yes |
-| Libs | 8,618 | 6 | 5 | no |
-| ShaderCompiler | 2,134 | 0 | 1 | no |
-| ShaderCompiler.Metal | 3,162 | 0 | 0 | yes |
-
-All six Libs failures have the exact names documented on base (four SSE4a signal
-bridge cases, import-result sampling and Rosetta vector-store preservation).
-The Metal failures were the lossy-texture case plus guest-view creation/rebind
-cases `AScatteredRangePastTheRingCapIsReadWholeThroughAGuestView`,
-`ScatteredReadsLeaveTheStagedCacheAndTheRingEmpty` and
-`AnUnmapDropsTheViewAndTheNextBindReadsTheNewMapping`. These were **not assumed**
-to be inherited: an isolated `git archive bdc7ea28c...` was built afresh, after
-checking every archived file against the base git blob. Its device-required
-17-case guest-view/lossy filter passed 13 and failed the identical four assertions.
-See `base-validation.py`, `base-guest-views-build-summary.json` and
-`base-guest-views-test-summary.json`. No new failure or aborted test run was
-accepted. The 13 suite skips are preserved rather than counted as passing.
-
-
-## A/B status and ready measurement bundle
-
-The signed measurement bundle was built with
-`SHARPEMU_MAC_GET_TASK_ALLOW=1 scripts/macos/build-app.sh`, osx-x64, ReadyToRun,
-clean source `751c2b9cfd45a34209f097079a1c0a0f1dd8ea23`. `codesign --verify
---deep --strict` passed; get-task-allow is true. `prototype-bundle.json` records
-the metadata and SHA-256 of all 255 managed/native/configuration payload files.
-The flag remains **default off**.
-
-The first warm control already completed under FIFO on exact base `bdc7ea28c`:
-`20261024-140403-ds-arch-parallel-base1`. The HUD appeared 207.047 seconds after
-actual launch. With `SHARPEMU_SHADER_PRECOMPILE_BUDGET=0`, overlay enabled, and
-the first 40 in-world seconds discarded, it recorded 112 presented-frame entries
-over 79.4424 seconds: 1.409826 fps, p50 481.783867 ms, p95 1665.824175 ms,
-p99 1815.888167 ms. The FPS convention is entries / first-to-last span; the
-interval-count convention is also preserved (1.397239 fps). There were zero
-detected build/test process-load alerts in the accepted interval. End screenshot
-inspection found the expected Outpost Passage scene, knight, foliage, tunnel,
-lighting and overlay, matching the diagnostic scene.
-
-The remaining alternating warm arms are `opt1`, `base2`, `opt2`, with the same
-budget, resolution, own cloned data root, overlay, HUD+120-second stop, and
-skip40 analysis. Their live FIFO entries are preserved behind the user's
-`int3-user-gui` lock. They must not launch while that lock remains held.
-No optimization FPS, A/B conclusion or rendering-equivalence claim is available
-until those runs complete and their final screenshots have been inspected.
-
-
-Completed validation outputs `artifacts/bin`, `artifacts/obj` and the isolated
-base's corresponding directories were removed after saving the results. There
-was no `.packages` directory. Signed game bundles, own data root and evidence
-remain available to the queued runs. Their helper saves skip40 summaries after
-each successful run; final screenshot inspection and A/B interpretation remain
-required.
-
-
-## First optimized attempt: excluded memory-pressure termination
-
-The user GUI lock was released; `opt1` acquired FIFO at local19:13:31 but the
-shared game harness continued waiting for the existing SharpEmu process to exit.
-Actual launch was local20:34:37. The run directory timestamp therefore does not
-represent launch time: `20261024-191332-ds-arch-parallel-opt1`. The HUD appeared
-336.429 seconds after actual launch. At local20:41:02 and20:41:04 the OOM guard
-reported 5% free memory twice and killed PID69844. The app exit was137; the wrapper
-correctly returned3 because no end marker existed. This attempt is excluded from
-A/B timing. Peak footprint was14,418MB and Metal allocation peaked at14,843MB;
-these are whole-run peaks rather than matched steady-state differences to base.
-
-The last screenshot (`shot-0376.png`) was opened and compared with base1's end
-shot. Knight, tunnel, foliage, lighting and the large bottom-left HUD layout
-matched; the Outpost Passage title was still visible after fewer completed
-frames. This is not a completed end-window equivalence result. The trace confirms
-three native QoS helpers and four-worker batches were active. Near the end, each
-flip added about5,300 queued draws and80 parallel batches, with writer, shape,
-dynamic-state and pass refusals reported separately. Memory pressure invalidates
-using that incomplete attempt to predict normal speedup.
-
-`base2` then rejected its failed predecessor before launching any game. The own
-invalid `opt2` suffix waiter was canceled before acquisition, its queue line alone
-was removed while another reservation held the queue stable, and fresh
-opt1/base2/opt2 jobs were appended in that order. The failed logs/result/guard
-evidence are preserved under `bench/arch-parallel/attempts/opt1-oom-20261024-184104Z`.
-
-
-The second unchanged-binary opt1 attempt
-(`20261024-210909-ds-arch-parallel-opt1`) also failed the OOM guard, PID11149,
-local21:13:46 after two 5%-free samples. HUD was at246.51 seconds; it survived
-only30 seconds in-world, so it never entered skip40. The wrapper returned3,
-app137; peaks were14,106MB footprint and14,863MB Metal allocation. All27 process
-sampler windows from actual launch through exit had zero build/test activity.
-Its last screenshot (`shot-0265.png`) was opened: expected knight/tunnel/foliage
-and HUD, with early fog/soul animation and title still visible. It is excluded
-from FPS and final rendering-equivalence claims. The archive is
-`attempts/opt1-oom-20261024-191346Z`.
-
-Rather than repeatedly launch the failing optimized arm, an exact-main
-`basecheck` control is queued under the same current host conditions and settings.
-This distinguishes a general memory constraint from prototype-specific growth
-before another optimized retry. Existing dependent base2/opt2 jobs retain their
-failed-predecessor guards. Sampler logs now start fresh per attempt; older
-attempt logs were archived first, and their actual launch timestamps bound
-all reported load checks.
-
-
-## Matched main control and small-batch allocation correction
-
-`basecheck` completed under exact base `bdc7ea28c` with budget0, overlay1 and
-build-server cleanup disabled, run`20261024-211738-ds-arch-parallel-basecheck`.
-HUD was at289.800 seconds. Skip40 captured117 entries over79.4911 seconds:
-1.471863fps, p50 552.483082ms, p95 1752.232075ms, p99 2163.524151ms. Its end
-screenshot was opened and showed the expected knight/tunnel/foliage/HUD scene.
-Main therefore completed under the current host conditions; the two optimized
-terminations cannot simply be dismissed as a host-wide inability to run.
-
-At nearby early-HUD memory samples, main had552MiB of unique resident+swapped
-`graphics_iokit` objects versus1,767MiB for the optimized attempt; managed heaps
-and Metal-reported allocations were similar. These are nearby scene samples,
-not proof of the cause. Code inspection found a concrete avoidable difference:
-the original small-batch path ended its current child, created another child for
-the batch, then created a tail. About22,000 small batches had already occurred
-by the second optimized attempt's termination.
-
-The revised path encodes a small batch into the existing serial child and keeps
-it open; full K-worker batches still use ordered distinct children and join
-once. A new device test alternates64 singleton render passes, compares all
-pixels to serial, and requires64 actual child creations rather than192. A
-`native_children` counter records the allocation effect. This correction is
-pending a fresh build, focused ordering tests, all four full suites and a new
-signed bundle; old validation does not cover the revised source. The original
-signed751c2b9cf bundle is preserved at`artifacts/parallel-initial-macos/SharpEmu.app`.
-
-
-The small-batch revision at`118999b12` built successfully:234 warnings,zero
-errors,98.39 seconds MSBuild time (99.855 seconds wrapper), source content
-SHA-256`86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0`. All25 focused device/ordering cases passed
-with zero skips. The new64-singleton-pass case observed exactly64 native
-children and pixel equality to serial. Full Metal/Libs/ShaderCompiler/MSL suites
-are queued sequentially against this revised signature; the original full-suite
-results remain historical until these finish.
-
-
-Revised full Metal validation completed:1,428 passed,1 failed,7 skipped. The
-only failure is the independently reproduced base lossy-texture case. The three
-guest-view cases that failed on both earlier prototype and isolated base passed
-this time; the small-batch change does not modify their guest-view code, so no
-causal claim is made. Libs/ShaderCompiler/MSL validation continues sequentially.
-Packaging now requires all five focused/full summary signatures and records a
-verified `app-ready.json` marker. Optimized game jobs require that exact ready
-marker, build signature and bundle revision. The next alternating series starts
-from the successful recent `basecheck` control, then revised opt1/base2/opt2.
-
-
-## Revised validation and signed measurement snapshot
-
-Final implementation change:`118999b12`; signed bundle source:
-`c9598a26304da5db2d5a73c813986ac39864161c`, clean osx-x64 ReadyToRun.
-Source content SHA-256:
-`86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0`.
-The normal-FIFO app build took74.042 seconds, succeeded with
-`SHARPEMU_MAC_GET_TASK_ALLOW=1`, and passed deep/strict code-signature verification.
-Get-task-allow is true;255 payload hashes are saved in`prototype-bundle.json`.
-The original751c2b9cf bundle is retained separately for failure reproduction.
-
-| Revised-source suite | Passed | Failed | Skipped |
-|---|---:|---:|---:|
-| Focused device/ordering | 25 | 0 | 0 |
-| Metal | 1,428 | 1 | 7 |
-| Libs | 8,618 | 6 | 5 |
-| ShaderCompiler | 2,134 | 0 | 1 |
-| ShaderCompiler.Metal | 3,162 | 0 | 0 |
-
-The remaining Metal failure is the exact base lossy-texture assertion. Libs has
-the six exact documented base failures. All five result signatures match the
-built source; no run aborted and no unexpected failure was accepted. Device
-flags, serial shader settings and blame120s/mini options are retained in the
-per-suite summaries/TRX paths. Own `artifacts/bin`, `artifacts/obj` were removed
-after this second full validation/package; no `.packages` existed. Signed bundles
-and runtime evidence remain available.
-
-The queued formal alternating series is the successful recent exact-main
-`basecheck`, revised K4 `opt1`, exact-main `base2`, revised K4 `opt2`. Both arms
-use budget0 and overlay1; no renderer quality/memory setting was reduced.
-All-suite signature and successful signed-bundle markers gate the optimized
-runs, while predecessor success gates each arm. Runtime measurements and end
-screenshot inspections still remain to complete.
-
-
-## First completed revised optimized arm
-
-Revised K4 `opt1` completed normally at clean signed source `c9598a263`, run
-`20261024-221738-ds-arch-parallel-opt1`, HUD217.954 seconds, graceful stop after
-the full HUD+120-second window. Skip40 recorded122 entries over79.703672
-seconds:1.530670fps (interval convention1.518123), p50 549.447060ms,
-p95 1598.145008ms and p99 1856.400967ms. All8 accepted process-sampler windows
-had zero build/test activity. The end screenshot was opened and compared with
-basecheck: expected knight/armour/tunnel/foliage/exit lighting and identical HUD
-layout; no structural difference was observed. Scene animation differs, so this
-is not a bitwise game-image equivalence proof.
-
-The121 counter intervals averaged5,314.32 queued draws,80.00 K4 batches,
-60.59 small batches,447.60 native children and1,018.31 refused draws per frame.
-Refusals split into206.23 writer,12.79 shape,434.18 dynamic state and365.12
-pass cases. Three native QoS helper threads were active. Added parent-pass ends
-for barriers were24.28/frame. Capture cost21.710ms/frame, native summed worker
-wall time27.932ms/frame and owner join-region wall time37.074ms/frame are
-diagnostic counters, not disjoint CPU phases: native work overlaps the join.
-Guest preparation and compute remain ordered.
-
-There was no OOM termination in this revised attempt, but it is too strong to
-say the allocation correction solved the memory issue: accepted unique
-resident+swapped `graphics_iokit` samples were still1,419-1,698MiB, above the
-matched main control's earlier552MiB near-HUD sample. Accepted peak footprint
-was13,891.5MiB. The new device test proves bounded child allocations for small
-passes; these runtime observations do not prove the cause of the earlier OOMs.
-The second control and optimized arm remain pending before an A/B verdict.
-
-
-The second exact-main control `base2` completed:
-`20261024-222328-ds-arch-parallel-base2`, actual HUD179.990 seconds, full
-120-second in-world window and graceful stop. The wrapper also waited for load
-to drop before launch, so directory timestamp and wrapper duration do not equal
-actual gameplay launch/duration. Skip40 captured127 entries over79.292967
-seconds:1.601655fps, p50 526.479006ms, p95 1486.330986ms, p99 2107.867002ms.
-All8 accepted load samples had zero build/test activity. The end screenshot was
-opened and showed the same expected scene/HUD layout as basecheck and opt1.
-Accepted peak footprint was13,052.8MiB; unique resident+swapped graphics_iokit
-samples were539-584MiB, lower than revised opt1's1,419-1,698MiB. The controls
-span1.472-1.602fps; the first optimized1.531fps lies within that variation.
-A performance verdict awaits the final optimized arm, which is queued/running
-with the same settings and load-wait policy.
-
-
-The revised `opt2` attempt (`20261024-222955-ds-arch-parallel-opt2`) failed
-the OOM guard at local22:35:20, PID14903, after two consecutive5%-free samples.
-Actual HUD was173.15 seconds and only~77 seconds in-world completed, so there is
-no end marker/full measurement window. Peak footprint14,153MB; app137/wrapper3.
-Its last screenshot (`shot-0245.png`) was opened and showed the expected scene
-and HUD. This attempt is excluded from the complete-window timing comparison
-and preserved in`attempts/opt2-oom-20261024-203520Z`; its failure is retained as
-a reliability/memory result. The small-batch correction demonstrably did not
-eliminate the memory-pressure failure. Owner and child autorelease pools and
-retains/releases were checked without finding an unbalanced ownership path;
-the source of the additional graphics-object charge is unresolved.
-
-An unchanged final-arm retry is queued after pressure recovery to obtain the
-required second complete optimized sample. No settings/worker count/source
-changes are made, the guard remains active, and default-off is retained.
+Reproduction helpers `step.py`, `game.py`, `summarize.py`, `validate.py`,
+`prototype-build.py`, `prototype-app.py`, `benchmark_validation.py` and
+`source_manifest.py` remain in `bench/arch-parallel/`. Signed binaries and raw test/
+game output are local; committed receipts record exact source, hashes, commands,
+counts and screenshot observations. No more jobs are launched or queued: the
+user's final instruction is to hand back the current negative result and stop.
+User apps and other agents' processes, locks and reservations remain untouched.
+Own `artifacts/bin `, `artifacts/obj` and isolated-base corresponding build outputs
+were removed after validation/packaging; no `.packages` remains. Main checkout was
+not edited. All changes are local to this branch/worktree, with no review or push.

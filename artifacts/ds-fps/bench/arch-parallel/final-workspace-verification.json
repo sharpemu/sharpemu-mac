@@ -1,0 +1,18 @@
+{
+  "atUtc": "2026-10-24T20:50:20.520609+00:00",
+  "worktree": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel",
+  "branch": "ds-fps-arch-parallel",
+  "baseAncestor": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+  "sourceSha256": "86ed2d96539a0a6bb5de3f28a56402b57b83efd83123276b025b8ca6a3061fe0",
+  "readyBundleRevision": "c9598a26304da5db2d5a73c813986ac39864161c",
+  "remainingOwnedBuildOutputs": [],
+  "remainingPackages": [],
+  "pendingOwnedJobs": [],
+  "ownedQueueTagsRemain": false,
+  "coordinationSnapshot": {
+    "lock": null,
+    "next": null,
+    "queue": ""
+  },
+  "action": "Read-only final verification. No new jobs queued, no game launches, no user applications closed or signalled. Binaries/raw evidence retained; build outputs previously removed."
+}
