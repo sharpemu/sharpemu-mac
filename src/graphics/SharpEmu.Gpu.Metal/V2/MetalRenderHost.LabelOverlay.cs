@@ -32,6 +32,28 @@ internal sealed partial class MetalRenderHost
 {
     private readonly MetalPendingWriteOverlay _labelOverlay = new(MetalV2Diagnostics.OverlayPageFilter);
     private long _labelOverlayHits;
+    private readonly MetalPendingWriteOverlay.RawBytesReader _labelBaselineReader;
+    private static readonly bool LabelReaderReuse =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_LABEL_READER_REUSE");
+    private long _labelReaderCached;
+    private long _labelReaderAllocated;
+
+    // The memory object never changes. Forming this interface method group on every
+    // check allocated a delegate even when the overlay's page filter refused the range.
+    private MetalPendingWriteOverlay.RawBytesReader LabelBaselineReader()
+    {
+        if (LabelReaderReuse)
+        {
+            _labelReaderCached++;
+            return _labelBaselineReader;
+        }
+        _labelReaderAllocated++;
+        return _memory.TryRead;
+    }
+
+    private string TakeLabelReaderCounters() =>
+        $" label_reader_cached={Interlocked.Exchange(ref _labelReaderCached, 0)}" +
+        $" label_reader_allocated={Interlocked.Exchange(ref _labelReaderAllocated, 0)}";
 
     // SHARPEMU_METAL_V2_LABEL_OVERLAY=0 is read once; tests set it per host.
     internal bool LabelOverlayEnabled { get; set; } = MetalV2Diagnostics.LabelOverlay;
@@ -91,7 +113,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var size = (ulong)destination.Length;
-        _labelOverlay.DropChangedBaselines(address, size, _memory.TryRead);
+        _labelOverlay.DropChangedBaselines(address, size, LabelBaselineReader());
         var coverage = _labelOverlay.Coverage(address, size, _completedSerialReader ??= () => CompletedSerial);
         if (coverage == MetalOverlayCoverage.None || (requireFull && coverage != MetalOverlayCoverage.Full))
         {
