@@ -247,14 +247,21 @@ public sealed partial class GpuCommandInterpreter
     internal void DispatchDirect(uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
         _host.DispatchDirect(SubmitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
-        SuspendIfPipelineNotReady();
+        SuspendDispatchIfNotReady();
     }
 
-    // A draw or dispatch whose pipeline is still compiling runs again from this same
-    // packet once the backend says the pipeline is ready. Nothing is skipped: the
-    // packet has not advanced, and the host touched nothing before it gave up.
-    private void SuspendIfPipelineNotReady()
+    // A dispatch with unavailable resources or a compiling pipeline runs again from
+    // this same packet once the backend reports it ready. No dispatch was encoded
+    // and no later packet on this queue can overtake it.
+    private void SuspendDispatchIfNotReady()
     {
+        var serial = _host.ConsumePendingResourceRead();
+        if (serial != 0)
+        {
+            SuspendOn(new CommandWaitCondition(CommandWaitKind.GpuSerial, Reference: serial));
+            return;
+        }
+
         if (_host.ConsumePipelineNotReady())
         {
             SuspendOn(new CommandWaitCondition(CommandWaitKind.Pipeline));

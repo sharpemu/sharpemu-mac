@@ -57,6 +57,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
     {
         _submissionsStarted++;
+        RetireCompletedResourceReads();
         CommitCoalescedIfOverdue();
         _ = EnsureCommandBuffer();
         _translation!.BeginSubmission(queueId, submissionId, geometrySnapshots, CommandStream.GetInterpreter(queueId));
@@ -2067,8 +2068,38 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         uint groupsY,
         uint groupsZ,
         uint dispatchInitiator,
-        ulong indirectArgumentsAddress = 0) =>
-        _translation!.Dispatch(submitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
+        ulong indirectArgumentsAddress = 0)
+    {
+        _resourceReadRetryAllowed = true;
+        try
+        {
+            _translation!.Dispatch(submitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
+        }
+        catch (ResourceReadPending pending)
+        {
+            // Materialization has unwound all of its read scopes/locks; this packet
+            // encoded no dispatch and will prepare fresh resources on its retry.
+            _pendingResourceReadSerial = pending.Serial;
+            DisarmPendingCopy();
+            _resourceReadSuspends++;
+            var stream = _commandStream!;
+            var serial = pending.Serial;
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            _completions.Enqueue(serial, () =>
+            {
+                Interlocked.Increment(ref _resourceReadWakeups);
+                Interlocked.Add(ref _resourceReadDeferredTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+                // This queue runs callbacks on one completion thread. Only that thread
+                // publishes this monotonic floor; retirement stays on the GPU worker.
+                if (serial > _resourceReadReadySerial) Volatile.Write(ref _resourceReadReadySerial, serial);
+                stream.NotifyResourceReadReady(serial);
+            });
+        }
+        finally
+        {
+            _resourceReadRetryAllowed = false;
+        }
+    }
 
     public bool ResolvesIndirectDispatchOnGpu => true;
 

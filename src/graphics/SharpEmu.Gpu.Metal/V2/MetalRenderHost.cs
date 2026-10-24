@@ -976,6 +976,7 @@ internal sealed partial class MetalRenderHost :
     /// </summary>
     public void FlushAndWaitForGpu(MetalWaitReason reason)
     {
+        var detail = CaptureGpuWait(reason, partial: false);
         // Charged to a phase of its own, so the phase that asked (a resource walk reading
         // bytes the GPU wrote, say) does not report the GPU's time as its own work.
         using var waitProfile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
@@ -997,6 +998,7 @@ internal sealed partial class MetalRenderHost :
 
         var profile = _completions.WaitFor(serial);
         ReportWait(serial, started, committedAt, waited, _previousCommitTime, in profile, reason, partial: false);
+        ReportGpuWait(in detail, serial, started, committedAt, in profile);
         _guestMemory.NoteCompleted(serial);
         _gpuWrites.Clear(serial);
         RetirePendingCopies(serial);
@@ -1013,6 +1015,7 @@ internal sealed partial class MetalRenderHost :
     /// </summary>
     private void WaitForCommittedSerial(ulong serial, MetalWaitReason reason)
     {
+        var detail = CaptureGpuWait(reason, partial: true);
         if (serial > _previousSerial)
         {
             // Nothing has committed this serial, so nothing will ever signal it: waiting
@@ -1039,6 +1042,7 @@ internal sealed partial class MetalRenderHost :
         // The buffer the wait was for, so the report can say what the GPU spent on it.
         var buffer = InFlightBufferFor(serial, out var commitTime);
         ReportWait(serial, started, started, buffer, commitTime, in profile, reason, partial: true);
+        ReportGpuWait(in detail, serial, started, started, in profile);
         _guestMemory.NoteCompleted(serial);
         var completed = CompletedSerial;
         _gpuWrites.Retire(completed);
@@ -1737,6 +1741,7 @@ internal sealed partial class MetalRenderHost :
         _lastReadSize = size;
         if (_imageCache.HasGpuModifiedImageBytes(address, size))
         {
+            _resourceReadImageRefused++;
             // The writeback is recorded into the buffer being built, so this one has
             // to be committed before the bytes can be read.
             FlushGpuWrites(address, size, MetalWritebackCause.HostRead);
@@ -1747,6 +1752,7 @@ internal sealed partial class MetalRenderHost :
         var pending = _gpuWrites.PendingSerial(address, size, CompletedSerial);
         if (pending != 0)
         {
+            SuspendResourceReadIfSafe(pending, address, size);
             if (size <= SmallReadWaitBytes)
             {
                 ReportSmallReadWaitSite(address, size);
@@ -2273,7 +2279,8 @@ internal sealed partial class MetalRenderHost :
             $"schedule_ms={scheduleMs.ToString("F1", culture)} " +
             $"completions={completions} completion_ms={completionMs.ToString("F1", culture)} " +
             $"host_waits={waits} partial_waits={partial} " +
-            $"host_wait_ms={(waitTicks * 1000.0 / frequency).ToString("F1", culture)} " +
+            $"host_wait_ms={(waitTicks * 1000.0 / frequency).ToString("F1", culture)}" +
+            TakeResourceReadRetryCounters() + " " +
             $"idle_ms={(idleTicks * 1000.0 / frequency).ToString("F0", culture)} pipelines={pipelines} " +
             $"pipeline_ms={pipelineMs.ToString("F1", culture)} " +
             $"library_ms={(Interlocked.Exchange(ref _libraryTicks, 0) * 1000.0 / frequency).ToString("F1", culture)} " +
@@ -2521,6 +2528,11 @@ internal sealed partial class MetalRenderHost :
             if (wait.Kind == SharpEmu.Libs.Gpu.GpuCommands.CommandWaitKind.Pipeline && _compiler is { } compiler)
             {
                 waited = $" compiling=[{compiler.DescribeInFlight()}]";
+            }
+
+            if (wait.Kind == SharpEmu.Libs.Gpu.GpuCommands.CommandWaitKind.GpuSerial)
+            {
+                waited = $" serial={wait.Reference} completed={CompletedSerial}";
             }
 
             if (wait.Kind == SharpEmu.Libs.Gpu.GpuCommands.CommandWaitKind.GuestMemory && wait.Address != 0)

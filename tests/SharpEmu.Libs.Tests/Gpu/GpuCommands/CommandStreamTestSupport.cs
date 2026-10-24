@@ -340,6 +340,9 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
 
     public bool ResolvesIndirectDispatchOnGpu { get; set; }
 
+    public Func<ulong>? ResourceReadDependency { get; set; }
+    public ulong ConsumePendingResourceRead() => ResourceReadDependency?.Invoke() ?? 0;
+
     public bool ResolvesIndirectDrawOnGpu { get; set; }
 
     public bool ResolvesIndirectAutoDrawOnGpu { get; set; }

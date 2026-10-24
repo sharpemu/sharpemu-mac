@@ -364,6 +364,11 @@ public interface ICommandStreamHost
     // backend reports the pipeline ready; nothing is skipped.
     bool ConsumePipelineNotReady() => false;
 
+    // A draw/dispatch stopped before encoding because its resource preparation needs
+    // bytes from this already-submitted GPU serial. Zero means no dependency. The
+    // packet stays at its current cursor until the backend reports that serial ready.
+    ulong ConsumePendingResourceRead() => 0;
+
     // True when an indirect dispatch in workgroup units reads its group counts on the
     // GPU, so the interpreter need not wait for the GPU to read them back first.
     bool ResolvesIndirectDispatchOnGpu => false;
