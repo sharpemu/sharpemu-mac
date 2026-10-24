@@ -1141,6 +1141,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var ending = _renderingState;
+        _batchCensus?.Close(MetalBatchCensus.Cut.Pass);
         if (_renderEncoder != 0)
         {
             if (MetalV2Diagnostics.DeferStoreActions)
@@ -2186,6 +2187,7 @@ internal sealed partial class MetalRenderHost
 
     private void CountDraw(long startedTicks)
     {
+        _batchCensus?.Encoded();
         NoteRecordedWork();
         Interlocked.Increment(ref _drawCount);
         NotePassDraw(_boundGraphicsPipeline?.Profile);

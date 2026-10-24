@@ -56,6 +56,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
     {
+        _batchCensus?.Close(MetalBatchCensus.Cut.Submission);
         _submissionsStarted++;
         CommitCoalescedIfOverdue();
         _ = EnsureCommandBuffer();
@@ -1850,6 +1851,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument)
     {
+        _batchCensus?.Frame();
         var result = VideoOutBackendServices.TryReserveFlipRequest(
             handle, index, flipMode, flipArgument, gpuQueued: true, out var requestId);
         if (result != 0)
@@ -2049,6 +2051,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
     {
+        _batchCensus?.Work(compute: false);
         using var entryScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandDrawEntry);
         _translation!.DrawIndexed(submitId, in arguments);
@@ -2056,6 +2059,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
     {
+        _batchCensus?.Work(compute: false);
         using var entryScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandDrawEntry);
         _translation!.DrawAuto(submitId, in arguments);
@@ -2067,8 +2071,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         uint groupsY,
         uint groupsZ,
         uint dispatchInitiator,
-        ulong indirectArgumentsAddress = 0) =>
+        ulong indirectArgumentsAddress = 0)
+    {
+        _batchCensus?.Work(compute: true);
         _translation!.Dispatch(submitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
+    }
 
     public bool ResolvesIndirectDispatchOnGpu => true;
 

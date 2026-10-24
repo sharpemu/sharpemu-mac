@@ -34,6 +34,8 @@ public sealed partial class GpuCommandInterpreter
     internal bool StrictHeaders { get; set; } = GpuStreamDiagnostics.StrictHeaders;
 
     private readonly ICommandStreamHost _host;
+    private static readonly bool BatchCensusEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BATCH_CENSUS") == "1";
     private readonly List<uint[]> _payloadScratchByDepth = new();
     private readonly uint[] _constantRam = new uint[ConstantRamDwords];
     private PacketCursorStack? _execution;
@@ -449,6 +451,10 @@ public sealed partial class GpuCommandInterpreter
             }
 
             var packetAddress = cursor.Address + ((ulong)cursor.Offset * sizeof(uint));
+            if (BatchCensusEnabled && _host is ICommandBatchObserver observer)
+            {
+                observer.BeforePacketRead();
+            }
             // The header and the body of a packet are consecutive, and almost every
             // packet is short, so one read of a small window covers both. Reading the
             // header on its own first doubled the number of guest reads the command
@@ -518,6 +524,10 @@ public sealed partial class GpuCommandInterpreter
             }
 
             var opcode = PacketHeader.Opcode(header);
+            if (BatchCensusEnabled && _host is ICommandBatchObserver packetObserver)
+            {
+                packetObserver.ObservePacket(header);
+            }
             // Only a wait or an inert NOP/marker may separate the store and its paired wait.
             // Draws, dispatches and transfers may produce a newer GPU value at the same address.
             if (opcode is not (PacketOpcode.WaitRegisterMemory or PacketOpcode.WaitRegisterMemory64) &&
