@@ -1,18 +1,20 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Diagnostics;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 
 // Program identity is the content hash or the declared hash; entries key on static state, permutations on specialization.
 [Collection(SchedulingStateCollection.Name)]
-public sealed class ShaderProgramCacheTests : IDisposable
+public sealed class ShaderProgramCacheTests(ITestOutputHelper output) : IDisposable
 {
     private const ulong CodeA = PipelineTestGuest.MemoryBase + 0x1000;
     private const ulong CodeB = PipelineTestGuest.MemoryBase + 0x2000;
@@ -21,6 +23,82 @@ public sealed class ShaderProgramCacheTests : IDisposable
     private const ulong DataBase = PipelineTestGuest.MemoryBase + 0x4_0000;
     private const uint Format32x4Uint = 75;
     private const uint Format32x4Float = 77;
+
+    [Fact]
+    public void NoAffinePreparationTimingWithFreshDrawInputs()
+    {
+        var previous = AffineVertexFetchResolver.Enabled;
+        try
+        {
+            const int count = 20000;
+            _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.EndProgram);
+            var source = _guest.Source(CodeA, ShaderStage.Vertex, []);
+            var options = new StageCompileOptions();
+            ShaderProgram Run(int iterations)
+            {
+                ShaderProgram program = default;
+                for (var iteration = 0; iteration < iterations; iteration++)
+                {
+                    options.VertexInfo = new VertexInputInfo();
+                    var cursor = 0u;
+                    program = _guest.Programs.GetOrCompile(source, options, ref cursor, out _);
+                }
+                return program;
+            }
+            ShaderProgram first = default;
+            foreach (var enabled in new[] { false, true })
+            {
+                AffineVertexFetchResolver.Enabled = enabled;
+                var program = Run(2000);
+                if (enabled) Assert.Equal(first, program);
+                else first = program;
+                var allocated = GC.GetAllocatedBytesForCurrentThread();
+                var start = Stopwatch.GetTimestamp();
+                Assert.Equal(program, Run(count));
+                var elapsed = Stopwatch.GetElapsedTime(start);
+                allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
+                output.WriteLine($"no-affine full preparation enabled={enabled} n={count} ns/call={elapsed.TotalNanoseconds / count:F1} bytes/call={(double)allocated / count:F1}");
+            }
+        }
+        finally { AffineVertexFetchResolver.Enabled = previous; }
+    }
+
+    [Fact]
+    public void AffineRepeatedDrawsReadFreshDescriptorsAndPreserveStaticVariants()
+    {
+        var previous = AffineVertexFetchResolver.Enabled;
+        AffineVertexFetchResolver.Enabled = true;
+        try
+        {
+            _guest.RegisterProgram(CodeA, HeaderA, [0xE00C2000, 0x80020A05, 0xBF810000]);
+            var data = new uint[16];
+            PipelineTestGuest.BufferDescriptor(DataBase, 16, 8, Format32x4Float).CopyTo(data, 8);
+            var source = _guest.Source(CodeA, ShaderStage.Vertex, data);
+            ShaderProgram Compile(VertexFetchBounds bounds, bool ieee, out VertexInputInfo info)
+            {
+                info = new() { FetchBounds = bounds, IeeeMode = ieee };
+                var cursor = 0u;
+                return _guest.Programs.GetOrCompile(source, new() { VertexInfo = info }, ref cursor, out _);
+            }
+            var bounds = new VertexFetchBounds(2, 4, 0, 1, true, true);
+            var first = Compile(bounds, false, out var info);
+            Assert.Equal(first, Compile(bounds, false, out var repeated));
+            Assert.Same(info.Attributes, repeated.Attributes);
+            Assert.Equal(1, _guest.Host.VertexFetchMappingQueries);
+
+            // The descriptor is mutated in place behind the same source/array.
+            data[8] += 16;
+            Assert.Equal(first, Compile(bounds, false, out var relocated));
+            Assert.Equal(DataBase + 16, Assert.Single(relocated.Buffers).Address);
+            Assert.Equal(2, _guest.Host.VertexFetchMappingQueries);
+            var fallback = Compile(default, false, out var portable);
+            Assert.Empty(portable.Attributes);
+            Assert.NotEqual(first, fallback);
+            Assert.NotEqual(fallback, Compile(default, true, out _));
+            Assert.Equal(fallback, Compile(default, false, out _));
+        }
+        finally { AffineVertexFetchResolver.Enabled = previous; }
+    }
 
     [Fact]
     public void AffineAttributeLimitRetainsTheRemainingShaderLoad()

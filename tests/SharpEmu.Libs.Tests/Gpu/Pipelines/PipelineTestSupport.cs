@@ -29,7 +29,14 @@ internal sealed class FakeCompiledShader(ShaderCompileRequest request, byte[]? s
 // Counts modules and pipelines; every guest read comes straight from the fake memory.
 internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 {
-    public bool VertexFetchRangeIsMapped(ulong address, ulong size) => true;
+    public bool VertexFetchMapped { get; set; } = true;
+    public int VertexFetchMappingQueries { get; private set; }
+    public long? VertexFetchMappingGeneration { get; set; } = 0;
+    public bool VertexFetchRangeIsMapped(ulong address, ulong size)
+    {
+        VertexFetchMappingQueries++;
+        return VertexFetchMapped;
+    }
     public uint MaxFixedFunctionVertexBuffers { get; set; } = 24;
 
     private ulong _nextHandle = 1;

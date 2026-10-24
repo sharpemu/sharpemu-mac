@@ -16,6 +16,49 @@ namespace SharpEmu.Libs.Tests.Memory;
 public sealed class PhysicalVirtualMemoryTests
 {
     [Fact]
+    public void ReadMappingGenerationChangesWhenMappedRangeMembershipChanges()
+    {
+        using var memory = new PhysicalVirtualMemory(new FakeHostMemory());
+        var before = memory.ReadMappingGeneration;
+        Assert.False(memory.CanRead(0x10000, 0x1000));
+        Assert.True(memory.TryAllocateAtExact(0x10000, 0x1000, false, out _));
+        var mapped = memory.ReadMappingGeneration;
+        Assert.NotNull(mapped);
+        Assert.NotEqual(before, mapped);
+        Assert.True(memory.CanRead(0x10000, 0x1000));
+        memory.Clear();
+        Assert.NotEqual(mapped, memory.ReadMappingGeneration);
+        Assert.False(memory.CanRead(0x10000, 0x1000));
+    }
+
+    [Fact]
+    public void ReadMappingGenerationRefusesDuringConcurrentMappingPublication()
+    {
+        using var memory = new PhysicalVirtualMemory(new FakeHostMemory());
+        var gate = (ReaderWriterLockSlim)typeof(PhysicalVirtualMemory).GetField("_gate",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(memory)!;
+        using var held = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var writer = new Thread(() =>
+        {
+            gate.EnterWriteLock();
+            try { held.Set(); release.Wait(); }
+            finally { gate.ExitWriteLock(); }
+        });
+        writer.Start();
+        try
+        {
+            Assert.True(held.Wait(TimeSpan.FromSeconds(5)));
+            Assert.Null(memory.ReadMappingGeneration);
+        }
+        finally { release.Set(); writer.Join(); }
+        Assert.NotNull(memory.ReadMappingGeneration);
+        gate.EnterWriteLock();
+        try { Assert.Null(memory.ReadMappingGeneration); }
+        finally { gate.ExitWriteLock(); }
+    }
+
+    [Fact]
     public void FreeHostRangesSkipTakenAndTooSmallRegionsAndStayInsideTheWindow()
     {
         var host = new ScriptedRegionHostMemory(

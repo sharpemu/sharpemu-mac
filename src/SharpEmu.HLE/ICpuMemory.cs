@@ -52,5 +52,9 @@ public interface ICpuMemory
     // True when the whole range is mapped guest memory; no bytes are copied.
     bool CanRead(ulong address, ulong size) => false;
 
+    // Changes whenever CanRead's mapped-range answer can change. Null forbids
+    // memoizing mapping queries for providers without a generation contract.
+    long? ReadMappingGeneration => null;
+
     string DescribeReadRange(ulong address, ulong size) => "Memory mapping details are unavailable.";
 }

@@ -1065,6 +1065,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     allocationSize = _regions[i].Size;
                     _allocationGaps.Remove(_regions[i].VirtualAddress);
                     _regions.RemoveAt(i);
+                    Interlocked.Increment(ref _mappingGeneration);
                     break;
                 }
             }
@@ -3079,6 +3080,18 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool CanRead(ulong address, ulong size) => size != 0 && (IsBackedRange(address, size) || IsAccessible(address, size));
 
+    public long? ReadMappingGeneration
+    {
+        get
+        {
+            // Do not reuse a proof while a map/unmap is publishing its bookkeeping.
+            // Like CanRead, the proof is an observation, not a mapping lifetime lease.
+            if (_gate.IsWriteLockHeld || !_gate.TryEnterReadLock(0)) return null;
+            try { return Volatile.Read(ref _mappingGeneration); }
+            finally { _gate.ExitReadLock(); }
+        }
+    }
+
     public bool IsAccessible(ulong virtualAddress, ulong size)
     {
         _gate.EnterReadLock();
@@ -3120,6 +3133,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private void InsertRegionSorted(MemoryRegion region)
     {
+        Interlocked.Increment(ref _mappingGeneration);
         var low = 0;
         var high = _regions.Count;
         while (low < high)
