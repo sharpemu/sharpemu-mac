@@ -1,0 +1,11 @@
+{
+  "step": "census2",
+  "command": [
+    "python3",
+    "artifacts/ds-fps/bench/arch-parallel/game.py",
+    "census2"
+  ],
+  "cwd": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel",
+  "seconds": 365.41709995269775,
+  "rc": 0
+}

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "builtAtUtc": "2026-10-23T00:46:18.485894+00:00",
+  "source": {
+    "revision": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+    "trackedSourceDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "dirtySource": false,
+    "untrackedSourceSha256": {}
+  },
+  "integratedUpstreamRevision": "a1061ef3241f55c2241b89f6df6b12ebf55674db",
+  "sdk": "10.0.103",
+  "rid": "osx-x64",
+  "graphicsBackend": "Metal",
+  "hostStack": [
+    "AppKit",
+    "GameController",
+    "CoreAudio"
+  ],
+  "verifiedPayloads": {
+    "SharpEmu": "6d60d9cf6c1b93b28ef8e96983f09bc2b323cf331ca39e762674380aeaa5a1b2",
+    "SharpEmu.Gpu.Metal.dll": "bd24ae32b7f4eac06acddef90949132488b608c5182c1c4cbdb5b376242ab859",
+    "SharpEmu.Libs.dll": "ca105f048e9da9e0d281ee0d24aa00936f7468dcaa381c6d2c9eefa3004a1446",
+    "SharpEmu.ShaderCompiler.dll": "3cea2b617969fe72d3e7790cb1412c5d5515bd45a02c4d4e66ed6a45db5266fd",
+    "SharpEmu.ShaderCompiler.Metal.dll": "bd0f6e85e186e3e6e8419610818624f99bdd35767791697b7867808a44d34a0b"
+  }
+}

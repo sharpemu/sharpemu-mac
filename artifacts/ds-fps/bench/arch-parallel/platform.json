@@ -1,0 +1,9 @@
+{
+  "hw.model": "Mac16,1",
+  "hw.perflevel0.logicalcpu": "4",
+  "hw.perflevel1.logicalcpu": "6",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.2\nBuildVersion:\t\t26B5112a\n",
+  "base": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+  "censusSource": "68edc60754acbaf0235209b27a891a87c0a7174e",
+  "baselineArchitecture": "artifacts/base-macos/SharpEmu.app/Contents/MacOS/SharpEmu: Mach-O 64-bit executable x86_64"
+}

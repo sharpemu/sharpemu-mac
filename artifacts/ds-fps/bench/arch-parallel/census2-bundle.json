@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "builtAtUtc": "2026-10-24T11:44:18.578082+00:00",
+  "source": {
+    "revision": "888a006c20e20cdc37757cebb9f7f75e4a95aa30",
+    "trackedSourceDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "dirtySource": false,
+    "untrackedSourceSha256": {}
+  },
+  "integratedUpstreamRevision": "a1061ef3241f55c2241b89f6df6b12ebf55674db",
+  "sdk": "10.0.103",
+  "rid": "osx-x64",
+  "graphicsBackend": "Metal",
+  "hostStack": [
+    "AppKit",
+    "GameController",
+    "CoreAudio"
+  ],
+  "verifiedPayloads": {
+    "SharpEmu.Libs.dll": "53843b7ac906706e31a1bd9e668fd8b5a2c85fe03aa4b9be4df891456da4e89f",
+    "SharpEmu": "224ef7444e21bff690f0e07cb71bc6466202ce5eb0bcc5cc0d9b89f291de86a1",
+    "SharpEmu.Gpu.Metal.dll": "4efe9d82e830dca47591bc9cb44f90b600573c53a255f23ffa28467f699265f8"
+  }
+}
