@@ -875,8 +875,8 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            if (_request.Memory.TryGetIndex(instruction.Pc, 0, out var index) &&
-                CapturedBufferByteLimit(_request.Memory[index]) is { } capturedLimit)
+            if (_request.Memory.TryGetIndex(instruction.Pc, 0, out var capturedMemoryIndex) &&
+                CapturedBufferByteLimit(_request.Memory[capturedMemoryIndex]) is { } capturedLimit)
                 _deviceBufferByteLimit = Temp("uint", capturedLimit);
             var descriptor = DeviceDescriptorBounds(instruction.Sources[1].Value);
             var scalarOffset = instruction.Sources.Count > 2

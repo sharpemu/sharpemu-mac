@@ -649,8 +649,8 @@ internal sealed partial class MetalRenderHost
             if (info.ReadOnlyDeviceBuffers)
             {
                 // Preserve the same publication/order hooks as ResolveStorageBuffer.
-                // No buffer window, staging copy, per-buffer residency or argument is
-                // needed: V# SGPRs and the pinned guest address table are the binding.
+                // V# SGPRs and the pinned guest address table replace buffer windows,
+                // staging selection and pointer arguments. Keep one pushed byte bound.
                 OrderAfterDeferredCopies(descriptor.Address, size);
                 OrderAfterStagedStores(descriptor.Address, size);
                 stage.Buffers[index] = default;
