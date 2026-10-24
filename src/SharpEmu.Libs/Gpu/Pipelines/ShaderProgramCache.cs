@@ -238,6 +238,7 @@ internal sealed class ShaderProgramCache
         _prefetchResidentGuestBytes = PrefetchEnabled ? _readResidentGuestBytes : null;
         _compareResidentGuestBytes = ResourceMaterializationCache.InPlaceValidateEnabled ? CompareResidentGuestBytes : null;
         _dataWritePending = host.DataWritePending;
+        _dataRangeWritePending = host.DataRangeWritePending;
     }
 
     // Where the preparation running now logs what it reads of guest memory, for a dispatch
@@ -272,6 +273,7 @@ internal sealed class ShaderProgramCache
         ReadLog is null && _host.TryCompareResidentGuestBytes(addresses, lengths, offsets, recorded);
 
     private readonly Func<ulong, bool>? _dataWritePending;
+    private readonly Func<ulong, ulong, bool>? _dataRangeWritePending;
     private ResourceRuntimeInputs? _inputs;
     // The shader the reused inputs' image-candidate trace attributes candidates to.
     private ulong _materializingHash;
@@ -424,6 +426,7 @@ internal sealed class ShaderProgramCache
             ReadResidentMemory = _prefetchResidentGuestBytes,
             CompareResidentMemory = _compareResidentGuestBytes,
             DataWritePending = _dataWritePending,
+            DataRangeWritePending = _dataRangeWritePending,
         };
         _materializingHash = source.Hash;
         inputs.UserData = source.UserData;

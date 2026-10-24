@@ -1945,6 +1945,13 @@ internal sealed partial class MetalRenderHost
     public Func<ulong, bool>? DataWritePending =>
         MetalV2Diagnostics.DataLoadsOnDevice ? _dataWritePending ??= IsDataWordPending : null;
 
+    private Func<ulong, ulong, bool>? _dataRangeWritePending;
+    public Func<ulong, ulong, bool>? DataRangeWritePending =>
+        MetalV2Diagnostics.DataLoadsOnDevice ? _dataRangeWritePending ??= IsDataRangePending : null;
+
+    private bool IsDataRangePending(ulong address, ulong size) =>
+        _gpuWrites.MayCover(address, size) && _gpuWrites.PendingSerial(address, size, CompletedSerial) != 0;
+
     private bool IsDataWordPending(ulong address) =>
         _gpuWrites.MayCover(address, sizeof(uint)) &&
         _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0 &&

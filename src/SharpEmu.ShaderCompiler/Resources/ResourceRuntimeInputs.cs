@@ -37,6 +37,10 @@ public sealed class ResourceRuntimeInputs
     // (DeviceDataLoads); null leaves every data word flattened.
     public Func<ulong, bool>? DataWritePending { get; init; }
 
+    // Conservative range prefilter for DataWritePending. False proves every dword's
+    // precise probe false; true retains those probes and their exact learning rule.
+    public Func<ulong, ulong, bool>? DataRangeWritePending { get; init; }
+
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
         UserData = UserData,
@@ -50,6 +54,7 @@ public sealed class ResourceRuntimeInputs
         CompareResidentMemory = CompareResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
         DataWritePending = DataWritePending,
+        DataRangeWritePending = DataRangeWritePending,
     };
 }
 

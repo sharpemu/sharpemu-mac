@@ -47,6 +47,7 @@ public static class ResourceMaterializationProfile
         ReadRecording,
         ConsumerLookup,
         ConsumerGraph,
+        BatchedWalk,
         Count,
     }
 

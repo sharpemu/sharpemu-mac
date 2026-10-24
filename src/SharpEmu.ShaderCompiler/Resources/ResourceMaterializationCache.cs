@@ -965,9 +965,9 @@ public sealed partial class ResourceMaterializationCache
                 $"{(Diagnostic)index}={Interlocked.Exchange(ref DiagnosticCounts[index], 0)}"))
             : string.Empty;
         return FormattableString.Invariant(
-            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} not_found={notFound} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} refused={refusals} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% retained_mb={Volatile.Read(ref _lastRetainedBytes) / (1024.0 * 1024.0):F1} {RawReadPrefetch.TakeReport()}{diagnostics}") +
+            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} not_found={notFound} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} refused={refusals} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% retained_mb={Volatile.Read(ref _lastRetainedBytes) / (1024.0 * 1024.0):F1} {RawReadPrefetch.TakeReport()}{diagnostics}") + BatchedResourceWalk.TakeReport() +
             TakeSlotReport() + TakeRebaseReport() +
-            TakeStaleDifferenceReport() + TakeMissReport() + TakeDetailReport();
+            TakeStaleDifferenceReport() + TakeMissReport() + TakeDetailReport() + TakeFullWalkReport();
     }
 
     private static readonly bool StaleDiffEnabled = Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE") == "1";
@@ -1318,7 +1318,8 @@ public sealed partial class ResourceMaterializationCache
                     ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
                     ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                     ReadsClean = inputs.ReadsClean,
-                DataWritePending = inputs.DataWritePending,
+                    DataWritePending = inputs.DataWritePending,
+                    DataRangeWritePending = inputs.DataRangeWritePending,
                     ComputeState = inputs.ComputeState,
                     TablePhase = recorder.TablePhase,
                 };
@@ -1342,6 +1343,7 @@ public sealed partial class ResourceMaterializationCache
             }
             if (StaleDiffEnabled && stale is not null && learning is null)
                 NoteStaleDifference(stale, built);
+            RecordFullWalk(drawKey, key, stale, built);
             if (learning is { } pending)
             {
                 var agrees = Difference(pending.Snapshot, pending.From.Specialization, built.Snapshot, built.Specialization) is null;
@@ -2448,6 +2450,7 @@ public sealed partial class ResourceMaterializationCache
                     ReadResidentMemory = resident,
                     ReadsClean = inputs.ReadsClean,
                     DataWritePending = inputs.DataWritePending,
+                    DataRangeWritePending = inputs.DataRangeWritePending,
                 };
             }
 
