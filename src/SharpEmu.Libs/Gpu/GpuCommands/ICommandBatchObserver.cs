@@ -7,5 +7,6 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 public interface ICommandBatchObserver
 {
     void BeforePacketRead();
+    void BeforeOperandRead();
     void ObservePacket(uint header);
 }

@@ -11,5 +11,6 @@ internal sealed partial class MetalRenderHost : ICommandBatchObserver
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BATCH_CENSUS") == "1" ? new() : null;
 
     void ICommandBatchObserver.BeforePacketRead() => _batchCensus?.Strict.Close(MetalBatchCensus.Cut.CommandRead);
+    void ICommandBatchObserver.BeforeOperandRead() => _batchCensus?.Strict.Close(MetalBatchCensus.Cut.Operand);
     void ICommandBatchObserver.ObservePacket(uint header) => _batchCensus?.Packet(header);
 }

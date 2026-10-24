@@ -707,6 +707,7 @@ public sealed partial class GpuCommandInterpreter
 
     internal uint ReadDword(ulong address, RenderPhaseProfile.CommandReadKind readKind = RenderPhaseProfile.CommandReadKind.Operand32)
     {
+        ObserveBatchOperand();
         RenderPhaseProfile.RecordCommandRead(readKind, sizeof(uint));
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         // The packets themselves are command data; anything else is an operand earlier work may write.
@@ -724,6 +725,7 @@ public sealed partial class GpuCommandInterpreter
 
     internal ulong ReadQword(ulong address)
     {
+        ObserveBatchOperand();
         RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.Operand64, sizeof(ulong));
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         if (!_host.TryReadGuestOperand(address, bytes))
@@ -805,10 +807,19 @@ public sealed partial class GpuCommandInterpreter
 
     internal void ReadBytes(ulong address, Span<byte> destination)
     {
+        ObserveBatchOperand();
         RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.Other, destination.Length);
         if (!_host.TryReadGuestOperand(address, destination))
         {
             throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size={destination.Length}.");
+        }
+    }
+
+    private void ObserveBatchOperand()
+    {
+        if (BatchCensusEnabled && _host is ICommandBatchObserver observer)
+        {
+            observer.BeforeOperandRead();
         }
     }
 
