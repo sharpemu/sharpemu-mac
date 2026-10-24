@@ -12,19 +12,21 @@ public sealed class Gen5MslReadOnlyDeviceBufferTests
     private const ulong GuestBase = 0x40000000;
 
     [Theory]
-    [InlineData(false, false, 0, 0x12345678u)]
-    [InlineData(true, false, 0, 0x12345678u)]
-    [InlineData(false, false, 4, 0x87654321u)]
-    [InlineData(true, false, 4, 0x87654321u)]
-    [InlineData(false, false, 8, 0u)]
-    [InlineData(true, false, 8, 0u)]
-    [InlineData(false, true, 0, 0x12345678u)]
-    [InlineData(true, true, 0, 0x12345678u)]
-    [InlineData(false, true, 4, 0x87654321u)]
-    [InlineData(true, true, 4, 0x87654321u)]
-    [InlineData(false, true, 8, 0u)]
-    [InlineData(true, true, 8, 0u)]
-    public void CapturedDescriptorsReadTheSameBytesAndRespectTheirEnd(bool enabled, bool vector, int offset, uint expected)
+    [InlineData(false, false, 0, 0x12345678u, 8)]
+    [InlineData(true, false, 0, 0x12345678u, 8)]
+    [InlineData(false, false, 4, 0x87654321u, 8)]
+    [InlineData(true, false, 4, 0x87654321u, 8)]
+    [InlineData(false, false, 8, 0u, 8)]
+    [InlineData(true, false, 8, 0u, 8)]
+    [InlineData(false, true, 0, 0x12345678u, 8)]
+    [InlineData(true, true, 0, 0x12345678u, 8)]
+    [InlineData(false, true, 4, 0x87654321u, 8)]
+    [InlineData(true, true, 4, 0x87654321u, 8)]
+    [InlineData(false, true, 8, 0u, 8)]
+    [InlineData(true, true, 8, 0u, 8)]
+    [InlineData(false, true, 4, 0u, 4)]
+    [InlineData(true, true, 4, 0u, 4)]
+    public void CapturedDescriptorsReadTheSameBytesAndRespectTheirEnd(bool enabled, bool vector, int offset, uint expected, int byteLimit)
     {
         var program = new Gen5ShaderProgram(0x2000, [
             vector ? new(0, Gen5ShaderEncoding.Mubuf, "BufferLoadDword", [0u, 0u],
@@ -69,10 +71,12 @@ public sealed class Gen5MslReadOnlyDeviceBufferTests
         for (var i = 0; i < request.Bindings.UserDataRegisters.Count; i++)
             BinaryPrimitives.WriteUInt32LittleEndian(push.AsSpan((int)(request.Bindings.PushDataStartDword + i) * 4),
                 words[request.Bindings.UserDataRegisters[i]]);
+        if (enabled)
+            BinaryPrimitives.WriteUInt32LittleEndian(push.AsSpan((int)(request.Bindings.PushDataStartDword + request.Bindings.FirstBufferWordDword()) * 4), (uint)byteLimit);
         Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out error), error);
         try
         {
-            Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, data[..8], push,
+            Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, data[..byteLimit], push,
                 shader.ArgumentLayout!, 1, out _, out _, out error, tables: [.. mapping, output]), error);
             Assert.Equal(expected, MetalNative.ReadWords(output.Buffer, 1)[0]);
         }

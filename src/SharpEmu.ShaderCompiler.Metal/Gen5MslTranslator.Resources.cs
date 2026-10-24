@@ -622,12 +622,13 @@ public static partial class Gen5MslTranslator
             DeviceDescriptorWord(DeviceDescriptorBounds(descriptorRegister), byteOffset);
 
         // The reach of a V# held in scalar registers: its base address, byte size and stride.
-        private (string Base, string Size, string Stride) DeviceDescriptorBounds(uint descriptorRegister)
+        private (string Base, string Size, string Stride) DeviceDescriptorBounds(uint descriptorRegister, string? byteLimit = null)
         {
             var word1 = Temp("uint", ScalarExpression(descriptorRegister + 1));
             var stride = Temp("uint", $"(({word1} >> 16u) & 0x3FFFu)");
             var records = Temp("uint", ScalarExpression(descriptorRegister + 2));
             var size = Temp("ulong", $"({stride} == 0u ? (ulong){records} : (ulong){stride} * (ulong){records})");
+            if (byteLimit is not null) size = Temp("ulong", $"min({size}, (ulong){byteLimit})");
             // Held in a temp: the base must not be re-read from SGPRs a later destination store may have overwritten.
             var baseAddress = Temp("ulong", $"((ulong){ScalarExpression(descriptorRegister)} | ((ulong)({word1} & 0xFFFFu) << 32))");
             return (baseAddress, size, stride);
@@ -655,10 +656,20 @@ public static partial class Gen5MslTranslator
         // OOB_SELECT check of the buffer access being emitted (_deviceBufferFits), or else the
         // descriptor's byte size (a scalar load, which has no OOB_SELECT).
         private Func<string, string, string>? _deviceBufferFits;
+        private string? _deviceBufferByteLimit;
 
-        private string DeviceBufferFits((string Base, string Size, string Stride) descriptor, string byteOffset, string bytes) =>
-            _deviceBufferFits?.Invoke(byteOffset, bytes) ??
-            $"((ulong){bytes} <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - (ulong){bytes})";
+        private string? CapturedBufferByteLimit(MemoryAccessInfo memory) =>
+            _request.Resources.Info.ReadOnlyDeviceBuffers && memory.Resource != MemoryAccessInfo.NoResource
+                ? ShaderDataDword(_request.Bindings.FirstBufferWordDword() + memory.Resource) : null;
+
+        private string DeviceBufferFits((string Base, string Size, string Stride) descriptor, string byteOffset, string bytes)
+        {
+            var check = _deviceBufferFits?.Invoke(byteOffset, bytes) ??
+                $"((ulong){bytes} <= {descriptor.Size} && (ulong){byteOffset} <= {descriptor.Size} - (ulong){bytes})";
+            return _deviceBufferByteLimit is { } limit
+                ? $"({check} && (ulong){bytes} <= (ulong){limit} && (ulong){byteOffset} <= (ulong){limit} - (ulong){bytes})"
+                : check;
+        }
 
         // The range check of a MUBUF/MTBUF access through a V# in scalar registers (RDNA2 ISA
         // 8.1.5, Table 35), per element of payload bytes at unswizzled offset o (the VGPR
@@ -815,6 +826,7 @@ public static partial class Gen5MslTranslator
             finally
             {
                 _deviceBufferFits = null;
+                _deviceBufferByteLimit = null;
             }
         }
 
@@ -863,6 +875,9 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            if (_request.Memory.TryGetIndex(instruction.Pc, 0, out var index) &&
+                CapturedBufferByteLimit(_request.Memory[index]) is { } capturedLimit)
+                _deviceBufferByteLimit = Temp("uint", capturedLimit);
             var descriptor = DeviceDescriptorBounds(instruction.Sources[1].Value);
             var scalarOffset = instruction.Sources.Count > 2
                 ? SourceExpression(instruction.Sources[2], instruction)
@@ -1327,7 +1342,7 @@ public static partial class Gen5MslTranslator
                         "uint",
                         $"({dynamicOffset} + {FormatUInt(unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint))))})");
                     // Snapshot the V# before the first destination store: SDATA may overlap SBASE.
-                    deviceDescriptor ??= DeviceDescriptorBounds(instruction.Sources[0].Value);
+                    deviceDescriptor ??= DeviceDescriptorBounds(instruction.Sources[0].Value, CapturedBufferByteLimit(entry));
                     value = DeviceDescriptorWord(deviceDescriptor.Value, descriptorOffset, control.Glc);
                 }
                 else if (entry.Kind == MemoryResourceKind.ScalarBuffer)

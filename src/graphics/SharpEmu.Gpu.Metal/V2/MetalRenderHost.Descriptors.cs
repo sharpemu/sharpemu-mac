@@ -655,6 +655,8 @@ internal sealed partial class MetalRenderHost
                 OrderAfterStagedStores(descriptor.Address, size);
                 stage.Buffers[index] = default;
                 stage.BufferLengths[index] = 0;
+                stage.ShaderData[(int)stage.Program.Bindings!.FirstBufferWordDword() + index] =
+                    (uint)Math.Min(size, uint.MaxValue);
                 _bindlessBufferReads++;
                 continue;
             }

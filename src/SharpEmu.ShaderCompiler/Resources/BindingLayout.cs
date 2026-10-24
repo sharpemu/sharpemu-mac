@@ -627,7 +627,10 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
         var memoryOffsetDword = (uint)userDataRegisters.Count + (usesShaderBase ? ShaderBaseDwordCount : 0);
         var memoryOffsetCount = info.ReadOnlyDeviceBuffers ? 0u : (uint)info.Buffers.Count;
-        var bufferWordCount = (portableBuffers ?? PortableBufferWord.Enabled) ? memoryOffsetCount * PortableBufferWord.DwordCount : 0u;
+        // Device reads still honor the host's mapped-prefix byte bound. One scalar
+        // per buffer replaces the ordinary pointer, length and portable V# fields.
+        var bufferWordCount = info.ReadOnlyDeviceBuffers ? (uint)info.Buffers.Count :
+            (portableBuffers ?? PortableBufferWord.Enabled) ? memoryOffsetCount * PortableBufferWord.DwordCount : 0u;
         var mipStatisticsCount = info.Images.Any(static image => image.MipStatistics) ? (uint)info.Images.Count : 0u;
         var bindlessImageTableCount = info.Images
             .Where(static image => image.BindlessSlot != DescriptorConstants.NoIndex)
