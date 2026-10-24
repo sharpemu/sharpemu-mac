@@ -514,9 +514,9 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     void IRenderHost.BeforeDeviceAddressPreparation(ReadOnlySpan<ShaderStageResources> stages)
     {
+        InvalidateCapturedBufferTable(stages);
         if (_singleCopy is not { } singleCopy)
         {
-            PrepareCapturedDeviceBuffers(stages);
             return;
         }
 
@@ -560,7 +560,6 @@ internal sealed partial class MetalRenderHost
         {
             FlushCommandBuffer(MetalFlushCause.Other);
         }
-        PrepareCapturedDeviceBuffers(stages);
     }
 
     private readonly List<ulong> _singleCopyTrapPages = new();
@@ -1098,6 +1097,7 @@ internal sealed partial class MetalRenderHost
             }
         }
 
+        DeclareCapturedBufferWindows(stage);
         _stageArgumentBuffers[stageIndex] = range.Buffer;
         _stageArgumentOffsets[stageIndex] = range.Offset;
         _stageArgumentValid[stageIndex] = true;
@@ -1171,7 +1171,7 @@ internal sealed partial class MetalRenderHost
             case DescriptorBindingKind.GlobalDataShare:
                 return MetalNative.SendGpuAddress(_guestMemory.GdsBuffer, SelGpuAddress);
             case DescriptorBindingKind.DeviceAddressPageTable:
-                return UploadDeviceAddressTable();
+                return UploadDeviceAddressTable(stage.Program.Resources!.Info.ReadOnlyDeviceBuffers);
             case DescriptorBindingKind.FaultBuffer:
                 // The fault-bitmap words stay at zero (WordFieldValue); the buffer takes the
                 // reach feedback instead, which also takes the single-copy trap's reports.
@@ -1219,9 +1219,10 @@ internal sealed partial class MetalRenderHost
     /// entries when the windows are cut differently, its reach flags with the submission's
     /// named windows.
     /// </summary>
-    private ulong UploadDeviceAddressTable()
+    private ulong UploadDeviceAddressTable(bool verifyCurrentRanges = false)
     {
-        if (_deviceAddressTable != 0 && _deviceAddressTableSerial == _submissionSerial)
+        var sameSubmission = _deviceAddressTable != 0 && _deviceAddressTableSerial == _submissionSerial;
+        if (sameSubmission && !verifyCurrentRanges)
         {
             return _deviceAddressTable;
         }
@@ -1232,6 +1233,10 @@ internal sealed partial class MetalRenderHost
         var gpuMemory = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current ??
             throw Fatal("A device-address program needs the guest GPU memory registry to build its page table.");
         var spanVersion = gpuMemory.SpanVersion;
+        if (sameSubmission && spanVersion == _deviceAddressSpanVersion &&
+            _deviceAddressTableBuilder.PartitionVersion == _guestMemory.PartitionVersion &&
+            _deviceAddressTableBuilder.TrapVersion == _guestMemory.TrapVersion)
+            return _deviceAddressTable;
         if (spanVersion != _deviceAddressSpanVersion)
         {
             RebuildDeviceAddressEntries(gpuMemory);

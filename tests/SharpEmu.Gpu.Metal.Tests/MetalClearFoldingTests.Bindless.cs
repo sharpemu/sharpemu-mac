@@ -30,7 +30,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         };
         var snapshot = new ResourceSnapshot
         {
-            Buffers = [[(uint)TargetAddress, (uint)(TargetAddress >> 32), (uint)ImageBytes,
+            Buffers = [[unchecked((uint)TargetAddress), (uint)(TargetAddress >> 32), (uint)ImageBytes,
                 DescriptorConstants.IdentityDestinationSelect | (20u << 12) | (3u << 28)]],
         };
         using (host.BeginPreparation())
