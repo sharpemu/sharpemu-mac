@@ -529,3 +529,14 @@ with zero skips. The new64-singleton-pass case observed exactly64 native
 children and pixel equality to serial. Full Metal/Libs/ShaderCompiler/MSL suites
 are queued sequentially against this revised signature; the original full-suite
 results remain historical until these finish.
+
+
+Revised full Metal validation completed:1,428 passed,1 failed,7 skipped. The
+only failure is the independently reproduced base lossy-texture case. The three
+guest-view cases that failed on both earlier prototype and isolated base passed
+this time; the small-batch change does not modify their guest-view code, so no
+causal claim is made. Libs/ShaderCompiler/MSL validation continues sequentially.
+Packaging now requires all five focused/full summary signatures and records a
+verified `app-ready.json` marker. Optimized game jobs require that exact ready
+marker, build signature and bundle revision. The next alternating series starts
+from the successful recent `basecheck` control, then revised opt1/base2/opt2.

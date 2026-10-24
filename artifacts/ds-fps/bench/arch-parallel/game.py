@@ -2,7 +2,7 @@ import os,sys,json,subprocess,pathlib,time,re
 WT=pathlib.Path(__file__).resolve().parents[4]
 OUT=WT/'artifacts/ds-fps/bench/arch-parallel'
 arm=sys.argv[1]
-previous={'opt1':'base1','base2':'opt1','opt2':'base2'}.get(arm)
+previous={'opt1':'basecheck','base2':'opt1','opt2':'base2'}.get(arm)
 if previous:
     prior=json.loads((OUT/(previous+'-result.json')).read_text())
     assert prior['rc']==0,'A/B requires the previous arm to complete successfully.'
@@ -22,6 +22,10 @@ assert not info['source']['dirtySource'],info['source']
 if arm.startswith('base'):assert info['source']['revision']=='bdc7ea28c8e7df0b8753966d8ba1881f60e5e764'
 if arm.startswith('census') and (OUT/(arm+'-source.txt')).exists():assert info['source']['revision']==(OUT/(arm+'-source.txt')).read_text().strip()
 if not arm.startswith(('base','census')):assert info['source']['revision']==(OUT/'prototype-revision.txt').read_text().strip()
+if arm.startswith('opt'):
+    ready=json.loads((OUT/'app-ready.json').read_text())
+    built=json.loads((OUT/'validated-source.json').read_text())
+    assert ready['revision']==info['source']['revision'] and ready['sourceSha256']==built['sourceSha256'] and ready['codeSignatureVerified'],'Game requires a successfully packaged and verified app for the tested source.'
 (OUT/(arm+'-build-info.json')).write_text(json.dumps(info,indent=2))
 env=os.environ.copy()
 env.update(SHARPEMU_APP_DIR=str(bundle/'Contents/MacOS'),SHARPEMU_GAMES_DIR='/Volumes/Untitled/games',SHARPEMU_DS_INWORLD_SECONDS='120',SHARPEMU_WINID='/Users/xnetcat/Projects/xnetcat/sharpemu-compat/scripts/winid',SHARPEMU_COMPAT_DIR='/Users/xnetcat/Projects/xnetcat/sharpemu-compat',SHARPEMU_OVERLAY='1',SHARPEMU_KEEP_BUILD_SERVERS='1')
