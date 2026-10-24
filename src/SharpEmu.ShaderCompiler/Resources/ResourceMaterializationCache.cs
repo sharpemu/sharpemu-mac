@@ -28,6 +28,12 @@ public delegate bool ResidentGuestBytesComparer(
 // miss; nothing is guessed.
 public sealed partial class ResourceMaterializationCache
 {
+    private static T[] CopyWalkArray<T>(T[] source)
+    {
+        if (!BatchedResourceWalk.Enabled) return (T[])source.Clone();
+        BatchedResourceWalk.RecordTypedCopy();
+        return source.AsSpan().ToArray();
+    }
     // Two generations approximate LRU: a full young generation becomes the old one,
     // and an old entry that is used again is promoted back. A generation is full at
     // _generationCapacity keys or at _generationByteBudget estimated retained bytes,
@@ -319,12 +325,12 @@ public sealed partial class ResourceMaterializationCache
             List<(int Buffer, uint Word)> patches)
         {
             if (ReferenceEquals(buffers, shared))
-                buffers = (uint[][])buffers.Clone();
+                buffers = CopyWalkArray(buffers);
             var sharedTable = table;
             foreach (var (buffer, word) in patches)
             {
                 if (ReferenceEquals(buffers[buffer], shared[buffer]))
-                    buffers[buffer] = (uint[])buffers[buffer].Clone();
+                    buffers[buffer] = CopyWalkArray(buffers[buffer]);
                 var previous = buffers[buffer][0];
                 buffers[buffer][0] = word;
                 var slot = _memorySlots[buffer];
@@ -332,7 +338,7 @@ public sealed partial class ResourceMaterializationCache
                 if (flat >= 0 && flat < sharedTable.Length && sharedTable[flat] == previous)
                 {
                     if (ReferenceEquals(table, sharedTable))
-                        table = (uint[])table.Clone();
+                        table = CopyWalkArray(table);
                     table[flat] = word;
                 }
             }
@@ -538,9 +544,9 @@ public sealed partial class ResourceMaterializationCache
             {
                 if (buffer < 0 || !IsUsed(Active, index) || shared[buffer][0] == userData[index])
                     continue;
-                buffers ??= (uint[][])shared.Clone();
+                buffers ??= CopyWalkArray(shared);
                 if (ReferenceEquals(buffers[buffer], shared[buffer]))
-                    buffers[buffer] = (uint[])buffers[buffer].Clone();
+                    buffers[buffer] = CopyWalkArray(buffers[buffer]);
                 buffers[buffer][0] = userData[index];
             }
 
@@ -830,7 +836,7 @@ public sealed partial class ResourceMaterializationCache
 
         private static ulong[] AndNot(ulong[] left, ulong[] right)
         {
-            var result = (ulong[])left.Clone();
+            var result = CopyWalkArray(left);
             for (var index = 0; index < result.Length && index < right.Length; index++)
                 result[index] &= ~right[index];
             return result.All(word => word == 0) ? [] : result;
@@ -2027,7 +2033,7 @@ public sealed partial class ResourceMaterializationCache
         {
             // The patch cloned the table when it moved a base slot; otherwise it is the entry's.
             var table = ReferenceEquals(patchedTable, cached.FlattenedResourceTable)
-                ? (uint[])patchedTable.Clone()
+                ? CopyWalkArray(patchedTable)
                 : patchedTable;
             // The copy writes nothing unless every slot can be placed.
             if (copyDirect
@@ -2441,7 +2447,8 @@ public sealed partial class ResourceMaterializationCache
             var table = _tableInputs;
             if (table is null || !ReferenceEquals(table.ReadMemory, read) || !ReferenceEquals(table.ReadCleanMemory, clean) ||
                 !ReferenceEquals(table.ReadResidentMemory, resident) || table.ReadsClean != inputs.ReadsClean ||
-                !ReferenceEquals(table.DataWritePending, inputs.DataWritePending))
+                !ReferenceEquals(table.DataWritePending, inputs.DataWritePending) ||
+                !ReferenceEquals(table.DataRangeWritePending, inputs.DataRangeWritePending))
             {
                 _tableInputs = table = new ResourceRuntimeInputs
                 {

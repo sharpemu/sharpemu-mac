@@ -6,8 +6,8 @@ using System.Buffers.Binary;
 namespace SharpEmu.ShaderCompiler.Resources;
 
 // The scalar evaluator's ordered, memoized walk, decoded once into array indices.
-// Every memory instruction still runs on every use. Only adjacent reads of the same
-// handle and policy are joined, and a refused resident span uses the ordinary readers.
+// Every memory instruction still runs on every use. Reads of the same handle and
+// policy can span intervening total ALU operations. A refused span keeps scalar order.
 // Structured resource selection stays on the original evaluator.
 internal sealed class BatchedResourceWalk
 {
@@ -17,7 +17,7 @@ internal sealed class BatchedResourceWalk
     private readonly record struct Op(Code Code, int Result, int A = 0, int B = 0, int C = 0, int D = 0,
         ScalarOperation Operation = default, ScalarValueKind Kind = default, long Immediate = 0,
         bool Clean = false, bool Absolute = false, int Group = 1, int[]? Pending = null, ScalarValue? Node = null,
-        int PendingWords = 0);
+        int PendingWords = 0, int[]? Members = null, int Ready = 0, int SkipWhen = 0);
     private readonly Op[] _ops;
     private readonly ulong[] _initial;
     private readonly int[][] _sources;
@@ -26,7 +26,13 @@ internal sealed class BatchedResourceWalk
     private readonly ShaderResourcePlan _plan;
     private readonly bool _requiresClean;
     private static long _walks, _groups, _words, _refused, _unsupported, _scalar, _structureFallback, _shapeFallback,
-        _pendingFallback, _pendingSkipped;
+        _pendingFallback, _pendingSkipped, _pendingResident, _selectorHits, _selectorMisses, _typedCopies;
+    internal static void RecordSelectorReuse(bool hit)
+    {
+        if (hit) Interlocked.Increment(ref _selectorHits);
+        else Interlocked.Increment(ref _selectorMisses);
+    }
+    internal static void RecordTypedCopy() => Interlocked.Increment(ref _typedCopies);
     internal static void RecordFallback(ShaderResourcePlan plan)
     {
         if (RuntimeValueEvaluator.HasResourceStructure(plan) || plan.RequiresSpecializationMemory)
@@ -45,7 +51,10 @@ internal sealed class BatchedResourceWalk
         $" fullwalk_words={Interlocked.Exchange(ref _words, 0)} fullwalk_span_refused={Interlocked.Exchange(ref _refused, 0)}" +
         $" fullwalk_unsupported_plans={Interlocked.Exchange(ref _unsupported, 0)} fullwalk_scalar={Interlocked.Exchange(ref _scalar, 0)}" +
         $" fullwalk_fallback_structure={Interlocked.Exchange(ref _structureFallback, 0)} fullwalk_fallback_shape={Interlocked.Exchange(ref _shapeFallback, 0)}" +
-        $" fullwalk_pending_fallback={Interlocked.Exchange(ref _pendingFallback, 0)} fullwalk_pending_skipped={Interlocked.Exchange(ref _pendingSkipped, 0)}";
+        $" fullwalk_pending_fallback={Interlocked.Exchange(ref _pendingFallback, 0)} fullwalk_pending_skipped={Interlocked.Exchange(ref _pendingSkipped, 0)}" +
+        $" fullwalk_pending_resident={Interlocked.Exchange(ref _pendingResident, 0)}" +
+        $" fullwalk_selector_hits={Interlocked.Exchange(ref _selectorHits, 0)} fullwalk_selector_misses={Interlocked.Exchange(ref _selectorMisses, 0)}" +
+        $" fullwalk_typed_copies={Interlocked.Exchange(ref _typedCopies, 0)}";
 
     internal static BatchedResourceWalk? Build(ShaderResourcePlan plan)
     {
@@ -133,32 +142,45 @@ internal sealed class BatchedResourceWalk
                 if (read.FlatOffset >= table.Length) return null;
                 table[read.FlatOffset] = Compile(read.Value, plan.CleanFlatSlots[(int)read.FlatOffset] != 0);
             }
-            // There can be constants in a handle/offset, but no operation or dependency
-            // between grouped reads. In particular, a pointer read ends the group.
+            // Prefetch through total, side-effect-free ALU only. A new handle, an
+            // input access, or an operation that could fail ends the run. Results
+            // are seeded ahead, but the ALU still executes in its original order.
+            bool Total(Op op) => op.Code == Code.Select || op.Code == Code.ShaderBase ||
+                op.Code == Code.Operation && op.Operation is
+                    ScalarOperation.IAdd32 or ScalarOperation.IAdd64 or ScalarOperation.ISub32 or ScalarOperation.ISub64 or
+                    ScalarOperation.IMul32 or ScalarOperation.IMul64 or ScalarOperation.Construct64 or
+                    ScalarOperation.And32 or ScalarOperation.And64 or ScalarOperation.Or32 or ScalarOperation.Xor32 or
+                    ScalarOperation.Not32 or ScalarOperation.ShiftLeft32 or ScalarOperation.ShiftLeft64 or
+                    ScalarOperation.ShiftRightLogical32 or ScalarOperation.ShiftRightLogical64 or
+                    ScalarOperation.ShiftRightArithmetic32 or ScalarOperation.ShiftRightArithmetic64;
             void Group(int first, int end)
             {
                 for (var index = first; index < end; index++)
                 {
                     var start = ops[index];
-                    if (start.Code != Code.Read || start.Node!.Operands[1].Kind != ScalarValueKind.Constant) continue;
+                    if (start.Code != Code.Read || start.SkipWhen != 0 || start.Node!.Operands[1].Kind != ScalarValueKind.Constant) continue;
                     long Relative(Op read) => read.Kind == ScalarValueKind.ScalarBufferWord
                         ? (read.Immediate + (uint)initial[read.C]) & ~3L
                         : (read.Immediate & ~3L) + ((uint)initial[read.C] & ~3U);
                     var relative = Relative(start);
-                    var length = 1;
+                    var members = new List<int> { index };
                     var pendingWords = start.PendingWords;
-                    while (index + length < end && length < MaximumGroupWords)
+                    for (var nextIndex = index + 1; nextIndex < end && members.Count < MaximumGroupWords; nextIndex++)
                     {
-                        var next = ops[index + length];
+                        var next = ops[nextIndex];
+                        if (Total(next)) continue;
                         if (next.Code != Code.Read || next.Kind != start.Kind || next.A != start.A || next.B != start.B ||
                             (next.Kind == ScalarValueKind.ScalarBufferWord && next.D != start.D) || next.Clean != start.Clean ||
                             next.Absolute != start.Absolute || next.Node!.Operands[1].Kind != ScalarValueKind.Constant ||
-                            Relative(next) != relative + length * 4) break;
+                            Relative(next) != relative + members.Count * 4) break;
                         pendingWords += next.PendingWords;
-                        length++;
+                        members.Add(nextIndex);
                     }
-                    ops[index] = start with { Group = length, PendingWords = pendingWords };
-                    index += length - 1;
+                    if (members.Count == 1) continue;
+                    var ready = initial.Count;
+                    initial.Add(0);
+                    ops[index] = start with { Group = members.Count, PendingWords = pendingWords, Members = members.ToArray(), Ready = ready };
+                    foreach (var member in members.Skip(1)) ops[member] = ops[member] with { SkipWhen = ready };
                 }
             }
             Group(0, tableStart); Group(tableStart, ops.Count);
@@ -204,8 +226,13 @@ internal sealed class BatchedResourceWalk
                         if (!ScalarOperationSemantics.TryEvaluateFixed(op.Operation, values[op.A], values[op.B], values[op.C], values[op.D], out values[op.Result])) return false;
                         break;
                     case Code.Read:
+                        if (op.SkipWhen != 0 && values[op.SkipWhen] != 0)
+                        {
+                            if (values[op.SkipWhen] == 2) LearnPending(inputs, values, op);
+                            break;
+                        }
                         if (!Read(inputs, values, index, op.Group)) return false;
-                        index += op.Group - 1; break;
+                        break;
                 }
             }
             var output = new List<DescriptorWords>(_sources.Length);
@@ -239,53 +266,79 @@ internal sealed class BatchedResourceWalk
         // The plan proved a monotonic, contiguous run with a common handle. Its two
         // endpoints prove every intermediate raw-address/OOB check without repeating
         // that work for every word. Refusal keeps the scalar checks below.
-        ref readonly var lastOp = ref _ops[index + count - 1];
+        ref readonly var lastOp = ref _ops[firstOp.Members is { } members ? members[^1] : index];
         var lastState = RuntimeValueEvaluator.ResolveRawAddress(lastOp.Kind, baseAddress, values[lastOp.B], values[lastOp.D],
             lastOp.Immediate, (uint)values[lastOp.C], out var lastAddress);
         var contiguous = firstState == RuntimeValueEvaluator.RawAddress.Read && lastState == RuntimeValueEvaluator.RawAddress.Read &&
             lastAddress - firstAddress == (ulong)(count - 1) * 4 && (baseAddress & ~3UL) != 0;
-        // If a writer might overlap, preserve the original probe/read order even
-        // when a scalar read waits and changes completion state. Only a range proof
-        // of no writer permits batching data words without their precise callbacks.
-        var pending = inputs.DataWritePending;
-        var probe = firstOp.PendingWords != 0 && pending is not null &&
-            !(contiguous && inputs.DataRangeWritePending is not null &&
-              !inputs.DataRangeWritePending(firstAddress, (ulong)count * 4));
-        if (probe) { contiguous = false; Interlocked.Increment(ref _pendingFallback); }
-        else if (firstOp.PendingWords != 0 && pending is not null) Interlocked.Add(ref _pendingSkipped, firstOp.PendingWords);
-        contiguous &= count > 1 && inputs.ReadResidentMemory is not null &&
+        contiguous &= inputs.ReadResidentMemory is not null &&
             (firstOp.Clean ? inputs.ReadCleanMemory : inputs.ReadMemory) is not null;
-        if (contiguous && inputs.ReadResidentMemory!(firstAddress, bytes, firstOp.Clean || inputs.ReadsClean))
+        var resident = false;
+        if (contiguous)
         {
+            using var readProfile = ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.BatchedResidentRead);
+            resident = inputs.ReadResidentMemory!(firstAddress, bytes, firstOp.Clean || inputs.ReadsClean);
+        }
+        // Match RawReadPrefetch: an admitted resident span is read before the
+        // table's precise data probes. A possible writer teaches device loads; it
+        // must not force a synchronizing scalar read that the base prefetch avoids.
+        // Refused spans still probe immediately before their original scalar read.
+        var pending = inputs.DataWritePending;
+        var probe = false;
+        if (firstOp.PendingWords != 0 && pending is not null)
+        {
+            using var pendingProfile = ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.BatchedPendingProbe);
+            probe = !(contiguous && inputs.DataRangeWritePending is not null &&
+                !inputs.DataRangeWritePending(firstAddress, (ulong)count * 4));
+        }
+        if (resident)
+        {
+            if (probe) Interlocked.Increment(ref _pendingResident);
+            else if (firstOp.PendingWords != 0 && pending is not null) Interlocked.Add(ref _pendingSkipped, firstOp.PendingWords);
             Interlocked.Increment(ref _groups); Interlocked.Add(ref _words, count);
             for (var word = 0; word < count; word++)
             {
-                ref readonly var op = ref _ops[index + word];
+                ref readonly var op = ref _ops[firstOp.Members is { } indices ? indices[word] : index];
                 values[op.Result] = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(word * 4)..]);
                 ResourceMaterializationCache.RecordReadConsumer(_plan, op.Node!, firstAddress + (ulong)word * 4);
             }
+            if (firstOp.Ready != 0) values[firstOp.Ready] = probe ? 2UL : 1UL;
+            if (probe) LearnPending(inputs, values, firstOp);
             return true;
         }
         if (contiguous) Interlocked.Increment(ref _refused);
-        for (var word = 0; word < count; word++)
+        if (probe) Interlocked.Increment(ref _pendingFallback);
+        if (!probe && firstOp.Pending is not null && pending is not null) Interlocked.Increment(ref _pendingSkipped);
+        // Only this read falls back. Future group members retain their original
+        // position, including precise pending probes and any earlier failure.
+        ref readonly var scalar = ref _ops[index];
+        var wordBase = ((values[scalar.B] << 32) | (uint)values[scalar.A]) & 0x0000FFFFFFFFFFFFUL;
+        var state = RuntimeValueEvaluator.ResolveRawAddress(scalar.Kind, wordBase, values[scalar.B], values[scalar.D], scalar.Immediate, (uint)values[scalar.C], out var address);
+        if (state == RuntimeValueEvaluator.RawAddress.Failed) return false;
+        values[scalar.Result] = 0;
+        if (state == RuntimeValueEvaluator.RawAddress.Zero) return true;
+        if (probe && scalar.Pending is not null && pending!(address)) DeviceDataLoads.Learn(_plan.Hash, scalar.Pending);
+        var reader = scalar.Clean ? inputs.ReadCleanMemory : inputs.ReadMemory;
+        Interlocked.Increment(ref _scalar);
+        uint value = 0;
+        bool read;
+        using (ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.BatchedScalarRead))
+            read = reader is not null && reader(address, out value);
+        if (!read)
         {
-            ref readonly var op = ref _ops[index + word];
-            var wordBase = ((values[op.B] << 32) | (uint)values[op.A]) & 0x0000FFFFFFFFFFFFUL;
-            var state = RuntimeValueEvaluator.ResolveRawAddress(op.Kind, wordBase, values[op.B], values[op.D], op.Immediate, (uint)values[op.C], out var address);
-            if (state == RuntimeValueEvaluator.RawAddress.Failed) return false;
-            values[op.Result] = 0;
-            if (state == RuntimeValueEvaluator.RawAddress.Zero) continue;
-            if (probe && op.Pending is not null && pending!(address)) DeviceDataLoads.Learn(_plan.Hash, op.Pending);
-            var reader = op.Clean ? inputs.ReadCleanMemory : inputs.ReadMemory;
-            Interlocked.Increment(ref _scalar);
-            if (reader is null || !reader(address, out var value))
-            {
-                if ((wordBase & ~3UL) == 0 || (op.Absolute && reader is not null && !op.Clean && !inputs.ReadsClean)) continue;
-                return false;
-            }
-            values[op.Result] = value;
-            ResourceMaterializationCache.RecordReadConsumer(_plan, op.Node!, address);
+            return (wordBase & ~3UL) == 0 || (scalar.Absolute && reader is not null && !scalar.Clean && !inputs.ReadsClean);
         }
+        values[scalar.Result] = value;
+        ResourceMaterializationCache.RecordReadConsumer(_plan, scalar.Node!, address);
         return true;
+    }
+
+    private void LearnPending(ResourceRuntimeInputs inputs, ulong[] values, in Op op)
+    {
+        if (op.Pending is null || inputs.DataWritePending is null) return;
+        var baseAddress = ((values[op.B] << 32) | (uint)values[op.A]) & 0x0000FFFFFFFFFFFFUL;
+        if (RuntimeValueEvaluator.ResolveRawAddress(op.Kind, baseAddress, values[op.B], values[op.D],
+                op.Immediate, (uint)values[op.C], out var address) == RuntimeValueEvaluator.RawAddress.Read &&
+            inputs.DataWritePending(address)) DeviceDataLoads.Learn(_plan.Hash, op.Pending);
     }
 }

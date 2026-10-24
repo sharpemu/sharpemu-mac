@@ -114,6 +114,65 @@ public sealed class IndirectSelectorValuesTests
         Assert.Equal(failRead ? "runtime_value_unavailable" : null, diagnostic.EvaluationFailure);
     }
 
+    [Fact]
+    public void ReusedSelectorSetsStillReadFreshRuntimeWordsAndKeepPriorResults()
+    {
+        var plan = Extract(CreateProgram(loadBase: true));
+        var selector = Assert.IsType<IndirectSelectorValues>(Selector(plan));
+        var registers = new uint[64];
+        registers[40] = 0x3000;
+        uint current = 100;
+        var readable = true;
+        var reads = 0;
+        bool Read(ulong address, out uint word)
+        {
+            Assert.Equal(0x3000UL, address);
+            reads++; word = current; return readable;
+        }
+        var inputs = Inputs(registers, readCleanMemory: Read);
+        Assert.True(selector.TryEvaluate(plan, inputs, out var first));
+        var saved = first.ToArray();
+        Assert.True(selector.TryEvaluate(plan, inputs, out var repeated));
+        Assert.Equal(saved, repeated);
+        Assert.Equal(2, reads);
+        current = 200;
+        Assert.True(selector.TryEvaluate(plan, inputs, out var changed));
+        var diagnostic = new IndirectSelectorDiagnostic();
+        Assert.True(selector.TryEvaluate(plan, inputs, out var reference, diagnostic));
+        Assert.Equal(reference, changed);
+        Assert.Equal(saved, first);
+        Assert.Equal(4, reads);
+        readable = false;
+        Assert.False(selector.TryEvaluate(plan, inputs, out var failed));
+        Assert.Empty(failed);
+        Assert.Equal(5, reads);
+    }
+
+    [Fact]
+    public void FailedSelectorLeafStillVisitsTheOtherRuntimeLeavesLikeTheReference()
+    {
+        var instructions = CreateProgram().Instructions.ToList();
+        instructions.Insert(0, ScalarLoad(0xEE0, 40, 9));
+        instructions.Insert(1, ScalarLoad(0xEE8, 42, 10));
+        instructions[instructions.FindIndex(instruction => instruction.Pc == 0x1000)] =
+            Vop3(0x1000, "VAdd3U32", 1, Gen5Operand.Scalar(9), Gen5Operand.Scalar(10), Gen5Operand.Vector(2));
+        var plan = Extract(Program([.. instructions]));
+        var selector = Assert.IsType<IndirectSelectorValues>(Selector(plan));
+        var registers = new uint[64];
+        registers[40] = 0x3000; registers[42] = 0x4000;
+        var addresses = new List<ulong>();
+        bool Read(ulong address, out uint word)
+        {
+            addresses.Add(address); word = 7; return address != 0x3000;
+        }
+        var inputs = Inputs(registers, readCleanMemory: Read);
+        Assert.False(selector.TryEvaluate(plan, inputs, out _));
+        var actual = addresses.ToArray(); addresses.Clear();
+        Assert.False(selector.TryEvaluate(plan, inputs, out _, new IndirectSelectorDiagnostic()));
+        Assert.Equal(addresses, actual);
+        Assert.Contains(0x4000UL, actual);
+    }
+
     [Theory]
     [InlineData(0u, true)]
     [InlineData(115043767u, false)]

@@ -1821,6 +1821,7 @@ internal sealed partial class MetalRenderHost
     private long _residentCompareReleased;
 
     private string TakeResidentCompareCounters() =>
+        $" fullwalk_pending_hint_queries={Interlocked.Exchange(ref _fullWalkPendingHintQueries, 0)}" +
         $" rescmp_calls={Interlocked.Exchange(ref _residentCompareCalls, 0)}" +
         $" rescmp_hits={Interlocked.Exchange(ref _residentCompareHits, 0)}" +
         $" rescmp_label_safe={Interlocked.Exchange(ref _residentCompareLabelSafe, 0)}" +
@@ -1949,12 +1950,25 @@ internal sealed partial class MetalRenderHost
     public Func<ulong, ulong, bool>? DataRangeWritePending =>
         MetalV2Diagnostics.DataLoadsOnDevice ? _dataRangeWritePending ??= IsDataRangePending : null;
 
+    private static readonly bool FullWalkPendingHints = SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOURCE_FULLWALK");
+    private long _fullWalkPendingHintQueries;
+
+    // The existing completion hint is a floor: zero with the hint proves zero with
+    // the real serial. A possible writer is still confirmed with the real serial.
+    // Avoid one native shared-event query per data word/range in the common case.
+    private ulong FullWalkPendingSerial(ulong address, ulong size)
+    {
+        if (!FullWalkPendingHints || !SerialHintEnabled) return _gpuWrites.PendingSerial(address, size, CompletedSerial);
+        Interlocked.Increment(ref _fullWalkPendingHintQueries);
+        return PendingSerialHinted(address, size);
+    }
+
     private bool IsDataRangePending(ulong address, ulong size) =>
-        _gpuWrites.MayCover(address, size) && _gpuWrites.PendingSerial(address, size, CompletedSerial) != 0;
+        _gpuWrites.MayCover(address, size) && FullWalkPendingSerial(address, size) != 0;
 
     private bool IsDataWordPending(ulong address) =>
         _gpuWrites.MayCover(address, sizeof(uint)) &&
-        _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0 &&
+        FullWalkPendingSerial(address, sizeof(uint)) != 0 &&
         _gpuWrites.LastMatch.Origin != MetalGpuWriteOrigin.Unbounded;
 
     // Resource tables are read straight from the backing, so a WRITE_DATA that patched one

@@ -488,6 +488,7 @@ internal sealed class ShaderProgramCache
         }
 
         MaterializingShader.Hash = source.Hash;
+        using var workerMaterializationProfile = ResourceMaterializationProfile.WorkerContext(RenderPhaseProfile.DetailMeasurementsEnabled);
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
         {
             // Failure capture needs the full walk, so a dump run bypasses the cache.

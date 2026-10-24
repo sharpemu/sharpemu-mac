@@ -469,7 +469,7 @@ public sealed partial class ResourceMaterializationCache
             if (table[slots.FlatOffsets[slot]] == values[slot])
                 continue;
             if (ReferenceEquals(table, previous.FlattenedResourceTable))
-                table = (uint[])table.Clone();
+                table = CopyWalkArray(table);
             table[slots.FlatOffsets[slot]] = values[slot];
         }
 

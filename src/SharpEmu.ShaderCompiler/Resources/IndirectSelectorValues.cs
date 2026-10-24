@@ -12,11 +12,44 @@ public sealed class IndirectSelectorValues
         ScalarOperation Operation = ScalarOperation.None, Expression[]? Inputs = null);
     private readonly Expression _root;
     private readonly WaveMaskSelectorBounds? _waveBounds;
+    private readonly ScalarValue[]? _runtimeValues;
+    private sealed record Evaluation(uint[] RuntimeValues, uint[] Values);
+    private Evaluation? _lastEvaluation;
 
     private IndirectSelectorValues(Expression root, WaveMaskSelectorBounds? waveBounds)
     {
         _root = root;
         _waveBounds = waveBounds;
+        _runtimeValues = RuntimeValues(root);
+    }
+
+    // Only total, bounded set operations qualify. Read every runtime leaf fresh,
+    // then reuse the pure set calculation when those leaf values are identical.
+    // Publication is immutable; concurrent materializations need no shared lock.
+    private static ScalarValue[]? RuntimeValues(Expression root)
+    {
+        var leaves = new List<ScalarValue>();
+        var seen = new HashSet<ScalarValue>();
+        int Bound(Expression expression)
+        {
+            if (expression.Values is { } constants) return constants.Length;
+            if (expression.RuntimeValue is { } runtime)
+            {
+                if (seen.Add(runtime)) leaves.Add(runtime);
+                return 1;
+            }
+            long size = expression.Operation == ScalarOperation.None ? 0 : 1;
+            if (expression.Operation is not (ScalarOperation.None or ScalarOperation.IAdd32 or ScalarOperation.ShiftLeft32)) return -1;
+            foreach (var input in expression.Inputs!)
+            {
+                var bound = Bound(input);
+                if (bound < 0) return -1;
+                size = expression.Operation == ScalarOperation.None ? size + bound : size * bound;
+                if (size > MaximumValues || size > MaximumCombinations) return -1;
+            }
+            return (int)size;
+        }
+        return Bound(root) >= 0 && leaves.Count <= 512 ? leaves.ToArray() : null;
     }
 
     internal static IndirectSelectorValues? Create(ShaderResourcePlan plan, ScalarValue selector)
@@ -44,9 +77,27 @@ public sealed class IndirectSelectorValues
         }
         var reader = inputs.ReadCleanMemory;
         if (diagnostic is not null && reader is not null) reader = ReadCapturedWord;
-        var evaluator = new RuntimeValueEvaluator(plan, inputs.WithReader(reader));
+        using var scratch = BatchedResourceWalk.Enabled ? RuntimeEvaluationScratch.Rent() : null;
+        var evaluator = scratch is null ? new RuntimeValueEvaluator(plan, inputs.WithReader(reader)) :
+            new RuntimeValueEvaluator(scratch, plan, inputs.WithReader(reader));
         if (_waveBounds is not null && _waveBounds.TryEvaluate(evaluator, inputs.ComputeState, out values))
             return true;
+        var reuse = BatchedResourceWalk.Enabled && diagnostic is null && _runtimeValues is not null;
+        Span<uint> runtimeValues = stackalloc uint[reuse ? _runtimeValues!.Length : 0];
+        if (reuse)
+        {
+            var readable = true;
+            for (var index = 0; index < runtimeValues.Length; index++)
+                readable &= evaluator.Evaluate(_runtimeValues![index], out runtimeValues[index]);
+            if (!readable) { values = []; return false; }
+            var previous = Volatile.Read(ref _lastEvaluation);
+            if (previous is not null && runtimeValues.SequenceEqual(previous.RuntimeValues))
+            {
+                values = previous.Values;
+                BatchedResourceWalk.RecordSelectorReuse(true);
+                return true;
+            }
+        }
         var cache = new Dictionary<Expression, uint[]>();
         uint[]? Decline(string reason)
         {
@@ -84,6 +135,11 @@ public sealed class IndirectSelectorValues
             return cache[expression] = results.ToArray();
         }
         values = Evaluate(_root) ?? [];
+        if (reuse && values.Length != 0)
+        {
+            Volatile.Write(ref _lastEvaluation, new(runtimeValues.ToArray(), values));
+            BatchedResourceWalk.RecordSelectorReuse(false);
+        }
         return values.Length != 0;
     }
 

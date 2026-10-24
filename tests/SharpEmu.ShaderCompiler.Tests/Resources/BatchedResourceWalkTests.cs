@@ -32,6 +32,7 @@ public sealed class BatchedResourceWalkTests
         internal uint Salt, Pointer = 0x2000, Stride = 4u << 16, Format = 20u << 12;
         internal bool RefuseSpan, RefuseClean, InTable;
         internal int SpanCalls;
+        internal readonly List<(ulong Address, int Length)> Spans = [];
         internal uint Word(ulong address) => address switch
         {
             0x1000 => Pointer, 0x1004 => 0,
@@ -51,6 +52,7 @@ public sealed class BatchedResourceWalkTests
         internal bool Span(ulong address, Span<byte> bytes, bool clean)
         {
             SpanCalls++;
+            Spans.Add((address, bytes.Length));
             if (RefuseSpan || (clean && RefuseClean) || (Failure >= address && Failure - address < (ulong)bytes.Length)) return false;
             for (var offset = 0; offset < bytes.Length; offset += 4)
             {
@@ -69,6 +71,60 @@ public sealed class BatchedResourceWalkTests
     private static bool Reference(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
         out List<DescriptorWords> descriptors, out uint[] table) => RuntimeValueEvaluator.EvaluateSources(
             plan, plan.MaterializationSources.ToArray(), inputs, plan.CleanFlatSlots, true, out descriptors, out table);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DescriptorAluDoesNotSplitAResidentRangeAndRefusalPreservesReadOrder(bool refuse)
+    {
+        var plan = Plan(4, false);
+        var source = plan.DescriptorSources[(int)plan.MaterializationSources[0]];
+        source.Dwords[0] = plan.Graph.Operation(ScalarOperation.Or32, ScalarValueType.U32,
+            source.Dwords[0], plan.Graph.Constant(0x80u));
+        var walk = Assert.IsType<BatchedResourceWalk>(BatchedResourceWalk.Build(plan));
+        var memory = new Memory { RefuseSpan = refuse };
+        Assert.True(Reference(plan, memory.Inputs(false), out var expected, out var expectedTable));
+        var trace = memory.Trace.ToArray(); memory.Trace.Clear();
+        Assert.True(walk.Evaluate(memory.Inputs(true), 0, out var actual, out var table));
+        Assert.Equal(trace, memory.Trace);
+        Assert.Equal(expected.SelectMany(words => words.Dwords), actual.SelectMany(words => words.Dwords));
+        Assert.Equal(expectedTable, table);
+        Assert.Contains((0x1800UL, 16), memory.Spans);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SingleWordUsesTheResidentChecksAndRefusalRetainsTheScalarReader(bool refuse)
+    {
+        var plan = Plan(1, false);
+        var walk = Assert.IsType<BatchedResourceWalk>(BatchedResourceWalk.Build(plan));
+        var memory = new Memory { RefuseSpan = refuse };
+        Assert.True(Reference(plan, memory.Inputs(false), out var expected, out var expectedTable));
+        var trace = memory.Trace.ToArray(); memory.Trace.Clear();
+        Assert.True(walk.Evaluate(memory.Inputs(true), 0, out var actual, out var table));
+        Assert.Equal(trace, memory.Trace);
+        Assert.Equal(expectedTable, table);
+        Assert.Equal(expected.SelectMany(words => words.Dwords), actual.SelectMany(words => words.Dwords));
+        Assert.Contains((0x1040UL, 4), memory.Spans);
+    }
+
+    [Fact]
+    public void AFailingAluEndsThePrefetchRangeBeforeTheNextRead()
+    {
+        var plan = Plan(1, false);
+        var source = plan.DescriptorSources[(int)plan.MaterializationSources[0]];
+        source.Dwords[0] = plan.Graph.Operation(ScalarOperation.Extract64, ScalarValueType.U32,
+            source.Dwords[0], plan.Graph.Constant(2u));
+        var walk = Assert.IsType<BatchedResourceWalk>(BatchedResourceWalk.Build(plan));
+        var memory = new Memory();
+        Assert.False(Reference(plan, memory.Inputs(false), out _, out _));
+        var trace = memory.Trace.ToArray(); memory.Trace.Clear();
+        Assert.False(walk.Evaluate(memory.Inputs(true), 0, out var descriptors, out var table));
+        Assert.Equal(trace, memory.Trace);
+        Assert.Empty(descriptors); Assert.Empty(table);
+        Assert.DoesNotContain(memory.Spans, span => span.Address > 0x1800);
+    }
 
     [Theory]
     [InlineData(4, false, false)]
@@ -130,7 +186,7 @@ public sealed class BatchedResourceWalkTests
         const ulong hash = 0xB3F0_1100_0000_0001;
         var plan = Plan(4, false, hash);
         var walk = Assert.IsType<BatchedResourceWalk>(BatchedResourceWalk.Build(plan));
-        var memory = new Memory();
+        var memory = new Memory { RefuseSpan = true };
         var probes = new List<ulong>();
         var inputs = new ResourceRuntimeInputs
         {
@@ -148,6 +204,32 @@ public sealed class BatchedResourceWalkTests
         Assert.True(walk.Evaluate(inputs, 0, out _, out _));
         Assert.Equal(plan.DeviceDataSlots.Count, probes.Count);
         Assert.All(plan.DeviceDataSlots.Values.SelectMany(indices => indices), index => Assert.True(DeviceDataLoads.Contains(hash, index)));
+    }
+
+    [Fact]
+    public void PendingResidentDataMatchesBasePrefetchAndLearnsWithoutScalarReads()
+    {
+        var plan = Plan(4, false, 0xB3F0_1100_0000_0003);
+        var walk = Assert.IsType<BatchedResourceWalk>(BatchedResourceWalk.Build(plan));
+        var memory = new Memory();
+        ResourceRuntimeInputs Inputs()
+        {
+            var basic = memory.Inputs(true);
+            return new()
+            {
+                UserData = basic.UserData, ReadMemory = basic.ReadMemory, ReadCleanMemory = basic.ReadCleanMemory,
+                ReadResidentMemory = basic.ReadResidentMemory, TablePhase = basic.TablePhase,
+                DataRangeWritePending = (_, _) => true,
+                DataWritePending = address => { memory.Trace.Add($"P:{address}"); return true; },
+            };
+        }
+        Assert.True(Reference(plan, Inputs(), out var expected, out var expectedTable));
+        var trace = memory.Trace.ToArray(); memory.Trace.Clear();
+        Assert.True(walk.Evaluate(Inputs(), 0, out var actual, out var table));
+        Assert.Equal(trace, memory.Trace);
+        Assert.Equal(expectedTable, table);
+        Assert.Equal(expected.SelectMany(words => words.Dwords), actual.SelectMany(words => words.Dwords));
+        Assert.All(plan.DeviceDataSlots.Values.SelectMany(indices => indices), index => Assert.True(DeviceDataLoads.Contains(plan.Hash, index)));
     }
 
     [Fact]
