@@ -18,10 +18,15 @@ internal sealed class MetalBatchCensus
         internal long Batches;
         internal int Maximum;
         internal readonly long[] Histogram = new long[Limit + 1];
+        internal readonly long[] DrawHistogram = new long[Limit + 1];
+        internal readonly long[] DispatchHistogram = new long[Limit + 1];
         internal readonly long[] Cuts = new long[Enum.GetValues<Cut>().Length];
+        internal readonly long[] NonemptyCuts = new long[Enum.GetValues<Cut>().Length];
+        private bool _pendingCompute;
 
-        internal void Add()
+        internal void Add(bool compute)
         {
+            if (Pending == 0) _pendingCompute = compute;
             Work++;
             if (++Pending == Limit) Close(Cut.Capacity);
         }
@@ -31,6 +36,8 @@ internal sealed class MetalBatchCensus
             Cuts[(int)reason]++;
             if (Pending == 0) return;
             Histogram[Pending]++;
+            (_pendingCompute ? DispatchHistogram : DrawHistogram)[Pending]++;
+            NonemptyCuts[(int)reason]++;
             Batches++;
             Maximum = Math.Max(Maximum, Pending);
             Pending = 0;
@@ -39,6 +46,9 @@ internal sealed class MetalBatchCensus
         internal string Format(string name) =>
             $"{name}_work={Work} {name}_batches={Batches} {name}_max={Maximum} " +
             $"{name}_hist={string.Join(',', Histogram.Select((n, i) => (n, i)).Where(x => x.n != 0).Select(x => $"{x.i}:{x.n}"))} " +
+            $"{name}_draw_hist={string.Join(',', DrawHistogram.Select((n, i) => (n, i)).Where(x => x.n != 0).Select(x => $"{x.i}:{x.n}"))} " +
+            $"{name}_dispatch_hist={string.Join(',', DispatchHistogram.Select((n, i) => (n, i)).Where(x => x.n != 0).Select(x => $"{x.i}:{x.n}"))} " +
+            $"{name}_nonempty_cuts={string.Join(',', NonemptyCuts.Select((n, i) => (n, i)).Where(x => x.n != 0).Select(x => $"{(Cut)x.i}:{x.n}"))} " +
             $"{name}_cuts={string.Join(',', Cuts.Select((n, i) => (n, i)).Where(x => x.n != 0).Select(x => $"{(Cut)x.i}:{x.n}"))}";
     }
 
@@ -58,13 +68,13 @@ internal sealed class MetalBatchCensus
         if (_compute is { } prior && prior != compute) Close(Cut.Kind);
         _compute = compute;
         if (compute) _dispatches++; else _draws++;
-        Strict.Add();
+        Strict.Add(compute);
     }
 
     internal void Encoded()
     {
-        Coarse.Add();
-        Symbolic.Add();
+        Coarse.Add(_compute == true);
+        Symbolic.Add(_compute == true);
     }
 
     internal void Close(Cut reason)
@@ -146,6 +156,9 @@ internal sealed class MetalBatchCensus
         distribution.Work = distribution.Batches = 0;
         distribution.Maximum = 0;
         Array.Clear(distribution.Histogram);
+        Array.Clear(distribution.DrawHistogram);
+        Array.Clear(distribution.DispatchHistogram);
         Array.Clear(distribution.Cuts);
+        Array.Clear(distribution.NonemptyCuts);
     }
 }
