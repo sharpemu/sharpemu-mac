@@ -1,0 +1,15 @@
+{
+  "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-191332-ds-arch-parallel-opt1",
+  "source": "751c2b9cfd45a34209f097079a1c0a0f1dd8ea23",
+  "excludedFromAB": true,
+  "reason": "OOM guard killed PID69844 at local20:41:04 after free-memory5percent two consecutive samples; HUD reached336.429seconds, no end marker.",
+  "guardEvidence": [
+    "20:41:02 pid=69844 level=2 free=5% swap_used=8773M",
+    "20:41:04 pid=69844 level=2 free=5% swap_used=8731M",
+    "20:41:04 KILL pid=69844"
+  ],
+  "lastScreenshot": "shot-0376.png",
+  "inspection": "Expected knight/tunnel/foliage/HUD layout, matching base layout; Outpost Passage title still visible at fewer completed frames. Not an end-of-window equivalence result.",
+  "subsequentBase2": "preflight refused because opt1 failed; no game launched",
+  "queuedOpt2": "canceled own invalid suffix waiter before acquisition; will requeue behind valid opt1/base2"
+}

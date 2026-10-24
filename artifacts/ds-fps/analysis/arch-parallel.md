@@ -444,3 +444,31 @@ was no `.packages` directory. Signed game bundles, own data root and evidence
 remain available to the queued runs. Their helper saves skip40 summaries after
 each successful run; final screenshot inspection and A/B interpretation remain
 required.
+
+
+## First optimized attempt: excluded memory-pressure termination
+
+The user GUI lock was released; `opt1` acquired FIFO at local19:13:31 but the
+shared game harness continued waiting for the existing SharpEmu process to exit.
+Actual launch was local20:34:37. The run directory timestamp therefore does not
+represent launch time: `20261024-191332-ds-arch-parallel-opt1`. The HUD appeared
+336.429 seconds after actual launch. At local20:41:02 and20:41:04 the OOM guard
+reported 5% free memory twice and killed PID69844. The app exit was137; the wrapper
+correctly returned3 because no end marker existed. This attempt is excluded from
+A/B timing. Peak footprint was14,418MB and Metal allocation peaked at14,843MB;
+these are whole-run peaks rather than matched steady-state differences to base.
+
+The last screenshot (`shot-0376.png`) was opened and compared with base1's end
+shot. Knight, tunnel, foliage, lighting and the large bottom-left HUD layout
+matched; the Outpost Passage title was still visible after fewer completed
+frames. This is not a completed end-window equivalence result. The trace confirms
+three native QoS helpers and four-worker batches were active. Near the end, each
+flip added about5,300 queued draws and80 parallel batches, with writer, shape,
+dynamic-state and pass refusals reported separately. Memory pressure invalidates
+using that incomplete attempt to predict normal speedup.
+
+`base2` then rejected its failed predecessor before launching any game. The own
+invalid `opt2` suffix waiter was canceled before acquisition, its queue line alone
+was removed while another reservation held the queue stable, and fresh
+opt1/base2/opt2 jobs were appended in that order. The failed logs/result/guard
+evidence are preserved under `bench/arch-parallel/attempts/opt1-oom-20261024-184104Z`.
