@@ -24,11 +24,11 @@ if arm.startswith('census') and (OUT/(arm+'-source.txt')).exists():assert info['
 if not arm.startswith(('base','census')):assert info['source']['revision']==(OUT/'prototype-revision.txt').read_text().strip()
 (OUT/(arm+'-build-info.json')).write_text(json.dumps(info,indent=2))
 env=os.environ.copy()
-env.update(SHARPEMU_APP_DIR=str(bundle/'Contents/MacOS'),SHARPEMU_GAMES_DIR='/Volumes/Untitled/games',SHARPEMU_DS_INWORLD_SECONDS='120',SHARPEMU_WINID='/Users/xnetcat/Projects/xnetcat/sharpemu-compat/scripts/winid',SHARPEMU_COMPAT_DIR='/Users/xnetcat/Projects/xnetcat/sharpemu-compat',SHARPEMU_OVERLAY='1')
+env.update(SHARPEMU_APP_DIR=str(bundle/'Contents/MacOS'),SHARPEMU_GAMES_DIR='/Volumes/Untitled/games',SHARPEMU_DS_INWORLD_SECONDS='120',SHARPEMU_WINID='/Users/xnetcat/Projects/xnetcat/sharpemu-compat/scripts/winid',SHARPEMU_COMPAT_DIR='/Users/xnetcat/Projects/xnetcat/sharpemu-compat',SHARPEMU_OVERLAY='1',SHARPEMU_KEEP_BUILD_SERVERS='1')
 if not any('/bin/bash /tmp/sharpemu-watch/oom-guard.sh' in x for x in subprocess.check_output(['ps','-axo','command'],text=True).splitlines()):
     subprocess.Popen(['/tmp/sharpemu-watch/oom-guard.sh'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
 env.update(SHARPEMU_PROFILE_RENDER='0',SHARPEMU_PROFILE_PERFORMANCE='0',SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE='0',SHARPEMU_METAL_V2_PROFILE_PASSES='0',SHARPEMU_METAL_V2_PROFILE_SHADERS='0',SHARPEMU_METAL_V2_BATCH_CENSUS='0')
-args=['bash','scripts/macos/games/ds.sh','arch-parallel-'+arm,'900','ingame','SHARPEMU_SHADER_PRECOMPILE_BUDGET=0','SHARPEMU_OVERLAY=1','SHARPEMU_PROFILE_RENDER=0','SHARPEMU_METAL_V2_PROFILE_PASSES=0','SHARPEMU_METAL_V2_PROFILE_SHADERS=0','SHARPEMU_PROFILE_PERFORMANCE=0','SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE=0','SHARPEMU_METAL_V2_BATCH_CENSUS=0']
+args=['bash','scripts/macos/games/ds.sh','arch-parallel-'+arm,'900','ingame','SHARPEMU_SHADER_PRECOMPILE_BUDGET=0','SHARPEMU_OVERLAY=1','SHARPEMU_KEEP_BUILD_SERVERS=1','SHARPEMU_PROFILE_RENDER=0','SHARPEMU_METAL_V2_PROFILE_PASSES=0','SHARPEMU_METAL_V2_PROFILE_SHADERS=0','SHARPEMU_PROFILE_PERFORMANCE=0','SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE=0','SHARPEMU_METAL_V2_BATCH_CENSUS=0']
 if arm.startswith('census'):args+=['SHARPEMU_METAL_V2_BATCH_CENSUS=1']
 args+=['SHARPEMU_METAL_V2_PARALLEL_ENCODE='+('1' if arm.startswith('opt') else '0'),'SHARPEMU_METAL_V2_PARALLEL_WORKERS=4']
 args+=sys.argv[2:]
