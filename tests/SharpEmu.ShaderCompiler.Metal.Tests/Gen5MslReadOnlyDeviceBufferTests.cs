@@ -29,7 +29,7 @@ public sealed class Gen5MslReadOnlyDeviceBufferTests
         var program = new Gen5ShaderProgram(0x2000, [
             vector ? new(0, Gen5ShaderEncoding.Mubuf, "BufferLoadDword", [0u, 0u],
                 [Gen5Operand.Vector(0), Gen5Operand.Scalar(8), Gen5Operand.Source(125)], [Gen5Operand.Vector(1)],
-                new Gen5BufferMemoryControl(1, 0, 1, 8, offset, false, false)) :
+                new Gen5BufferMemoryControl(1, 0, 1, 8, offset, false, false, false, false)) :
             new(0, Gen5ShaderEncoding.Smem, "SBufferLoadDword", [0u, 0u],
                 [Gen5Operand.Scalar(8), Gen5Operand.Source(125)], [Gen5Operand.Scalar(20)],
                 new Gen5ScalarMemoryControl(1, offset, null)),
