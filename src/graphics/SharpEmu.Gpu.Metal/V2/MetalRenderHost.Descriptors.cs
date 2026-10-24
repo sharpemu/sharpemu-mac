@@ -153,6 +153,10 @@ internal sealed partial class MetalRenderHost
     private MetalResourcePreparation? _preparation;
     private int _preparedStageMask;
 
+    // Single-copy chunks need their own publication/admission proof before bypassing
+    // ResolveStorageBuffer. Keep that configuration on the existing binding path.
+    public bool AllowsReadOnlyDeviceBuffers => _singleCopy is null;
+
     public IResourcePreparation BeginPreparation()
     {
         _bindlessCoverage?.Begin();
@@ -1080,6 +1084,7 @@ internal sealed partial class MetalRenderHost
             }
         }
 
+        DeclareCapturedBufferWindows(stage);
         _stageArgumentBuffers[stageIndex] = range.Buffer;
         _stageArgumentOffsets[stageIndex] = range.Offset;
         _stageArgumentValid[stageIndex] = true;

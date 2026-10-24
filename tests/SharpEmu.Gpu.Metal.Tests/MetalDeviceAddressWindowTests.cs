@@ -147,6 +147,22 @@ public sealed unsafe class MetalDeviceAddressWindowTests(ITestOutputHelper outpu
         }
     }
 
+    [Fact]
+    public void CapturedRangesNameAllIntersectingWindowsBeforeTheirFirstUse()
+    {
+        if (!RequireDevice()) return;
+        using var fixture = new Fixture(movedEdge: true);
+        var windows = new MetalWindowSet();
+        Assert.True(fixture.Table.AddWindowsOfRange(GuestBase + 0x0F0004, 0x200000 - 4, windows));
+        Assert.Equal([0, 1, 2], windows.ToArray());
+        Assert.False(fixture.Table.AddWindowsOfRange(GuestBase + 0x0F0004, 4, windows));
+        Assert.False(fixture.Table.AddWindowsOfRange(GuestBase + 0x2F0000, 0x90000, windows));
+        Assert.True(fixture.Table.AddWindowsOfRange(GuestBase + 0x380000, 4, windows));
+        Assert.Equal([0, 1, 2, 3], windows.ToArray());
+        Assert.False(fixture.Table.AddWindowsOfRange(GuestBase, 0, windows));
+        Assert.False(fixture.Table.AddWindowsOfRange(ulong.MaxValue - 3, 8, windows));
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly MetalGuestWindowGranuleTests.Backing _backing = new();

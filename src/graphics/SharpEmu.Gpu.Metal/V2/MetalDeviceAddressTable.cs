@@ -358,6 +358,27 @@ internal sealed class MetalDeviceAddressTable
         }
     }
 
+    /// <summary>Adds all windows intersecting an exact captured guest byte range.</summary>
+    public bool AddWindowsOfRange(ulong address, ulong size, MetalWindowSet windows)
+    {
+        if (size == 0 || size > ulong.MaxValue - address || _entries.Count == 0) return false;
+        var first = address >> DeviceAddressPaging.PageBits;
+        var end = ((address + size - 1) >> DeviceAddressPaging.PageBits) + 1;
+        var low = 0;
+        var high = _entries.Count;
+        while (low < high)
+        {
+            var middle = low + ((high - low) >> 1);
+            if (_entries[middle].FirstPage <= first) low = middle + 1;
+            else high = middle;
+        }
+        var added = false;
+        for (var index = Math.Max(low - 1, 0); index < _entries.Count && _entries[index].FirstPage < end; index++)
+            if (_entries[index].FirstPage + _entries[index].PageCount > first)
+                added |= windows.Add(_entryWindows[index]);
+        return added;
+    }
+
     /// <summary>
     /// Writes the table and its granule index. An entry in a window outside
     /// <paramref name="namedWindows"/> is flagged with its granule; null flags none.

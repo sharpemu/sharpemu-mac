@@ -96,6 +96,26 @@ internal sealed partial class MetalRenderHost
     /// <summary>The windows an encoder that runs a device-address program names.</summary>
     private MetalWindowSet DeviceAddressNamedWindows() => _deviceAddressNamedWindows;
 
+    // The buffer-only prototype still has exact CPU-captured ranges. Add their actual
+    // windows before execution, even on a cold reach profile. The already uploaded
+    // table may still report an unnamed reach, but the access is resident immediately.
+    private void DeclareCapturedBufferWindows(MetalStageBindings stage)
+    {
+        if (!stage.Program.Resources!.Info.ReadOnlyDeviceBuffers) return;
+        var added = false;
+        var snapshot = stage.StageResources.Resources;
+        var first = (int)stage.Program.Bindings!.FirstBufferWordDword();
+        for (var index = 0; index < snapshot.Buffers.Length; index++)
+        {
+            var size = stage.ShaderData[first + index];
+            if (size == 0) continue;
+            var words = snapshot.Buffers[index];
+            var address = words[0] | ((ulong)(words[1] & 0xFFFFu) << 32);
+            added |= _deviceAddressTableBuilder.AddWindowsOfRange(address, size, _deviceAddressNamedWindows);
+        }
+        if (added) _guestMemory.PinWindows(_deviceAddressNamedWindows);
+    }
+
     private string TakeDeviceAddressReachCounters()
     {
         var (misses, learned) = _reach?.TakeCounters() ?? (0, 0);
