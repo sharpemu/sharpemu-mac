@@ -160,6 +160,7 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
         _inner.TryFillInPlace(virtualAddress, length, state, fill, out filled);
 
     public bool CanRead(ulong address, ulong size) => _inner.CanRead(address, size);
+    public long? ReadMappingGeneration => _inner.ReadMappingGeneration;
 
     public bool TryScanCString(ulong address, byte needle, bool findLast, ulong maxLength, out ulong match) =>
         _inner.TryScanCString(address, needle, findLast, maxLength, out match);

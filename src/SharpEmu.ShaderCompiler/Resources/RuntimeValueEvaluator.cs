@@ -659,9 +659,9 @@ public sealed class RuntimeValueEvaluator
         plan.ResourceBranches.Count != 0 || plan.IndirectImages.Count != 0 || plan.BufferCandidateTables.Count != 0;
 
     private static bool[] EvaluateActiveSources(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, RuntimeValueEvaluator cleanEvaluator,
-        RuntimeEvaluationScratch scratch)
+        RuntimeEvaluationScratch scratch, bool[]? reusable = null)
     {
-        var activeSources = new bool[plan.DescriptorSources.Count];
+        var activeSources = reusable ?? new bool[plan.DescriptorSources.Count];
         Array.Fill(activeSources, true);
         foreach (var block in plan.ResourceBranches)
             foreach (var source in block.Sources) activeSources[source] = false;
@@ -696,6 +696,130 @@ public sealed class RuntimeValueEvaluator
 
         result = results[0];
         return true;
+    }
+
+    // A narrow, fresh descriptor read before choosing a native vertex layout. It does
+    // not build a snapshot/specialization or evaluate unrelated resources. The common
+    // inline V# needs only four register reads and allocates nothing. A sentinel source
+    // is a statically refused fetch. Branch activity and clean table reads follow the
+    // same rules as full materialization.
+    public static bool EvaluateBufferDescriptorWords(ShaderResourcePlan plan, ReadOnlySpan<uint> sources,
+        ResourceRuntimeInputs inputs, Span<uint> words)
+    {
+        BufferDescriptorEvaluationState? state = null;
+        return EvaluateBufferDescriptorWords(plan, sources, inputs, words, ref state);
+    }
+
+    // Retained by a serialized program entry, never shared between concurrent walks.
+    // Only storage survives a call; graph results are cleared before and after it.
+    public sealed class BufferDescriptorEvaluationState
+    {
+        internal readonly ShaderResourcePlan Plan;
+        internal readonly ResourceRuntimeInputs Inputs;
+        internal readonly ResourceRuntimeInputs CleanInputs;
+        internal readonly RuntimeEvaluationScratch CleanScratch = new();
+        internal readonly RuntimeEvaluationScratch Scratch = new();
+        internal readonly bool[] ActiveSources;
+        internal RuntimeValueEvaluator Clean = null!;
+        internal RuntimeValueEvaluator Evaluator = null!;
+
+        internal BufferDescriptorEvaluationState(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+        {
+            Plan = plan;
+            // Own the mutable inputs cell. The caller may reuse or release its
+            // inputs immediately after this call; no draw data survives Reset.
+            Inputs = new()
+            {
+                ReadMemory = inputs.ReadMemory, ReadCleanMemory = inputs.ReadCleanMemory,
+                TraceImageCandidate = inputs.TraceImageCandidate, TablePhase = inputs.TablePhase,
+                ReadResidentMemory = inputs.ReadResidentMemory, CompareResidentMemory = inputs.CompareResidentMemory,
+                ReadsClean = inputs.ReadsClean, DataWritePending = inputs.DataWritePending,
+            };
+            CleanInputs = Inputs.WithReader(inputs.ReadCleanMemory);
+            ActiveSources = plan.ResourceBranches.Count == 0 ? [] : new bool[plan.DescriptorSources.Count];
+            CreateEvaluators();
+        }
+
+        private void CreateEvaluators()
+        {
+            Clean = new(CleanScratch, Plan, CleanInputs);
+            Evaluator = new(Scratch, Plan, Inputs, Plan.CleanFlatSlots, Clean);
+        }
+
+        internal bool Matches(ResourceRuntimeInputs inputs) =>
+            ReferenceEquals(Inputs.ReadMemory, inputs.ReadMemory) && ReferenceEquals(Inputs.ReadCleanMemory, inputs.ReadCleanMemory) &&
+            ReferenceEquals(Inputs.TraceImageCandidate, inputs.TraceImageCandidate) && ReferenceEquals(Inputs.TablePhase, inputs.TablePhase) &&
+            ReferenceEquals(Inputs.ReadResidentMemory, inputs.ReadResidentMemory) && ReferenceEquals(Inputs.CompareResidentMemory, inputs.CompareResidentMemory) &&
+            Inputs.ReadsClean == inputs.ReadsClean && ReferenceEquals(Inputs.DataWritePending, inputs.DataWritePending);
+
+        internal void Begin(ResourceRuntimeInputs inputs)
+        {
+            Reset();
+            CleanInputs.UserData = Inputs.UserData = inputs.UserData;
+            CleanInputs.ShaderBase = Inputs.ShaderBase = inputs.ShaderBase;
+            CleanInputs.ComputeState = Inputs.ComputeState = inputs.ComputeState;
+            // Adopt compiled evaluation once it is published, without creating
+            // new evaluators on subsequent draws or replaying a failed read.
+            if ((!Clean.UsesCompiledEvaluator || !Evaluator.UsesCompiledEvaluator) && Plan.CompiledEvaluator is not null)
+                CreateEvaluators();
+        }
+
+        internal void Reset()
+        {
+            CleanScratch.Values.Reset();
+            CleanScratch.CompiledValues.Reset();
+            CleanScratch.Visiting.Clear();
+            CleanScratch.PendingBranches.Clear();
+            Scratch.Values.Reset();
+            Scratch.CompiledValues.Reset();
+            Scratch.Visiting.Clear();
+            Scratch.PendingBranches.Clear();
+            CleanInputs.UserData = Inputs.UserData = [];
+            CleanInputs.ShaderBase = Inputs.ShaderBase = 0;
+            CleanInputs.ComputeState = Inputs.ComputeState = null;
+        }
+    }
+
+    public static bool EvaluateBufferDescriptorWords(ShaderResourcePlan plan, ReadOnlySpan<uint> sources,
+        ResourceRuntimeInputs inputs, Span<uint> words, ref BufferDescriptorEvaluationState? state)
+    {
+        if (words.Length != sources.Length * 4) throw new ArgumentException("Four words per buffer are required.");
+        words.Clear();
+        var simple = plan.ResourceBranches.Count == 0;
+        for (var index = 0; simple && index < sources.Length; index++)
+        {
+            if (sources[index] == uint.MaxValue) continue;
+            var source = plan.DescriptorSources[(int)sources[index]];
+            for (var word = 0; word < 4; word++)
+            {
+                var value = source.Dwords[word];
+                if (value.IsConstant) words[index * 4 + word] = value.ConstantU32;
+                else if (value.Kind == ScalarValueKind.UserData && value.UserDataRegister >= plan.UserDataBase &&
+                    value.UserDataRegister - plan.UserDataBase < inputs.UserData.Count)
+                    words[index * 4 + word] = inputs.UserData[(int)(value.UserDataRegister - plan.UserDataBase)];
+                else { simple = false; break; }
+            }
+        }
+        if (simple) return true;
+
+        if (state is null || !ReferenceEquals(state.Plan, plan) || !state.Matches(inputs))
+            state = new(plan, inputs);
+        try
+        {
+            state.Begin(inputs);
+            var active = plan.ResourceBranches.Count != 0
+                ? EvaluateActiveSources(plan, inputs, state.Clean, state.CleanScratch, state.ActiveSources) : [];
+            words.Clear();
+            for (var index = 0; index < sources.Length; index++)
+            {
+                var source = sources[index];
+                if (source == uint.MaxValue || (active.Length != 0 && !active[source])) continue;
+                for (var word = 0; word < 4; word++)
+                    if (!state.Evaluator.EvaluateSourceWord((int)source, word, out words[index * 4 + word])) return false;
+            }
+            return true;
+        }
+        finally { state.Reset(); }
     }
 
     public static bool FlattenResourceTable(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out uint[] table) =>

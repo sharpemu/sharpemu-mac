@@ -2105,6 +2105,7 @@ internal sealed partial class MetalRenderHost :
 
     public bool VertexFetchRangeIsMapped(ulong address, ulong size) =>
         address != 0 && size != 0 && size <= ulong.MaxValue - address && _memory.CanRead(address, size);
+    public long? VertexFetchMappingGeneration => _memory.ReadMappingGeneration;
     // Keep the rectangle-list draw/rebase slots available too; excess attributes
     // retain their shader fetch rather than making that draw unrepresentable.
     public uint MaxFixedFunctionVertexBuffers => RectangleRebaseFirstSlot - VertexBufferSlotBase;

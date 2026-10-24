@@ -21,6 +21,10 @@ public static class AffineVertexFetchResolver
 
     public static bool TryResolve(AffineVertexFetchLoad load, BufferDescriptorWords descriptor,
         VertexFetchBounds bounds, out VertexInputBuffer buffer, out VertexAttributeResource attribute, out VertexFetchRefusal refusal)
+        => TryResolve(load, load.Index, descriptor, bounds, out buffer, out attribute, out refusal);
+
+    internal static bool TryResolve(AffineVertexFetchLoad load, AffineVertexIndex index, BufferDescriptorWords descriptor,
+        VertexFetchBounds bounds, out VertexInputBuffer buffer, out VertexAttributeResource attribute, out VertexFetchRefusal refusal)
     {
         refusal = VertexFetchRefusal.Descriptor;
         buffer = default;
@@ -45,7 +49,6 @@ public static class AffineVertexFetchResolver
         }
 
         refusal = VertexFetchRefusal.Index;
-        var index = load.Index;
         if (index.BiasScalarRegister >= 0) return false;
         if (index.Divisor == 0 || (index.Kind == VertexFetchIndex.Vertex && index.Divisor != 1)) return false;
         // Metal adds baseInstance after stepping, while the guest divides the full

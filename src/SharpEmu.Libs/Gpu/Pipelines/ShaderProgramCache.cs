@@ -184,8 +184,17 @@ internal sealed class ProgramSourceEntry
     public bool PositionOnlyVertex { get; init; }
     public ShaderVertexInput[] VertexInputs { get; init; } = [];
     public IReadOnlyList<AffineVertexFetchLoad> AffineFetches { get; init; } = [];
-    public List<ProgramPermutation> Permutations { get; } = new(8);
+    public AffineProgramDecision? Affine { get; set; }
+    public List<ProgramPermutation> Permutations { get; private set; } = new(8);
     public ProgramPermutation? LastPermutation { get; set; }
+
+    public ProgramSourceEntry ForStaticKey()
+    {
+        var copy = (ProgramSourceEntry)MemberwiseClone();
+        copy.Permutations = new(8);
+        copy.LastPermutation = null;
+        return copy;
+    }
 
     // How many device data loads the plan was extracted with, and the registry generation
     // last seen to agree with it (DeviceDataLoads).
@@ -195,7 +204,7 @@ internal sealed class ProgramSourceEntry
 
 // Programs keyed by identity and static state; each draw materializes its resources and reuses
 // the permutation whose specialization and push-data start match, else compiles one more.
-internal sealed class ShaderProgramCache
+internal sealed partial class ShaderProgramCache
 {
     private readonly ImageDescriptorTrace _imageDescriptorTrace = new();
     private const uint MaxInstructionScan = 16384;
@@ -401,6 +410,38 @@ internal sealed class ShaderProgramCache
 
     private ShaderProgram GetOrCompileCore(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor, out ShaderStageResources stage)
     {
+        // One inputs object refilled per lookup: the materialization reads it during the call
+        // and keeps nothing of it (a miss copies what its entry needs).
+        var inputs = _inputs ??= new ResourceRuntimeInputs
+        {
+            ReadMemory = _readGuestWord,
+            ReadCleanMemory = _readCleanGuestWord,
+            TraceImageCandidate = SharpEmu.Libs.Gpu.Images.ImageClearTrace.Enabled
+                ? (descriptorSource, candidateKey, heap, address, words) =>
+                    _imageDescriptorTrace.RecordCandidate(_materializingHash, descriptorSource, candidateKey, heap, address, words.Span)
+                : null,
+            ReadResidentMemory = _prefetchResidentGuestBytes,
+            CompareResidentMemory = _compareResidentGuestBytes,
+            DataWritePending = _dataWritePending,
+        };
+        _materializingHash = source.Hash;
+        inputs.UserData = source.UserData;
+        inputs.ShaderBase = source.Address;
+        inputs.ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
+            ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
+                Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
+                computeState.LocalDataShareDwords, computeState.ThreadIdCount)
+            : null;
+        if (Diagnostics.GpuReadTrace.Enabled)
+        {
+            Diagnostics.GpuReadTrace.CurrentShader = source.Hash;
+            Diagnostics.GpuReadTrace.CurrentStage = source.Label;
+        }
+
+        MaterializingShader.Hash = source.Hash;
+        // Resolve native inputs before constructing the static key. Only the selected
+        // program is materialized; the portable analysis is retained separately.
+        var portable = PrepareAffineVertexInput(source, options, inputs);
         ProgramKey? key = null;
         ProgramSourceEntry? entry;
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
@@ -427,31 +468,10 @@ internal sealed class ShaderProgramCache
             RenderTrace.Write($"ProgramCache lookup stage={source.Label} hash=0x{source.Hash:X16} cached={entry is not null} permutations={entry?.Permutations.Count ?? 0}");
         }
 
-        // One inputs object refilled per lookup: the materialization reads it during the call
-        // and keeps nothing of it (a miss copies what its entry needs).
-        var inputs = _inputs ??= new ResourceRuntimeInputs
-        {
-            ReadMemory = _readGuestWord,
-            ReadCleanMemory = _readCleanGuestWord,
-            TraceImageCandidate = SharpEmu.Libs.Gpu.Images.ImageClearTrace.Enabled
-                ? (descriptorSource, candidateKey, heap, address, words) =>
-                    _imageDescriptorTrace.RecordCandidate(_materializingHash, descriptorSource, candidateKey, heap, address, words.Span)
-                : null,
-            ReadResidentMemory = _prefetchResidentGuestBytes,
-            CompareResidentMemory = _compareResidentGuestBytes,
-            DataWritePending = _dataWritePending,
-        };
-        _materializingHash = source.Hash;
-        inputs.UserData = source.UserData;
-        inputs.ShaderBase = source.Address;
-        inputs.ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
-            ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
-                Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
-                computeState.LocalDataShareDwords, computeState.ThreadIdCount)
-            : null;
         if (entry is null)
         {
-            entry = CreateEntry(source, options.Detached());
+            entry = portable is not null && options.VertexInfo is { Attributes.Length: 0 }
+                ? portable.ForStaticKey() : CreateEntry(source, options.Detached());
             key = BuildProgramKey(source);
             _programs.Add(key, entry);
             ShaderCacheCounters.CountProgram();
@@ -497,13 +517,6 @@ internal sealed class ShaderProgramCache
         ResourceSnapshot snapshot = null!;
         ResourceSpecialization specialization = null!;
         var captureIndirectImageFailure = _spirvDumpEnabled ? ShaderPermutationDump.CreateFailureCapture(source) : null;
-        if (Diagnostics.GpuReadTrace.Enabled)
-        {
-            Diagnostics.GpuReadTrace.CurrentShader = source.Hash;
-            Diagnostics.GpuReadTrace.CurrentStage = source.Label;
-        }
-
-        MaterializingShader.Hash = source.Hash;
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
         {
             // Failure capture needs the full walk, so a dump run bypasses the cache.
@@ -574,65 +587,6 @@ internal sealed class ShaderProgramCache
         }
         MaterializingShader.Hash = 0;
         _imageDescriptorTrace.Record(source, entry.Plan, snapshot);
-
-        if (AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex &&
-            options.VertexInfo is { Attributes.Length: 0, FetchEmbedded: false } affineInfo &&
-            ShaderCompileRequest.AllowsEmbeddedVertexFetch(entry.Program, options.PrimitiveShader, options.MeshPerVertexParameterMask) &&
-            !entry.Plan.Info.WritesDeviceAddresses && !entry.Plan.Info.Buffers.Any(buffer => buffer.Written) &&
-            !entry.Plan.Info.Images.Any(image => image.Written))
-        {
-            List<VertexAttributeResource>? attributes = null;
-            List<VertexInputBuffer>? buffers = null;
-            List<uint>? pcs = null;
-            if (entry.AffineFetches.Count == 0) VertexFetchCounters.Refuse(VertexFetchRefusal.NoAffineIndex);
-            foreach (var load in entry.AffineFetches)
-            {
-                var access = entry.Plan.Memory.Find(load.Pc);
-                if ((attributes?.Count ?? 0) >= Math.Min(VertexInputInfo.MaxBuffers, _host.MaxFixedFunctionVertexBuffers))
-                { VertexFetchCounters.Refuse(VertexFetchRefusal.Capacity); continue; }
-                if (access is null || access.DeviceDescriptor ||
-                    access.Resource >= snapshot.Buffers.Length ||
-                    access.BufferDescriptor?.ChooseStrategy(false, !load.Raw, false) == BufferLoweringStrategy.BoundedCandidateTable)
-                { VertexFetchCounters.Refuse(VertexFetchRefusal.Resource); continue; }
-                var words = snapshot.Buffers[access.Resource];
-                if (words.Length < 4) { VertexFetchCounters.Refuse(VertexFetchRefusal.Descriptor); continue; }
-                var resolvedLoad = load;
-                if (load.Index.BiasScalarRegister is >= 0 and var scalar)
-                {
-                    var word = scalar - (int)source.UserDataBase;
-                    if ((uint)word >= source.UserData.Length ||
-                        (scalar < 64 && (source.ExcludedUserDataRegisters & (1ul << scalar)) != 0))
-                    { VertexFetchCounters.Refuse(VertexFetchRefusal.Index); continue; }
-                    resolvedLoad = load with { Index = load.Index with
-                    {
-                        Bias = unchecked(load.Index.Bias + (source.UserData[word] & load.Index.BiasMask)),
-                        BiasScalarRegister = -1,
-                    }};
-                }
-                if (!AffineVertexFetchResolver.TryResolve(resolvedLoad, BufferDescriptorWords.From(words),
-                        affineInfo.FetchBounds, out var buffer, out var attribute, out var refusal))
-                { VertexFetchCounters.Refuse(refusal); continue; }
-                if (!_host.VertexFetchRangeIsMapped(buffer.Address, buffer.Size))
-                { VertexFetchCounters.Refuse(VertexFetchRefusal.Mapping); continue; }
-                VertexFetchCounters.Replaced();
-                var location = attributes?.Count ?? 0;
-                (attributes ??= []).Add(attribute with { AttributeId = location, BufferIndex = location });
-                (buffers ??= []).Add(buffer);
-                (pcs ??= []).Add(load.Pc);
-            }
-            if (pcs is { Count: > 0 })
-            {
-                affineInfo.Attributes = attributes!.ToArray();
-                affineInfo.Buffers = buffers!.ToArray();
-                affineInfo.AffineFetchPcs = pcs.ToArray();
-                // This layout has its own static program key. The portable plan above
-                // stays available for every draw whose bounds cannot be proved.
-                return GetOrCompileCore(source, options, ref pushDataCursor, out stage);
-            }
-        }
-        else if (AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex &&
-            options.VertexInfo is { Attributes.Length: 0, FetchEmbedded: false })
-            VertexFetchCounters.Refuse(VertexFetchRefusal.Eligibility);
 
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
         {
@@ -814,7 +768,7 @@ internal sealed class ShaderProgramCache
             exclusiveOr |= instruction.Opcode.Contains("Xor", StringComparison.Ordinal);
         }
 
-        return new ProgramSourceEntry
+        var entry = new ProgramSourceEntry
         {
             Plan = plan,
             DeviceDataLoadCount = deviceDataLoads,
@@ -828,9 +782,15 @@ internal sealed class ShaderProgramCache
             EmbeddedFetch = fetch,
             PositionOnlyVertex = options.PositionOnlyVertex,
             VertexInputs = vertexInputs,
-            AffineFetches = AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex
+            AffineFetches = AffineVertexFetchResolver.Enabled && source.Stage == ShaderStage.Vertex &&
+                options.VertexInfo is { Attributes.Length: 0, FetchEmbedded: false }
                 ? EmbeddedVertexFetchDetector.Detect(program, -2, -2, source.UserDataBase, (uint)source.UserData.Length, 32).AffineLoads : [],
         };
+        // The common no-affine case never scans resources or tests workgroup eligibility
+        // on a draw. Access lookup and descriptor lowering strategy are plan invariants.
+        if (entry.AffineFetches.Count != 0)
+            entry.Affine = AffineProgramDecision.Create(entry);
+        return entry;
     }
 
     // One fixed-function input per fetched attribute; later loads of the same attribute alias the first.
