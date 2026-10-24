@@ -577,3 +577,33 @@ use budget0 and overlay1; no renderer quality/memory setting was reduced.
 All-suite signature and successful signed-bundle markers gate the optimized
 runs, while predecessor success gates each arm. Runtime measurements and end
 screenshot inspections still remain to complete.
+
+
+## First completed revised optimized arm
+
+Revised K4 `opt1` completed normally at clean signed source `c9598a263`, run
+`20261024-221738-ds-arch-parallel-opt1`, HUD217.954 seconds, graceful stop after
+the full HUD+120-second window. Skip40 recorded122 entries over79.703672
+seconds:1.530670fps (interval convention1.518123), p50 549.447060ms,
+p95 1598.145008ms and p99 1856.400967ms. All8 accepted process-sampler windows
+had zero build/test activity. The end screenshot was opened and compared with
+basecheck: expected knight/armour/tunnel/foliage/exit lighting and identical HUD
+layout; no structural difference was observed. Scene animation differs, so this
+is not a bitwise game-image equivalence proof.
+
+The121 counter intervals averaged5,314.32 queued draws,80.00 K4 batches,
+60.59 small batches,447.60 native children and1,018.31 refused draws per frame.
+Refusals split into206.23 writer,12.79 shape,434.18 dynamic state and365.12
+pass cases. Three native QoS helper threads were active. Added parent-pass ends
+for barriers were24.28/frame. Capture cost21.710ms/frame, native summed worker
+wall time27.932ms/frame and owner join-region wall time37.074ms/frame are
+diagnostic counters, not disjoint CPU phases: native work overlaps the join.
+Guest preparation and compute remain ordered.
+
+There was no OOM termination in this revised attempt, but it is too strong to
+say the allocation correction solved the memory issue: accepted unique
+resident+swapped `graphics_iokit` samples were still1,419-1,698MiB, above the
+matched main control's earlier552MiB near-HUD sample. Accepted peak footprint
+was13,891.5MiB. The new device test proves bounded child allocations for small
+passes; these runtime observations do not prove the cause of the earlier OOMs.
+The second control and optimized arm remain pending before an A/B verdict.
