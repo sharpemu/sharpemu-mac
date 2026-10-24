@@ -43,6 +43,7 @@ internal sealed partial class MetalRenderHost
         private readonly long[] _bufferStages = new long[4];
         private long _draws, _dispatches, _bufferDraws, _bufferDispatches, _emptyDraws;
         private long _emittedDraws, _emittedDispatches, _emittedBufferDraws, _emittedBufferDispatches;
+        private long _emittedEmptyDraws;
         private long _buffers, _imageReferences, _samplers, _readonlyStages, _flatFreeStages;
         private long _bridgeStages, _bridgeBuffers;
         private bool _issueImages, _issueBuffers, _issueCompute;
@@ -109,6 +110,7 @@ internal sealed partial class MetalRenderHost
             {
                 _emittedDraws++;
                 if (!_issueImages) _emittedBufferDraws++;
+                if (!_issueImages && !_issueBuffers) _emittedEmptyDraws++;
             }
             else
             {
@@ -123,6 +125,7 @@ internal sealed partial class MetalRenderHost
             Console.Error.WriteLine(
                 $"[METAL-V2][BINDLESS-COVERAGE] frame draws={_emittedDraws} dispatches={_emittedDispatches} " +
                 $"buffer_draws={_emittedBufferDraws} buffer_dispatches={_emittedBufferDispatches} " +
+                $"empty_draws={_emittedEmptyDraws} " +
                 $"prep_draws={_draws} prep_dispatches={_dispatches} " +
                 $"buffer_prep_draws={_bufferDraws} buffer_prep_dispatches={_bufferDispatches} empty_prep_draws={_emptyDraws} " +
                 $"stages=[{string.Join(',', _stages)}] buffer_stages=[{string.Join(',', _bufferStages)}] " +
@@ -140,6 +143,7 @@ internal sealed partial class MetalRenderHost
             _buffers = _imageReferences = _samplers = _readonlyStages = _flatFreeStages = 0;
             _bridgeStages = _bridgeBuffers = 0;
             _emittedDraws = _emittedDispatches = _emittedBufferDraws = _emittedBufferDispatches = 0;
+            _emittedEmptyDraws = 0;
         }
     }
 }
