@@ -10,9 +10,12 @@ internal sealed partial class MetalRenderHost
 {
     private long _bindlessBufferReads, _bindlessBufferStages, _bindlessLegacyStages;
     private long _bindlessWritableRefusals, _bindlessEmptyStages;
+    private static readonly bool BindlessCountersEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINDLESS") == "1";
 
     private void NoteBindlessStage(ShaderResourceInfo info)
     {
+        if (!BindlessCountersEnabled) return;
         if (info.ReadOnlyDeviceBuffers) _bindlessBufferStages++;
         else if (info.Buffers.Count == 0) _bindlessEmptyStages++;
         else
