@@ -1,0 +1,5 @@
+{
+  "revision": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+  "method": "git archive into isolated validation directory",
+  "path": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/arch-parallel-base-validation"
+}

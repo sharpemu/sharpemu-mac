@@ -1,0 +1,15 @@
+{
+  "base": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+  "command": [
+    "/Users/xnetcat/.dotnet-x64/dotnet",
+    "build",
+    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/arch-parallel-base-validation/tests/SharpEmu.Gpu.Metal.Tests/SharpEmu.Gpu.Metal.Tests.csproj",
+    "-c",
+    "Release",
+    "-p:RestorePackagesPath=/Users/xnetcat/.nuget/sharpemu-shared",
+    "-nodeReuse:false",
+    "-p:UseSharedCompilation=false"
+  ],
+  "rc": 0,
+  "archiveFilesMatchBase": true
+}

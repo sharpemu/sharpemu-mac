@@ -3,6 +3,9 @@
   "evidence": "/Users/xnetcat/Projects/sharpemu/sharpemu-mac/artifacts/ds-fps/analysis/v3-resmat.md#verification-and-exact-base-failures",
   "failures": {
     "metal": [
+      "SharpEmu.Gpu.Metal.Tests.MetalGuestViewTests.AScatteredRangePastTheRingCapIsReadWholeThroughAGuestView",
+      "SharpEmu.Gpu.Metal.Tests.MetalGuestViewTests.AnUnmapDropsTheViewAndTheNextBindReadsTheNewMapping",
+      "SharpEmu.Gpu.Metal.Tests.MetalGuestViewTests.ScatteredReadsLeaveTheStagedCacheAndTheRingEmpty",
       "SharpEmu.Gpu.Metal.Tests.MetalLossyTextureTests.ASampledImageIsExactByDefaultAndLossyWithTheFlagOn"
     ],
     "libs": [
@@ -15,5 +18,6 @@
     ],
     "shader": [],
     "msl": []
-  }
+  },
+  "independentBaseEvidence": "base-guest-views-test-summary.json: exact git-archive blobs verified before build and device tests; 13 passed and the same 4 Metal failures"
 }

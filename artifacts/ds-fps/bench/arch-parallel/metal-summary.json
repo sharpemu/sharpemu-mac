@@ -1,0 +1,101 @@
+{
+  "rc": 1,
+  "sourceSha256": "3929f87e750903e303c11e9b166b7ec370e0cdcf75efb4863d2540fec0dd2f5a",
+  "command": [
+    "/Users/xnetcat/.dotnet-x64/dotnet",
+    "test",
+    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/tests/SharpEmu.Gpu.Metal.Tests/SharpEmu.Gpu.Metal.Tests.csproj",
+    "-c",
+    "Release",
+    "--no-build",
+    "--no-restore",
+    "--blame-hang-timeout",
+    "120s",
+    "--blame-hang-dump-type",
+    "mini",
+    "--results-directory",
+    "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/metal/20261024T143617550564Z",
+    "--logger",
+    "trx;LogFileName=metal.trx",
+    "-p:RestorePackagesPath=/Users/xnetcat/.nuget/sharpemu-shared",
+    "-nodeReuse:false",
+    "-p:UseSharedCompilation=false"
+  ],
+  "requireDevice": "1",
+  "trx": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/tests/metal/20261024T143617550564Z/metal.trx",
+  "counters": {
+    "total": "1435",
+    "executed": "1428",
+    "passed": "1424",
+    "failed": "4",
+    "error": "0",
+    "timeout": "0",
+    "aborted": "0",
+    "inconclusive": "0",
+    "passedButRunAborted": "0",
+    "notRunnable": "0",
+    "notExecuted": "0",
+    "disconnected": "0",
+    "warning": "0",
+    "completed": "0",
+    "inProgress": "0",
+    "pending": "0"
+  },
+  "nonpassing": [
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.Scenes.ComputeSceneTests.TheOcclusionTestFlagsMatchTheHzbRuleAndNeverCullAVisibleObject(width: 37, height: 23, staticLevels: False)",
+      "outcome": "NotExecuted",
+      "message": "Refused loudly, a resource-planning limitation: the level's T# is s_load-ed through a pointer computed from buffer-loaded bounds (s_flbit, clamped by s_min to user data), so the host cannot evaluate the image before the dispatch, and the tracker enumerates device-selected images only for the s_ff1 bit-scan selector over an SGPR soffset (ResourceTracker.TryMakeDirectImage)."
+    },
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.MetalGuestViewTests.AScatteredRangePastTheRingCapIsReadWholeThroughAGuestView",
+      "outcome": "Failed",
+      "message": "Assert.True() Failure\nExpected: True\nActual:   False"
+    },
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.Scenes.TextureSceneTests.PointSampledFormatsDecodeToTheAnalyticTexels(name: \"Float11_11_10\")",
+      "outcome": "NotExecuted",
+      "message": "IMG_FORMAT 43 (11_11_10_FLOAT, R in the low ten bits) has no Metal pixel format; the emulator binds it as a null texture with a one-time warning (ResourceMaterializer, the unsupported-format fallback)"
+    },
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.Scenes.ShadowSceneTests.CompareHappensAtTheDepthFormatsPrecision(d16: True, func: 2)",
+      "outcome": "NotExecuted",
+      "message": "RDNA2 rounding of a sub-LSB compare reference against a D16 texel is not documented (the ISA and PAL leave it open); Metal's sample_compare rounds the reference to 16 bits. Not an emulator decision to pin."
+    },
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.Scenes.ShadowSceneTests.CompareHappensAtTheDepthFormatsPrecision(d16: True, func: 4)",
+      "outcome": "NotExecuted",
+      "message": "RDNA2 rounding of a sub-LSB compare reference against a D16 texel is not documented (the ISA and PAL leave it open); Metal's sample_compare rounds the reference to 16 bits. Not an emulator decision to pin."
+    },
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.Scenes.DepthSceneTests.StencilReplaceWithAnOperandThatDiffersFromTheReferenceUnderACompare",
+      "outcome": "NotExecuted",
+      "message": "Refused loudly, not fixable on the host: Metal has one stencil reference per face for both the compare and the replace, so STENCILOPVAL != STENCILTESTVAL under a compare is a fatal (DepthTargetResolver.ConvertFace)."
+    },
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.MetalLossyTextureTests.ASampledImageIsExactByDefaultAndLossyWithTheFlagOn",
+      "outcome": "Failed",
+      "message": "Assert.True() Failure\nExpected: True\nActual:   False"
+    },
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.Scenes.ComputeSceneTests.TheOcclusionTestFlagsMatchTheHzbRuleAndNeverCullAVisibleObject(width: 80, height: 48, staticLevels: False)",
+      "outcome": "NotExecuted",
+      "message": "Refused loudly, a resource-planning limitation: the level's T# is s_load-ed through a pointer computed from buffer-loaded bounds (s_flbit, clamped by s_min to user data), so the host cannot evaluate the image before the dispatch, and the tracker enumerates device-selected images only for the s_ff1 bit-scan selector over an SGPR soffset (ResourceTracker.TryMakeDirectImage)."
+    },
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.MetalGuestViewTests.ScatteredReadsLeaveTheStagedCacheAndTheRingEmpty",
+      "outcome": "Failed",
+      "message": "Assert.True() Failure\nExpected: True\nActual:   False"
+    },
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.Scenes.RasterSceneTests.ALineListDrawsLinesOfThePaSuLineCntlWidth(widthRegister: 24, widthPixels: 3)",
+      "outcome": "NotExecuted",
+      "message": "Wide lines: Metal has no wide lines, so a PA_SU_LINE_CNTL width above one pixel is drawn one pixel wide with a one-time warning."
+    },
+    {
+      "test": "SharpEmu.Gpu.Metal.Tests.MetalGuestViewTests.AnUnmapDropsTheViewAndTheNextBindReadsTheNewMapping",
+      "outcome": "Failed",
+      "message": "Assert.True() Failure\nExpected: True\nActual:   False"
+    }
+  ]
+}

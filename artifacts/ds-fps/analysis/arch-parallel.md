@@ -5,8 +5,9 @@ Worktree: `/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel`.
 
 Phase1 dependency analysis and the base-path in-world batch census are complete.
 The opt-in native-encoding prototype builds and passes all 24 focused device/ordering
-tests. The full suites, game A/B and final verdict are in progress. No measured
-prototype speedup is claimed. Guest preparation remains ordered in this prototype.
+tests. All four full suites completed, with the base failures listed below. Game A/B
+and the final verdict remain pending. No measured prototype speedup is claimed.
+Guest preparation remains ordered in this prototype.
 
 ## Hard limits and proposed partition
 
@@ -373,3 +374,37 @@ The user's later queue exception allows sequential builds and unit tests while
 `int3-user-gui` holds the lock. It does not allow game launches. Obsolete own
 build/test/package waiters were canceled; opt1/base2/opt2 game tags remain queued.
 The GUI process and its lock were left untouched.
+
+
+## Prototype build and complete suite results
+
+Implementation commit: `e616f4a81`. Successfully built/tested source content
+SHA-256: `3929f87e750903e303c11e9b166b7ec370e0cdcf75efb4863d2540fec0dd2f5a`.
+The final Release solution build completed in 30.57 seconds with 197 warnings and
+zero errors. Commands and per-case results are preserved under
+`artifacts/ds-fps/bench/arch-parallel/`; `validate.py` records the exact command,
+source signature, device flag and TRX path for each suite. All used `--no-build`,
+`--blame-hang-timeout 120s --blame-hang-dump-type mini`; ShaderCompiler also used
+the required serial runsettings. Suites ran sequentially under the user's GUI-lock
+build/unit-test exception, without launching any game.
+
+| Suite | Passed | Failed | Skipped | Device required |
+|---|---:|---:|---:|---|
+| Focused ordering | 24 | 0 | 0 | yes |
+| Metal | 1,424 | 4 | 7 | yes |
+| Libs | 8,618 | 6 | 5 | no |
+| ShaderCompiler | 2,134 | 0 | 1 | no |
+| ShaderCompiler.Metal | 3,162 | 0 | 0 | yes |
+
+All six Libs failures have the exact names documented on base (four SSE4a signal
+bridge cases, import-result sampling and Rosetta vector-store preservation).
+The Metal failures were the lossy-texture case plus guest-view creation/rebind
+cases `AScatteredRangePastTheRingCapIsReadWholeThroughAGuestView`,
+`ScatteredReadsLeaveTheStagedCacheAndTheRingEmpty` and
+`AnUnmapDropsTheViewAndTheNextBindReadsTheNewMapping`. These were **not assumed**
+to be inherited: an isolated `git archive bdc7ea28c...` was built afresh, after
+checking every archived file against the base git blob. Its device-required
+17-case guest-view/lossy filter passed 13 and failed the identical four assertions.
+See `base-validation.py`, `base-guest-views-build-summary.json` and
+`base-guest-views-test-summary.json`. No new failure or aborted test run was
+accepted. The 13 suite skips are preserved rather than counted as passing.
