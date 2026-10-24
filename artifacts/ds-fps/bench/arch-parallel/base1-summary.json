@@ -1,0 +1,16 @@
+{
+  "run": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/runs/20261024-140403-ds-arch-parallel-base1",
+  "hudSeconds": 207.04700016975403,
+  "skip": 40.0,
+  "frames": 112,
+  "seconds": 79.44240808486938,
+  "fps": 1.4098263471614418,
+  "intervalFps": 1.397238611918929,
+  "p50": 481.7838668823242,
+  "p95": 1665.8241748809814,
+  "p99": 1815.8881664276123,
+  "max": 1858.992099761963,
+  "censusReports": 0,
+  "windowStart": 1792843781.509,
+  "windowEnd": 1792843861.56
+}

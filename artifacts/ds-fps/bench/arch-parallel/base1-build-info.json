@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "builtAtUtc": "2026-10-23T00:46:18.485894+00:00",
+  "source": {
+    "revision": "bdc7ea28c8e7df0b8753966d8ba1881f60e5e764",
+    "trackedSourceDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "dirtySource": false,
+    "untrackedSourceSha256": {}
+  },
+  "integratedUpstreamRevision": "a1061ef3241f55c2241b89f6df6b12ebf55674db",
+  "sdk": "10.0.103",
+  "rid": "osx-x64",
+  "graphicsBackend": "Metal",
+  "hostStack": [
+    "AppKit",
+    "GameController",
+    "CoreAudio"
+  ]
+}

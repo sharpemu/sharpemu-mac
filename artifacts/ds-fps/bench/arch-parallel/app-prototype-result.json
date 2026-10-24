@@ -1,0 +1,10 @@
+{
+  "rc": 0,
+  "command": [
+    "SHARPEMU_MAC_GET_TASK_ALLOW=1",
+    "scripts/macos/build-app.sh"
+  ],
+  "source": "751c2b9cfd45a34209f097079a1c0a0f1dd8ea23",
+  "buildLog": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel/artifacts/ds-fps/bench/arch-parallel/exception-app-prototype.log",
+  "lockException": "User allowed sequential build/unit tests while int3-user-gui remains active; this step did not launch the app."
+}

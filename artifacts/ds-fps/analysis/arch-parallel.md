@@ -408,3 +408,31 @@ checking every archived file against the base git blob. Its device-required
 See `base-validation.py`, `base-guest-views-build-summary.json` and
 `base-guest-views-test-summary.json`. No new failure or aborted test run was
 accepted. The 13 suite skips are preserved rather than counted as passing.
+
+
+## A/B status and ready measurement bundle
+
+The signed measurement bundle was built with
+`SHARPEMU_MAC_GET_TASK_ALLOW=1 scripts/macos/build-app.sh`, osx-x64, ReadyToRun,
+clean source `751c2b9cfd45a34209f097079a1c0a0f1dd8ea23`. `codesign --verify
+--deep --strict` passed; get-task-allow is true. `prototype-bundle.json` records
+the metadata and SHA-256 of all 255 managed/native/configuration payload files.
+The flag remains **default off**.
+
+The first warm control already completed under FIFO on exact base `bdc7ea28c`:
+`20261024-140403-ds-arch-parallel-base1`. The HUD appeared 207.047 seconds after
+actual launch. With `SHARPEMU_SHADER_PRECOMPILE_BUDGET=0`, overlay enabled, and
+the first 40 in-world seconds discarded, it recorded 112 presented-frame entries
+over 79.4424 seconds: 1.409826 fps, p50 481.783867 ms, p95 1665.824175 ms,
+p99 1815.888167 ms. The FPS convention is entries / first-to-last span; the
+interval-count convention is also preserved (1.397239 fps). There were zero
+detected build/test process-load alerts in the accepted interval. End screenshot
+inspection found the expected Outpost Passage scene, knight, foliage, tunnel,
+lighting and overlay, matching the diagnostic scene.
+
+The remaining alternating warm arms are `opt1`, `base2`, `opt2`, with the same
+budget, resolution, own cloned data root, overlay, HUD+120-second stop, and
+skip40 analysis. Their live FIFO entries are preserved behind the user's
+`int3-user-gui` lock. They must not launch while that lock remains held.
+No optimization FPS, A/B conclusion or rendering-equivalence claim is available
+until those runs complete and their final screenshots have been inspected.
