@@ -653,6 +653,8 @@ internal sealed partial class MetalRenderHost
                 // needed: V# SGPRs and the pinned guest address table are the binding.
                 OrderAfterDeferredCopies(descriptor.Address, size);
                 OrderAfterStagedStores(descriptor.Address, size);
+                stage.Buffers[index] = default;
+                stage.BufferLengths[index] = 0;
                 _bindlessBufferReads++;
                 continue;
             }
