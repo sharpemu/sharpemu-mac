@@ -38,10 +38,12 @@ internal sealed partial class MetalRenderHost
     private long _parallelCaptureTicks, _parallelNativeTicks, _parallelJoinTicks;
     private long _parallelRefusedWriter, _parallelRefusedShape, _parallelRefusedDynamic, _parallelRefusedPass;
     private long _parallelBarrierPassEnds;
+    private long _parallelNativeChildren;
 
     internal Action<int>? BeforeParallelChunk { get; set; }
     internal Action<int>? AfterParallelChunk { get; set; }
     internal (long Queued, long Batches, long Chunks) ParallelCounts => (_parallelQueued, _parallelBatches, _parallelChunks);
+    internal long ParallelNativeChildCount => _parallelNativeChildren;
 
     // Native encoder ordering alone does not order arbitrary shader stores. Only
     // attachment writes and commutative mip-statistics atomics are admitted here.
@@ -75,6 +77,12 @@ internal sealed partial class MetalRenderHost
         _parallelRenderEncoder = RetainEncoder(MetalNative.Send(buffer, SelParallelRenderEncoder, descriptor));
         MetalMemoryTelemetry.RenderEncoders.Add();
         if (_parallelRenderEncoder == 0) throw Fatal("A parallel render encoder could not be created.");
+        return NewParallelChild();
+    }
+
+    private nint NewParallelChild()
+    {
+        _parallelNativeChildren++;
         return MetalNative.Send(_parallelRenderEncoder, SelParallelChild);
     }
 
@@ -193,27 +201,30 @@ internal sealed partial class MetalRenderHost
             if (count == resources.Length) Array.Resize(ref resources, count * 2);
             resources[count++] = resource;
         }
-        // The serial prefix precedes every child; it cannot inherit queued state.
-        EndAndReleaseEncoder(_renderEncoder);
-        _renderEncoder = 0;
         var chunks = _parallelDrawCount >= Math.Min(ParallelWorkerCount * 8, _parallelDraws.Length) ? ParallelWorkerCount : 1;
         try
         {
-            // Creation order, not worker completion order, fixes draw order.
-            for (var i = 0; i < chunks; i++)
-            {
-                _parallelChildEnded[i] = false;
-                _parallelChildren[i] = RetainEncoder(MetalNative.Send(_parallelRenderEncoder, SelParallelChild));
-                MetalMemoryTelemetry.RenderEncoders.Add();
-                if (_parallelChildren[i] == 0) throw Fatal("A parallel render child could not be created.");
-            }
             if (chunks == 1)
             {
+                // A small batch stays in the serial prefix/tail already open.
+                // Allocating a separate child and replacement tail here used two
+                // extra native encoders for every singleton observation cut.
                 _parallelSmallBatches++;
-                EncodeParallelChunk(0, 1);
+                EncodeFrozenDrawRange(_renderEncoder, 0, 1, endEncoder: false);
             }
             else
             {
+                // The serial prefix precedes every child; it cannot inherit queued state.
+                EndAndReleaseEncoder(_renderEncoder);
+                _renderEncoder = 0;
+                // Creation order, not worker completion order, fixes draw order.
+                for (var i = 0; i < chunks; i++)
+                {
+                    _parallelChildEnded[i] = false;
+                    _parallelChildren[i] = RetainEncoder(NewParallelChild());
+                    MetalMemoryTelemetry.RenderEncoders.Add();
+                    if (_parallelChildren[i] == 0) throw Fatal("A parallel render child could not be created.");
+                }
                 _parallelWorkers ??= new MetalParallelBatchWorkers(ParallelWorkerCount,
                     worker => EncodeParallelChunk(worker, ParallelWorkerCount));
                 _parallelWorkers.Execute();
@@ -238,9 +249,9 @@ internal sealed partial class MetalRenderHost
             _parallelWindowsNamed = false;
             _parallelDrawCount = 0;
         }
-        if (createTail)
+        if (createTail && chunks > 1)
         {
-            _renderEncoder = RetainEncoder(MetalNative.Send(_parallelRenderEncoder, SelParallelChild));
+            _renderEncoder = RetainEncoder(NewParallelChild());
             MetalMemoryTelemetry.RenderEncoders.Add();
             if (_renderEncoder == 0) throw Fatal("A parallel render tail could not be created.");
         }
@@ -248,11 +259,13 @@ internal sealed partial class MetalRenderHost
         _parallelJoinTicks += System.Diagnostics.Stopwatch.GetTimestamp() - joinStarted;
     }
 
-    private unsafe void EncodeParallelChunk(int worker, int chunks)
+    private void EncodeParallelChunk(int worker, int chunks) =>
+        EncodeFrozenDrawRange(_parallelChildren[worker], worker, chunks, endEncoder: true);
+
+    private unsafe void EncodeFrozenDrawRange(nint encoder, int worker, int chunks, bool endEncoder)
     {
         var nativeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         var pool = MetalNative.objc_autoreleasePoolPush();
-        var encoder = _parallelChildren[worker];
         try
         {
             if (chunks > 1) BeforeParallelChunk?.Invoke(worker);
@@ -270,8 +283,11 @@ internal sealed partial class MetalRenderHost
         }
         finally
         {
-            MetalNative.SendVoid(encoder, SelEndEncoding);
-            _parallelChildEnded[worker] = true;
+            if (endEncoder)
+            {
+                MetalNative.SendVoid(encoder, SelEndEncoding);
+                _parallelChildEnded[worker] = true;
+            }
             try { if (chunks > 1) AfterParallelChunk?.Invoke(worker); }
             finally
             {
@@ -291,6 +307,7 @@ internal sealed partial class MetalRenderHost
         if (!ParallelEncode) return;
         Console.Error.WriteLine($"[METAL-V2][PARALLEL] workers={ParallelWorkerCount} queued={_parallelQueued} " +
             $"batches={_parallelBatches} chunks={_parallelChunks} small_batches={_parallelSmallBatches} refused={_parallelRefused} " +
+            $"native_children={_parallelNativeChildren} " +
             $"native_qos_workers={_parallelWorkers?.NativeQosWorkers ?? 0} " +
             $"refused_writer={_parallelRefusedWriter} refused_shape={_parallelRefusedShape} " +
             $"refused_dynamic={_parallelRefusedDynamic} refused_pass={_parallelRefusedPass} barrier_pass_ends={_parallelBarrierPassEnds} " +

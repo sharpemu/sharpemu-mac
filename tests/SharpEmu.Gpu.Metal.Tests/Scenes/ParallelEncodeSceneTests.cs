@@ -10,6 +10,41 @@ namespace SharpEmu.Gpu.Metal.Tests.Scenes;
 public sealed class ParallelEncodeSceneTests(ITestOutputHelper output) : SceneTestBase(output)
 {
     [Fact]
+    public void ShortPassesMatchSerialPixelsWithoutExtraNativeChildrenPerDraw()
+    {
+        const uint size = 16;
+        const int passes = 64;
+        byte[][]? serial = null;
+        foreach (var parallel in new[] { false, true })
+        {
+            using var rig = CreateRig();
+            if (rig is null) return;
+            rig.Host.ParallelEncode = parallel;
+            rig.Host.ParallelWorkerCount = 4;
+            var targets = new[] { rig.ColorTarget(size, size), rig.ColorTarget(size, size) };
+            var pm4 = new ScenePm4();
+            for (var i = 0; i < passes; i++)
+            {
+                var state = new SceneState(size, size).ColorTarget(0, targets[i & 1], size, size);
+                rig.DrawMesh(pm4, state, SceneDraws.Quad(.5f, i / 63f, .25f, .75f));
+            }
+            rig.Submit(pm4);
+            var pixels = targets.Select(target => rig.ReadImage(target, size, size)).ToArray();
+            Assert.Empty(rig.Fatals);
+            if (!parallel) serial = pixels;
+            else
+            {
+                for (var i = 0; i < targets.Length; i++) Assert.Equal(serial![i], pixels[i]);
+                Assert.Equal(passes, rig.Host.ParallelCounts.Queued);
+                Assert.Equal(0, rig.Host.ParallelCounts.Batches);
+                // A singleton pass needs its initial child only. The old small-
+                // batch path allocated two more children for every draw.
+                Assert.Equal(passes, rig.Host.ParallelNativeChildCount);
+            }
+        }
+    }
+
+    [Fact]
     public void ReversedChunkCompletionMatchesSerialPixelsAcrossStateChangesAndBatchRollover()
     {
         const uint size = 64;

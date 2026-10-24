@@ -1,0 +1,11 @@
+{
+  "step": "basecheck",
+  "command": [
+    "python3",
+    "artifacts/ds-fps/bench/arch-parallel/game.py",
+    "basecheck"
+  ],
+  "cwd": "/Users/xnetcat/.t3/worktrees/sharpemu-mac/ds-fps-arch-parallel",
+  "seconds": 419.6296241283417,
+  "rc": 0
+}

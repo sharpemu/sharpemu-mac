@@ -492,3 +492,31 @@ before another optimized retry. Existing dependent base2/opt2 jobs retain their
 failed-predecessor guards. Sampler logs now start fresh per attempt; older
 attempt logs were archived first, and their actual launch timestamps bound
 all reported load checks.
+
+
+## Matched main control and small-batch allocation correction
+
+`basecheck` completed under exact base `bdc7ea28c` with budget0, overlay1 and
+build-server cleanup disabled, run`20261024-211738-ds-arch-parallel-basecheck`.
+HUD was at289.800 seconds. Skip40 captured117 entries over79.4911 seconds:
+1.471863fps, p50 552.483082ms, p95 1752.232075ms, p99 2163.524151ms. Its end
+screenshot was opened and showed the expected knight/tunnel/foliage/HUD scene.
+Main therefore completed under the current host conditions; the two optimized
+terminations cannot simply be dismissed as a host-wide inability to run.
+
+At nearby early-HUD memory samples, main had552MiB of unique resident+swapped
+`graphics_iokit` objects versus1,767MiB for the optimized attempt; managed heaps
+and Metal-reported allocations were similar. These are nearby scene samples,
+not proof of the cause. Code inspection found a concrete avoidable difference:
+the original small-batch path ended its current child, created another child for
+the batch, then created a tail. About22,000 small batches had already occurred
+by the second optimized attempt's termination.
+
+The revised path encodes a small batch into the existing serial child and keeps
+it open; full K-worker batches still use ordered distinct children and join
+once. A new device test alternates64 singleton render passes, compares all
+pixels to serial, and requires64 actual child creations rather than192. A
+`native_children` counter records the allocation effect. This correction is
+pending a fresh build, focused ordering tests, all four full suites and a new
+signed bundle; old validation does not cover the revised source. The original
+signed751c2b9cf bundle is preserved at`artifacts/parallel-initial-macos/SharpEmu.app`.

@@ -16,6 +16,6 @@ def require_ready(out):
         assert int(counters['failed'])==len(failed),(suite,'failure accounting')
         assert result['rc']==(1 if failed else 0),(suite,'incomplete or unexpected runner result')
         if suite=='ordering':
-            assert int(counters['passed'])>=24 and result['requireDevice']=='1',(suite,'device ordering cases missing')
+            assert int(counters['passed'])>=25 and result['requireDevice']=='1',(suite,'device ordering cases missing')
         checked[suite]=dict(counters=counters,knownBaseFailures=sorted(failed),trx=result['trx'])
     (out/'benchmark-validation.json').write_text(json.dumps(dict(sourceSha256=built['sourceSha256'],suites=checked),indent=2)+'\n')
