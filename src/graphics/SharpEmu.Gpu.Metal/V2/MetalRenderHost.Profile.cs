@@ -44,6 +44,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     private void ProfileWork(MetalPipelineEntry entry, string kind, WorkShape shape)
     {
+        _bindlessCoverage?.Emission(kind);
         // Remembered even when the profiler is off: it costs two field writes and it is
         // what names the shaders in a slow command buffer's SLOW-WAIT line.
         _lastWorkKind = kind;

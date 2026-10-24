@@ -42,6 +42,7 @@ internal sealed partial class MetalRenderHost
         private readonly long[] _stages = new long[4];
         private readonly long[] _bufferStages = new long[4];
         private long _draws, _dispatches, _bufferDraws, _bufferDispatches, _emptyDraws;
+        private long _emittedDraws, _emittedDispatches, _emittedBufferDraws, _emittedBufferDispatches;
         private long _buffers, _imageReferences, _samplers, _readonlyStages, _flatFreeStages;
         private long _bridgeStages, _bridgeBuffers;
         private bool _issueImages, _issueBuffers, _issueCompute;
@@ -102,12 +103,28 @@ internal sealed partial class MetalRenderHost
             }
         }
 
+        public void Emission(string kind)
+        {
+            if (kind.StartsWith("draw", StringComparison.Ordinal))
+            {
+                _emittedDraws++;
+                if (!_issueImages) _emittedBufferDraws++;
+            }
+            else
+            {
+                _emittedDispatches++;
+                if (!_issueImages) _emittedBufferDispatches++;
+            }
+        }
+
         public void Frame(MetalImageCache cache)
         {
             var epochs = cache.Epochs;
             Console.Error.WriteLine(
-                $"[METAL-V2][BINDLESS-COVERAGE] frame draws={_draws} dispatches={_dispatches} " +
-                $"buffer_draws={_bufferDraws} buffer_dispatches={_bufferDispatches} empty_draws={_emptyDraws} " +
+                $"[METAL-V2][BINDLESS-COVERAGE] frame draws={_emittedDraws} dispatches={_emittedDispatches} " +
+                $"buffer_draws={_emittedBufferDraws} buffer_dispatches={_emittedBufferDispatches} " +
+                $"prep_draws={_draws} prep_dispatches={_dispatches} " +
+                $"buffer_prep_draws={_bufferDraws} buffer_prep_dispatches={_bufferDispatches} empty_prep_draws={_emptyDraws} " +
                 $"stages=[{string.Join(',', _stages)}] buffer_stages=[{string.Join(',', _bufferStages)}] " +
                 $"readonly_buffer_stages={_readonlyStages} readonly_no_flat_stages={_flatFreeStages} " +
                 $"bridge_stages={_bridgeStages} bridge_buffers={_bridgeBuffers} " +
@@ -122,6 +139,7 @@ internal sealed partial class MetalRenderHost
             _draws = _dispatches = _bufferDraws = _bufferDispatches = _emptyDraws = 0;
             _buffers = _imageReferences = _samplers = _readonlyStages = _flatFreeStages = 0;
             _bridgeStages = _bridgeBuffers = 0;
+            _emittedDraws = _emittedDispatches = _emittedBufferDraws = _emittedBufferDispatches = 0;
         }
     }
 }
