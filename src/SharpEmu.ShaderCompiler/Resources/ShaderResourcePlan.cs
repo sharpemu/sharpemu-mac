@@ -181,7 +181,7 @@ public sealed class ShaderResourcePlan
         // Keep CPU-captured descriptor/table words immutable for this draw. Only the
         // pointer/length bindings disappear; alias publication still has the exact V#.
         // Candidate tables need their original resource-index lowering, and a stage
-        // with any buffer store retains the complete ordinary binding path.
+        // with any host-bound buffer store retains the ordinary binding path.
         if (readOnlyDeviceBuffers)
             plan.Info.DeviceBufferRefusal = plan.Info.Buffers.Count == 0 ? ReadOnlyDeviceBufferRefusal.Empty :
                 plan.Info.Buffers.Any(buffer => buffer.Written) ? ReadOnlyDeviceBufferRefusal.Writable :

@@ -181,12 +181,13 @@ public sealed class BufferCandidateTableInfo
     public BufferCandidateTableInfo Clone() => (BufferCandidateTableInfo)MemberwiseClone();
 }
 
-// The dense resource tables of a program plus the facts the pipeline layout needs.
+// Why a stage retained ordinary buffer bindings under the optional device-buffer policy.
 public enum ReadOnlyDeviceBufferRefusal : byte
 {
     Disabled, None, Empty, Writable, Candidates, ShaderFunction, SuppressedLoad,
 }
 
+// The dense resource tables of a program plus the facts the pipeline layout needs.
 public sealed class ShaderResourceInfo
 {
     public const int MaxBuffers = 32;

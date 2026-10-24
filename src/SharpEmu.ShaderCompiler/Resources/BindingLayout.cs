@@ -353,7 +353,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public uint ShaderBaseDword { get; init; } = NoShaderBase;
     public uint MemoryOffsetDword { get; init; }
     public uint MemoryOffsetCount { get; init; }
-    // The run-time stride and word 3 of each buffer (PortableBufferWord), when portable, from
+    // Per-buffer words from FirstBufferWordDword(): stride/word 3 (PortableBufferWord),
+    // or one captured byte limit per read-only device buffer. The words are from
     // FirstBufferWordDword(). A field, not a property: GraphicsPrewarmList's schema
     // fingerprint walks the properties of every type a record reaches, a stage's runtime
     // bindings among them, and a new property there would orphan every recorded list
