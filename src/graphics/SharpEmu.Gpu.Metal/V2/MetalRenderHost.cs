@@ -299,6 +299,10 @@ internal sealed partial class MetalRenderHost :
         // Released once, when the in-flight ring is done with it (or in Dispose).
         MetalNative.Send(_commandBuffer, MetalNative.Selector("retain"));
         _submissionSerial = ++_nextSerial;
+        if (ConcurrentComputeEnabled && _lastConcurrentComputeSerial != 0)
+        {
+            MetalV2Native.SendEventValue(_commandBuffer, SelEncodeWaitForEvent, _sharedEvent, _lastConcurrentComputeSerial);
+        }
         var completed = CompletedSerial;
         _guestMemory.BeginSubmission(_submissionSerial, completed);
         // Staging slabs idle for a while are released or made purgeable here too, not only
@@ -427,10 +431,9 @@ internal sealed partial class MetalRenderHost :
             return 0;
         }
 
-        // A serial compute encoder already runs its dispatches in order; the barrier says
-        // so for the guest windows and textures whichever way they are tracked.
-        MetalV2Native.SendMemoryBarrierScope(
-            _computeEncoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+        // Utility dispatches have no captured footprint. Order them on both sides.
+        ComputeTransferBarriers++;
+        ComputeScopeBarrier();
         _transferInSharedEncoder = true;
         return _computeEncoder;
     }
@@ -442,8 +445,8 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
-        MetalV2Native.SendMemoryBarrierScope(
-            _computeEncoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+        ComputeTransferBarriers++;
+        ComputeScopeBarrier();
         // The tiler bound its own pipeline; the next dispatch binds the guest's again.
         // Its buffers are bound per dispatch already (ApplyStageBindings).
         _boundComputePipeline = 0;
@@ -526,11 +529,7 @@ internal sealed partial class MetalRenderHost :
         {
             _encodersInBuffer++;
             PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
-            EndAndReleaseEncoder(_computeEncoder);
-            _computeEncoder = 0;
-            _boundComputePipeline = 0;
-            PassProfileClose();
-            SnapshotComputeStorage();
+            EndComputeEncoder();
         }
 
         EncodeStagedStores();
@@ -2247,7 +2246,7 @@ internal sealed partial class MetalRenderHost :
         var (refreshesSkipped, refreshSkippedBytes) = _imageCache.TakeSkippedRefreshes();
         var (pageWatches, pageWatchPeak) = _imageCache.TakePageWatchCounters();
         Console.Error.WriteLine(
-            $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
+            $"[METAL-V2][PERF] {ComputeDispatchCounters()}seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
             // Colour loads a full-screen first draw made dead (MetalPassLoads).
             $"load_elided={loadsElided} load_elided_mb={(loadElidedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"join_refused=[{joinRefusals}] load_refused=[{loadRefusals}] subset_joins={subsetJoins} subset_load_avoided_mb={(subsetLoadBytes / 1048576.0).ToString("F1", culture)} " +
@@ -2585,6 +2584,11 @@ internal sealed partial class MetalRenderHost :
         }
 
         _retiredLabelBarrierEvents.Clear();
+        if (_computeBoundaryEvent != 0)
+        {
+            MetalNative.SendVoid(_computeBoundaryEvent, SelRelease);
+            _computeBoundaryEvent = 0;
+        }
         if (_labelBarrierEvent != 0)
         {
             MetalNative.SendVoid(_labelBarrierEvent, SelRelease);

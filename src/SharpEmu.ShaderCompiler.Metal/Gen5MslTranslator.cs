@@ -297,10 +297,13 @@ public static partial class Gen5MslTranslator
                 ? probeHash
                 : 0;
 
+        private bool _writesStepReport;
+
         private string StepCapReportCode
         {
             get
             {
+                _writesStepReport = true;
                 if (StepCapProbeRegisters.Length == 0 || (StepCapProbeHash != 0 && StepCapProbeHash != _request.Hash))
                 {
                     return StepCapReportCall;
@@ -606,6 +609,8 @@ public static partial class Gen5MslTranslator
                     CannotDiscard = _stage == Gen5MslStage.Pixel && _usesPixelValidMask && !_validMaskFromExec,
                     ColorOutputMask = _stage == Gen5MslStage.Pixel ? ColorOutputLocations(_pixelOutputBindings) : 0,
                     PersistentThreads = IsPersistentThreadsKernel(),
+                    WritesStepReport = _writesStepReport || _usesPairLocks || _stage != Gen5MslStage.Compute,
+                    UsesPairLocks = _usesPairLocks,
                 };
                 return true;
             }

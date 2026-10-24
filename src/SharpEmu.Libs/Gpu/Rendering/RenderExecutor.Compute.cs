@@ -229,7 +229,7 @@ public sealed partial class RenderExecutor
                 hasStorageWrites |= image.Written && image.Class == ImageResourceClass.Storage;
             }
 
-            if (hasStorageWrites)
+            if (hasStorageWrites && !_host.TracksComputeDependencies)
             {
                 // Every earlier read of the written resources completes before this dispatch writes.
                 _host.ShaderWriteHazardBarrier();
@@ -256,7 +256,10 @@ public sealed partial class RenderExecutor
                 _host.Dispatch(physicalGroups[0], physicalGroups[1], physicalGroups[2]);
             }
             _host.EndComputeImageSnapshot(imageSnapshot, bindings);
-            _host.ShaderAccessBarrier();
+            if (!_host.TracksComputeDependencies)
+            {
+                _host.ShaderAccessBarrier();
+            }
         }
 
         _host.ResetBindings();

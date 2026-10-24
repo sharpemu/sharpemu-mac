@@ -55,6 +55,8 @@ internal interface IMetalSubmissionContext
         return 0;
     }
 
+    bool SharedComputeIsConcurrent => false;
+
     // The transfer has recorded its dispatches into the shared compute encoder.
     void EndSharedCompute()
     {

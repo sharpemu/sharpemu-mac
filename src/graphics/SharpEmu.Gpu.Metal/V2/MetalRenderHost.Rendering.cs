@@ -1292,6 +1292,7 @@ internal sealed partial class MetalRenderHost
         EndAndReleaseEncoder(_computeEncoder);
         _computeEncoder = 0;
         _boundComputePipeline = 0;
+        OrderComputeEncoderBoundary();
         PassProfileClose();
         SnapshotComputeStorage();
     }
@@ -1322,13 +1323,17 @@ internal sealed partial class MetalRenderHost
         }
 
         var computeBuffer = EnsureCommandBuffer();
+        OrderComputeEncoderBoundary(starting: true);
         _computeEncoder = PassProfileEnabled ? PassProfileComputeEncoder(computeBuffer) : 0;
         if (_computeEncoder == 0)
         {
-            _computeEncoder = MetalNative.Send(computeBuffer, SelComputeEncoder);
+            _computeEncoder = ConcurrentComputeEnabled
+                ? MetalV2Native.SendWithValue(computeBuffer, SelComputeEncoderDispatchType, 1)
+                : MetalNative.Send(computeBuffer, SelComputeEncoder);
             MetalMemoryTelemetry.ComputeEncoders.Add();
         }
 
+        ComputeEncoders++;
         RetainEncoder(_computeEncoder);
 
         if (_computeEncoder == 0)
@@ -1943,6 +1948,7 @@ internal sealed partial class MetalRenderHost
 
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
+        OrderComputeDispatch(groupsX: groupsX, groupsY: groupsY, groupsZ: groupsZ);
         MetalNative.SendDispatch(
             encoder,
             SelDispatchThreadgroups,
@@ -1957,7 +1963,9 @@ internal sealed partial class MetalRenderHost
 
     public bool TryDispatchIndirect(ulong argumentsAddress)
     {
-        var range = _guestMemory.Resolve(argumentsAddress, 3 * sizeof(uint));
+        FlushGpuWrites(argumentsAddress, 3 * sizeof(uint), MetalWritebackCause.StorageDescriptor);
+        // Preserve a preceding producer's staged allocation instead of snapshotting stale CPU bytes.
+        var range = ResolveStorageBuffer(argumentsAddress, 3 * sizeof(uint), written: false);
         if (!range.IsValid)
         {
             return false;
@@ -1971,6 +1979,7 @@ internal sealed partial class MetalRenderHost
             throw Fatal("An indirect dispatch has no bound Metal compute pipeline state.");
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
+        OrderComputeDispatch(argumentsAddress, range);
         MetalV2Native.SendDispatchIndirect(
             encoder,
             SelDispatchIndirect,
@@ -2337,8 +2346,7 @@ internal sealed partial class MetalRenderHost
             // A compute encoder has no render targets to order against, and Metal
             // rejects a scope that names them: validation fails the assertion rather
             // than ignoring the bit, which ends the process.
-            MetalV2Native.SendMemoryBarrierScope(
-                _computeEncoder, SelComputeMemoryBarrier, scope & ~Mtl.BarrierScopeRenderTargets);
+            ComputeScopeBarrier();
         }
     }
 
@@ -2351,6 +2359,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public void EmitGlobalBarrier()
     {
+        if (_computeEncoder != 0) ComputeGuestBarriers++;
         if (_renderEncoder != 0 || _computeEncoder != 0)
         {
             RecordMemoryBarrier();
