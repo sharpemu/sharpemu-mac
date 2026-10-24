@@ -92,9 +92,6 @@ public interface IResourcePreparation : IDisposable
 // Everything the executor needs from the renderer, the caches and the pipeline objects.
 public interface IRenderHost
 {
-    // A host with separately owned guest backing can retain ordinary buffer bindings.
-    bool AllowsReadOnlyDeviceBuffers => false;
-
     int BeginImageSnapshot(IPreparedBindings? pixelBindings) => 0;
 
     int BeginComputeImageSnapshot(IPreparedBindings bindings) => 0;

@@ -153,10 +153,6 @@ internal sealed partial class MetalRenderHost
     private MetalResourcePreparation? _preparation;
     private int _preparedStageMask;
 
-    // Single-copy chunks need their own publication/admission proof before bypassing
-    // ResolveStorageBuffer. Keep that configuration on the existing binding path.
-    public bool AllowsReadOnlyDeviceBuffers => _singleCopy is null;
-
     public IResourcePreparation BeginPreparation()
     {
         _bindlessCoverage?.Begin();
@@ -533,6 +529,7 @@ internal sealed partial class MetalRenderHost
         TakeSingleCopyTrapHits();
         var mappingVersion = DeviceAddressMappingVersion();
         _mappedDeviceAddressBytes ??= MappedDeviceAddressBytes;
+        Span<DeviceAddressRange> capturedRange = stackalloc DeviceAddressRange[1];
         foreach (var stage in stages)
         {
             if (stage.Program is { UsesDeviceAddresses: true } program)
@@ -540,6 +537,21 @@ internal sealed partial class MetalRenderHost
                 singleCopy.BeforeDeviceAddressProgram(
                     program.WritesDeviceAddresses, stage.Resources.DeviceAddressRanges, mappingVersion,
                     _mappedDeviceAddressBytes, late: _preparation is not null);
+                if (!singleCopy.DeviceAddressSeen && program.Resources?.Info.ReadOnlyDeviceBuffers == true)
+                {
+                    // Give captured V# ranges back before BeginPreparation, where stale
+                    // windows can still be retired by the flush below. BindResources will
+                    // retain exact image-alias publication and the mapped byte bound.
+                    for (var index = 0; index < stage.Resources.Buffers.Length; index++)
+                    {
+                        var descriptor = BufferDescriptorWords.From(stage.Resources.Buffers[index]);
+                        var size = descriptor.Footprint() ?? 0;
+                        if (descriptor.Address == 0 || size == 0) continue;
+                        capturedRange[0] = new DeviceAddressRange((uint)index, descriptor.Address, size, true, false);
+                        singleCopy.BeforeDeviceAddressProgram(false, capturedRange, mappingVersion,
+                            _mappedDeviceAddressBytes, late: _preparation is not null);
+                    }
+                }
             }
         }
 

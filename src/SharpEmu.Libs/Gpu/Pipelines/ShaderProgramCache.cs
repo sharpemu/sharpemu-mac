@@ -689,7 +689,7 @@ internal sealed class ShaderProgramCache
                     _ => 32u,
                 },
                 excludedUserDataRegisters: source.ExcludedUserDataRegisters,
-                readOnlyDeviceBuffers: _compiler.SupportsReadOnlyDeviceBuffers && _host.AllowsReadOnlyDeviceBuffers);
+                readOnlyDeviceBuffers: _compiler.SupportsReadOnlyDeviceBuffers);
         }
         catch (ResourcePlanException exception)
         {
