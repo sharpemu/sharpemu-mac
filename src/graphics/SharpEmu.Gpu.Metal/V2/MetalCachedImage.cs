@@ -94,7 +94,8 @@ internal sealed class MetalCachedImage : IDisposable
     // guest swizzle was honoured, the common whole-image view returned the
     // texture without ever touching the list.
     private readonly object _viewGate = new();
-    private readonly List<(ImageViewDescription Description, nint Texture, ulong ResourceId)> _views = new();
+    private readonly List<(ImageViewDescription Description, nint Texture, ulong ResourceId, bool SameFormatSwizzle, uint FirstLevel)> _views = new();
+    private int _lastViewIndex = -1;
     private nint _textureIdHandle;
     private ulong _textureId;
     private bool _cpuDirty;
@@ -376,6 +377,7 @@ internal sealed class MetalCachedImage : IDisposable
         {
             retired._views.AddRange(_views);
             _views.Clear();
+            _lastViewIndex = -1;
         }
 
         Texture = texture;
@@ -408,6 +410,7 @@ internal sealed class MetalCachedImage : IDisposable
         {
             retired._views.AddRange(_views);
             _views.Clear();
+            _lastViewIndex = -1;
         }
 
         Texture = texture;
@@ -438,6 +441,7 @@ internal sealed class MetalCachedImage : IDisposable
         {
             retired._views.AddRange(_views);
             _views.Clear();
+            _lastViewIndex = -1;
         }
 
         Texture = texture;
@@ -862,6 +866,23 @@ internal sealed class MetalCachedImage : IDisposable
                 $"An image without a texture cannot make a view: address=0x{Description.Data.Address:X16}.");
         }
 
+        if (SharpEmu.Libs.Gpu.Pipelines.DrawPathCounters.Enabled && Volatile.Read(ref _lastViewIndex) >= 0)
+        {
+            lock (_viewGate)
+            {
+                var index = _lastViewIndex;
+                if ((uint)index < (uint)_views.Count && _views[index].SameFormatSwizzle == sameFormatSwizzle &&
+                    _views[index].FirstLevel == FirstLevel && _views[index].Description.Equals(requested))
+                {
+                    SharpEmu.Libs.Gpu.Pipelines.DrawPathCounters.View(true);
+                    resourceId = _views[index].ResourceId;
+                    return _views[index].Texture;
+                }
+            }
+        }
+        if (SharpEmu.Libs.Gpu.Pipelines.DrawPathCounters.Enabled)
+            SharpEmu.Libs.Gpu.Pipelines.DrawPathCounters.View(false);
+
         var viewFormat = MetalV2Formats.PixelFormat(requested.Format);
         var viewType = MetalV2Formats.ViewTextureType(requested.Type, Shape.SampleCount);
         var swizzle = SwizzleOf(requested.Mapping, out var identitySwizzle);
@@ -955,6 +976,7 @@ internal sealed class MetalCachedImage : IDisposable
             {
                 if (_views[index].Description.Equals(requested))
                 {
+                    _lastViewIndex = index;
                     resourceId = _views[index].ResourceId;
                     return _views[index].Texture;
                 }
@@ -1027,7 +1049,8 @@ internal sealed class MetalCachedImage : IDisposable
             }
 
             resourceId = MetalNative.SendGpuResourceId(view, SelGpuResourceId);
-            _views.Add((requested, view, resourceId));
+            _lastViewIndex = _views.Count;
+            _views.Add((requested, view, resourceId, sameFormatSwizzle, FirstLevel));
         }
 
         return view;
@@ -1053,12 +1076,13 @@ internal sealed class MetalCachedImage : IDisposable
     {
         lock (_viewGate)
         {
-            foreach (var (_, view, _) in _views)
+            foreach (var (_, view, _, _, _) in _views)
             {
                 MetalNative.SendVoid(view, SelRelease);
             }
 
             _views.Clear();
+            _lastViewIndex = -1;
         }
     }
 

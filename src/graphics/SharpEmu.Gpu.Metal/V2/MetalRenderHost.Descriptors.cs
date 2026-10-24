@@ -1439,25 +1439,42 @@ internal sealed partial class MetalRenderHost
             UploadDeviceAddressTable();
         }
 
-        var named = DeviceAddressNamedWindows();
-        if (SharpEmu.Logging.MemoryTelemetry.Enabled)
-        {
-            _commandBufferReachWindows.UnionWith(named);
-        }
-
         if (DeviceAddressBufferReuse)
             _deviceAddressBufferReuses++;
         else
             ResolveDeviceAddressBuffers();
 
+        // This set is fixed by BeginDeviceAddressReach; naming it twice on the same
+        // encoder/stages has no effect. Avoid 128 dictionary probes per draw, as well
+        // as rebuilding telemetry's identical reach union.
+        if (SharpEmu.Libs.Gpu.Pipelines.DrawPathCounters.Enabled && DeviceAddressBufferReuse &&
+            _deviceAddressResidency.Covers(_encoderEpoch, _deviceAddressBuffersVersion, _submissionSerial, stages))
+        {
+            _deviceAddressResidencyHits++;
+            _deviceAddressResidencyProbesSaved += _deviceAddressBuffers.Count;
+            return;
+        }
+        _deviceAddressResidencyMisses++;
+        if (SharpEmu.Logging.MemoryTelemetry.Enabled)
+            _commandBufferReachWindows.UnionWith(DeviceAddressNamedWindows());
+
         NameResidentBuffers(encoder, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deviceAddressBuffers), stages);
+        _deviceAddressResidency.Record(_encoderEpoch, _deviceAddressBuffersVersion, _submissionSerial, stages);
     }
+
+    private MetalResidencyStamp _deviceAddressResidency;
+    private long _deviceAddressResidencyHits, _deviceAddressResidencyMisses, _deviceAddressResidencyProbesSaved;
+    private string TakeDrawPathResidencyReport() =>
+        $"drawpath_residency_hit={Interlocked.Exchange(ref _deviceAddressResidencyHits, 0)} " +
+        $"drawpath_residency_changed={Interlocked.Exchange(ref _deviceAddressResidencyMisses, 0)} " +
+        $"drawpath_residency_probes_saved={Interlocked.Exchange(ref _deviceAddressResidencyProbesSaved, 0)}";
 
     // BeginDeviceAddressReach pins the table's window cuts for this submission.
     // Resolve their buffers there once; encoder residency still accounts for every stage.
     private static readonly bool DeviceAddressBufferReuse =
         SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_DA_BUFFER_REUSE");
     private long _deviceAddressBufferBuilds;
+    private long _deviceAddressBuffersVersion; // Monotonic; PERF resets the build counter.
     private long _deviceAddressBufferReuses;
     private long _deviceAddressBufferLookups;
     private readonly List<nint> _deviceAddressBuffers = new();
@@ -1465,6 +1482,7 @@ internal sealed partial class MetalRenderHost
     private void ResolveDeviceAddressBuffers()
     {
         _deviceAddressBufferBuilds++;
+        _deviceAddressBuffersVersion++;
         _deviceAddressBuffers.Clear();
         foreach (var id in DeviceAddressNamedWindows())
         {

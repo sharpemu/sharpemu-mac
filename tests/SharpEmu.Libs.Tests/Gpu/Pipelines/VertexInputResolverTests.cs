@@ -37,7 +37,12 @@ public sealed class VertexInputResolverTests : IDisposable
     private readonly FakeCpuMemory _memory = new(MemoryBase, 0x1_0000);
     private readonly CpuContext _context;
 
-    public VertexInputResolverTests() => _context = new CpuContext(_memory, Generation.Gen5);
+    private readonly Xunit.Abstractions.ITestOutputHelper _output;
+    public VertexInputResolverTests(Xunit.Abstractions.ITestOutputHelper output)
+    {
+        _context = new CpuContext(_memory, Generation.Gen5);
+        _output = output;
+    }
 
     public void Dispose() => _fatal.Dispose();
 
@@ -89,6 +94,98 @@ public sealed class VertexInputResolverTests : IDisposable
         WriteHalf(DirectOffsets + VertexBufferTableType * 2, bufferRegister);
         WriteHalf(DirectOffsets + VertexAttributeTableType * 2, attributeRegister);
         return new RegisteredShader(ShaderAddress, MemoryBase, 16, 0, UserDataBlock, semanticsAddress, semanticCount, 0, 0);
+    }
+
+    [Fact]
+    public void DrawPathVertexLayoutCostFixture()
+    {
+        var shader = RegisterTables(semanticCount: 4);
+        for (var index = 0u; index < 4; index++)
+        {
+            WriteWord(Semantics + index * 4, SemanticWord(index, index * 4, 4));
+            WriteWord(AttributeTable + index * 4, AttributeWord(index, 0, 0));
+            WriteBuffer(index, StreamBase + index * 0x100, 16, 3);
+        }
+        var userData = new uint[12];
+        userData[8] = unchecked((uint)AttributeTable); userData[9] = (uint)(AttributeTable >> 32);
+        userData[10] = unchecked((uint)BufferTable); userData[11] = (uint)(BufferTable >> 32);
+        var cache = new VertexTableMetadataCache();
+        VertexInputInfo Resolve() => VertexInputResolver.ResolveVertexInputs(_context, shader, userData, metadataCache: cache);
+        for (var index = 0; index < 1000; index++) _ = Resolve();
+        const int count = 20000;
+        var allocated = GC.GetAllocatedBytesForCurrentThread();
+        var start = System.Diagnostics.Stopwatch.GetTimestamp();
+        VertexInputInfo last = null!;
+        for (var index = 0; index < count; index++) last = Resolve();
+        var ticks = System.Diagnostics.Stopwatch.GetTimestamp() - start;
+        var bytes = GC.GetAllocatedBytesForCurrentThread() - allocated;
+        Assert.Equal(4, last.Buffers.Length);
+        _output.WriteLine($"DRAWPATH_BENCH vertex enabled={DrawPathCounters.Enabled} calls={count} ns_per_call={ticks * 1e9 / System.Diagnostics.Stopwatch.Frequency / count:F1} bytes_per_call={bytes / (double)count:F1}");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void DrawPathVertexLayoutReadsFreshDescriptorsAndAttributes(int changedWord)
+    {
+        var shader = RegisterTables();
+        WriteWord(Semantics, SemanticWord(0, 0, 4));
+        WriteWord(AttributeTable, AttributeWord(0, 0, 0));
+        WriteBuffer(0, StreamBase, 16, 3);
+        var userData = new uint[12];
+        userData[8] = unchecked((uint)AttributeTable); userData[9] = (uint)(AttributeTable >> 32);
+        userData[10] = unchecked((uint)BufferTable); userData[11] = (uint)(BufferTable >> 32);
+        var cache = new VertexTableMetadataCache();
+        VertexInputInfo Resolve() => VertexInputResolver.ResolveVertexInputs(_context, shader, userData, metadataCache: cache, codeHash: 7);
+        var first = Resolve();
+        var same = Resolve();
+        Assert.NotSame(first, same);
+        if (DrawPathCounters.Enabled)
+        {
+            Assert.Same(first.Attributes, same.Attributes);
+            Assert.Same(first.Buffers, same.Buffers);
+        }
+        var address = changedWord == 4 ? AttributeTable : BufferTable + (uint)changedWord * 4;
+        Assert.True(_context.TryReadUInt32(address, out var word));
+        var mask = changedWord switch { 0 => 0x100u, 1 => 1u << 16, 2 => 1u, 3 => 1u, _ => 1u << 14 };
+        WriteWord(address, word ^ mask);
+        var changed = Resolve();
+        Assert.NotEqual(first.Attributes[0], changed.Attributes[0]);
+        Assert.NotSame(first.Attributes, changed.Attributes);
+        Assert.Equal(first.Attributes[0], same.Attributes[0]);
+        WriteWord(address, word);
+        var restored = Resolve();
+        Assert.Equal(first.Attributes, restored.Attributes);
+        Assert.Equal(first.Buffers, restored.Buffers);
+    }
+
+    [Fact]
+    public void DrawPathVertexLayoutKeepsTablePointersAndPerDrawStateLive()
+    {
+        var shader = RegisterTables();
+        WriteWord(Semantics, SemanticWord(0, 0, 4));
+        WriteWord(AttributeTable, AttributeWord(0, 0, 0));
+        WriteBuffer(0, StreamBase, 16, 3);
+        WriteBuffer(1, StreamBase + 0x400, 32, 5);
+        var userData = new uint[12];
+        userData[8] = unchecked((uint)AttributeTable); userData[9] = (uint)(AttributeTable >> 32);
+        userData[10] = unchecked((uint)BufferTable); userData[11] = (uint)(BufferTable >> 32);
+        var cache = new VertexTableMetadataCache();
+        var first = VertexInputResolver.ResolveVertexInputs(_context, shader, userData, 1, metadataCache: cache);
+        // The same header and user-data count can point at different live tables.
+        userData[10] += 16;
+        var changed = VertexInputResolver.ResolveVertexInputs(_context, shader, userData, 2, metadataCache: cache);
+        Assert.Equal(StreamBase + 0x400, changed.Buffers[0].Address);
+        Assert.Equal(2u, changed.PositionExportControl);
+        Assert.Equal(1u, first.PositionExportControl);
+        Assert.Equal(StreamBase, first.Buffers[0].Address);
+        // A new code identity gets its own metadata and derived arrays.
+        var fresh = VertexInputResolver.ResolveVertexInputs(_context, shader, userData, metadataCache: cache, codeHash: 8);
+        Assert.NotSame(changed.Attributes, fresh.Attributes);
+        Assert.Equal(changed.Attributes, fresh.Attributes);
     }
 
     [Fact]

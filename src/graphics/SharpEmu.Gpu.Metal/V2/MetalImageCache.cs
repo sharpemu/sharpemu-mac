@@ -220,7 +220,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // binding takes the lock once, and only a DCC slice scan takes it again.
         using (var held = _lock.Hold())
         {
-            result = LookUpImageLocked(ref request, exactFormat);
+            result = LookUpDrawPathImageLocked(ref request, exactFormat);
             scanDcc = AdoptDccMetadataLocked(result, in request, out imageWriteSequence);
         }
 

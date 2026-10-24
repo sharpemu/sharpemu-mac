@@ -2263,6 +2263,9 @@ internal sealed partial class MetalRenderHost :
                 : string.Empty) +
             $"draws={draws} vertex_fetch_fixed_draws={fixedFetch} vertex_fetch_shader_draws={shaderFetch} position_only_draws={positionOnly} " +
             SharpEmu.Libs.Gpu.Pipelines.VertexFetchCounters.TakeReport() + " " +
+            SharpEmu.Libs.Gpu.Pipelines.DrawPathCounters.TakeReport() + " " +
+            _imageCache.TakeDrawPathReport() + " " +
+            TakeDrawPathResidencyReport() + " " +
             $"passes={passes} flushes={flushes} flush_by=[{flushBy}] flush_deferred={TakeDeferredStreamFlushes()} " +
             // Page-guard write watches held, and the most one page reached (the guard fails past 127).
             $"page_watches={pageWatches} page_watch_peak={pageWatchPeak} " +

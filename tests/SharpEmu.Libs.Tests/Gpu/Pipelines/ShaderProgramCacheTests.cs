@@ -281,6 +281,51 @@ public sealed class ShaderProgramCacheTests : IDisposable
     }
 
     [Fact]
+    public void DrawPathProgramAndPermutationMemosSurviveAlternatingInputs()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.FormatLoadProgram);
+        var original = PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Uint);
+        var changed = PipelineTestGuest.BufferDescriptor(DataBase + 0x100, 16, 8, Format32x4Float);
+        ShaderProgram Obtain(uint[] data, uint cursorStart, uint threads, out ShaderStageResources stage)
+        {
+            var cursor = cursorStart;
+            return Compile(CodeA, data, ref cursor, out stage, threads);
+        }
+        var a = Obtain(original, 0, 64, out var old);
+        Assert.Equal(a, Obtain(original, 0, 64, out _));
+        var b = Obtain(changed, 0, 64, out var newer);
+        Assert.NotEqual(a, b);
+        Assert.Equal(a, Obtain(original, 0, 64, out _));
+        var cursorChanged = Obtain(original, 3, 64, out _);
+        Assert.NotEqual(a, cursorChanged);
+        Assert.Equal(a, Obtain(original, 0, 64, out _));
+        var staticChanged = Obtain(original, 0, 32, out _);
+        Assert.NotEqual(a, staticChanged);
+        Assert.Equal(a, Obtain(original, 0, 64, out _));
+        Assert.Equal(2, _guest.Programs.ProgramCount);
+        Assert.Equal(unchecked((uint)DataBase), old.Resources.Buffers[0][0]);
+        Assert.Equal(unchecked((uint)(DataBase + 0x100)), newer.Resources.Buffers[0][0]);
+        Assert.Equal(8u, newer.Resources.Buffers[0][2]);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void DrawPathProgramProbeChecksEveryIdentityField(int field)
+    {
+        var key = new ProgramKey(ShaderStage.Vertex, 7, 8, 16, 32, [1, 2]);
+        var probe = new ProgramKeyProbe(field == 0 ? ShaderStage.Pixel : key.Stage,
+            field == 1 ? 9ul : key.Hash, field == 2 ? 9u : key.UserDataCount,
+            field == 3 ? 20u : key.CodeSize, field == 4 ? 40ul : key.ContinuationAddressOffset,
+            field == 5 ? new uint[] { 1, 3 } : key.StaticState);
+        Assert.False(ProgramKeyComparer.Instance.Equals(probe, key));
+    }
+
+    [Fact]
     public void StaticStateChange_IsANewEntryNotAPermutation()
     {
         _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.EndProgram);

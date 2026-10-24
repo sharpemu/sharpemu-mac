@@ -45,6 +45,31 @@ public sealed class RenderPhaseProfileTests
     }
 
     [Fact]
+    public void DisabledDrawPathProfilingDoesNotChargeOrAllocate()
+    {
+        if (RenderPhaseProfile.Enabled) return;
+        // Warm static initialization and JIT before measuring.
+        using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Draw)) { }
+        var ticks = RenderPhaseProfile.PhaseTicks(RenderPhaseProfile.Phase.Draw);
+        var allocated = GC.GetAllocatedBytesForCurrentThread();
+        DrawPathProfileLoop(10000);
+        Assert.Equal(allocated, GC.GetAllocatedBytesForCurrentThread());
+        Assert.Equal(ticks, RenderPhaseProfile.PhaseTicks(RenderPhaseProfile.Phase.Draw));
+        Assert.False(RenderPhaseProfile.DetailMeasurementsEnabled);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void DrawPathProfileLoop(int count)
+    {
+        for (var index = 0; index < count; index++)
+        {
+            using var outer = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Draw);
+            using var inner = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawTargetResolution);
+            inner.SwitchPhase(RenderPhaseProfile.Phase.DrawAttachmentPreparation);
+        }
+    }
+
+    [Fact]
     public void DetailMeasurement_PreservesTheOuterScope()
     {
         Assert.False(RenderPhaseProfile.DetailMeasurementsEnabled);
