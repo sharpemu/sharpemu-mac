@@ -74,8 +74,16 @@ internal sealed class MetalBatchCensus
         {
             return PacketHeader.CustomCode(header) switch
             {
-                0 or PacketCustomCode.PushMarker or PacketCustomCode.PopMarker or PacketCustomCode.DrawIndexAuto => null,
+                0 or PacketCustomCode.PushMarker or PacketCustomCode.PopMarker or PacketCustomCode.DrawIndexAuto or
+                    PacketCustomCode.DrawReset or PacketCustomCode.DispatchReset or PacketCustomCode.ContextState or
+                    PacketCustomCode.IndexCount => null,
                 PacketCustomCode.WaitMemory32 or PacketCustomCode.WaitMemory64 or PacketCustomCode.WaitFlipDone => Cut.Wait,
+                PacketCustomCode.ShaderRegisterTable or PacketCustomCode.ContextRegisterTable or
+                    PacketCustomCode.UserConfigRegisterTable => Cut.Operand,
+                PacketCustomCode.AcquireMemory => Cut.Barrier,
+                PacketCustomCode.WriteData or PacketCustomCode.ReleaseMemory => Cut.Label,
+                PacketCustomCode.DmaData => Cut.Dma,
+                PacketCustomCode.Flip => Cut.Frame,
                 _ => Cut.Other,
             };
         }
@@ -86,7 +94,7 @@ internal sealed class MetalBatchCensus
             PacketOpcode.EventWriteEndOfPipe or PacketOpcode.EventWriteEndOfShader or
                 PacketOpcode.ReleaseMemory or PacketOpcode.WriteData => Cut.Label,
             PacketOpcode.DmaData or PacketOpcode.CopyData or PacketOpcode.AtomicMemory or
-                PacketOpcode.MemorySemaphore or PacketOpcode.ConditionalWrite => Cut.Dma,
+                PacketOpcode.MemorySemaphore or PacketOpcode.ConditionalWrite or PacketOpcode.DumpConstantRam => Cut.Dma,
             PacketOpcode.SurfaceSync or PacketOpcode.AcquireMemory or PacketOpcode.PfpSyncMe or
                 PacketOpcode.EventWrite => Cut.Barrier,
             PacketOpcode.SetShaderRegisterIndirect or PacketOpcode.SetContextRegisterIndirect or
