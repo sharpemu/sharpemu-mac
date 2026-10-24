@@ -52,7 +52,14 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     ICpuMemory ICommandStreamHost.Memory => _memory;
 
-    public void RunPendingCommands() => _relay.RunPendingCommands();
+    public void RunPendingCommands()
+    {
+        if (_batchCensus is not null && _relay.HasPendingCommands)
+        {
+            _batchCensus.Close(MetalBatchCensus.Cut.Relay);
+        }
+        _relay.RunPendingCommands();
+    }
 
     public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
     {

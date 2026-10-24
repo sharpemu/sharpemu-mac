@@ -970,6 +970,7 @@ internal sealed partial class MetalRenderHost :
     /// </summary>
     public void FlushAndWaitForGpu(MetalWaitReason reason)
     {
+        _batchCensus?.Close(MetalBatchCensus.Cut.HostWait);
         // Charged to a phase of its own, so the phase that asked (a resource walk reading
         // bytes the GPU wrote, say) does not report the GPU's time as its own work.
         using var waitProfile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(

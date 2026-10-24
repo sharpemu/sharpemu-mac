@@ -42,7 +42,7 @@ internal sealed class MetalBatchCensus
             $"{name}_cuts={string.Join(',', Cuts.Select((n, i) => (n, i)).Where(x => x.n != 0).Select(x => $"{(Cut)x.i}:{x.n}"))}";
     }
 
-    internal enum Cut { Capacity, Pass, Kind, Barrier, Label, Wait, Dma, Operand, Submission, Frame, CommandRead, Other }
+    internal enum Cut { Capacity, Pass, Kind, Barrier, Label, Wait, Dma, Operand, Submission, Frame, CommandRead, Other, HostWait, Relay }
     internal readonly Distribution Coarse = new();
     internal readonly Distribution Strict = new();
     private bool? _compute;
