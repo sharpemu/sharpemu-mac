@@ -90,6 +90,7 @@ public sealed class CommandStreamQueue
     private bool _graphicsDone;
     private ulong _submitId;
     private ulong _lastCompletedGpuTick;
+    private ulong _resourceReadReadySerial;
     private int _doneCount;
     private int _pendingBoundaries;
     private IdleOutcome _outcome = IdleOutcome.Completed;
@@ -933,7 +934,7 @@ public sealed class CommandStreamQueue
     }
 
     /// <summary>
-    /// Wakes every blocked head after a host finished publishing deferred writes. A slice
+    /// Wakes blocked heads other than serial dependencies after a host finished publishing deferred writes. A slice
     /// running at the time sees the wake generation change and stays runnable at its park.
     /// </summary>
     public void NotifyPublicationCompleted()
@@ -944,7 +945,8 @@ public sealed class CommandStreamQueue
             var retried = false;
             foreach (var queue in _queues)
             {
-                if (queue.First is { Value.Blocked: true } head)
+                if (queue.First is { Value.Blocked: true } head &&
+                    head.Value.Wait.Kind != CommandWaitKind.GpuSerial)
                 {
                     head.Value.Blocked = false;
                     retried = true;
@@ -961,7 +963,8 @@ public sealed class CommandStreamQueue
     }
 
     /// <summary>
-    /// Wakes every blocked head. This is the fallback: it is what a timer does when
+    /// Wakes blocked heads except serial dependencies, which have an exact completion
+    /// callback. This is the fallback: it is what a timer does when
     /// nothing told us which wait could have changed, and what a guest CPU write we
     /// cannot observe is eventually caught by.
     /// </summary>
@@ -974,7 +977,7 @@ public sealed class CommandStreamQueue
             var dsOldest = 0L;
             foreach (var queue in _queues)
             {
-                if (queue.First is { } head)
+                if (queue.First is { } head && head.Value.Wait.Kind != CommandWaitKind.GpuSerial)
                 {
                     if (ds && head.Value.Blocked)
                     {
@@ -1138,6 +1141,22 @@ public sealed class CommandStreamQueue
         }
     }
 
+    /// <summary>
+    /// A resource read can retry after its producer has completed. Unlike an ordinary
+    /// tick this also covers a callback registered after that tick was already seen.
+    /// The wake generation protects a completion racing the packet's suspension.
+    /// </summary>
+    public void NotifyResourceReadReady(ulong completedSerial)
+    {
+        lock (_gate)
+        {
+            _resourceReadReadySerial = Math.Max(_resourceReadReadySerial, completedSerial);
+            WakeMatchingLocked(completedSerial,
+                static (serial, wait) => wait.Kind == CommandWaitKind.GpuSerial && wait.Reference <= serial,
+                DsWakeSource.GpuTick);
+        }
+    }
+
     /// <summary>The presenter freed a flip slot.</summary>
     public void NotifyFlipSlotAvailable()
     {
@@ -1293,8 +1312,12 @@ public sealed class CommandStreamQueue
                 // slice re-runs instead and reads what changed. Polling a label the GPU is
                 // about to write is exactly this race, and the timer is a hundred
                 // milliseconds against a submission that completes in one.
+                // A serial dependency can only have changed when its producer is
+                // ready; an unrelated wake must not keep re-materializing it.
+                var pendingWait = submission!.Commands.SuspendCondition;
                 var raced = _wakeGeneration != sliceWakeGeneration &&
-                    submission!.RacedWakeGeneration != _wakeGeneration;
+                    submission.RacedWakeGeneration != _wakeGeneration &&
+                    (pendingWait.Kind != CommandWaitKind.GpuSerial || pendingWait.Reference <= _resourceReadReadySerial);
                 submission!.Blocked = !raced;
                 if (!raced)
                 {
@@ -1318,7 +1341,7 @@ public sealed class CommandStreamQueue
                 }
 
                 submission.BlockedPacketAddress = packetAddress;
-                submission.Wait = submission.Commands.SuspendCondition;
+                submission.Wait = pendingWait;
                 if (submission.Wait.Watched)
                 {
                     // What the packet saw, not what memory holds now: a store that landed
@@ -1343,7 +1366,7 @@ public sealed class CommandStreamQueue
                 // every head here instead made each one re-run a slice, re-read its
                 // label and suspend again. A pipeline wait is not one of them either:
                 // only the compiler finishing it (NotifyPipelineReady) changes it.
-                WakeMatchingLocked(wait => wait.Kind is not (CommandWaitKind.GuestMemory or CommandWaitKind.Pipeline),
+                WakeMatchingLocked(wait => wait.Kind is not (CommandWaitKind.GuestMemory or CommandWaitKind.Pipeline or CommandWaitKind.GpuSerial),
                     DsWakeSource.SliceCompleted);
                 result = SliceResult.Completed;
             }

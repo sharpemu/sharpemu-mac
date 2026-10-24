@@ -26,6 +26,9 @@ public enum CommandWaitKind : byte
 
     /// <summary>A pipeline the backend is still compiling off the command stream.</summary>
     Pipeline,
+
+    /// <summary>Resource bytes from the submitted GPU serial in Reference.</summary>
+    GpuSerial,
 }
 
 /// <summary>
