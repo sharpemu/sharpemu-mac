@@ -154,13 +154,17 @@ public sealed unsafe class MetalDeviceAddressWindowTests(ITestOutputHelper outpu
         using var fixture = new Fixture(movedEdge: true);
         var windows = new MetalWindowSet();
         Assert.True(fixture.Table.AddWindowsOfRange(GuestBase + 0x0F0004, 0x200000 - 4, windows));
-        Assert.Equal([0, 1, 2], windows.ToArray());
+        Assert.Equal(fixture.Table.EntryWindows[..4].ToArray().Distinct().Order(), windows.ToArray());
         Assert.False(fixture.Table.AddWindowsOfRange(GuestBase + 0x0F0004, 4, windows));
         Assert.False(fixture.Table.AddWindowsOfRange(GuestBase + 0x2F0000, 0x90000, windows));
         Assert.True(fixture.Table.AddWindowsOfRange(GuestBase + 0x380000, 4, windows));
-        Assert.Equal([0, 1, 2, 3], windows.ToArray());
+        Assert.Equal(fixture.Table.Windows.ToArray(), windows.ToArray());
         Assert.False(fixture.Table.AddWindowsOfRange(GuestBase, 0, windows));
         Assert.False(fixture.Table.AddWindowsOfRange(ulong.MaxValue - 3, 8, windows));
+        var results = fixture.Run(namedWindows: windows, nameWindows: windows);
+        for (var index = 0; index < Probes.Length; index++)
+            Assert.Equal(Mapped[index] ? Pattern(Probes[index]) : 0u, results[index]);
+        Assert.Equal(0, fixture.Reach.TakeFeedback());
     }
 
     private sealed class Fixture : IDisposable
