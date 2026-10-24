@@ -182,6 +182,11 @@ public sealed class BufferCandidateTableInfo
 }
 
 // The dense resource tables of a program plus the facts the pipeline layout needs.
+public enum ReadOnlyDeviceBufferRefusal : byte
+{
+    Disabled, None, Empty, Writable, Candidates, ShaderFunction, SuppressedLoad,
+}
+
 public sealed class ShaderResourceInfo
 {
     public const int MaxBuffers = 32;
@@ -208,6 +213,7 @@ public sealed class ShaderResourceInfo
     // Read-only V# bindings retain host snapshots for alias publication, but have
     // no Metal buffer-pointer arguments: the shader decodes the captured SGPRs.
     public bool ReadOnlyDeviceBuffers { get; set; }
+    public ReadOnlyDeviceBufferRefusal DeviceBufferRefusal { get; set; }
 
     /// <summary>
     /// The program stores through the device-address page table, so it can write any
@@ -234,6 +240,7 @@ public sealed class ShaderResourceInfo
         HasBitwiseExclusiveOr = HasBitwiseExclusiveOr,
         UsesDeviceAddresses = UsesDeviceAddresses,
         ReadOnlyDeviceBuffers = ReadOnlyDeviceBuffers,
+        DeviceBufferRefusal = DeviceBufferRefusal,
         WritesDeviceAddresses = WritesDeviceAddresses,
     };
 }

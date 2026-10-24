@@ -182,9 +182,14 @@ public sealed class ShaderResourcePlan
         // pointer/length bindings disappear; alias publication still has the exact V#.
         // Candidate tables need their original resource-index lowering, and a stage
         // with any buffer store retains the complete ordinary binding path.
-        if (readOnlyDeviceBuffers && plan.Info.Buffers.Count != 0 &&
-            plan.Info.Buffers.All(buffer => !buffer.Written) && plan.BufferCandidateTables.Count == 0 &&
-            program.FunctionBufferAccesses.Count == 0 && plan.BufferDescriptorLoadsAreEmitted())
+        if (readOnlyDeviceBuffers)
+            plan.Info.DeviceBufferRefusal = plan.Info.Buffers.Count == 0 ? ReadOnlyDeviceBufferRefusal.Empty :
+                plan.Info.Buffers.Any(buffer => buffer.Written) ? ReadOnlyDeviceBufferRefusal.Writable :
+                plan.BufferCandidateTables.Count != 0 ? ReadOnlyDeviceBufferRefusal.Candidates :
+                program.FunctionBufferAccesses.Count != 0 ? ReadOnlyDeviceBufferRefusal.ShaderFunction :
+                !plan.BufferDescriptorLoadsAreEmitted() ? ReadOnlyDeviceBufferRefusal.SuppressedLoad :
+                ReadOnlyDeviceBufferRefusal.None;
+        if (plan.Info.DeviceBufferRefusal == ReadOnlyDeviceBufferRefusal.None)
         {
             plan.Info.ReadOnlyDeviceBuffers = true;
             plan.Info.UsesDeviceAddresses = true;

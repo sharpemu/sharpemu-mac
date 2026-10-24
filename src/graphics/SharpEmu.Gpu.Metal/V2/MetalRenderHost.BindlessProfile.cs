@@ -10,6 +10,7 @@ internal sealed partial class MetalRenderHost
 {
     private long _bindlessBufferReads, _bindlessBufferStages, _bindlessLegacyStages;
     private long _bindlessWritableRefusals, _bindlessEmptyStages;
+    private long _bindlessCandidateRefusals, _bindlessFunctionRefusals, _bindlessProducerRefusals, _bindlessPolicyRefusals;
     private static readonly bool BindlessCountersEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINDLESS") == "1";
 
@@ -21,7 +22,14 @@ internal sealed partial class MetalRenderHost
         else
         {
             _bindlessLegacyStages++;
-            if (info.Buffers.Any(buffer => buffer.Written)) _bindlessWritableRefusals++;
+            switch (info.DeviceBufferRefusal)
+            {
+                case ReadOnlyDeviceBufferRefusal.Writable: _bindlessWritableRefusals++; break;
+                case ReadOnlyDeviceBufferRefusal.Candidates: _bindlessCandidateRefusals++; break;
+                case ReadOnlyDeviceBufferRefusal.ShaderFunction: _bindlessFunctionRefusals++; break;
+                case ReadOnlyDeviceBufferRefusal.SuppressedLoad: _bindlessProducerRefusals++; break;
+                default: _bindlessPolicyRefusals++; break;
+            }
         }
     }
 
@@ -30,6 +38,10 @@ internal sealed partial class MetalRenderHost
         $"bindless_stages={Interlocked.Exchange(ref _bindlessBufferStages, 0)} " +
         $"bindless_legacy={Interlocked.Exchange(ref _bindlessLegacyStages, 0)} " +
         $"bindless_refused_write={Interlocked.Exchange(ref _bindlessWritableRefusals, 0)} " +
+        $"bindless_refused_candidate={Interlocked.Exchange(ref _bindlessCandidateRefusals, 0)} " +
+        $"bindless_refused_function={Interlocked.Exchange(ref _bindlessFunctionRefusals, 0)} " +
+        $"bindless_refused_producer={Interlocked.Exchange(ref _bindlessProducerRefusals, 0)} " +
+        $"bindless_refused_policy={Interlocked.Exchange(ref _bindlessPolicyRefusals, 0)} " +
         $"bindless_empty={Interlocked.Exchange(ref _bindlessEmptyStages, 0)}";
 
     // Diagnostic only. Hash sets and descriptor scans never run in normal/A-B measurements.
