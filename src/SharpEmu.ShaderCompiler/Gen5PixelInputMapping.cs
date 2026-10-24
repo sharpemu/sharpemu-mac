@@ -61,8 +61,11 @@ public static class Gen5PixelInputMapping
     {
         Span<bool> needsVertices = stackalloc bool[32];
         Span<bool> otherThanP0 = stackalloc bool[32];
-        foreach (var instruction in program.Instructions)
+        // Indexed: foreach over the interface boxed the list's enumerator on every draw.
+        var instructions = program.Instructions;
+        for (var index = 0; index < instructions.Count; index++)
         {
+            var instruction = instructions[index];
             if (instruction.Control is not Gen5InterpolationControl control || control.Attribute >= 32u)
             {
                 continue;

@@ -9,6 +9,7 @@ using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
+using WorkerScratch = SharpEmu.ShaderCompiler.WorkerScratch;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -47,6 +48,9 @@ public sealed partial class RenderExecutor
     private static int _geometryWarningShown;
 
     private readonly IRenderHost _host;
+    // Forming the host's Fatal method group allocated a delegate on every draw; one serves them all.
+    private readonly Func<string, Exception> _fatal;
+    private Func<string, Exception> HostFatal => WorkerScratch.Enabled ? _fatal : _host.Fatal;
     private readonly IShaderPipelineProvider _pipelines;
     private readonly bool _strictDrawResources;
     private readonly bool _dumpSkippedGraphics = Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SKIPPED_GRAPHICS") == "1";
@@ -60,6 +64,7 @@ public sealed partial class RenderExecutor
     internal RenderExecutor(IRenderHost host, IShaderPipelineProvider pipelines, bool strictDrawResources)
     {
         _host = host;
+        _fatal = host.Fatal;
         _pipelines = pipelines;
         _strictDrawResources = strictDrawResources;
     }

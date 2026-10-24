@@ -2367,6 +2367,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" cp_overlay_reads=").Append(TakeOverlayReads())
             .Append(" label_overlay_hits=").Append(TakeLabelOverlayHits())
             .Append(TakeLabelReaderCounters())
+            .Append(SharpEmu.ShaderCompiler.WorkerScratch.TakeCounters())
             .Append(" cp_overlay=").Append(_cpOverlay.Count)
             .Append(TakeWordLineCounters())
             .Append(TakeResidentCompareCounters())

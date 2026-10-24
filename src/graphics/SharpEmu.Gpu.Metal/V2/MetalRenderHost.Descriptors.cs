@@ -151,6 +151,7 @@ internal sealed partial class MetalRenderHost
     private nuint[] _usedResourceUsage = new nuint[64];
     private int _usedResourceCount;
     private MetalResourcePreparation? _preparation;
+    private MetalResourcePreparation? _preparationHandle;
     private int _preparedStageMask;
 
     public IResourcePreparation BeginPreparation()
@@ -182,7 +183,11 @@ internal sealed partial class MetalRenderHost
         }
 
         _ = EnsureCommandBuffer();
-        _preparation ??= new MetalResourcePreparation(this);
+        // The handle holds only the host, and a draw disposes it before the next one begins:
+        // one serves them all instead of a new object per draw.
+        _preparation ??= SharpEmu.ShaderCompiler.WorkerScratch.Enabled
+            ? _preparationHandle ??= new MetalResourcePreparation(this)
+            : new MetalResourcePreparation(this);
         _preparedStageMask = 0;
         _usedResourceCount = 0;
         _bindlessDeclarations.Clear();

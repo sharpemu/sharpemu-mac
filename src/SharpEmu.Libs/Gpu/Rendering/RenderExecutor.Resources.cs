@@ -9,6 +9,7 @@ using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
+using WorkerScratch = SharpEmu.ShaderCompiler.WorkerScratch;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -44,7 +45,11 @@ public sealed partial class RenderExecutor
     }
 
     // Merges the vertex ranges, obtains one host buffer per merged range and offsets every slot into it.
-    private BufferBinding[] AcquireVertexBuffers(VertexInputInfo vertexInput)
+    // The bindings of one draw, handed to BindVertexBuffers as a span and not kept past that call
+    // (the Metal host copies them into its slot tables), so the executor's draw thread reuses one array.
+    private BufferBinding[]? _vertexBindingScratch;
+
+    private ReadOnlySpan<BufferBinding> AcquireVertexBuffers(VertexInputInfo vertexInput)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawVertexBufferAcquisition);
         var buffers = vertexInput.Buffers;
@@ -107,7 +112,18 @@ public sealed partial class RenderExecutor
             range.Binding = _host.ObtainBuffer(range.BaseAddress, size, isWritten: false);
         }
 
-        var prepared = new BufferBinding[buffers.Length];
+        BufferBinding[] prepared;
+        if (WorkerScratch.Enabled)
+        {
+            prepared = _vertexBindingScratch ??= new BufferBinding[VertexInputInfo.MaxBuffers];
+            WorkerScratch.Note(WorkerScratch.Site.VertexBindings, reused: true);
+        }
+        else
+        {
+            prepared = new BufferBinding[buffers.Length];
+            WorkerScratch.Note(WorkerScratch.Site.VertexBindings, reused: false);
+        }
+
         BufferBinding? nullBuffer = null;
         Span<ulong> acquiredBytes = stackalloc ulong[buffers.Length];
         acquiredBytes.Clear();
@@ -148,7 +164,7 @@ public sealed partial class RenderExecutor
                 prepared[slot], sizes[slot], acquiredBytes[slot]);
         }
 
-        return prepared;
+        return prepared.AsSpan(0, buffers.Length);
     }
 
     private PreparedIndexBuffer AcquireIndexBuffer(in IndexSource source)
@@ -512,7 +528,7 @@ public sealed partial class RenderExecutor
             _host.BindResources(pixelBindings);
         }
 
-        var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : [];
+        var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : default;
         var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
         var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
             ? _host.ObtainBuffer(

@@ -235,16 +235,25 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
             return;
         }
 
-        _copies.RemoveAll(copy =>
+        // RemoveAll with a lambda over address and size allocated its closure on every call, even
+        // for the early return above; this keeps the survivors in order in place.
+        var kept = 0;
+        for (var index = 0; index < _copies.Count; index++)
         {
+            var copy = _copies[index];
             if (copy.Dirty || !Overlaps(copy, address, size))
             {
-                return false;
+                _copies[kept++] = copy;
+                continue;
             }
 
             copy.InList = false;
-            return true;
-        });
+        }
+
+        if (kept != _copies.Count)
+        {
+            _copies.RemoveRange(kept, _copies.Count - kept);
+        }
     }
 
     /// <summary>

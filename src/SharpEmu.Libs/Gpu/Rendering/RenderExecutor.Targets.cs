@@ -50,7 +50,7 @@ public sealed partial class RenderExecutor
             state.Colors[(int)state.ColorCount++] = new ColorTargetState(in resolution, resolvedSlot, image);
         }
 
-        if (DepthTargetResolver.Resolve(context, _host.FormatSupport, _host.Fatal) is { } depthTarget)
+        if (DepthTargetResolver.Resolve(context, _host.FormatSupport, HostFatal) is { } depthTarget)
         {
             var request = depthTarget.Target.Request;
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("depth-request", $"address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View}");

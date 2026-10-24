@@ -104,7 +104,20 @@ internal sealed partial class MetalRenderHost
     {
         if (_pendingCopies.Count != 0)
         {
-            _pendingCopies.RemoveAll(copy => copy.Serial <= completed);
+            // In place and in order; the lambda over `completed` allocated its closure on every call.
+            var kept = 0;
+            for (var index = 0; index < _pendingCopies.Count; index++)
+            {
+                if (_pendingCopies[index].Serial > completed)
+                {
+                    _pendingCopies[kept++] = _pendingCopies[index];
+                }
+            }
+
+            if (kept != _pendingCopies.Count)
+            {
+                _pendingCopies.RemoveRange(kept, _pendingCopies.Count - kept);
+            }
         }
     }
 

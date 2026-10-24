@@ -792,6 +792,47 @@ internal sealed class MetalCachedImage : IDisposable
 
     public nint GetOrCreateView(in ImageViewDescription requested) => GetOrCreateView(requested, out _);
 
+    // The once-only warnings of GetOrCreateView are keyed by strings formatted from the request, and the
+    // keys were formatted on every bind though only the first of each could report. An image remembers
+    // the request of the last warning it asked about: asked again with the same one, the answer is
+    // known. A benign race with the flip path costs a repeated ask, which the global set still answers.
+    private (ulong Format, GpuComponentSwizzle R, GpuComponentSwizzle G, GpuComponentSwizzle B, GpuComponentSwizzle A, bool Set) _swizzleWarning;
+    private (ulong Format, ulong ViewFormat, ulong Type, ulong ViewType, bool Set) _reinterpretWarning;
+
+    private bool SwizzleWarningAsked(in GpuComponentMapping mapping)
+    {
+        if (!SharpEmu.ShaderCompiler.WorkerScratch.Enabled)
+        {
+            return false;
+        }
+
+        var asked = ((ulong)Shape.PixelFormat, mapping.R, mapping.G, mapping.B, mapping.A, true);
+        if (_swizzleWarning.Equals(asked))
+        {
+            return true;
+        }
+
+        _swizzleWarning = asked;
+        return false;
+    }
+
+    private bool ReinterpretWarningAsked(ulong viewFormat, ulong viewType)
+    {
+        if (!SharpEmu.ShaderCompiler.WorkerScratch.Enabled)
+        {
+            return false;
+        }
+
+        var asked = ((ulong)Shape.PixelFormat, viewFormat, (ulong)Shape.TextureType, viewType, true);
+        if (_reinterpretWarning.Equals(asked))
+        {
+            return true;
+        }
+
+        _reinterpretWarning = asked;
+        return false;
+    }
+
     // The gpuResourceID of the backing texture; it is fixed for a given MTLTexture, so it is
     // asked once per handle rather than once per bind.
     private ulong TextureResourceId()
@@ -843,12 +884,17 @@ internal sealed class MetalCachedImage : IDisposable
         if (!viewable && !identitySwizzle && !(sameFormatSwizzle && viewFormat == Shape.PixelFormat))
         {
             // Metal raises on a swizzled view of a texture without the usage, so the view
-            // reads the components in the texture's own order, and that is reported.
-            MetalV2Diagnostics.WarnOnce(
-                $"view-swizzle:{Shape.PixelFormat}:{requested.Mapping}",
-                $"A texture without the pixel-format-view usage cannot swizzle; the view keeps the " +
-                $"texture's component order: format={Shape.PixelFormat} mapping={requested.Mapping} " +
-                $"usage=0x{Shape.Usage:X} address=0x{Description.Data.Address:X16}.");
+            // reads the components in the texture's own order, and that is reported. The report's
+            // key is formatted on every bind, so this image remembers the one it last asked about.
+            if (!SwizzleWarningAsked(requested.Mapping))
+            {
+                MetalV2Diagnostics.WarnOnce(
+                    $"view-swizzle:{Shape.PixelFormat}:{requested.Mapping}",
+                    $"A texture without the pixel-format-view usage cannot swizzle; the view keeps the " +
+                    $"texture's component order: format={Shape.PixelFormat} mapping={requested.Mapping} " +
+                    $"usage=0x{Shape.Usage:X} address=0x{Description.Data.Address:X16}.");
+            }
+
             identitySwizzle = true;
         }
 
@@ -922,12 +968,16 @@ internal sealed class MetalCachedImage : IDisposable
             // on the GPU worker takes the process down. A compressed image is the
             // usual case: it is sampled whole, in its own format, so binding it
             // unviewed is what the draw wanted anyway.
-            MetalV2Diagnostics.WarnOnce(
-                $"view-usage:{Shape.PixelFormat}->{viewFormat}:{Shape.TextureType}->{viewType}",
-                $"A texture without the pixel-format-view usage cannot be reinterpreted; binding the image instead: " +
-                $"format={Shape.PixelFormat}->{viewFormat} type={Shape.TextureType}->{viewType} " +
-                $"usage=0x{Shape.Usage:X} levels={requested.BaseLevel}+{requested.LevelCount} " +
-                $"layers={requested.BaseLayer}+{requested.LayerCount}.");
+            if (!ReinterpretWarningAsked(viewFormat, viewType))
+            {
+                MetalV2Diagnostics.WarnOnce(
+                    $"view-usage:{Shape.PixelFormat}->{viewFormat}:{Shape.TextureType}->{viewType}",
+                    $"A texture without the pixel-format-view usage cannot be reinterpreted; binding the image instead: " +
+                    $"format={Shape.PixelFormat}->{viewFormat} type={Shape.TextureType}->{viewType} " +
+                    $"usage=0x{Shape.Usage:X} levels={requested.BaseLevel}+{requested.LevelCount} " +
+                    $"layers={requested.BaseLayer}+{requested.LayerCount}.");
+            }
+
             resourceId = TextureResourceId();
             return Texture;
         }

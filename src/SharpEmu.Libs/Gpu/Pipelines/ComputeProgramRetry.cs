@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Rendering;
+using WorkerScratch = SharpEmu.ShaderCompiler.WorkerScratch;
 using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
@@ -65,7 +66,12 @@ internal sealed class GuestReadLog
     private const int MaxBytes = 64 * 1024;
 
     private readonly List<(ulong Address, uint Word)> _words = [];
-    private readonly List<(ulong Address, byte[] Bytes)> _runs = [];
+    // The runs live in one buffer the log keeps across Clear, so a dispatch's reads cost no array
+    // each; SHARPEMU_WORKER_SCRATCH_REUSE=0 copies every run into an array of its own again.
+    private readonly List<(ulong Address, int Offset, int Length)> _runs = [];
+    private readonly List<(ulong Address, byte[] Bytes)> _copiedRuns = [];
+    private byte[] _data = [];
+    private int _dataLength;
     private readonly object _gate = new();
     private int _bytes;
 
@@ -79,7 +85,7 @@ internal sealed class GuestReadLog
         {
             lock (_gate)
             {
-                return _words.Count + _runs.Count;
+                return _words.Count + _runs.Count + _copiedRuns.Count;
             }
         }
     }
@@ -90,6 +96,8 @@ internal sealed class GuestReadLog
         {
             _words.Clear();
             _runs.Clear();
+            _copiedRuns.Clear();
+            _dataLength = 0;
             _bytes = 0;
             Complete = true;
         }
@@ -119,7 +127,23 @@ internal sealed class GuestReadLog
                 return;
             }
 
-            _runs.Add((address, bytes.ToArray()));
+            if (!WorkerScratch.Enabled)
+            {
+                WorkerScratch.Note(WorkerScratch.Site.ReadLogRuns, reused: false);
+                _copiedRuns.Add((address, bytes.ToArray()));
+                return;
+            }
+
+            var grown = _data.Length < _dataLength + bytes.Length;
+            if (grown)
+            {
+                Array.Resize(ref _data, Math.Max(_dataLength + bytes.Length, Math.Min(_data.Length * 2, MaxBytes)));
+            }
+
+            WorkerScratch.Note(WorkerScratch.Site.ReadLogRuns, reused: !grown);
+            bytes.CopyTo(_data.AsSpan(_dataLength));
+            _runs.Add((address, _dataLength, bytes.Length));
+            _dataLength += bytes.Length;
         }
     }
 
@@ -147,15 +171,30 @@ internal sealed class GuestReadLog
             }
 
             var longest = 0;
-            foreach (var (_, expected) in _runs)
+            foreach (var (_, _, length) in _runs)
+            {
+                longest = Math.Max(longest, length);
+            }
+
+            foreach (var (_, expected) in _copiedRuns)
             {
                 longest = Math.Max(longest, expected.Length);
             }
 
-            var scratch = longest == 0 ? [] : new byte[longest];
-            foreach (var (address, expected) in _runs)
+            // The comparison buffer is a stack frame for the usual run and one array for a long one.
+            Span<byte> scratch = longest <= 1024 ? stackalloc byte[longest] : new byte[longest];
+            foreach (var (address, offset, length) in _runs)
             {
-                var now = scratch.AsSpan(0, expected.Length);
+                var now = scratch[..length];
+                if (!read(address, now, false) || !now.SequenceEqual(_data.AsSpan(offset, length)))
+                {
+                    return false;
+                }
+            }
+
+            foreach (var (address, expected) in _copiedRuns)
+            {
+                var now = scratch[..expected.Length];
                 if (!read(address, now, false) || !now.SequenceEqual(expected))
                 {
                     return false;

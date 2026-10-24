@@ -1077,21 +1077,54 @@ internal sealed partial class MetalImageCache
         return true;
     }
 
+    private ulong _reArmAddress;
+    private ulong _reArmSize;
+    private Predicate<(ResourceSlotIdentifier Image, ulong Address, byte Code)>? _reArmPredicate;
+
+    private bool RemoveClaimInReArmRange((ResourceSlotIdentifier Image, ulong Address, byte Code) entry)
+    {
+        if (entry.Address < _reArmAddress || entry.Address - _reArmAddress >= _reArmSize)
+        {
+            return false;
+        }
+
+        UnindexDccClaim(entry.Address);
+        UnstandDccClaimLocked(entry.Image, entry.Address);
+        return true;
+    }
+
+    // The form without the shared predicate, for SHARPEMU_WORKER_SCRATCH_REUSE=0.
+    private int RemoveClaimsInRangeAllocating(ulong address, ulong size) =>
+        _materializedDccSlices.RemoveWhere(entry =>
+        {
+            if (entry.Address < address || entry.Address - address >= size)
+            {
+                return false;
+            }
+
+            UnindexDccClaim(entry.Address);
+            UnstandDccClaimLocked(entry.Image, entry.Address);
+            return true;
+        });
+
     private void ReArmMaterializedDccLocked(ulong address, ulong size)
     {
         if (_materializedDccSlices.Count != 0 && MayHoldDccClaimStart(address, size))
         {
-            var removed = _materializedDccSlices.RemoveWhere(entry =>
+            // The predicate captured the range, which allocated a closure on entry (even when
+            // nothing was claimed) and a delegate each time; the range sits in fields for one
+            // predicate made once. The caller holds the cache lock, as the fields need.
+            int removed;
+            if (SharpEmu.ShaderCompiler.WorkerScratch.Enabled)
             {
-                if (entry.Address < address || entry.Address - address >= size)
-                {
-                    return false;
-                }
-
-                UnindexDccClaim(entry.Address);
-                UnstandDccClaimLocked(entry.Image, entry.Address);
-                return true;
-            });
+                _reArmAddress = address;
+                _reArmSize = size;
+                removed = _materializedDccSlices.RemoveWhere(_reArmPredicate ??= RemoveClaimInReArmRange);
+            }
+            else
+            {
+                removed = RemoveClaimsInRangeAllocating(address, size);
+            }
             if (removed != 0)
             {
                 Epochs.NoteDccChanged();
