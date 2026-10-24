@@ -516,6 +516,7 @@ internal sealed partial class MetalRenderHost
     {
         if (_singleCopy is not { } singleCopy)
         {
+            PrepareCapturedDeviceBuffers(stages);
             return;
         }
 
@@ -559,6 +560,7 @@ internal sealed partial class MetalRenderHost
         {
             FlushCommandBuffer(MetalFlushCause.Other);
         }
+        PrepareCapturedDeviceBuffers(stages);
     }
 
     private readonly List<ulong> _singleCopyTrapPages = new();
@@ -1096,7 +1098,6 @@ internal sealed partial class MetalRenderHost
             }
         }
 
-        DeclareCapturedBufferWindows(stage);
         _stageArgumentBuffers[stageIndex] = range.Buffer;
         _stageArgumentOffsets[stageIndex] = range.Offset;
         _stageArgumentValid[stageIndex] = true;

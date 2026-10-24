@@ -4,6 +4,8 @@
 using System.Globalization;
 using SharpEmu.Logging;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Gpu.Metal.V2;
@@ -99,20 +101,38 @@ internal sealed partial class MetalRenderHost
     // The buffer-only prototype still has exact CPU-captured ranges. Add their actual
     // windows before execution, even on a cold reach profile. The already uploaded
     // table may still report an unnamed reach, but the access is resident immediately.
-    private void DeclareCapturedBufferWindows(MetalStageBindings stage)
+    private void PrepareCapturedDeviceBuffers(ReadOnlySpan<ShaderStageResources> stages)
     {
-        if (!stage.Program.Resources!.Info.ReadOnlyDeviceBuffers) return;
+        var needed = false;
+        foreach (var stage in stages)
+            needed |= stage.Program?.Resources?.Info.ReadOnlyDeviceBuffers == true;
+        if (!needed) return;
+        if (_preparation is not null)
+            throw Fatal("Captured device buffers must be admitted before resource preparation.");
+        // An ordered guest mapping change or a window/trap change cannot reuse an
+        // older table. Retire it between issues, before allocating their arguments.
+        if (_commandBuffer != 0 && _deviceAddressTable != 0 && _deviceAddressTableSerial == _submissionSerial &&
+            (_deviceAddressSpanVersion != DeviceAddressMappingVersion() ||
+             _deviceAddressTableBuilder.PartitionVersion != _guestMemory.PartitionVersion ||
+             _deviceAddressTableBuilder.TrapVersion != _guestMemory.TrapVersion))
+            FlushCommandBuffer(MetalFlushCause.Other);
+        _ = EnsureCommandBuffer();
+        _ = UploadDeviceAddressTable();
         var added = false;
-        var snapshot = stage.StageResources.Resources;
-        var first = (int)stage.Program.Bindings!.FirstBufferWordDword();
-        for (var index = 0; index < snapshot.Buffers.Length; index++)
+        foreach (var stage in stages)
         {
-            var size = stage.ShaderData[first + index];
-            if (size == 0) continue;
-            var words = snapshot.Buffers[index];
-            var address = words[0] | ((ulong)(words[1] & 0xFFFFu) << 32);
-            added |= _deviceAddressTableBuilder.AddWindowsOfRange(address, size, _deviceAddressNamedWindows);
+            if (stage.Program?.Resources?.Info.ReadOnlyDeviceBuffers != true) continue;
+            foreach (var words in stage.Resources.Buffers)
+            {
+                var descriptor = BufferDescriptorWords.From(words);
+                var size = descriptor.Footprint() ?? 0;
+                if (size == 0 || descriptor.Address == 0) continue;
+                size = Math.Min(MappedDeviceAddressBytes(descriptor.Address, size), uint.MaxValue);
+                added |= _deviceAddressTableBuilder.AddWindowsOfRange(descriptor.Address, size, _deviceAddressNamedWindows);
+            }
         }
+        // Pin before attachments and staged bindings can move a previously unnamed
+        // window. Every captured range then uses the same table cuts until execution.
         if (added) _guestMemory.PinWindows(_deviceAddressNamedWindows);
     }
 
