@@ -47,6 +47,10 @@ public static class ResourceMaterializationProfile
         ReadRecording,
         ConsumerLookup,
         ConsumerGraph,
+        BatchedWalk,
+        BatchedPendingProbe,
+        BatchedResidentRead,
+        BatchedScalarRead,
         Count,
     }
 
@@ -57,6 +61,24 @@ public static class ResourceMaterializationProfile
     private static readonly long[] _elapsedTicks = new long[(int)Phase.Count];
     private static readonly long[] _calls = new long[(int)Phase.Count];
     private static readonly long[] _allocatedBytesByPhase = new long[(int)Phase.Count];
+    private static readonly long[] _workerElapsedTicks = new long[(int)Phase.Count];
+    private static readonly long[] _workerCalls = new long[(int)Phase.Count];
+    [ThreadStatic] private static bool _workerContext;
+
+    // The caller already knows whether this call is inside the render worker's
+    // profiling scopes. Keep its inclusive timers separate from prefetch threads.
+    public static WorkerScope WorkerContext(bool worker)
+    {
+        if (!Enabled) return default;
+        var previous = _workerContext;
+        _workerContext = worker;
+        return new(previous, true);
+    }
+
+    public readonly struct WorkerScope(bool previous, bool active) : IDisposable
+    {
+        public void Dispose() { if (active) _workerContext = previous; }
+    }
     private static long _branchEvaluations;
     private static long _descriptorSources;
     private static long _inactiveSources;
@@ -100,10 +122,12 @@ public static class ResourceMaterializationProfile
         private readonly Phase _phase;
         private readonly long _started;
         private readonly long _initialAllocatedBytes;
+        private readonly bool _worker;
 
         internal Scope(Phase phase)
         {
             _phase = phase;
+            _worker = _workerContext;
             _initialAllocatedBytes = phase is Phase.Total or Phase.RecorderWrap or Phase.EntryBuild
                 ? GC.GetAllocatedBytesForCurrentThread()
                 : 0;
@@ -113,8 +137,14 @@ public static class ResourceMaterializationProfile
         public void Dispose()
         {
             if (_started == 0) return;
-            Interlocked.Add(ref _elapsedTicks[(int)_phase], Stopwatch.GetTimestamp() - _started);
+            var elapsed = Stopwatch.GetTimestamp() - _started;
+            Interlocked.Add(ref _elapsedTicks[(int)_phase], elapsed);
             Interlocked.Increment(ref _calls[(int)_phase]);
+            if (_worker)
+            {
+                Interlocked.Add(ref _workerElapsedTicks[(int)_phase], elapsed);
+                Interlocked.Increment(ref _workerCalls[(int)_phase]);
+            }
             if (_initialAllocatedBytes != 0)
                 Interlocked.Add(
                     ref _allocatedBytesByPhase[(int)_phase],
@@ -153,10 +183,14 @@ public static class ResourceMaterializationProfile
         var parts = new List<string>();
         for (var index = 0; index < (int)Phase.Count; index++)
             parts.Add(FormattableString.Invariant($"{(Phase)index}={Interlocked.Read(ref _elapsedTicks[index]) * 1000.0 / Stopwatch.Frequency:F3}ms/n{Interlocked.Read(ref _calls[index])}"));
-        output.WriteLine($"[PERF][RESOURCE_MATERIALIZATION] cumulative=1 inclusive=1 sample_stride={SampleStride} sampled_phases=CompiledOutputAllocation,CompiledBody,CompiledWordRead,CompiledGroupRead,ReadRecording,ConsumerLookup allocated_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.Total])} wrap_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.RecorderWrap])} build_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.EntryBuild])} branch_evaluations={Interlocked.Read(ref _branchEvaluations)} descriptor_sources={Interlocked.Read(ref _descriptorSources)} inactive_sources={Interlocked.Read(ref _inactiveSources)} table_words={Interlocked.Read(ref _tableWords)} descriptor_words={Interlocked.Read(ref _descriptorWords)} compiled_walks={Interlocked.Read(ref _compiledEvaluators)} interpreted_walks={Interlocked.Read(ref _interpretedEvaluators)} {string.Join(" ", parts)}");
+        output.WriteLine($"[PERF][RESOURCE_MATERIALIZATION] cumulative=1 inclusive=1 sample_stride={SampleStride} sampled_phases=CompiledOutputAllocation,CompiledBody,CompiledWordRead,CompiledGroupRead,ReadRecording,ConsumerLookup,BatchedPendingProbe,BatchedResidentRead,BatchedScalarRead allocated_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.Total])} wrap_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.RecorderWrap])} build_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.EntryBuild])} branch_evaluations={Interlocked.Read(ref _branchEvaluations)} descriptor_sources={Interlocked.Read(ref _descriptorSources)} inactive_sources={Interlocked.Read(ref _inactiveSources)} table_words={Interlocked.Read(ref _tableWords)} descriptor_words={Interlocked.Read(ref _descriptorWords)} compiled_walks={Interlocked.Read(ref _compiledEvaluators)} interpreted_walks={Interlocked.Read(ref _interpretedEvaluators)} {string.Join(" ", parts)}");
         var reads = new List<string>();
         for (var index = 0; index < (int)ReadCounter.Count; index++)
             reads.Add($"{(ReadCounter)index}={Interlocked.Read(ref _readCounts[index])}");
         output.WriteLine($"[PERF][RESOURCE_READ_COUNTS] cumulative=1 sampled=0 {string.Join(" ", reads)}");
+        var workerParts = new List<string>();
+        for (var index = 0; index < (int)Phase.Count; index++)
+            workerParts.Add(FormattableString.Invariant($"{(Phase)index}={Interlocked.Read(ref _workerElapsedTicks[index]) * 1000.0 / Stopwatch.Frequency:F3}ms/n{Interlocked.Read(ref _workerCalls[index])}"));
+        output.WriteLine($"[PERF][RESOURCE_MATERIALIZATION_WORKER] cumulative=1 inclusive=1 sample_stride={SampleStride} {string.Join(" ", workerParts)}");
     }
 }

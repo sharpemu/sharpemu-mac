@@ -49,6 +49,22 @@ public sealed class ShaderResourcePlan
 
     internal RawReadPrefetchPlan? RawReadPrefetch { get; set; }
     private readonly object _compileGate = new();
+    private BatchedResourceWalk? _batchedWalk;
+    private int _batchedWalkBuilt;
+    internal BatchedResourceWalk? BatchedWalk
+    {
+        get
+        {
+            if (Volatile.Read(ref _batchedWalkBuilt) != 0) return _batchedWalk;
+            lock (_compileGate)
+            {
+                if (_batchedWalkBuilt != 0) return _batchedWalk;
+                _batchedWalk = BatchedResourceWalk.Build(this);
+                Volatile.Write(ref _batchedWalkBuilt, 1);
+                return _batchedWalk;
+            }
+        }
+    }
     private CompiledResourceEvaluator? _compiledEvaluator;
     private CompiledResourceTransaction? _compiledTransaction;
     private CompiledResourceTransaction? _compiledTableTransaction;

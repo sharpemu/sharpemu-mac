@@ -535,6 +535,17 @@ public sealed class RuntimeValueEvaluator
         results = [];
         table = [];
         activeSources = [];
+        if (BatchedResourceWalk.Enabled && inputs.ReadResidentMemory is not null && evaluateTable &&
+            ReferenceEquals(sources, plan.MaterializationSources) && ReferenceEquals(cleanFlatSlots, plan.CleanFlatSlots))
+        {
+            if (plan.BatchedWalk is { } batchedWalk)
+            {
+                ResourceMaterializationCache.RecordEvaluationPath(plan, "batched_walk");
+                // Failure is final for this walk: do not repeat a synchronizing guest read.
+                return batchedWalk.Evaluate(inputs, additionalTableWords, out results, out table);
+            }
+            BatchedResourceWalk.RecordFallback(plan);
+        }
         if (evaluateTable && sources.Count == 0 && !HasResourceStructure(plan) && ReferenceEquals(cleanFlatSlots, plan.CleanFlatSlots) &&
             plan.CompiledTableTransaction is { } tableTransaction)
         {

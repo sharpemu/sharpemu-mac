@@ -144,6 +144,7 @@ public interface IShaderPipelineHost
     // host that returns a delegate lets a shader whose data-only table words the GPU writes
     // be re-planned to load them on the device (DeviceDataLoads); null keeps them flattened.
     Func<ulong, bool>? DataWritePending => null;
+    Func<ulong, ulong, bool>? DataRangeWritePending => null;
 
     // Creates the host module of one compiled permutation and returns its handle.
     ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId);
