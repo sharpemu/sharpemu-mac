@@ -1008,6 +1008,7 @@ internal sealed partial class MetalRenderHost :
     /// </summary>
     private void WaitForCommittedSerial(ulong serial, MetalWaitReason reason)
     {
+        _batchCensus?.Close(MetalBatchCensus.Cut.HostWait);
         if (serial > _previousSerial)
         {
             // Nothing has committed this serial, so nothing will ever signal it: waiting
