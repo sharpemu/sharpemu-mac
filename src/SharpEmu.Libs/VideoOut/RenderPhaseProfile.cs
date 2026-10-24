@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace SharpEmu.Libs.VideoOut;
 
@@ -430,6 +431,7 @@ public static class RenderPhaseProfile
             _active = true;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Dispose()
         {
             if (!_active)
@@ -442,6 +444,7 @@ public static class RenderPhaseProfile
         }
 
         // Switch sequential work in this scope. Nested scopes must finish first.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void SwitchPhase(Phase phase)
         {
             if (!_active)
@@ -454,6 +457,7 @@ public static class RenderPhaseProfile
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Scope Measure(Phase phase)
     {
         if (!Enabled)
@@ -474,6 +478,7 @@ public static class RenderPhaseProfile
     /// work on other threads does not enter the render-thread counters.
     /// </summary>
     /// <remarks>Backend contract: the measurement entry point backends use.</remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Scope MeasureDetail(Phase phase) =>
         Enabled && _scopeDepth > 0 ? Measure(phase) : default;
 

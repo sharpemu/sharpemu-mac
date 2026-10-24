@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
@@ -71,9 +73,14 @@ public static class PixelStageInputResolver
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         var customMask = 0u;
         var semanticCount = Math.Min(Math.Min(shader.InputSemanticsCount, inputCount), (uint)PixelInputInfo.InterpolatorCount);
+        Span<uint> semantics = stackalloc uint[(int)semanticCount];
+        var bulk = DrawPathCounters.Enabled && semanticCount != 0 &&
+            context.Memory.TryRead(shader.InputSemanticsAddress, MemoryMarshal.AsBytes(semantics));
+        if (semanticCount != 0) DrawPathCounters.PixelRead(bulk);
         for (var index = 0u; index < semanticCount; index++)
         {
-            if (!context.TryReadUInt32(shader.InputSemanticsAddress + index * sizeof(uint), out var word))
+            var word = bulk ? BinaryPrimitives.ReadUInt32LittleEndian(MemoryMarshal.AsBytes(semantics.Slice((int)index, 1))) : 0;
+            if (!bulk && !context.TryReadUInt32(shader.InputSemanticsAddress + index * sizeof(uint), out word))
             {
                 throw GpuFatal.Fatal($"The pixel input semantics are unreadable: shader=0x{shader.CodeAddress:X16} index={index}.");
             }

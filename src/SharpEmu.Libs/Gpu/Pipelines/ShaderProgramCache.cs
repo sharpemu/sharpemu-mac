@@ -185,6 +185,7 @@ internal sealed class ProgramSourceEntry
     public ShaderVertexInput[] VertexInputs { get; init; } = [];
     public IReadOnlyList<AffineVertexFetchLoad> AffineFetches { get; init; } = [];
     public List<ProgramPermutation> Permutations { get; } = new(8);
+    public ProgramPermutation? LastPermutation { get; set; }
 
     // How many device data loads the plan was extracted with, and the registry generation
     // last seen to agree with it (DeviceDataLoads).
@@ -207,6 +208,10 @@ internal sealed class ShaderProgramCache
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), Gen5ShaderProgram> _decoded = new();
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), ShaderCodeCapture> _codeCaptures = new();
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
+    // The full immutable key is still compared; each stage has its own hot entry.
+    // Used under the same gate as _programs, including asynchronous preparation.
+    private readonly (ProgramKey? Key, ProgramSourceEntry? Entry)[] _lastPrograms =
+        new (ProgramKey?, ProgramSourceEntry?)[Enum.GetValues<ShaderStage>().Length];
     // Draws that re-bind unchanged resources reuse the last materialization.
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
     private readonly ResourceMaterializationCache? _materializations =
@@ -403,7 +408,18 @@ internal sealed class ShaderProgramCache
             BuildStaticState(source.Stage, options);
             var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
                 source.ContinuationAddressOffset, CollectionsMarshal.AsSpan(_staticState));
-            _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out key, out entry);
+            var recent = _lastPrograms[(int)source.Stage];
+            var hit = DrawPathCounters.Enabled && recent.Key is not null && ProgramKeyComparer.Instance.Equals(probe, recent.Key);
+            DrawPathCounters.Program(hit);
+            if (hit)
+            {
+                key = recent.Key;
+                entry = recent.Entry;
+            }
+            else
+            {
+                _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out key, out entry);
+            }
         }
         var sourceWasCached = entry is not null;
         if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -469,6 +485,9 @@ internal sealed class ShaderProgramCache
 
             entry.DeviceDataGeneration = generation;
         }
+
+        if (DrawPathCounters.Enabled)
+            _lastPrograms[(int)source.Stage] = (key, entry);
 
         // A backend that cannot link compiles the caller alone, as every backend did before
         // linking existed: its S_SWAPPC_B64 calls are skipped rather than the program refused.
@@ -617,11 +636,21 @@ internal sealed class ShaderProgramCache
 
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
         {
+            var recent = entry.LastPermutation;
+            var hit = DrawPathCounters.Enabled && !RenderTrace.Enabled && recent is not null && MatchesPermutation(recent, specialization, pushDataCursor);
+            DrawPathCounters.Permutation(hit);
+            if (hit)
+            {
+                stage = CreateStageResources(recent!.Program, snapshot, source, options);
+                recent.Bindings.AdvancePushData(ref pushDataCursor);
+                return recent.Handle;
+            }
             foreach (var candidate in entry.Permutations)
             {
                 var layout = candidate.Bindings;
-                if (layout.PushDataStartDword == PushData.StartFor(pushDataCursor, layout.ShaderDataDwordCount) && candidate.Specialization.Equals(specialization))
+                if (MatchesPermutation(candidate, specialization, pushDataCursor))
                 {
+                    if (DrawPathCounters.Enabled) entry.LastPermutation = candidate;
                     stage = CreateStageResources(candidate.Program, snapshot, source, options);
                     layout.AdvancePushData(ref pushDataCursor);
                     if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -636,6 +665,7 @@ internal sealed class ShaderProgramCache
 
         var permutation = CompilePermutation(source, options.Detached(), entry, specialization, pushDataCursor, key ?? BuildProgramKey(source), sourceWasCached, snapshot);
         entry.Permutations.Add(permutation);
+        if (DrawPathCounters.Enabled) entry.LastPermutation = permutation;
         ShaderCacheCounters.CountPermutation();
         stage = CreateStageResources(permutation.Program, snapshot, source, options);
         permutation.Bindings.AdvancePushData(ref pushDataCursor);
@@ -646,6 +676,10 @@ internal sealed class ShaderProgramCache
 
         return permutation.Handle;
     }
+
+    private static bool MatchesPermutation(ProgramPermutation candidate, ResourceSpecialization specialization, uint cursor) =>
+        candidate.Bindings.PushDataStartDword == PushData.StartFor(cursor, candidate.Bindings.ShaderDataDwordCount) &&
+        candidate.Specialization.Equals(specialization);
 
     // The key of the entry the static state was just built for.
     private ProgramKey BuildProgramKey(ShaderSource source) =>

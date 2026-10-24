@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -15,11 +16,13 @@ public sealed class VertexTableMetadata
     public int VertexBufferRegister { get; init; } = NoRegister;
     public int VertexAttributeRegister { get; init; } = NoRegister;
     public uint[] InputSemantics { get; init; } = [];
+    internal VertexAttributeResource[]? LastAttributes;
+    internal VertexInputBuffer[]? LastBuffers;
 }
 
 // The header-derived tables of vertex programs already read, keyed by the registered header
 // and the code hash so a different binary at the same address never reuses an entry.
-// Used under the pipeline cache's resolve lock; entries are never mutated after they are stored.
+// Used under the pipeline cache's resolve lock; the derived-layout memo shares immutable arrays.
 public sealed class VertexTableMetadataCache
 {
     private const int MaxEntries = 4096;
@@ -88,8 +91,23 @@ public static class VertexInputResolver
             var resources = _attributeScratch ??= new List<VertexAttributeResource>(VertexInputInfo.MaxBuffers);
             resources.Clear();
             ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress, resources);
-            buffers = MergeBuffers(resources, shader.CodeAddress);
-            attributes = resources.ToArray();
+            var reuse = DrawPathCounters.Enabled && SameAttributes(resources, metadata.LastAttributes);
+            DrawPathCounters.Vertex(reuse);
+            if (reuse)
+            {
+                buffers = metadata.LastBuffers!;
+                attributes = metadata.LastAttributes!;
+            }
+            else
+            {
+                buffers = MergeBuffers(resources, shader.CodeAddress);
+                attributes = resources.ToArray();
+                if (DrawPathCounters.Enabled)
+                {
+                    metadata.LastBuffers = buffers;
+                    metadata.LastAttributes = attributes;
+                }
+            }
             resources.Clear();
         }
 
@@ -104,6 +122,16 @@ public static class VertexInputResolver
             PositionExportControl = positionExportControl,
             ClipSpace = clipSpace,
         };
+    }
+
+    // MergeBuffers only adds BufferIndex/OffsetBytes. Compare all inputs before that
+    // operation, including the fresh descriptor words, semantics and fetch rate.
+    private static bool SameAttributes(List<VertexAttributeResource> resources, VertexAttributeResource[]? previous)
+    {
+        if (previous is null || previous.Length != resources.Count) return false;
+        for (var index = 0; index < previous.Length; index++)
+            if (resources[index] != (previous[index] with { BufferIndex = -1, OffsetBytes = 0 })) return false;
+        return true;
     }
 
     private static ulong ReadTablePointer(ReadOnlySpan<uint> userData, int register) =>
@@ -283,6 +311,7 @@ public static class VertexInputResolver
         List<VertexAttributeResource> resources)
     {
         Span<uint> descriptorWords = stackalloc uint[4];
+        Span<byte> descriptorBytes = stackalloc byte[16];
         foreach (var word in semantics)
         {
             var semantic = new ShaderInputSemantic(word);
@@ -312,9 +341,12 @@ public static class VertexInputResolver
             }
 
             var descriptorAddress = bufferTable + index * 16u;
+            var bulk = DrawPathCounters.Enabled && context.Memory.TryRead(descriptorAddress, descriptorBytes);
+            DrawPathCounters.VertexRead(bulk);
             for (var component = 0; component < 4; component++)
             {
-                if (!context.TryReadUInt32(descriptorAddress + (ulong)component * sizeof(uint), out descriptorWords[component]))
+                if (bulk) descriptorWords[component] = BinaryPrimitives.ReadUInt32LittleEndian(descriptorBytes[(component * 4)..]);
+                else if (!context.TryReadUInt32(descriptorAddress + (ulong)component * sizeof(uint), out descriptorWords[component]))
                 {
                     throw GpuFatal.Fatal($"The vertex buffer table is unreadable: shader=0x{shaderAddress:X16} address=0x{descriptorAddress:X16}.");
                 }
