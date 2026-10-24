@@ -1896,6 +1896,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         Interlocked.Increment(ref _flipAttempts);
         Interlocked.Increment(ref FlipsCaptured);
         NoteFlipForCompilingDraws();
+        _bindlessCoverage?.Frame(_imageCache);
         // The one point in the frame that is outside a flush, so the safe place to read
         // back everything the passes since the last flip wrote.
         DrainPendingDumps();

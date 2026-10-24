@@ -155,6 +155,7 @@ internal sealed partial class MetalRenderHost
 
     public IResourcePreparation BeginPreparation()
     {
+        _bindlessCoverage?.Begin();
         if (_preparation is not null)
         {
             throw Fatal("A Metal resource preparation is already open.");
@@ -199,6 +200,7 @@ internal sealed partial class MetalRenderHost
 
     private void EndPreparation()
     {
+        _bindlessCoverage?.End();
         // A draw that acquired its attachments and then never began its pass leaves no
         // upload waiting past its own preparation.
         _imageCache.DrainDeferredRefreshes();
@@ -269,6 +271,7 @@ internal sealed partial class MetalRenderHost
         var layout = program.Bindings!;
         var snapshot = stage.Resources;
         var info = resources.Info;
+        _bindlessCoverage?.Stage(program, snapshot);
         if (snapshot.Images.Length != info.Images.Count || snapshot.Samplers.Length != info.Samplers.Count ||
             snapshot.Buffers.Length != info.Buffers.Count)
         {
