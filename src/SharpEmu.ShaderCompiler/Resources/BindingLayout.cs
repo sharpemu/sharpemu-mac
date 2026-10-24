@@ -626,7 +626,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     {
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
         var memoryOffsetDword = (uint)userDataRegisters.Count + (usesShaderBase ? ShaderBaseDwordCount : 0);
-        var memoryOffsetCount = (uint)info.Buffers.Count;
+        var memoryOffsetCount = info.ReadOnlyDeviceBuffers ? 0u : (uint)info.Buffers.Count;
         var bufferWordCount = (portableBuffers ?? PortableBufferWord.Enabled) ? memoryOffsetCount * PortableBufferWord.DwordCount : 0u;
         var mipStatisticsCount = info.Images.Any(static image => image.MipStatistics) ? (uint)info.Images.Count : 0u;
         var bindlessImageTableCount = info.Images
@@ -638,7 +638,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u);
         var pushStart = PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
-        if (info.Buffers.Count != 0)
+        if (info.Buffers.Count != 0 && !info.ReadOnlyDeviceBuffers)
         {
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.Buffers, Enumerable.Range(0, info.Buffers.Count).Select(index => (uint)index).ToArray()));
         }

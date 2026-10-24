@@ -2293,7 +2293,7 @@ internal sealed partial class MetalRenderHost :
             $"msl_structured={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Structured} " +
             $"msl_dispatcher={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Dispatcher} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed} " +
-            (_meshletCache?.TakeCounters() ?? "meshlet_draws=0") + " " + TakeIndirectCounters());
+            (_meshletCache?.TakeCounters() ?? "meshlet_draws=0") + " " + TakeIndirectCounters() + " " + TakeBindlessBufferCounters());
         _slowWaitReports = 0;
         ResetSlowCompletionReports();
         var reasons = new System.Text.StringBuilder();

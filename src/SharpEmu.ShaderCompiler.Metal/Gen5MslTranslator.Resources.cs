@@ -471,7 +471,7 @@ public static partial class Gen5MslTranslator
         {
             var request = _request;
             var layout = request.Bindings;
-            var bufferCount = request.Resources.Info.Buffers.Count;
+            var bufferCount = request.Resources.Info.ReadOnlyDeviceBuffers ? 0 : request.Resources.Info.Buffers.Count;
             for (var index = 0; index < bufferCount; index++)
             {
                 source.AppendLine($"    device uint* b{index} = {ResourcesName}.buffers[{index}];");

@@ -688,7 +688,8 @@ internal sealed class ShaderProgramCache
                     ShaderStage.Compute => options.ComputeInfo?.WaveSize ?? 64u,
                     _ => 32u,
                 },
-                excludedUserDataRegisters: source.ExcludedUserDataRegisters);
+                excludedUserDataRegisters: source.ExcludedUserDataRegisters,
+                readOnlyDeviceBuffers: _compiler.SupportsReadOnlyDeviceBuffers);
         }
         catch (ResourcePlanException exception)
         {
@@ -1304,7 +1305,7 @@ internal sealed class ShaderProgramCache
             }
 
             var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, record.Hash, record.UserDataBase, record.UserDataCount,
-                waveSize: record.Info.WaveSize);
+                waveSize: record.Info.WaveSize, readOnlyDeviceBuffers: compiler.SupportsReadOnlyDeviceBuffers);
             var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
                 record.Info.DispatchThreadDimensions);

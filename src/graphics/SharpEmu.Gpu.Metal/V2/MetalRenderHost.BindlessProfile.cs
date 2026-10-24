@@ -8,6 +8,27 @@ namespace SharpEmu.Gpu.Metal.V2;
 
 internal sealed partial class MetalRenderHost
 {
+    private long _bindlessBufferReads, _bindlessBufferStages, _bindlessLegacyStages;
+    private long _bindlessWritableRefusals, _bindlessEmptyStages;
+
+    private void NoteBindlessStage(ShaderResourceInfo info)
+    {
+        if (info.ReadOnlyDeviceBuffers) _bindlessBufferStages++;
+        else if (info.Buffers.Count == 0) _bindlessEmptyStages++;
+        else
+        {
+            _bindlessLegacyStages++;
+            if (info.Buffers.Any(buffer => buffer.Written)) _bindlessWritableRefusals++;
+        }
+    }
+
+    private string TakeBindlessBufferCounters() =>
+        $"bindless_reads={Interlocked.Exchange(ref _bindlessBufferReads, 0)} " +
+        $"bindless_stages={Interlocked.Exchange(ref _bindlessBufferStages, 0)} " +
+        $"bindless_legacy={Interlocked.Exchange(ref _bindlessLegacyStages, 0)} " +
+        $"bindless_refused_write={Interlocked.Exchange(ref _bindlessWritableRefusals, 0)} " +
+        $"bindless_empty={Interlocked.Exchange(ref _bindlessEmptyStages, 0)}";
+
     // Diagnostic only. Hash sets and descriptor scans never run in normal/A-B measurements.
     private readonly BindlessCoverage? _bindlessCoverage =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINDLESS_PROFILE") == "1" ? new() : null;

@@ -205,6 +205,10 @@ public sealed class ShaderResourceInfo
     public bool HasBitwiseExclusiveOr { get; set; }
     public bool UsesDeviceAddresses { get; set; }
 
+    // Read-only V# bindings retain host snapshots for alias publication, but have
+    // no Metal buffer-pointer arguments: the shader decodes the captured SGPRs.
+    public bool ReadOnlyDeviceBuffers { get; set; }
+
     /// <summary>
     /// The program stores through the device-address page table, so it can write any
     /// mapped guest page and no host-side range describes where. A backend that keeps
@@ -229,6 +233,7 @@ public sealed class ShaderResourceInfo
         InstanceOffsetScalarRegister = InstanceOffsetScalarRegister,
         HasBitwiseExclusiveOr = HasBitwiseExclusiveOr,
         UsesDeviceAddresses = UsesDeviceAddresses,
+        ReadOnlyDeviceBuffers = ReadOnlyDeviceBuffers,
         WritesDeviceAddresses = WritesDeviceAddresses,
     };
 }

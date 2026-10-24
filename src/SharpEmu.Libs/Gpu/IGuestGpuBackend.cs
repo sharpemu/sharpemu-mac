@@ -25,6 +25,10 @@ public interface IGuestGpuBackend
 
     bool LinkedShaderCallsSupported => false;
 
+    // The host still captures V# words and publishes their exact alias ranges; the
+    // shader decodes read-only buffer descriptors through the guest address table.
+    bool SupportsReadOnlyDeviceBuffers => false;
+
     /// <summary>Starts the presenter (window + device) once; safe to call repeatedly.</summary>
     void EnsureStarted(uint width, uint height);
 

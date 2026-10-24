@@ -29,6 +29,10 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
 
     public string BackendName => "Metal v2";
 
+    // Experimental until an alternating in-game comparison proves a net win.
+    public bool SupportsReadOnlyDeviceBuffers { get; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINDLESS") == "1";
+
     /// <summary>
     /// v2 builds MTLMeshRenderPipelineDescriptor pipelines and launches
     /// drawMeshThreadgroups, so the merged ES/GS stage runs as what it is.

@@ -127,7 +127,7 @@ public sealed class ShaderResourcePlan
 
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
-        ulong excludedUserDataRegisters = 0)
+        ulong excludedUserDataRegisters = 0, bool readOnlyDeviceBuffers = false)
     {
         // Mesh system inputs are not uniform user data, even when a GS pointer occupies s0:s1.
         // A caller whose user data starts below its system scalars names them itself.
@@ -177,6 +177,22 @@ public sealed class ShaderResourcePlan
         plan.IndirectImages = tracked.IndirectImages;
         plan.BufferCandidateTables = tracked.BufferCandidateTables;
         plan.DynamicReads = plan.DynamicReads.Where(read => !tracked.IndirectReads.Contains(read)).ToList();
+
+        // Keep CPU-captured descriptor/table words immutable for this draw. Only the
+        // pointer/length bindings disappear; alias publication still has the exact V#.
+        // Candidate tables need their original resource-index lowering, and a stage
+        // with any buffer store retains the complete ordinary binding path.
+        if (readOnlyDeviceBuffers && plan.Info.Buffers.Count != 0 &&
+            plan.Info.Buffers.All(buffer => !buffer.Written) && plan.BufferCandidateTables.Count == 0 &&
+            program.FunctionBufferAccesses.Count == 0)
+        {
+            plan.Info.ReadOnlyDeviceBuffers = true;
+            plan.Info.UsesDeviceAddresses = true;
+            foreach (var memory in plan.Memory.Entries)
+                if (memory.Kind is MemoryResourceKind.Buffer or MemoryResourceKind.ScalarBuffer &&
+                    !memory.PlanningOnly && memory.Resource != MemoryAccessInfo.NoResource)
+                    memory.DeviceDescriptor = true;
+        }
 
         var materialization = new List<uint>();
         foreach (var buffer in plan.Info.Buffers)

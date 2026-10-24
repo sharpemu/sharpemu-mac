@@ -272,6 +272,7 @@ internal sealed partial class MetalRenderHost
         var snapshot = stage.Resources;
         var info = resources.Info;
         _bindlessCoverage?.Stage(program, snapshot);
+        NoteBindlessStage(info);
         if (snapshot.Images.Length != info.Images.Count || snapshot.Samplers.Length != info.Samplers.Count ||
             snapshot.Buffers.Length != info.Buffers.Count)
         {
@@ -645,6 +646,16 @@ internal sealed partial class MetalRenderHost
             var size = ClampMappedSize(descriptor.Address, requested);
             var written = info.Buffers[index].Written;
             FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor);
+            if (info.ReadOnlyDeviceBuffers)
+            {
+                // Preserve the same publication/order hooks as ResolveStorageBuffer.
+                // No buffer window, staging copy, per-buffer residency or argument is
+                // needed: V# SGPRs and the pinned guest address table are the binding.
+                OrderAfterDeferredCopies(descriptor.Address, size);
+                OrderAfterStagedStores(descriptor.Address, size);
+                _bindlessBufferReads++;
+                continue;
+            }
             var range = ResolveStorageBuffer(descriptor.Address, size, written);
             if (written)
             {
