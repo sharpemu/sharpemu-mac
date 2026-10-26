@@ -73,6 +73,27 @@ internal static unsafe partial class VulkanVideoPresenter
                 ? testStream.Done()
                 : IdleOutcome.Completed;
 
+    // SubmitDone split for IGuestGpuBackend.BeginSubmitDone: the live presenter's queue hands back its wait.
+    public static IdleOutcome BeginSubmitDone(ICpuMemory memory, out Func<IdleOutcome>? wait)
+    {
+        wait = null;
+        if (Volatile.Read(ref _presenterStartupFailure) is not null ||
+            HostSessionControl.IsShutdownRequested || Volatile.Read(ref _closed) || Volatile.Read(ref _presenterCloseRequested) ||
+            !TryGetActivePresenter(out var presenter))
+        {
+            return SubmitDone(memory);
+        }
+
+        var commandStream = presenter.CommandStream;
+        var outcome = commandStream.BeginDone(out var ticket);
+        if (outcome == IdleOutcome.Completed && ticket != 0)
+        {
+            wait = () => commandStream.WaitDone(ticket);
+        }
+
+        return outcome;
+    }
+
     public static void RunAfterPendingCommandStreams(Action work)
     {
         ArgumentNullException.ThrowIfNull(work);

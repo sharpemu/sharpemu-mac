@@ -103,6 +103,8 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
     private SplitSharedState? _state;
     private readonly object _barrierGate = new();
     private readonly ConcurrentDictionary<ulong, WorkerBracket> _brackets = new();
+    // Frame boundaries the ring thread queued, by A's ticket, until A's wait call takes them.
+    private readonly ConcurrentDictionary<ulong, (IdleOutcome Outcome, Func<IdleOutcome>? Wait)> _frameBoundaries = new();
     private SplitGuestMemory? _guestMemory;
     private RemoteGuestAddressSpace? _space;
     private GuestGpuMemory? _memory;
@@ -257,6 +259,20 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
             case GpuRemoteMessage.VideoOptions:
                 _options.ConfigureVideo?.Invoke(SplitConvert.FromWire(GpuSplitWire.Read<VideoOptionsWire>(payload)));
                 break;
+
+            case GpuRemoteMessage.FrameBoundary:
+            {
+                // In ring order, behind the submissions A sent before it; A's wait call collects it.
+                // A session shutting down leaves the whole SubmitDone (its worker teardown) to the call thread.
+                var message = GpuSplitWire.Read<FrameBoundaryMessage>(payload);
+                var space = _space!;
+                Func<IdleOutcome>? wait = () => backend.SubmitDone(space);
+                var outcome = HostSessionControl.IsShutdownRequested
+                    ? IdleOutcome.Completed
+                    : backend.BeginSubmitDone(space, out wait);
+                _frameBoundaries[message.Ticket] = (outcome, wait);
+                break;
+            }
 
             default:
                 Report($"Ignoring split record type {type} ({payload.Length} bytes).");
@@ -438,6 +454,22 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                     }
 
                     var outcome = _backend!.SubmitDone(_space!);
+                    return GpuSplitWire.Write(response, new IdleOutcomeResponse { Outcome = (int)outcome });
+                }
+
+                case GpuRemoteSyncOpcode.WaitFrameBoundary:
+                {
+                    var call = GpuSplitWire.Read<FrameBoundaryWaitRequest>(request);
+                    if (!WaitForRecords(call.Barrier, LongWait) ||
+                        !_frameBoundaries.TryRemove(call.Ticket, out var boundary))
+                    {
+                        status = GpuSplitStatus.Failed;
+                        return 0;
+                    }
+
+                    var outcome = boundary.Outcome == IdleOutcome.Completed && boundary.Wait is { } wait
+                        ? wait()
+                        : boundary.Outcome;
                     return GpuSplitWire.Write(response, new IdleOutcomeResponse { Outcome = (int)outcome });
                 }
 

@@ -10,8 +10,9 @@ public static class GpuRemoteProtocol
 {
     /// <summary>Bumped on any change to the region layout or a message format.</summary>
     /// <remarks>2: the B → A call table, the application block and the split's messages (GpuSplitMessages.cs).
-    /// 3: <see cref="GpuRemoteMessage.TessellationRings"/>.</remarks>
-    public const uint Version = 3;
+    /// 3: <see cref="GpuRemoteMessage.TessellationRings"/>.
+    /// 4: <see cref="GpuRemoteMessage.FrameBoundary"/> and <see cref="GpuRemoteSyncOpcode.WaitFrameBoundary"/>.</remarks>
+    public const uint Version = 4;
 }
 
 /// <summary>Record types on the two rings. 0 is never used; <see cref="SpscRing.PaddingType"/> is reserved.</summary>
@@ -93,6 +94,9 @@ public enum GpuRemoteMessage : uint
 
     /// <summary>A → B: <see cref="TessellationRingsMessage"/>, the guest driver's tessellation memory.</summary>
     TessellationRings = 25,
+
+    /// <summary>A → B: <see cref="FrameBoundaryMessage"/>, the ordering half of a split <c>SubmitDone</c>.</summary>
+    FrameBoundary = 26,
 }
 
 /// <summary>Opcodes of the A → B synchronous call table.</summary>
@@ -127,6 +131,9 @@ public enum GpuRemoteSyncOpcode : uint
 
     /// <summary><see cref="QueryRequest"/> → <see cref="QueryResponse"/>.</summary>
     Query = 10,
+
+    /// <summary><see cref="FrameBoundaryWaitRequest"/> → <see cref="IdleOutcomeResponse"/>: the waiting half of a split <c>SubmitDone</c>.</summary>
+    WaitFrameBoundary = 11,
 }
 
 /// <summary>Opcodes of the B → A synchronous call table: what B's GPU code asks of A's video-out state.</summary>

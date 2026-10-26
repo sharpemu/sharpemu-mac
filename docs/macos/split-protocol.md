@@ -56,6 +56,7 @@ fused program.
 | `HostFrame` | width, height, total, offset + piece | `Submit` of a CPU frame (splash, video), in pieces of 256 KiB written back to back. |
 | `GamepadOutput` | rumble, trigger rumble, adaptive triggers, lightbar | To the pad, which lives with B's window. |
 | `VideoOptions` | window options | Options configured after the start. |
+| `FrameBoundary` | ticket | The ordering half of a split `SubmitDone` (`BeginSubmitDone`): B queues the boundary behind the submissions before it and keeps its wait for `WaitFrameBoundary`. A sends it under its submission gate and waits after releasing it. |
 
 ### A -> B, synchronous (`SyncCalls`)
 
@@ -65,6 +66,7 @@ many, so they come after A's earlier records.
 | Opcode | Request | Response | Semantics |
 |---|---|---|---|
 | `SubmitDone` (barrier) | - | IdleOutcome | B's `SubmitDone`: returns at the frame boundary. With A's session shutdown requested A sends `RequestClose` and answers `Cancelled` itself. |
+| `WaitFrameBoundary` (barrier) | ticket | IdleOutcome | The waiting half of a split `SubmitDone`: runs the wait B kept for the `FrameBoundary` record of that ticket. |
 | `BracketBegin` | kind, barrier (AfterPendingCommandStreams only) | bracket id | `GuestGpuMemory.RunMappingChange` / `Unregister` in A (kind MappingChange: the relay's `TryRunAfterPendingWork`) and `RunAfterPendingCommandStreams` (kind AfterPendingCommandStreams). B parks its GPU worker (`WorkerBracket`: B's own `RunMappingChange` / `RunAfterPendingCommandStreams` hand the worker a park loop); A then runs the work itself, as the GPU queue thread (`RemoteGpuQueueRelay.IsGpuQueueThread`). |
 | `BracketEnd` | bracket id, viewLogSequence | - | B syncs its replica that far on the parked worker and lets it go. |
 | `Fault` | kind, address, size | handled, restoration version | From A's signal handler (`RemoteImageStore.MarkCpuWrite`, allocation-free). B runs its stores' fault path, then waits until A applied every protection B requested so far: the guest retries the access as soon as this answers. Every write fault crosses (the page faulted because B protected it). When no store handled it, B answers its guard's write-restoration version of the page: a watch removed before the fault reached the store. A retries the store once per version when the page is writable (one process's `TryRetryReleasedWrite`, from B's guard). |

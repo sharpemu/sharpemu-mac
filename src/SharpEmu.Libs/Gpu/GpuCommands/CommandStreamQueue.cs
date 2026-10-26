@@ -92,6 +92,10 @@ public sealed class CommandStreamQueue
     private ulong _lastCompletedGpuTick;
     private int _doneCount;
     private int _pendingBoundaries;
+    // Boundaries queued by BeginDone and boundaries the worker finished or dropped; both only grow,
+    // and boundaries retire in queue order, so a ticket's wait is ticket - _boundariesRetired.
+    private long _boundaryTickets;
+    private long _boundariesRetired;
     private IdleOutcome _outcome = IdleOutcome.Completed;
     private Thread? _processingThread;
     private CommandSubmissionPreparation? _activePreparation;
@@ -507,6 +511,16 @@ public sealed class CommandStreamQueue
 
     public IdleOutcome Done()
     {
+        var outcome = BeginDone(out var ticket);
+        return outcome == IdleOutcome.Completed && ticket != 0 ? WaitDone(ticket) : outcome;
+    }
+
+    // The ordering half of Done: marks the graphics pipe done and queues the frame boundary behind
+    // the accepted submissions. A nonzero ticket is the boundary for WaitDone; zero means there is
+    // nothing to wait for (the worker's own call, or a shutdown drain that already ran).
+    public IdleOutcome BeginDone(out long ticket)
+    {
+        ticket = 0;
         if (_processingThread == Thread.CurrentThread)
         {
             lock (_gate)
@@ -539,11 +553,22 @@ public sealed class CommandStreamQueue
             }
 
             _pendingBoundaries++;
+            ticket = ++_boundaryTickets;
             EnqueueLocked(new CommandSubmission(CommandSubmissionKind.FrameBoundary, 0, 0, 0, 0, null));
+            return IdleOutcome.Completed;
+        }
+    }
+
+    // The waiting half of Done: blocks while more than the allowed boundaries up to and including
+    // this ticket's are still ahead of the worker. A boundary queued after it does not extend the wait.
+    public IdleOutcome WaitDone(long ticket)
+    {
+        lock (_gate)
+        {
             var dsSuspend = DsTrace.Gpu && DsTrace.Armed;
-            var dsPending = _pendingBoundaries;
+            var dsPending = ticket - _boundariesRetired;
             var dsStarted = dsSuspend ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
-            while (_outcome == IdleOutcome.Completed && _pendingBoundaries > _boundariesInFlight)
+            while (_outcome == IdleOutcome.Completed && ticket - _boundariesRetired > _boundariesInFlight)
             {
                 WaitLocked(Timeout.Infinite);
             }
@@ -1511,6 +1536,7 @@ public sealed class CommandStreamQueue
                 if (submission!.Kind == CommandSubmissionKind.FrameBoundary)
                 {
                     _pendingBoundaries--;
+                    _boundariesRetired++;
                     _doneCount++;
                 }
 
@@ -1737,6 +1763,7 @@ public sealed class CommandStreamQueue
                         if (dropped.Kind == CommandSubmissionKind.FrameBoundary)
                         {
                             _pendingBoundaries--;
+                            _boundariesRetired++;
                         }
                     }
 
@@ -1968,5 +1995,6 @@ public sealed class CommandStreamQueue
 
         _submissionCount = 0;
         _pendingBoundaries = 0;
+        _boundariesRetired = _boundaryTickets;
     }
 }

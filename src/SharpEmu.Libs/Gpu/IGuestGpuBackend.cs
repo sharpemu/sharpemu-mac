@@ -71,6 +71,15 @@ public interface IGuestGpuBackend
     // Marks the frame boundary; off the worker it first waits for the accepted submissions.
     IdleOutcome SubmitDone(ICpuMemory memory);
 
+    // SubmitDone in two halves. This one orders the frame boundary among the accepted submissions and
+    // runs under the caller's submission gate; the wait it hands back, when not null, is the
+    // boundaries-in-flight back-pressure and runs after the caller has released the gate.
+    IdleOutcome BeginSubmitDone(ICpuMemory memory, out Func<IdleOutcome>? wait)
+    {
+        wait = null;
+        return SubmitDone(memory);
+    }
+
     void RunAfterPendingCommandStreams(Action work)
     {
         work();

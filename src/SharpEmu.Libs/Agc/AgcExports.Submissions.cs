@@ -210,10 +210,13 @@ public static partial class AgcExports
         TraceAgc("agc.suspend_point");
         // The frame boundary: off the worker it waits for every accepted submission first.
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
+        Func<IdleOutcome>? wait = null;
         lock (gpuState.CommandSubmissionGate)
         {
             SplitCrossingStats.Count(SplitCrossing.SubmitDone);
-            var outcome = GuestGpu.Current.SubmitDone(ctx.Memory);
+            var outcome = SplitSubmitDoneWait
+                ? GuestGpu.Current.BeginSubmitDone(ctx.Memory, out wait)
+                : GuestGpu.Current.SubmitDone(ctx.Memory);
             if (outcome != IdleOutcome.Completed)
             {
                 TraceAgc($"agc.suspend_point_incomplete outcome={outcome}");
@@ -230,9 +233,21 @@ public static partial class AgcExports
             capture.IndirectArgsAddress = 0;
         }
 
+        // The boundary and the capture reset are in submit order now; another thread's DCB or ACB
+        // may go in behind them while this one waits for the worker.
+        if (wait is not null && wait() is var waited && waited != IdleOutcome.Completed)
+        {
+            TraceAgc($"agc.suspend_point_incomplete outcome={waited}");
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
+        }
+
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    // SHARPEMU_SUBMIT_DONE_SPLIT=0 holds CommandSubmissionGate through the frame-boundary wait again,
+    // so every other submitter blocks while the guest waits on the worker.
+    internal static bool SplitSubmitDoneWait = Environment.GetEnvironmentVariable("SHARPEMU_SUBMIT_DONE_SPLIT") != "0";
 
     // Synthetic label for an uncatalogued NID (the Unknown* convention); the NID is authoritative.
     #pragma warning disable SHEM006

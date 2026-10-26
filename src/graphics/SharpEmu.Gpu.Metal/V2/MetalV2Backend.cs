@@ -155,6 +155,32 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
         return outcome;
     }
 
+    public IdleOutcome BeginSubmitDone(ICpuMemory memory, out Func<IdleOutcome>? wait)
+    {
+        wait = null;
+        if (HostSessionControl.IsShutdownRequested || !MetalV2Presenter.IsStarted)
+        {
+            return SubmitDone(memory);
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var commandStream = MetalV2Presenter.Host.CommandStream;
+        var outcome = commandStream.BeginDone(out var ticket);
+        if (outcome != IdleOutcome.Completed || ticket == 0)
+        {
+            ReportGuestWait(System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            return outcome;
+        }
+
+        wait = () =>
+        {
+            var waited = commandStream.WaitDone(ticket);
+            ReportGuestWait(System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            return waited;
+        };
+        return outcome;
+    }
+
     private static long _flipSubmissions;
     private static long _flipsRefused;
     private static long _doneCalls;

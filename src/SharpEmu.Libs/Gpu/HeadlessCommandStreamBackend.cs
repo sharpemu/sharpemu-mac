@@ -34,6 +34,13 @@ internal sealed class HeadlessCommandStreamBackend : IGuestGpuBackend
 
     public IdleOutcome SubmitDone(ICpuMemory memory) => _streams(memory).Done();
 
+    // The inline stream runs the boundary on the submitting thread: nothing is left to wait for.
+    public IdleOutcome BeginSubmitDone(ICpuMemory memory, out Func<IdleOutcome>? wait)
+    {
+        wait = null;
+        return SubmitDone(memory);
+    }
+
     public void RunAfterPendingCommandStreams(Action work)
     {
         ArgumentNullException.ThrowIfNull(work);

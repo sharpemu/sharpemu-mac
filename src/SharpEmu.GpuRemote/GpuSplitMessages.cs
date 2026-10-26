@@ -377,6 +377,21 @@ public struct BarrierRequest
 }
 
 [StructLayout(LayoutKind.Sequential)]
+public struct FrameBoundaryMessage
+{
+    /// <summary>A's number for the boundary; the matching <see cref="FrameBoundaryWaitRequest"/> names it.</summary>
+    public ulong Ticket;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct FrameBoundaryWaitRequest
+{
+    /// <summary>Split records A had written once the boundary was on the ring.</summary>
+    public ulong Barrier;
+    public ulong Ticket;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 public struct IdleOutcomeResponse
 {
     /// <summary>The <c>IdleOutcome</c> value.</summary>

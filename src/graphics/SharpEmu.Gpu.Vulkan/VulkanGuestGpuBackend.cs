@@ -69,6 +69,9 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     public IdleOutcome SubmitDone(ICpuMemory memory) =>
         VulkanVideoPresenter.SubmitDone(memory);
 
+    public IdleOutcome BeginSubmitDone(ICpuMemory memory, out Func<IdleOutcome>? wait) =>
+        VulkanVideoPresenter.BeginSubmitDone(memory, out wait);
+
     public void RunAfterPendingCommandStreams(Action work) =>
         VulkanVideoPresenter.RunAfterPendingCommandStreams(work);
 

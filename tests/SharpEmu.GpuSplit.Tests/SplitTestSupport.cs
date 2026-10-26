@@ -269,6 +269,9 @@ internal sealed class RecordingBackend : IGuestGpuBackend
 
     public int SubmissionDelayMilliseconds { get; set; }
 
+    // Holds the waiting half of a split SubmitDone until set.
+    public ManualResetEventSlim BoundaryRelease { get; } = new(true);
+
     public string BackendName => "Recording";
 
     public void EnsureStarted(uint width, uint height) => Calls.Enqueue($"start {width}x{height}");
@@ -314,6 +317,18 @@ internal sealed class RecordingBackend : IGuestGpuBackend
     public IdleOutcome SubmitDone(ICpuMemory memory)
     {
         Calls.Enqueue($"done {Submissions.Count}");
+        return IdleOutcome.Completed;
+    }
+
+    public IdleOutcome BeginSubmitDone(ICpuMemory memory, out Func<IdleOutcome>? wait)
+    {
+        Calls.Enqueue($"boundary {Submissions.Count}");
+        wait = () =>
+        {
+            BoundaryRelease.Wait();
+            Calls.Enqueue("boundary-waited");
+            return IdleOutcome.Completed;
+        };
         return IdleOutcome.Completed;
     }
 

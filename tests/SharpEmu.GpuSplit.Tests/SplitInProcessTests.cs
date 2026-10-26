@@ -161,6 +161,32 @@ public sealed unsafe class SplitInProcessTests
     }
 
     [MacOSFact]
+    public void ASplitFrameBoundaryIsOrderedOnTheRingAndWaitsOutsideIt()
+    {
+        using var split = new InProcessSplit();
+        var backend = split.Session.Backend;
+        backend.SubmitCommandStream(null!, queue: 0, address: 0x1000, dwordCount: 16, submissionId: 1, null);
+        backend.SubmitCommandStream(null!, queue: 0x20, address: 0x2000, dwordCount: 16, submissionId: 2, null);
+        split.Backend.BoundaryRelease.Reset();
+
+        // The ordering half only writes the record; the GPU side queues it behind both submissions.
+        Assert.Equal(IdleOutcome.Completed, backend.BeginSubmitDone(null!, out var wait));
+        Assert.NotNull(wait);
+        var waiter = Task.Run(wait!);
+
+        // A submission sent while the boundary is still waited on reaches the GPU side after it.
+        backend.SubmitCommandStream(null!, queue: 0x20, address: 0x3000, dwordCount: 16, submissionId: 3, null);
+        Wait.Until(() => split.Backend.Submissions.Count == 3, "the submission behind the boundary");
+        Assert.Contains("boundary 2", split.Backend.Calls);
+        Assert.False(waiter.IsCompleted);
+
+        split.Backend.BoundaryRelease.Set();
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(IdleOutcome.Completed, waiter.Result);
+        Assert.Contains("boundary-waited", split.Backend.Calls);
+    }
+
+    [MacOSFact]
     public void ExportFlipsAreAcceptedOrRefusedBack()
     {
         using var split = new InProcessSplit();

@@ -149,6 +149,34 @@ public sealed class RemoteGpuBackend : IGuestGpuBackend
             : IdleOutcome.Failed;
     }
 
+    // The boundary goes on the ring behind the submissions already sent, so a submission another
+    // thread sends after it is ordered after it in the GPU process too. Only the wait is a call.
+    public IdleOutcome BeginSubmitDone(ICpuMemory memory, out Func<IdleOutcome>? wait)
+    {
+        wait = null;
+        if (HostSessionControl.IsShutdownRequested || !_session.IsAlive)
+        {
+            return SubmitDone(memory);
+        }
+
+        var message = new FrameBoundaryMessage { Ticket = (ulong)Interlocked.Increment(ref _frameBoundaryTickets) };
+        if (!_session.Writer.Write(GpuRemoteMessage.FrameBoundary, in message))
+        {
+            return _session.IsAlive ? IdleOutcome.Failed : IdleOutcome.Cancelled;
+        }
+
+        var request = new FrameBoundaryWaitRequest { Barrier = _session.Writer.Written, Ticket = message.Ticket };
+        wait = () =>
+            !_session.IsAlive ? IdleOutcome.Cancelled :
+            _session.Call(GpuRemoteSyncOpcode.WaitFrameBoundary, request,
+                out IdleOutcomeResponse response, SplitGpuSession.LongCallNanoseconds)
+                ? (IdleOutcome)response.Outcome
+                : IdleOutcome.Failed;
+        return IdleOutcome.Completed;
+    }
+
+    private long _frameBoundaryTickets;
+
     public void RunAfterPendingCommandStreams(Action work)
     {
         ArgumentNullException.ThrowIfNull(work);
