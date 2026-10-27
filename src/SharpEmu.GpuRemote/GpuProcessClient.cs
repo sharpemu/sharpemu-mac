@@ -35,7 +35,7 @@ public sealed class GpuProcessClient : IDisposable
 
     private readonly int _parentProcessId;
     private readonly ManualResetEventSlim _parentExited = new(false);
-    private readonly List<Thread> _syncThreads = new();
+    private readonly List<Func<TimeSpan, bool>> _syncThreads = new();
     private volatile bool _stopRequested;
     private int _disposed;
 
@@ -65,6 +65,13 @@ public sealed class GpuProcessClient : IDisposable
 
     /// <summary>Threads serving the A → B call table; read by <see cref="Run"/>.</summary>
     public int SyncThreadCount { get; set; } = 4;
+
+    /// <summary>
+    /// Starts a call thread (name, stack bytes, body) and returns its join; read by <see cref="Run"/>.
+    /// Null starts managed threads. The host sets one that starts them at a QoS class, which this
+    /// assembly cannot reach.
+    /// </summary>
+    public Func<string, int, Action, Func<TimeSpan, bool>>? StartThread { get; set; }
 
     /// <summary>Taken around every write to the B → A ring (see the type remarks).</summary>
     public object OutboundLock { get; } = new();
@@ -145,12 +152,15 @@ public sealed class GpuProcessClient : IDisposable
     {
         for (var index = 0; index < Math.Max(1, SyncThreadCount); index++)
         {
-            var thread = new Thread(ServeSyncCalls, 1024 * 1024)
+            var name = $"SharpEmu GPU host sync calls {index}";
+            if (StartThread is { } start)
             {
-                IsBackground = true,
-                Name = $"SharpEmu GPU host sync calls {index}",
-            };
-            _syncThreads.Add(thread);
+                _syncThreads.Add(start(name, 1024 * 1024, ServeSyncCalls));
+                continue;
+            }
+
+            var thread = new Thread(ServeSyncCalls, 1024 * 1024) { IsBackground = true, Name = name };
+            _syncThreads.Add(thread.Join);
             thread.Start();
         }
 
@@ -167,9 +177,9 @@ public sealed class GpuProcessClient : IDisposable
         {
             _stopRequested = true;
             Channel.SyncCalls.WakeAll();
-            foreach (var thread in _syncThreads)
+            foreach (var join in _syncThreads)
             {
-                _ = thread.Join(TimeSpan.FromSeconds(2));
+                _ = join(TimeSpan.FromSeconds(2));
             }
 
             Service?.Stop();
@@ -192,9 +202,9 @@ public sealed class GpuProcessClient : IDisposable
 
         _stopRequested = true;
         Channel.WakeAll();
-        foreach (var thread in _syncThreads)
+        foreach (var join in _syncThreads)
         {
-            _ = thread.Join(TimeSpan.FromSeconds(2));
+            _ = join(TimeSpan.FromSeconds(2));
         }
 
         Channel.Dispose();

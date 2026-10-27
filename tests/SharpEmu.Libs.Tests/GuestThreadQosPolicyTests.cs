@@ -85,4 +85,29 @@ public sealed class GuestThreadQosPolicyTests
         Assert.Equal("qos-test", name);
         Assert.Equal(0, errno);
     }
+
+    [Fact]
+    public void HelperThreadRunsAtItsClassJoinsAndKnowsItself()
+    {
+        uint actual = 0;
+        var self = false;
+        HostHelperThread? thread = null;
+        var started = new ManualResetEventSlim(false);
+        thread = HostHelperThread.Start("helper-test", 1024 * 1024, () =>
+        {
+            started.Wait();
+            actual = HostThreadQualityOfService.GetCurrentThreadClassForDiagnostics();
+            self = thread!.IsCurrentThread;
+        }, HostThreadQos.UserInitiated);
+        started.Set();
+
+        Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
+        Assert.True(self);
+        Assert.False(thread.IsCurrentThread);
+        if (OperatingSystem.IsMacOS() && HostHelperThread.QosEnabled)
+        {
+            Assert.True(thread.HasQos);
+            Assert.Equal(0x19u, actual);
+        }
+    }
 }

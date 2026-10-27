@@ -216,6 +216,79 @@ public sealed unsafe class GuestViewTableTests
     }
 
     [Fact]
+    public void TranslatorCachesViewsAtAPowerOfTwoStrideAndMissesWithoutAllocating()
+    {
+        // Every view starts a 64 KiB block whose index is a multiple of 64: one slot each, not one between them.
+        const int Views = 48;
+        const ulong Stride = 4UL << 20;
+        using var table = NewTable(capacity: 128);
+        for (var view = 0; view < Views; view++)
+            table.Map(Base + (ulong)view * Stride, Block, (ulong)view * 2 * Block, HostPageProtection.ReadWrite);
+        var translator = new GuestMirrorTranslator(table.Region.Address, table.Region.Size, MirrorBase, MirrorBytes)
+        {
+            CountCacheAccesses = true,
+        };
+
+        // The thread's first translation sets up its thread-static storage: not a miss's cost.
+        _ = new GuestMirrorTranslator(table.Region.Address, table.Region.Size, MirrorBase, MirrorBytes).TryTranslate(Base, 8, out _);
+        // Measure the translator only. xUnit's successful value assertions allocate too;
+        // keep every result check, but run it after the allocation sample.
+        Span<bool> translated = stackalloc bool[Views];
+        Span<ulong> mirrors = stackalloc ulong[Views];
+        var allocated = GC.GetAllocatedBytesForCurrentThread();
+        for (var view = 0; view < Views; view++)
+            translated[view] = translator.TryTranslate(Base + (ulong)view * Stride + 0x40, 8, out mirrors[view]);
+        var translationBytes = GC.GetAllocatedBytesForCurrentThread() - allocated;
+
+        Assert.Equal(0, translationBytes);
+        for (var view = 0; view < Views; view++)
+        {
+            Assert.True(translated[view]);
+            Assert.Equal(MirrorBase + (ulong)view * 2 * Block + 0x40, mirrors[view]);
+        }
+        Assert.Equal(Views, translator.CacheMisses);
+        for (var view = 0; view < Views; view++)
+            Assert.True(translator.TryTranslate(Base + (ulong)view * Stride + 0x80, 8, out _));
+        Assert.Equal(Views, translator.CacheMisses);
+        Assert.Equal(Views, translator.CacheHits);
+    }
+
+    [Fact]
+    public void TranslatorServesTheOtherBlocksOfARangeFromTheThreadsLastRead()
+    {
+        using var table = NewTable();
+        table.Map(Base, 256 * Block, 5 * Block, HostPageProtection.ReadWrite);
+        var translator = new GuestMirrorTranslator(table.Region.Address, table.Region.Size, MirrorBase, MirrorBytes)
+        {
+            CountCacheAccesses = true,
+        };
+
+        for (ulong block = 0; block < 256; block++)
+        {
+            Assert.True(translator.TryTranslate(Base + block * Block + 0x10, 8, out var mirror));
+            Assert.Equal(MirrorBase + (5 + block) * Block + 0x10, mirror);
+        }
+
+        Assert.Equal(1, translator.CacheMisses);
+
+        // Another thread has its own last read, and an unmap retires both it and the slots.
+        long otherMisses = 0;
+        var other = new Thread(() =>
+        {
+            var before = translator.CacheMisses;
+            for (ulong block = 0; block < 256; block++) translator.TryTranslate(Base + block * Block, 8, out _);
+            otherMisses = translator.CacheMisses - before;
+        });
+        other.Start();
+        other.Join();
+        Assert.Equal(0, otherMisses);
+        table.Unmap(Base, Block);
+        Assert.False(translator.TryTranslate(Base, 8, out _));
+        Assert.True(translator.TryTranslate(Base + 7 * Block, 8, out var moved));
+        Assert.Equal(MirrorBase + 12 * Block, moved);
+    }
+
+    [Fact]
     public void TranslatorStopsAtTheMirrorAndRefusesARegionWithoutATable()
     {
         using var table = NewTable();

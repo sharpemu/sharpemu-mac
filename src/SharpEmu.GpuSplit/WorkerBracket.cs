@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
+
 namespace SharpEmu.GpuSplit;
 
 /// <summary>
@@ -44,7 +46,7 @@ internal sealed class WorkerBracket
     /// </summary>
     public void Start(Action<Action> runParked)
     {
-        new Thread(() =>
+        BracketRunner.Run(release =>
         {
             try
             {
@@ -63,13 +65,11 @@ internal sealed class WorkerBracket
                 }
 
                 _parked.Set();
+                // Idle before the end is seen: the guest's next bracket finds this thread.
+                release();
                 _finished.Set();
             }
-        })
-        {
-            IsBackground = true,
-            Name = $"SharpEmu GPU split bracket {Id}",
-        }.Start();
+        });
     }
 
     /// <summary>Waits until the worker is parked (or the bracket ended without it).</summary>
@@ -190,6 +190,73 @@ internal sealed class WorkerBracket
             if (leave)
             {
                 return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The threads that hand brackets to the worker and block there, parked between brackets: a
+    /// mapping change is two calls and a replica sync, and a thread made for each one added its
+    /// creation and first wake to all three. One that is busy is never taken, so brackets that
+    /// overlap still each have a thread, as before.
+    /// </summary>
+    internal sealed class BracketRunner
+    {
+        private static readonly ConcurrentStack<BracketRunner> Idle = new();
+        private static int _created;
+
+        private readonly SemaphoreSlim _go = new(0);
+        private readonly Action _release;
+        private Action<Action>? _work;
+        private bool _released;
+
+        private BracketRunner() => _release = Release;
+
+        /// <summary>Runner threads made so far (diagnostics and tests).</summary>
+        internal static int Created => Volatile.Read(ref _created);
+
+        /// <summary>
+        /// Runs <paramref name="work"/> on an idle runner, or on a new one when none is idle. The
+        /// work calls the action it gets once it no longer needs the thread (the runner is idle
+        /// from then on); one that returns without calling it is released on return.
+        /// </summary>
+        public static void Run(Action<Action> work)
+        {
+            if (!Idle.TryPop(out var runner))
+            {
+                runner = new BracketRunner();
+                var index = Interlocked.Increment(ref _created);
+                runner._work = work;
+                runner._go.Release();
+                _ = SharpEmu.HLE.Host.HostHelperThread.Start($"SharpEmu GPU split bracket {index}", 1024 * 1024, runner.Loop);
+                return;
+            }
+
+            // Taken off the stack: nothing else hands this runner work until it releases itself.
+            runner._work = work;
+            runner._go.Release();
+        }
+
+        private void Release()
+        {
+            if (!_released)
+            {
+                _released = true;
+                Idle.Push(this);
+            }
+        }
+
+        // Start's work catches its own exceptions.
+        private void Loop()
+        {
+            while (true)
+            {
+                _go.Wait();
+                var work = _work!;
+                _work = null;
+                _released = false;
+                work(_release);
+                Release();
             }
         }
     }
