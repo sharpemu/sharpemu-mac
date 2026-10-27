@@ -25,6 +25,12 @@ public static class GpuFatal
     public sealed class AbandonedWorkException(string message) : Exception(message);
 
     /// <summary>
+    /// Whether this thread is doing work ahead of need (<see cref="ThrowOnFatal"/>): a backend
+    /// may abandon it rather than block, for example rather than wait for the GPU.
+    /// </summary>
+    public static bool IsSpeculative => ThrowOnFatal;
+
+    /// <summary>
     /// Runs work done ahead of need on any thread with <see cref="ThrowOnFatal"/> set: a fatal
     /// condition inside it abandons the work instead of ending the process, and whoever needs the
     /// result does the work itself and fails on it if it is real.

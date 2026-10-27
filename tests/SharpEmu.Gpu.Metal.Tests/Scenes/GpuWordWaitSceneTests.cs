@@ -34,6 +34,8 @@ public sealed class GpuWordWaitSceneTests(ITestOutputHelper output) : SceneTestB
         if (rig is null) return;
         var host = rig.Host;
         Assert.True(host.WriteFences, "write fences are on by default");
+        // The learned fences: an eager one would answer the first read too (GpuWordNoWaitSceneTests).
+        host.EagerWriteFences = false;
         var word = rig.Memory.Allocate(Words * 4, 256);
         // Apart, so the two submissions' write ranges stay two records rather than merging into one.
         var later = rig.Memory.Allocate(Words * 4 * LaterGroups, 0x10000);
