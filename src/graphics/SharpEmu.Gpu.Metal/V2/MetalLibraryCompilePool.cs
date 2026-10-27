@@ -72,11 +72,8 @@ internal sealed class MetalLibraryCompilePool
     {
         for (var index = 0; index < threads; index++)
         {
-            new Thread(Run)
-            {
-                IsBackground = true,
-                Name = $"SharpEmu Metal v2 library compile {index}",
-            }.Start();
+            // The frame waits for these: below the worker, above the background prewarm.
+            MetalCompileThread.Start($"SharpEmu Metal v2 library compile {index}", SharpEmu.HLE.Host.HostThreadQos.UserInitiated, Run);
         }
     }
 

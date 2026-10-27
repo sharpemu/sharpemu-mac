@@ -184,15 +184,28 @@ internal static class MetalShaderPrewarm
     private static bool _graphicsRan;
     private static ConcurrentDictionary<string, byte>? _prewarmedShaderIdentities;
     private static ConcurrentDictionary<string, byte>? _runtimeComputeIdentities;
-    private static Thread[] _threads = [];
+    private static MetalCompileThread[] _threads = [];
     private static volatile bool _stopping;
     private static volatile bool _finished;
     private static int _compiled;
     private static int _failed;
     private static int _runtimeHits;
     private static int _deduplicated;
+    private static int _archived;
+
+    // SHARPEMU_SHADER_PREWARM_SKIP_ARCHIVED=0 compiles the computes the binary archive holds too.
+    private static readonly bool SkipsArchived =
+        Environment.GetEnvironmentVariable("SHARPEMU_SHADER_PREWARM_SKIP_ARCHIVED") != "0";
     private static readonly ConcurrentQueue<ulong> _completed = new();
     private static readonly ConcurrentDictionary<string, ManualResetEventSlim> _inFlight = new(StringComparer.Ordinal);
+
+    // Set on a prewarm thread once it compiles at Utility (the computes the guest is not held
+    // for): a runtime compile does not wait for one of its compiles, which a busy machine may
+    // leave behind every thread above it (WaitWhileCompiling).
+    [ThreadStatic]
+    private static bool _onUtilityThread;
+
+    private static readonly ConcurrentDictionary<ManualResetEventSlim, byte> _utilityCompiles = new();
 
     /// <summary>
     /// Compiles in flight at once. The MSL front end runs in the driver's compiler service
@@ -227,7 +240,7 @@ internal static class MetalShaderPrewarm
 
         TranslateAsTheGameDoes();
         Gate.Begin();
-        new Thread(() =>
+        MetalCompileThread.Start("SharpEmu Metal v2 shader prewarm", SharpEmu.HLE.Host.HostThreadQos.UserInitiated, () =>
         {
             try
             {
@@ -244,11 +257,7 @@ internal static class MetalShaderPrewarm
                     Gate.SetRunning(false);
                 }
             }
-        })
-        {
-            IsBackground = true,
-            Name = "SharpEmu Metal v2 shader prewarm",
-        }.Start();
+        });
     }
 
     /// <summary>
@@ -333,11 +342,18 @@ internal static class MetalShaderPrewarm
             MetalLibraryPrewarm.Begin();
         }
 
-        var threads = new Thread[workerCount];
+        var threads = new MetalCompileThread[workerCount];
         for (var index = 0; index < workerCount; index++)
         {
-            threads[index] = new Thread(() =>
+            // UserInitiated while the guest is held for these compiles: the driver's compiler
+            // service runs a request at the requester's class, and from below-normal threads
+            // each compile took about a fifth longer even on an idle machine
+            // (ShaderCompileBench, 200 cold Demon's Souls computes) and fell far behind under
+            // load from other processes. The computes the guest is not held for compile at
+            // Utility (see the loop below).
+            threads[index] = MetalCompileThread.Create($"SharpEmu shader prewarm {index}", SharpEmu.HLE.Host.HostThreadQos.UserInitiated, () =>
             {
+                var lowered = false;
                 while (!_stopping && work.TryDequeue(out var item))
                 {
                     if (item.Graphics is { } graphicsItem)
@@ -351,9 +367,11 @@ internal static class MetalShaderPrewarm
                         if (!item.Held)
                         {
                             // The guest runs again: what is left compiles behind its threads.
-                            if (Thread.CurrentThread.Priority != ThreadPriority.BelowNormal)
+                            if (!lowered)
                             {
+                                lowered = true;
                                 Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                                _onUtilityThread = MetalCompileThread.ApplyToCurrent(SharpEmu.HLE.Host.HostThreadQos.Utility);
                             }
 
                             YieldToTheGame();
@@ -391,17 +409,7 @@ internal static class MetalShaderPrewarm
                 {
                     Finish(list, stamp, started);
                 }
-            })
-            {
-                // Normal priority while the guest is held for these compiles: the driver's
-                // compiler service runs a request at the requester's priority, and from
-                // below-normal threads each compile took about a fifth longer even on an idle
-                // machine (ShaderCompileBench, 200 cold Demon's Souls computes) and fell far
-                // behind under load from other processes. The computes the guest is not
-                // held for compile below normal (see the loop above).
-                IsBackground = true,
-                Name = $"SharpEmu shader prewarm {index}",
-            };
+            });
         }
 
         Volatile.Write(ref _threads, threads);
@@ -674,7 +682,8 @@ internal static class MetalShaderPrewarm
             return;
         }
 
-        if (_inFlight.TryGetValue(Identity(shader), out var compiling) && !compiling.IsSet)
+        if (_inFlight.TryGetValue(Identity(shader), out var compiling) && !compiling.IsSet &&
+            !_utilityCompiles.ContainsKey(compiling))
         {
             var started = Stopwatch.GetTimestamp();
             compiling.Wait();
@@ -752,6 +761,19 @@ internal static class MetalShaderPrewarm
             return;
         }
 
+        // The title's binary archive holds this compute's library and its pipeline's binary
+        // (MetalBinaryArchive): the dispatch opens both from there and asks the driver for
+        // neither, so compiling them again here would only fill the driver's own cache, at
+        // the cost of a front end and a back end per program (a second start of a title
+        // compiled every recorded compute once more, behind the guest's first frame for the
+        // held ones). The translation above still ran: its source names the file.
+        if (SkipsArchived && MetalBinaryArchive.For(device) is { } archive &&
+            archive.IsStored(MetalBinaryArchive.LibraryKey(metal.Shader.Source, metal.Shader.UsesPerVertexInputs)))
+        {
+            Interlocked.Increment(ref _archived);
+            return;
+        }
+
         // Waits while the game compiles (MetalCompileScheduler), and holds a prewarm slot
         // until this compile is done.
         using var prewarm = MetalCompileScheduler.Shared.EnterPrewarm(static () => _stopping);
@@ -770,6 +792,11 @@ internal static class MetalShaderPrewarm
 
         // Not disposed: a dispatch may still be waking from it.
         var compiling = new ManualResetEventSlim(false);
+        if (_onUtilityThread)
+        {
+            _utilityCompiles[compiling] = 0;
+        }
+
         _inFlight[identity] = compiling;
         try
         {
@@ -778,6 +805,7 @@ internal static class MetalShaderPrewarm
         finally
         {
             _inFlight.TryRemove(identity, out _);
+            _utilityCompiles.TryRemove(compiling, out _);
             compiling.Set();
         }
     }
@@ -865,6 +893,7 @@ internal static class MetalShaderPrewarm
         var summary =
             $"[LOADER][INFO] Shader prewarm done: compiled={Volatile.Read(ref _compiled)} " +
             $"failed={Volatile.Read(ref _failed)} same_source={Volatile.Read(ref _deduplicated)} " +
+            $"archived={Volatile.Read(ref _archived)} " +
             $"runtime_first={Volatile.Read(ref _runtimeFirst)} " +
             $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
             $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
@@ -921,7 +950,7 @@ internal static class MetalShaderPrewarm
         MetalDeviceDataLoadsStore.Stop();
         foreach (var thread in Volatile.Read(ref _threads))
         {
-            if (thread != Thread.CurrentThread)
+            if (!thread.IsCurrentThread)
             {
                 thread.Join(TimeSpan.FromSeconds(10));
             }

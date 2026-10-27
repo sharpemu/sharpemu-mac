@@ -92,7 +92,7 @@ internal static class MetalStaticPrecompile
     private static StaticShaderPlanner? _planner;
     private static FileStream? _doneFile;
     private static List<StaticShaderJob> _plan = [];
-    private static Thread[] _threads = [];
+    private static MetalCompileThread[] _threads = [];
     private static int _next = -1;
     private static bool _started;
     private static volatile bool _stopping;
@@ -157,23 +157,22 @@ internal static class MetalStaticPrecompile
             _started = true;
         }
 
-        new Thread(() =>
-        {
-            try
+        // Utility unless the guest is held until it completes (MetalCompileThread).
+        MetalCompileThread.Start(
+            "SharpEmu static shader precompile",
+            Precompile.HoldsUntilComplete ? SharpEmu.HLE.Host.HostThreadQos.UserInitiated : SharpEmu.HLE.Host.HostThreadQos.Utility,
+            () =>
             {
-                Run(device, metalDirectory, stamp, compiler);
-            }
-            catch (Exception exception)
-            {
-                Console.Error.WriteLine($"[LOADER][WARN] Shader precompile (static) stopped: {exception.Message}");
-                _finished.Set();
-            }
-        })
-        {
-            IsBackground = true,
-            Priority = Precompile.HoldsUntilComplete ? ThreadPriority.Normal : ThreadPriority.BelowNormal,
-            Name = "SharpEmu static shader precompile",
-        }.Start();
+                try
+                {
+                    Run(device, metalDirectory, stamp, compiler);
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine($"[LOADER][WARN] Shader precompile (static) stopped: {exception.Message}");
+                    _finished.Set();
+                }
+            });
     }
 
     /// <summary>
@@ -224,7 +223,7 @@ internal static class MetalStaticPrecompile
         _scanCancel.Cancel();
         foreach (var thread in Volatile.Read(ref _threads))
         {
-            if (thread != Thread.CurrentThread)
+            if (!thread.IsCurrentThread)
             {
                 thread.Join(TimeSpan.FromSeconds(10));
             }
@@ -297,28 +296,26 @@ internal static class MetalStaticPrecompile
         var jobs = hold ? MetalShaderPrewarm.WorkerCount : ReadInt(JobsVariable, DefaultJobs, 1, 16);
         // The workers take the created programs while the scan runs; the plan follows it.
         var remaining = jobs;
-        var threads = new Thread[jobs];
+        var threads = new MetalCompileThread[jobs];
         for (var index = 0; index < jobs; index++)
         {
-            threads[index] = new Thread(() =>
-            {
-                try
+            threads[index] = MetalCompileThread.Create(
+                $"SharpEmu static shader precompile {index}",
+                hold ? SharpEmu.HLE.Host.HostThreadQos.UserInitiated : SharpEmu.HLE.Host.HostThreadQos.Utility,
+                () =>
                 {
-                    Work(planner, archive, device, compiler, hold);
-                }
-                finally
-                {
-                    if (Interlocked.Decrement(ref remaining) == 0)
+                    try
                     {
-                        Finish(archive);
+                        Work(planner, archive, device, compiler, hold);
                     }
-                }
-            })
-            {
-                IsBackground = true,
-                Priority = hold ? ThreadPriority.Normal : ThreadPriority.BelowNormal,
-                Name = $"SharpEmu static shader precompile {index}",
-            };
+                    finally
+                    {
+                        if (Interlocked.Decrement(ref remaining) == 0)
+                        {
+                            Finish(archive);
+                        }
+                    }
+                });
         }
 
         Volatile.Write(ref _threads, threads);

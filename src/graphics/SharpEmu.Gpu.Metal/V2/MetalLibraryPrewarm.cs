@@ -93,8 +93,8 @@ internal static class MetalLibraryPrewarm
     private static ConcurrentDictionary<ulong, Slot>? _slots;
     private static ConcurrentDictionary<ulong, byte>? _written;
     private static BlockingCollection<(byte Kind, ulong Key, bool UsesPerVertexInputs, string? Source)>? _writes;
-    private static Thread? _writer;
-    private static Thread[] _threads = [];
+    private static MetalCompileThread? _writer;
+    private static MetalCompileThread[] _threads = [];
     private static List<Slot> _order = [];
     private static nint _device;
     private static volatile bool _stopping;
@@ -204,12 +204,8 @@ internal static class MetalLibraryPrewarm
             }
 
             var writes = new BlockingCollection<(byte, ulong, bool, string?)>();
-            var writer = new Thread(() => WriteLoop(path, writes))
-            {
-                IsBackground = true,
-                Priority = ThreadPriority.BelowNormal,
-                Name = "SharpEmu Metal v2 library list",
-            };
+            var writer = MetalCompileThread.Create(
+                "SharpEmu Metal v2 library list", SharpEmu.HLE.Host.HostThreadQos.Utility, () => WriteLoop(path, writes));
             lock (_sync)
             {
                 _stopping = false;
@@ -262,10 +258,13 @@ internal static class MetalLibraryPrewarm
         _running = true;
         var started = Stopwatch.GetTimestamp();
         Console.Error.WriteLine($"[LOADER][INFO] Library prewarm started: libraries={order.Count} workers={workerCount}");
-        var threads = new Thread[workerCount];
+        var threads = new MetalCompileThread[workerCount];
         for (var index = 0; index < workerCount; index++)
         {
-            threads[index] = new Thread(() =>
+            // UserInitiated, as the compute prewarm's while it holds the guest: a library the
+            // game takes from here waits for it, and the compiler service runs the request at
+            // this thread's class.
+            threads[index] = MetalCompileThread.Create($"SharpEmu library prewarm {index}", SharpEmu.HLE.Host.HostThreadQos.UserInitiated, () =>
             {
                 while (!_stopping && work.TryDequeue(out var slot))
                 {
@@ -282,14 +281,7 @@ internal static class MetalLibraryPrewarm
                         $"claimed={Volatile.Read(ref _claimed)} ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
                         $"library_avg_ms={(compiled == 0 ? 0 : TicksToMs(Interlocked.Read(ref _compileTicks)) / compiled):F1}"));
                 }
-            })
-            {
-                // Normal priority, as the compute prewarm's: a library the game takes from
-                // here waits for it, and the compiler service runs the request at this
-                // thread's priority.
-                IsBackground = true,
-                Name = $"SharpEmu library prewarm {index}",
-            };
+            });
         }
 
         lock (_sync)
@@ -345,7 +337,8 @@ internal static class MetalLibraryPrewarm
         }
 
         var threads = Enumerable.Range(0, Math.Max(0, MetalShaderPrewarm.WorkerCount - 1))
-            .Select(index => new Thread(drain) { IsBackground = true, Name = $"SharpEmu library precompile {index}" })
+            .Select(index => MetalCompileThread.Create(
+                $"SharpEmu library precompile {index}", SharpEmu.HLE.Host.HostThreadQos.UserInitiated, drain))
             .ToArray();
         foreach (var thread in threads)
         {
@@ -597,8 +590,8 @@ internal static class MetalLibraryPrewarm
     /// <summary>Stops the workers, closes the list and releases the libraries nobody took.</summary>
     public static void Stop()
     {
-        Thread[] threads;
-        Thread? writer;
+        MetalCompileThread[] threads;
+        MetalCompileThread? writer;
         BlockingCollection<(byte, ulong, bool, string?)>? writes;
         ConcurrentDictionary<ulong, Slot>? slots;
         lock (_sync)
@@ -622,7 +615,7 @@ internal static class MetalLibraryPrewarm
         Console.Error.WriteLine(Summary("Library prewarm session"));
         foreach (var thread in threads)
         {
-            if (thread != Thread.CurrentThread)
+            if (!thread.IsCurrentThread)
             {
                 thread.Join(TimeSpan.FromSeconds(10));
             }
