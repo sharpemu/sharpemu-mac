@@ -10,6 +10,50 @@ namespace SharpEmu.Libs.Tests.Pad;
 public sealed class HostWindowInputTests
 {
     [Fact]
+    public void WaitForChangeReturnsAtOnceWhenTheVersionAlreadyMoved()
+    {
+        var seen = HostWindowInput.Version;
+        HostWindowInput.SetKey(0x41, true);
+        try
+        {
+            Assert.True(HostWindowInput.WaitForChange(seen, TimeSpan.FromSeconds(30)));
+        }
+        finally
+        {
+            HostWindowInput.SetKey(0x41, false);
+        }
+    }
+
+    [Fact]
+    public void WaitForChangeTimesOutWithoutAChangeAndWakesOnOne()
+    {
+        var seen = HostWindowInput.Version;
+        Assert.False(HostWindowInput.WaitForChange(seen, TimeSpan.FromMilliseconds(20)));
+
+        using var waiting = new ManualResetEventSlim();
+        var woke = false;
+        var thread = new Thread(() =>
+        {
+            waiting.Set();
+            woke = HostWindowInput.WaitForChange(seen, TimeSpan.FromSeconds(30));
+        });
+        thread.Start();
+        Assert.True(waiting.Wait(TimeSpan.FromSeconds(10)));
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        HostWindowInput.SetKey(0x42, true);
+        try
+        {
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
+            Assert.True(woke);
+            Assert.True(started.Elapsed < TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            HostWindowInput.SetKey(0x42, false);
+        }
+    }
+
+    [Fact]
     public void ConnectPublishesWindowKeyboardState()
     {
         HostWindowInput.Connect();

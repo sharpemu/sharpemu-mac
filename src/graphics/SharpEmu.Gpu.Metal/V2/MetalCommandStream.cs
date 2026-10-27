@@ -716,7 +716,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var copy = new DeferredLabelCopy(
             staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, bytes, write.Destination);
         var serial = EncodeOrderedCopy(in copy, write.Destination,
-            GpuClobberDiagnostics.Enabled ? GpuClobberDiagnostics.LandedKind(write.Kind) : null,
+            CommandProcessorWriteHistory.Enabled ? GpuClobberDiagnostics.LandedKind(write.Kind) : null,
             bytes == sizeof(uint) ? (uint)write.Value : write.Value,
             MetalGpuWriteOrigin.EndOfPipeLabel, "eop label", null, (ulong)bytes);
         Interlocked.Increment(ref _gpuTimedLabels);
@@ -879,9 +879,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             });
         }
 
-        if (landedKind is not null)
+        if (landedKind is not null && CommandProcessorWriteHistory.Enabled)
         {
-            // SHARPEMU_GPU_CLOBBER_DIAG: the bytes are in guest memory once this serial completes.
+            // SHARPEMU_GPU_CLOBBER_DIAG / SHARPEMU_CP_HISTORY: the bytes are in guest memory once this serial completes.
             var bytes = copies[0].Bytes;
             _completions.Enqueue(serial, () => CommandProcessorWriteHistory.Record(
                 -1, guestAddress, bytes, landedValue, landedKind, deferred: true));
@@ -947,7 +947,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         Interlocked.Increment(ref _hostCommandProcessorWrites);
         var bytes = source.ToArray();
-        var landedKind = GpuClobberDiagnostics.Enabled ? "landed:" + kind : null;
+        var landedKind = CommandProcessorWriteHistory.Enabled ? "landed:" + kind : null;
         var lazy = RidesNextCommit(clock: false);
         Interlocked.Increment(ref _owedHostLabels);
         QueueCompletion(() =>
@@ -961,7 +961,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 }
 
                 _imageCache.InvalidateMemory(address, (ulong)bytes.Length);
-                if (landedKind is not null)
+                if (landedKind is not null && CommandProcessorWriteHistory.Enabled)
                 {
                     CommandProcessorWriteHistory.Record(-1, address, bytes.Length, FirstValue(bytes), landedKind, deferred: true);
                 }
@@ -1005,8 +1005,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         source.CopyTo(payload);
         var copy = new DeferredLabelCopy(
             staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length, address);
-        var serial = EncodeOrderedCopy(in copy, address, GpuClobberDiagnostics.Enabled ? "landed:" + kind : null,
-            FirstValue(source), MetalGpuWriteOrigin.Copy, "cp write", kind, size);
+        var recordHistory = CommandProcessorWriteHistory.Enabled;
+        var serial = EncodeOrderedCopy(in copy, address, recordHistory ? "landed:" + kind : null,
+            recordHistory ? FirstValue(source) : 0, MetalGpuWriteOrigin.Copy, "cp write", kind, size);
 
         // Parse-time readers see the bytes as written until they land (MetalPendingWriteOverlay).
         using var bookkeepingScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
@@ -1699,7 +1700,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 $"address=0x{write.Destination:X16} bytes={bytes}.");
         }
 
-        if (GpuClobberDiagnostics.Enabled)
+        if (CommandProcessorWriteHistory.Enabled)
         {
             CommandProcessorWriteHistory.Record(-1, write.Destination, bytes,
                 bytes == sizeof(uint) ? (uint)write.Value : write.Value, GpuClobberDiagnostics.LandedKind(write.Kind), deferred: true);
@@ -2253,8 +2254,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             serial,
             VideoOutBackendServices.IsHdrPixelFormat(displayBuffer.PixelFormat));
         VideoOutBackendServices.TraceGpuFlip(
-            _memory, handle, index, flipMode, flipArg, displayBuffer.Address,
-            VideoOutBackendServices.GetFlipEventCount(requestId));
+            _memory, handle, index, flipMode, flipArg, displayBuffer.Address, requestId);
         // The shared phase profile measures the whole draw translation path, which v2
         // runs on this thread exactly as the Vulkan render loop does on its own. A
         // flip is this host's frame boundary, so SHARPEMU_PROFILE_RENDER=1 reports the

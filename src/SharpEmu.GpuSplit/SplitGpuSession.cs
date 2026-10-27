@@ -560,6 +560,9 @@ public sealed class SplitGpuSession : IDisposable
                         Result = result,
                         RequestId = requestId,
                         HdrRequested = _guest.IsHdrOutputRequested ? 1u : 0u,
+                        Buffer = result == 0 && _guest.TryGetDisplayBufferInfo(call.Handle, call.BufferIndex, out var info)
+                            ? SplitConvert.ToWire(info)
+                            : default,
                     });
                 }
 
