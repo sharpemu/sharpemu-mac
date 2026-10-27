@@ -154,6 +154,25 @@ internal static class MetalV2Diagnostics
     public static readonly bool DeferFragmentWritePassEnd =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_FRAGMENT_WRITE_PASS_END"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_SKIP_SERIAL_COMPUTE_BARRIERS=0 records a memory barrier on the open
+    // compute encoder again for every barrier the executor asks for (two per dispatch). The
+    // encoder is serial, and Metal documents a barrier there as "allowed, but ignored"
+    // (MTLComputeCommandEncoder.h, memoryBarrierWithScope:): each dispatch completes, its
+    // stores visible, before the next starts, for untracked buffers as for tracked textures.
+    // Perf-audit bench 8b1/8b2: 2,700 dependent dispatches on untracked buffers read back
+    // right without the barriers and take the same GPU time with them.
+    public static readonly bool SkipSerialComputeBarriers =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SKIP_SERIAL_COMPUTE_BARRIERS"), "0", StringComparison.Ordinal);
+
+    // SHARPEMU_METAL_V2_ELIDE_GLOBAL_BARRIERS=0 records the guest acquire or release barrier in
+    // an open render pass every time, as it did before. The executor already orders a draw's
+    // buffer stores from the vertex stage with a barrier right after the draw, and ends the pass
+    // over fragment stores before their consumer; attachments are ordered per fragment in draw
+    // order. So the barrier is recorded only while the pass holds stores nothing ordered yet
+    // (deferred fragment stores, or vertex stores through a device address or storage image).
+    public static readonly bool ElideGlobalBarriers =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ELIDE_GLOBAL_BARRIERS"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_KERNEL_FILLS=0 runs a title's own compute memset or memcpy over the
     // exact bytes of a cached image as the dispatch it is, with the writeback before it
     // and the upload after it, instead of as a clear or texture copy of the image

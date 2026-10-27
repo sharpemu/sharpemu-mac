@@ -294,7 +294,7 @@ internal sealed class MetalCompletionQueue : IDisposable
     /// <summary>When the completion thread last saw the event reach a new value.</summary>
     public long LastSignalObservedTimestamp => Interlocked.Read(ref _lastSignalObserved);
 
-    /// <summary>How many completions are still waiting for their submission.</summary>
+    /// <summary>How many completions are queued or executing their host work.</summary>
     public int PendingCount
     {
         get
@@ -371,7 +371,7 @@ internal sealed class MetalCompletionQueue : IDisposable
         var signalled = System.Diagnostics.Stopwatch.GetTimestamp();
         lock (_gate)
         {
-            while (_drainedSerial < serial && !_stopping && HasWorkAtOrBefore(serial))
+            while (!_stopping && HasWorkAtOrBefore(serial))
             {
                 Monitor.Wait(_gate, 2);
             }
@@ -622,9 +622,9 @@ internal sealed class MetalCompletionQueue : IDisposable
         {
             Action? work = null;
             ulong serial = 0;
+            var index = -1;
             lock (_gate)
             {
-                var index = -1;
                 var best = ulong.MaxValue;
                 for (var candidate = 0; candidate < _pending.Count; candidate++)
                 {
@@ -638,7 +638,9 @@ internal sealed class MetalCompletionQueue : IDisposable
                 if (index >= 0)
                 {
                     (serial, work) = _pending[index];
-                    _pending.RemoveAt(index);
+                    // Keep it visible to PendingCount and WaitFor until its label writes,
+                    // interrupts and other host work finish. Only this thread removes entries;
+                    // concurrent enqueues append, so the index stays valid during the action.
                 }
                 else
                 {
@@ -664,6 +666,7 @@ internal sealed class MetalCompletionQueue : IDisposable
 
             lock (_gate)
             {
+                _pending.RemoveAt(index);
                 if (serial > _drainedSerial)
                 {
                     _drainedSerial = serial;

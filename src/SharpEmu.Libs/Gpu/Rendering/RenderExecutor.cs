@@ -95,6 +95,20 @@ public sealed partial class RenderExecutor
     private bool _fragmentWritesPending;
     private long _fragmentWritesPass;
 
+    // A draw stored to memory from its vertex stage through a device address or a storage image,
+    // which no barrier after the draw orders, in the pass with this serial.
+    private bool _vertexStoresUnordered;
+    private long _vertexStoresPass;
+
+    /// <summary>
+    /// Whether the open render pass holds shader stores no barrier has ordered yet: fragment stores
+    /// whose pass end is deferred, or vertex stores the draw's own barrier does not cover. A guest
+    /// cache flush or invalidate in the pass has nothing else to make visible to later draws.
+    /// </summary>
+    public bool HasUnorderedStoresInOpenPass =>
+        (_fragmentWritesPending && _host.RenderPassSerial == _fragmentWritesPass) ||
+        (_vertexStoresUnordered && _host.RenderPassSerial == _vertexStoresPass);
+
     // The buffer ranges those deferred stores may have written, or untracked when one of the
     // storing draws wrote through a device address or a storage image.
     private readonly List<(ulong Start, ulong End)> _fragmentWriteRanges = new();

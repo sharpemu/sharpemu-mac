@@ -754,6 +754,11 @@ public sealed partial class RenderExecutor
         {
             writeStages |= meshInput is null ? GpuPipelineStage.VertexShaderBit : GpuPipelineStage.MeshShaderBitExt;
         }
+        else if (vertexProgram.WritesDeviceAddresses || WritesStorageImage(vertexProgram))
+        {
+            _vertexStoresUnordered = true;
+            _vertexStoresPass = _host.RenderPassSerial;
+        }
 
         if (state.PixelActive && DrawWritesMemory(pixelInput.Stage))
         {

@@ -647,6 +647,9 @@ public static partial class AgcExports
             _executor?.ReleaseShaderWrites();
         }
 
+        /// <summary>See <see cref="RenderExecutor.HasUnorderedStoresInOpenPass"/>; read where the draws run.</summary>
+        public bool HasUnorderedStoresInOpenPass => _executor?.HasUnorderedStoresInOpenPass ?? true;
+
         public void Dispatch(ulong submitId, uint endX, uint endY, uint endZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
         {
             var state = RequireCurrent();

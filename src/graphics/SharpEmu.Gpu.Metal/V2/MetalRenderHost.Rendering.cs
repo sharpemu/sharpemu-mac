@@ -2353,9 +2353,9 @@ internal sealed partial class MetalRenderHost
 
     private void RecordMemoryBarrier() => RecordMemoryBarrier(Mtl.RenderStageVertex | Mtl.RenderStageFragment);
 
-    private void RecordMemoryBarrier(nuint afterStages)
+    private void RecordMemoryBarrier(nuint afterStages,
+        nuint scope = Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures | Mtl.BarrierScopeRenderTargets)
     {
-        const nuint scope = Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures | Mtl.BarrierScopeRenderTargets;
         if (_renderEncoder != 0)
         {
             MetalV2Native.SendMemoryBarrierStages(
@@ -2367,7 +2367,9 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        if (_computeEncoder != 0)
+        // Every compute encoder this host opens is serial, where Metal ignores the barrier
+        // (MetalV2Diagnostics.SkipSerialComputeBarriers).
+        if (_computeEncoder != 0 && !MetalV2Diagnostics.SkipSerialComputeBarriers)
         {
             // A compute encoder has no render targets to order against, and Metal
             // rejects a scope that names them: validation fails the assertion rather
@@ -2401,9 +2403,33 @@ internal sealed partial class MetalRenderHost
     }
 
     private Action? _emitOrderedGlobalBarrier;
+    private long _globalBarriersRecorded;
+    private long _globalBarriersElided;
+
+    /// <summary>Guest barriers recorded and elided in an open render pass, for tests.</summary>
+    internal (long Recorded, long Elided) GlobalBarrierCounts => (_globalBarriersRecorded, _globalBarriersElided);
 
     private void EmitOrderedGlobalBarrier()
     {
+        if (_renderEncoder != 0 && MetalV2Diagnostics.ElideGlobalBarriers)
+        {
+            // What the guest's flush or invalidate must make visible to later work in this pass
+            // is shader stores; the executor has ordered every one but those it reports here.
+            // Attachments need no barrier: their loads and stores run in draw order per fragment.
+            if (_translation is not { HasUnorderedStoresInOpenPass: false })
+            {
+                RecordMemoryBarrier(Mtl.RenderStageVertex | Mtl.RenderStageFragment,
+                    Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+                _globalBarriersRecorded++;
+            }
+            else
+            {
+                _globalBarriersElided++;
+            }
+
+            return;
+        }
+
         if (_renderEncoder != 0 || _computeEncoder != 0)
         {
             RecordMemoryBarrier();

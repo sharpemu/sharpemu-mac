@@ -590,6 +590,71 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     /// a queue waiting on the stamp never waits for the worker to park.
     /// </summary>
     [Fact]
+    public void AWaitForASerialIncludesTheSecondCompletionWhileItsHostWorkRuns()
+    {
+        if (!RequireDevice()) return;
+        var sharedEvent = MetalNative.Send(Device.Value, MetalNative.Selector("newSharedEvent"));
+        Assert.NotEqual(0, sharedEvent);
+        try
+        {
+            using var completions = new MetalCompletionQueue(sharedEvent);
+            using var harness = new MetalTransferHarness(Device.Value);
+            using var running = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            using var waiting = new ManualResetEventSlim();
+            using var finished = new ManualResetEventSlim();
+            const ulong serial = 1;
+            var published = 0;
+            completions.Enqueue(serial, static () => { });
+            completions.Enqueue(serial, () =>
+            {
+                try
+                {
+                    running.Set();
+                    if (release.Wait(TimeSpan.FromSeconds(10)))
+                        Volatile.Write(ref published, 1);
+                }
+                finally
+                {
+                    finished.Set();
+                }
+            });
+            Task? waiter = null;
+            try
+            {
+                // Signal exactly this producer on the real GPU before publishing its host work.
+                harness.Begin();
+                MetalV2Native.SendEventValue(harness.CommandBuffer, MetalNative.Selector("encodeSignalEvent:value:"), sharedEvent, serial);
+                harness.Submit();
+                completions.Publish(serial);
+                Assert.True(running.Wait(TimeSpan.FromSeconds(10)));
+                Assert.Equal(1, completions.PendingCount);
+                waiter = Task.Run(() =>
+                {
+                    waiting.Set();
+                    completions.WaitFor(serial);
+                });
+                Assert.True(waiting.Wait(TimeSpan.FromSeconds(10)));
+                Assert.False(waiter.Wait(TimeSpan.FromMilliseconds(100)), "The serial completed while its second host action was held.");
+                release.Set();
+                Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
+                Assert.Equal(1, Volatile.Read(ref published));
+                Assert.Equal(0, completions.PendingCount);
+            }
+            finally
+            {
+                release.Set();
+                if (running.IsSet) Assert.True(finished.Wait(TimeSpan.FromSeconds(10)));
+                if (waiter is not null) Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)));
+            }
+        }
+        finally
+        {
+            MetalNative.SendVoid(sharedEvent, MetalNative.Selector("release"));
+        }
+    }
+
+    [Fact]
     public void AWaitPacketPollingALazyClockCommitsItsBuffer()
     {
         if (!RequireDevice()) return;
@@ -604,14 +669,15 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.Equal(open, host.SubmissionSerial);
 
         Span<byte> polled = stackalloc byte[sizeof(ulong)];
-        Assert.True(host.TryReadGuestWaitOperand(clockLabel, polled, commitPendingWrite: false));
+        Assert.True(host.TryReadGuestWaitOperand(clockLabel, polled, commitPendingWrite: false), "Reading the lazy clock without committing was refused.");
         Assert.Equal(open, host.SubmissionSerial);
-        Assert.True(host.TryReadGuestWaitOperand(clockLabel, polled, commitPendingWrite: true));
+        Assert.True(host.TryReadGuestWaitOperand(clockLabel, polled, commitPendingWrite: true), "Reading the lazy clock while committing was refused.");
         Assert.NotEqual(open, host.SubmissionSerial);
 
         WaitForGpu(host, open);
         WaitForCompletions(host);
-        Assert.True(rig.Backing.Read64(clockLabel) > 1);
+        var actualClock = rig.Backing.Read64(clockLabel);
+        Assert.True(actualClock > 1, $"Lazy clock remained {actualClock}; producer={open}, completed={host.CompletedSerial}.");
     }
 
     private (ulong Parsed, ulong GpuDone, (ulong WhileHeld, ulong AfterDrain) Clock,

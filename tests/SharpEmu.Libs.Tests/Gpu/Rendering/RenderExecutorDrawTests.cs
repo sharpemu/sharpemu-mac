@@ -1396,6 +1396,54 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
+    public void DeferredPixelStores_AreUnorderedInTheOpenPassUntilTheGuestReleasesThem()
+    {
+        Assert.False(_executor.HasUnorderedStoresInOpenPass);
+        DrawWithPixelStores();
+        Assert.True(_executor.HasUnorderedStoresInOpenPass);
+
+        _executor.ReleaseShaderWrites();
+        Assert.False(_executor.HasUnorderedStoresInOpenPass);
+    }
+
+    [Fact]
+    public void DeferredPixelStores_AreNotUnorderedOnceTheHostEndedTheirPass()
+    {
+        DrawWithPixelStores();
+        _host.RenderPassSerial++;
+
+        Assert.False(_executor.HasUnorderedStoresInOpenPass);
+    }
+
+    [Fact]
+    public void VertexBufferStores_TheDrawBarriersLeaveNothingUnordered()
+    {
+        _host.OrdersVertexWritesInsidePass = true;
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [BufferDescriptor(VertexBase, 4, 16)]),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel)));
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+
+        Assert.Contains($"write_barrier {GpuPipelineStage.VertexShaderBit}", _host.Calls);
+        Assert.False(_executor.HasUnorderedStoresInOpenPass);
+    }
+
+    [Fact]
+    public void VertexDeviceAddressStores_AreUnorderedInTheirPass()
+    {
+        _host.OrdersVertexWritesInsidePass = true;
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex, usesDeviceAddresses: true, writesDeviceAddresses: true)),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel)));
+        _executor.DrawIndexed(1, Banks(), Indexed(3));
+
+        Assert.True(_executor.HasUnorderedStoresInOpenPass);
+        _host.RenderPassSerial++;
+        Assert.False(_executor.HasUnorderedStoresInOpenPass);
+    }
+
+    [Fact]
     public void DeferredPixelStores_NeedNothingOnceTheHostEndedTheirPass()
     {
         DrawWithPixelStores();
