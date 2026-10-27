@@ -121,7 +121,7 @@ public static partial class AjmExports
         }
 
         Contexts[contextId] = new AjmContextState();
-        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
+        if (TraceEnabled)
         {
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] ajm.initialize reserved_or_options=0x{reservedOrOptions:X16} " +
@@ -239,7 +239,7 @@ public static partial class AjmExports
             }
         }
 
-        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
+        if (TraceEnabled)
         {
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] ajm.module_register context={contextId} codec={codecType} reserved={reserved}");
@@ -631,9 +631,12 @@ public static partial class AjmExports
         }
 
         WriteBasicResult(ctx, resultAddress, status);
-        Trace(
-            $"batch_job_set_gapless_decode instance=0x{instanceId:X8} " +
-            $"gapless=0x{gaplessAddress:X16} reset={reset} status=0x{status:X8}");
+        if (TraceEnabled)
+        {
+            Trace(
+                $"batch_job_set_gapless_decode instance=0x{instanceId:X8} " +
+                $"gapless=0x{gaplessAddress:X16} reset={reset} status=0x{status:X8}");
+        }
         return ctx.SetReturn(0);
     }
 
@@ -862,9 +865,12 @@ public static partial class AjmExports
             return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
         }
 
-        Trace(
-            $"batch_start context={contextId} info=0x{infoAddress:X16} " +
-            $"priority={priority} batch={batchId} error=0x{errorAddress:X16}");
+        if (TraceEnabled)
+        {
+            Trace(
+                $"batch_start context={contextId} info=0x{infoAddress:X16} " +
+                $"priority={priority} batch={batchId} error=0x{errorAddress:X16}");
+        }
         return ctx.SetReturn(0);
     }
 
@@ -878,10 +884,13 @@ public static partial class AjmExports
         // Batches complete synchronously in Start; Wait is a no-op success.
         var errorAddress = ctx[CpuRegister.Rcx];
         ClearAjmBatchError(ctx, errorAddress);
-        Trace(
-            $"batch_wait context={unchecked((uint)ctx[CpuRegister.Rdi])} " +
-            $"batch={unchecked((uint)ctx[CpuRegister.Rsi])} " +
-            $"timeout={unchecked((uint)ctx[CpuRegister.Rdx])}");
+        if (TraceEnabled)
+        {
+            Trace(
+                $"batch_wait context={unchecked((uint)ctx[CpuRegister.Rdi])} " +
+                $"batch={unchecked((uint)ctx[CpuRegister.Rsi])} " +
+                $"timeout={unchecked((uint)ctx[CpuRegister.Rdx])}");
+        }
         return ctx.SetReturn(0);
     }
 
@@ -892,9 +901,12 @@ public static partial class AjmExports
         LibraryName = "libSceAjm")]
     public static int AjmBatchCancel(CpuContext ctx)
     {
-        Trace(
-            $"batch_cancel context={unchecked((uint)ctx[CpuRegister.Rdi])} " +
-            $"batch={unchecked((uint)ctx[CpuRegister.Rsi])}");
+        if (TraceEnabled)
+        {
+            Trace(
+                $"batch_cancel context={unchecked((uint)ctx[CpuRegister.Rdi])} " +
+                $"batch={unchecked((uint)ctx[CpuRegister.Rsi])}");
+        }
         return ctx.SetReturn(0);
     }
 
@@ -963,10 +975,13 @@ public static partial class AjmExports
         }
 
         WriteDecodeStreamResult(ctx, resultAddress, result, multipleFrames);
-        Trace(
-            $"batch_job_decode instance=0x{instanceId:X8} in=0x{inputAddress:X16}+0x{inputSize:X} " +
-            $"out=0x{outputAddress:X16}+0x{outputSize:X} consumed={result.InputConsumed} " +
-            $"produced={result.OutputWritten} frames={result.Frames} status=0x{result.Status:X8}");
+        if (TraceEnabled)
+        {
+            Trace(
+                $"batch_job_decode instance=0x{instanceId:X8} in=0x{inputAddress:X16}+0x{inputSize:X} " +
+                $"out=0x{outputAddress:X16}+0x{outputSize:X} consumed={result.InputConsumed} " +
+                $"produced={result.OutputWritten} frames={result.Frames} status=0x{result.Status:X8}");
+        }
         return ctx.SetReturn(0);
     }
 
@@ -1033,11 +1048,14 @@ public static partial class AjmExports
             out var instance, out var config);
 
         WriteRunSideband(ctx, sidebandAddress, sidebandSize, flags, result, instance, config);
-        Trace(
-            $"batch_job_run{(split ? "_split" : string.Empty)} instance=0x{instanceId:X8} flags=0x{flags:X} " +
-            $"in=0x{inputAddress:X16}#{inputCountOrSize} out=0x{outputAddress:X16}#{outputCountOrSize} " +
-            $"sideband=0x{sidebandAddress:X16}+0x{sidebandSize:X} consumed={result.InputConsumed} " +
-            $"produced={result.OutputWritten} frames={result.Frames} status=0x{result.Status:X8}");
+        if (TraceEnabled)
+        {
+            Trace(
+                $"batch_job_run{(split ? "_split" : string.Empty)} instance=0x{instanceId:X8} flags=0x{flags:X} " +
+                $"in=0x{inputAddress:X16}#{inputCountOrSize} out=0x{outputAddress:X16}#{outputCountOrSize} " +
+                $"sideband=0x{sidebandAddress:X16}+0x{sidebandSize:X} consumed={result.InputConsumed} " +
+                $"produced={result.OutputWritten} frames={result.Frames} status=0x{result.Status:X8}");
+        }
         TraceBufferDescriptors(ctx, split, "in", inputAddress, inputCountOrSize);
         TraceBufferDescriptors(ctx, split, "out", outputAddress, outputCountOrSize);
         return ctx.SetReturn(0);
@@ -1117,7 +1135,7 @@ public static partial class AjmExports
             address == 0 ||
             countOrSize == 0 ||
             countOrSize > MaxBufferDescriptors ||
-            !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
+            !TraceEnabled)
         {
             return;
         }
@@ -1137,9 +1155,12 @@ public static partial class AjmExports
             var bufferAddress = BinaryPrimitives.ReadUInt64LittleEndian(descriptor);
             var bufferSize = BinaryPrimitives.ReadUInt64LittleEndian(descriptor[8..]);
             var readable = bufferAddress != 0 && bufferSize != 0 && ctx.Memory.TryRead(bufferAddress, head);
-            Trace(
-                $"buffer[{label}][{index}] address=0x{bufferAddress:X16} size=0x{bufferSize:X} " +
-                $"head={(readable ? Convert.ToHexString(head) : "<unreadable>")}");
+            if (TraceEnabled)
+            {
+                Trace(
+                    $"buffer[{label}][{index}] address=0x{bufferAddress:X16} size=0x{bufferSize:X} " +
+                    $"head={(readable ? Convert.ToHexString(head) : "<unreadable>")}");
+            }
         }
     }
 
@@ -1619,11 +1640,23 @@ public static partial class AjmExports
         return ctx.Memory.TryWrite(address, buffer);
     }
 
+    // SHARPEMU_LOG_AJM=1 enables the ajm.* traces; read once, not per call.
+    internal static readonly bool TraceEnabled = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal);
+
     private static void Trace(string message)
     {
-        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
+        if (TraceEnabled)
         {
             Console.Error.WriteLine($"[LOADER][TRACE] ajm.{message}");
+        }
+    }
+
+    // A plain interpolated message binds here and is only formatted when tracing is on.
+    private static void Trace(AjmTraceInterpolatedStringHandler message)
+    {
+        if (message.Enabled)
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] ajm.{message.ToStringAndClear()}");
         }
     }
 }

@@ -145,11 +145,14 @@ internal sealed class Atrac9DecodeState
                 _totalDecodedSamples = 0;
                 _containerHeaderLength = 0;
                 _gapless = _gaplessInit;
-                Trace(
-                    $"initialized config={Convert.ToHexString(normalizedConfig)} channels={config.ChannelCount} " +
-                    $"rate={config.SampleRate} frame_samples={config.FrameSamples} " +
-                    $"superframe_samples={config.SuperframeSamples} superframe_bytes={config.SuperframeBytes} " +
-                    $"frames_per_superframe={config.FramesPerSuperframe}");
+                if (TraceEnabled)
+                {
+                    Trace(
+                        $"initialized config={Convert.ToHexString(normalizedConfig)} channels={config.ChannelCount} " +
+                        $"rate={config.SampleRate} frame_samples={config.FrameSamples} " +
+                        $"superframe_samples={config.SuperframeSamples} superframe_bytes={config.SuperframeBytes} " +
+                        $"frames_per_superframe={config.FramesPerSuperframe}");
+                }
                 return true;
             }
             catch (Exception exception) when (
@@ -291,11 +294,14 @@ internal sealed class Atrac9DecodeState
                 catch (Exception exception) when (
                     exception is ArgumentException or InvalidDataException or InvalidOperationException or IndexOutOfRangeException)
                 {
-                    Trace(
-                        $"decode_failed superframe_bytes={config.SuperframeBytes} " +
-                        $"config={Convert.ToHexString(_configData ?? [])} " +
-                        $"head={Convert.ToHexString(_compressed.AsSpan(0, Math.Min(16, _compressed.Length)))} " +
-                        $"error={exception.GetType().Name}: {exception.Message}");
+                    if (TraceEnabled)
+                    {
+                        Trace(
+                            $"decode_failed superframe_bytes={config.SuperframeBytes} " +
+                            $"config={Convert.ToHexString(_configData ?? [])} " +
+                            $"head={Convert.ToHexString(_compressed.AsSpan(0, Math.Min(16, _compressed.Length)))} " +
+                            $"error={exception.GetType().Name}: {exception.Message}");
+                    }
                     _compressedLength = 0;
                     return new Atrac9DecodeResult(
                         status | ResultInvalidData | ResultCodecError,
@@ -361,7 +367,10 @@ internal sealed class Atrac9DecodeState
                 // as raw superframes rather than swallowing it forever. The
                 // scratch is dropped without advancing the caller's cursor, so
                 // the bytes are still decoded normally.
-                Trace($"container_scan_gave_up bytes={totalLength}");
+                if (TraceEnabled)
+                {
+                    Trace($"container_scan_gave_up bytes={totalLength}");
+                }
                 _containerHeader = null;
                 _containerHeaderLength = 0;
                 return ContainerScan.NotContainer;
@@ -372,7 +381,10 @@ internal sealed class Atrac9DecodeState
         }
 
         inputHeaderBytes = dataOffset - previousLength;
-        Trace($"container_header_skipped bytes={dataOffset} from_this_input={inputHeaderBytes}");
+        if (TraceEnabled)
+        {
+            Trace($"container_header_skipped bytes={dataOffset} from_this_input={inputHeaderBytes}");
+        }
         return ContainerScan.Found;
     }
 
@@ -469,9 +481,12 @@ internal sealed class Atrac9DecodeState
         }
     }
 
+    // SHARPEMU_LOG_AJM=1 enables the ajm.at9.* traces; read once, not per call.
+    private static readonly bool TraceEnabled = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal);
+
     private static void Trace(string message)
     {
-        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
+        if (TraceEnabled)
         {
             Console.Error.WriteLine($"[LOADER][TRACE] ajm.at9.{message}");
         }

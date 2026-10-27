@@ -83,10 +83,13 @@ public static partial class AjmExports
             WriteBasicResult(ctx, outputAddress, status);
         }
 
-        Trace(
-            $"batch_job_control instance=0x{instanceId:X8} flags=0x{flags:X} " +
-            $"in=0x{inputAddress:X16}+0x{inputSize:X} out=0x{outputAddress:X16}+0x{outputSize:X} " +
-            $"status=0x{status:X8}");
+        if (TraceEnabled)
+        {
+            Trace(
+                $"batch_job_control instance=0x{instanceId:X8} flags=0x{flags:X} " +
+                $"in=0x{inputAddress:X16}+0x{inputSize:X} out=0x{outputAddress:X16}+0x{outputSize:X} " +
+                $"status=0x{status:X8}");
+        }
         return ctx.SetReturn(0);
     }
 

@@ -178,7 +178,11 @@ public static partial class KernelEventQueueCompatExports
             return PosixFail(ctx, PosixEfault);
         }
 
-        RefreshDescriptorKnotes(state);
+        if (Volatile.Read(ref state.DescriptorKnotes) != 0)
+        {
+            RefreshDescriptorKnotes(state);
+        }
+
         var delivered = DequeueEvents(ctx, state, eventList, eventCapacity);
         if (delivered > 0 || poll)
         {
@@ -186,25 +190,28 @@ public static partial class KernelEventQueueCompatExports
             return delivered;
         }
 
+        var waiter = new EqueueWaiter
+        {
+            Ctx = ctx,
+            State = state,
+            EventsAddress = eventList,
+            EventCapacity = eventCapacity,
+            OutCountAddress = 0,
+            WaiterId = Interlocked.Increment(ref _nextEventQueueWaiterId),
+            PosixResult = true,
+        };
+        waiter.Arm();
         if (GuestThreadExecution.RequestCurrentThreadBlock(
                 ctx,
                 "kevent",
                 state.WakeKey,
-                new EqueueWaiter
-                {
-                    Ctx = ctx,
-                    State = state,
-                    EventsAddress = eventList,
-                    EventCapacity = eventCapacity,
-                    OutCountAddress = 0,
-                    WaiterId = Interlocked.Increment(ref _nextEventQueueWaiterId),
-                    PosixResult = true,
-                },
+                waiter,
                 deadline))
         {
             return 0;
         }
 
+        waiter.Disarm();
         var outcome = HostWait(state, deadline, eventCapacity, out var events, out var count);
         return outcome switch
         {
