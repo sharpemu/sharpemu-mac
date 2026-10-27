@@ -250,7 +250,25 @@ internal sealed class MetalCachedImage : IDisposable
 
     public MetalTextureShape Shape { get; private set; }
 
-    public nint Texture { get; private set; }
+    // Every texture this image refers to is counted in MetalTileViews, which keeps the
+    // tiler's integer view of it until the last image lets go of the texture.
+    public nint Texture
+    {
+        get => _texture;
+        private set
+        {
+            if (_texture == value)
+            {
+                return;
+            }
+
+            MetalTileViews.Reference(value);
+            MetalTileViews.Unreference(_texture);
+            _texture = value;
+        }
+    }
+
+    private nint _texture;
 
     /// <summary>
     /// The guest mip level the texture's level 0 holds. Zero for the whole chain; above zero
@@ -1072,12 +1090,15 @@ internal sealed class MetalCachedImage : IDisposable
     public void ReplaceTexture(nint texture, in MetalTextureShape shape)
     {
         ReleaseViews();
-        if (Texture != 0)
+        // The old texture's tiler view goes before the texture does, so a texture made
+        // later at the same handle never finds it.
+        var old = Texture;
+        Texture = texture;
+        if (old != 0)
         {
-            MetalNative.SendVoid(Texture, SelRelease);
+            MetalNative.SendVoid(old, SelRelease);
         }
 
-        Texture = texture;
         Shape = shape;
         Sparse = null;
         NoteContentChanged();
@@ -1107,10 +1128,11 @@ internal sealed class MetalCachedImage : IDisposable
 
         _disposed = true;
         ReleaseViews();
-        if (Texture != 0)
+        var texture = Texture;
+        Texture = 0;
+        if (texture != 0)
         {
-            MetalNative.SendVoid(Texture, SelRelease);
-            Texture = 0;
+            MetalNative.SendVoid(texture, SelRelease);
         }
     }
 }

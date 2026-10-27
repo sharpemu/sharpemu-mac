@@ -833,12 +833,13 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             return true;
         }
 
-        var compute = _tiler.BeginCompute(context);
+        var compute = _tiler.BeginCompute(context, concurrent: true);
         var source = linear;
         if (plan.Swap)
         {
             var swapped = _tiler.Acquire(context, plan.Tiled ? plan.LinearSize : staged);
             _tiler.EncodeSwapBgra16(compute, new MetalBufferSpan(linear.Buffer, linear.Offset, swapped.Size), swapped);
+            MetalTiler.Barrier(compute);
             source = swapped;
         }
 
@@ -862,11 +863,16 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
     private static readonly bool TextureTilerEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TEXTURE_TILER") != "0";
 
-    private static readonly nint SelPixelFormat = MetalNative.Selector("pixelFormat");
-    private static readonly nint SelUsage = MetalNative.Selector("usage");
-    private static readonly nint SelTextureType = MetalNative.Selector("textureType");
-    private static readonly nint SelMipmapLevelCount = MetalNative.Selector("mipmapLevelCount");
-    private static readonly nint SelArrayLength = MetalNative.Selector("arrayLength");
+    // SHARPEMU_METAL_V2_TEXTURE_TILER_TAIL=0 sends every mip chain that reaches its tail
+    // back through staging, as before the one-pass kernels placed the tail levels.
+    private static readonly bool TextureTilerTailEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TEXTURE_TILER_TAIL") != "0";
+
+    // SHARPEMU_METAL_V2_TEXTURE_TILER_SUBDWORD=0 stages the uploads of one and two byte
+    // texels again instead of detiling them straight into the texture.
+    private static readonly bool TextureTilerSubDwordEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TEXTURE_TILER_SUBDWORD") != "0";
+
     private static readonly nint SelNewTextureView =
         MetalNative.Selector("newTextureViewWithPixelFormat:textureType:levels:slices:");
     private static readonly nint SelReleaseView = MetalNative.Selector("release");
@@ -875,10 +881,16 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
     /// The unsigned-integer view format whose texel is exactly one element of this colour
     /// format, or Invalid when the format is not one a texture block copy may carry: an
     /// sRGB format (no shader writes, and a read would decode it), a shared-exponent or
-    /// compressed one, or one whose texel is not 4, 8 or 16 bytes.
+    /// compressed one (Metal refuses an integer view of a block format), a packed 16-bit
+    /// one, or one whose texel is not 1, 2, 4, 8 or 16 bytes.
     /// </summary>
     internal static MtlPixelFormat TextureTileViewFormat(MtlPixelFormat format) => format switch
     {
+        MtlPixelFormat.R8Unorm or MtlPixelFormat.R8Snorm or MtlPixelFormat.R8Uint or
+        MtlPixelFormat.R8Sint => MtlPixelFormat.R8Uint,
+        MtlPixelFormat.R16Unorm or MtlPixelFormat.R16Snorm or MtlPixelFormat.R16Uint or
+        MtlPixelFormat.R16Sint or MtlPixelFormat.R16Float or MtlPixelFormat.Rg8Unorm or
+        MtlPixelFormat.Rg8Snorm or MtlPixelFormat.Rg8Uint or MtlPixelFormat.Rg8Sint => MtlPixelFormat.R16Uint,
         MtlPixelFormat.R32Uint or MtlPixelFormat.R32Sint or MtlPixelFormat.R32Float or
         MtlPixelFormat.Rg16Unorm or MtlPixelFormat.Rg16Snorm or MtlPixelFormat.Rg16Uint or
         MtlPixelFormat.Rg16Sint or MtlPixelFormat.Rg16Float or
@@ -895,6 +907,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
     private static uint ViewElementBytes(MtlPixelFormat view) => view switch
     {
+        MtlPixelFormat.R8Uint => 1,
+        MtlPixelFormat.R16Uint => 2,
         MtlPixelFormat.R32Uint => 4,
         MtlPixelFormat.Rg32Uint => 8,
         MtlPixelFormat.Rgba32Uint => 16,
@@ -906,7 +920,8 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
     // a frame that ping-pongs aliased render targets through guest memory the transfers
     // are most of the GPU's time. Only what the one-pass kernels address exactly the way
     // the staged path does qualifies - whole-element texels of a plain 2D or 2D-array
-    // texture, no mip tail, no channel swap - and the staged path keeps the rest.
+    // texture, no channel swap, and for the tiling direction no element under a dword -
+    // and the staged path keeps the rest.
     private bool TryEncodeTextureTiles(
         IMetalSubmissionContext context, TransferPlan plan, nint texture, ulong guestAddress, MetalBufferSpan guest,
         MetalTileDirection direction)
@@ -917,53 +932,47 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             return false;
         }
 
-        var format = (MtlPixelFormat)(uint)MetalV2Native.SendValue(texture, SelPixelFormat);
-        var viewFormat = TextureTileViewFormat(format);
-        if (viewFormat == MtlPixelFormat.Invalid || ViewElementBytes(viewFormat) != plan.ElementBytes)
+        // A texture a cached image owns keeps its properties and its view from the first
+        // transfer on (MetalTileViews); any other is asked again each time.
+        var owned = MetalTileViews.TryLookup(texture, out var info, out var known, out var view);
+        if (!known)
         {
-            return false;
-        }
-
-        var usage = (MtlTextureUsage)(uint)MetalV2Native.SendValue(texture, SelUsage);
-        var needed = direction == MetalTileDirection.Detile ? MtlTextureUsage.ShaderWrite : MtlTextureUsage.ShaderRead;
-        if ((usage & needed) == 0 || (format != viewFormat && (usage & MtlTextureUsage.PixelFormatView) == 0))
-        {
-            return false;
-        }
-
-        var type = (MtlTextureType)(uint)MetalV2Native.SendValue(texture, SelTextureType);
-        if (type is not (MtlTextureType.Type2D or MtlTextureType.Type2DArray))
-        {
-            return false;
-        }
-
-        var levels = MetalV2Native.SendValue(texture, SelMipmapLevelCount);
-        var slices = MetalV2Native.SendValue(texture, SelArrayLength);
-        foreach (var transfer in _tiles)
-        {
-            if (transfer.Tail || transfer.Depth != 1 || transfer.BytesPerElement != plan.ElementBytes ||
-                transfer.Level >= levels || transfer.Slice >= slices)
+            info = MetalTileViews.Read(texture);
+            if (owned)
             {
-                return false;
+                MetalTileViews.Remember(texture, info);
             }
-        }
-
-        var view = MetalV2Native.SendNewTextureView(
-            texture, SelNewTextureView, (nuint)viewFormat, (nuint)MtlTextureType.Type2DArray,
-            new NsRange { Location = 0, Length = levels }, new NsRange { Location = 0, Length = slices });
-        if (view == 0)
-        {
-            throw GpuFatal.Fatal(
-                $"The texture tiler could not make its view: format={format} view={viewFormat} type={type} " +
-                $"levels={levels} slices={slices}.");
         }
 
         try
         {
+            if (!TextureTilesQualify(plan, info, direction, out var viewFormat))
+            {
+                return false;
+            }
+
+            if (view == 0)
+            {
+                view = MetalV2Native.SendNewTextureView(
+                    texture, SelNewTextureView, (nuint)viewFormat, (nuint)MtlTextureType.Type2DArray,
+                    new NsRange { Location = 0, Length = info.Levels }, new NsRange { Location = 0, Length = info.Slices });
+                if (view == 0)
+                {
+                    throw GpuFatal.Fatal(
+                        $"The texture tiler could not make its view: format={info.Format} view={viewFormat} " +
+                        $"type={info.Type} levels={info.Levels} slices={info.Slices}.");
+                }
+
+                if (owned)
+                {
+                    MetalTileViews.RememberView(texture, view);
+                }
+            }
+
             // Nothing but dispatches: the open compute encoder takes them when the host
             // leaves it to this transfer, which saves the encoder boundary.
             var shared = context.TryShareComputeEncoder(guestAddress, guest.Size);
-            var compute = shared != 0 ? shared : _tiler.BeginCompute(context);
+            var compute = shared != 0 ? shared : _tiler.BeginCompute(context, concurrent: true);
             _tiler.EncodeTextureBlockCopies(compute, guest, view, _tiles, direction);
             if (shared != 0)
             {
@@ -976,8 +985,46 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
         finally
         {
-            // The command buffer holds the view for as long as the encoded work needs it.
-            MetalNative.SendVoid(view, SelReleaseView);
+            // The command buffer holds the view for as long as the encoded work needs it,
+            // and a kept one is still held by MetalTileViews.
+            if (view != 0)
+            {
+                MetalNative.SendVoid(view, SelReleaseView);
+            }
+        }
+
+        return true;
+    }
+
+    // Whether every selected transfer can move through the texture's integer view in one
+    // pass, and the view's format when they can.
+    private bool TextureTilesQualify(
+        TransferPlan plan, in MetalTileTextureInfo info, MetalTileDirection direction, out MtlPixelFormat viewFormat)
+    {
+        viewFormat = TextureTileViewFormat(info.Format);
+        if (viewFormat == MtlPixelFormat.Invalid || ViewElementBytes(viewFormat) != plan.ElementBytes ||
+            !MetalTilerShaders.SupportsTextureCopy(plan.ElementBytes, direction) ||
+            (plan.ElementBytes < 4 && !TextureTilerSubDwordEnabled))
+        {
+            return false;
+        }
+
+        var needed = direction == MetalTileDirection.Detile ? MtlTextureUsage.ShaderWrite : MtlTextureUsage.ShaderRead;
+        if ((info.Usage & needed) == 0 ||
+            (info.Format != viewFormat && (info.Usage & MtlTextureUsage.PixelFormatView) == 0) ||
+            info.Type is not (MtlTextureType.Type2D or MtlTextureType.Type2DArray))
+        {
+            return false;
+        }
+
+        foreach (var transfer in _tiles)
+        {
+            if ((transfer.Tail && !TextureTilerTailEnabled) || transfer.Depth != 1 ||
+                transfer.BytesPerElement != plan.ElementBytes ||
+                transfer.Level >= info.Levels || transfer.Slice >= info.Slices)
+            {
+                return false;
+            }
         }
 
         return true;
@@ -1035,7 +1082,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
 
         var guest = new MetalBufferSpan(source.Buffer, source.Offset, source.Size);
-        var compute = _tiler.BeginCompute(context);
+        var compute = _tiler.BeginCompute(context, concurrent: true);
         MetalBufferSpan linear;
         if (plan.Tiled)
         {
@@ -1052,6 +1099,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         if (plan.Swap)
         {
             var swapped = _tiler.Acquire(context, linear.Size);
+            MetalTiler.Barrier(compute);
             _tiler.EncodeSwapBgra16(compute, linear, swapped);
             linear = swapped;
         }
@@ -1933,7 +1981,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         nint compute = 0;
         if (plan.Tiled)
         {
-            compute = _tiler.BeginCompute(context);
+            compute = _tiler.BeginCompute(context, concurrent: true);
             var detiled = _tiler.Acquire(context, depthPiece);
             _tiler.EncodeDetile(compute, depthPlane, detiled, _tiles);
             depthPlane = detiled;
@@ -1950,7 +1998,15 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         var depthSliceBytes = depthRowBytes * description.Extent.Height;
         if (plan.TransferBytes != description.BytesPerBlock)
         {
-            compute = compute != 0 ? compute : _tiler.BeginCompute(context);
+            if (compute != 0)
+            {
+                MetalTiler.Barrier(compute);
+            }
+            else
+            {
+                compute = _tiler.BeginCompute(context, concurrent: true);
+            }
+
             var widened = _tiler.Acquire(context, depthSliceBytes * layerCount);
             _tiler.EncodeDepthConversion(compute, depthPlane, widened, MetalDepthConversion.Widen, float32: true,
                 new MetalDepthConversionLayout
@@ -2049,7 +2105,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             return;
         }
 
-        var compute = _tiler.BeginCompute(context);
+        var compute = _tiler.BeginCompute(context, concurrent: true);
         _tiler.EncodeDepthTextureWriteback(compute, texture,
             new MetalBufferSpan(destination.Buffer, destination.Offset, depthPiece),
             description.BytesPerBlock, plan.Layers > 1, _tiles);
@@ -2088,7 +2144,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
 
         MetalTiler.EndEncoding(context, blit);
-        var compute = _tiler.BeginCompute(context);
+        var compute = _tiler.BeginCompute(context, concurrent: true);
         if (widening)
         {
             var narrowed = _tiler.Acquire(context, depthPiece);
@@ -2104,6 +2160,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                     TargetSliceStride = plan.SliceSize,
                 });
             staging = narrowed;
+            MetalTiler.Barrier(compute);
         }
 
         _tiler.EncodeTile(compute, staging,
@@ -2173,7 +2230,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             return;
         }
 
-        var compute = _tiler.BeginCompute(context);
+        var compute = _tiler.BeginCompute(context, concurrent: true);
         if (widening)
         {
             var narrowed = _tiler.Acquire(context, depthPiece);
@@ -2189,6 +2246,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
                     TargetSliceStride = plan.SliceSize,
                 });
             depthPlane = narrowed;
+            MetalTiler.Barrier(compute);
         }
 
         _tiler.EncodeRepackRows(compute, depthPlane,

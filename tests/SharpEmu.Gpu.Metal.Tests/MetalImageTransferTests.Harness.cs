@@ -45,6 +45,11 @@ internal sealed unsafe class MetalTransferHarness : IMetalSubmissionContext, IDi
 
     public MetalTiler Tiler => Transfer.Tiler;
 
+    /// <summary>The encoders the transfer and the tiler opened through this context.</summary>
+    public int EncodersStarted { get; private set; }
+
+    void IMetalSubmissionContext.EncoderStarted(nint encoder, bool render) => EncodersStarted++;
+
     public void Begin() => CommandBuffer = MetalNative.Send(MetalNative.Send(_queue, SelCommandBuffer), SelRetain);
 
     public void Submit()

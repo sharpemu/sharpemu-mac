@@ -23,6 +23,21 @@ public sealed partial class MetalImageTransferTests
         "rg32 render target",
         "rgba32f 64kb 2 mips",
         "rgba16f 4kb 3 layers",
+        "rgba8 64kb full chain",
+        "rgba16f 4kb full chain 2 layers",
+        "rg32 64kb full chain",
+        "rgba32f 4kb full chain",
+    };
+
+    // Elements under a dword go one pass on the way in only: the writeback merges
+    // neighbouring elements into a guest dword, which the staged path's kernel does.
+    public static TheoryData<string> SubDwordTextureTileCases => new()
+    {
+        "r8 64kb full chain",
+        "rg8 4kb full chain 2 layers",
+        "r16f 64kb 3 mips into the tail",
+        "r8 render target",
+        "r16 render target",
     };
 
     private static ImageDescription TextureTileCase(string name) => name switch
@@ -39,18 +54,39 @@ public sealed partial class MetalImageTransferTests
             256, 256, 2, 1, GuestTileMode.Standard64KB),
         "rgba16f 4kb 3 layers" => Color2D(GuestPixelFormat.Bits16_16_16_16Float, GpuFormat.R16G16B16A16Sfloat,
             96, 48, 1, 3, GuestTileMode.Standard4KB),
+        "rgba8 64kb full chain" => Color2D(GuestPixelFormat.Bits8_8_8_8UNorm, GpuFormat.R8G8B8A8Unorm,
+            256, 256, 9, 1, GuestTileMode.Standard64KB),
+        "rgba16f 4kb full chain 2 layers" => Color2D(GuestPixelFormat.Bits16_16_16_16Float, GpuFormat.R16G16B16A16Sfloat,
+            128, 64, 8, 2, GuestTileMode.Standard4KB),
+        "rg32 64kb full chain" => Color2D(GuestPixelFormat.Bits32_32UInt, GpuFormat.R32G32Uint,
+            200, 120, 8, 1, GuestTileMode.Standard64KB),
+        "rgba32f 4kb full chain" => Color2D(GuestPixelFormat.Bits32_32_32_32Float, GpuFormat.R32G32B32A32Sfloat,
+            64, 64, 7, 1, GuestTileMode.Standard4KB),
+        "r8 64kb full chain" => Color2D(GuestPixelFormat.Bits8UNorm, GpuFormat.R8Unorm,
+            512, 256, 10, 1, GuestTileMode.Standard64KB),
+        "rg8 4kb full chain 2 layers" => Color2D(GuestPixelFormat.Bits8_8UNorm, GpuFormat.R8G8Unorm,
+            96, 80, 7, 2, GuestTileMode.Standard4KB),
+        "r16f 64kb 3 mips into the tail" => Color2D(GuestPixelFormat.Bits16Float, GpuFormat.R16Sfloat,
+            300, 200, 3, 1, GuestTileMode.Standard64KB),
+        "r8 render target" => Color2D(GuestPixelFormat.Bits8UNorm, GpuFormat.R8Unorm,
+            200, 120, 1, 1, GuestTileMode.RenderTarget),
+        "r16 render target" => Color2D(GuestPixelFormat.Bits16UNorm, GpuFormat.R16Unorm,
+            160, 72, 1, 1, GuestTileMode.RenderTarget),
         _ => throw new ArgumentOutOfRangeException(nameof(name)),
     };
 
     [Theory]
     [MemberData(nameof(TextureTileCases))]
+    [MemberData(nameof(SubDwordTextureTileCases))]
     public void ATiledColorUploadWritesTheTextureInOnePassExactlyAsTheOracleDetiles(string name)
     {
         if (!RequireDevice()) return;
         using var harness = new MetalTransferHarness(Device.Value);
         var description = TextureTileCase(name);
         var guest = BuildGuest(description, 91, out var linear);
-        var (_, copies, _, element) = BuildLayout(description);
+        var (_, copies, tiles, element) = BuildLayout(description);
+        // A full chain (or a small enough level) reaches the mip tail, which the one-pass kernel places itself.
+        Assert.Equal(name.Contains("full chain") || name.Contains("tail"), tiles.Exists(tile => tile.Tail));
         var texture = harness.Texture(harness.Transfer.ShapeFor(description));
         var range = new SubresourceRange(0, description.Resources.Levels, 0, description.Resources.Layers);
 
@@ -88,7 +124,8 @@ public sealed partial class MetalImageTransferTests
         using var harness = new MetalTransferHarness(Device.Value);
         var description = TextureTileCase(name);
         var expected = BuildGuest(description, 93, out var linear);
-        var (_, copies, _, element) = BuildLayout(description);
+        var (_, copies, tiles, element) = BuildLayout(description);
+        Assert.Equal(name.Contains("full chain") || name.Contains("tail"), tiles.Exists(tile => tile.Tail));
         var texture = harness.Texture(harness.Transfer.ShapeFor(description));
         var source = harness.Buffer(linear);
         harness.Begin();
@@ -151,5 +188,53 @@ public sealed partial class MetalImageTransferTests
         }
 
         output.WriteLine($"{name}: one-pass upload matched the oracle over 0x{compared:x} texel bytes");
+    }
+}
+
+// A texture a cached image owns is viewed once for every transfer of its lifetime, and the
+// view goes with the last image that refers to the texture; any other texture is viewed
+// per transfer and nothing is kept for it.
+public sealed partial class MetalImageTransferTests
+{
+    [Fact]
+    public void ACachedImageKeepsOneTilerViewUntilItsTextureIsReleased()
+    {
+        if (!RequireDevice()) return;
+        using var harness = new MetalTransferHarness(Device.Value);
+        var description = TextureTileCase("rgba8 64kb full chain");
+        var guest = BuildGuest(description, 97, out _);
+        var shape = harness.Transfer.ShapeFor(description);
+        var texture = harness.Texture(shape);
+        var loose = harness.Texture(shape);
+        var range = new SubresourceRange(0, description.Resources.Levels, 0, description.Resources.Layers);
+        var source = new MetalGuestRange(harness.Buffer(guest), 0, description.Data.Size, 0);
+
+        // The image releases the texture it owns; the harness releases its own reference.
+        MetalNative.SendVoid(texture, MetalNative.Selector("retain"));
+        var image = new MetalCachedImage(in description, in shape, texture);
+        nint kept = 0;
+        for (var pass = 0; pass < 3; pass++)
+        {
+            harness.Begin();
+            Assert.True(harness.Transfer.EncodeGuestToTexture(harness, description, range, source, default, texture, 0,
+                description.Data.Size));
+            Assert.True(harness.Transfer.EncodeGuestToTexture(harness, description, range, source, default, loose, 0,
+                description.Data.Size));
+            harness.Submit();
+            var view = MetalTileViews.KeptView(texture);
+            Assert.NotEqual(0, view);
+            Assert.True(kept == 0 || kept == view, "the kept view changed between transfers");
+            kept = view;
+            Assert.Equal(0, MetalTileViews.KeptView(loose));
+        }
+
+        // An image retiring the texture (PromoteToOwned and its kin) refers to it too, so
+        // the view survives until both have let go.
+        var retired = new MetalCachedImage(in description, in shape, texture);
+        MetalNative.SendVoid(texture, MetalNative.Selector("retain"));
+        image.Dispose();
+        Assert.Equal(kept, MetalTileViews.KeptView(texture));
+        retired.Dispose();
+        Assert.Equal(0, MetalTileViews.KeptView(texture));
     }
 }
