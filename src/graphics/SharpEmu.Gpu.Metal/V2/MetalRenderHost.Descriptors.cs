@@ -828,7 +828,7 @@ internal sealed partial class MetalRenderHost
 
             var size = mappedWhole ? requested : ClampMappedSize(descriptor.Address, requested);
             var written = info.Buffers[index].Written;
-            FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor);
+            FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
             var range = ResolveStorageBuffer(descriptor.Address, size, written);
             if (written)
             {
@@ -923,7 +923,7 @@ internal sealed partial class MetalRenderHost
             var size = ClampMappedSize(range.Base, range.Size);
             OrderAfterDeferredCopies(range.Base, size);
             OrderAfterStagedStores(range.Base, size);
-            FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor);
+            FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor, range.Written);
             if (!range.Written)
             {
                 continue;

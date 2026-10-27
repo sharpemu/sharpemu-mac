@@ -1661,8 +1661,8 @@ internal sealed partial class MetalRenderHost :
     }
 
     /// <summary>Publishes every GPU-owned image byte in the range into guest memory.</summary>
-    public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause) =>
-        _imageCache.FlushGpuWrites(address, size, cause);
+    public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause, bool written = false) =>
+        _imageCache.FlushGpuWrites(address, size, cause, written);
 
     public void RunPendingOperations() => _relay.RunPendingCommands();
 
@@ -2206,7 +2206,7 @@ internal sealed partial class MetalRenderHost :
     {
         // A buffer binding sees guest memory, so any image that owns these bytes
         // publishes them first; a written binding also invalidates those images.
-        FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding);
+        FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding, isWritten);
         // A read takes the storage path: its window, a guest view, or a staged copy that
         // holds the GPU's writes still in flight in this command buffer - whole, however
         // large, up to the largest window.
