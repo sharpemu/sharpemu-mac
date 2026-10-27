@@ -50,11 +50,6 @@ public static partial class Gen5MslTranslator
     private const uint MeshLdsDwordFloor = 512;
     private const uint MeshLdsDwordCeiling = 4096;
 
-    // A guest LDS above this does not stay in threadgroup memory: its occupancy cost
-    // (a 15.6 KB allocation leaves a handful of threadgroups per core) outweighs the cost of
-    // keeping the data in device memory, so it lives in a slot of a shared device pool.
-    private const uint MeshDeviceLdsThresholdBytes = 12288;
-
     private const string MeshVertexStructName = "Gen5MeshVertex";
     private const string MeshPrimitiveStructName = "Gen5MeshPrimitive";
     private const string MeshDrawInfoStructName = "Gen5MeshDrawInfo";
@@ -79,7 +74,8 @@ public static partial class Gen5MslTranslator
 
     // The subgroup budget the geometry-engine registers describe, clamped to what a Metal
     // mesh threadgroup can carry.
-    private static Gen5MslMeshInfo BuildMeshInfo(ShaderCompileRequest request, uint ldsDwords)
+    private static Gen5MslMeshInfo BuildMeshInfo(ShaderCompileRequest request, uint ldsDwords, uint deviceLdsThreshold,
+        bool geometryOutputCapacity)
     {
         var ngg = request.PrimitiveShader ?? default;
         var fallback = ngg.MaxOutputPerSubgroup != 0 ? ngg.MaxOutputPerSubgroup : MeshWaveLanes;
@@ -88,7 +84,27 @@ public static partial class Gen5MslTranslator
         var perPrimitive = Gen5NggExports.VerticesPerPrimitive(ngg.OutputPrimitiveType);
         if (ngg.AmplifiedVerticesOut != 0 && ngg.GeometryVerticesOut == 0)
         {
-            return BuildAmplifiedMeshInfo(ngg, ldsDwords);
+            return BuildAmplifiedMeshInfo(ngg, ldsDwords, deviceLdsThreshold);
+        }
+
+        var geometryInputs = geometryOutputCapacity && ngg.GeometryVerticesOut != 0;
+        var inputVertices = geometryInputs ? vertices : 0;
+        var inputPrimitives = geometryInputs ? primitives : 0;
+        if (geometryInputs)
+        {
+            // ES vertices and GS primitives describe the input work, not the space
+            // GS_ALLOC_REQ can request after amplification. Keep both capacities.
+            var emitted = Math.Max(ngg.GeometryVerticesOut, 1u);
+            vertices = Clamp(ngg.MaxOutputPerSubgroup != 0 ? ngg.MaxOutputPerSubgroup :
+                (uint)Math.Min((ulong)inputPrimitives * emitted, MeshMaxVertices), 1, MeshMaxVertices);
+            var primitivesPerInput = ngg.OutputPrimitiveType switch
+            {
+                Gen5NggExports.OutputPrimitivePointList => emitted,
+                Gen5NggExports.OutputPrimitiveLineStrip => Math.Max(emitted, 2u) - 1u,
+                _ => Math.Max(emitted, 3u) - 2u,
+            };
+            primitives = Clamp((uint)Math.Min((ulong)inputPrimitives * primitivesPerInput, MeshMaxPrimitives),
+                1, MeshMaxPrimitives);
         }
 
         // A wave64 program with no GS half runs as a narrow wave64: one 32-lane simdgroup
@@ -96,14 +112,14 @@ public static partial class Gen5MslTranslator
         // vertex, one per primitive) has to fit in 32 lanes. The pipeline declares the full
         // 32 of each; how many a draw uses is per-draw state (draw-info words 0/1 for the
         // whole-triangle path, the meshlet header otherwise), never the declared extent.
-        var deviceLds = ldsDwords * sizeof(uint) > MeshDeviceLdsThresholdBytes;
+        var deviceLds = ldsDwords * sizeof(uint) > deviceLdsThreshold;
         var narrow = IsNarrowWave64(request);
         if (narrow)
         {
             vertices = MeshWaveLanes;
             primitives = MeshWaveLanes;
         }
-        else if (request.MeshPerVertexParameterMask != 0)
+        else if (geometryInputs || request.MeshPerVertexParameterMask != 0)
         {
             // Three vertex values per handed parameter make each primitive heavy, so the
             // extents shrink until the declared outputs fit what the device accepts.
@@ -116,7 +132,14 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        // This diagnostic must not pack even one GS invocation into an output budget
+        // smaller than its declared maximum. Leave unsupported shapes on the old path.
+        if (geometryInputs && vertices < ngg.GeometryVerticesOut)
+            return BuildMeshInfo(request, ldsDwords, deviceLdsThreshold, geometryOutputCapacity: false);
+
         var waves = Clamp((Math.Max(vertices, primitives) + MeshWaveLanes - 1) / MeshWaveLanes, 1, MeshMaxWaves);
+        if (geometryInputs && ngg.IsWave64)
+            waves = (waves + 1u) & ~1u;
         var topology = ngg.OutputPrimitiveType switch
         {
             Gen5NggExports.OutputPrimitivePointList => Gen5MslMeshTopology.Point,
@@ -126,7 +149,7 @@ public static partial class Gen5MslTranslator
 
         return new Gen5MslMeshInfo(
             ThreadsPerThreadgroup: waves * MeshWaveLanes,
-            WavesPerThreadgroup: waves,
+            WavesPerThreadgroup: geometryInputs && ngg.IsWave64 ? waves / 2u : waves,
             MaxVertices: vertices,
             MaxPrimitives: primitives,
             VerticesPerPrimitive: Gen5NggExports.VerticesPerPrimitive(ngg.OutputPrimitiveType),
@@ -139,7 +162,9 @@ public static partial class Gen5MslTranslator
             NarrowWave64: narrow,
             DeviceLds: deviceLds,
             Wave64: ngg.IsWave64,
-            LdsBytes: ldsDwords * sizeof(uint));
+            LdsBytes: ldsDwords * sizeof(uint),
+            GeometryInputVertices: inputVertices,
+            GeometryInputPrimitives: inputPrimitives);
     }
 
     // An amplified subgroup (Prospero's mesh shader, Gen5NggStageInfo.AmplifiedVerticesOut) is
@@ -147,13 +172,13 @@ public static partial class Gen5MslTranslator
     // and PRIM_AMP_FACTOR primitives, each thread its own vertex and primitive at index
     // (merged-wave subgroup id << 6) + lane. So the threadgroup holds the whole output in
     // real guest waves: 64 lanes as two bridged simdgroups for a wave64 program.
-    private static Gen5MslMeshInfo BuildAmplifiedMeshInfo(Gen5NggStageInfo ngg, uint ldsDwords)
+    private static Gen5MslMeshInfo BuildAmplifiedMeshInfo(Gen5NggStageInfo ngg, uint ldsDwords, uint deviceLdsThreshold)
     {
         var lanes = ngg.IsWave64 ? 2 * MeshWaveLanes : MeshWaveLanes;
         var vertices = Clamp(ngg.AmplifiedVerticesOut, 1, MeshMaxVertices);
         var primitives = Clamp(ngg.AmplifiedPrimitivesOut, 1, MeshMaxPrimitives);
         var waves = Math.Max((Math.Max(vertices, primitives) + lanes - 1) / lanes, 1u);
-        var deviceLds = ldsDwords * sizeof(uint) > MeshDeviceLdsThresholdBytes;
+        var deviceLds = ldsDwords * sizeof(uint) > deviceLdsThreshold;
         return new Gen5MslMeshInfo(
             ThreadsPerThreadgroup: waves * lanes,
             WavesPerThreadgroup: waves,
@@ -257,10 +282,6 @@ public static partial class Gen5MslTranslator
         /// <summary>The guest LDS lives in a slot of the device pool: the program uses LDS and
         /// the exact allocation is above the threadgroup-memory threshold.</summary>
         private bool UsesDeviceLds => _usesLds && _meshInfo is { DeviceLds: true };
-
-        /// <summary>Dwords of one device LDS slot; a power of two so the masked LDS index
-        /// stays inside the slot.</summary>
-        private uint DeviceLdsSlotDwords => (uint)System.Numerics.BitOperations.RoundUpToPowerOf2(_meshLdsDwords);
 
         /// <summary>The address space of a pointer to guest LDS.</summary>
         private string LdsAddressSpace => UsesDeviceLds ? "device" : "threadgroup";
@@ -443,6 +464,14 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    threadgroup atomic_uint sharpemu_mesh_live[2];");
             source.AppendLine("    threadgroup atomic_uint sharpemu_mesh_parked[2];");
             source.AppendLine("    threadgroup uint sharpemu_mesh_alloc[2];");
+            if (_meshHotLds.Length != 0)
+                source.AppendLine($"    threadgroup uint sharpemu_hot_lds[{MeshHotLdsWords}];");
+            if (UseMeshLdsForwarding)
+            {
+                source.AppendLine("    uint4 sharpemu_lds_forward_values = uint4(0u);");
+                source.AppendLine("    uint sharpemu_lds_forward_base = 0u;");
+                source.AppendLine("    bool sharpemu_lds_forward_valid = false;");
+            }
             source.AppendLine("    bool sharpemu_mesh_wait = false;");
             source.AppendLine("    uint sharpemu_mesh_round = 0u;");
             source.AppendLine($"    {MeshVertexStructName} sharpemu_out = {{}};");
@@ -519,8 +548,8 @@ public static partial class Gen5MslTranslator
                 source.AppendLine(
                     $"            : sharpemu_gs_input == {strip}u ? (sharpemu_gs_verts > 2u ? sharpemu_gs_verts - 2u : 0u)");
                 source.AppendLine("            : sharpemu_gs_verts;");
-                source.AppendLine($"        sharpemu_mesh_alloc[0] = min(sharpemu_gs_verts, {mesh.MaxVertices}u);");
-                source.AppendLine($"        sharpemu_mesh_alloc[1] = min(sharpemu_gs_prims, {mesh.MaxPrimitives}u);");
+                source.AppendLine($"        sharpemu_mesh_alloc[0] = min(sharpemu_gs_verts, {(mesh.GeometryInputVertices != 0 ? mesh.GeometryInputVertices : mesh.MaxVertices)}u);");
+                source.AppendLine($"        sharpemu_mesh_alloc[1] = min(sharpemu_gs_prims, {(mesh.GeometryInputPrimitives != 0 ? mesh.GeometryInputPrimitives : mesh.MaxPrimitives)}u);");
             }
             else if (mesh.Amplified)
             {
@@ -600,9 +629,12 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"    {MeshWorkgroupBarrier}");
             if (UsesDeviceLds)
             {
+                // All pipelines share the same reservations and allocation. A smaller
+                // shader may mask fewer LDS words, but its slot must keep the fixed stride
+                // or slot 1 of that shader can alias slot 0 of a larger live shader.
                 source.AppendLine(
                     $"    device uint* sharpemu_lds = (device uint*)sharpemu_lds_pool + {Gen5MslMeshInfo.LdsPoolHeaderDwords}u + " +
-                    $"sharpemu_lds_slot * {DeviceLdsSlotDwords}u;");
+                    $"sharpemu_lds_slot * {Gen5MslMeshInfo.LdsPoolSlotDwords}u;");
             }
         }
 

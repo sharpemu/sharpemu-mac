@@ -202,11 +202,11 @@ public static class Gen5ExecFullAnalysis
                         nextExecFull = execFull;
                         break;
                     case "SMovB64" or "SMovB32" when sources.Count == 1:
-                        nextExecFull = IsFullCopy(sources[0], copies, execFull, wide);
+                        nextExecFull = IsFullCopy(sources[0], copies, execFull, wide, wave32);
                         break;
                     case "SOrB64" or "SOrB32" when sources.Count == 2:
-                        nextExecFull = IsFullCopy(sources[0], copies, execFull, wide) ||
-                            IsFullCopy(sources[1], copies, execFull, wide);
+                        nextExecFull = IsFullCopy(sources[0], copies, execFull, wide, wave32) ||
+                            IsFullCopy(sources[1], copies, execFull, wide, wave32);
                         break;
                 }
             }
@@ -240,8 +240,20 @@ public static class Gen5ExecFullAnalysis
         operand.Kind == Gen5OperandKind.ScalarRegister && operand.Value == ExecLow;
 
     // True when the operand is a full EXEC or a saved copy of one.
-    private static bool IsFullCopy(Gen5Operand operand, UInt128 copies, bool execFull, bool wide)
+    private static bool IsFullCopy(Gen5Operand operand, UInt128 copies, bool execFull, bool wide, bool wave32)
     {
+        // Inline -1 sign-extends for a 64-bit scalar operation. A literal dword
+        // zero-extends instead, so 0xffffffff covers only a 32-lane wave;
+        // it must not prove a wave64 EXEC restore full.
+        if (operand is { Kind: Gen5OperandKind.EncodedConstant, Value: 193 })
+        {
+            return true;
+        }
+        if ((!wide || wave32) && operand is { Kind: Gen5OperandKind.LiteralConstant, Value: uint.MaxValue })
+        {
+            return true;
+        }
+
         if (operand.Kind != Gen5OperandKind.ScalarRegister)
         {
             return false;

@@ -31,6 +31,8 @@ The executable has its own assembly name and cannot overwrite the Metal test DLL
 | `w8` | Staged range/cache behavior |
 | `xlate` | Single, fragmented and strided guest view layouts |
 | `wranges` | GPU-written range tracking |
+| `labels` | Held-label overlap lookup, exact scan versus bounded page filter |
+| `shmap` | Dictionary versus standalone dense shader-register map candidate; shared interface dispatch |
 | `metal` | Raw Metal binding/encoding and submission timings |
 | `e2e` | Generated textured draws through the interpreter and Metal backend |
 | `gword` | Synthetic GPU-word wait path |
@@ -55,3 +57,13 @@ For the final cold-admission A/B experiment, use the dedicated
 sampling and counters match the published final result. Historical measurements
 were made with the corresponding historical source, not this newly packaged binary.
 See [benchmark results and scope](../../docs/performance/benchmark-index.md).
+
+The `labels` selector uses fixed parameters: 20,000 warmup pairs followed by four
+alternating trials of 100,000 lookups for each list size and overlap shape. It
+prints nanoseconds and allocations per lookup plus filter insertion/reset cost;
+`--quick` does not alter this selector. To match the native ARM64 lookup experiment,
+publish this tool for `osx-arm64` with `--self-contained true` and
+`-p:PublishReadyToRun=false`, then run the resulting executable with
+`DOTNET_TieredCompilation=0` and selector `labels`. The original measurement used
+a standalone build of the same benchmark body linked to `MetalPageRangeFilter.cs`;
+packaged-tool validation is recorded separately.

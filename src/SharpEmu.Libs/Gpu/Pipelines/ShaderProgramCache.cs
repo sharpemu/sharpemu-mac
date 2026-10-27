@@ -620,6 +620,13 @@ internal sealed class ShaderProgramCache
 
             if (!materialized)
             {
+                // Keep the draw's pointer inputs with the failure. A later draw or a
+                // shader dump made at compilation may carry entirely different user data.
+                Console.Error.WriteLine($"[GPU][RESOURCE_FAILURE_INPUTS] stage={source.Label} hash=0x{source.Hash:X16} " +
+                    $"shader=0x{source.Address:X16} code_bytes={source.CodeSize} user_data_base={source.UserDataBase} " +
+                    $"user_data=[{string.Join(",", source.UserData.Select(word => $"{word:X8}"))}]");
+                if (GpuCommands.GpuResourceOrigin.Enabled)
+                    GpuCommands.GpuResourceOrigin.ReportFailure(source, _host.TryReadResidentGuestBytes, Console.Error);
                 var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
                 if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
                     throw new ShaderProgramRejectedException(message);

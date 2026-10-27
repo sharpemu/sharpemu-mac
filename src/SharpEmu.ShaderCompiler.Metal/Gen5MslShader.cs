@@ -54,12 +54,14 @@ public sealed record Gen5MslMeshInfo(
     bool DeviceLds = false,
     bool Wave64 = false,
     uint LdsBytes = 0,
-    bool Amplified = false)
+    bool Amplified = false,
+    uint GeometryInputVertices = 0,
+    uint GeometryInputPrimitives = 0)
 {
-    /// <summary>Lanes in one guest wave of this program: an amplified wave64 subgroup runs
+    /// <summary>Lanes in one guest wave of this program: an amplified or capacity-aware geometry wave64 subgroup runs
     /// its 64-lane waves as two bridged simdgroups each; everything else runs a guest wave
     /// as one simdgroup (<see cref="WaveLanes"/>).</summary>
-    public uint GuestWaveLanes => Amplified && Wave64 ? 64u : WaveLanes;
+    public uint GuestWaveLanes => (Amplified || GeometryInputVertices != 0) && Wave64 ? 64u : WaveLanes;
 
     /// <summary>The mesh slot the device-memory LDS pool is bound at when
     /// <see cref="DeviceLds"/> is set.</summary>
@@ -103,12 +105,11 @@ public sealed record Gen5MslMeshInfo(
     /// </summary>
     public uint InputPrimitivesPerSubgroup(Gen5MslMeshInputTopology input)
     {
-        // A wave64 GS half numbers its ES vertices, GS primitives and emitted vertices as
-        // (merged-wave subgroup id << 6) + lane. A mesh wave is 32 lanes, so the second
-        // wave's lanes land at 64 + lane while the offsets the prologue packs count on
-        // from 32: a subgroup has to stay inside the first wave to line up.
-        var vertices = Math.Min(MaxVertices, WaveLanes);
-        var primitives = Math.Min(MaxPrimitives, WaveLanes);
+        // The legacy path models a guest wave with one simdgroup and must stay within
+        // its first 32 lanes. Capacity-aware geometry has separate input/output
+        // budgets and bridges both halves of every wave64.
+        var vertices = GeometryInputVertices != 0 ? GeometryInputVertices : Math.Min(MaxVertices, WaveLanes);
+        var primitives = GeometryInputPrimitives != 0 ? GeometryInputPrimitives : Math.Min(MaxPrimitives, WaveLanes);
         var byInput = input switch
         {
             Gen5MslMeshInputTopology.TriangleStrip => vertices > 2 ? vertices - 2 : 1,
@@ -116,8 +117,16 @@ public sealed record Gen5MslMeshInfo(
             _ => Math.Max(vertices / 3, 1),
         };
         var emitted = Math.Max(GeometryVerticesOut, 1);
-        var byOutputVertices = Math.Max(vertices / emitted, 1);
-        var byOutputPrimitives = Math.Max(primitives / (emitted > 2 ? emitted - 2 : 1), 1);
+        var outputVertices = GeometryInputVertices != 0 ? MaxVertices : vertices;
+        var outputPrimitives = GeometryInputPrimitives != 0 ? MaxPrimitives : primitives;
+        var perInput = GeometryInputVertices == 0 ? (emitted > 2 ? emitted - 2 : 1) : Topology switch
+        {
+            Gen5MslMeshTopology.Point => emitted,
+            Gen5MslMeshTopology.Line => Math.Max(emitted, 2) - 1,
+            _ => Math.Max(emitted, 3) - 2,
+        };
+        var byOutputVertices = Math.Max(outputVertices / emitted, 1);
+        var byOutputPrimitives = Math.Max(outputPrimitives / perInput, 1);
         return Math.Min(Math.Min(byInput, primitives), Math.Min(byOutputVertices, byOutputPrimitives));
     }
 

@@ -48,6 +48,10 @@ public static class ResourceMaterializationProfile
         ReadRecording,
         ConsumerLookup,
         ConsumerGraph,
+        AddressRebasing,
+        HitValidation,
+        InPlaceComparison,
+        HitSnapshot,
         Count,
     }
 
@@ -76,6 +80,35 @@ public static class ResourceMaterializationProfile
     internal static void CountRead(ReadCounter counter, int amount = 1)
     {
         if (Enabled) Interlocked.Add(ref _readCounts[(int)counter], amount);
+    }
+
+    // One tiny counter record per participating thread. Hit recording never walks ranges
+    // and uses no atomics; reporting reads a cumulative, approximate live snapshot.
+    private sealed class HitCounts
+    {
+        internal long Normal, Recall, RebasedNormal, RebasedRecall, Ranges, Bytes;
+    }
+    private static readonly System.Collections.Concurrent.ConcurrentBag<HitCounts> _hitCounts = new();
+    [ThreadStatic] private static HitCounts? _threadHitCounts;
+
+    internal static void RecordCacheHit(bool recalled, bool rebased, int ranges, int bytes)
+    {
+        if (!Enabled) return;
+        var counts = _threadHitCounts;
+        if (counts is null)
+        {
+            counts = _threadHitCounts = new HitCounts();
+            _hitCounts.Add(counts);
+        }
+        if (recalled) counts.Recall++;
+        else counts.Normal++;
+        if (rebased)
+        {
+            if (recalled) counts.RebasedRecall++;
+            else counts.RebasedNormal++;
+        }
+        counts.Ranges += ranges;
+        counts.Bytes += bytes;
     }
 
     // The frame trace prints a line per guest flow and per mutex handoff, which on a
@@ -154,7 +187,18 @@ public static class ResourceMaterializationProfile
         var parts = new List<string>();
         for (var index = 0; index < (int)Phase.Count; index++)
             parts.Add(FormattableString.Invariant($"{(Phase)index}={Interlocked.Read(ref _elapsedTicks[index]) * 1000.0 / Stopwatch.Frequency:F3}ms/n{Interlocked.Read(ref _calls[index])}"));
-        output.WriteLine($"[PERF][RESOURCE_MATERIALIZATION] cumulative=1 inclusive=1 sample_stride={SampleStride} sampled_phases=CompiledOutputAllocation,CompiledBody,CompiledWordRead,CompiledGroupRead,ReadRecording,ConsumerLookup allocated_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.Total])} wrap_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.RecorderWrap])} build_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.EntryBuild])} branch_evaluations={Interlocked.Read(ref _branchEvaluations)} descriptor_sources={Interlocked.Read(ref _descriptorSources)} inactive_sources={Interlocked.Read(ref _inactiveSources)} table_words={Interlocked.Read(ref _tableWords)} descriptor_words={Interlocked.Read(ref _descriptorWords)} compiled_walks={Interlocked.Read(ref _compiledEvaluators)} interpreted_walks={Interlocked.Read(ref _interpretedEvaluators)} {string.Join(" ", parts)}");
+        output.WriteLine($"[PERF][RESOURCE_MATERIALIZATION] cumulative=1 inclusive=1 sample_stride={SampleStride} sampled_phases=CompiledOutputAllocation,CompiledBody,CompiledWordRead,CompiledGroupRead,ReadRecording,ConsumerLookup,AddressRebasing,HitValidation,InPlaceComparison,HitSnapshot allocated_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.Total])} wrap_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.RecorderWrap])} build_bytes={Interlocked.Read(ref _allocatedBytesByPhase[(int)Phase.EntryBuild])} branch_evaluations={Interlocked.Read(ref _branchEvaluations)} descriptor_sources={Interlocked.Read(ref _descriptorSources)} inactive_sources={Interlocked.Read(ref _inactiveSources)} table_words={Interlocked.Read(ref _tableWords)} descriptor_words={Interlocked.Read(ref _descriptorWords)} compiled_walks={Interlocked.Read(ref _compiledEvaluators)} interpreted_walks={Interlocked.Read(ref _interpretedEvaluators)} {string.Join(" ", parts)}");
+        long normal = 0, recalled = 0, rebasedNormal = 0, rebasedRecall = 0, ranges = 0, bytes = 0;
+        foreach (var counts in _hitCounts)
+        {
+            normal += Volatile.Read(ref counts.Normal);
+            recalled += Volatile.Read(ref counts.Recall);
+            rebasedNormal += Volatile.Read(ref counts.RebasedNormal);
+            rebasedRecall += Volatile.Read(ref counts.RebasedRecall);
+            ranges += Volatile.Read(ref counts.Ranges);
+            bytes += Volatile.Read(ref counts.Bytes);
+        }
+        output.WriteLine($"[PERF][RESOURCE_HIT_COUNTS] cumulative=1 sampled=0 live_snapshot=1 normal={normal} recalled={recalled} normal_active_rebase={rebasedNormal} recalled_active_rebase={rebasedRecall} recorded_ranges={ranges} recorded_bytes={bytes}");
         var reads = new List<string>();
         for (var index = 0; index < (int)ReadCounter.Count; index++)
             reads.Add($"{(ReadCounter)index}={Interlocked.Read(ref _readCounts[index])}");

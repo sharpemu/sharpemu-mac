@@ -105,6 +105,7 @@ internal sealed partial class MetalRenderHost
         // done, which RequireModule waits for, or runs itself while no pool thread has it.
         public Task? Compiling;
         public MetalLibraryCompilePool.Job? Job;
+        public bool Deferred;
 
         // What the compile spent waiting for the prewarm's compile of the same source, and
         // whether prewarm compiles were in the driver when it started: the split of the
@@ -151,6 +152,11 @@ internal sealed partial class MetalRenderHost
     /// <summary>Runs where a module's library compile starts, on whichever thread runs it; tests hold it.</summary>
     internal Action? BeforeLibraryCompile { get; set; }
 
+    // Experimental: retain an untaken job until a pipeline or its preparation
+    // requests the module. Source/module creation alone need not invoke Metal.
+    internal bool DeferLibraryCompiles { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_LIBRARIES") == "1";
+
     public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
     {
         _ = programId;
@@ -169,6 +175,7 @@ internal sealed partial class MetalRenderHost
             Compiled = metal,
             Hash = hash,
             Stage = stage,
+            Deferred = DeferLibraryCompiles,
             LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
         };
 
@@ -179,6 +186,8 @@ internal sealed partial class MetalRenderHost
         // worker, with the translation of the second in between.
         void build()
         {
+            if (module.Deferred)
+                MetalShaderPrewarm.GameCompileStarted();
             try
             {
                 BeforeLibraryCompile?.Invoke();
@@ -200,15 +209,21 @@ internal sealed partial class MetalRenderHost
             }
         }
 
-        // From here until the module is built the background prewarm holds back.
-        MetalShaderPrewarm.GameCompileStarted();
-        if (MetalLibraryCompilePool.Enabled)
+        // An unused deferred module must not hold back prewarm indefinitely.
+        if (module.Deferred)
         {
+            module.Job = new MetalLibraryCompilePool.Job(build);
+            module.Compiling = module.Job.Task;
+        }
+        else if (MetalLibraryCompilePool.Enabled)
+        {
+            MetalShaderPrewarm.GameCompileStarted();
             module.Job = MetalLibraryCompilePool.Shared.Run(build);
             module.Compiling = module.Job.Task;
         }
         else
         {
+            MetalShaderPrewarm.GameCompileStarted();
             build();
         }
 
@@ -2066,6 +2081,8 @@ internal sealed partial class MetalRenderHost
         {
             try
             {
+                if (module.Deferred)
+                    module.Job?.CancelIfQueued();
                 module.Compiling?.Wait();
             }
             catch (AggregateException)

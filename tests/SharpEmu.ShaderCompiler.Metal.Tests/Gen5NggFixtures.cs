@@ -145,6 +145,83 @@ internal static class Gen5NggFixtures
     private static uint Branch(uint opcodeWord, uint fromPc, uint toPc) =>
         opcodeWord | (ushort)(short)(((int)toPc - (int)(fromPc + 4)) / 4);
 
+    // The two waves take opposite exits after their LDS exchange. One keeps the
+    // original parameter; the other overwrites it. Both must reach the mesh epilogue.
+    public static Gen5ShaderProgram ConditionalMeshExit(bool firstWaveExitsEarly)
+    {
+        var instructions = CullingTriangle().Instructions.SkipLast(1).ToList();
+        var pc = instructions[^1].Pc + 4;
+        instructions.Add(new(pc, Gen5ShaderEncoding.Sop2, "SAndB32", [0u],
+            [Scalar(Gen5NggExports.MergedWaveInfoRegister), Literal(1u << 24)], [Scalar(30)], null));
+        pc += 4;
+        instructions.Add(new(pc, Gen5ShaderEncoding.Sopc, "SCmpEqU32", [0u],
+            [Scalar(30), Literal(firstWaveExitsEarly ? 0u : 1u << 24)], [], null));
+        pc += 4;
+        instructions.Add(new(pc, Gen5ShaderEncoding.Sopp, "SCbranchScc1",
+            [Branch(BranchScc1Word, pc, pc + 16)], [], [], null));
+        pc += 4;
+        instructions.Add(new(pc, Gen5ShaderEncoding.Vop1, "VMovB32", [0u],
+            [Literal(Bits(0.25f))], [Vector(15)], null));
+        pc += 4;
+        instructions.Add(new(pc, Gen5ShaderEncoding.Exp, "Exp", [0u],
+            [Vector(15), Vector(15), Vector(15), Vector(15)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstParameterTarget, 0xF, false, false, false)));
+        pc += 4;
+        instructions.Add(new(pc, Gen5ShaderEncoding.Sopp, "SEndpgm", [EndProgramWord], [], [], null));
+        pc += 4;
+        instructions.Add(new(pc, Gen5ShaderEncoding.Sopp, "SEndpgm", [EndProgramWord], [], [], null));
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
+    public static Gen5ShaderProgram MaskedMeshAlu()
+    {
+        var instructions = MeshExitLoop(3).Instructions.SkipLast(1).ToList();
+        var pc = instructions[^1].Pc + 4;
+        void Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] sources,
+            Gen5Operand[] destinations, Gen5InstructionControl? control = null)
+        {
+            instructions.Add(new(pc, encoding, opcode, [0u], sources, destinations, control));
+            pc += 4;
+        }
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(Bits(0.125f))], [Vector(11)]);
+        Add("SMovB32", Gen5ShaderEncoding.Sop1, [Literal(5)], [Scalar(126)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(Bits(0.75f))], [Vector(12)]);
+        Add("VAddF32", Gen5ShaderEncoding.Vop2, [Vector(12), Vector(12)], [Vector(11)]);
+        Add("SMovB64", Gen5ShaderEncoding.Sop1, [new Gen5Operand(Gen5OperandKind.EncodedConstant, 193)], [Scalar(126)]);
+        Add("Exp", Gen5ShaderEncoding.Exp, [Vector(11), Vector(11), Vector(11), Vector(11)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstParameterTarget, 0xF, false, false, false));
+        instructions.Add(new(pc, Gen5ShaderEncoding.Sopp, "SEndpgm", [EndProgramWord], [], [], null));
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
+    public static Gen5ShaderProgram MeshExitLoop(uint iterations)
+    {
+        // One wave: read back its own LDS rather than the absent second wave.
+        var instructions = CullingTriangle().Instructions.SkipLast(1).Select(instruction =>
+            instruction.Opcode == "VXorB32"
+                ? instruction with { Sources = [Inline(0), Vector(Gen5NggExports.EsVertexIndexRegister)] }
+                : instruction).ToList();
+        var pc = instructions[^1].Pc + 4;
+        void Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] sources,
+            Gen5Operand[] destinations, Gen5InstructionControl? control = null, uint word = 0)
+        {
+            instructions.Add(new(pc, encoding, opcode, [word], sources, destinations, control));
+            pc += 4;
+        }
+        Add("SMovB32", Gen5ShaderEncoding.Sop1, [Literal(iterations)], [Scalar(31)]);
+        var loop = pc;
+        Add("SSubU32", Gen5ShaderEncoding.Sop2, [Scalar(31), Inline(1)], [Scalar(31)]);
+        Add("SCmpEqU32", Gen5ShaderEncoding.Sopc, [Scalar(31), Inline(0)], []);
+        Add("SCbranchScc0", Gen5ShaderEncoding.Sopp, [], [], word: Branch(BranchScc0Word, pc, loop));
+        // Only a normal loop exit executes this export. A capped loop preserves the
+        // preceding parameter, making an incorrect fall-through visible in the image.
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(Bits(0.25f))], [Vector(15)]);
+        Add("Exp", Gen5ShaderEncoding.Exp, [Vector(15), Vector(15), Vector(15), Vector(15)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstParameterTarget, 0xF, false, false, false));
+        Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], [], word: EndProgramWord);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
     private static void AppendTail(List<Gen5ShaderInstruction> instructions, ref uint pc)
     {
         var at = pc;
@@ -246,6 +323,129 @@ internal static class Gen5NggFixtures
         instructions.Add(new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopp, "SBarrier", [0], [], [], null));
         pc += 4;
         AppendTail(instructions, ref pc);
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
+    /// <summary>Every visible vertex samples the same LDS record, so its red output has
+    /// an exact CPU oracle. Mutations cover masked writers, aliasing stores/atomics,
+    /// another region, non-affine writers and wrapped/unaligned read addresses.</summary>
+    public static Gen5ShaderProgram MeshLdsForwardingProbe(uint readLane, int mutation, uint baseAddress = 0, bool allComponents = false)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        void Add(string op, Gen5ShaderEncoding encoding, Gen5Operand[] sources,
+            Gen5Operand[] destinations, Gen5InstructionControl? control = null)
+        {
+            instructions.Add(new Gen5ShaderInstruction(pc, encoding, op, [0], sources, destinations, control));
+            pc += 4;
+        }
+        static Gen5DataShareControl Offset(uint value) => new(value & 255u, value >> 8, false);
+        var all = new Gen5Operand(Gen5OperandKind.EncodedConstant, 193);
+        void Restore() => Add("SMovB64", Gen5ShaderEncoding.Sop1, [all], [Scalar(126), Scalar(127)]);
+        Restore();
+        Add("VMbcntLoU32B32", Gen5ShaderEncoding.Vop3, [all, Inline(0)], [Vector(40)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Vector(40)], [Vector(44)]);
+        if (mutation == 3)
+            Add("VXorB32", Gen5ShaderEncoding.Vop2, [Inline(1), Vector(44)], [Vector(44)]);
+        Add("VLshlrevB32", Gen5ShaderEncoding.Vop2, [Inline(4), Vector(44)], [Vector(44)]);
+        if (baseAddress != 0)
+            Add("VAddI32", Gen5ShaderEncoding.Vop2, [Literal(baseAddress), Vector(44)], [Vector(44)]);
+        for (uint i = 1; i < 4; i++) Add("VMovB32", Gen5ShaderEncoding.Vop1, [Inline(i)], [Vector(40 + i)]);
+        Add("DsWriteB128", Gen5ShaderEncoding.Ds, [Vector(44), Vector(40), Vector(41), Vector(42), Vector(43)], [], Offset(128));
+        if (mutation == 1)
+        {
+            Add("SMovB64", Gen5ShaderEncoding.Sop1, [Literal(255)], [Scalar(126), Scalar(127)]);
+            Add("VAddI32", Gen5ShaderEncoding.Vop2, [Literal(100), Vector(40)], [Vector(40)]);
+            Add("DsWriteB128", Gen5ShaderEncoding.Ds, [Vector(44), Vector(40), Vector(41), Vector(42), Vector(43)], [], Offset(128));
+            Restore();
+        }
+        if (mutation == 4)
+            Add("DsWriteB128", Gen5ShaderEncoding.Ds, [Vector(44), Vector(40), Vector(41), Vector(42), Vector(43)], [], Offset(640));
+        if (mutation is 2 or 5 or 6 or 10)
+        {
+            Add("SMovB64", Gen5ShaderEncoding.Sop1, [Inline(2)], [Scalar(126), Scalar(127)]);
+            Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(baseAddress + readLane * 16 + (mutation == 10 ? 128u : 0u))], [Vector(45)]);
+            Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(mutation is 2 or 10 ? 999u : mutation == 5 ? 127u : 1u)], [Vector(46)]);
+            Add(mutation is 2 or 10 ? "DsWriteB32" : mutation == 5 ? "DsWriteB8" : "DsAddU32",
+                Gen5ShaderEncoding.Ds, [Vector(45), Vector(46)], [], Offset(mutation == 10 ? 0u : 128u));
+            Restore();
+        }
+        Add("SBarrier", Gen5ShaderEncoding.Sopp, [], []);
+        var readAddress = baseAddress + readLane * 16 + (mutation == 7 ? 1024u : mutation == 8 ? 1u : 0u);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(readAddress)], [Vector(45)]);
+        Add("DsReadB128", Gen5ShaderEncoding.Ds, [Vector(45)], [Vector(50), Vector(51), Vector(52), Vector(53)], Offset(128));
+        if (allComponents)
+        {
+            for (uint i = 1; i < 4; i++)
+            {
+                Add("VLshlrevB32", Gen5ShaderEncoding.Vop2, [Inline(i * 5), Vector(50 + i)], [Vector(55)]);
+                Add("VAddI32", Gen5ShaderEncoding.Vop2, [Vector(55), Vector(50)], [Vector(50)]);
+            }
+        }
+        Add("VCvtF32U32", Gen5ShaderEncoding.Vop1, [Vector(50)], [Vector(54)]);
+        foreach (var instruction in GeometryQuad(false, 0).Instructions)
+        {
+            var next = instruction with { Pc = pc };
+            if (next.Control is Gen5ExportControl { Target: Gen5NggExports.FirstParameterTarget })
+                next = next with { Sources = new[] { Vector(54), Vector(20), Vector(20), Vector(21) } };
+            instructions.Add(next);
+            pc += 4;
+        }
+        return new Gen5ShaderProgram(0, instructions);
+    }
+
+    /// <summary>A fused geometry program emits a quad from one input triangle. With a
+    /// nonzero first vertex its output lives in a later guest wave. The lane exchange
+    /// and LDS round trip exercise both halves of wave64 and the workgroup barrier.</summary>
+    public static Gen5ShaderProgram GeometryQuad(bool wave64, uint firstVertex)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        void Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] sources,
+            Gen5Operand[] destinations, Gen5InstructionControl? control = null, uint word = 0)
+        {
+            instructions.Add(new Gen5ShaderInstruction(pc, encoding, opcode, [word], sources, destinations, control));
+            pc += sizeof(uint);
+        }
+        var minusOne = new Gen5Operand(Gen5OperandKind.EncodedConstant, 193);
+        Add("VMbcntLoU32B32", Gen5ShaderEncoding.Vop3, [minusOne, Inline(0)], [Vector(10)]);
+        if (wave64)
+            Add("VMbcntHiU32B32", Gen5ShaderEncoding.Vop3, [minusOne, Vector(10)], [Vector(10)]);
+        Add("SBfeU32", Gen5ShaderEncoding.Sop2, [Scalar(3), Literal(0x00040018)], [Scalar(20)]);
+        Add("VLshlAddU32", Gen5ShaderEncoding.Vop3, [Scalar(20), Inline(wave64 ? 6u : 5u), Vector(10)], [Vector(11)]);
+        Add("VLshlrevB32", Gen5ShaderEncoding.Vop2, [Inline(2), Vector(11)], [Vector(12)]);
+        Add("DsWriteB32", Gen5ShaderEncoding.Ds, [Vector(12), Vector(11)], [], new Gen5DataShareControl(0, 0, false));
+        Add("SBarrier", Gen5ShaderEncoding.Sopp, [], []);
+        Add("DsReadB32", Gen5ShaderEncoding.Ds, [Vector(12)], [Vector(11)], new Gen5DataShareControl(0, 0, false));
+        Add("VReadlaneB32", Gen5ShaderEncoding.Vop3, [Vector(10), Inline(wave64 ? 63u : 31u)], [Scalar(21)]);
+        Add("SAddI32", Gen5ShaderEncoding.Sop2, [Scalar(21), Literal(unchecked(0u - (wave64 ? 63u : 31u)))], [Scalar(21)]);
+        Add("VAddI32", Gen5ShaderEncoding.Vop2, [Literal(unchecked(0u - firstVertex)), Vector(11)], [Vector(14)]);
+        Add("VAddI32", Gen5ShaderEncoding.Vop2, [Scalar(21), Vector(14)], [Vector(14)]);
+        Add("VAndB32", Gen5ShaderEncoding.Vop2, [Inline(1), Vector(14)], [Vector(15)]);
+        Add("VCvtF32U32", Gen5ShaderEncoding.Vop1, [Vector(15)], [Vector(16)]);
+        Add("VMulF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(1.6f)), Vector(16)], [Vector(16)]);
+        Add("VAddF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(-0.8f)), Vector(16)], [Vector(16)]);
+        Add("VLshrrevB32", Gen5ShaderEncoding.Vop2, [Inline(1), Vector(14)], [Vector(17)]);
+        Add("VCvtF32U32", Gen5ShaderEncoding.Vop1, [Vector(17)], [Vector(18)]);
+        Add("VMulF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(1.6f)), Vector(18)], [Vector(19)]);
+        Add("VAddF32", Gen5ShaderEncoding.Vop2, [Literal(Bits(-0.8f)), Vector(19)], [Vector(19)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Inline(0)], [Vector(20)]);
+        Add("VMovB32", Gen5ShaderEncoding.Vop1, [Literal(Bits(1.0f))], [Vector(21)]);
+        Add("SMovB32", Gen5ShaderEncoding.Sop1,
+            [Literal((firstVertex + 4) | (2u << Gen5NggExports.AllocationPrimitiveCountShift))], [Scalar(124)]);
+        Add("SSendmsg", Gen5ShaderEncoding.Sopp, [], [], word: SendMessageWord);
+        Add("Exp", Gen5ShaderEncoding.Exp, [Vector(16), Vector(19), Vector(20), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstPositionTarget, 0xF, false, false, false));
+        Add("Exp", Gen5ShaderEncoding.Exp, [Vector(20), Vector(20), Vector(20), Vector(21)], [],
+            new Gen5ExportControl(Gen5NggExports.FirstParameterTarget, 0xF, false, false, false));
+        // Primitive 0 joins vertices 0,1,2; primitive 1 joins 1,3,2.
+        var a = firstVertex | ((firstVertex + 1) << 10) | ((firstVertex + 2) << 20);
+        var b = (firstVertex + 1) | ((firstVertex + 3) << 10) | ((firstVertex + 2) << 20);
+        Add("VCmpEqU32", Gen5ShaderEncoding.Vop3, [Inline(1), Vector(11)], [Scalar(30)]);
+        Add("VCndmaskB32", Gen5ShaderEncoding.Vop3, [Literal(a), Literal(b), Scalar(30)], [Vector(22)]);
+        Add("Exp", Gen5ShaderEncoding.Exp, [Vector(22), Vector(22), Vector(22), Vector(22)], [],
+            new Gen5ExportControl(Gen5NggExports.PrimitiveTarget, 0x1, false, true, false));
+        Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], [], word: EndProgramWord);
         return new Gen5ShaderProgram(0, instructions);
     }
 

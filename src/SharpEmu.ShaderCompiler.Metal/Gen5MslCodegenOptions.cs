@@ -146,6 +146,45 @@ public sealed record Gen5MslCodegenOptions(
     bool ContractPixelCompute = false,
     bool RuntimeDwordFormatLoads = true)
 {
+    /// <summary>Diagnostic threshold for moving mesh LDS from threadgroup memory to the
+    /// device pool, in bytes. The supported mesh allocation is at most 16 KiB. Zero
+    /// selects the device pool for every nonempty allocation; 16384 keeps all allocations
+    /// in threadgroup memory. The default preserves the existing 12 KiB policy.</summary>
+    public uint MeshDeviceLdsThresholdBytes { get; init; } = 12288;
+
+    /// <summary>Experimental structured mesh exits, enabled with SHARPEMU_MSL_MESH_EXIT_JOIN=1.
+    /// A single hardware wave may also publish its output at a loop-limit exit.</summary>
+    public bool MeshExitJoin { get; init; }
+
+    /// <summary>Experimental constant indexing of provably invariant private scratch slots.
+    /// Enabled with SHARPEMU_MSL_STATIC_SCRATCH=1.</summary>
+    public bool StaticScratchSlots { get; init; }
+
+    /// <summary>Experimental removal of pure ALU guards when inactive values cannot
+    /// be observed. SHARPEMU_MSL_UNOBSERVED_ALU=1 enables this for wave32 compute
+    /// and single-wave mesh shaders.</summary>
+    public bool UnobservedAluWrites { get; init; }
+
+    /// <summary>Experimental separation of fused geometry input and output capacities,
+    /// with complete wave64 execution. SHARPEMU_MSL_GEOMETRY_CAPACITY=1.</summary>
+    public bool GeometryOutputCapacity { get; init; }
+
+    /// <summary>Experimental single-run loads for statically known packed formats.
+    /// SHARPEMU_MSL_PACKED_FORMAT_LOADS=1; partial trailing elements retain the decoder.</summary>
+    public bool PackedFormatLoads { get; init; }
+
+    /// <summary>Experimental guarded forwarding of the last 128-bit LDS write in a
+    /// single-wave mesh subgroup. SHARPEMU_MSL_MESH_LDS_FORWARDING=1.</summary>
+    public bool MeshLdsForwarding { get; init; }
+
+    /// <summary>Experimental constant-address-space bindings for scalar-only buffers
+    /// in mesh shaders without device-memory writes. SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS=1.</summary>
+    public bool ScalarConstantBuffers { get; init; }
+
+    /// <summary>Experimental compact threadgroup bank for frequently addressed LDS
+    /// regions, retaining device storage for other addresses. SHARPEMU_MSL_MESH_HOT_LDS=1.</summary>
+    public bool MeshHotLds { get; init; }
+
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
         RegisterAllocation: Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGALLOC") != "0",
@@ -172,5 +211,18 @@ public sealed record Gen5MslCodegenOptions(
         ConstantTableSlots: Environment.GetEnvironmentVariable("SHARPEMU_MSL_TABLEPAD") != "0",
         FastReciprocals: Environment.GetEnvironmentVariable("SHARPEMU_MSL_FASTRCP") != "0",
         ContractPixelCompute: Environment.GetEnvironmentVariable("SHARPEMU_MSL_CONTRACT") == "1",
-        RuntimeDwordFormatLoads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_RUNTIME_DWORD_FORMAT") != "0");
+        RuntimeDwordFormatLoads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_RUNTIME_DWORD_FORMAT") != "0")
+    {
+        UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "1",
+        GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
+        PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") == "1",
+        MeshLdsForwarding = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_FORWARDING") == "1",
+        ScalarConstantBuffers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS") == "1",
+        MeshHotLds = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_HOT_LDS") == "1",
+        StaticScratchSlots = Environment.GetEnvironmentVariable("SHARPEMU_MSL_STATIC_SCRATCH") == "1",
+        MeshExitJoin = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_EXIT_JOIN") == "1",
+        MeshDeviceLdsThresholdBytes = uint.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_THRESHOLD"), out var threshold)
+                ? Math.Min(threshold, 16384u) : 12288u,
+    };
 }

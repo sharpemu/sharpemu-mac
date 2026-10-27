@@ -88,6 +88,28 @@ public sealed class Gen5VectorObservationAnalysisTests
     }
 
     [Fact]
+    public void AMaskedDppWriteUnderFullExecDoesNotKillTheOldDestination()
+    {
+        SaveExec();
+        Narrow();
+        var write = Add(Vop2(0, "VAddU32", 3, Operand(1), Gen5Operand.Vector(2)));
+        RestoreExec();
+        Add(new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vop1, "VMovB32", [0u, 0u],
+            [Gen5Operand.Vector(4)], [Gen5Operand.Vector(3)],
+            new Gen5DppControl(0x111, false, false, 0, 0, 0x1, 0xF)));
+        Add(Vop2(0, "VAddU32", 5, Operand(1), Gen5Operand.Vector(3)));
+        Assert.False(Analyze().UnobservedWrites(write).Contains(3));
+    }
+
+    [Fact]
+    public void ARelativeSwapDisablesThePlan()
+    {
+        Add(Vop1(0, "VSwaprelB32", 3, Gen5Operand.Vector(4)));
+        Add(EndProgram(0));
+        Assert.Null(Gen5VectorObservationAnalysis.Analyze(Program([.. _instructions]), wave32: false));
+    }
+
+    [Fact]
     public void ARelativeMoveDisablesThePlan()
     {
         Add(Vop1(0, "VMovrelsB32", 3, Gen5Operand.Vector(4)));

@@ -241,6 +241,18 @@ public sealed class GpuCommandInterpreterPacketSemanticsTests
     }
 
     [Fact]
+    public void ShaderRegisterWaitDistinguishesWrittenZeroFromClearedPresence()
+    {
+        var runner = new StreamRunner();
+        var writeZero = StreamRunner.Packet(PacketOpcode.SetShaderRegister, 0x0C, 0);
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(writeZero, RegisterWait(3, 0x2C0C, 0, uint.MaxValue)));
+        var alias = runner.Interpreter.Registers.Shader;
+        runner.Interpreter.Registers.Reset();
+        Assert.Same(alias, runner.Interpreter.Registers.Shader);
+        Assert.Contains("never wrote", runner.RunExpectingFatal(RegisterWait(3, 0x2C0C, 0, uint.MaxValue)).Message);
+    }
+
+    [Fact]
     public void AcquireMemory_BarriersOnlyForCacheActions()
     {
         var runner = new StreamRunner();

@@ -1471,7 +1471,8 @@ public sealed partial class ResourceMaterializationCache
             for (var variant = cached; variant is not null; previous = variant, variant = variant.Next)
             {
                 CountDiagnostic((Diagnostic)((int)Diagnostic.Variant1 + Math.Min(variantIndex++, MaxVariants - 1)));
-                if (!variant.Matches(plan, inputs, rebase.Active) || !rebase.AppliesTo(variant))
+                // TryFind already checked the head against this draw's unchanged inputs.
+                if ((!ReferenceEquals(variant, cached) && !variant.Matches(plan, inputs, rebase.Active)) || !rebase.AppliesTo(variant))
                     continue;
                 stale ??= variant;
                 if (rebase.Active.Length == 0 && !rebase.HasLearnableMemoryBases && rejection.Rejects(variant))
@@ -1493,6 +1494,8 @@ public sealed partial class ResourceMaterializationCache
                     Hits++;
                     Interlocked.Increment(ref _totalHits);
                     snapshot = HitSnapshot(variant, inputs.UserData, rebase);
+                    ResourceMaterializationProfile.RecordCacheHit(recalled: false, rebase.Active.Length != 0,
+                        variant.RangeAddresses.Length, variant.Bytes.Length);
                     specialization = variant.Specialization;
                     failure = default;
                     return true;
@@ -2016,7 +2019,8 @@ public sealed partial class ResourceMaterializationCache
 
         for (Entry? previous = null, variant = cached; variant is not null; previous = variant, variant = variant.Next)
         {
-            if (!variant.Matches(plan, inputs, rebase.Active) || !rebase.AppliesTo(variant) ||
+            // Only the head was checked by TryFind; older variants still need the full check.
+            if ((!ReferenceEquals(variant, cached) && !variant.Matches(plan, inputs, rebase.Active)) || !rebase.AppliesTo(variant) ||
                 !Validate(variant, residentReader, rebase, inputs.UserData, false, out _, out _, out _, inputs.CompareResidentMemory))
                 continue;
             if (previous is not null)
@@ -2029,6 +2033,8 @@ public sealed partial class ResourceMaterializationCache
             Hits++;
             Interlocked.Increment(ref _totalHits);
             snapshot = HitSnapshot(variant, inputs.UserData, rebase);
+            ResourceMaterializationProfile.RecordCacheHit(recalled: true, rebase.Active.Length != 0,
+                variant.RangeAddresses.Length, variant.Bytes.Length);
             specialization = variant.Specialization;
             return true;
         }
@@ -2101,6 +2107,7 @@ public sealed partial class ResourceMaterializationCache
     // encoded later still holds exactly the snapshot it was given.
     private static ResourceSnapshot HitSnapshot(Entry entry, IReadOnlyList<uint> userData, AddressRebase rebase)
     {
+        using var profile = ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.HitSnapshot);
         var kept = entry.HitSnapshots;
         if (kept is not null)
         {
@@ -2588,6 +2595,13 @@ public sealed partial class ResourceMaterializationCache
             Length != 0 && Clean == clean && Address + (ulong)WordOffset == address && Word != expected;
     }
 
+    private static ulong MoveValidationRead(Entry entry, IReadOnlyList<uint> userData, AddressRebase rebase,
+        ulong address, int length)
+    {
+        using var profile = ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.AddressRebasing);
+        return rebase.MoveRead(entry, userData, address, length);
+    }
+
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase,
         IReadOnlyList<uint> userData, bool joined, out bool unreadable) =>
         Validate(entry, residentReader, rebase, userData, joined, out unreadable, out _, out _);
@@ -2596,11 +2610,36 @@ public sealed partial class ResourceMaterializationCache
         bool joined, out bool unreadable, out bool descriptorChanged, out RejectionSample rejection,
         ResidentGuestBytesComparer? comparer = null)
     {
+        using var profile = ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.HitValidation);
         unreadable = false;
         descriptorChanged = false;
         rejection = default;
+        // With no recorded guest reads there are no bytes or base-word probes to validate.
+        if (entry.RangeAddresses.Length == 0) return true;
         if (joined && rebase.Active.Length == 0)
             return ValidateJoined(entry, residentReader, comparer, out unreadable, out descriptorChanged, out rejection);
+        if (comparer is not null && InPlaceValidateEnabled &&
+            CompareValidationRanges(entry, userData, rebase, comparer))
+        {
+            if (!InPlaceValidateVerify) return true;
+            // Verification must use the original scalar reads, not enter this fast path again.
+            var read = ValidateByReading(entry, residentReader, rebase, userData,
+                out unreadable, out descriptorChanged, out rejection);
+            if (!read)
+                Console.Error.WriteLine($"[PERF][INPLACE_VALIDATE_VERIFY] mismatch: exact-address comparison found all {entry.RangeAddresses.Length} ranges equal, " +
+                    $"scalar reading found them {(unreadable ? "unreadable" : "changed")}.");
+            return read;
+        }
+        return ValidateByReading(entry, residentReader, rebase, userData,
+            out unreadable, out descriptorChanged, out rejection);
+    }
+
+    private bool ValidateByReading(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase,
+        IReadOnlyList<uint> userData, out bool unreadable, out bool descriptorChanged, out RejectionSample rejection)
+    {
+        unreadable = false;
+        descriptorChanged = false;
+        rejection = default;
         // A memory-loaded base usually moved when anything did: its few bytes are checked before
         // ranges that can span kilobytes. The full comparison below still decides a match.
         if (entry.BaseWordBuffers is not null)
@@ -2608,7 +2647,7 @@ public sealed partial class ResourceMaterializationCache
             Span<byte> word = stackalloc byte[sizeof(uint)];
             foreach (var (range, offset) in entry.BaseWordProbes ??= BaseWordProbesOf(entry))
             {
-                var address = rebase.MoveRead(entry, userData, entry.RangeAddresses[range], entry.RangeLengths[range]) + (ulong)offset;
+                var address = MoveValidationRead(entry, userData, rebase, entry.RangeAddresses[range], entry.RangeLengths[range]) + (ulong)offset;
                 if (residentReader(address, word, entry.RangeClean[range]) &&
                     !word.SequenceEqual(entry.Bytes.AsSpan(entry.RangeOffsets[range] + offset, sizeof(uint))))
                     return false;
@@ -2621,7 +2660,7 @@ public sealed partial class ResourceMaterializationCache
             if (_scratch.Length < length)
                 _scratch = new byte[Math.Max(length, _scratch.Length * 2)];
             var current = _scratch.AsSpan(0, length);
-            var address = rebase.MoveRead(entry, userData, entry.RangeAddresses[index], length);
+            var address = MoveValidationRead(entry, userData, rebase, entry.RangeAddresses[index], length);
             if (!ReadWithProfile(residentReader, address, current, entry.RangeClean[index], CacheDetail.ValidateRead))
             {
                 unreadable = true;

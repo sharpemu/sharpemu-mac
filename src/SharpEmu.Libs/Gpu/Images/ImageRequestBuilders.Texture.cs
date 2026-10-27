@@ -94,6 +94,7 @@ public static partial class ImageRequestBuilders
     // Fills the mip layout of a texture from the guest tiling rules.
     public static void PopulateTextureMipLayout(ref ImageDescription description)
     {
+        Span<MipLevelLayout> layouts = stackalloc MipLevelLayout[ImageDescription.MaxLevels];
         if (description.IsVolume && description.TileMode != GuestTileMode.Linear)
         {
             var surfaceDescription = new TiledSurfaceDescription(
@@ -109,9 +110,10 @@ public static partial class ImageRequestBuilders
             for (var level = 0; level < description.Resources.Levels; level++)
             {
                 var mip = surface.Mips[level];
-                description.MipLayout[level] = new MipLevelLayout { Offset = mip.Offset, Size = mip.Size, Pitch = mip.PaddedWidth, Height = mip.PaddedHeight };
+                layouts[level] = new MipLevelLayout { Offset = mip.Offset, Size = mip.Size, Pitch = mip.PaddedWidth, Height = mip.PaddedHeight };
             }
 
+            description.MipLayout.SetPrefix(layouts[..(int)description.Resources.Levels]);
             return;
         }
 
@@ -125,7 +127,7 @@ public static partial class ImageRequestBuilders
             var offset = span.SourceSize != 0 ? span.SourceOffset : span.Offset;
             ulong size = span.SourceSize != 0 ? span.SourceSize : span.Size;
             size *= description.IsVolume ? Math.Max(description.Extent.Depth >> level, 1) : description.Resources.Layers;
-            description.MipLayout[level] = new MipLevelLayout
+            layouts[level] = new MipLevelLayout
             {
                 Offset = offset,
                 Size = size,
@@ -133,6 +135,7 @@ public static partial class ImageRequestBuilders
                 Height = padded[level].Height != 0 ? padded[level].Height : Math.Max(description.Extent.Height >> level, 1),
             };
         }
+        description.MipLayout.SetPrefix(layouts[..(int)description.Resources.Levels]);
     }
 
     // The view follows the compiled module: a volume, a layer window to the last layer, or one layer.

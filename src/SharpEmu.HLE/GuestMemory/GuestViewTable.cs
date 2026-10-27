@@ -86,6 +86,7 @@ public sealed unsafe class GuestViewTable : IDisposable
     private readonly GuestViewLogRecord* _log;
     private readonly object _gate = new();
     private int _overflowReports;
+    private readonly bool _traceMappings = Environment.GetEnvironmentVariable("SHARPEMU_SPLIT_MISS_DETAILS") == "1";
 
     /// <summary>
     /// Builds an empty table over a writable shared region, with a log of
@@ -261,6 +262,15 @@ public sealed unsafe class GuestViewTable : IDisposable
                 if (!fits) NoteOverflowLocked();
             }
             finally { EndWrite(); }
+            // Log after publishing the even sequence so diagnostic I/O does not hold readers
+            // in the seqlock retry loop. Mapping-only history survives protection-log churn.
+            if (_traceMappings)
+            {
+                if (cutSize != 0)
+                    Console.Error.WriteLine($"[GPU-VIEW][UNMAP] generation={MappingGeneration} address=0x{cutAddress:X16} size=0x{cutSize:X}");
+                if (added is { } traced)
+                    Console.Error.WriteLine($"[GPU-VIEW][MAP] generation={MappingGeneration} address=0x{traced.Address:X16} size=0x{traced.Size:X} offset=0x{traced.Offset:X}");
+            }
         }
     }
 

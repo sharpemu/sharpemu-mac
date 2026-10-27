@@ -37,6 +37,381 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         return AppContext.BaseDirectory;
     }
 
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    [InlineData(4u)]
+    [InlineData(8u)]
+    [InlineData(16u)]
+    public void ScalarConstantBuffersPreserveRawBoundsAndWideLoads(uint count)
+    {
+        if (SkipWithoutMetalDevice("scalar constant mesh buffers")) return;
+        var data = new byte[64];
+        for (var i = 0; i < 16; i++) BitConverter.GetBytes((uint)(i + 1)).CopyTo(data, i * 4);
+        foreach (var offset in new[] { 0u, 1u, 56u, 60u, 64u, 0xFFFFFFFCu })
+        {
+            float[]? baseline = null;
+            foreach (var enabled in new[] { false, true })
+            {
+                var request = ScalarConstantRequest(count, offset);
+                Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error,
+                    new Gen5MslCodegenOptions { ScalarConstantBuffers = enabled }), error);
+                Assert.Equal(enabled, shader.Source.Contains("constant uint* b0 =", StringComparison.Ordinal));
+                Assert.True(MetalNative.TryCompileLibrary(shader.Source + FragmentSource, out var library, out var compileError), compileError);
+                var mesh = shader.MeshInfo!;
+                Assert.True(MetalNative.TryRenderMeshWithArgumentBuffer(library, shader.EntryPoint, "gen5_mesh_test_fs",
+                    data, new byte[PushData.ByteSize], BuildDrawInfo(mesh), shader.ArgumentLayout!,
+                    mesh.DrawInfoBufferIndex, mesh.IndexBufferIndex, 1, mesh.ThreadsPerThreadgroup,
+                    TargetSize, TargetSize, out var pixels, out var renderError), renderError);
+                uint expected = 0;
+                for (uint i = 0; i < count; i++)
+                {
+                    var index = unchecked(offset + i * 4) >> 2;
+                    if (index < 16) expected += index + 1;
+                }
+                Assert.Equal((float)expected, Red(pixels, 16, 16), 2);
+                Assert.Equal(1f, Green(pixels, 16, 16), 3);
+                if (!enabled) baseline = pixels;
+                else Assert.Equal(baseline, pixels);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    public void ScalarConstantBuffersRefuseCoherentVectorOrDeviceWriteAccess(bool coherent, bool vectorAccess, bool deviceWrite)
+    {
+        var request = ScalarConstantRequest(4, 0, coherent, vectorAccess, deviceWrite: deviceWrite);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error,
+            new Gen5MslCodegenOptions { ScalarConstantBuffers = true }), error);
+        Assert.DoesNotContain("constant uint* b0 =", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ScalarConstantBuffersRequireOptInAndRawDwordSemantics()
+    {
+        foreach (var options in new[] { new Gen5MslCodegenOptions(),
+                     new Gen5MslCodegenOptions(RawDwordAccess: false) { ScalarConstantBuffers = true } })
+        {
+            Assert.True(Gen5MslTranslator.TryCompileProgram(ScalarConstantRequest(4, 0),
+                out var shader, out var error, options), error);
+            Assert.DoesNotContain("constant uint* b0 =", shader.Source, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ScalarConstantBuffersPreserveMixedPointerArgumentLayout()
+    {
+        if (SkipWithoutMetalDevice("mixed scalar constant mesh buffers")) return;
+        float[]? baseline = null;
+        foreach (var enabled in new[] { false, true })
+        {
+            var request = ScalarConstantRequest(1, 12, vectorAccess: true, separateScalarBinding: true);
+            Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error,
+                new Gen5MslCodegenOptions { ScalarConstantBuffers = enabled }), error);
+            Assert.Equal(2u, shader.ArgumentLayout!.Find(DescriptorBindingKind.Buffers, MslArgumentFieldKind.BufferPointers)!.Count);
+            if (enabled)
+            {
+                Assert.Contains("device uint* buffer_0 [[id(0)]]", shader.Source, StringComparison.Ordinal);
+                Assert.Contains("constant uint* buffer_1 [[id(1)]]", shader.Source, StringComparison.Ordinal);
+                Assert.Contains("buffer_bytes [[id(2)]]", shader.Source, StringComparison.Ordinal);
+            }
+            Assert.True(MetalNative.TryCompileLibrary(shader.Source + FragmentSource, out var library, out var compileError), compileError);
+            var mesh = shader.MeshInfo!;
+            Assert.True(MetalNative.TryRenderMeshWithArgumentBuffer(library, shader.EntryPoint, "gen5_mesh_test_fs",
+                PositionBuffer(), new byte[PushData.ByteSize], BuildDrawInfo(mesh), shader.ArgumentLayout!,
+                mesh.DrawInfoBufferIndex, mesh.IndexBufferIndex, 1, mesh.ThreadsPerThreadgroup,
+                TargetSize, TargetSize, out var pixels, out var renderError), renderError);
+            Assert.Equal(1f, Green(pixels, 16, 16), 3);
+            Assert.InRange(Red(pixels, 16, 16), 1065353216f - 128f, 1065353216f + 128f);
+            if (!enabled) baseline = pixels;
+            else Assert.Equal(baseline, pixels);
+        }
+    }
+
+    private static ShaderCompileRequest ScalarConstantRequest(uint count, uint offset, bool coherent = false, bool vectorAccess = false, bool separateScalarBinding = false, bool deviceWrite = false)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        foreach (var instruction in Gen5NggFixtures.CullingTriangle(bufferFetchPosition: vectorAccess).Instructions)
+        {
+            if (instruction.Control is Gen5ExportControl { Target: Gen5NggExports.FirstParameterTarget })
+            {
+                instructions.Add(new(0, Gen5ShaderEncoding.Smem, count == 1 ? "SBufferLoadDword" : $"SBufferLoadDwordx{count}",
+                    [0u, 0u], [Gen5Operand.Scalar(separateScalarBinding ? 12u : 8u), Gen5Operand.Source(125)],
+                    [.. Enumerable.Range(32, (int)count).Select(i => Gen5Operand.Scalar((uint)i))],
+                    new Gen5ScalarMemoryControl(count, unchecked((int)offset), null, Glc: coherent)));
+                for (uint i = 1; i < count; i++)
+                    instructions.Add(new(0, Gen5ShaderEncoding.Sop2, "SAddU32", [0u],
+                        [Gen5Operand.Scalar(32), Gen5Operand.Scalar(32 + i)], [Gen5Operand.Scalar(32)], null));
+                instructions.Add(new(0, Gen5ShaderEncoding.Vop1, "VCvtF32U32", [0u],
+                    [Gen5Operand.Scalar(32)], [Gen5Operand.Vector(15)], null));
+                if (deviceWrite)
+                    instructions.Add(new(0, Gen5ShaderEncoding.Mubuf, "BufferStoreDword", [0u, 0u],
+                        [Gen5Operand.Vector(15), Gen5Operand.Scalar(12), Gen5Operand.Source(128)], [],
+                        new Gen5BufferMemoryControl(1, 0, 15, 12, 0, false, false, false, false)));
+            }
+            instructions.Add(instruction);
+        }
+        var program = new Gen5ShaderProgram(0, instructions.Select((i, n) => i with { Pc = (uint)n * 8 }).ToArray());
+        var userData = Gen5NggFixtures.PositionUserData();
+        if (separateScalarBinding || deviceWrite)
+        {
+            Array.Copy(userData, 0, userData, 4, 4);
+            userData[4] += 0x10000; // Distinct guest binding; the device harness populates both slots.
+        }
+        return Gen5NggFixtures.Request(program, runtimeInputs: new ResourceRuntimeInputs { UserData = userData });
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(8)]
+    [InlineData(10)]
+    public void HotLdsBankPreservesColdFallbackAliasingAndWrap(int mutation)
+    {
+        if (SkipWithoutMetalDevice("compact hot LDS bank")) return;
+        foreach (var baseAddress in new[] { 0u, 500u, 1024u, 4096u, 8048u, 0xFFFFFF80u })
+        foreach (var readLane in new[] { 0u, 17u, 31u })
+        {
+            float[]? baseline = null;
+            foreach (var enabled in new[] { false, true })
+            {
+                var stage = Gen5NggFixtures.Wave64StageInfo with { LocalDataShareBytes = 8192u };
+                Assert.True(Gen5MslTranslator.TryCompileProgram(
+                    Gen5NggFixtures.Request(Gen5NggFixtures.MeshLdsForwardingProbe(readLane, mutation, baseAddress, allComponents: true), stage),
+                    out var shader, out var error, new Gen5MslCodegenOptions
+                    { MeshHotLds = enabled, MeshDeviceLdsThresholdBytes = 0 }), error);
+                var mesh = shader.MeshInfo!;
+                Assert.Equal(enabled, shader.Source.Contains("threadgroup uint sharpemu_hot_lds[", StringComparison.Ordinal));
+                Assert.Equal(enabled, mesh.ThreadgroupMemoryBytes != 0);
+                Assert.True(mesh.DeviceLds);
+                Assert.True(MetalNative.TryCompileLibrary(shader.Source + FragmentSource, out var library, out var compileError), compileError);
+                Assert.True(MetalNative.TryRenderMesh(library, shader.EntryPoint, "gen5_mesh_test_fs",
+                    [(BuildArgumentBuffer(shader), 0u), (new byte[64], 1u), (BuildDrawInfo(mesh), mesh.DrawInfoBufferIndex),
+                     (new byte[16], mesh.IndexBufferIndex),
+                     (new byte[(Gen5MslMeshInfo.LdsPoolHeaderDwords + Gen5MslMeshInfo.LdsPoolSlotDwords) * 4], Gen5MslMeshInfo.LdsPoolBufferIndex)],
+                    1, mesh.ThreadsPerThreadgroup, TargetSize, TargetSize, out var pixels, out var renderError), renderError);
+                var expected = mutation switch
+                {
+                    1 when readLane < 8 => readLane + 100,
+                    2 or 10 => 999u, 3 => readLane ^ 1, _ => readLane,
+                };
+                expected += 100384; // 1<<5 + 2<<10 + 3<<15: check every loaded component.
+                Assert.Equal((float)expected, Red(pixels, 16, 16), 2);
+                Assert.Equal(1f, Green(pixels, 16, 16), 3);
+                if (!enabled) baseline = pixels;
+                else Assert.Equal(baseline, pixels);
+            }
+        }
+    }
+
+    [Fact]
+    public void HotLdsBankRefusesMultipleWavesAndOtherStorageModes()
+    {
+        foreach (var (stage, threshold, forwarding) in new[]
+        {
+            (Gen5NggFixtures.StageInfo, 0u, false),
+            (Gen5NggFixtures.Wave64StageInfo, 16384u, false),
+            (Gen5NggFixtures.Wave64StageInfo, 0u, true),
+        })
+        {
+            Assert.True(Gen5MslTranslator.TryCompileProgram(
+                Gen5NggFixtures.Request(Gen5NggFixtures.MeshLdsForwardingProbe(3, 0), stage),
+                out var shader, out var error, new Gen5MslCodegenOptions
+                { MeshHotLds = true, MeshDeviceLdsThresholdBytes = threshold, MeshLdsForwarding = forwarding }), error);
+            Assert.DoesNotContain("sharpemu_hot_lds", shader.Source, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(6)]
+    public void HotLdsBankRefusesUnsupportedMemoryOperations(int mutation)
+    {
+        Assert.True(Gen5MslTranslator.TryCompileProgram(
+            Gen5NggFixtures.Request(Gen5NggFixtures.MeshLdsForwardingProbe(3, mutation), Gen5NggFixtures.Wave64StageInfo),
+            out var shader, out var error, new Gen5MslCodegenOptions { MeshHotLds = true, MeshDeviceLdsThresholdBytes = 0 }), error);
+        Assert.DoesNotContain("sharpemu_hot_lds", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LdsForwardingRefusesAGroupWithMoreThanOneHardwareWave()
+    {
+        Assert.True(Gen5MslTranslator.TryCompileProgram(
+            Gen5NggFixtures.Request(Gen5NggFixtures.MeshLdsForwardingProbe(3, 0)),
+            out var shader, out var error, new Gen5MslCodegenOptions { MeshLdsForwarding = true }), error);
+        Assert.Equal(64u, shader.MeshInfo!.ThreadsPerThreadgroup);
+        Assert.DoesNotContain("sharpemu_lds_forward_", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
+    public void SingleWaveLdsForwardingPreservesNeighborReadsAndAliasing(int mutation)
+    {
+        if (SkipWithoutMetalDevice("guarded mesh LDS forwarding")) return;
+        foreach (var threshold in new[] { 0u, 12288u })
+        foreach (var readLane in new[] { 0u, 3u, 17u, 31u })
+        {
+            float[]? reference = null;
+            foreach (var forwarding in new[] { false, true })
+            {
+                var stage = Gen5NggFixtures.Wave64StageInfo with { LocalDataShareBytes = mutation == 4 ? 2048u : 1024u };
+                Assert.True(Gen5MslTranslator.TryCompileProgram(
+                    Gen5NggFixtures.Request(Gen5NggFixtures.MeshLdsForwardingProbe(readLane, mutation), stage),
+                    out var shader, out var error, new Gen5MslCodegenOptions
+                    { MeshLdsForwarding = forwarding, MeshDeviceLdsThresholdBytes = threshold }), error);
+                var mesh = shader.MeshInfo!;
+                Assert.Equal(32u, mesh.ThreadsPerThreadgroup);
+                Assert.Equal(forwarding, shader.Source.Contains("simd_shuffle(sharpemu_lds_forward_values", StringComparison.Ordinal));
+                Assert.True(MetalNative.TryCompileLibrary(shader.Source + FragmentSource, out var library, out var compileError), compileError);
+                var buffers = new List<(byte[], uint)>
+                {
+                    (BuildArgumentBuffer(shader), 0u), (new byte[64], 1u),
+                    (BuildDrawInfo(mesh), mesh.DrawInfoBufferIndex), (new byte[16], mesh.IndexBufferIndex),
+                };
+                if (mesh.DeviceLds) buffers.Add((new byte[(Gen5MslMeshInfo.LdsPoolHeaderDwords + Gen5MslMeshInfo.LdsPoolSlotDwords) * 4], Gen5MslMeshInfo.LdsPoolBufferIndex));
+                Assert.True(MetalNative.TryRenderMesh(library, shader.EntryPoint, "gen5_mesh_test_fs", buffers,
+                    1, mesh.ThreadsPerThreadgroup, TargetSize, TargetSize, out var pixels, out var renderError), renderError);
+                var expected = mutation switch
+                {
+                    1 when readLane < 8 => readLane + 100,
+                    2 => 999u, 3 => readLane ^ 1, 5 => 127u, 6 => readLane + 1,
+                    _ => readLane,
+                };
+                Assert.Equal((float)expected, Red(pixels, 16, 16), 2);
+                Assert.Equal(1f, Green(pixels, 16, 16), 3);
+                if (!forwarding) reference = pixels;
+                else Assert.Equal(reference, pixels);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(1024u)]
+    [InlineData(5120u)]
+    [InlineData(9216u)]
+    [InlineData(15872u)]
+    public void DeviceLdsSlotCannotOverlapAnOccupiedSlotOfALargerShader(uint ldsBytes)
+    {
+        if (SkipWithoutMetalDevice("mixed-size device LDS slot isolation")) return;
+        Assert.True(Gen5MslTranslator.TryCompileProgram(
+            Gen5NggFixtures.Request(Gen5NggFixtures.CullingTriangle(),
+                Gen5NggFixtures.StageInfo with { LocalDataShareBytes = ldsBytes }),
+            out var shader, out var error, new Gen5MslCodegenOptions { MeshDeviceLdsThresholdBytes = 0 }), error);
+        var mesh = shader.MeshInfo!;
+        var pool = new byte[Gen5MslMeshInfo.LdsPoolByteSize];
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(pool.AsSpan());
+        words[0] = 1; // The next acquisition takes slot 1.
+        words[1] = 1; // Slot 0 belongs to a still-live shader using the full 16 KiB.
+        var held = words.Slice((int)Gen5MslMeshInfo.LdsPoolHeaderDwords, (int)Gen5MslMeshInfo.LdsPoolSlotDwords);
+        held.Fill(0xA5B6C7D8u);
+        var expectedHeld = held.ToArray();
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source + FragmentSource, out var library, out var compileError), compileError);
+        var readback = new Dictionary<uint, byte[]>();
+        Assert.True(MetalNative.TryRenderMesh(library, shader.EntryPoint, "gen5_mesh_test_fs",
+            [(BuildArgumentBuffer(shader), 0u), (new byte[64], 1u), (BuildDrawInfo(mesh), mesh.DrawInfoBufferIndex),
+             (new byte[16], mesh.IndexBufferIndex), (pool, Gen5MslMeshInfo.LdsPoolBufferIndex)],
+            1, mesh.ThreadsPerThreadgroup, TargetSize, TargetSize, out var pixels, out var renderError,
+            readbackBuffers: readback), renderError);
+        Assert.Equal(1f, Green(pixels, TargetSize / 2, TargetSize / 2), 3);
+        var actual = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(readback[Gen5MslMeshInfo.LdsPoolBufferIndex]);
+        Assert.Equal(1u, actual[1]); // The other owner's reservation survives.
+        Assert.Equal(0u, actual[2]); // This invocation released slot 1.
+        Assert.Equal(expectedHeld, actual.Slice((int)Gen5MslMeshInfo.LdsPoolHeaderDwords,
+            (int)Gen5MslMeshInfo.LdsPoolSlotDwords).ToArray());
+    }
+
+    [Theory]
+    [InlineData(Gen5NggExports.OutputPrimitiveTriangleStrip, 88u)]
+    [InlineData(Gen5NggExports.OutputPrimitiveLineStrip, 92u)]
+    [InlineData(Gen5NggExports.OutputPrimitivePointList, 96u)]
+    public void GeometryInputAndOutputBudgetsRemainIndependent(uint topology, uint outputPrimitives)
+    {
+        var stage = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 24, PrimitivesPerSubgroup = 4, MaxOutputPerSubgroup = 96,
+            GeometryVerticesOut = 24, OutputPrimitiveType = topology, IsWave64 = true,
+        };
+        Assert.True(Gen5MslTranslator.TryCompileProgram(
+            Gen5NggFixtures.Request(Gen5NggFixtures.GeometryQuad(true, 0), stage),
+            out var shader, out var error, new Gen5MslCodegenOptions { GeometryOutputCapacity = true }), error);
+        var mesh = shader.MeshInfo!;
+        Assert.Equal(24u, mesh.GeometryInputVertices);
+        Assert.Equal(4u, mesh.GeometryInputPrimitives);
+        Assert.Equal(96u, mesh.MaxVertices);
+        Assert.Equal(outputPrimitives, mesh.MaxPrimitives);
+        Assert.Equal(128u, mesh.ThreadsPerThreadgroup);
+        Assert.Equal(2u, mesh.WavesPerThreadgroup);
+        foreach (var input in Enum.GetValues<Gen5MslMeshInputTopology>())
+            Assert.Equal(4u, mesh.InputPrimitivesPerSubgroup(input));
+        Assert.Equal(2u, Gen5MslMeshLaunch.SubgroupCount(mesh, Gen5MslMeshInputTopology.TriangleList, 15));
+        Assert.Equal(2u, Gen5MslMeshLaunch.SubgroupCount(mesh, Gen5MslMeshInputTopology.TriangleStrip, 7));
+        Assert.Equal(2u, Gen5MslMeshLaunch.SubgroupCount(mesh, Gen5MslMeshInputTopology.PointList, 5));
+    }
+
+    [Theory]
+    [InlineData(false, 0u, 12288u)]
+    [InlineData(true, 0u, 12288u)]
+    [InlineData(false, 64u, 12288u)]
+    [InlineData(true, 64u, 12288u)]
+    [InlineData(true, 64u, 0u)]
+    public void GeometryOutputCapacityPreservesAmplifiedVerticesAndPrimitives(bool wave64, uint firstVertex, uint ldsThreshold)
+    {
+        if (SkipWithoutMetalDevice("geometry output capacity")) return;
+        var stage = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 3, PrimitivesPerSubgroup = 1,
+            MaxOutputPerSubgroup = firstVertex + 4, GeometryVerticesOut = firstVertex + 4,
+            IsWave64 = wave64,
+        };
+        foreach (var capacity in new[] { false, true })
+        {
+            Assert.True(Gen5MslTranslator.TryCompileProgram(
+                Gen5NggFixtures.Request(Gen5NggFixtures.GeometryQuad(wave64, firstVertex), stage),
+                out var shader, out var error, new Gen5MslCodegenOptions
+                { GeometryOutputCapacity = capacity, MeshDeviceLdsThresholdBytes = ldsThreshold }), error);
+            var mesh = shader.MeshInfo!;
+            Assert.Equal(capacity ? firstVertex + 4 : 3u, mesh.MaxVertices);
+            Assert.Equal(capacity ? firstVertex + 2 : 1u, mesh.MaxPrimitives);
+            if (capacity)
+            {
+                Assert.Equal(wave64 ? 64u : 32u, mesh.GuestWaveLanes);
+                Assert.Equal(mesh.ThreadsPerThreadgroup / mesh.GuestWaveLanes, mesh.WavesPerThreadgroup);
+            }
+            Assert.True(MetalNative.TryCompileLibrary(shader.Source + FragmentSource, out var library, out var compileError), compileError);
+            var words = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];
+            Gen5MslMeshLaunch.FillDrawInfo(mesh, Gen5MslMeshInputTopology.TriangleList, words, 3, 1, false, 0, 0, 0, 0);
+            var drawInfo = new byte[words.Length * 4];
+            Buffer.BlockCopy(words, 0, drawInfo, 0, drawInfo.Length);
+            var bindings = new List<(byte[], uint)>
+            {
+                (BuildArgumentBuffer(shader), 0u), (new byte[64], 1u),
+                (drawInfo, mesh.DrawInfoBufferIndex), (new byte[16], mesh.IndexBufferIndex),
+            };
+            if (mesh.DeviceLds) bindings.Add((new byte[Gen5MslMeshInfo.LdsPoolByteSize], Gen5MslMeshInfo.LdsPoolBufferIndex));
+            Assert.True(MetalNative.TryRenderMesh(library, shader.EntryPoint, "gen5_mesh_test_fs", bindings,
+                1, mesh.ThreadsPerThreadgroup, TargetSize, TargetSize, out var pixels, out var renderError), renderError);
+            // The upper-right half belongs only to the second triangle. The old input
+            // bounds clip its fourth vertex and second primitive; the fixed bounds retain it.
+            Assert.Equal(capacity ? 1f : 0f, Green(pixels, 24, 8), 3);
+            if (capacity) Assert.Equal(1f, Green(pixels, 8, 24), 3);
+            Assert.Equal(0f, Green(pixels, 1, 1), 3);
+        }
+    }
+
     [Fact]
     public void SyntheticPrimitiveShadersCompileWithTheRuntimeMetalCompiler()
     {
@@ -176,20 +551,25 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void DeviceLdsPrimitiveShaderExchangesThroughTheSlotAndBarrier(bool nullPrimitive)
+    [InlineData(false, 0u)]
+    [InlineData(true, 0u)]
+    [InlineData(false, 12288u)]
+    [InlineData(true, 12288u)]
+    [InlineData(false, 16384u)]
+    [InlineData(true, 16384u)]
+    public void DeviceLdsPrimitiveShaderExchangesThroughTheSlotAndBarrier(bool nullPrimitive, uint threshold)
     {
         if (SkipWithoutMetalDevice("the device LDS mesh execution test")) return;
 
-        // The same program as the threadgroup-memory case, with its LDS in the device pool:
-        // the exchange across both waves only survives if the slot is acquired before the
-        // first access and every barrier orders device memory.
-        var shader = Gen5NggFixtures.CompileOrThrow(
+        // Exercise the same cross-wave exchange with both LDS placements. Device-pool
+        // execution also requires acquisition before the first access and device fences.
+        var request = Gen5NggFixtures.Request(
             Gen5NggFixtures.CullingTriangle(nullPrimitive),
             Gen5NggFixtures.StageInfo with { LocalDataShareBytes = 15 * 1024 });
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error,
+            new Gen5MslCodegenOptions { MeshDeviceLdsThresholdBytes = threshold }), error);
         var mesh = shader.MeshInfo!;
-        Assert.True(mesh.DeviceLds);
+        Assert.Equal(threshold < 15 * 1024, mesh.DeviceLds);
         var source = shader.Source + FragmentSource;
         if (!MetalNative.TryCompileLibrary(source, out var library, out var compileError))
         {
@@ -642,9 +1022,100 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
             Gen5NggFixtures.StageInfo with { GeometryVerticesOut = 3 }));
     }
 
-    private float[] RenderOrThrow(Gen5ShaderProgram program)
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ConditionalMeshExitsReconvergeAndKeepEachWavesOutput(bool firstWaveExitsEarly)
     {
-        var shader = Gen5NggFixtures.CompileOrThrow(program);
+        if (SkipWithoutMetalDevice("conditional mesh exits")) return;
+        var request = Gen5NggFixtures.Request(Gen5NggFixtures.ConditionalMeshExit(firstWaveExitsEarly));
+        float[]? reference = null;
+        foreach (var options in new[]
+        {
+            new Gen5MslCodegenOptions(StructuredControlFlow: false),
+            new Gen5MslCodegenOptions { MeshExitJoin = false },
+            new Gen5MslCodegenOptions { MeshExitJoin = true },
+        })
+        {
+            Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options), error);
+            if (options.StructuredControlFlow && options.MeshExitJoin)
+            {
+                Assert.DoesNotContain("pc ==", shader.Source, StringComparison.Ordinal);
+                Assert.DoesNotContain("while (active", shader.Source, StringComparison.Ordinal);
+            }
+
+            var pixels = RenderOrThrow(shader);
+            Assert.Equal(1.0f, Green(pixels, TargetSize / 2, TargetSize / 2), 3);
+            Assert.Equal(firstWaveExitsEarly ? 1.0f : 0.25f, Red(pixels, TargetSize / 2, TargetSize / 2), 1);
+            Assert.Equal(0.0f, Green(pixels, 1, 1), 3);
+            if (reference is not null) Assert.Equal(reference, pixels);
+            reference = pixels;
+        }
+    }
+
+    [Theory]
+    [InlineData(3u, false)]
+    [InlineData(3u, true)]
+    [InlineData(100001u, false)]
+    [InlineData(100001u, true)]
+    public void OneWaveLoopExitPublishesOnceIncludingAtTheStepLimit(uint iterations, bool deviceLds)
+    {
+        if (SkipWithoutMetalDevice("mesh loop exit")) return;
+        var stage = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 32, MaxOutputPerSubgroup = 32,
+            LocalDataShareBytes = deviceLds ? 15u * 1024 : 1024u,
+        };
+        var request = Gen5NggFixtures.Request(Gen5NggFixtures.MeshExitLoop(iterations), stage);
+        float[]? reference = null;
+        foreach (var structured in new[] { false, true })
+        {
+            Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error,
+                new Gen5MslCodegenOptions(StructuredControlFlow: structured) { MeshExitJoin = true }), error);
+            Assert.Equal(1u, shader.MeshInfo!.WavesPerThreadgroup);
+            if (structured) Assert.DoesNotContain("pc ==", shader.Source, StringComparison.Ordinal);
+            var pixels = RenderOrThrow(shader);
+            Assert.Equal(1.0f, Green(pixels, TargetSize / 2, TargetSize / 2), 3);
+            Assert.Equal(iterations > 100000 ? 1.0f : 0.25f, Red(pixels, TargetSize / 2, TargetSize / 2), 1);
+            if (reference is not null) Assert.Equal(reference, pixels);
+            reference = pixels;
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void UnobservedMeshAluPreservesInactiveExportValues(bool deviceLds, bool structured)
+    {
+        if (SkipWithoutMetalDevice("masked mesh ALU")) return;
+        var stage = Gen5NggFixtures.StageInfo with
+        {
+            VerticesPerSubgroup = 32, MaxOutputPerSubgroup = 32,
+            LocalDataShareBytes = deviceLds ? 15u * 1024 : 1024u,
+        };
+        var request = Gen5NggFixtures.Request(Gen5NggFixtures.MaskedMeshAlu(), stage);
+        float[]? reference = null;
+        foreach (var enabled in new[] { false, true })
+        {
+            Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error,
+                new Gen5MslCodegenOptions(StructuredControlFlow: structured)
+                { UnobservedAluWrites = enabled, MeshExitJoin = true }), error);
+            Assert.Equal(32u, shader.MeshInfo!.ThreadsPerThreadgroup);
+            var pixels = RenderOrThrow(shader);
+            Assert.Equal(1.0f, Green(pixels, TargetSize / 2, TargetSize / 2), 3);
+            Assert.InRange(Red(pixels, TargetSize / 2, TargetSize / 2), 0.75f, 0.9f);
+            if (reference is not null) Assert.Equal(reference, pixels);
+            reference = pixels;
+        }
+    }
+
+    private float[] RenderOrThrow(Gen5ShaderProgram program) =>
+        RenderOrThrow(Gen5NggFixtures.CompileOrThrow(program));
+
+    private float[] RenderOrThrow(Gen5MslShader shader)
+    {
         var mesh = shader.MeshInfo!;
         var source = shader.Source + FragmentSource;
         if (!MetalNative.TryCompileLibrary(source, out var library, out var compileError))
@@ -652,16 +1123,21 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
             throw new InvalidOperationException($"Metal rejected the mesh MSL: {compileError}\n{source}");
         }
 
+        var bindings = new List<(byte[], uint)>
+        {
+            (BuildArgumentBuffer(shader), 0u),
+            (new byte[64], 1u),
+            (BuildDrawInfo(mesh), mesh.DrawInfoBufferIndex),
+            (new byte[16], mesh.IndexBufferIndex),
+        };
+        if (mesh.DeviceLds)
+            bindings.Add((new byte[Gen5MslMeshInfo.LdsPoolByteSize], Gen5MslMeshInfo.LdsPoolBufferIndex));
+
         if (!MetalNative.TryRenderMesh(
                 library,
                 shader.EntryPoint,
                 "gen5_mesh_test_fs",
-                [
-                    (BuildArgumentBuffer(shader), 0u),
-                    (new byte[64], 1u),
-                    (BuildDrawInfo(mesh), mesh.DrawInfoBufferIndex),
-                    (new byte[16], mesh.IndexBufferIndex),
-                ],
+                bindings,
                 threadgroups: 1,
                 mesh.ThreadsPerThreadgroup,
                 TargetSize,

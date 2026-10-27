@@ -29,6 +29,8 @@ if (On("w8")) W8Benches.Run();
 if (filter.Split(',').Contains("xlate")) TranslatorBenches.Run();
 if (filter.Split(',').Contains("gword")) MetalRawBenches.GpuWordWait();
 if (filter.Split(',').Contains("wranges")) WriteRangeBenches.Run();
+if (filter.Split(',').Contains("labels")) LabelFilterBenches.Run();
+if (filter.Split(',').Contains("shmap")) ShaderRegisterMapBenches.Run();
 
 Console.WriteLine();
 Console.WriteLine(Harness.Table());

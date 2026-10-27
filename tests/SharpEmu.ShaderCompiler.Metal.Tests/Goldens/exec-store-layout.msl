@@ -659,9 +659,6 @@ static inline void sharpemu_note_step_cap(device atomic_uint* report)
         s126 = t15;
         exec = ((t15) >> sharpemu_lane & 1u) != 0u;
         uint t16 = (0x10u + 0u + 0u + (0u * 0u));
-        if (exec)
-        {
-            sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t16 + 0u, v0);
-        }
+        sharpemu_store_dword(b0, sharpemu_resources.buffer_bytes[0], t16 + 0u, v0);
     }
 }

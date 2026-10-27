@@ -150,6 +150,37 @@ public sealed unsafe class MetalShaderSourceReleaseTests(ITestOutputHelper outpu
         Assert.Equal(expected, metal.PayloadHash);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ADeferredModuleCompilesOnlyIfAPipelineRequestsIt(bool requested)
+    {
+        if (!RequireDevice()) return;
+        var compiles = 0;
+        using (var rig = new Rig(Device.Value))
+        {
+            rig.Host.DeferLibraryCompiles = true;
+            rig.Host.BeforeLibraryCompile = () => Interlocked.Increment(ref compiles);
+            var request = Gen5ComputeFixtures.CreateComputeRequest(Gen5ComputeFixtures.ExecStore);
+            Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+            var metal = new MetalCompiledGuestShader(shader, request);
+            var program = new ShaderProgram(1, rig.Host.CreateShaderModule(metal, ShaderStage.Compute, 0x5EED, 1));
+            Assert.Equal(0, Volatile.Read(ref compiles));
+            if (requested)
+            {
+                rig.Host.CreateComputePipeline(new ComputePipelineDescription
+                {
+                    Input = new ComputeInputInfo { ThreadsX = 32, ThreadsY = 1, ThreadsZ = 1 },
+                    Program = program,
+                    Stage = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x5EED },
+                });
+                Assert.True(metal.SourceReleased);
+                Assert.Equal(1, Volatile.Read(ref compiles));
+            }
+        }
+        Assert.Equal(requested ? 1 : 0, Volatile.Read(ref compiles));
+    }
+
     private static PipelineHandle Pipeline(MetalRenderHost host, MetalCompiledGuestShader shader, ulong id)
     {
         var program = new ShaderProgram(id, host.CreateShaderModule(shader, ShaderStage.Compute, 0x5EED + id, id));

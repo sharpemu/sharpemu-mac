@@ -199,7 +199,12 @@ public static partial class Gen5MslTranslator
                 text.AppendLine();
             }
 
-            EmitRegion(text, 0, NoFollow, 1);
+            // Mesh exits converge at the common output epilogue, which contains a
+            // workgroup barrier. Treat that exit as the outer region's follow: the
+            // assembler then encloses each remaining path in its conditional rather
+            // than returning from the kernel. An exit from inside a nested loop still
+            // has to satisfy the existing loop/region rules; otherwise we fall back.
+            EmitRegion(text, 0, _stage == Gen5MslStage.Mesh && _options.MeshExitJoin ? ExitTarget : NoFollow, 1);
             if (_structureFailed)
             {
                 return false;
@@ -607,6 +612,19 @@ public static partial class Gen5MslTranslator
                     AppendIndented(text, "return sharpemu_out;", indent);
                     return;
                 case Gen5MslStage.Mesh:
+                    if (indent > 1 && _options.MeshExitJoin && Mesh.ThreadsPerThreadgroup <= MeshWaveLanes)
+                    {
+                        // Scalar control flow (including the loop budget) is uniform in
+                        // this one hardware wave. Every lane reaches this copy of the
+                        // epilogue together, including its barrier and LDS slot release.
+                        // A multi-wave group must still reconverge at the common copy.
+                        var meshEpilogue = new StringBuilder();
+                        EmitMeshEpilogue(meshEpilogue);
+                        AppendBlockText(text, meshEpilogue.ToString(), indent - 1);
+                        AppendIndented(text, "return;", indent);
+                        return;
+                    }
+
                     // The mesh epilogue publishes the whole workgroup's output after a
                     // threadgroup barrier, so every thread has to reach it: an exit at the
                     // end of the program falls into it, and one anywhere else would leave

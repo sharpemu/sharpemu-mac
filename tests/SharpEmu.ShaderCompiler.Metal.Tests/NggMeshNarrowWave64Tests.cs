@@ -9,12 +9,13 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests;
 public sealed class NggMeshNarrowWave64Tests
 {
     private static Gen5MslShader Compile(
-        Gen5ShaderProgram program, Gen5NggStageInfo? stage, bool structured)
+        Gen5ShaderProgram program, Gen5NggStageInfo? stage, bool structured, bool meshExitJoin = true)
     {
         var request = Gen5NggFixtures.Request(program, stage);
         Assert.True(
             Gen5MslTranslator.TryCompileProgram(
-                request, out var shader, out var error, new Gen5MslCodegenOptions(StructuredControlFlow: structured)),
+                request, out var shader, out var error,
+                new Gen5MslCodegenOptions(StructuredControlFlow: structured) { MeshExitJoin = meshExitJoin }),
             error);
         return shader;
     }
@@ -66,11 +67,17 @@ public sealed class NggMeshNarrowWave64Tests
             PrimitivesPerSubgroup = 1,
             MaxOutputPerSubgroup = 32,
         };
-        var shader = Compile(Gen5NggFixtures.BarrierLoopWithTwoExits(), stage, structured: true);
+        var shader = Compile(Gen5NggFixtures.BarrierLoopWithTwoExits(), stage, structured: true, meshExitJoin: false);
         Assert.DoesNotContain("while (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("while (active && pc >= 1u && pc <= 3u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("if (active && pc == 2u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("threadgroup_barrier(mem_flags::mem_threadgroup);", shader.Source, StringComparison.Ordinal);
+
+        // Joining the exits now lets this one-wave loop use structured control flow;
+        // the kill switch above still exercises the linear fallback itself.
+        var joined = Compile(Gen5NggFixtures.BarrierLoopWithTwoExits(), stage, structured: true);
+        Assert.DoesNotContain("pc ==", joined.Source, StringComparison.Ordinal);
+        Assert.Contains("while (true)", joined.Source, StringComparison.Ordinal);
 
         // Several waves around a barrier inside a loop: back to the dispatcher.
         var wide = Compile(Gen5NggFixtures.BarrierLoopWithTwoExits(), null, structured: true);
@@ -82,7 +89,7 @@ public sealed class NggMeshNarrowWave64Tests
     {
         // A wave that runs out of steps clears active; a barrier under that guard would be
         // skipped by it while the other waves wait. So it follows the guarded block.
-        var shader = Compile(Gen5NggFixtures.BarrierAfterLoopWithTwoExits(), null, structured: true);
+        var shader = Compile(Gen5NggFixtures.BarrierAfterLoopWithTwoExits(), null, structured: true, meshExitJoin: false);
         Assert.Equal(2u, Assert.IsType<Gen5MslMeshInfo>(shader.MeshInfo).WavesPerThreadgroup);
         Assert.Contains("while (active && pc >= ", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("while (active && !sharpemu_mesh_wait)", shader.Source, StringComparison.Ordinal);
@@ -102,7 +109,7 @@ public sealed class NggMeshNarrowWave64Tests
             PrimitivesPerSubgroup = 1,
             MaxOutputPerSubgroup = 32,
         };
-        var oneWave = Compile(Gen5NggFixtures.BarrierAfterLoopWithTwoExits(), stage, structured: true);
+        var oneWave = Compile(Gen5NggFixtures.BarrierAfterLoopWithTwoExits(), stage, structured: true, meshExitJoin: false);
         var oneLines = oneWave.Source.Split('\n');
         var oneBody = Array.FindIndex(oneLines, static line => line.Contains("if (active && pc == 0u)", StringComparison.Ordinal));
         var oneBarrier = Array.FindIndex(oneLines, oneBody, static line => line.Trim() == "threadgroup_barrier(mem_flags::mem_threadgroup);");

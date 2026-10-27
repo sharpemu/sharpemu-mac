@@ -12,6 +12,7 @@ using SharpEmu.HLE.Host;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.AppContent;
 using SharpEmu.Libs.SaveData;
@@ -159,6 +160,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     public OrbisGen2Result Run(string ebootPath)
     {
         using var archiveMount = MountArchive(ref ebootPath);
+        using var aprSession = _aprSession = AmprExports.BeginRuntimeSession(_virtualMemory);
         var normalizedEbootPath = Path.GetFullPath(ebootPath);
         using var app0Binding = BindApp0Root(normalizedEbootPath);
         Console.Error.WriteLine($"[RUNTIME] Loading: {ebootPath}");
@@ -1506,6 +1508,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         return _moduleManager.Dispatch(nid, context);
     }
 
+    private IDisposable? _aprSession;
+
     public void Dispose()
     {
         if (_disposed)
@@ -1530,6 +1534,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 "[RUNTIME] Guest workers were still active at teardown; keeping the guest address space mapped.");
             return;
         }
+
+        _aprSession?.Dispose();
 
         if (_gpuMemory != null)
         {

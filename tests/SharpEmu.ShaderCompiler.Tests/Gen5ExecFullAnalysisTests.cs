@@ -44,6 +44,71 @@ public sealed class Gen5ExecFullAnalysisTests
 
     private IReadOnlySet<uint> Analyze() => Gen5ExecFullAnalysis.Analyze(new Gen5ShaderProgram(0x1000, _program), wave32: false);
 
+    [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(false, true, false, true)]
+    [InlineData(false, true, true, false)]
+    [InlineData(true, false, false, true)]
+    [InlineData(true, false, true, true)]
+    [InlineData(true, true, false, true)]
+    [InlineData(true, true, true, true)]
+    public void ConstantExecRestore_RespectsWidthAndLiteralExtension(bool wave32, bool wide, bool literal, bool expected)
+    {
+        Kill();
+        var mask = literal ? new Gen5Operand(Gen5OperandKind.LiteralConstant, uint.MaxValue)
+            : new Gen5Operand(Gen5OperandKind.EncodedConstant, 193);
+        Scalar(wide ? "SMovB64" : "SMovB32", Exec, mask);
+        var after = VectorAdd();
+        var full = Gen5ExecFullAnalysis.Analyze(new Gen5ShaderProgram(0x1000, _program), wave32);
+        Assert.Equal(expected, full.Contains(after));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OrWithInlineMinusOne_RestoresExec(bool constantFirst)
+    {
+        Kill();
+        var mask = new Gen5Operand(Gen5OperandKind.EncodedConstant, 193);
+        Scalar("SOrB64", Exec, constantFirst ? mask : Gen5Operand.Scalar(Exec),
+            constantFirst ? Gen5Operand.Scalar(Exec) : mask);
+        Assert.Contains(VectorAdd(), Analyze());
+    }
+
+    [Theory]
+    [InlineData(Gen5OperandKind.EncodedConstant, 192u)]
+    [InlineData(Gen5OperandKind.EncodedConstant, 194u)]
+    [InlineData(Gen5OperandKind.LiteralConstant, 0x7fffffffu)]
+    [InlineData(Gen5OperandKind.LiteralConstant, 0xfffffffeu)]
+    public void PartialConstantExecRestore_RemainsGuarded(Gen5OperandKind kind, uint value)
+    {
+        Kill();
+        Scalar("SMovB64", Exec, new Gen5Operand(kind, value));
+        Assert.DoesNotContain(VectorAdd(), Analyze());
+    }
+
+    [Fact]
+    public void ConstantRestoreOnOnlyOneBranch_DoesNotProveJoinFull()
+    {
+        Kill();
+        var branch = Branch("SCbranchScc0");
+        Scalar("SMovB64", Exec, new Gen5Operand(Gen5OperandKind.EncodedConstant, 193));
+        var join = VectorAdd();
+        PointBranch(branch, join);
+        Assert.DoesNotContain(join, Analyze());
+    }
+
+    [Fact]
+    public void LiteralSavedHighWord_DoesNotProveWave32ExecFull()
+    {
+        Scalar("SMovB64", 40, new Gen5Operand(Gen5OperandKind.LiteralConstant, uint.MaxValue));
+        Kill();
+        Scalar("SMovB32", Exec, Gen5Operand.Scalar(41));
+        var after = VectorAdd();
+        Assert.DoesNotContain(after, Gen5ExecFullAnalysis.Analyze(new Gen5ShaderProgram(0x1000, _program), true));
+    }
+
     [Fact]
     public void StraightLineCode_RunsWithAFullExec()
     {

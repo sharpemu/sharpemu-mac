@@ -280,6 +280,11 @@ public sealed class NggMeshIndirectLaunchTests(ITestOutputHelper output)
             ThreadsPerThreadgroup: 64, WavesPerThreadgroup: 2, MaxVertices: 64, MaxPrimitives: 64,
             VerticesPerPrimitive: 3, Topology: Gen5MslMeshTopology.Triangle, ThreadgroupMemoryBytes: 4096,
             DrawInfoBufferIndex: 2, IndexBufferIndex: 3, ReadsIndexBuffer: true, GeometryVerticesOut: 4));
+        yield return ("geometry separate input and output capacities", new Gen5MslMeshInfo(
+            ThreadsPerThreadgroup: 128, WavesPerThreadgroup: 2, MaxVertices: 96, MaxPrimitives: 88,
+            VerticesPerPrimitive: 3, Topology: Gen5MslMeshTopology.Triangle, ThreadgroupMemoryBytes: 4096,
+            DrawInfoBufferIndex: 2, IndexBufferIndex: 3, ReadsIndexBuffer: true, GeometryVerticesOut: 24,
+            Wave64: true, GeometryInputVertices: 24, GeometryInputPrimitives: 4));
         yield return ("points", new Gen5MslMeshInfo(
             ThreadsPerThreadgroup: 32, WavesPerThreadgroup: 1, MaxVertices: 32, MaxPrimitives: 32,
             VerticesPerPrimitive: 1, Topology: Gen5MslMeshTopology.Point, ThreadgroupMemoryBytes: 4096,

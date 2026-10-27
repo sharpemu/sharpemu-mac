@@ -22,15 +22,18 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     internal MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written)
     {
-        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageBufferResolve);
+        using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageDeferredLabels);
         OrderAfterDeferredCopies(address, size);
+        phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageSharedLookup);
         var staged = StagedStorage;
         if (staged.TryShare(address, size, written, out var shared))
         {
             return shared;
         }
 
+        phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageStoreOrder);
         OrderAfterStagedStores(address, size);
+        phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageBufferResolve);
         if (_guestMemory.TryResolveInPlace(address, size, out var window))
         {
             return window;

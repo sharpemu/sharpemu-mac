@@ -31,6 +31,7 @@ internal sealed class MetalLibraryCompilePool
     {
         private const int Queued = 0;
         private const int Taken = 1;
+        private const int Cancelled = 2;
 
         private readonly TaskCompletionSource _done = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _state;
@@ -39,6 +40,16 @@ internal sealed class MetalLibraryCompilePool
 
         // Whether no thread has taken it yet; a thread may take it the moment after.
         internal bool IsQueued => Volatile.Read(ref _state) == Queued;
+
+        // A deferred module that no pipeline requested must not start compiling at
+        // teardown. Racing a claimant is safe: only one transition leaves Queued.
+        internal bool CancelIfQueued()
+        {
+            if (Interlocked.CompareExchange(ref _state, Cancelled, Queued) != Queued)
+                return false;
+            _done.SetCanceled();
+            return true;
+        }
 
         // True when this call ran the work; false when another thread has it (or had it).
         internal bool TryRun()

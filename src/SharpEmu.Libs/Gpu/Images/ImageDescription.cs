@@ -77,6 +77,27 @@ public struct MipLevelLayouts
 {
     private MipLevelLayout[]? _levels;
 
+    // Build a chain with one owned array instead of copying an increasingly long array for
+    // every level. Existing value copies and the caller's input remain independent. As with
+    // individual indexer writes, levels after the supplied prefix retain their old values.
+    public void SetPrefix(ReadOnlySpan<MipLevelLayout> values)
+    {
+        if (values.Length > ImageDescription.MaxLevels)
+        {
+            throw new ArgumentOutOfRangeException(nameof(values));
+        }
+
+        if (values.IsEmpty)
+        {
+            return;
+        }
+
+        var levels = new MipLevelLayout[Math.Max(values.Length, _levels?.Length ?? 0)];
+        _levels?.CopyTo(levels, 0);
+        values.CopyTo(levels);
+        _levels = levels;
+    }
+
     public MipLevelLayout this[int index]
     {
         readonly get => _levels is { } levels && (uint)index < (uint)levels.Length ? levels[index] : default;

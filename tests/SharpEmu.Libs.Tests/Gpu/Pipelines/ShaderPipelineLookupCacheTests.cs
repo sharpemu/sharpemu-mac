@@ -227,6 +227,39 @@ public sealed class ShaderPipelineLookupCacheTests : IDisposable
         Assert.Equal(B + 0x22030, AddressOf(second, 2));
     }
 
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void RelocatedIdenticalVertexTablesReuseLayoutsButRewrittenBytesDoNot(bool moveAttributes, bool moveBuffers)
+    {
+        var first = Draw();
+        var attributes = moveAttributes ? B + 0x9600 : AttributeTable;
+        var buffers = moveBuffers ? B + 0x9800 : BufferTable;
+        Span<byte> attributeBytes = stackalloc byte[3 * 4];
+        Span<byte> bufferBytes = stackalloc byte[3 * 16];
+        Assert.True(_memory.TryRead(AttributeTable, attributeBytes));
+        Assert.True(_memory.TryRead(BufferTable, bufferBytes));
+        Assert.True(_memory.TryWrite(attributes, attributeBytes));
+        Assert.True(_memory.TryWrite(buffers, bufferBytes));
+        SetAttributeTable(attributes);
+        var user = _banks.Shader.Vertex.GeometryUserScalars;
+        user.Set(10, unchecked((uint)buffers), UserScalarKind.Unknown);
+        user.Set(11, (uint)(buffers >> 32), UserScalarKind.Unknown);
+
+        var moved = Draw();
+        Assert.Same(first.VertexInput.Attributes, moved.VertexInput.Attributes);
+        Assert.Same(first.VertexInput.Buffers, moved.VertexInput.Buffers);
+
+        WriteWord(buffers + 2 * 16, unchecked((uint)(B + 0x30000)));
+        var changed = Draw();
+        Assert.NotSame(first.VertexInput.Buffers, changed.VertexInput.Buffers);
+        Assert.Equal(B + 0x30000, AddressOf(changed, 2));
+        Assert.Equal(B + 0x22000, AddressOf(first, 2));
+        WriteAttribute(attributes, 1, 1, offset: 32);
+        Assert.Equal(B + 0x21020, AddressOf(Draw(), 1));
+    }
+
     [Fact]
     public void ARewrittenBufferDescriptorIsSeenOnTheNextDraw()
     {

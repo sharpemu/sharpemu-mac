@@ -91,16 +91,20 @@ public static partial class ImageRequestBuilders
     {
         public bool Valid;
         public ColorTargetWords Words;
-        public uint TargetMask;
+        public bool Enabled;
         public uint DrawLayerOffset;
-        public bool IgnoreTargetMask;
+        public bool NativeClearMetadata;
         public ColorTargetResolution? Result;
     }
 
     private const int TargetMemoCount = 8;
+    private const int TargetMemoWays = 4;
 
     [ThreadStatic]
     private static ColorTargetMemo[]? _colorTargetMemos;
+
+    [ThreadStatic]
+    private static byte[]? _colorTargetMemoNext;
 
     private static int TargetMemoSlot(ulong address) => (int)((address >> 12) ^ (address >> 20)) & (TargetMemoCount - 1);
 
@@ -112,22 +116,35 @@ public static partial class ImageRequestBuilders
             return ColorTargetCore(in words, targetMask, drawLayerOffset, ignoreTargetMask);
         }
 
-        var memos = _colorTargetMemos ??= new ColorTargetMemo[TargetMemoCount];
-        ref var memo = ref memos[TargetMemoSlot(words.BaseAddress)];
-        if (memo.Valid && memo.TargetMask == targetMask && memo.DrawLayerOffset == drawLayerOffset &&
-            memo.IgnoreTargetMask == ignoreTargetMask && memo.Words.Equals(words))
+        // The mask only decides whether a target exists; channel write masks are applied by
+        // the draw. Keep equivalent masks together, including an ignored zero mask. Multiple
+        // attachments often share the address hash, so retain four requests in each bucket.
+        var enabled = words.BaseAddress != 0 && (ignoreTargetMask || (targetMask & 0xF) != 0);
+        var nativeClearMetadata = NativeColorClearMetadata;
+        var memos = _colorTargetMemos ??= new ColorTargetMemo[TargetMemoCount * TargetMemoWays];
+        var bucket = TargetMemoSlot(words.BaseAddress);
+        var start = bucket * TargetMemoWays;
+        for (var way = 0; way < TargetMemoWays; way++)
         {
-            return memo.Result;
+            ref var held = ref memos[start + way];
+            if (held.Valid && held.Enabled == enabled && held.DrawLayerOffset == drawLayerOffset &&
+                held.NativeClearMetadata == nativeClearMetadata && held.Words.Equals(words))
+            {
+                return held.Result;
+            }
         }
 
         var result = ColorTargetCore(in words, targetMask, drawLayerOffset, ignoreTargetMask);
-        memo = new ColorTargetMemo
+        var next = _colorTargetMemoNext ??= new byte[TargetMemoCount];
+        var slot = start + next[bucket];
+        next[bucket] = (byte)((next[bucket] + 1) % TargetMemoWays);
+        memos[slot] = new ColorTargetMemo
         {
             Valid = true,
             Words = words,
-            TargetMask = targetMask,
+            Enabled = enabled,
             DrawLayerOffset = drawLayerOffset,
-            IgnoreTargetMask = ignoreTargetMask,
+            NativeClearMetadata = nativeClearMetadata,
             Result = result,
         };
         return result;
@@ -415,20 +432,22 @@ public static partial class ImageRequestBuilders
             description.Metadata.DccAlphaMsb = DccAlphaOnMsb(words);
         }
 
+        Span<MipLevelLayout> layouts = stackalloc MipLevelLayout[ImageDescription.MaxLevels];
         for (var level = 0; level < levels; level++)
         {
             if (volume)
             {
                 var mip = volumeLayout!.Mips[level];
-                description.MipLayout[level] = new MipLevelLayout { Offset = mip.Offset, Size = mip.Size, Pitch = mip.PaddedWidth, Height = mip.PaddedHeight };
+                layouts[level] = new MipLevelLayout { Offset = mip.Offset, Size = mip.Size, Pitch = mip.PaddedWidth, Height = mip.PaddedHeight };
                 continue;
             }
 
             var span = mipSpans[level];
             var levelOffset = span.SourceSize != 0 ? span.SourceOffset : span.Offset;
             var levelSize = (ulong)(span.SourceSize != 0 ? span.SourceSize : span.Size) * view.ImageLayers;
-            description.MipLayout[level] = new MipLevelLayout { Offset = levelOffset, Size = levelSize, Pitch = mipPadded[level].Width, Height = mipPadded[level].Height };
+            layouts[level] = new MipLevelLayout { Offset = levelOffset, Size = levelSize, Pitch = mipPadded[level].Width, Height = mipPadded[level].Height };
         }
+        description.MipLayout.SetPrefix(layouts[..(int)levels]);
 
         var viewType = is1D
             ? view.LayerCount == 1 ? GpuImageViewType.Type1D : GpuImageViewType.Type1DArray

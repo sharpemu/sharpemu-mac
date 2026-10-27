@@ -65,13 +65,23 @@ internal sealed class MetalPendingWriteOverlay
     // of up to MaxPooledBytes are kept, by size, once they have left the page lists and the
     // order queue, and reused by the next write of that size. Guarded by the gate.
     private const int MaxPooledBytes = 16;
-    private const int MaxPooledPerSize = 256;
+    // A frame can retire thousands of occlusion-dump writes together. A 256-entry pool
+    // discarded most of that burst, allocating entries and byte arrays again next frame.
+    // Bound the total across sizes, rather than multiplying the limit by every size bin.
+    internal const int MaxPooledEntries = 8192;
     private readonly Stack<Entry>[] _spareEntries = [new(), new(), new(), new(), new()];
+    private int _spareEntryCount;
+
+    internal int SpareEntryCount
+    {
+        get { lock (_gate) return _spareEntryCount; }
+    }
 
     private Entry RentEntry(int length)
     {
         if (length <= MaxPooledBytes && (length & 3) == 0 && _spareEntries[length >> 2] is { Count: > 0 } spare)
         {
+            _spareEntryCount--;
             return spare.Pop();
         }
 
@@ -83,7 +93,7 @@ internal sealed class MetalPendingWriteOverlay
     {
         var length = entry.Bytes.Length;
         if (length == 0 || length > MaxPooledBytes || (length & 3) != 0 ||
-            _spareEntries[length >> 2].Count >= MaxPooledPerSize)
+            _spareEntryCount >= MaxPooledEntries)
         {
             return;
         }
@@ -92,6 +102,7 @@ internal sealed class MetalPendingWriteOverlay
         entry.Dead = null;
         entry.Removed = false;
         _spareEntries[length >> 2].Push(entry);
+        _spareEntryCount++;
     }
 
     /// <summary>Entries not yet dropped. Zero is the fast path every read checks first.</summary>

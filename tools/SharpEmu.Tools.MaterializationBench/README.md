@@ -36,3 +36,19 @@ load drift. Cache counters must distinguish actual hits from rebuilds; correctne
 and invalidation remain the responsibility of the regression suites.
 
 These are synthetic per-operation timings, not game frame-time projections.
+
+Set `PA_COMPARE_RESIDENT=1` to offer an exact in-place comparer over the benchmark's
+native allocation. Use identical settings in both source/binary arms when comparing
+warm or moving-pointer validation. The default retains read-and-copy validation.
+This synthetic comparer checks bounds and every recorded byte, but has no GPU
+ownership, pending-write, alias-lifetime or released-page costs; its times are not
+Metal-backend or game-FPS measurements. `SHARPEMU_RESOURCE_INPLACE_VALIDATE=0`
+disables use of the offered comparer, and
+`SHARPEMU_RESOURCE_INPLACE_VALIDATE_VERIFY=1` also checks accepted comparisons
+through the original reader.
+
+The resident-reader delegate is now reused across calls. Earlier versions converted
+a capturing local function into a delegate on every cache call; their per-operation
+allocation figures therefore include harness overhead. Keep the benchmark binary
+fixed across compiler comparisons, and do not attribute changes from this harness
+correction to the emulator.

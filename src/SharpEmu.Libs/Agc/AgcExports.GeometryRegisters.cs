@@ -29,7 +29,7 @@ public static partial class AgcExports
                 startRegister &= 0x0FFF_FFFFu;
             }
 
-            var directDestination = operation switch
+            IDictionary<uint, uint> directDestination = operation switch
             {
                 ItSetShReg => state.ShRegisters,
                 ItSetContextReg => state.CxRegisters,
@@ -66,7 +66,7 @@ public static partial class AgcExports
             return;
         }
 
-        Dictionary<uint, uint> destination;
+        IDictionary<uint, uint> destination;
         uint registerCount;
         ulong registersAddress;
         uint indirectRegister;

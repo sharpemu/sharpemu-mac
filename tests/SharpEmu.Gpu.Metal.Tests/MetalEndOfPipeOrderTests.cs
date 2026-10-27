@@ -285,8 +285,11 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
     // The held copies' span only spares the scan: a binding between two of them that touches
     // neither keeps the encoder open, and once they land the span starts over, so bytes only
     // an earlier copy covered no longer count.
-    [Fact]
-    public void ABindingBetweenTwoHeldCopiesTouchesNeitherAndTheSpanStartsOverWhenTheyLand()
+    [Theory]
+    [InlineData(0x1000UL, 0x800UL, 1)]
+    [InlineData(0x4000UL, 0x2000UL, 1)]
+    [InlineData(0x4000UL, 0x2000UL, 32)]
+    public void ABindingBetweenTwoHeldCopiesTouchesNeitherAndTheSpanStartsOverWhenTheyLand(ulong secondOffset, ulong gapOffset, int copiesPerCluster)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
@@ -294,20 +297,23 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         Assert.True(host.DefersCopiesInCompute);
 
         _ = host.EnsureComputeEncoder();
-        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
-        host.RecordCommandProcessorWrite(LaterLabel + 0x1000, BitConverter.GetBytes(0x66UL), "WRITE_DATA");
-        Assert.Equal(2, host.DeferredLabelCopyCount);
+        for (var index = 0; index < copiesPerCluster; index++)
+        {
+            host.RecordCommandProcessorWrite(LaterLabel + (ulong)index * 8, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
+            host.RecordCommandProcessorWrite(LaterLabel + secondOffset + (ulong)index * 8, BitConverter.GetBytes(0x66UL), "WRITE_DATA");
+        }
+        Assert.Equal(copiesPerCluster * 2, host.DeferredLabelCopyCount);
 
-        host.OrderAfterDeferredCopies(LaterLabel + 0x800, 0x40);
+        host.OrderAfterDeferredCopies(LaterLabel + gapOffset, 0x40);
         Assert.True(host.ComputeEncoderOpen);
-        Assert.Equal(2, host.DeferredLabelCopyCount);
+        Assert.Equal(copiesPerCluster * 2, host.DeferredLabelCopyCount);
 
-        host.OrderAfterDeferredCopies(LaterLabel + 0x1000, 8);
+        host.OrderAfterDeferredCopies(LaterLabel + secondOffset, 8);
         Assert.False(host.ComputeEncoderOpen);
         Assert.Equal(0, host.DeferredLabelCopyCount);
 
         _ = host.EnsureComputeEncoder();
-        host.RecordCommandProcessorWrite(LaterLabel + 0x1000, BitConverter.GetBytes(0x77UL), "WRITE_DATA");
+        host.RecordCommandProcessorWrite(LaterLabel + secondOffset, BitConverter.GetBytes(0x77UL), "WRITE_DATA");
         host.OrderAfterDeferredCopies(LaterLabel, 8);
         Assert.True(host.ComputeEncoderOpen);
         Assert.Equal(1, host.DeferredLabelCopyCount);
@@ -316,7 +322,7 @@ public sealed unsafe class MetalEndOfPipeOrderTests(ITestOutputHelper output)
         WaitForGpu(host, host.LastWorkSerial);
         WaitForCompletions(host);
         Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
-        Assert.Equal(0x77UL, rig.Backing.Read64(LaterLabel + 0x1000));
+        Assert.Equal(0x77UL, rig.Backing.Read64(LaterLabel + secondOffset));
     }
 
     [Fact]

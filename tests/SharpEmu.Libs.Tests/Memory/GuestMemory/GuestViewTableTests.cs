@@ -49,6 +49,29 @@ public sealed unsafe class GuestViewTableTests
     }
 
     [Fact]
+    public void TranslatorDiagnosticsReadPublishedChangesWithoutChangingTranslations()
+    {
+        using var table = NewTable(logCapacity: 4);
+        var translator = new GuestMirrorTranslator(table.Region.Address, table.Region.Size, MirrorBase, MirrorBytes);
+        table.Map(Base, Block, 0, HostPageProtection.ReadWrite);
+        Assert.True(translator.TryTranslate(Base, 4, out var before));
+        for (ulong i = 1; i < 6; i++) table.Map(Base + i * 2 * Block, Block, i * Block, HostPageProtection.ReadWrite);
+        var generation = translator.MappingGeneration;
+        Assert.Equal(table.LogSequence, translator.ChangeSequence);
+        Assert.False(translator.TryReadChange(0, out _)); // overwritten ring slot
+        Assert.False(translator.TryReadChange(table.LogSequence, out _)); // unpublished future slot
+        for (ulong i = 2; i < table.LogSequence; i++)
+        {
+            Assert.True(table.TryReadLog(i, out var expected));
+            Assert.True(translator.TryReadChange(i, out var actual));
+            Assert.Equal(expected, actual);
+        }
+        Assert.Equal(generation, translator.MappingGeneration);
+        Assert.True(translator.TryTranslate(Base, 4, out var after));
+        Assert.Equal(before, after);
+    }
+
+    [Fact]
     public void TheLogRecordsEveryChangeInTheOrderItWasMade()
     {
         using var table = NewTable();

@@ -215,12 +215,15 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
 
     // With the pool busy, the compile is still queued when the draw needs it, and runs off the worker.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void AGuestStoreIsServedWhileADrawWaitsForItsLibraryCompile(bool poolBusy)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void AGuestStoreIsServedWhileADrawWaitsForItsLibraryCompile(bool poolBusy, bool deferred)
     {
         using var rig = CreateRig();
         if (rig is null) return;
+        rig.Host.DeferLibraryCompiles = deferred;
         using var poolFree = new ManualResetEventSlim(false);
         try
         {

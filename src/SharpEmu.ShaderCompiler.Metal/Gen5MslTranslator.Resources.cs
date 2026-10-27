@@ -200,7 +200,11 @@ public static partial class Gen5MslTranslator
             if (_stage == Gen5MslStage.Mesh)
             {
                 _meshLdsDwords = MeshLdsDwordCount(request);
-                _meshInfo = BuildMeshInfo(request, _meshLdsDwords);
+                _meshInfo = BuildMeshInfo(request, _meshLdsDwords, Math.Min(options.MeshDeviceLdsThresholdBytes, 16384u),
+                    options.GeometryOutputCapacity);
+                _meshHotLds = PlanMeshHotLds();
+                if (_meshHotLds.Length != 0)
+                    _meshInfo = _meshInfo with { ThreadgroupMemoryBytes = MeshHotLdsWords * sizeof(uint) };
             }
 
             _computeLdsDwords = options.DispatchThreadgroupMemory
@@ -385,6 +389,16 @@ public static partial class Gen5MslTranslator
                     continue;
                 }
 
+                if (field.FieldKind == MslArgumentFieldKind.BufferPointers &&
+                    Enumerable.Range(0, (int)field.Count).Any(IsScalarConstantBuffer))
+                {
+                    // Keep the host's pointer array ABI: each pointer retains its id and
+                    // eight-byte slot, even when adjacent pointers have different types.
+                    for (var index = 0; index < field.Count; index++)
+                        source.AppendLine($"    {(IsScalarConstantBuffer(index) ? "constant" : "device")} uint* buffer_{index} [[id({field.FirstId + index})]];");
+                    continue;
+                }
+
                 var declaration = field.FieldKind switch
                 {
                     MslArgumentFieldKind.BufferPointers => $"array<device uint*, {field.Count}> {field.Name}",
@@ -480,9 +494,11 @@ public static partial class Gen5MslTranslator
             var request = _request;
             var layout = request.Bindings;
             var bufferCount = request.Resources.Info.Buffers.Count;
+            var splitBufferFields = Enumerable.Range(0, bufferCount).Any(IsScalarConstantBuffer);
             for (var index = 0; index < bufferCount; index++)
             {
-                source.AppendLine($"    device uint* b{index} = {ResourcesName}.buffers[{index}];");
+                var field = splitBufferFields ? $"buffer_{index}" : $"buffers[{index}]";
+                source.AppendLine($"    {(IsScalarConstantBuffer(index) ? "constant" : "device")} uint* b{index} = {ResourcesName}.{field};");
             }
 
             if (!_options.ElideByteBias)
@@ -1964,7 +1980,7 @@ public static partial class Gen5MslTranslator
                         : $"(v[{control.SourceVectorRegister}] >> {sourceShift})";
                     var element = FormatUInt(byteCount == 1 ? 0xFFu : 0xFFFFu);
                     var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
-                    var word = ScratchWord(byteAddress);
+                    var word = ScratchAccessWord(control, byteAddress);
                     Line($"{word} = ({word} & ~({element} << {shift})) | (((({source}) & {element})) << {shift});");
                 }
                 else
@@ -1974,7 +1990,7 @@ public static partial class Gen5MslTranslator
                         var value = control.SourceIsScalar
                             ? ScalarExpression(control.SourceVectorRegister + index)
                             : $"v[{control.SourceVectorRegister + index}]";
-                        Line($"{ScratchWord(byteAddress, index * sizeof(uint))} = {value};");
+                        Line($"{ScratchAccessWord(control, byteAddress, index * sizeof(uint))} = {value};");
                     }
                 }
 
@@ -1994,7 +2010,7 @@ public static partial class Gen5MslTranslator
                 var shift = Temp("uint", $"({byteAddress} & 3u) << 3u");
                 var loaded = Temp(
                     "uint",
-                    $"({ScratchWord(byteAddress)} >> {shift}) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}");
+                    $"({ScratchAccessWord(control, byteAddress)} >> {shift}) & {FormatUInt(loadBytes == 1 ? 0xFFu : 0xFFFFu)}");
                 if (signExtend)
                 {
                     loaded = Temp("uint", $"(uint)extract_bits(as_type<int>({loaded}), 0u, {loadBytes * 8}u)");
@@ -2011,7 +2027,7 @@ public static partial class Gen5MslTranslator
 
             for (uint index = 0; index < control.DwordCount; index++)
             {
-                StoreVector(destination + index, ScratchWord(byteAddress, index * sizeof(uint)));
+                StoreVector(destination + index, ScratchAccessWord(control, byteAddress, index * sizeof(uint)));
             }
 
             return true;

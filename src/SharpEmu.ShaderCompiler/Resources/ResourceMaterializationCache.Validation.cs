@@ -22,6 +22,29 @@ public sealed partial class ResourceMaterializationCache
     }
 
     private const ulong JoinedGapBytes = 64;
+
+    // Reused only during this cache's serialized validation. A range may move independently
+    // of its neighbors; never move a joined span or retain these addresses on the entry.
+    private ulong[] _validationMovedAddresses = [];
+
+    private bool CompareValidationRanges(Entry entry, IReadOnlyList<uint> userData, AddressRebase rebase,
+        ResidentGuestBytesComparer comparer)
+    {
+        ReadOnlySpan<ulong> addresses = entry.RangeAddresses;
+        if (rebase.Active.Length != 0)
+        {
+            var count = entry.RangeAddresses.Length;
+            if (_validationMovedAddresses.Length < count)
+                _validationMovedAddresses = new ulong[Math.Max(count, _validationMovedAddresses.Length * 2)];
+            for (var index = 0; index < count; index++)
+                _validationMovedAddresses[index] = MoveValidationRead(entry, userData, rebase,
+                    entry.RangeAddresses[index], entry.RangeLengths[index]);
+            addresses = _validationMovedAddresses.AsSpan(0, count);
+        }
+        using var profile = ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.InPlaceComparison);
+        return comparer(addresses, entry.RangeLengths, entry.RangeOffsets, entry.Bytes);
+    }
+
     private const int PageShift = 12;
 
     private ulong[] _joinedAddresses = [];
@@ -119,8 +142,13 @@ public sealed partial class ResourceMaterializationCache
     private bool ValidateJoined(Entry entry, ResidentGuestBytesReader residentReader, ResidentGuestBytesComparer? comparer,
         out bool unreadable, out bool descriptorChanged, out RejectionSample rejection)
     {
-        if (comparer is null || !InPlaceValidateEnabled ||
-            !comparer(entry.RangeAddresses, entry.RangeLengths, entry.RangeOffsets, entry.Bytes))
+        var equal = false;
+        if (comparer is not null && InPlaceValidateEnabled)
+        {
+            using var profile = ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.InPlaceComparison);
+            equal = comparer(entry.RangeAddresses, entry.RangeLengths, entry.RangeOffsets, entry.Bytes);
+        }
+        if (!equal)
             return ValidateJoinedByReading(entry, residentReader, out unreadable, out descriptorChanged, out rejection);
         unreadable = false;
         descriptorChanged = false;

@@ -109,6 +109,46 @@ public sealed class MslLiteralFormatLoadTests(ITestOutputHelper output)
         }
     }
 
+    [Theory]
+    [InlineData(14u)] // 8x2 UNORM: missing Z/W and a partial final word.
+    [InlineData(44u)] // 2:10:10:10 UNORM, all components in one word.
+    [InlineData(56u)] // 8x4 UNORM.
+    [InlineData(57u)] // 8x4 SNORM.
+    [InlineData(60u, false)] // 8x4 UINT.
+    [InlineData(60u, true)] // Coherent loads use the same packed span.
+    [InlineData(61u)] // 8x4 SINT.
+    [InlineData(65u)] // 16x4 UNORM, two words.
+    [InlineData(71u)] // 16x4 FLOAT, including arbitrary half bit patterns.
+    public void PackedRunsMatchTheDecoderAtAlignedUnalignedAndPartialElements(uint format, bool glc = false)
+    {
+        if (!RequireDevice()) return;
+        foreach (var offset in new[] { 16, 17, 61, 63 })
+        foreach (var swizzle in new[] { Identity, Swizzle(7, 6, 5, 4), Swizzle(4, 1, 0, 4) })
+        {
+            var initial = new byte[BufferBytes];
+            for (var i = 0; i < initial.Length; i++) initial[i] = (byte)((i * 37) + 11);
+            byte[]? reference = null;
+            foreach (var fast in new[] { false, true })
+            {
+                var shader = Compile(format, swizzle, offset, packed: fast, glc: glc);
+                if (fast) Assert.Contains(glc ? "sharpemu_load_words_coherent<" : "sharpemu_load_words<", shader.Source, StringComparison.Ordinal);
+                Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError), compileError);
+                Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint,
+                    initial, new byte[PushData.ByteSize], shader.ArgumentLayout!, 1,
+                    out var result, out var runError), runError);
+                if (!fast) reference = result;
+                else Assert.Equal(reference, result);
+                // Independent oracle for the four unsigned-byte components.
+                if (format == 60 && swizzle == Identity)
+                {
+                    for (var i = 0; i < 4; i++)
+                        Assert.Equal(offset <= BufferBytes - 4 ? (uint)initial[offset + i] : 0u,
+                            BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(i * 4)));
+                }
+            }
+        }
+    }
+
     private bool RequireDevice()
     {
         if (!MetalNative.IsAvailable)
@@ -125,13 +165,13 @@ public sealed class MslLiteralFormatLoadTests(ITestOutputHelper output)
 
     // v1 = the byte offset (OFFEN); buffer_load_format_xyzw v[4:7] from s[8:11]; the four
     // registers are stored at bytes 0, 4, 8 and 12 of the same buffer.
-    private static Gen5MslShader Compile(uint format, uint swizzle, int offset)
+    private static Gen5MslShader Compile(uint format, uint swizzle, int offset, bool packed = false, bool glc = false)
     {
         var fixture = new Gen5ComputeFixture(
             "format-load-literal",
             [
                 0x7E0202FF, (uint)offset,                     // v_mov_b32 v1, offset
-                0xE0000000u | (3u << 18) | (1u << 12),        // buffer_load_format_xyzw v[4:7], v1, s[8:11], 0 offen
+                0xE0000000u | (3u << 18) | (1u << 12) | (glc ? 1u << 14 : 0),        // buffer_load_format_xyzw v[4:7], v1, s[8:11], 0 offen
                 0x80020401,
                 0xE0700000, 0x80020400,                       // buffer_store_dword v4 offset:0
                 0xE0700004, 0x80020500,                       // buffer_store_dword v5 offset:4
@@ -150,7 +190,8 @@ public sealed class MslLiteralFormatLoadTests(ITestOutputHelper output)
             Gen5ComputeFixtures.DecodeOrThrow(fixture),
             ShaderStage.Compute,
             runtimeInputs: new ResourceRuntimeInputs { UserData = userData });
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error,
+            new Gen5MslCodegenOptions { PackedFormatLoads = packed }), error);
         return shader!;
     }
 }

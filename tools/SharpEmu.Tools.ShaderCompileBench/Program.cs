@@ -15,6 +15,7 @@ using SharpEmu.Libs.Gpu.Pipelines;
 // Arguments are key=value:
 //   dir=<copy of pipeline_cache/<title>/metal-v2>  (required; the list loader prunes files)
 //   mode=translate|compute|libraries               (default compute)
+//   mode=analysis hash=<comma-separated hex hashes> reports graphics IR opportunities only
 //   workers=4 tworkers=4 priority=normal|below limit=0 order=list|bigfirst
 //   salt=<text>  prefixes every source with a comment, so the front end misses its cache
 //   opt=default|size  lang=3.2|4.0  pipeline=1|0  csv=<file>  dumpmsl=<dir>
@@ -160,6 +161,10 @@ internal static class Program
         else if (mode == "computematch")
         {
             return Derivation.ComputeMatch(dir, Arg);
+        }
+        else if (mode == "analysis")
+        {
+            return Observation.Analyze(dir, Arg);
         }
         else if (mode == "graphics")
         {

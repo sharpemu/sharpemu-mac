@@ -147,7 +147,7 @@ internal sealed unsafe class RemoteGuestAddressSpace :
         {
             if (!TryPiece(virtualAddress + done, size - done, out var pointer, out var take))
             {
-                NoteMiss(virtualAddress, size, "compare");
+                NoteMiss(virtualAddress, size, "compare", virtualAddress + done);
                 return false;
             }
 
@@ -475,7 +475,7 @@ internal sealed unsafe class RemoteGuestAddressSpace :
         {
             if (!TryPiece(address + done, size - done, out var pointer, out var take))
             {
-                NoteMiss(address, size, toGuest ? "write" : "read");
+                NoteMiss(address, size, toGuest ? "write" : "read", address + done);
                 return false;
             }
 
@@ -494,14 +494,38 @@ internal sealed unsafe class RemoteGuestAddressSpace :
         return true;
     }
 
-    private void NoteMiss(ulong address, ulong size, string access)
+    private void NoteMiss(ulong address, ulong size, string access, ulong? failedAddress = null)
     {
         Interlocked.Increment(ref _misses);
         if (Interlocked.Increment(ref _missReports) <= MaxMissReports)
         {
             Console.Error.WriteLine(
                 $"[GPU-SPLIT][WARN] GPU {access} of guest 0x{address:X16}+0x{size:X} failed: not in the shared backing " +
-                "(memory private to the guest process).");
+                "(unmapped, private, or outside the mirrored range).");
+            if (Environment.GetEnvironmentVariable("SHARPEMU_SPLIT_MISS_DETAILS") == "1")
+            {
+                var failed = failedAddress ?? address;
+                var snapshot = _translator.Snapshot();
+                var before = snapshot.LastOrDefault(entry => entry.Address <= failed);
+                var after = snapshot.FirstOrDefault(entry => entry.Address > failed);
+                var sequence = _translator.ChangeSequence;
+                Console.Error.WriteLine($"[GPU-SPLIT][MISS] first=0x{failed:X16} generation={_translator.MappingGeneration} " +
+                    $"complete={_translator.IsComplete} mirror_bytes=0x{_mirrorBytes:X} changes={sequence} " +
+                    $"before=[0x{before.Address:X16},0x{before.End:X16}) offset=0x{before.Offset:X} " +
+                    $"after=[0x{after.Address:X16},0x{after.End:X16}) offset=0x{after.Offset:X}");
+                var first = sequence > 65536 ? sequence - 65536 : 0;
+                var reported = 0;
+                for (var number = sequence; number > first && reported < 16;)
+                {
+                    if (_translator.TryReadChange(--number, out var change) && change.Kind != GuestViewLogKind.Protect &&
+                        failed >= change.Address && failed - change.Address < change.Size)
+                    {
+                        Console.Error.WriteLine($"[GPU-SPLIT][MISS-CHANGE] n={number} kind={change.Kind} " +
+                            $"address=0x{change.Address:X16} size=0x{change.Size:X} offset=0x{change.Offset:X}");
+                        reported++;
+                    }
+                }
+            }
         }
     }
 }

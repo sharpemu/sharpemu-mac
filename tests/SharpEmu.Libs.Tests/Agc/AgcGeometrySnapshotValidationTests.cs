@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -78,6 +79,65 @@ public sealed class AgcGeometrySnapshotValidationTests
             IndexCount,
             instanceCount: 1,
             [(UserDataRegister, UserDataValue)]);
+
+    private static void SubmitDriver(FakeCpuMemory memory, uint dwords)
+    {
+        var context = new CpuContext(memory, Generation.Gen5);
+        const ulong submissionAddress = BaseAddress + 0x40;
+        context[CpuRegister.Rdi] = submissionAddress;
+        Assert.True(context.TryWriteUInt64(submissionAddress, CommandAddress));
+        Span<byte> length = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(length, dwords);
+        Assert.True(memory.TryWrite(submissionAddress + 8, length));
+        Assert.Equal(0, AgcExports.DriverSubmitDcb(context));
+    }
+
+    [Fact]
+    public void ExecutedShaderRegistersKeepTheInterpreterAliasAcrossClearAndReset()
+    {
+        var (memory, dwords, _) = WriteStream(SetShaderRegister(UserDataRegister, 0));
+        SubmitDriver(memory, dwords);
+        var interpreter = AgcExports.GetHeadlessCommandStreamForTests(memory).Queue.GetInterpreter(0);
+        var alias = AgcExports.GetExecutedShaderRegistersForTests(memory);
+        Assert.Same(interpreter.Registers.Shader, alias);
+        Assert.True(alias.TryGetValue(UserDataRegister, out var zero));
+        Assert.Equal(0u, zero);
+        alias.Clear();
+        Assert.Empty(interpreter.Registers.Shader);
+        interpreter.Registers.Shader[UserDataRegister] = 9;
+        Assert.Equal(9u, alias[UserDataRegister]);
+        interpreter.Registers.Reset();
+        Assert.Same(alias, interpreter.Registers.Shader);
+        Assert.Empty(alias);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CaptureRetainsOverflowShaderKeysEvenWhenExecutionSkipsTheWrite(bool indirect)
+    {
+        const ulong table = PredicateAddress + 0x100;
+        uint[] write = indirect
+            ? [Pm4Header(5, PacketOpcode.SetShaderRegisterIndirect), unchecked((uint)table), (uint)(table >> 32), 0, 1]
+            : SetShaderRegister(uint.MaxValue, 0);
+        var (memory, dwords, _) = WriteStream(
+            ConditionalExecute(PredicateAddress, (uint)write.Length), write,
+            IndexType(0), DrawIndex2(IndexAddress));
+        Span<byte> zero = stackalloc byte[4];
+        zero.Clear();
+        Assert.True(memory.TryWrite(PredicateAddress, zero));
+        Span<byte> entry = stackalloc byte[8];
+        BinaryPrimitives.WriteUInt32LittleEndian(entry, uint.MaxValue);
+        BinaryPrimitives.WriteUInt32LittleEndian(entry[4..], 0);
+        Assert.True(memory.TryWrite(table, entry));
+        SubmitDriver(memory, dwords);
+        var captured = AgcExports.GetGeometryCaptureRegistersForTests(memory);
+        var key = indirect ? uint.MaxValue & ~0x7000_0000u : uint.MaxValue;
+        Assert.True(captured.TryGetValue(key, out var value));
+        Assert.Equal(0u, value);
+        var executed = AgcExports.GetExecutedShaderRegistersForTests(memory);
+        Assert.False(executed.ContainsKey(key));
+    }
 
     [Fact]
     public void MatchingState_UsesTheSnapshot()

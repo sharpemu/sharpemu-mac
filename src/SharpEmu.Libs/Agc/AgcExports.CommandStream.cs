@@ -60,6 +60,9 @@ public static partial class AgcExports
     internal static IReadOnlyDictionary<uint, uint> GetGeometryCaptureRegistersForTests(ICpuMemory memory) =>
         new Dictionary<uint, uint>(_submittedGpuStates.GetValue(CanonicalMemory(memory), static _ => new SubmittedGpuState()).GeometryCapture.ShRegisters);
 
+    internal static DenseShaderRegisterMap GetExecutedShaderRegistersForTests(ICpuMemory memory) =>
+        _submittedGpuStates.GetValue(CanonicalMemory(memory), static _ => new SubmittedGpuState()).Graphics.ShRegisters;
+
     // Builds the snapshots of one draw as the prepass would, for tests of the execution-time check.
     internal static object CreateGeometrySnapshotsForTests(
         ulong packetAddress,

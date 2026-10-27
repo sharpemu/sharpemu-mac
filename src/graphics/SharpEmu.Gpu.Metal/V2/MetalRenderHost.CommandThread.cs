@@ -25,6 +25,9 @@ internal sealed partial class MetalRenderHost
     internal static readonly bool CommandThreadEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMAND_THREAD") == "1";
 
+    private static readonly bool CommandThreadQosEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMAND_THREAD_QOS") == "1";
+
     // Items run in batches; completions and relay commands are taken between them.
     private const int CommandItemBatch = 256;
 
@@ -48,13 +51,16 @@ internal sealed partial class MetalRenderHost
     {
         if (_commandThread is null)
         {
-            _commandThread = new DeferredCommandThread(CommandStream, _memory, RunDeferredWork, _translation!.Prefetch, WakeWorker)
+            _commandThread = new DeferredCommandThread(CommandStream, _memory, RunDeferredWork, _translation!.Prefetch, WakeWorker,
+                useHostQos: CommandThreadQosEnabled)
             {
                 ProducerIdle = RequestIdleCommit,
             };
             _betweenCommandItems = RunRelayBetweenCommandItems;
             _translation.Sink = _commandThread;
             _commandThread.Start();
+            if (CommandThreadQosEnabled)
+                Console.Error.WriteLine($"[METAL-V2][QOS] command_stream requested=UserInteractive applied={_commandThread.HasHostQos}.");
         }
 
         var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 100;

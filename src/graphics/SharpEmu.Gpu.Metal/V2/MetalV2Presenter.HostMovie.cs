@@ -31,7 +31,7 @@ internal static partial class MetalV2Presenter
     /// </summary>
     private static bool SelectHostMovieFallback(ref nint texture, ref uint width, ref uint height)
     {
-        var guestFrames = Interlocked.Read(ref _presentedGuestFrames);
+        var guestFrames = Interlocked.Read(ref _adoptedGuestFrameSequence);
         if (MoviePresentationServices.TryGetFallbackPresentationFrame(
                 out var pixels, out var frameWidth, out var frameHeight, out var serial))
         {

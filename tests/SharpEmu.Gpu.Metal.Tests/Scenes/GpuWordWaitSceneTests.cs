@@ -171,11 +171,9 @@ public sealed class GpuWordWaitSceneTests(ITestOutputHelper output) : SceneTestB
             var waitsBefore = host.HostGpuWaits;
             var suspendsBefore = SharpEmu.Libs.Gpu.GpuCommands.GpuCommandInterpreter.OperandSuspends;
             rig.Enqueue(producer);
-            host.RunPendingCommands();
-            host.RunCommandStreamSlices(64);
+            rig.RecordPending();
             rig.Enqueue(waiter, queue: 0x20);
-            host.RunPendingCommands();
-            host.RunCommandStreamSlices(64);
+            rig.RecordPending();
 
             Assert.Equal(0, Volatile.Read(ref released));
             // The wait met the pending label: the compute queue ran to its end without a host wait or a park.
@@ -212,8 +210,7 @@ public sealed class GpuWordWaitSceneTests(ITestOutputHelper output) : SceneTestB
     {
         rig.Enqueue(first);
         rig.Enqueue(second);
-        rig.Host.RunPendingCommands();
-        rig.Host.RunCommandStreamSlices(64);
+        rig.RecordPending();
         Assert.False(rig.Host.CommandStream.HasPending);
     }
 

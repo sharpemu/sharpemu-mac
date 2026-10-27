@@ -953,7 +953,7 @@ public sealed class CommandStreamQueue
         // wake, when there is anything to wake, follows it.
         lock (_labelGate)
         {
-            _pendingLabels[address] = (value, size, tick);
+            StorePendingLabelLocked(address, size, value, tick);
         }
 
         if (!_blockedHeadsPossible)
@@ -987,7 +987,7 @@ public sealed class CommandStreamQueue
         {
             for (var index = 0; index < count; index++)
             {
-                _pendingLabels[address + (ulong)index * strideBytes] = (value, sizeof(ulong), tick);
+                StorePendingLabelLocked(address + (ulong)index * strideBytes, sizeof(ulong), value, tick);
             }
         }
 
@@ -1004,6 +1004,29 @@ public sealed class CommandStreamQueue
                 DsWakeSource.PendingLabel);
             LowerBlockedHintLocked();
         }
+    }
+
+    private void StorePendingLabelLocked(ulong address, int size, ulong value, ulong tick)
+    {
+        // The cache answers whole dwords/qwords. A partial replacement must not leave
+        // an older overlapping value eligible to satisfy a wait or a predicate.
+        // Unaligned/other-sized stores take the backend's ordered-memory path; dropping
+        // cached answers is conservative and keeps every cached start dword-aligned.
+        if ((address & 3) != 0 || size is not (sizeof(uint) or sizeof(ulong)))
+        {
+            _pendingLabels.Clear();
+            return;
+        }
+
+        if (address >= sizeof(uint) &&
+            _pendingLabels.TryGetValue(address - sizeof(uint), out var preceding) &&
+            preceding.Size == sizeof(ulong))
+            _pendingLabels.Remove(address - sizeof(uint));
+
+        if (size == sizeof(ulong) && address <= ulong.MaxValue - sizeof(uint))
+            _pendingLabels.Remove(address + sizeof(uint));
+
+        _pendingLabels[address] = (value, size, tick);
     }
 
     // Caller holds _gate.

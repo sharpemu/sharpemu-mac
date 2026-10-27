@@ -45,6 +45,7 @@ internal sealed partial class MetalRenderHost
         public ulong[]?[] MipTextureIds = [];
         public nint[] Samplers = [];
         public ulong[] SamplerIds = [];
+        public byte[] SamplerViewClasses = [];
         public ResourceSlotIdentifier[] Images = [];
         public ImageRequest[] Requests = [];
         public bool[] IsStorage = [];
@@ -93,6 +94,7 @@ internal sealed partial class MetalRenderHost
             {
                 Samplers = new nint[samplers];
                 SamplerIds = new ulong[samplers];
+                SamplerViewClasses = new byte[samplers];
             }
 
             if (Buffers.Length < buffers)
@@ -408,10 +410,15 @@ internal sealed partial class MetalRenderHost
             ResolveImageBinding(prepared, info.Images[index], snapshot.Images[index], index);
         }
 
+        // All image requests, including movie replacements and texture memo hits, are current.
+        // Classify their sampler pairings once rather than scanning every pair for every sampler.
+        MetalSamplerViewClasses.Resolve(info.SampledPairs, prepared.Requests.AsSpan(0, prepared.ImageCount),
+            prepared.SamplerViewClasses.AsSpan(0, info.Samplers.Count));
         for (var index = 0; index < info.Samplers.Count; index++)
         {
             prepared.Samplers[index] = ResolveSampler(
-                info, prepared, info.Samplers[index], snapshot.Samplers[index], index, out prepared.SamplerIds[index]);
+                prepared, info.Samplers[index], snapshot.Samplers[index], index,
+                prepared.SamplerViewClasses[index] == MetalSamplerViewClasses.AllInteger, out prepared.SamplerIds[index]);
         }
 
         var shaderData = prepared.ShaderData;
@@ -489,11 +496,11 @@ internal sealed partial class MetalRenderHost
     }
 
     private nint ResolveSampler(
-        ShaderResourceInfo info,
         MetalStageBindings prepared,
         SamplerResource sampler,
         uint[] words,
         int index,
+        bool integerViews,
         out ulong resourceId)
     {
         if (words.Length < 4)
@@ -520,30 +527,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var descriptor = new SamplerDescriptorWords(native);
-        return GetSampler(in descriptor, SamplesIntegerViews(info, prepared, index), out resourceId);
-    }
-
-    // A sampler takes the numeric class of the views it samples; integer only when
-    // every paired view is integer, since a float view needs filtering.
-    private static bool SamplesIntegerViews(ShaderResourceInfo info, MetalStageBindings prepared, int sampler)
-    {
-        var paired = false;
-        foreach (var pair in info.SampledPairs)
-        {
-            if (pair.Sampler != sampler || pair.Image >= prepared.ImageCount)
-            {
-                continue;
-            }
-
-            if (!ViewFormatRules.IsIntegerFormat(prepared.Requests[pair.Image].View.Format))
-            {
-                return false;
-            }
-
-            paired = true;
-        }
-
-        return paired;
+        return GetSampler(in descriptor, integerViews, out resourceId);
     }
 
     // The binding layout gives a dynamic-mip storage image one element per level of its
@@ -1939,23 +1923,37 @@ internal sealed partial class MetalRenderHost
 
         if (_stageArgumentValid[stageIndex])
         {
-            MetalNative.SendSetBuffer(
-                encoder,
-                setBufferSelector,
-                _stageArgumentBuffers[stageIndex],
-                (nuint)_stageArgumentOffsets[stageIndex],
-                Gen5MslArgumentLayout.ResourcesBufferIndex);
+            BindStageBuffer(encoder, setBufferSelector, _stageArgumentBuffers[stageIndex],
+                _stageArgumentOffsets[stageIndex], Gen5MslArgumentLayout.ResourcesBufferIndex);
         }
 
         if (_hasPushData && (_preparedStageMask & (1 << stageIndex)) != 0)
         {
-            MetalNative.SendSetBuffer(
-                encoder,
-                setBufferSelector,
-                _pushBuffer,
-                (nuint)_pushOffset,
-                Gen5MslArgumentLayout.PushDataBufferIndex);
+            BindStageBuffer(encoder, setBufferSelector, _pushBuffer,
+                _pushOffset, Gen5MslArgumentLayout.PushDataBufferIndex);
         }
+    }
+
+    private void BindStageBuffer(nint encoder, nint selector, nint buffer, ulong offset, int slot)
+    {
+        // Compute utility kernels overwrite their slots independently of this path.
+        // Keep their binding calls unchanged, and distinguish physical vertex/mesh state.
+        var stage = selector == SelSetVertexBuffer ? MetalGraphicsBindingStage.Vertex
+            : selector == SelSetMeshBuffer ? MetalGraphicsBindingStage.Mesh
+            : MetalGraphicsBindingStage.Fragment;
+        if (selector != SelSetVertexBuffer && selector != SelSetMeshBuffer && selector != SelSetFragmentBuffer)
+        {
+            MetalNative.SendSetBuffer(encoder, selector, buffer, (nuint)offset, (nuint)slot);
+            return;
+        }
+        _graphicsBindingAttempts[(int)stage]++;
+        if (GraphicsBindingReuseEnabled && _graphicsBindings.Matches(stage, selector, slot, buffer, offset))
+        {
+            _graphicsBindingSkipped[(int)stage]++;
+            return;
+        }
+        MetalNative.SendSetBuffer(encoder, selector, buffer, (nuint)offset, (nuint)slot);
+        if (GraphicsBindingReuseEnabled) _graphicsBindings.Record(stage, selector, slot, buffer, offset);
     }
 
     // One MTLSamplerState per distinct guest descriptor and view numeric class.

@@ -47,6 +47,8 @@ public sealed unsafe class GuestMirrorTranslator
     private readonly GuestViewTableHeader* _header;
     private readonly GuestViewTableEntry* _entries;
     private readonly int _capacity;
+    private readonly GuestViewLogRecord* _log;
+    private readonly int _logCapacity;
     private readonly Slot[] _cache = new Slot[CacheSlots];
     private long _hits;
     private long _misses;
@@ -81,7 +83,7 @@ public sealed unsafe class GuestMirrorTranslator
     /// </summary>
     public GuestMirrorTranslator(ulong tableAddress, ulong tableBytes, ulong mirrorBase, ulong mirrorBytes)
     {
-        GuestViewTableReader.Open(tableAddress, tableBytes, out _header, out _entries, out _capacity, out _, out _);
+        GuestViewTableReader.Open(tableAddress, tableBytes, out _header, out _entries, out _capacity, out _log, out _logCapacity);
         MirrorBase = mirrorBase;
         MirrorBytes = Math.Min(mirrorBytes, _header->BackingSize);
     }
@@ -101,6 +103,17 @@ public sealed unsafe class GuestMirrorTranslator
     public bool IsComplete => (Volatile.Read(ref _header->Flags) & GuestViewTable.IncompleteFlag) == 0;
 
     public ulong MappingGeneration => Volatile.Read(ref _header->MappingGeneration);
+
+    /// <summary>The sequence after the last published mapping/protection change, for diagnostics.</summary>
+    public ulong ChangeSequence => Volatile.Read(ref _header->LogSequence);
+
+    /// <summary>A published change while the owner's ring still retains it. Reading it
+    /// does not advance the replica or alter translation caches.</summary>
+    public bool TryReadChange(ulong number, out GuestViewLogEntry entry)
+    {
+        entry = default;
+        return number < ChangeSequence && GuestViewTableReader.TryReadLog(_log, _logCapacity, number, out entry);
+    }
 
     /// <summary>
     /// Whether translations count their cache hits and misses (<see cref="CacheHits"/>,

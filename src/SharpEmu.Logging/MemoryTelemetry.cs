@@ -134,7 +134,16 @@ public static class MemoryTelemetry
             Thread.Sleep(TimeSpan.FromSeconds(seconds));
             var elapsed = Stopwatch.GetElapsedTime(started).TotalSeconds;
             var pause = GC.GetTotalPauseDuration();
-            Report(elapsed, pause - lastPause, pause);
+            try
+            {
+                Report(elapsed, pause - lastPause, pause);
+            }
+            catch (Exception exception)
+            {
+                // Even taking the provider snapshot can fail. Optional diagnostics must
+                // not take down the emulation process from this background thread.
+                WriteError(Console.Error, "report", exception);
+            }
             lastPause = pause;
         }
     }
@@ -142,7 +151,6 @@ public static class MemoryTelemetry
     private static void Report(double elapsed, TimeSpan intervalPause, TimeSpan totalPause)
     {
         var culture = CultureInfo.InvariantCulture;
-        Console.Error.WriteLine($"[MEM] dotnet t={elapsed.ToString("F0", culture)} {Dotnet(intervalPause, totalPause)}");
         (string Section, Func<string> Provider)[] providers;
         MemoryCounter[] counters;
         lock (Gate)
@@ -151,17 +159,8 @@ public static class MemoryTelemetry
             counters = [.. Counters];
         }
 
-        foreach (var (section, provider) in providers)
-        {
-            try
-            {
-                Console.Error.WriteLine($"[MEM] {section} {provider()}");
-            }
-            catch (Exception exception)
-            {
-                Console.Error.WriteLine($"[MEM] {section} error={exception.GetType().Name}: {exception.Message}");
-            }
-        }
+        ReportSections(Console.Error,
+            () => $"t={elapsed.ToString("F0", culture)} {Dotnet(intervalPause, totalPause)}", providers);
 
         if (counters.Length != 0)
         {
@@ -173,6 +172,40 @@ public static class MemoryTelemetry
             }
 
             Console.Error.WriteLine(line.ToString());
+        }
+    }
+
+    // The built-in process sampler has the same failure boundary as registered providers.
+    // Process inspection can fail as host threads/process resources change underneath it.
+    internal static void ReportSections(TextWriter output, Func<string> dotnet,
+        IReadOnlyList<(string Section, Func<string> Provider)> providers)
+    {
+        WriteSection(output, "dotnet", dotnet);
+        foreach (var (section, provider) in providers)
+            WriteSection(output, section, provider);
+    }
+
+    private static void WriteSection(TextWriter output, string section, Func<string> provider)
+    {
+        try
+        {
+            output.WriteLine($"[MEM] {section} {provider()}");
+        }
+        catch (Exception exception)
+        {
+            WriteError(output, section, exception);
+        }
+    }
+
+    private static void WriteError(TextWriter output, string section, Exception exception)
+    {
+        try
+        {
+            output.WriteLine($"[MEM] {section} error={exception.GetType().Name}: {exception.Message}");
+        }
+        catch (Exception)
+        {
+            // A closed/failed diagnostic sink cannot be used to report its own failure.
         }
     }
 

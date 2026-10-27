@@ -1,0 +1,40 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+// Scalar-only read-only bindings use the uniform memory path, with identical
+// dword truncation, wrapping and partial-run bounds semantics.
+// A raw dword load: the address truncates to the dword it lands in, which is what the
+// hardware does for S_BUFFER_LOAD_DWORD and BUFFER_LOAD_DWORD and what the SPIR-V
+// backend emits. Out of range reads zero.
+static inline uint sharpemu_load_dword(constant uint* b, uint bytes, uint addr)
+{
+    uint index = addr >> 2;
+    return index < (bytes >> 2) ? b[index] : 0u;
+}
+
+// Up to four consecutive raw dwords of an S_BUFFER_LOAD/BUFFER_LOAD_DWORDXn, each what
+// sharpemu_load_dword reads at addr + 4 * i. A run that lies inside the binding is one
+// bounds check and adjacent loads; one that crosses the end reads dword by dword.
+template <int N>
+static inline uint4 sharpemu_load_dwords(constant uint* b, uint bytes, uint addr)
+{
+    uint4 result = uint4(0u);
+    uint index = addr >> 2;
+    uint words = bytes >> 2;
+    if (index < words && (uint)N <= words - index)
+    {
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = b[index + (uint)i];
+        }
+    }
+    else
+    {
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = sharpemu_load_dword(b, bytes, addr + (uint)(4 * i));
+        }
+    }
+    return result;
+}
+

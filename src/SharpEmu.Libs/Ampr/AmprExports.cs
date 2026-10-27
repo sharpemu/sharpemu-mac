@@ -129,6 +129,9 @@ public static partial class AmprExports
         private readonly SafeFileHandle? _handle;
         private readonly ZArchiveFileStream? _archived;
         private long _nextSequentialOffset = -1;
+        // One cache ownership reference plus one reference for each active read.
+        private int _references = 1;
+        public void Acquire() => Interlocked.Increment(ref _references);
 
         public CachedHostFile(string path)
         {
@@ -200,8 +203,11 @@ public static partial class AmprExports
 
         public void Dispose()
         {
-            _handle?.Dispose();
-            _archived?.Dispose();
+            if (Interlocked.Decrement(ref _references) == 0)
+            {
+                _handle?.Dispose();
+                _archived?.Dispose();
+            }
         }
     }
 
@@ -1093,6 +1099,11 @@ public static partial class AmprExports
 
         foreach (var commandEntry in captured.Order)
         {
+            if (AprExecutionStopping)
+            {
+                executionResult = AprStoppedResult;
+                return;
+            }
             switch (commandEntry.Kind)
             {
                 case 0:
@@ -1479,6 +1490,7 @@ public static partial class AmprExports
         const int ChunkSize = 4 * 1024 * 1024;
         // Rented only for a chunk that cannot be read in place.
         byte[]? buffer = null;
+        CachedHostFile? readLease = null;
 
         try
         {
@@ -1487,6 +1499,7 @@ public static partial class AmprExports
                 return openResult;
             }
 
+            readLease = cachedFile;
             if (fileOffset >= (ulong)cachedFile.Length)
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1494,6 +1507,7 @@ public static partial class AmprExports
 
             while (bytesRead < size)
             {
+                if (AprExecutionStopping) return AprStoppedResult;
                 if (bytesRead > ulong.MaxValue - fileOffset)
                 {
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -1558,6 +1572,7 @@ public static partial class AmprExports
         }
         finally
         {
+            readLease?.Dispose();
             if (buffer is not null)
             {
                 ArrayPool<byte>.Shared.Return(buffer);
@@ -1603,6 +1618,7 @@ public static partial class AmprExports
                 _hostFileLru.Remove(existing);
                 _hostFileLru.AddFirst(existing);
                 file = existing.Value.File;
+                file.Acquire();
                 return true;
             }
         }
@@ -1647,6 +1663,7 @@ public static partial class AmprExports
                 _hostFileLru.Remove(raced);
                 _hostFileLru.AddFirst(raced);
                 file = raced.Value.File;
+                file.Acquire();
                 return true;
             }
 
@@ -1659,6 +1676,7 @@ public static partial class AmprExports
             var node = _hostFileLru.AddFirst(entry);
             _hostFileByPath[cachePath] = node;
             file = opened;
+            file.Acquire();
             return true;
         }
     }
@@ -1999,6 +2017,7 @@ public static partial class AmprExports
         var spinWait = new SpinWait();
         while (true)
         {
+            if (AprExecutionStopping) return AprStoppedResult;
             var observed = GuestAddressWatch.Version;
             if (DsTrace.Io)
             {

@@ -70,8 +70,35 @@ internal static unsafe class MaterializationBenches
         }
 
         bool ReadResident(ulong address, Span<byte> destination, bool clean) => memory.TryRead(address, destination);
+        // Reuse the capturing delegate as the renderer does. Re-converting the local
+        // function at every call measures a harness allocation on each cache hit.
+        ResidentGuestBytesReader residentReader = ReadResident;
 
-        var inputs = new ResourceRuntimeInputs { ReadMemory = ReadWord, ReadCleanMemory = ReadWord, ReadResidentMemory = ReadResident };
+        bool CompareResident(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths,
+            ReadOnlySpan<int> offsets, ReadOnlySpan<byte> recorded)
+        {
+            if (addresses.Length != lengths.Length || addresses.Length != offsets.Length) return false;
+            for (var index = 0; index < addresses.Length; index++)
+            {
+                var address = addresses[index];
+                var length = lengths[index];
+                var offset = offsets[index];
+                if (length < 0 || offset < 0 || offset > recorded.Length - length ||
+                    address < NativeGuestMemory.Base || address - NativeGuestMemory.Base > memory.Size ||
+                    (ulong)length > memory.Size - (address - NativeGuestMemory.Base)) return false;
+                if (!new ReadOnlySpan<byte>(memory.Raw(address), length).SequenceEqual(recorded.Slice(offset, length)))
+                    return false;
+            }
+            return true;
+        }
+
+        var compareResident = Environment.GetEnvironmentVariable("PA_COMPARE_RESIDENT") == "1";
+        Console.WriteLine($"resident_comparer={compareResident} (synthetic fixed native allocation; no Metal ownership checks)");
+        var inputs = new ResourceRuntimeInputs
+        {
+            ReadMemory = ReadWord, ReadCleanMemory = ReadWord, ReadResidentMemory = residentReader,
+            CompareResidentMemory = compareResident ? CompareResident : null,
+        };
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
         var table0 = TableRegion;
@@ -90,13 +117,13 @@ internal static unsafe class MaterializationBenches
 
         // 3b: warm cache hit, same descriptors every draw.
         var cache = new ResourceMaterializationCache();
-        if (!cache.Materialize(plan, inputs, ReadResident, ref snapshot, ref specialization, out var warmFailure)) throw new InvalidOperationException(warmFailure.ToString());
+        if (!cache.Materialize(plan, inputs, residentReader, ref snapshot, ref specialization, out var warmFailure)) throw new InvalidOperationException(warmFailure.ToString());
         var hitsBefore = cache.Hits;
         var warm = Harness.Measure("3b", "WARM cache hit, same descriptors every call (validation re-read)", Batch * 5, 13825, _ =>
         {
             for (var i = 0; i < Batch * 5; i++)
             {
-                if (!cache.Materialize(plan, inputs, ReadResident, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
+                if (!cache.Materialize(plan, inputs, residentReader, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
             }
         }, unit: "cache-hit call", note: "validation re-read");
         Console.WriteLine($"       -> cache hits {cache.Hits - hitsBefore}, misses {cache.Misses}, refreshes {cache.TableRefreshes}");
@@ -110,7 +137,7 @@ internal static unsafe class MaterializationBenches
             {
                 var table = TableRegion + (ulong)(cursor++ % Pool) * TableStride;
                 inputs.UserData = new uint[] { (uint)table, (uint)(table >> 32) };
-                if (!cold.Materialize(plan, inputs, ReadResident, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
+                if (!cold.Materialize(plan, inputs, residentReader, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
             }
         }, unit: "miss", note: "cold: includes allocating the user-data array and the entry build");
         Console.WriteLine($"       -> hits {cold.Hits} misses {cold.Misses} refreshes {cold.TableRefreshes} uncacheable {cold.Uncacheable} cold_bypasses {ColdBypasses(cold)}");
@@ -118,7 +145,7 @@ internal static unsafe class MaterializationBenches
         // 3d: same key, the table's descriptors change between calls (stale same-key): tries refresh, falls back to the walk.
         var stale = new ResourceMaterializationCache();
         inputs.UserData = new uint[] { (uint)table0, (uint)(table0 >> 32) };
-        stale.Materialize(plan, inputs, ReadResident, ref snapshot, ref specialization, out _);
+        stale.Materialize(plan, inputs, residentReader, ref snapshot, ref specialization, out _);
         var salt = 0;
         var refreshesBefore = stale.TableRefreshes;
         Harness.Measure("3d", "STALE same key: descriptor words change every call (refresh or re-walk)", Batch, 1404, _ =>
@@ -126,7 +153,7 @@ internal static unsafe class MaterializationBenches
             for (var i = 0; i < Batch; i++)
             {
                 WriteTable(memory, table0, 1 + (salt++ % (Pool - 1)));
-                if (!stale.Materialize(plan, inputs, ReadResident, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
+                if (!stale.Materialize(plan, inputs, residentReader, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
             }
         }, unit: "stale", note: "includes WriteTable (14 small writes) in the timed loop");
         Console.WriteLine($"       -> hits {stale.Hits} misses {stale.Misses} refreshes {stale.TableRefreshes - refreshesBefore} (slot refreshes {stale.SlotRefreshes}, cold_bypasses {ColdBypasses(stale)})");
@@ -148,7 +175,7 @@ internal static unsafe class MaterializationBenches
             for (var i = 0; i < Draws; i++)
             {
                 inputs.UserData = userData[i % Tables];
-                if (!alternating.Materialize(plan, inputs, ReadResident, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
+                if (!alternating.Materialize(plan, inputs, residentReader, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
             }
             Console.WriteLine($"       3f first {Draws} draws (cold cache): hits {alternating.Hits} misses {alternating.Misses} refreshes {alternating.TableRefreshes} -> hit rate {100.0 * alternating.Hits / Draws:F1}%");
             var hits0 = alternating.Hits; var misses0 = alternating.Misses; var refreshes0 = alternating.TableRefreshes;
@@ -158,7 +185,7 @@ internal static unsafe class MaterializationBenches
                 for (var i = 0; i < Draws; i++)
                 {
                     inputs.UserData = userData[draw++ % Tables];
-                    if (!alternating.Materialize(plan, inputs, ReadResident, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
+                    if (!alternating.Materialize(plan, inputs, residentReader, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
                 }
             }, unit: "draw");
             var calls = (alternating.Hits - hits0) + (alternating.Misses - misses0) + (alternating.TableRefreshes - refreshes0);
@@ -183,7 +210,7 @@ internal static unsafe class MaterializationBenches
                     var table = TableRegion + (ulong)(RingFirst + start + m) * TableStride;
                     WriteTable(memory, table, 100 + m);
                     inputs.UserData = new uint[] { (uint)table, (uint)(table >> 32) };
-                    if (!ring.Materialize(plan, inputs, ReadResident, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
+                    if (!ring.Materialize(plan, inputs, residentReader, ref snapshot, ref specialization, out var failure)) throw new InvalidOperationException(failure.ToString());
                 }
             }
 

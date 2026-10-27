@@ -189,6 +189,60 @@ public sealed class MetalPendingWriteOverlayTests
         Assert.Equal(0, overlay.Count);
     }
 
+    [Theory]
+    [InlineData(512)]
+    [InlineData(2048)]
+    [InlineData(8192)]
+    public void CompletedOcclusionWriteBurstsReuseEntries(int count)
+    {
+        var overlay = new MetalPendingWriteOverlay();
+        ulong serial = 0;
+        void Round()
+        {
+            overlay.AddQwords(0x7100_0000, count, 16, ++serial, serial);
+            overlay.Retire(serial);
+        }
+
+        for (var warm = 0; warm < 8; warm++) Round();
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var round = 0; round < 16; round++) Round();
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(allocated <= 512, $"A warm {count}-write burst allocated {allocated} bytes over16rounds.");
+        Assert.Equal(0, overlay.Count);
+
+        // A reused entry must carry the new value, and retirement must still remove it.
+        overlay.AddQwords(0x7100_0000, count, 16, 0xFEDCBA9876543210, ++serial);
+        Span<byte> last = stackalloc byte[8];
+        overlay.Apply(0x7100_0000 + (ulong)(count - 1) * 16, last);
+        Assert.Equal(0xFEDCBA9876543210UL, System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(last));
+        overlay.Retire(serial);
+        Assert.Equal(0, overlay.Count);
+    }
+
+    [Fact]
+    public void SpareEntryBudgetIsSharedAcrossSizesAndClearReturnsOnlyRemovedEntries()
+    {
+        var overlay = new MetalPendingWriteOverlay();
+        Span<byte> bytes = stackalloc byte[16];
+        bytes.Fill(0x55);
+        for (var length = 4; length <= 16; length += 4)
+        {
+            for (var i = 0; i < MetalPendingWriteOverlay.MaxPooledEntries; i++)
+                overlay.Add(0x7200_0000 + (ulong)i * 16, bytes[..length], serial: 1);
+            overlay.Clear();
+            Assert.InRange(overlay.SpareEntryCount, 0, MetalPendingWriteOverlay.MaxPooledEntries);
+            Assert.Equal(0, overlay.Count);
+        }
+
+        Assert.Equal(MetalPendingWriteOverlay.MaxPooledEntries, overlay.SpareEntryCount);
+        overlay.Add(0x7200_0000, bytes[..4], serial: 2);
+        Assert.Equal(MetalPendingWriteOverlay.MaxPooledEntries - 1, overlay.SpareEntryCount);
+        overlay.Retire(1);
+        Assert.Equal(1, overlay.Count);
+        overlay.Retire(2);
+        Assert.Equal(MetalPendingWriteOverlay.MaxPooledEntries, overlay.SpareEntryCount);
+    }
+
     [Fact]
     public void ALongRangeIsWalkedRatherThanCounted()
     {

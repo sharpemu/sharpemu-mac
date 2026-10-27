@@ -236,4 +236,33 @@ public sealed class MetalCompileSchedulerTests
             CancellationToken.None,
             TaskCreationOptions.LongRunning,
             TaskScheduler.Default);
+
+    [Fact]
+    public void AnUnusedDeferredLibraryCanBeCancelledWithoutRunningIt()
+    {
+        var runs = 0;
+        var job = new MetalLibraryCompilePool.Job(() => runs++);
+        Assert.True(job.CancelIfQueued());
+        Assert.False(job.TryRun());
+        Assert.False(job.CancelIfQueued());
+        Assert.True(job.Task.IsCanceled);
+        Assert.Equal(0, runs);
+    }
+
+    [Fact]
+    public void AClaimedDeferredLibraryCannotBeCancelled()
+    {
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var job = new MetalLibraryCompilePool.Job(() => { entered.Set(); release.Wait(); });
+        var running = Task.Run(() => job.TryRun());
+        try
+        {
+            Assert.True(entered.Wait(Released));
+            Assert.False(job.CancelIfQueued());
+        }
+        finally { release.Set(); }
+        Assert.True(running.Wait(Released));
+        Assert.True(job.Task.IsCompletedSuccessfully);
+    }
 }

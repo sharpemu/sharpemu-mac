@@ -128,8 +128,7 @@ public sealed class GpuWordNoWaitSceneTests(ITestOutputHelper output) : SceneTes
         {
             MetalV2Native.SendEventValue(host.CommandBuffer, SelEncodeWaitForEvent, gate, 1);
             rig.Enqueue(writer);
-            host.RunPendingCommands();
-            host.RunCommandStreamSlices(64);
+            rig.RecordPending();
             var waitsBefore = host.HostGpuWaits;
 
             Assert.Throws<GpuFatal.AbandonedWorkException>(() =>
@@ -183,8 +182,7 @@ public sealed class GpuWordNoWaitSceneTests(ITestOutputHelper output) : SceneTes
 
             var waitsBefore = host.HostGpuWaits;
             rig.Enqueue(stream);
-            host.RunPendingCommands();
-            host.RunCommandStreamSlices(64);
+            rig.RecordPending();
             Assert.False(host.CommandStream.HasUnblockedPending);
             // Parsing the copy waited for nothing.
             Assert.Equal(waitsBefore, host.HostGpuWaits);
@@ -235,8 +233,7 @@ public sealed class GpuWordNoWaitSceneTests(ITestOutputHelper output) : SceneTes
     {
         rig.Enqueue(first);
         rig.Enqueue(second);
-        rig.Host.RunPendingCommands();
-        rig.Host.RunCommandStreamSlices(64);
+        rig.RecordPending();
         Assert.False(rig.Host.CommandStream.HasPending);
     }
 

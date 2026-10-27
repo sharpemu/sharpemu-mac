@@ -56,6 +56,10 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     // Wakes the thread that runs the queued items (the backend's render or GPU worker thread).
     private readonly Action _wakeConsumer;
     private readonly Thread _thread;
+    private readonly bool _useHostQos;
+    private SharpEmu.HLE.Host.HostHelperThread? _helperThread;
+    private int _producerThreadId;
+    private int _started;
     private readonly object _lock = new();
     private List<Item> _incoming = new();
     private List<Item> _draining = new();
@@ -88,17 +92,30 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         ICpuMemory memory,
         Action<AgcExports.DeferredWork> runDeferred,
         ParallelProgramPrefetch? prefetch,
-        Action wakeConsumer)
+        Action wakeConsumer,
+        bool useHostQos = false)
     {
         _wakeConsumer = wakeConsumer;
         _queue = queue;
         _memory = memory;
         _runDeferred = runDeferred;
         _prefetch = prefetch;
+        _useHostQos = useHostQos;
         _thread = new Thread(Run) { IsBackground = true, Name = "SharpEmu command stream" };
     }
 
-    public void Start() => _thread.Start();
+    public void Start()
+    {
+        if (Interlocked.Exchange(ref _started, 1) != 0)
+            throw new ThreadStateException("The command thread has already started.");
+        if (_useHostQos)
+            _helperThread = SharpEmu.HLE.Host.HostHelperThread.Start("SharpEmu command stream", 16 * 1024 * 1024, Run);
+        else
+            _thread.Start();
+    }
+
+    /// <summary>Whether the producer was created with its requested native QoS class.</summary>
+    public bool HasHostQos => _helperThread?.HasQos == true;
 
     // The producer's side since the last TakeCounters: synchronous calls, their wait, the wait for
     // room in the queue, and the items handed over.
@@ -119,7 +136,7 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
     /// </summary>
     public Action? ProducerIdle { get; set; }
 
-    public bool IsProducerThread => Environment.CurrentManagedThreadId == _thread.ManagedThreadId;
+    public bool IsProducerThread => Environment.CurrentManagedThreadId == Volatile.Read(ref _producerThreadId);
 
     public long Gate => _enqueuedNonDraw;
 
@@ -131,7 +148,7 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         set => _consumerIdle = value;
     }
 
-    public bool IsAlive => _thread.IsAlive;
+    public bool IsAlive => _helperThread is { } helper ? !helper.Join(TimeSpan.Zero) : _thread.IsAlive;
 
     // The producer side, on the command stream thread.
 
@@ -483,10 +500,11 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
         _stopping = true;
         _queue.Wake();
         var deadline = Stopwatch.GetTimestamp() + 5 * Stopwatch.Frequency;
-        while (_thread.IsAlive && Stopwatch.GetTimestamp() < deadline)
+        while (IsAlive && Stopwatch.GetTimestamp() < deadline)
         {
             runItems();
-            _thread.Join(1);
+            if (_helperThread is { } helper) helper.Join(TimeSpan.FromMilliseconds(1));
+            else _thread.Join(1);
         }
 
         runItems();
@@ -494,6 +512,9 @@ public sealed class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     private void Run()
     {
+        // A native helper can enter before Start has returned its wrapper. Publish
+        // identity from the body, rather than depending on that wrapper assignment.
+        Volatile.Write(ref _producerThreadId, Environment.CurrentManagedThreadId);
         try
         {
             var lastProgress = Stopwatch.GetTimestamp();

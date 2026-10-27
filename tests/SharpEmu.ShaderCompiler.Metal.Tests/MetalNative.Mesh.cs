@@ -56,7 +56,8 @@ internal static partial class MetalNative
         IReadOnlyList<nint>? extraResidentBuffers = null,
         uint layers = 1,
         bool volume = false,
-        MeshIndirectLaunch? indirect = null)
+        MeshIndirectLaunch? indirect = null,
+        IDictionary<uint, byte[]>? readbackBuffers = null)
     {
         pixels = [];
         error = string.Empty;
@@ -148,6 +149,7 @@ internal static partial class MetalNative
 
         SendVoid(encoder, Selector("setRenderPipelineState:"), pipeline);
         var residents = new List<nint>();
+        var bound = new List<(nint Buffer, uint Index, int Length)>();
         foreach (var (bytes, index) in meshBuffers)
         {
             var buffer = SharedBuffer(bytes.Length == 0 ? new byte[4] : bytes);
@@ -158,6 +160,7 @@ internal static partial class MetalNative
             }
 
             residents.Add(buffer);
+            bound.Add((buffer, index, bytes.Length));
             SendSetBuffer(encoder, Selector("setMeshBuffer:offset:atIndex:"), buffer, 0, index);
         }
 
@@ -201,6 +204,10 @@ internal static partial class MetalNative
         {
             indirect.Written = ReadSharedBuffer(launchSlot, indirect.Slot.Length);
         }
+
+        if (readbackBuffers is not null)
+            foreach (var (buffer, index, length) in bound)
+                readbackBuffers[index] = ReadSharedBuffer(buffer, length);
 
         var bytesOut = volume
             ? ReadFloatTexture(target, width, height, 1, layers)

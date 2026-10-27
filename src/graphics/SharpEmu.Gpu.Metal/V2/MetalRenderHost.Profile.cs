@@ -16,6 +16,13 @@ namespace SharpEmu.Gpu.Metal.V2;
 // profiling mode pays for it; nothing here runs when the switch is off.
 internal sealed partial class MetalRenderHost
 {
+    // Diagnostic only: stage-boundary counters cannot time individual dispatches
+    // inside one compute encoder. Split after each dispatch, without committing or
+    // waiting, to identify its cost. This changes scheduling and is not a frame-time
+    // benchmark; normal pass profiling leaves encoder boundaries untouched.
+    private static readonly bool SplitComputeProfile =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PROFILE_SPLIT_COMPUTE") == "1";
+
     private static readonly nint SelCommandBufferStatus = MetalNative.Selector("status");
 
     // The pipeline entry's profile label, resolved once per pipeline so a draw only
@@ -48,9 +55,10 @@ internal sealed partial class MetalRenderHost
         // what names the shaders in a slow command buffer's SLOW-WAIT line.
         _lastWorkKind = kind;
         _lastWorkLabel = entry.Profile;
+        var split = PassProfileEnabled && SplitComputeProfile && kind.StartsWith("dispatch", StringComparison.Ordinal);
         if (PassProfileEnabled)
         {
-            PassProfileNoteWork(entry.Profile, kind);
+            PassProfileNoteWork(split ? $"{entry.Profile} {shape}" : entry.Profile, kind);
         }
         if (DumpTargetsEnabled && kind.StartsWith("draw", StringComparison.Ordinal))
         {
@@ -59,6 +67,12 @@ internal sealed partial class MetalRenderHost
         else if (DumpTargetsEnabled)
         {
             NoteDispatchState(entry, kind, shape);
+        }
+
+        if (split)
+        {
+            PassProfileNoteEnd("profile-dispatch");
+            EndComputeEncoder();
         }
 
         ProfileCommandBuffer(kind, entry.Profile ?? "stage=?", shape);

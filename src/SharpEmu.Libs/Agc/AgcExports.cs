@@ -238,7 +238,7 @@ public static partial class AgcExports
         private RegisterBanks? _interpreterBanks;
 
         public Dictionary<uint, uint> CxRegisters { get; private set; } = new();
-        public Dictionary<uint, uint> ShRegisters { get; private set; } = new();
+        public DenseShaderRegisterMap ShRegisters { get; private set; } = new();
         public Dictionary<uint, uint> UcRegisters { get; private set; } = new();
 
         // With an interpreter attached the banks and the composite extent are its own.

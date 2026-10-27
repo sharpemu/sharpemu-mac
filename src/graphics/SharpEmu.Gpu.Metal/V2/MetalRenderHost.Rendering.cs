@@ -424,6 +424,7 @@ internal sealed partial class MetalRenderHost
 
     private void ForgetEncoderState()
     {
+        _graphicsBindings.Reset();
         _boundViewportKnown = false;
         _boundGraphicsPipeline = null;
         _boundRenderState = 0;
@@ -998,6 +999,7 @@ internal sealed partial class MetalRenderHost
 
         EndRenderingBefore(in state);
         EndComputeEncoder();
+        NativeOcclusionMakeRoom();
         EncodeStagedStores();
         EncodeDeferredLabelCopies();
         MaterializePendingClears();
@@ -1134,6 +1136,8 @@ internal sealed partial class MetalRenderHost
                 PassProfileAttachRender(descriptor);
             }
 
+            NativeOcclusionAttach(descriptor);
+            OcclusionAuditAttach(descriptor);
             _renderEncoder = RetainEncoder(MetalNative.Send(commandBuffer, SelRenderEncoder, descriptor));
             MetalMemoryTelemetry.RenderEncoders.Add();
             LabelEncoder(_renderEncoder, $"render {state.Width}x{state.Height}");
@@ -1267,8 +1271,10 @@ internal sealed partial class MetalRenderHost
                 ResolveStoreActions(in next, hasNext);
             }
 
+            OcclusionAuditClose();
             EndAndReleaseEncoder(_renderEncoder, render: true);
             _renderEncoder = 0;
+            NativeOcclusionFinish();
             PassProfileClose();
         }
 
@@ -1489,6 +1495,8 @@ internal sealed partial class MetalRenderHost
             _boundDepthStencilState = depthStencilState;
         }
 
+        NativeOcclusionPrepareDraw();
+        OcclusionAuditPrepareDraw();
         ApplyViewportAndScissor();
         if (_boundBlendRed != _dynamicState.BlendRed || _boundBlendGreen != _dynamicState.BlendGreen ||
             _boundBlendBlue != _dynamicState.BlendBlue || _boundBlendAlpha != _dynamicState.BlendAlpha)
@@ -2312,6 +2320,7 @@ internal sealed partial class MetalRenderHost
     private void CountDraw(long startedTicks)
     {
         NoteRecordedWork();
+        OcclusionAuditCountDraw();
         Interlocked.Increment(ref _drawCount);
         NotePassDraw(_boundGraphicsPipeline?.Profile);
         Interlocked.Add(ref _drawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks);

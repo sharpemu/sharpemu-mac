@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.Gpu.Metal.V2;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -106,4 +107,66 @@ public sealed class BindingReuseSceneTests(ITestOutputHelper output) : SceneTest
         Assert.True(reuses > 0, "no draw reused an earlier draw's argument buffer");
         Assert.True(writes > 0, "no argument buffer was written");
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FixedAttachmentDrawsFollowChangedArgumentOffsetsAndEncoderRestart(bool reuse)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        rig.Host.GraphicsBindingReuseEnabled = reuse;
+        const uint red = 0xFF0000FF;
+        const uint green = 0xFF00FF00;
+        const uint width = 16;
+        var redTexture = SolidTexture(rig, red);
+        var greenTexture = SolidTexture(rig, green);
+        var target = rig.ColorTarget(width, width, 16, 0xFF);
+        var state = new SceneState(width, width).ColorTarget(0, target, width, width, format: 14, numberType: 7);
+        SceneVertex[] quad =
+        [
+            SceneVertex.At(-1, -1, 0.5f, 0, 1, 0, 1), SceneVertex.At(1, -1, 0.5f, 1, 1, 0, 1),
+            SceneVertex.At(-1, 1, 0.5f, 0, 0, 0, 1), SceneVertex.At(-1, 1, 0.5f, 0, 0, 0, 1),
+            SceneVertex.At(1, -1, 0.5f, 1, 1, 0, 1), SceneVertex.At(1, 1, 0.5f, 1, 0, 0, 1),
+        ];
+        void Stripe(ScenePm4 stream, int left, int right, ulong texture)
+        {
+            state.ScreenScissor(left, 0, right, (int)width);
+            uint[] data = [.. Descriptors.Texture(texture, Rgba8, Size, Size), .. Descriptors.Sampler(), 0, 0, 0, 0];
+            rig.DrawMesh(stream, state, quad, Sample, data);
+        }
+        float[] Pixel(int x)
+        {
+            var pixels = MemoryMarshal.Cast<byte, float>(rig.ReadImage(target, width, width, 16));
+            return pixels.Slice((int)((8 * width + (uint)x) * 4), 4).ToArray();
+        }
+
+        var pm4 = new ScenePm4();
+        Stripe(pm4, 0, 4, redTexture);
+        Stripe(pm4, 4, 8, redTexture); // Same fragment arguments: native state can survive.
+        Stripe(pm4, 8, 12, greenTexture); // Same ring buffer, different argument content/range.
+        Stripe(pm4, 12, 16, redTexture); // Return to the earlier argument range.
+        rig.Submit(pm4);
+        AssertColour("first red", Pixel(2), red);
+        AssertColour("repeated red", Pixel(6), red);
+        AssertColour("changed green", Pixel(10), green);
+        AssertColour("returned red", Pixel(14), red);
+        var first = rig.Host.GraphicsBindingCounters(MetalGraphicsBindingStage.Fragment);
+        Assert.True(first.Attempted > 0);
+        if (reuse) Assert.True(first.Skipped > 0, "No repeated fragment binding was skipped inside the fixed render pass.");
+        else Assert.Equal(0L, first.Skipped);
+
+        // Submit drained and ended the old encoder. The first draw of the next one
+        // must bind every valid fragment slot even when its material was seen before.
+        var restart = new ScenePm4();
+        Stripe(restart, 0, 16, redTexture);
+        rig.Submit(restart);
+        var after = rig.Host.GraphicsBindingCounters(MetalGraphicsBindingStage.Fragment);
+        Assert.True(after.Attempted > first.Attempted);
+        Assert.Equal(first.Skipped, after.Skipped);
+        AssertColour("restarted encoder", Pixel(8), red);
+        Assert.Empty(rig.Fatals);
+        output.WriteLine($"graphics binding reuse={reuse} attempted={rig.Host.GraphicsBindingAttempts} skipped={rig.Host.GraphicsBindingSkipped}");
+    }
+
 }

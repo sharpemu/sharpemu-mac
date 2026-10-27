@@ -172,7 +172,7 @@ public static class Gen5VectorObservationAnalysis
     {
         effect = default;
         var opcode = instruction.Opcode;
-        if (opcode.StartsWith("VMovrel", StringComparison.Ordinal) ||
+        if (opcode.StartsWith("VMovrel", StringComparison.Ordinal) || opcode == "VSwaprelB32" ||
             opcode.Contains("Raw", StringComparison.Ordinal) ||
             opcode is "SSetpcB64" or "SSwappcB64" or "SRfeB64" or "SCbranchJoin" or "SCbranchGFork" or "SCbranchIFork")
         {
@@ -279,7 +279,10 @@ public static class Gen5VectorObservationAnalysis
             writes = writes.With(destination + 1);
         }
 
+        // DPP row/bank masks and inactive-source rules can retain the old
+        // destination even under a full EXEC. Such a write cannot kill its value.
         var partial =
+            instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
             opcode.Contains("Mac", StringComparison.Ordinal) ||
             opcode.StartsWith("VDot", StringComparison.Ordinal) ||
             opcode is "VWritelaneB32" ||

@@ -152,15 +152,42 @@ internal sealed unsafe class SceneRig : IDisposable
     /// <summary>The relay the rig's host posts GPU-queue work through, for driving the worker's own pass.</summary>
     internal MetalGpuWorkerRelay Relay => _relay;
 
+    /// <summary>Records all queued packets without waiting for their GPU work to finish.</summary>
+    public void RecordPending()
+    {
+        var recorded = 0;
+        if (!Host.CommandStream.TryEnqueueControlBarrier(
+                () => Volatile.Write(ref recorded, 1), () => Volatile.Write(ref recorded, -1)))
+            throw new InvalidOperationException("The scene could not enqueue its recording barrier.");
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        do
+        {
+            if (DateTime.UtcNow > deadline || Volatile.Read(ref recorded) < 0)
+                throw new TimeoutException("The scene's recording barrier did not finish.");
+            Host.RunPendingCommands();
+            Host.RunCommandStreamSlices(64);
+            Thread.Yield();
+        } while (Volatile.Read(ref recorded) != 1 || Host.CommandThreadHasWork || _relay.HasPendingCommands);
+    }
+
     /// <summary>Runs the worker loop until no submission is runnable, then waits for the GPU.</summary>
     public void Drain()
     {
+        // HasPending excludes a slice the producer is currently interpreting. A
+        // trailing control barrier proves it handed every earlier item to the worker.
+        var producerDrained = Host.UsesCommandThread ? 0 : 1;
+        if (Host.UsesCommandThread && !Host.CommandStream.TryEnqueueControlBarrier(
+                () => Volatile.Write(ref producerDrained, 1),
+                () => Volatile.Write(ref producerDrained, -1)))
+            throw new InvalidOperationException("The scene could not enqueue its producer barrier.");
         var deadline = DateTime.UtcNow.AddSeconds(30);
         while (true)
         {
+            if (DateTime.UtcNow > deadline || Volatile.Read(ref producerDrained) < 0)
+                throw new TimeoutException("The scene's command stream did not finish its producer barrier.");
             Host.RunPendingCommands();
             Host.RunCommandStreamSlices(64);
-            if (Host.CommandStream.HasUnblockedPending || _relay.HasPendingCommands)
+            if (Host.CommandStream.HasUnblockedPending || Host.CommandThreadHasWork || _relay.HasPendingCommands)
             {
                 continue;
             }
@@ -168,7 +195,10 @@ internal sealed unsafe class SceneRig : IDisposable
             Host.CommitCoalescedFlush();
             Host.FlushAndWaitForGpu();
             Host.PollGpuCompletions();
-            if (!Host.CommandStream.HasPending)
+            // A producer may have consumed the final packet while its worker items
+            // still own the draws and result copies. Stream-empty alone is not done.
+            if (Volatile.Read(ref producerDrained) == 1 && !Host.CommandStream.HasPending &&
+                !Host.CommandThreadHasWork && !_relay.HasPendingCommands)
             {
                 return;
             }

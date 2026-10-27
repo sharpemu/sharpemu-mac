@@ -203,6 +203,9 @@ public static class RenderPhaseProfile
         GpuWriteFlush,
         MappedSizeClamp,
         StorageBufferResolve,
+        StorageDeferredLabels,
+        StorageSharedLookup,
+        StorageStoreOrder,
         // The command stream's own time on the Metal worker, split by what it was doing.
         // Exclusive: nested scopes (draw translation, waits, label encoding) are carved out.
         CommandPacketRead,

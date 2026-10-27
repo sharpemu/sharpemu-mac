@@ -2,13 +2,26 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
 
-public sealed class NativeColorClearRequestTests
+[Collection(SchedulingStateCollection.Name)]
+public sealed class NativeColorClearRequestTests : IDisposable
 {
+    private readonly bool _previousNativeMetadata = ImageRequestBuilders.NativeColorClearMetadata;
+
+    public NativeColorClearRequestTests()
+    {
+        // FakeCpuMemory registers the Metal backend in other tests, disabling this
+        // process-wide mode. These tests exercise the native metadata builder explicitly.
+        ImageRequestBuilders.NativeColorClearMetadata = true;
+    }
+
+    public void Dispose() => ImageRequestBuilders.NativeColorClearMetadata = _previousNativeMetadata;
+
     [Fact]
     public void CmaskTargetUsesItsOwnMetadataSizeAndPackedClear()
     {

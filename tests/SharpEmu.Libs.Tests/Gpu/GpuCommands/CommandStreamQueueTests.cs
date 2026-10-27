@@ -33,6 +33,50 @@ public sealed class CommandStreamQueueTests
         return (host, new CommandStreamQueue(host));
     }
 
+    [Theory]
+    [InlineData(0UL)]
+    [InlineData(4UL)]
+    public void APartialLabelReplacementCannotAnswerWithTheOldQword(ulong offset)
+    {
+        var (host, queue) = NewQueue();
+        host.PendingLabelTick = 5;
+        var interpreter = queue.GetInterpreter(0);
+        interpreter.PendingLabelRecorded!(Label, 8, 0x22222222_11111111UL);
+        interpreter.PendingLabelRecorded!(Label + offset, 4, 0x33333333);
+        Assert.False(interpreter.PendingLabelLookup!(Label, true, out _));
+        Assert.True(interpreter.PendingLabelLookup!(Label + offset, false, out var replacement));
+        Assert.Equal(0x33333333UL, replacement);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AQwordReplacementRemovesAnOlderUpperDword(bool batch)
+    {
+        var (host, queue) = NewQueue();
+        host.PendingLabelTick = 5;
+        var interpreter = queue.GetInterpreter(0);
+        interpreter.PendingLabelRecorded!(Label + 4, 4, 0xBAD);
+        if (batch) interpreter.PendingQwordsRecorded!(Label, 2, 16, 0x22222222_11111111UL);
+        else interpreter.PendingLabelRecorded!(Label, 8, 0x22222222_11111111UL);
+        Assert.True(interpreter.PendingLabelLookup!(Label + 4, false, out var high));
+        Assert.Equal(0x22222222UL, high);
+        queue.NotifyCompletedGpuTick(5);
+        Assert.False(interpreter.PendingLabelLookup!(Label, true, out _));
+    }
+
+    [Fact]
+    public void AnUnalignedReplacementRefusesStaleCachedAnswers()
+    {
+        var (host, queue) = NewQueue();
+        host.PendingLabelTick = 5;
+        var interpreter = queue.GetInterpreter(0);
+        interpreter.PendingLabelRecorded!(Label, 8, 0x22222222_11111111UL);
+        interpreter.PendingLabelRecorded!(Label + 2, 4, 0x33333333);
+        Assert.False(interpreter.PendingLabelLookup!(Label, true, out _));
+        Assert.False(interpreter.PendingLabelLookup!(Label + 2, false, out _));
+    }
+
     private static void Enqueue(RecordingCommandStreamHost host, CommandStreamQueue queue, ulong address, ulong submissionId, params uint[][] packets)
     {
         var words = StreamRunner.Concat(packets);

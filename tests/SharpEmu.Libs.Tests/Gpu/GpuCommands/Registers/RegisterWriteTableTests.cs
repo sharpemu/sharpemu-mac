@@ -16,6 +16,54 @@ public sealed class RegisterWriteTableTests
 {
     private const ulong PacketAddress = 0x1_0000_1000;
 
+    [Theory]
+    [InlineData(SpiShaderUserDataPs0, 32u)]
+    [InlineData(SpiShaderUserDataGs0, 32u)]
+    [InlineData(SpiShaderUserDataHs0, 32u)]
+    [InlineData(ComputeUserData0, 16u)]
+    public void DirectScalarBatchPreservesKindsCountAndSnapshotsAtTheStageBoundary(uint first, uint capacity)
+    {
+        static UserScalarRegisters Scalars(RegisterBanks banks, uint first) => first switch
+        {
+            SpiShaderUserDataPs0 => banks.Shader.Pixel.UserScalars,
+            SpiShaderUserDataGs0 => banks.Shader.Vertex.GeometryUserScalars,
+            SpiShaderUserDataHs0 => banks.Shader.Vertex.HullUserScalars,
+            ComputeUserData0 => banks.Shader.Compute.UserScalars,
+            _ => throw new InvalidOperationException(),
+        };
+
+        var banks = NewBanks();
+        banks.UserDataMarker = UserScalarKind.Region;
+        Assert.Equal(2u, WriteShader(banks, first + capacity - 2, 17, 19));
+        var before = banks.Snapshot();
+        var original = Scalars(before, first);
+        Assert.Equal(capacity, original.Count);
+        Assert.Equal(17u, original.Values[(int)capacity - 2]);
+        Assert.Equal(19u, original.Values[(int)capacity - 1]);
+        Assert.Equal(UserScalarKind.Region, original.Kinds[(int)capacity - 2]);
+        Assert.Equal(UserScalarKind.Region, original.Kinds[(int)capacity - 1]);
+        Assert.Equal(0u, original.Values[(int)capacity - 3]);
+        Assert.Equal(UserScalarKind.Unknown, banks.UserDataMarker);
+
+        WriteShader(banks, first + capacity - 2, 23);
+        var current = Scalars(banks, first);
+        Assert.NotSame(original, current);
+        Assert.Equal(capacity, current.Count);
+        Assert.Equal(23u, current.Values[(int)capacity - 2]);
+        Assert.Equal(UserScalarKind.Unknown, current.Kinds[(int)capacity - 2]);
+        Assert.Equal(19u, current.Values[(int)capacity - 1]);
+        Assert.Equal(UserScalarKind.Region, current.Kinds[(int)capacity - 1]);
+        Assert.Equal(17u, original.Values[(int)capacity - 2]);
+        Assert.Equal(UserScalarKind.Region, original.Kinds[(int)capacity - 2]);
+
+        banks.UserDataMarker = UserScalarKind.Region;
+        var error = Assert.Throws<InvalidOperationException>(() => WriteShader(banks, first + capacity - 1, 29, 31));
+        Assert.Contains("outside the stage window", error.Message);
+        Assert.Equal(19u, Scalars(banks, first).Values[(int)capacity - 1]);
+        Assert.Equal(capacity, Scalars(banks, first).Count);
+        Assert.Equal(UserScalarKind.Region, banks.UserDataMarker);
+    }
+
     [Fact]
     public void GeometryUserDataPointerPreservesBothWordsAndSubmissionCopy()
     {

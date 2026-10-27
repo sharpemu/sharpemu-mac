@@ -23,12 +23,11 @@ public sealed class VertexTableMetadata
 
 // A draw's decoded vertex layout and the guest bytes it came from: the attribute table words from the lowest
 // to the highest semantic the program reads, and the buffer descriptors from index zero to the highest index
-// an attribute names. A draw that reads the same bytes at the same tables has the same layout.
-internal sealed class VertexLayoutMemo(ulong attributeTable, ulong bufferTable, byte[] attributeBytes, byte[] bufferBytes,
+// an attribute names. The descriptor bytes contain absolute stream addresses: moving the tables
+// without changing their bytes leaves the decoded layout unchanged. Every lookup rereads both.
+internal sealed class VertexLayoutMemo(byte[] attributeBytes, byte[] bufferBytes,
     VertexAttributeResource[] attributes, VertexInputBuffer[] buffers)
 {
-    public readonly ulong AttributeTable = attributeTable;
-    public readonly ulong BufferTable = bufferTable;
     public readonly byte[] AttributeBytes = attributeBytes;
     public readonly byte[] BufferBytes = bufferBytes;
     public readonly VertexAttributeResource[] Attributes = attributes;
@@ -379,7 +378,7 @@ public static class VertexInputResolver
 
     // The tables of a draw in two guest reads, one over the attribute words the program names and one over the buffer
     // descriptors they index, instead of two reads per attribute (each taking the memory read lock). A draw whose
-    // bytes equal the last draw's at the same tables gets that draw's attributes and buffers back without decoding or
+    // bytes equal the last draw's gets that draw's attributes and buffers back without decoding or
     // allocating them; any other byte decodes afresh, so a guest that rewrites a table is seen on the next draw.
     // False leaves the word-by-word path to decode the draw, and to report whatever stopped this one.
     private static bool TryResolveLayout(CpuContext context, VertexTableMetadata metadata, ulong attributeTable, ulong bufferTable,
@@ -437,7 +436,7 @@ public static class VertexInputResolver
         }
 
         var memo = metadata.Layout;
-        if (memo is not null && memo.AttributeTable == attributeTable && memo.BufferTable == bufferTable &&
+        if (memo is not null &&
             attributeBytes.SequenceEqual(memo.AttributeBytes) && bufferBytes.SequenceEqual(memo.BufferBytes))
         {
             attributes = memo.Attributes;
@@ -465,7 +464,7 @@ public static class VertexInputResolver
         buffers = MergeBuffers(resources, shaderAddress);
         attributes = resources.ToArray();
         resources.Clear();
-        metadata.Layout = new VertexLayoutMemo(attributeTable, bufferTable, attributeBytes.ToArray(), bufferBytes.ToArray(), attributes, buffers);
+        metadata.Layout = new VertexLayoutMemo(attributeBytes.ToArray(), bufferBytes.ToArray(), attributes, buffers);
         return true;
     }
 

@@ -525,6 +525,10 @@ internal static partial class MetalV2Native
         nuint action,
         nuint index);
 
+    // -setVisibilityResultMode:offset:
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendVisibilityResultMode(nint receiver, nint selector, nuint mode, nuint offset);
+
     // -setBufferOffset:atIndex:
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendSetBufferOffset(nint receiver, nint selector, nuint offset, nuint index);

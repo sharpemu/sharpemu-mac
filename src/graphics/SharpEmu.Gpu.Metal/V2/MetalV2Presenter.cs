@@ -79,6 +79,12 @@ internal static partial class MetalV2Presenter
     private static uint _hostFrameHeight;
     private static long _guestFrameSequence;
     private static long _presentedGuestFrames;
+    // Independent of the resettable statistics counters and the published flip queue.
+    private static long _adoptedGuestFrameSequence;
+    private static long _hostFrameSequence;
+    private static readonly bool ReusePresentedFrame =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_REUSE_PRESENTED_FRAME") == "1";
+    private static readonly MetalPresentationCache PresentationCache = new();
     private static int _firstGuestFrameNoted;
     private static long _publishedGuestFrames;
     private static long _adoptionsBlocked;
@@ -646,35 +652,13 @@ internal static partial class MetalV2Presenter
             if (window.ConsumeSurfaceRestore())
             {
                 _drawableWidth = 0;
+                PresentationCache.Invalidate();
             }
 
             SyncDrawableSize();
             AdoptPendingFrame();
             UploadPendingHostFrame();
             UpdateOutputColor(window);
-            var drawable = MetalNative.Send(_metalLayer, MetalNative.Selector("nextDrawable"));
-            if (drawable == 0)
-            {
-                return;
-            }
-
-            var drawableTexture = MetalNative.Send(drawable, MetalNative.Selector("texture"));
-            var commandBuffer = MetalNative.Send(_presentQueue, MetalNative.Selector("commandBuffer"));
-            MetalMemoryTelemetry.CommandBuffers.Add();
-            if (drawableTexture == 0 || commandBuffer == 0)
-            {
-                return;
-            }
-
-            var pass = CreateClearPass(drawableTexture);
-            var encoder = MetalNative.Send(
-                commandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
-            MetalMemoryTelemetry.RenderEncoders.Add();
-            if (encoder == 0)
-            {
-                return;
-            }
-
             // The GPU worker promotes frames too, when it publishes one and when it asks
             // for a flip slot, and a promotion releases the frame it replaces. So the
             // presented frame is read under the gate and held until the encoder has bound
@@ -683,12 +667,14 @@ internal static partial class MetalV2Presenter
             nint presented;
             uint presentedWidth, presentedHeight;
             bool presentedHdr;
+            long presentedSequence;
             lock (_frameGate)
             {
                 presented = _presentTexture;
                 presentedWidth = _presentWidth;
                 presentedHeight = _presentHeight;
                 presentedHdr = _presentIsHdr;
+                presentedSequence = _adoptedGuestFrameSequence;
                 if (presented != 0)
                 {
                     MetalNative.Send(presented, MetalNative.Selector("retain"));
@@ -701,6 +687,44 @@ internal static partial class MetalV2Presenter
                 var width = presented != 0 ? presentedWidth : _hostFrameWidth;
                 var height = presented != 0 ? presentedHeight : _hostFrameHeight;
                 var movie = SelectHostMovieFallback(ref texture, ref width, ref height);
+                var stamp = new MetalPresentationStamp(
+                    presentedSequence, _hostFrameSequence, movie ? _movieFallbackSerial : 0,
+                    texture, _drawableWidth, _drawableHeight, _layerHdrActive,
+                    !movie && presented != 0 && presentedHdr, _edrCurrentHeadroom);
+                // Keep polling movies, window state and guest flips. The flip pacer is
+                // independent, so reusing a drawable never delays guest flip completion.
+                // Before a guest/movie image exists, the prewarm overlay may animate.
+                if (ReusePresentedFrame && !PresentationCache.NeedsPresent(in stamp, presented == 0 && !movie))
+                {
+                    ReportPresentationStatistics(presented: false);
+                    // nextDrawable normally paces this loop; skipping it must not spin.
+                    Thread.Sleep(8);
+                    return;
+                }
+
+                var drawable = MetalNative.Send(_metalLayer, MetalNative.Selector("nextDrawable"));
+                if (drawable == 0)
+                {
+                    return;
+                }
+
+                var drawableTexture = MetalNative.Send(drawable, MetalNative.Selector("texture"));
+                var commandBuffer = MetalNative.Send(_presentQueue, MetalNative.Selector("commandBuffer"));
+                MetalMemoryTelemetry.CommandBuffers.Add();
+                if (drawableTexture == 0 || commandBuffer == 0)
+                {
+                    return;
+                }
+
+                var pass = CreateClearPass(drawableTexture);
+                var encoder = MetalNative.Send(
+                    commandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
+                MetalMemoryTelemetry.RenderEncoders.Add();
+                if (encoder == 0)
+                {
+                    return;
+                }
+
                 if (texture != 0 && width != 0 && height != 0)
                 {
                     EncodePresent(encoder, texture, width, height, !movie && presented != 0 && presentedHdr);
@@ -710,6 +734,14 @@ internal static partial class MetalV2Presenter
                 {
                     EncodePrewarmProgress(encoder);
                 }
+
+                MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+                MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
+                MetalMemoryTelemetry.Commits.Add();
+                MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
+                PresentationCache.RecordPresented(in stamp);
+                PerfOverlay.RecordPresent();
+                ReportPresentationStatistics();
             }
             finally
             {
@@ -718,13 +750,6 @@ internal static partial class MetalV2Presenter
                     MetalNative.SendVoid(presented, MetalNative.Selector("release"));
                 }
             }
-
-            MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
-            MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
-            MetalMemoryTelemetry.Commits.Add();
-            MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
-            PerfOverlay.RecordPresent();
-            ReportPresentationStatistics();
         }
         finally
         {
@@ -906,6 +931,7 @@ internal static partial class MetalV2Presenter
         _presentWidth = frame.Width;
         _presentHeight = frame.Height;
         _presentIsHdr = frame.IsHdr;
+        Interlocked.Increment(ref _adoptedGuestFrameSequence);
         if (Interlocked.Increment(ref _presentedGuestFrames) == 1 && Interlocked.Exchange(ref _firstGuestFrameNoted, 1) == 0)
         {
             MetalShaderPrewarm.NoteFirstGuestFrame();
@@ -983,6 +1009,7 @@ internal static partial class MetalV2Presenter
                 (nint)pixels,
                 width * 4);
         }
+        _hostFrameSequence++;
     }
 
     private static nint CreateClearPass(nint targetTexture)
@@ -1177,9 +1204,9 @@ internal static partial class MetalV2Presenter
         }
     }
 
-    private static void ReportPresentationStatistics()
+    private static void ReportPresentationStatistics(bool presented = true)
     {
-        Interlocked.Increment(ref _hostPresents);
+        if (presented) Interlocked.Increment(ref _hostPresents);
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_statsTimestamp == 0)
         {

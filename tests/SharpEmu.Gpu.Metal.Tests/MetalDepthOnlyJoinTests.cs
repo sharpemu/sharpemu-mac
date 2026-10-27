@@ -28,6 +28,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
 {
     private const ulong GuestBase = 0x2_0000_0000;
+    private const ulong GuestAliasBase = GuestBase + 0x1000_0000;
     private const ulong TargetAddress = GuestBase + 0x4000;
     private const ulong OtherAddress = GuestBase + 0x8000;
     private const ulong LabelAddress = GuestBase + 0x1000;
@@ -58,6 +59,7 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         PendingClear,
         // A deferred copy lands in a buffer the depth-only draw binds.
         BindsCopyDestination,
+        BindsAliasedCopyDestination,
         // A deferred copy waits, in bytes the draw does not bind.
         BindsOtherBytes,
     }
@@ -96,11 +98,13 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         AssertRedLeftGreenRight(outcome.Pixels);
     }
 
-    [Fact]
-    public void ADepthOnlyDrawDoesNotJoinWhileACopyOwesBytesItBinds()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ADepthOnlyDrawDoesNotJoinWhileACopyOwesBytesItBinds(bool alias)
     {
         if (!RequireDevice()) return;
-        var outcome = Run(Scene.BindsCopyDestination);
+        var outcome = Run(alias ? Scene.BindsAliasedCopyDestination : Scene.BindsCopyDestination);
         Assert.Equal(0L, outcome.Joins);
         Assert.Equal(1L, outcome.JoinsWaitingOnCopies);
         Assert.Equal(3L, outcome.Passes);
@@ -196,7 +200,7 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
                 Assert.Equal(1, host.PendingClearCount);
             }
 
-            if (scene is Scene.BindsCopyDestination or Scene.BindsOtherBytes)
+            if (scene is Scene.BindsCopyDestination or Scene.BindsAliasedCopyDestination or Scene.BindsOtherBytes)
             {
                 host.RecordCommandProcessorWrite(LabelAddress, BitConverter.GetBytes(0x55UL), "WRITE_DATA");
                 Assert.Equal(1, host.DeferredLabelCopyCount);
@@ -207,6 +211,7 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
             {
                 Scene.SamplesAttachment => Rig.Stage(textures: [(nint)colourView.Handle]),
                 Scene.BindsCopyDestination => Rig.Stage(buffers: [host.GuestMemory.ResolveWritable(LabelAddress, 64)]),
+                Scene.BindsAliasedCopyDestination => Rig.Stage(buffers: [host.GuestMemory.ResolveWritable(GuestAliasBase + (LabelAddress - GuestBase), 64)]),
                 Scene.BindsOtherBytes => Rig.Stage(buffers: [host.GuestMemory.ResolveWritable(LabelAddress + 0x400, 64)]),
                 _ => null,
             };
@@ -279,6 +284,8 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
 
         public bool TryResolveBackingAlias(ulong address, ulong size, out ulong alias)
         {
+            if (address >= GuestAliasBase && address - GuestAliasBase < Size)
+                address = GuestBase + (address - GuestAliasBase);
             alias = Contains(address, size) ? (ulong)_block + (address - GuestBase) : 0;
             return alias != 0;
         }

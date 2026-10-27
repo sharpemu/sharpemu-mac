@@ -15,6 +15,23 @@ public sealed class ResourceMaterializationProfileCollection;
 public sealed class ResourceMaterializationProfileTests
 {
     [Fact]
+    public void CacheHitCountsDistinguishRecallAndRebaseAcrossThreads()
+    {
+        var before = ReadReport();
+        Parallel.For(0, 100, index =>
+            ResourceMaterializationProfile.RecordCacheHit(recalled: (index & 1) != 0,
+                rebased: index % 4 < 2, ranges: 3, bytes: 128));
+        var after = ReadReport();
+        if (!ResourceMaterializationProfile.Enabled) { Assert.Empty(after); return; }
+        Assert.Equal(ReadCounter(before, "normal") + 50, ReadCounter(after, "normal"));
+        Assert.Equal(ReadCounter(before, "recalled") + 50, ReadCounter(after, "recalled"));
+        Assert.Equal(ReadCounter(before, "normal_active_rebase") + 25, ReadCounter(after, "normal_active_rebase"));
+        Assert.Equal(ReadCounter(before, "recalled_active_rebase") + 25, ReadCounter(after, "recalled_active_rebase"));
+        Assert.Equal(ReadCounter(before, "recorded_ranges") + 300, ReadCounter(after, "recorded_ranges"));
+        Assert.Equal(ReadCounter(before, "recorded_bytes") + 12800, ReadCounter(after, "recorded_bytes"));
+    }
+
+    [Fact]
     public void ReadCountersAreExactAndGated()
     {
         var before = ReadReport();

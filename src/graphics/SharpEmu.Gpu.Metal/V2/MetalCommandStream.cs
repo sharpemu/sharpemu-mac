@@ -77,6 +77,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _translation!.BeginSubmission(queueId, submissionId, geometrySnapshots, CommandStream.GetInterpreter(queueId));
             _commandThread!.Post(() =>
             {
+                NativeOcclusionBeginQueue(queueId);
                 CommitCoalescedIfOverdue();
                 _ = EnsureCommandBuffer();
             });
@@ -84,6 +85,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         DrainDraws();
+        NativeOcclusionBeginQueue(queueId);
         _submissionsStarted++;
         CommitCoalescedIfOverdue();
         _ = EnsureCommandBuffer();
@@ -177,7 +179,10 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var commit = ShouldCommitStreamFlush(
             coalesce, streamIdle: false, _coalescedSubmissions, _encodersInBuffer, now - _commitWantedSince,
             MetalV2Diagnostics.CoalesceMaxSubmissions, MetalV2Diagnostics.CoalesceMaxEncoders, CoalesceMaxTicks) ||
-            !(_commandStream?.HasUnblockedPending ?? false);
+            // With a producer, an empty packet queue can still have many worker items
+            // behind this flush. Its ordered idle callback commits after those items;
+            // testing the producer queue here would commit each parsed submission.
+            (!UsesCommandThread && !(_commandStream?.HasUnblockedPending ?? false));
         if (commit)
         {
             FlushCommandBuffer(MetalFlushCause.Stream);
@@ -789,13 +794,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         string profileWhat,
         string? profileKind,
         ulong profileBytes,
-        bool sourceIsFinal = true)
+        bool sourceIsFinal = true,
+        bool deferStableGpuResult = false)
     {
         ulong serial;
         // A copy whose source later work in the same encoder may still change (the GDS a
         // pixel or compute shader appends to) cannot wait for the boundary: it would copy
         // what that later work left there.
-        if (sourceIsFinal &&
+        // A GPU-produced snapshot may wait for its producer encoder to end, but must
+        // never be read on the CPU for label replay before that producer has executed.
+        if ((sourceIsFinal || deferStableGpuResult) &&
             (LabelsAtCommit ||
              (MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
              (DefersCopiesInCompute && _computeEncoder != 0)))
@@ -918,13 +926,28 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// copied by the GPU where the stream has reached, or - when the GPU cannot write them,
     /// or a label is still owed by a completion - published by a completion behind it.
     /// </summary>
+    internal bool QueueCommandProcessorWrites { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_QUEUE_CP_WRITES") == "1";
+
     public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
     {
         if (OnCommandThread)
         {
-            // Recorded before the stream goes on, so its own reads see the bytes (the overlay).
+            if (source.IsEmpty) return;
+            if (address == 0 || (ulong)source.Length > ulong.MaxValue - address)
+                throw Fatal($"A command-processor write has an invalid range: address=0x{address:X16} bytes={source.Length}.");
             var queued = source.ToArray();
-            RunTagged(() => RecordCommandProcessorWrite(address, queued, kind));
+            if (QueueCommandProcessorWrites)
+            {
+                // Reads overlapping this queued write wait until the worker installed
+                // its overlay. Unrelated packets can continue; prefetch's non-draw gate
+                // still orders future resource reads after the write.
+                _commandThread!.PostRange(() => RecordCommandProcessorWrite(address, queued, kind), address, (ulong)queued.Length);
+            }
+            else
+            {
+                RunTagged(() => RecordCommandProcessorWrite(address, queued, kind));
+            }
             return;
         }
 
@@ -1035,16 +1058,27 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </remarks>
     public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
     {
-        if (RunOnWorker(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind)))
+        if (count <= 0) return;
+        if (OnCommandThread)
         {
+            // Publish the whole conservative hull before the producer advances. Reads in a
+            // sparse gap may wait unnecessarily, but no following overlapping read can miss
+            // the worker installing these writes. Invalid/wrapping runs keep the synchronous
+            // path and its original store-by-store failure/partial-write behavior.
+            if (QueueCommandProcessorWrites && address != 0 && address <= ulong.MaxValue - sizeof(ulong) &&
+                (count == 1 || strideBytes <= (ulong.MaxValue - address - sizeof(ulong)) / (ulong)(count - 1)))
+            {
+                var size = (ulong)(count - 1) * strideBytes + sizeof(ulong);
+                _commandThread!.PostRange(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind), address, size);
+            }
+            else
+            {
+                RunTagged(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind));
+            }
             return;
         }
 
         DrainDraws();
-        if (count <= 0)
-        {
-            return;
-        }
 
         if (count > 1 && strideBytes >= sizeof(ulong) && address != 0 && CommandProcessorWriteBatching.Enabled &&
             !GpuClobberDiagnostics.Enabled &&
@@ -1314,6 +1348,29 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     private readonly List<DeferredLabelCopy> _deferredLabelCopies = [];
     private bool _encodingDeferredLabels;
+    private static readonly bool DeferredLabelFilterEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABEL_PAGE_FILTER") != "0";
+    private readonly MetalPageRangeFilter _deferredGuestPages = new();
+    private readonly MetalPageRangeFilter _deferredBufferPages = new();
+    private long _labelLookupQueries, _labelHullRejects, _labelPageRejects, _labelExactScans, _labelEntriesInspected;
+    private int _labelMaxHeldCopies;
+
+    private void NoteLabelScan(int entries)
+    {
+        if (!SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled) return;
+        _labelExactScans++;
+        _labelEntriesInspected += entries;
+    }
+
+    private string TakeDeferredLabelLookupStats()
+    {
+        if (!SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled) return "disabled";
+        var result = $"queries:{_labelLookupQueries},hull_rejects:{_labelHullRejects},page_rejects:{_labelPageRejects}," +
+            $"scans:{_labelExactScans},entries:{_labelEntriesInspected},max_held:{_labelMaxHeldCopies}";
+        _labelLookupQueries = _labelHullRejects = _labelPageRejects = _labelExactScans = _labelEntriesInspected = 0;
+        _labelMaxHeldCopies = _deferredLabelCopies.Count;
+        return result;
+    }
 
     // The span of guest bytes, and of destination bytes when they all go to one buffer
     // (_deferredLabelBuffer, -1 for several), the held copies land in: every storage binding
@@ -1337,12 +1394,24 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _deferredLabelDestinationLow = Math.Min(_deferredLabelDestinationLow, copy.DestinationOffset);
             _deferredLabelDestinationHigh = Math.Max(_deferredLabelDestinationHigh, copy.DestinationOffset + (ulong)copy.Bytes);
             _deferredLabelCopies.Add(copy);
+            if (DeferredLabelFilterEnabled)
+            {
+                _deferredGuestPages.Add(copy.GuestAddress, (ulong)copy.Bytes);
+                _deferredBufferPages.Add(copy.DestinationOffset, (ulong)copy.Bytes, unchecked((ulong)copy.DestinationBuffer));
+            }
+            if (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled)
+                _labelMaxHeldCopies = Math.Max(_labelMaxHeldCopies, _deferredLabelCopies.Count);
         }
     }
 
     private void ClearHeldLabelCopies()
     {
         _deferredLabelCopies.Clear();
+        if (DeferredLabelFilterEnabled)
+        {
+            _deferredGuestPages.Clear();
+            _deferredBufferPages.Clear();
+        }
         _deferredLabelLow = ulong.MaxValue;
         _deferredLabelHigh = 0;
         _deferredLabelBuffer = 0;
@@ -1526,45 +1595,66 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // Whether a copy waiting for the end of the open encoder lands in these guest bytes.
     private bool DeferredLabelCopiesTouch(ulong address, ulong size)
     {
+        if (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled) _labelLookupQueries++;
         if (address >= _deferredLabelHigh || address + size <= _deferredLabelLow)
         {
+            if (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled) _labelHullRejects++;
+            return false;
+        }
+        if (DeferredLabelFilterEnabled && !_deferredGuestPages.MayOverlap(address, size))
+        {
+            if (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled) _labelPageRejects++;
             return false;
         }
 
-        foreach (ref readonly var copy in
-            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies))
+        var copies = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies);
+        for (var index = 0; index < copies.Length; index++)
         {
+            ref readonly var copy = ref copies[index];
             if (copy.GuestAddress < address + size && address < copy.GuestAddress + (ulong)copy.Bytes)
             {
+                NoteLabelScan(index + 1);
                 return true;
             }
         }
 
+        NoteLabelScan(copies.Length);
         return false;
     }
 
-    // The same question for a binding already resolved to host memory: whether a copy waiting
-    // for the open encoder to end lands in the window bytes the range names.
+    // Buffer identity is part of the page key: aliases with different guest addresses
+    // must still land before a binding to the same native buffer bytes.
     private bool DeferredLabelCopiesTouch(in MetalGuestRange range)
     {
+        if (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled) _labelLookupQueries++;
         if (_deferredLabelBuffer != -1 &&
             (range.Buffer != _deferredLabelBuffer ||
              range.Offset >= _deferredLabelDestinationHigh || range.Offset + range.Size <= _deferredLabelDestinationLow))
         {
+            if (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled) _labelHullRejects++;
+            return false;
+        }
+        if (DeferredLabelFilterEnabled &&
+            !_deferredBufferPages.MayOverlap(range.Offset, range.Size, unchecked((ulong)range.Buffer)))
+        {
+            if (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled) _labelPageRejects++;
             return false;
         }
 
-        foreach (ref readonly var copy in
-            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies))
+        var copies = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies);
+        for (var index = 0; index < copies.Length; index++)
         {
+            ref readonly var copy = ref copies[index];
             if (copy.DestinationBuffer == range.Buffer &&
                 copy.DestinationOffset < range.Offset + range.Size &&
                 range.Offset < copy.DestinationOffset + (ulong)copy.Bytes)
             {
+                NoteLabelScan(index + 1);
                 return true;
             }
         }
 
+        NoteLabelScan(copies.Length);
         return false;
     }
 
@@ -1805,8 +1895,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     public bool DefersEndOfPipeLabels => !PublishLabelsWhenParsed;
 
-    // Metal has no occlusion counter: the dumps keep the synthetic always-visible pairs.
-    public bool PublishesSyntheticOcclusionDumps => true;
+    // Keep conservative pairs by default. Precise GPU snapshots are opt-in while
+    // native query ordering and runtime behavior are validated; the audit changes no dumps.
+    public bool PublishesSyntheticOcclusionDumps => !NativeOcclusionEnabled;
 
     // A deferred label is encoded into the command buffer being recorded, before it is
     // committed, so it has landed once that submission completes.

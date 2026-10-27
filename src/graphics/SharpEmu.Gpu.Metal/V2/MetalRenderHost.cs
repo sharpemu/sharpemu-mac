@@ -32,6 +32,34 @@ internal sealed partial class MetalRenderHost :
 {
     private const uint MaxFramebufferDimension = 16384;
 
+    private readonly MetalGraphicsBindingMemo _graphicsBindings = new();
+    private readonly long[] _graphicsBindingAttempts = new long[3];
+    private readonly long[] _graphicsBindingSkipped = new long[3];
+    private bool _graphicsBindingReuseEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GRAPHICS_BINDING_REUSE") == "1";
+
+    internal bool GraphicsBindingReuseEnabled
+    {
+        get => _graphicsBindingReuseEnabled;
+        set
+        {
+            if (_graphicsBindingReuseEnabled == value) return;
+            _graphicsBindingReuseEnabled = value;
+            _graphicsBindings.Reset();
+        }
+    }
+
+    internal long GraphicsBindingAttempts => _graphicsBindingAttempts.Sum();
+    internal long GraphicsBindingSkipped => _graphicsBindingSkipped.Sum();
+
+    internal (long Attempted, long Skipped) GraphicsBindingCounters(MetalGraphicsBindingStage stage) =>
+        (_graphicsBindingAttempts[(int)stage], _graphicsBindingSkipped[(int)stage]);
+
+    private string FormatGraphicsBindingCounters() =>
+        $"graphics_bind=[cumulative=1 enabled={GraphicsBindingReuseEnabled} attempted={GraphicsBindingAttempts} skipped={GraphicsBindingSkipped} " +
+        $"vertex={_graphicsBindingAttempts[0]}/{_graphicsBindingSkipped[0]} mesh={_graphicsBindingAttempts[1]}/{_graphicsBindingSkipped[1]} " +
+        $"fragment={_graphicsBindingAttempts[2]}/{_graphicsBindingSkipped[2]}]";
+
     private static readonly nint SelCommandBuffer = MetalNative.Selector("commandBuffer");
     private static readonly nint SelCommit = MetalNative.Selector("commit");
     private static readonly nint SelEndEncoding = MetalNative.Selector("endEncoding");
@@ -592,6 +620,7 @@ internal sealed partial class MetalRenderHost :
 
         _slotTrap?.OnCommit(serial);
         PassProfileCommit(serial, cause == PassEndCause.Present);
+        OcclusionAuditCommit(serial);
         if (cause == PassEndCause.Present)
         {
             _imageCache.MarkFrame();
@@ -714,6 +743,7 @@ internal sealed partial class MetalRenderHost :
                 MetalNative.SendVoid(oldest, SelWaitUntilCompleted);
             }
 
+            OcclusionAuditResolve(_inFlightSerials[(_inFlightHead + MaxInFlightSubmissions - 1) % MaxInFlightSubmissions], false);
             PassProfileResolve(
                 _inFlightSerials[(_inFlightHead + MaxInFlightSubmissions - 1) % MaxInFlightSubmissions],
                 PassProfileEnabled,
@@ -786,7 +816,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         var status = MetalV2Native.SendValue(buffer, MetalNative.Selector("status"));
-        if (PassProfileEnabled && status != CommandBufferStatusCompleted && status != CommandBufferStatusError)
+        if ((PassProfileEnabled || OcclusionAuditEnabled) && status != CommandBufferStatusCompleted && status != CommandBufferStatusError)
         {
             // Its serial is signalled from inside it, so it is all but finished; the pass
             // profile needs its timestamps, which are readable only once it has completed.
@@ -804,6 +834,7 @@ internal sealed partial class MetalRenderHost :
                 Console.Error.WriteLine(
                     $"[METAL-V2][WARN] A Metal submission failed and will never signal its serial: serial={serial} " +
                     $"completed={CompletedSerial} {MetalNative.DescribeError(error)}{DescribeEncoderStatus(error)}");
+            OcclusionAuditResolve(serial, false);
             PassProfileResolve(serial, false, 0);
             return;
         }
@@ -811,6 +842,7 @@ internal sealed partial class MetalRenderHost :
         if (status != CommandBufferStatusCompleted)
         {
             _unsampledSubmissions++;
+            OcclusionAuditResolve(serial, false);
             PassProfileResolve(serial, false, 0);
             if (DsTrace.Gpu && DsTrace.Armed)
             {
@@ -831,6 +863,7 @@ internal sealed partial class MetalRenderHost :
             _gpuBusySamples++;
         }
 
+        OcclusionAuditResolve(serial, true);
         PassProfileResolve(serial, true, Math.Max(gpuEnd - gpuStart, 0));
 
         var kernelStart = MetalNative.SendDouble(buffer, SelKernelStartTime);
@@ -2444,9 +2477,10 @@ internal sealed partial class MetalRenderHost :
             $"prefetch=[{FormatPrefetchCounters()}] " +
             // The command thread's synchronous calls and their wait, its wait for room in the queue, and its items.
             $"cthread=[{FormatCommandThreadCounters()}] " +
+            (NativeOcclusionEnabled ? $"occlusion=[dumps={_oqDumps} reductions={_oqReductions} buffers={_oqBatches.Count} budget_waits={_oqBudgetWaits} unused_passes={_oqUnusedPasses} initialized_slots={_oqInitializedSlots}] " : string.Empty) +
             // Sampled bindings the texture memo answered, those whose stamp failed between the preparation
             // and the bind, lookups made in full, results memoised, and entries held.
-            $"texture_memo=({TakeTextureMemoCounters()}) " +
+            $"texture_memo=({TakeTextureMemoCounters()}) {FormatGraphicsBindingCounters()} " +
             // Modules and pipeline states resident against made, and what the bound released.
             $"{DescribeShaderCache()} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
@@ -2609,7 +2643,7 @@ internal sealed partial class MetalRenderHost :
             $"end_other={endOtherCount} end_indirect={TakeIndirectPassEnds()} {TakeExecutorPassEnds()} targetless={targetlessCount} " +
             $"clears=[{TakeClearArrivals()}] clear_passes={clearPasses} " +
             $"clear_depth={clearDepthPasses} clear_mpx={(clearPixels / 1e6).ToString("F1", culture)} " +
-            $"labels_deferred={TakeDeferredLabelWrites()} clears_folded={foldedClears} " +
+            $"labels_deferred={TakeDeferredLabelWrites()} label_lookup=[{TakeDeferredLabelLookupStats()}] clears_folded={foldedClears} " +
             $"clears_encoded={encodedClears} depth_joins={depthJoins} depth_join_sampled={depthJoinsSampled} depth_join_copies={depthJoinsCopies} " +
             $"subset_joins={subsetJoins} subset_join_sampled={subsetJoinsSampled}{TakeSubsetRefusals()} " +
             $"transfers=[{TakeTransferCauses()}]");
@@ -2760,6 +2794,8 @@ internal sealed partial class MetalRenderHost :
         }
 
         _completions.Dispose();
+        DisposeNativeOcclusion();
+        DisposeOcclusionAudit();
         DisposeWriteFences();
         DisposeHostMovie();
         DisposeBindlessImages();

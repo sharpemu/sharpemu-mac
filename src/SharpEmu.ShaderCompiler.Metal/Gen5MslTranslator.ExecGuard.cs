@@ -36,10 +36,30 @@ public static partial class Gen5MslTranslator
         /// <summary>Set while the instruction being emitted is one of those: its vector
         /// writes need no guard.</summary>
         private bool _execKnownFull;
+        private Ir.Gen5VectorObservationPlan? _observationPlan;
+        private bool _observationPlanBuilt;
+        private Ir.VectorRegisterSet _unobservedAluWrites;
 
         private void BeginInstruction(Gen5ShaderInstruction instruction)
         {
             _execKnownFull = IsExecKnownFull(instruction.Pc);
+            _unobservedAluWrites = default;
+            // Only pure ALU destination writes participate. Memory, exports and
+            // mask updates retain their guards even when their result is dead.
+            if (_options.UnobservedAluWrites && _options.ExecGuardElision && _request.EnableExecGuardElision &&
+                _waveLaneCount == 32 && (_stage == Gen5MslStage.Compute ||
+                    (_stage == Gen5MslStage.Mesh && Mesh.ThreadsPerThreadgroup <= 32)) &&
+                instruction.Encoding is (Gen5ShaderEncoding.Vop1 or Gen5ShaderEncoding.Vop2 or
+                    Gen5ShaderEncoding.Vop3 or Gen5ShaderEncoding.Vop3p) &&
+                instruction.Control is not (Gen5DppControl or Gen5Dpp8Control))
+            {
+                if (!_observationPlanBuilt)
+                {
+                    _observationPlan = Ir.Gen5VectorObservationAnalysis.Analyze(_request.Program, wave32: true);
+                    _observationPlanBuilt = true;
+                }
+                _unobservedAluWrites = _observationPlan?.UnobservedWrites(instruction.Pc) ?? default;
+            }
         }
 
         private bool IsExecKnownFull(uint pc)

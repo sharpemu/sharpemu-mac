@@ -6,6 +6,7 @@ using SharpEmu.HLE.DsTrace;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Threading;
+using System.Runtime.CompilerServices;
 
 namespace SharpEmu.Libs.Ampr;
 
@@ -24,6 +25,7 @@ public static partial class AmprExports
 
     private sealed class AprSubmission
     {
+        public required AprSession Session { get; init; }
         public required uint Id { get; init; }
         public required CapturedCommandBuffer Captured { get; init; }
         public required ICpuMemory Memory { get; init; }
@@ -50,8 +52,103 @@ public static partial class AmprExports
     private static readonly object _aprGate = new();
     private static readonly Dictionary<uint, AprSubmission> _aprSubmissions = new();
     private static readonly Queue<AprSubmission> _aprCompletedOrder = new();
-    private static readonly AprWorker[] _aprWorkers =
-        [new AprWorker(), new AprWorker(), new AprWorker(), new AprWorker()];
+    private sealed class AprSession : IDisposable
+    {
+        internal readonly AprWorker[] Workers = [new(), new(), new(), new()];
+        internal volatile bool Stopping;
+        // Admission and collection leases are guarded by _aprGate.
+        internal int ActiveProducers;
+        private readonly object _stopGate = new();
+        private bool _stopped;
+
+        public void Dispose()
+        {
+            // Serialize repeated Dispose calls through the entire join, not just the stop flag.
+            lock (_stopGate)
+            {
+                if (_stopped) return;
+                lock (_aprGate)
+                {
+                    Stopping = true;
+                    foreach (var worker in Workers)
+                    {
+                        while (worker.Pending.TryDequeue(out var pending))
+                        {
+                            pending.ExecutionResult = AprStoppedResult;
+                            pending.Done = true;
+                        }
+                    }
+                    Monitor.PulseAll(_aprGate);
+                    while (ActiveProducers != 0) Monitor.Wait(_aprGate);
+                }
+                foreach (var worker in Workers)
+                {
+                    worker.Thread?.Join();
+                }
+                lock (_aprGate)
+                {
+                    foreach (var id in _aprSubmissions.Where(pair => ReferenceEquals(pair.Value.Session, this))
+                                 .Select(pair => pair.Key).ToArray())
+                        _aprSubmissions.Remove(id);
+                    var retained = _aprCompletedOrder.Where(item => !ReferenceEquals(item.Session, this)).ToArray();
+                    _aprCompletedOrder.Clear();
+                    foreach (var item in retained) _aprCompletedOrder.Enqueue(item);
+                }
+                // Cache leases protect readers belonging to other independent memories.
+                EvictAllCachedHostFiles();
+                lock (_aprGate)
+                {
+                    if (ReferenceEquals(_runtimeAprSession, this)) _runtimeAprSession = null;
+                }
+                _stopped = true;
+            }
+        }
+    }
+
+    private const int AprStoppedResult = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+    private static readonly ConditionalWeakTable<ICpuMemory, AprSession> _aprSessions = new();
+    // Preserve the process-wide worker pool for direct library callers that do not own a runtime.
+    private static readonly AprSession _standaloneAprSession = new();
+    private static AprSession? _runtimeAprSession;
+    [ThreadStatic] private static AprSession? _executingAprSession;
+    private static bool AprExecutionStopping => _executingAprSession?.Stopping == true;
+
+    /// <summary>
+    /// Owns APR submissions for a runtime's root memory, including future tracked wrappers.
+    /// The stopped root association survives disposal, so late wrappers cannot enter the fallback pool.
+    /// Dispose after guest dispatch exits and before unmounting app0 or releasing guest memory.
+    /// Direct library callers retain the shared standalone worker pool.
+    /// </summary>
+    public static IDisposable BeginRuntimeSession(ICpuMemory memory)
+    {
+        lock (_aprGate)
+        {
+            if (_runtimeAprSession is not null)
+                throw new InvalidOperationException("An APR runtime session is already active.");
+            var session = new AprSession();
+            var owner = AprMemoryOwner(memory);
+            _aprSessions.Remove(owner);
+            _aprSessions.Add(owner, session);
+            return _runtimeAprSession = session;
+        }
+    }
+
+    private static ICpuMemory AprMemoryOwner(ICpuMemory memory)
+    {
+        while (memory is ICpuMemoryWrapper wrapper && !ReferenceEquals(memory, wrapper.Inner))
+            memory = wrapper.Inner;
+        return memory;
+    }
+
+    private static void ReleaseAprProducer(AprSession session)
+    {
+        lock (_aprGate)
+        {
+            session.ActiveProducers--;
+            Monitor.PulseAll(_aprGate);
+        }
+    }
+
     private static int _nextAprSubmissionId;
     private static long _aprSequence;
 
@@ -71,81 +168,101 @@ public static partial class AmprExports
         out uint submissionId)
     {
         submissionId = 0;
-        var captureResult = CaptureCommandBuffer(ctx, commandBuffer, out var captured);
-        if (captureResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        // Resolve wrappers before admission; no guest byte access occurs under the gate.
+        var owner = AprMemoryOwner(ctx.Memory);
+        AprSession session;
+        lock (_aprGate)
         {
-            return captureResult;
+            session = _aprSessions.GetValue(owner, static _ => _standaloneAprSession);
+            if (session.Stopping) return AprStoppedResult;
+            session.ActiveProducers++;
         }
-
-        submissionId = unchecked((uint)Interlocked.Increment(ref _nextAprSubmissionId));
-        if (submissionId == 0)
+        try
         {
+            submissionId = 0;
+            var captureResult = CaptureCommandBuffer(ctx, commandBuffer, out var captured);
+            if (captureResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+            {
+                return captureResult;
+            }
+
             submissionId = unchecked((uint)Interlocked.Increment(ref _nextAprSubmissionId));
-        }
+            if (submissionId == 0)
+            {
+                submissionId = unchecked((uint)Interlocked.Increment(ref _nextAprSubmissionId));
+            }
 
-        if (outIdAddress != 0 && !ctx.TryWriteUInt32(outIdAddress, submissionId))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
+            if (outIdAddress != 0 && !ctx.TryWriteUInt32(outIdAddress, submissionId))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
 
-        var submission = new AprSubmission
-        {
-            Id = submissionId,
-            Captured = captured!,
-            Memory = ctx.Memory,
-            Generation = ctx.TargetGeneration,
-            ResultAddress = resultAddress,
-            Retained = outIdAddress != 0,
-            Sequence = Interlocked.Increment(ref _aprSequence),
-            DsCaller = DsTrace.CurrentRa1,
-            DsReturnAddress = dsReturnAddress,
-            SubmitTimestamp = Stopwatch.GetTimestamp(),
-        };
-        if (submission.Retained)
-        {
+            var submission = new AprSubmission
+            {
+                Session = session,
+                Id = submissionId,
+                Captured = captured!,
+                Memory = ctx.Memory,
+                Generation = ctx.TargetGeneration,
+                ResultAddress = resultAddress,
+                Retained = outIdAddress != 0,
+                Sequence = Interlocked.Increment(ref _aprSequence),
+                DsCaller = DsTrace.CurrentRa1,
+                DsReturnAddress = dsReturnAddress,
+                SubmitTimestamp = Stopwatch.GetTimestamp(),
+            };
             lock (_aprGate)
             {
-                _aprSubmissions[submissionId] = submission;
-            }
-        }
-
-        var worker = _aprWorkers[(int)Math.Min(priority, AprPriorityCount - 1)];
-        lock (worker)
-        {
-            worker.Pending.Enqueue(submission);
-            if (worker.Thread is null)
-            {
-                var index = Array.IndexOf(_aprWorkers, worker);
-                worker.Thread = new Thread(() => RunAprWorker(worker))
+                if (session.Stopping) return AprStoppedResult;
+                if (submission.Retained)
                 {
-                    IsBackground = true,
-                    Name = $"SharpEmu apr p{index}",
-                };
-                worker.Thread.Start();
+                    _aprSubmissions[submissionId] = submission;
+                }
+
+                var worker = session.Workers[(int)Math.Min(priority, AprPriorityCount - 1)];
+                worker.Pending.Enqueue(submission);
+                if (worker.Thread is null)
+                {
+                    var index = Array.IndexOf(session.Workers, worker);
+                    worker.Thread = new Thread(() => RunAprWorker(session, worker))
+                    {
+                        IsBackground = true,
+                        Name = $"SharpEmu apr p{index}",
+                    };
+                    worker.Thread.Start();
+                }
+
+                Monitor.PulseAll(_aprGate);
+
             }
 
-            Monitor.Pulse(worker);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        finally
+        {
+            ReleaseAprProducer(session);
+        }
     }
 
-    private static void RunAprWorker(AprWorker worker)
+    private static void RunAprWorker(AprSession session, AprWorker worker)
     {
         while (true)
         {
             AprSubmission submission;
-            lock (worker)
+            lock (_aprGate)
             {
-                while (worker.Pending.Count == 0)
+                while (!session.Stopping && worker.Pending.Count == 0)
                 {
-                    Monitor.Wait(worker);
+                    Monitor.Wait(_aprGate);
                 }
 
+                if (session.Stopping) return;
                 submission = worker.Pending.Dequeue();
             }
 
-            CompleteAprSubmission(submission);
+            _executingAprSession = session;
+            try { CompleteAprSubmission(submission); }
+            finally { _executingAprSession = null; }
         }
     }
 
@@ -159,7 +276,7 @@ public static partial class AmprExports
 
         var ctx = new CpuContext(submission.Memory, submission.Generation);
         ExecuteCapturedCommandBuffer(ctx, submission.Captured, out var executionResult, out var errorOffset);
-        if (submission.ResultAddress != 0)
+        if (!submission.Session.Stopping && submission.ResultAddress != 0)
         {
             _ = TryWriteAprResult(submission.Memory, submission.ResultAddress, executionResult, errorOffset);
         }
@@ -169,7 +286,7 @@ public static partial class AmprExports
             submission.ExecutionResult = executionResult;
             submission.ErrorOffset = errorOffset;
             submission.Done = true;
-            if (submission.Retained)
+            if (!submission.Session.Stopping && submission.Retained)
             {
                 _aprCompletedOrder.Enqueue(submission);
                 // A guest that never waits must not grow the table without bound.
@@ -186,7 +303,8 @@ public static partial class AmprExports
             Monitor.PulseAll(_aprGate);
         }
 
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(AprWaitWakeKey);
+        if (!submission.Session.Stopping)
+            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(AprWaitWakeKey);
         if (dsApr)
         {
             DsTrace.Emit(
@@ -226,6 +344,7 @@ public static partial class AmprExports
     {
         commandBuffer = 0;
         AprSubmission? submission;
+        bool done;
         lock (_aprGate)
         {
             if (!_aprSubmissions.TryGetValue(submissionId, out submission))
@@ -234,11 +353,12 @@ public static partial class AmprExports
             }
 
             commandBuffer = submission.Captured.CommandBuffer;
-            if (submission.Done)
-            {
-                return CollectAprSubmission(ctx, submission);
-            }
+            done = submission.Done;
         }
+
+        // Collect may write guest memory. Do not retain this outer gate while
+        // its own admission lease protects the lifetime of that write.
+        if (done) return CollectAprSubmission(ctx, submission);
 
         if (GuestThreadExecution.RequestCurrentThreadBlock(
                 ctx,
@@ -271,18 +391,24 @@ public static partial class AmprExports
             {
                 _aprSubmissions.Remove(submission.Id);
             }
-
+            if (submission.Session.Stopping) return AprStoppedResult;
+            submission.Session.ActiveProducers++;
             executionResult = submission.ExecutionResult;
             errorOffset = submission.ErrorOffset;
         }
-
-        if (submission.ResultAddress != 0 &&
-            !TryWriteAprResult(ctx.Memory, submission.ResultAddress, executionResult, errorOffset))
+        try
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            if (submission.ResultAddress != 0 &&
+                !TryWriteAprResult(ctx.Memory, submission.ResultAddress, executionResult, errorOffset))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        finally
+        {
+            ReleaseAprProducer(submission.Session);
+        }
     }
 
     private static bool TryWriteAprResult(ICpuMemory memory, ulong resultAddress, int executionResult, uint errorOffset)

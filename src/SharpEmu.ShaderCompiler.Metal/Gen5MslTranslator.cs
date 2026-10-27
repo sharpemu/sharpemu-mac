@@ -21,7 +21,8 @@ internal enum Gen5MslPreludes
     Float64 = 1 << 5,
     Bvh = 1 << 6,
     MipStatistics = 1 << 7,
-    All = (1 << 8) - 1,
+    ScalarConstants = 1 << 8,
+    All = (1 << 9) - 1,
 }
 
 // Compiles shader requests into Metal source with argument-buffer bindings.
@@ -417,7 +418,7 @@ public static partial class Gen5MslTranslator
         /// waves per threadgroup. Their exchanges meet at a pair barrier of the wave's two
         /// simdgroups instead of a threadgroup barrier, since the other waves need not be at
         /// the same exchange (see <see cref="Wave64Barrier"/>).</summary>
-        private bool IsBridgedMeshWave64 => _stage == Gen5MslStage.Mesh && _meshInfo is { Amplified: true, Wave64: true };
+        private bool IsBridgedMeshWave64 => _stage == Gen5MslStage.Mesh && _meshInfo is { GuestWaveLanes: 64 };
 
         /// <summary>Where the two halves of a bridged wave64 meet: a threadgroup barrier when
         /// the wave is the whole threadgroup (compute), else the wave's own pair barrier. The
@@ -551,6 +552,7 @@ public static partial class Gen5MslTranslator
                     }
                 }
 
+                _staticScratchSlots = CanUseStaticScratchSlots();
                 AssignLaneSlotLds(blocks);
 
                 if (_stage is Gen5MslStage.Vertex or Gen5MslStage.Mesh)
@@ -1322,6 +1324,9 @@ public static partial class Gen5MslTranslator
                 preludes |= Gen5MslPreludes.MipStatistics;
             }
 
+            if (Enumerable.Range(0, _request.Resources.Info.Buffers.Count).Any(IsScalarConstantBuffer))
+                preludes |= Gen5MslPreludes.ScalarConstants;
+
             return preludes;
         }
 
@@ -1346,6 +1351,9 @@ public static partial class Gen5MslTranslator
                 ("ballot_return", (preludes & Gen5MslPreludes.RealWaveLanes) != 0
                     ? "(uint)(uint64_t)simd_ballot(value)"
                     : "value ? 1u : 0u")));
+            if ((preludes & Gen5MslPreludes.ScalarConstants) != 0)
+                source.Append(MslTemplates.Render("scalar_constant_prelude"));
+
             if ((preludes & Gen5MslPreludes.BufferOffset) != 0)
             {
                 source.Append(MslTemplates.Render("buffer_offset_prelude"));
@@ -2680,6 +2688,9 @@ public static partial class Gen5MslTranslator
             uint componentCount,
             FormatD16 d16)
         {
+            var packedRun = _options.PackedFormatLoads && !d16.Enabled && byteAddress.Contiguous &&
+                memory.LoadWords is not null && TryParseUIntLiteral(descriptorWord3, out var packedWord3) &&
+                BeginLiteralPackedFormatLoad(memory, byteAddress.Base, packedWord3, vectorData, componentCount);
             // Format and destination swizzle come from descriptor word 3, a register
             // or a specialization constant; the prelude table decodes the unified format.
             var word3 = Temp("uint", descriptorWord3);
@@ -2769,7 +2780,7 @@ public static partial class Gen5MslTranslator
             }
 
             StoreFormatLoadComponents(vectorData, values, d16, numberFormat);
-            if (dwordRun)
+            if (dwordRun || packedRun)
             {
                 _indent--;
                 Line("}");
@@ -3130,6 +3141,14 @@ public static partial class Gen5MslTranslator
                 }
             }
 
+            // Any intervening LDS writer may alias the cached record. Even a masked
+            // write invalidates every lane's copy, not just the writing lane's copy.
+            if (UseMeshLdsForwarding && !instruction.Opcode.StartsWith("DsRead", StringComparison.Ordinal) &&
+                instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32" or "DsNop"))
+                Line("sharpemu_lds_forward_valid = false;");
+
+            if (TryEmitMeshHotLds(instruction, control)) return true;
+
             void StoreLds(string index, string value)
             {
                 // Exec-guarded like every other lane-visible write.
@@ -3251,6 +3270,7 @@ public static partial class Gen5MslTranslator
                             LdsIndex(address, offset + (uint)(dword * sizeof(uint))),
                             RawSource(instruction, 1 + dword));
                     }
+                    RememberMeshLdsWrite(instruction, address, offset);
 
                     return true;
                 }
@@ -3321,6 +3341,7 @@ public static partial class Gen5MslTranslator
 
                     var address = Temp("uint", RawSource(instruction, 0));
                     var offset = control.SingleOffsetBytes;
+                    if (TryForwardMeshLdsRead(instruction, address, offset)) return true;
                     for (var dword = 0; dword < dwordCount; dword++)
                     {
                         StoreVector(
@@ -4420,7 +4441,7 @@ public static partial class Gen5MslTranslator
                 return;
             }
 
-            if (guardWithExec && !_execKnownFull)
+            if (guardWithExec && !_execKnownFull && !_unobservedAluWrites.Contains(register))
             {
                 Line($"if (exec) {{ v[{register}] = {expression}; }}");
             }

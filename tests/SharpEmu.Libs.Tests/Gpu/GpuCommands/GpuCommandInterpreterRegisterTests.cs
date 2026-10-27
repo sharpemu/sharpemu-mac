@@ -121,6 +121,21 @@ public sealed class GpuCommandInterpreterRegisterTests
     }
 
     [Fact]
+    public void DirectShaderRangeWithInvalidTailPreservesOnlyItsRawPrefix()
+    {
+        var runner = new StreamRunner();
+        var before = runner.Interpreter.TypedRegisters.Snapshot();
+        var last = RegisterBankLayout.ShaderRegisterCount - 1;
+        var error = runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetShaderRegister, last, 0x1234, 0x5678));
+        Assert.Contains("shader register range leaves the bank", error.Message);
+        Assert.Equal(0x1234u, runner.Interpreter.Registers.Shader[last]);
+        Assert.False(runner.Interpreter.Registers.Shader.ContainsKey(last + 1));
+        Assert.Same(before.Shader.Pixel, runner.Interpreter.TypedRegisters.Shader.Pixel);
+        Assert.Same(before.Shader.Vertex, runner.Interpreter.TypedRegisters.Shader.Vertex);
+        Assert.Same(before.Shader.Compute, runner.Interpreter.TypedRegisters.Shader.Compute);
+    }
+
+    [Fact]
     public void DirectDepthWrites_ClearTheCompositeExtent()
     {
         var runner = new StreamRunner();
