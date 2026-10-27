@@ -19,6 +19,8 @@ internal static partial class GuestRedZonePatcher
     // a spin. Longer bodies are not tight spins and are left alone.
     private const int MaxSpinLoopBodyBytes = 96;
 
+    internal static List<string>? SurveyLog; // TEMP survey
+
     // Locked-op polling loops (xchg mem / lock-prefixed RMW): the whole loop body, from its
     // backward branch's target to the branch, must fit this and contain no call, return,
     // indirect branch or syscall.
@@ -266,6 +268,7 @@ internal static partial class GuestRedZonePatcher
                         pauseSites++;
                         if (!ClosesShortBackwardLoop(decoded, index, decoded[index].Instruction.IP))
                         {
+                            SurveyLog?.Add($"{decoded[index].Instruction.IP - imageBase:X} NONLOOP");
                             nonLoop++;
                             continue;
                         }
@@ -276,8 +279,9 @@ internal static partial class GuestRedZonePatcher
                         continue;
                     }
 
-                    if (!TryBuildPatchSpan(decoded, index, branchTargets, canBorrow, groupInstructions: false, out var span, out _))
+                    if (!TryBuildPatchSpan(decoded, index, branchTargets, canBorrow, groupInstructions: false, out var span, out var dbgRefusal))
                     {
+                        SurveyLog?.Add($"{decoded[index].Instruction.IP - imageBase:X} {dbgRefusal} borrow={canBorrow} next={(index + 1 < decoded.Count ? decoded[index + 1].Instruction.ToString() : "-")} | {(index + 2 < decoded.Count ? decoded[index + 2].Instruction.ToString() : "-")} | {(index + 3 < decoded.Count ? decoded[index + 3].Instruction.ToString() : "-")}");
                         unrelocatable++;
                         continue;
                     }
