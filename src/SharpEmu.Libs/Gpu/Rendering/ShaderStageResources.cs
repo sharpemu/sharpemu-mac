@@ -78,6 +78,9 @@ public class ShaderProgramInfo
     public SpecializedResourceInfo? Resources { get; init; }
     public BindingLayout? Bindings { get; init; }
 
+    // The words a host pads the flattened resource table it binds to (IGuestCompiledShader).
+    public uint FlattenedTableMinimumWords { get; init; }
+
     // What the host resolves for each record of each callee, by callee slot, when the program reads its records'
     // descriptors at run time (ShaderCompileRequest.CallRecordCallees).
     public IReadOnlyList<CallRecordCallee> CallRecordCallees { get; init; } = [];

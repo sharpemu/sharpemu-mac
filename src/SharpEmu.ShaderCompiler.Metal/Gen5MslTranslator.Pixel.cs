@@ -206,7 +206,9 @@ public static partial class Gen5MslTranslator
                 var readsMip = !isStorage && imageClass.SupportsMipLevels && !imageClass.Multisampled;
                 var outside = new List<string>();
                 var mip = readsMip ? Temp("uint", mipLevel) : null;
-                if (mip is not null)
+                // Mip 0 is inside every texture that has one, so a load without a mip operand
+                // skips the query (a null texture reads zero at any mip either way).
+                if (mip is not null && mipLevel != "0u")
                 {
                     outside.Add($"{mip} >= {texture}.get_num_mip_levels()");
                 }
@@ -252,7 +254,7 @@ public static partial class Gen5MslTranslator
                 }
                 else if (mip is not null)
                 {
-                    arguments += $", ({away} ? 0u : {mip})";
+                    arguments += away is null ? $", {mip}" : $", ({away} ? 0u : {mip})";
                 }
 
                 sampled = Temp($"vec<{kind}, 4>", $"{texture}.read({arguments})");

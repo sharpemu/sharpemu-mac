@@ -14,6 +14,10 @@ public interface IGuestCompiledShader
     byte[] Payload { get; }
     uint? InputLocationMask => null;
 
+    /// <summary>The words the flattened resource table bound with this module must have: a
+    /// host binds a shorter table zero-padded to it.</summary>
+    uint FlattenedTableMinimumWords => 0;
+
     /// <summary>File extension for diagnostics dumps of <see cref="Payload"/> ("spv",
     /// "msl", ...), so dumps stay honestly labeled whatever the backend.</summary>
     string PayloadFileExtension { get; }

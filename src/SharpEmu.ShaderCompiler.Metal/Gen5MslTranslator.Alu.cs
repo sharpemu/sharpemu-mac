@@ -291,8 +291,10 @@ public static partial class Gen5MslTranslator
                 "VTruncF32" => FloatResult(instruction, $"trunc({F(instruction, 0)})"),
                 "VRndneF32" => FloatResult(instruction, $"rint({F(instruction, 0)})"),
                 "VFractF32" => EmitFractF32(instruction),
+                // fast::sqrt exceeded the one-ULP budget on input 0x5E606496. Keep
+                // square root precise even when the reciprocal fast paths are enabled.
                 "VSqrtF32" => InvalidNanF32Result(instruction, "sqrt"),
-                "VRsqF32" => InvalidNanF32Result(instruction, "rsqrt"),
+                "VRsqF32" => InvalidNanF32Result(instruction, _options.FastReciprocals ? "fast::rsqrt" : "rsqrt"),
                 "VRcpF16" => Float16Reciprocal(instruction, destination),
                 "VSqrtF16" => Float16SquareRoot(instruction, destination),
                 "VLogF16" => Float16Logarithm(instruction, destination),
@@ -310,7 +312,11 @@ public static partial class Gen5MslTranslator
                     $"rsqrt({F16(instruction, 0)})"),
                 // F32 denormal inputs reach rcp/rsq/sqrt/log/exp as a signed zero, as
                 // on the guest; the IEEE-flag reciprocal keeps the unflushed input.
-                "VRcpF32" => FloatResult(instruction, $"(1.0f / sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
+                "VRcpF32" => FloatResult(
+                    instruction,
+                    _options.FastReciprocals
+                        ? $"fast::divide(1.0f, sharpemu_flush_f32_denorm({F(instruction, 0)}))"
+                        : $"(1.0f / sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
                 "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),
                 "VLogF32" => InvalidNanF32Result(instruction, "fast::log2"),
                 "VExpF32" => FloatResult(instruction, $"fast::exp2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
@@ -3028,6 +3034,12 @@ public static partial class Gen5MslTranslator
         {
             var ieee = _request.IeeeMode ? "true" : "false";
             string Bits(int index) => FlushInputDenormalF32(AsUInt(F(instruction, index)));
+            if (_options.NativeFloatMinMax && !_request.IeeeMode && TryNativeMinMaxF32(instruction, Bits) is { } native)
+            {
+                var nativeResult = Temp("uint", native);
+                return HasFloatOutputModifiers(instruction) ? FloatResult(instruction, AsFloat(nativeResult)) : nativeResult;
+            }
+
             var bits = instruction.Opcode switch
             {
                 "VMinF32" => $"sharpemu_min_f32({Bits(0)}, {Bits(1)}, {ieee})",
@@ -3038,6 +3050,189 @@ public static partial class Gen5MslTranslator
             };
             var result = Temp("uint", bits);
             return HasFloatOutputModifiers(instruction) ? FloatResult(instruction, AsFloat(result)) : result;
+        }
+
+        /// <summary>V_MIN/MAX/MIN3/MAX3/MED3_F32 outside IEEE mode without the bit-level helpers, or
+        /// null where that is not provably the helpers' answer (see
+        /// <see cref="Gen5MslCodegenOptions.NativeFloatMinMax"/>):
+        ///   * against a non-NaN inline constant c, the answer is x exactly when x is a number that
+        ///     orders above (max) or below (min) c, and c otherwise. The x that do are one or two
+        ///     ranges of bit patterns, so the select tests the bits: no float compare, which a
+        ///     denormal x could not survive;
+        ///   * between two registers while FLOAT_MODE flushes f32 input denormals, fmax/fmin give
+        ///     the number when one operand is NaN, and only a NaN src0 (answer src1) and two
+        ///     operands that compare equal (the same bits, or +0 and -0, where the AND or OR of
+        ///     the bits is the ordered answer) need the bits;
+        ///   * V_MED3 with two constants lo &lt; hi, hi not a zero, is hi above hi, x between them,
+        ///     and lo below lo or for a NaN x (MIN3 then answers lo).</summary>
+        private string? TryNativeMinMaxF32(Gen5ShaderInstruction instruction, Func<int, string> bits)
+        {
+            var count = instruction.Opcode is "VMinF32" or "VMaxF32" ? 2 : 3;
+            if (instruction.Sources.Count < count)
+            {
+                return null;
+            }
+
+            var constants = new uint?[count];
+            for (var index = 0; index < count; index++)
+            {
+                constants[index] = TryConstantF32Operand(instruction, index, out var value) ? value : null;
+            }
+
+            var flushed = (_request.FloatMode & 0x10u) == 0;
+            string? Pair(string? left, uint? leftConstant, string? right, uint? rightConstant, bool max)
+            {
+                if (rightConstant is { } c)
+                {
+                    return leftConstant is null ? MinMaxAgainstConstant(left!, c, max) : null;
+                }
+
+                if (leftConstant is { } d)
+                {
+                    return MinMaxAgainstConstant(right!, d, max);
+                }
+
+                if (!flushed)
+                {
+                    return null;
+                }
+
+                var a = Temp("uint", left!);
+                var b = Temp("uint", right!);
+                var fa = AsFloat(a);
+                var fb = AsFloat(b);
+                return $"(isnan({fa}) ? {b} : ({fa} == {fb} ? ({a} {(max ? "&" : "|")} {b}) : as_type<uint>({(max ? "fmax" : "fmin")}({fa}, {fb}))))";
+            }
+
+            string? Operand(int index) => constants[index] is null ? bits(index) : null;
+            switch (instruction.Opcode)
+            {
+                case "VMinF32":
+                case "VMaxF32":
+                    return Pair(Operand(0), constants[0], Operand(1), constants[1], instruction.Opcode == "VMaxF32");
+                case "VMin3F32":
+                case "VMax3F32":
+                {
+                    var max = instruction.Opcode == "VMax3F32";
+                    if (constants[0] is not null && constants[1] is not null)
+                    {
+                        return null;
+                    }
+
+                    var first = Pair(Operand(0), constants[0], Operand(1), constants[1], max);
+                    return first is null ? null : Pair(Temp("uint", first), null, Operand(2), constants[2], max);
+                }
+
+                case "VMed3F32":
+                {
+                    var variable = -1;
+                    var known = new List<uint>();
+                    for (var index = 0; index < 3; index++)
+                    {
+                        if (constants[index] is { } value)
+                        {
+                            known.Add(value);
+                        }
+                        else
+                        {
+                            variable = index;
+                        }
+                    }
+
+                    if (known.Count != 2)
+                    {
+                        return null;
+                    }
+
+                    var (lo, hi) = OrderKeyF32(known[0]) < OrderKeyF32(known[1]) ? (known[0], known[1]) : (known[1], known[0]);
+                    if (OrderKeyF32(lo) == OrderKeyF32(hi) || (hi & 0x7FFFFFFFu) == 0)
+                    {
+                        return null;
+                    }
+
+                    var x = Temp("uint", bits(variable));
+                    return $"({BitRangesTest(x, AboveF32(hi))} ? {FormatUInt(hi)} : ({BitRangesTest(x, AboveF32(lo))} ? {x} : {FormatUInt(lo)}))";
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>Min or max of <paramref name="value"/> and the non-NaN constant
+        /// <paramref name="constant"/>, as the ISA orders them.</summary>
+        private string MinMaxAgainstConstant(string value, uint constant, bool max)
+        {
+            var x = Temp("uint", value);
+            return $"({BitRangesTest(x, max ? AboveF32(constant) : BelowF32(constant))} ? {x} : {FormatUInt(constant)})";
+        }
+
+        /// <summary>An operand that is an inline constant or literal, as the f32 bits the
+        /// instruction reads: its abs and neg applied, and a denormal flushed to a zero of its
+        /// sign while FLOAT_MODE flushes f32 input denormals. False for a NaN, and for an SDWA
+        /// operand, whose selects the bits would have to follow.</summary>
+        private bool TryConstantF32Operand(Gen5ShaderInstruction instruction, int index, out uint bits)
+        {
+            bits = 0;
+            if (instruction.Control is not (null or Gen5Vop3Control))
+            {
+                return false;
+            }
+
+            var operand = instruction.Sources[index];
+            if (operand.Kind == Gen5OperandKind.LiteralConstant)
+            {
+                bits = operand.Value;
+            }
+            else if (operand.Kind != Gen5OperandKind.EncodedConstant || operand.Value is 251 or 252 or 253 ||
+                     !Gen5InlineConstants.TryDecode(operand.Value, out bits))
+            {
+                return false;
+            }
+
+            var (absolute, negate) = SourceModifierMasks(instruction);
+            if ((absolute & (1u << index)) != 0)
+            {
+                bits &= 0x7FFFFFFFu;
+            }
+
+            if ((negate & (1u << index)) != 0)
+            {
+                bits ^= 0x80000000u;
+            }
+
+            if ((_request.FloatMode & 0x10u) == 0 && (bits & 0x7F800000u) == 0)
+            {
+                bits &= 0x80000000u;
+            }
+
+            return (bits & 0x7FFFFFFFu) <= 0x7F800000u;
+        }
+
+        /// <summary>The ISA's f32 order as an unsigned key (sharpemu_order_f32): -0 below +0.</summary>
+        private static uint OrderKeyF32(uint bits) => (bits & 0x80000000u) != 0 ? ~bits : bits | 0x80000000u;
+
+        /// <summary>The non-NaN bit patterns that order above the non-NaN <paramref name="c"/>:
+        /// the positive numbers past it, or, for a negative c, every positive number and the
+        /// negative ones of smaller magnitude.</summary>
+        private static (uint Low, uint High)[] AboveF32(uint c) => (c & 0x80000000u) == 0
+            ? c == 0x7F800000u ? [] : [(c + 1, 0x7F800000u)]
+            : c == 0x80000000u ? [(0u, 0x7F800000u)] : [(0u, 0x7F800000u), (0x80000000u, c - 1)];
+
+        /// <summary>The non-NaN bit patterns that order below the non-NaN <paramref name="c"/>.</summary>
+        private static (uint Low, uint High)[] BelowF32(uint c) => (c & 0x80000000u) != 0
+            ? c == 0xFF800000u ? [] : [(c + 1, 0xFF800000u)]
+            : c == 0u ? [(0x80000000u, 0xFF800000u)] : [(0x80000000u, 0xFF800000u), (0u, c - 1)];
+
+        private static string BitRangesTest(string value, (uint Low, uint High)[] ranges)
+        {
+            if (ranges.Length == 0)
+            {
+                return "false";
+            }
+
+            return string.Join(" || ", ranges.Select(range => range.Low == 0
+                ? $"{value} <= {FormatUInt(range.High)}"
+                : $"({value} - {FormatUInt(range.Low)}) <= {FormatUInt(range.High - range.Low)}"));
         }
 
         /// <summary>The f32 bits of an operand read by a bit-exact path, with a denormal flushed

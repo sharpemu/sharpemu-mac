@@ -7,6 +7,32 @@ static inline uint sharpemu_load_dword(device uint* b, uint bytes, uint addr)
     return index < (bytes >> 2) ? b[index] : 0u;
 }
 
+// Up to four consecutive raw dwords of an S_BUFFER_LOAD/BUFFER_LOAD_DWORDXn, each what
+// sharpemu_load_dword reads at addr + 4 * i. A run that lies inside the binding is one
+// bounds check and adjacent loads; one that crosses the end reads dword by dword.
+template <int N>
+static inline uint4 sharpemu_load_dwords(device uint* b, uint bytes, uint addr)
+{
+    uint4 result = uint4(0u);
+    uint index = addr >> 2;
+    uint words = bytes >> 2;
+    if (index < words && (uint)N <= words - index)
+    {
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = b[index + (uint)i];
+        }
+    }
+    else
+    {
+        for (int i = 0; i < N; i++)
+        {
+            result[i] = sharpemu_load_dword(b, bytes, addr + (uint)(4 * i));
+        }
+    }
+    return result;
+}
+
 // A dword a format access may straddle, assembled from the two it spans. Only the
 // format path needs this: a descriptor's stride is a byte count, so a component can
 // start at any byte.

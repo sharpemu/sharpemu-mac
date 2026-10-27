@@ -203,4 +203,9 @@ public sealed record Gen5MslShader(
     /// role the source is a post-tessellation vertex function, and the host's pipeline takes its
     /// partition, winding and maximum factor from here.</summary>
     public Gen5TessellationLaunch? Tessellation { get; init; }
+
+    /// <summary>The words the flattened resource table bound to this program must have: the
+    /// source reads the fixed slots below this without a bounds check, so a host binds a
+    /// shorter table zero-padded to it (see <see cref="Gen5MslCodegenOptions.ConstantTableSlots"/>).</summary>
+    public uint FlattenedTableMinimumWords { get; init; }
 }

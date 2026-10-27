@@ -87,6 +87,35 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// only tests depth before the shader on its own for a function that writes no memory, so a shader
 /// with buffer or image stores ran for fragments the guest hardware would have rejected first.
 /// <c>SHARPEMU_MSL_EARLYZ=0</c> leaves the choice to Metal.</param>
+/// <param name="VectorDwordLoads">Read the dwords of an S_BUFFER_LOAD/S_LOAD_DWORDXn from a bound
+/// buffer, and of a BUFFER_LOAD_DWORDXn with a contiguous address, in runs of up to four behind one
+/// bounds check (sharpemu_load_dwords) instead of one checked load per dword. A run that crosses
+/// the end of the binding still reads each dword alone, so nothing a shader sees changes.
+/// <c>SHARPEMU_MSL_VECLOAD=0</c> loads dword by dword.</param>
+/// <param name="ThreadgroupSizeHint">Declare a compute kernel's workgroup size as
+/// <c>[[max_total_threads_per_threadgroup(N)]]</c>, so the compiler budgets registers for the N
+/// threads the dispatch launches rather than the device's 1024. Only a size the dispatch is
+/// known to use (more than one thread) is declared. <c>SHARPEMU_MSL_TGHINT=0</c> leaves it
+/// out.</param>
+/// <param name="NativeFloatMinMax">Lower V_MIN/MAX/MIN3/MAX3/MED3_F32 outside IEEE mode to float
+/// compares and selects on the operand bits, where that gives the bit-level helpers' answer for
+/// every input: against an inline constant, and between two registers while FLOAT_MODE flushes
+/// f32 input denormals. Everything else keeps the helpers. <c>SHARPEMU_MSL_FMINMAX=0</c> keeps
+/// the helpers everywhere.</param>
+/// <param name="ConstantTableSlots">Read a flattened-table word at a slot fixed at translation
+/// time without the bounds select: the shader reports the highest such slot
+/// (<see cref="Gen5MslShader.FlattenedTableMinimumWords"/>) and the host zero-pads the table it
+/// uploads to it, so a slot past the evaluated table still reads 0.
+/// <c>SHARPEMU_MSL_TABLEPAD=0</c> keeps the select.</param>
+/// <param name="FastReciprocals">Lower V_RCP/V_RSQ_F32 to the fast:: forms, retaining
+/// input flush and special results (0, infinity, negative, NaN). Device sweeps check a
+/// one-ULP budget against the precise forms. V_SQRT_F32 stays precise because fast::sqrt
+/// exceeded that budget. <c>SHARPEMU_MSL_FASTRCP=0</c> keeps the precise forms.</param>
+/// <param name="ContractPixelCompute">Leave out <c>#pragma clang fp contract(off)</c> in pixel and
+/// compute programs, so the relaxed math mode may fuse a multiply and an add. V_MAD_F32 rounds
+/// the product on the guest, so a fused result can differ by an ULP; vertex and mesh programs,
+/// which feed positions, keep the pragma either way. Off by default;
+/// <c>SHARPEMU_MSL_CONTRACT=1</c> turns it on.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
@@ -104,7 +133,13 @@ public sealed record Gen5MslCodegenOptions(
     bool PersistentWaitFences = true,
     bool PersistentRecordLocks = true,
     bool DeviceAddressSpans = true,
-    bool EarlyFragmentTests = true)
+    bool EarlyFragmentTests = true,
+    bool VectorDwordLoads = true,
+    bool ThreadgroupSizeHint = true,
+    bool NativeFloatMinMax = true,
+    bool ConstantTableSlots = true,
+    bool FastReciprocals = true,
+    bool ContractPixelCompute = false)
 {
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -125,5 +160,11 @@ public sealed record Gen5MslCodegenOptions(
         PersistentWaitFences: Environment.GetEnvironmentVariable("SHARPEMU_MSL_PERSISTENT_FENCES") != "0",
         PersistentRecordLocks: Environment.GetEnvironmentVariable("SHARPEMU_MSL_PERSISTENT_RECORDS") != "0",
         DeviceAddressSpans: Environment.GetEnvironmentVariable("SHARPEMU_MSL_DEVICESPAN") != "0",
-        EarlyFragmentTests: Environment.GetEnvironmentVariable("SHARPEMU_MSL_EARLYZ") != "0");
+        EarlyFragmentTests: Environment.GetEnvironmentVariable("SHARPEMU_MSL_EARLYZ") != "0",
+        VectorDwordLoads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_VECLOAD") != "0",
+        ThreadgroupSizeHint: Environment.GetEnvironmentVariable("SHARPEMU_MSL_TGHINT") != "0",
+        NativeFloatMinMax: Environment.GetEnvironmentVariable("SHARPEMU_MSL_FMINMAX") != "0",
+        ConstantTableSlots: Environment.GetEnvironmentVariable("SHARPEMU_MSL_TABLEPAD") != "0",
+        FastReciprocals: Environment.GetEnvironmentVariable("SHARPEMU_MSL_FASTRCP") != "0",
+        ContractPixelCompute: Environment.GetEnvironmentVariable("SHARPEMU_MSL_CONTRACT") == "1");
 }

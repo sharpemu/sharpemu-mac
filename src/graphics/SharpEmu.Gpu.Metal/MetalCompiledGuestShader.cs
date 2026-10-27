@@ -48,6 +48,8 @@ internal sealed class MetalCompiledGuestShader(Gen5MslShader shader, ShaderCompi
 
     public string PayloadFileExtension => "msl";
 
+    public uint FlattenedTableMinimumWords => Shader.FlattenedTableMinimumWords;
+
     /// <summary>XxHash3 of the UTF-8 <see cref="Payload"/>, computed once and kept.</summary>
     internal ulong PayloadHash
     {

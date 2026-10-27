@@ -567,8 +567,26 @@ public static partial class Gen5MslTranslator
             return (ShaderDataDword(layout.ShaderBaseDword), ShaderDataDword(layout.ShaderBaseDword + 1));
         }
 
-        private string LoadFlattenedWord(string slot) =>
-            $"({slot} < {ResourcesName}.flattened_table_words ? {ResourcesName}.flattened_table[{slot}] : 0u)";
+        private string LoadFlattenedWord(string slot)
+        {
+            // A slot fixed here is read without the select: the host pads the table it binds to
+            // FlattenedTableMinimumWords with zeros, which is what the select would have read.
+            if (_options.ConstantTableSlots && slot.Length > 1 && slot[^1] == 'u' &&
+                uint.TryParse(slot.AsSpan(0, slot.Length - 1), NumberStyles.None, CultureInfo.InvariantCulture, out var fixedSlot) &&
+                fixedSlot < MaxPaddedFlattenedTableWords)
+            {
+                _flattenedTableMinimumWords = Math.Max(_flattenedTableMinimumWords, fixedSlot + 1);
+                return $"{ResourcesName}.flattened_table[{slot}]";
+            }
+
+            return $"({slot} < {ResourcesName}.flattened_table_words ? {ResourcesName}.flattened_table[{slot}] : 0u)";
+        }
+
+        /// <summary>A fixed slot past this keeps the select, so no shader asks the host for a
+        /// table of more than 256 KB.</summary>
+        private const uint MaxPaddedFlattenedTableWords = 1u << 16;
+
+        private uint _flattenedTableMinimumWords;
 
         private static string FormatULong(ulong value) => $"0x{value.ToString("X", CultureInfo.InvariantCulture)}ul";
 
@@ -1276,6 +1294,47 @@ public static partial class Gen5MslTranslator
             string? deviceAddress = null;
             string? deviceSpan = null;
             string? deviceSpanValid = null;
+            string? scalarRun = null;
+
+            // The run of up to four dwords, starting at a multiple of four, that the dword at
+            // `component` loads with: every dword of it a plain read of the same bound buffer.
+            bool TryScalarBufferRun(int component, out (int First, int Count) run)
+            {
+                run = default;
+                if (!_options.VectorDwordLoads || !_options.RawDwordAccess || control.Glc)
+                {
+                    return false;
+                }
+
+                var first = component & ~3;
+                var count = Math.Min(4, instruction.Destinations.Count - first);
+                if (count < 2)
+                {
+                    return false;
+                }
+
+                uint? binding = null;
+                for (var index = first; index < first + count; index++)
+                {
+                    if (!request.Memory.TryGetIndex(instruction.Pc, (uint)index, out var memory))
+                    {
+                        return false;
+                    }
+
+                    var record = request.Memory[memory];
+                    if (record.PlanningOnly || record.Kind != MemoryResourceKind.ScalarBuffer || record.DeviceDescriptor ||
+                        record.Resource == MemoryAccessInfo.NoResource || (binding is { } known && known != record.Resource))
+                    {
+                        return false;
+                    }
+
+                    binding = record.Resource;
+                }
+
+                run = (first, count);
+                return true;
+            }
+
             for (var component = 0; component < instruction.Destinations.Count; component++)
             {
                 var destination = instruction.Destinations[component];
@@ -1337,6 +1396,22 @@ public static partial class Gen5MslTranslator
                     // Snapshot the V# before the first destination store: SDATA may overlap SBASE.
                     deviceDescriptor ??= DeviceDescriptorBounds(instruction.Sources[0].Value);
                     value = DeviceDescriptorWord(deviceDescriptor.Value, descriptorOffset, control.Glc);
+                }
+                else if (entry.Kind == MemoryResourceKind.ScalarBuffer &&
+                         TryScalarBufferRun(component, out var run))
+                {
+                    // A run of the load's dwords from one bound buffer, behind one bounds check
+                    // (Gen5MslCodegenOptions.VectorDwordLoads); every dword is read before the
+                    // first destination store, as the hardware does.
+                    if (run.First == component)
+                    {
+                        var bindingIndex = (int)entry.Resource;
+                        var byteOffset = unchecked((uint)control.ImmediateOffsetBytes + ((uint)component * sizeof(uint)));
+                        var address = Temp("uint", ApplyByteBias(bindingIndex, $"({dynamicOffset} + {FormatUInt(byteOffset)})"));
+                        scalarRun = Temp("uint4", LoadDwords(bindingIndex, address, (uint)run.Count));
+                    }
+
+                    value = Temp("uint", $"{scalarRun}[{component - run.First}]");
                 }
                 else if (entry.Kind == MemoryResourceKind.ScalarBuffer)
                 {

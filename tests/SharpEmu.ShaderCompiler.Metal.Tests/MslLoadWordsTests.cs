@@ -59,7 +59,18 @@ kernel void load_words_test(device uint* b [[buffer(0)]], uint t [[thread_positi
 
     [Theory]
     [MemberData(nameof(Cases))]
-    public void TheRunMatchesPerDwordLoads(uint address, uint bytes)
+    public void TheRunMatchesPerDwordLoads(uint address, uint bytes) => CheckRun(address, bytes, raw: false);
+
+    [Theory]
+    [MemberData(nameof(Cases))]
+    [InlineData(0xFFFF_FFFCu, 64u)]
+    [InlineData(0xFFFF_FFFFu, 64u)]
+    [InlineData(1u, 3u)]
+    [InlineData(3u, 7u)]
+    public void RawDwordRunMatchesScalarLoadsIncludingAddressWrap(uint address, uint bytes) =>
+        CheckRun(address, bytes, raw: true);
+
+    private static void CheckRun(uint address, uint bytes, bool raw)
     {
         if (!MetalNative.IsAvailable)
         {
@@ -70,7 +81,11 @@ kernel void load_words_test(device uint* b [[buffer(0)]], uint t [[thread_positi
         }
 
         var prelude = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.CullingTriangle()).Source;
-        Assert.True(MetalNative.TryCompileLibrary(prelude + Kernel, out var library, out var compileError), compileError);
+        var kernel = raw
+            ? Kernel.Replace("sharpemu_load_words", "sharpemu_load_dwords", StringComparison.Ordinal)
+                .Replace("sharpemu_load_word(", "sharpemu_load_dword(", StringComparison.Ordinal)
+            : Kernel;
+        Assert.True(MetalNative.TryCompileLibrary(prelude + kernel, out var library, out var compileError), compileError);
 
         var contents = new byte[(OutputBase + OutputStride) * sizeof(uint)];
         var words = new uint[contents.Length / sizeof(uint)];
@@ -100,7 +115,13 @@ kernel void load_words_test(device uint* b [[buffer(0)]], uint t [[thread_positi
         // A dword wholly inside both the binding and the data reads as the bytes that sit there.
         for (var i = 0; i < 4; i++)
         {
-            var at = address + (uint)(4 * i);
+            var at = unchecked(address + (uint)(4 * i));
+            if (raw)
+            {
+                Assert.Equal((at >> 2) < (bytes >> 2) ? words[at >> 2] : 0u, output[i]);
+                continue;
+            }
+
             if ((address & 3) == 0 && at + 4 <= bytes && at + 4 <= DataWords * 4)
             {
                 Assert.Equal(words[at / 4], output[i]);

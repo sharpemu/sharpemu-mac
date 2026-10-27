@@ -1583,7 +1583,7 @@ internal sealed class ShaderProgramCache
         CompiledShaderDump.Write(source.Label, source.Address, source.Hash, compiled, program);
         var id = ++_nextProgramId;
         var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
-        var info = CreateProgramInfo(source, entry, resources, layout, request, compiled.InputLocationMask);
+        var info = CreateProgramInfo(source, entry, resources, layout, request, compiled.InputLocationMask, compiled.FlattenedTableMinimumWords);
         if (source.Stage != ShaderStage.Compute &&
             _host.GraphicsPrewarm is { } graphicsPrewarm &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var graphicsCapture))
@@ -2026,7 +2026,7 @@ internal sealed class ShaderProgramCache
         ProgramSourceEntry entry,
         SpecializedResourceInfo resources,
         BindingLayout layout,
-        ShaderCompileRequest request, uint? inputLocationMask)
+        ShaderCompileRequest request, uint? inputLocationMask, uint flattenedTableMinimumWords = 0)
     {
         var info = resources.Info;
         var buffers = new BufferResourceInfo[info.Buffers.Count];
@@ -2091,6 +2091,7 @@ internal sealed class ShaderProgramCache
             Resources = resources,
             Bindings = layout,
             CallRecordCallees = request.CallRecordCallees,
+            FlattenedTableMinimumWords = flattenedTableMinimumWords,
         };
     }
 }

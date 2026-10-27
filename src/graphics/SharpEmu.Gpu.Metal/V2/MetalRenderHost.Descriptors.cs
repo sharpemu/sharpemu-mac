@@ -1440,7 +1440,7 @@ internal sealed partial class MetalRenderHost
                     ? ReachFeedbackAddress()
                     : MetalNative.SendGpuAddress(_guestMemory.NullBuffer, SelGpuAddress);
             case DescriptorBindingKind.FlattenedResourceTable:
-                return UploadDwords(stage.StageResources.Resources.FlattenedResourceTable);
+                return UploadFlattenedTable(stage.StageResources.Resources.FlattenedResourceTable, stage.Program.FlattenedTableMinimumWords);
             case DescriptorBindingKind.ShaderData:
                 return UploadDwords(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount));
             case DescriptorBindingKind.MipStatistics:
@@ -1558,6 +1558,22 @@ internal sealed partial class MetalRenderHost
         (ulong FirstPage, ulong PageCount, ulong Base) entry,
         int spanCount) =>
         MetalDeviceAddressTable.AddEntry(entries, entry, spanCount, MaxAddressRanges);
+
+    // The program reads the table's fixed slots below minimumWords without a bounds check
+    // (Gen5MslCodegenOptions.ConstantTableSlots), so a shorter table goes up zero-padded:
+    // those slots read the 0 the check gave. The padded words are part of the reuse key.
+    private ulong UploadFlattenedTable(uint[] table, uint minimumWords)
+    {
+        if ((uint)table.Length >= minimumWords)
+        {
+            return UploadDwords(table);
+        }
+
+        Span<uint> padded = minimumWords <= 1024 ? stackalloc uint[(int)minimumWords] : new uint[minimumWords];
+        padded.Clear();
+        table.CopyTo(padded);
+        return UploadDwords(padded);
+    }
 
     private ulong UploadDwords(ReadOnlySpan<uint> words)
     {

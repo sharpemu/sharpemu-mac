@@ -55,15 +55,18 @@ public sealed unsafe class MetalLossyTextureTests(ITestOutputHelper output)
         using var rig = new Rig(Device.Value);
         // Off by default (SHARPEMU_METAL_V2_LOSSY_TEXTURES=1 turns it on).
         Assert.False(rig.Cache.LossyTextures);
+        // A 64x64 texture rounds both modes to the same minimum allocation. Use a
+        // larger surface so the strict footprint assertion measures compression.
+        const uint CompressionSide = 256;
         rig.Cache.LossyTextures = true;
-        var on = rig.Find(ImageAddress + 0x40000, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture);
+        var on = rig.Find(ImageAddress + 0x40000, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture, height: CompressionSide, width: CompressionSide);
         var onImage = rig.Cache.GetImage(on);
         Assert.True(onImage.Shape.Lossy);
         Assert.Equal(Mtl.TextureUsageShaderRead, onImage.Shape.Usage);
         Assert.Equal(1, CompressionOf(onImage.Texture));
 
         rig.Cache.LossyTextures = false;
-        var off = rig.Find(ImageAddress, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture);
+        var off = rig.Find(ImageAddress, GpuFormat.R8G8B8A8Unorm, ImageRole.Texture, height: CompressionSide, width: CompressionSide);
         var offImage = rig.Cache.GetImage(off);
         Assert.False(offImage.Shape.Lossy);
         Assert.Equal(Breaking, offImage.Shape.Usage & Breaking);
@@ -352,21 +355,21 @@ public sealed unsafe class MetalLossyTextureTests(ITestOutputHelper output)
         public void Write(ulong address, ReadOnlySpan<byte> bytes) => Assert.True(_backing.TryWriteBacking(address, bytes));
 
         // A linear 64x64 surface of four-byte texels.
-        public ImageRequest Request(ulong address, GpuFormat format, ImageRole role, uint height = Side)
+        public ImageRequest Request(ulong address, GpuFormat format, ImageRole role, uint height = Side, uint width = Side)
         {
-            var size = (ulong)Side * height * 4;
+            var size = (ulong)width * height * 4;
             var description = ImageDescription.Create();
             description.Data = new GuestSpan(address, size);
             description.PixelFormat = format;
             description.GuestFormat = format == GpuFormat.R32Uint ? GuestPixelFormat.Bits32UInt : GuestPixelFormat.Bits8_8_8_8UNorm;
             description.Type = GuestImageType.Color2D;
-            description.Extent = new GpuExtent3D(Side, height, 1);
+            description.Extent = new GpuExtent3D(width, height, 1);
             description.Resources = new SubresourceCount(1, 1);
-            description.Pitch = Side;
+            description.Pitch = width;
             description.BytesPerBlock = 4;
             description.Samples = 1;
             description.TileMode = GuestTileMode.Linear;
-            description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = Side, Height = height };
+            description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = width, Height = height };
             var view = ImageViewDescription.Default with
             {
                 Format = format,
@@ -378,9 +381,9 @@ public sealed unsafe class MetalLossyTextureTests(ITestOutputHelper output)
             return new ImageRequest(description, view, role);
         }
 
-        public ResourceSlotIdentifier Find(ulong address, GpuFormat format, ImageRole role, uint height = Side)
+        public ResourceSlotIdentifier Find(ulong address, GpuFormat format, ImageRole role, uint height = Side, uint width = Side)
         {
-            var request = Request(address, format, role, height);
+            var request = Request(address, format, role, height, width);
             return Cache.FindImage(ref request);
         }
 
