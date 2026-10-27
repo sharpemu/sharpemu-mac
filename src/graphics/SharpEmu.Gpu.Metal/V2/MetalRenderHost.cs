@@ -2406,6 +2406,7 @@ internal sealed partial class MetalRenderHost :
             .Append(TakeCopyReadCounters())
             .Append(" resident_reads_pending=").Append(Interlocked.Exchange(ref _residentReadsPending, 0))
             .Append(" inline_eop=").Append(TakeInlineCompletions())
+            .Append(" active_publication_holds=").Append(_completions.TakeActivePublicationHolds())
             .Append(" gpu_labels=").Append(labels.GpuTimed)
             .Append(TakeGpuWordCounters())
             .Append(" host_labels=").Append(labels.WithoutWindow)

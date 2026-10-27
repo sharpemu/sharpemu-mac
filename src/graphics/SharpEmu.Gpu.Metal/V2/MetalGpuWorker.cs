@@ -304,13 +304,26 @@ internal sealed class MetalCompletionQueue : IDisposable
     /// <summary>When the completion thread last saw the event reach a new value.</summary>
     public long LastSignalObservedTimestamp => Interlocked.Read(ref _lastSignalObserved);
 
-    /// <summary>How many completions are still waiting for their submission.</summary>
+    private long _activePublicationHolds;
+
+    internal long TakeActivePublicationHolds() => Interlocked.Exchange(ref _activePublicationHolds, 0);
+
+    /// <summary>How many completions are queued or still publishing their effects.</summary>
     public int PendingCount
     {
         get
         {
             lock (_gate)
             {
+                // Drain removes work before invoking it. Until that invocation returns,
+                // the queue is not idle: neither a drain observer nor an inline later
+                // completion may pass the final callback's guest-memory stores.
+                if (WaitForActivePublications && _runningPublicationSerial != 0)
+                {
+                    if (_pending.Count == 0) Interlocked.Increment(ref _activePublicationHolds);
+                    return _pending.Count + 1;
+                }
+
                 return _pending.Count;
             }
         }
