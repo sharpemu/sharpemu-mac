@@ -178,6 +178,84 @@ public sealed class ResourceMaterializationContentKeyTests
         Assert.Equal(hits + 1, cache.Hits);
     }
 
+    // A hit through a pointer seen before guesses its key from the print the pointer gave last time.
+    // Descriptors rewritten behind the pointer since then must never hit the entry of the old ones,
+    // and when they now equal another object's, the draw finds that object's entry instead.
+    [Fact]
+    public void ARecalledPrintNeverHitsDescriptorsRewrittenBehindThePointer()
+    {
+        var plan = TablePlan(textures: 4, buffers: 2);
+        var memory = NewMemory();
+        var tables = Enumerable.Range(0, 8).Select(index => MemoryBase + 0x1000 + (ulong)index * 0x300).ToArray();
+        foreach (var table in tables)
+            WriteTable(memory, table, material: 3, textures: 4, buffers: 2);
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 32; draw++)
+            Assert.True(Run(cache, plan, memory, Pointer(tables[draw % tables.Length]), out _, out _));
+        var hits = cache.Hits;
+        var misses = cache.Misses;
+
+        void Draw(ulong table)
+        {
+            Assert.True(Run(cache, plan, memory, Pointer(table), out var snapshot, out var specialization));
+            AssertFullWalk(plan, memory, Pointer(table), snapshot, specialization);
+        }
+
+        // Every descriptor behind tables[5] rewritten: the recalled print points at material 3's entry.
+        WriteTable(memory, tables[5], material: 7, textures: 4, buffers: 2);
+        Draw(tables[5]);
+        Assert.Equal((hits, misses + 1), (cache.Hits, cache.Misses));
+
+        // tables[6] now holds what tables[5] does: its recalled print is stale, its real one finds
+        // the entry tables[5] just built.
+        WriteTable(memory, tables[6], material: 7, textures: 4, buffers: 2);
+        Draw(tables[6]);
+        Assert.Equal((hits + 1, misses + 1), (cache.Hits, cache.Misses));
+
+        // One word rewritten behind a pointer whose print was just read.
+        Write(memory, tables[6] + 32 + 4, [21u << 20]);
+        Draw(tables[6]);
+        Assert.Equal((hits + 1, misses + 2), (cache.Hits, cache.Misses));
+
+        // Pointers left alone keep hitting their own descriptors.
+        Draw(tables[5]);
+        Draw(tables[2]);
+        Assert.Equal((hits + 3, misses + 2), (cache.Hits, cache.Misses));
+    }
+
+    [Fact]
+    public void ARecalledPrintChecksReadabilityAndReplacementMemoryAtTheSameAddress()
+    {
+        var plan = TablePlan(textures: 4, buffers: 2);
+        var memory = NewMemory();
+        var tables = Enumerable.Range(0, 8).Select(index => MemoryBase + 0x1000 + (ulong)index * 0x300).ToArray();
+        foreach (var table in tables)
+            WriteTable(memory, table, material: 3, textures: 4, buffers: 2);
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 32; draw++)
+            Assert.True(Run(cache, plan, memory, Pointer(tables[draw % tables.Length]), out _, out _));
+
+        var hits = cache.Hits;
+        // The table pointer and its last print survive, but a descriptor word is no longer readable.
+        memory.FailAddress = tables[5] + 4;
+        var expected = new ResourceSnapshot();
+        var expectedSpecialization = new ResourceSpecialization();
+        var expectedResult = ResourceMaterializer.Materialize(plan,
+            Inputs(Pointer(tables[5]), memory.Read, memory.Read), ref expected, ref expectedSpecialization);
+        Assert.Equal(expectedResult, Run(cache, plan, memory, Pointer(tables[5]), out _, out _));
+        Assert.Equal(hits, cache.Hits);
+
+        // A new mapping at the same guest address must use its own contents, including buffer bounds.
+        var replacement = NewMemory();
+        foreach (var table in tables)
+            WriteTable(replacement, table, material: 9, textures: 4, buffers: 2);
+        Write(replacement, tables[5] + 4 * 32 + 16 + 8, [1024u]);
+        Assert.True(Run(cache, plan, replacement, Pointer(tables[5]), out var snapshot, out var specialization));
+        AssertFullWalk(plan, replacement, Pointer(tables[5]), snapshot, specialization);
+        Assert.Equal(1024u, snapshot.Buffers[0][2]);
+        Assert.Equal(hits, cache.Hits);
+    }
+
     // A hit through a moved pointer gives each pointer its own snapshot; draws that come back to a
     // pointer share the one made for it, and nothing a later draw does changes an earlier one's.
     [Fact]
