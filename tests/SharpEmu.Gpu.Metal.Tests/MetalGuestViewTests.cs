@@ -231,6 +231,45 @@ public sealed unsafe class MetalGuestViewTests(ITestOutputHelper output)
         AssertEqualBytes(expected, harness.Read(read, 0, size));
     }
 
+    // A written scattered range bound with no encoder open has its pristine twin copied by the
+    // GPU from the staged copy, cached or in the ring, and the twin holds the staged bytes.
+    [Fact]
+    public void AWrittenScatteredRangeBoundBetweenPassesHasItsPristineTwinCopiedOnTheGpu()
+    {
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        using var backing = new ShmScatteredBacking(BackingBytes, ViewBytes);
+        backing.FillAliasPattern(0x2545F491u);
+        using var rig = new HostRig(Device.Value, backing);
+        var host = rig.Host;
+        var before = host.GpuPristines;
+        var expectedSnapshots = MetalRenderHost.GpuPristine ? 1 : 0;
+
+        const ulong cachedSize = 1 * Mib;
+        var cachedAddress = backing.Base + (ShmScatteredBacking.Piece / 2);
+        var cached = host.ResolveStorageBuffer(cachedAddress, cachedSize, written: true);
+        Assert.True(cached.IsValid);
+        Assert.Equal(before + expectedSnapshots, host.GpuPristines);
+
+        const ulong ringSize = 128 * 1024;
+        var ringAddress = backing.Base + (8 * Mib) + (ShmScatteredBacking.Piece / 2);
+        var ring = host.ResolveStorageBuffer(ringAddress, ringSize, written: true);
+        Assert.True(ring.IsValid);
+        Assert.Equal(before + (2 * expectedSnapshots), host.GpuPristines);
+        host.FlushAndWaitForGpu();
+
+        var expected = new byte[cachedSize];
+        Assert.True(backing.TryRead(cachedAddress, expected));
+        var cache = host.ImageCache.StagedRanges!;
+        Assert.True(cache.Acquire(cachedAddress, cachedSize, written: true, host.SubmissionSerial,
+            host.SubmissionSerial - 1, out var entry));
+        AssertEqualBytes(expected, new ReadOnlySpan<byte>((void*)entry!.StagingBuffer!.Contents, (int)cachedSize).ToArray());
+        AssertEqualBytes(expected, new ReadOnlySpan<byte>((void*)entry.PristineBuffer!.Contents, (int)cachedSize).ToArray());
+    }
+
     // A blit from a binding into a new shared buffer, recorded in the host's command buffer
     // the way its own transfers are.
     private static nint CopyOnHost(MetalRenderHost host, MetalTransferHarness harness, BufferBinding binding, ulong size)
