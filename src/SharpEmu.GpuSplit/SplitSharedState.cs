@@ -27,18 +27,36 @@ namespace SharpEmu.GpuSplit;
 /// barrier: a managed write in A either sees the bit (and is reported) or lands before B reads
 /// the bytes the watch covers.</para>
 ///
-/// <para>Layout: the counter at 0 (<see cref="SharedCounter.BlockSize"/> bytes), the summary at
-/// <see cref="SummaryOffset"/>, <see cref="SummaryWords"/> words (32 MiB of address space in the
-/// region, touched only where watches are).</para>
+/// <para><b>Pending-writeback summary.</b> One bit per 4 KiB page, set while B holds bytes for the
+/// page that guest memory does not have yet: an image the GPU wrote and has not written back, or a
+/// recorded writeback whose submission has not completed (<see cref="PendingWritebackPages"/>).
+/// Those are the only cases in which B's answer to a managed write's <see cref="GpuRemoteSyncOpcode.CpuWrite"/>
+/// call does anything before the write lands (it writes the image back, or waits for the
+/// writeback); everything else the call does, B's handling of the write's ordered record does as
+/// well. So A calls only when a bit under the write is set, and otherwise sends the record. A bit
+/// is set before the state it stands for exists and cleared only once B's image cache, as it lets
+/// its lock go, finds the state gone: a clear bit at any moment means a call made then would have
+/// found nothing to write back or wait for. Until B's cache keeps the summary
+/// (<see cref="PendingLive"/> is 0) every page counts as pending.</para>
+///
+/// <para>Layout: the counter at 0 (<see cref="SharedCounter.BlockSize"/> bytes), the pending
+/// summary's live word at <see cref="PendingLiveOffset"/>, the interest summary at
+/// <see cref="SummaryOffset"/> and the pending summary at <see cref="PendingOffset"/>,
+/// <see cref="SummaryWords"/> words each (32 MiB of address space in the region apiece, touched only
+/// where watches and GPU-written images are).</para>
 /// </remarks>
 public sealed unsafe class SplitSharedState : IInterestSummary
 {
     public const int PageShift = 12;
+    public const int PendingLiveOffset = SharedCounter.BlockSize;
     public const int SummaryOffset = 4096;
     public const int SummaryWords = (int)(TrackerLayout.SpaceBytes >> PageShift >> 6);
-    public const int Bytes = SummaryOffset + SummaryWords * sizeof(ulong);
+    public const int PendingOffset = SummaryOffset + SummaryWords * sizeof(ulong);
+    public const int Bytes = PendingOffset + SummaryWords * sizeof(ulong);
 
     private readonly ulong* _summary;
+    private readonly ulong* _pending;
+    private readonly long* _pendingLive;
 
     public SplitSharedState(GpuRemoteChannel channel)
     {
@@ -51,6 +69,8 @@ public sealed unsafe class SplitSharedState : IInterestSummary
 
         ProtectApplied = SharedCounter.InApplicationBlock(channel, 0);
         _summary = (ulong*)(channel.Application + SummaryOffset);
+        _pending = (ulong*)(channel.Application + PendingOffset);
+        _pendingLive = (long*)(channel.Application + PendingLiveOffset);
     }
 
     /// <summary>The layout of a region that holds this state.</summary>
@@ -60,7 +80,30 @@ public sealed unsafe class SplitSharedState : IInterestSummary
     public SharedCounter ProtectApplied { get; }
 
     /// <summary>A: whether any 4 KiB page under [address, address + size) carries a watch.</summary>
-    public bool MayInterest(ulong address, ulong size)
+    public bool MayInterest(ulong address, ulong size) => AnyPage(_summary, address, size);
+
+    /// <summary>Whether B keeps the pending-writeback summary (until it does, every page counts as pending).</summary>
+    public bool PendingLive => Volatile.Read(ref *_pendingLive) != 0;
+
+    /// <summary>
+    /// A: whether B may hold bytes for a page under [address, address + size) that guest memory
+    /// lacks, so a managed write there has to wait for B before it lands.
+    /// </summary>
+    public bool MayPendWriteback(ulong address, ulong size) => !PendingLive || AnyPage(_pending, address, size);
+
+    /// <summary>B: its image cache keeps the pending summary from now on.</summary>
+    public void SetPendingLive() => Interlocked.Exchange(ref *_pendingLive, 1);
+
+    /// <summary>B: sets the pending bits in <paramref name="mask"/> of summary word <paramref name="word"/> (a full barrier).</summary>
+    public void SetPendingBits(ulong word, ulong mask) => Interlocked.Or(ref _pending[word], mask);
+
+    /// <summary>B: clears the pending bits in <paramref name="mask"/> of summary word <paramref name="word"/>.</summary>
+    public void ClearPendingBits(ulong word, ulong mask) => Interlocked.And(ref _pending[word], ~mask);
+
+    /// <summary>The pending bits of summary word <paramref name="word"/>.</summary>
+    public ulong PendingBits(ulong word) => Volatile.Read(ref _pending[word]);
+
+    private static bool AnyPage(ulong* bitmap, ulong address, ulong size)
     {
         if (size == 0 || address >= TrackerLayout.SpaceBytes)
         {
@@ -73,7 +116,7 @@ public sealed unsafe class SplitSharedState : IInterestSummary
         while (page <= last)
         {
             var word = page >> 6;
-            var bits = Volatile.Read(ref _summary[word]);
+            var bits = Volatile.Read(ref bitmap[word]);
             var wordLast = Math.Min(last, (word << 6) | 63);
             if (bits != 0)
             {

@@ -56,7 +56,7 @@ internal interface IInterestSummary
 /// </remarks>
 internal sealed unsafe class RemoteGuestAddressSpace :
     ICpuMemory, IGuestBackedSpace, IGuestAddressSpace, IGuestDerivedProtectionAddressSpace, IPageWatchObserver,
-    IProtectionBatchSpace
+    IProtectionBatchSpace, IPendingWritebackSource
 {
     private const int MaxMissReports = 16;
 
@@ -82,6 +82,9 @@ internal sealed unsafe class RemoteGuestAddressSpace :
         _protections = protections;
         _summary = summary;
     }
+
+    /// <summary>The pending-writeback summary the GPU caches keep for the guest process (null: none is kept).</summary>
+    public IPendingWritebackPages? PendingWritebacks { get; set; }
 
     /// <summary>Accesses to memory the backing does not hold.</summary>
     public long PrivateMemoryMisses => Interlocked.Read(ref _misses);

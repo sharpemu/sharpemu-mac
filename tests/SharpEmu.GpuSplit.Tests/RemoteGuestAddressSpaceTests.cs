@@ -69,6 +69,64 @@ public sealed class SplitSharedStateTests
     }
 
     [MacOSFact]
+    public void EveryPageIsPendingUntilTheGpuSideKeepsTheSummary()
+    {
+        using var channel = GpuRemoteChannel.Create(SharedMemoryRegion.CreateUniqueName("sesplit"), SplitSharedState.Layout);
+        var state = new SplitSharedState(channel);
+        Assert.True(state.MayPendWriteback(0x10_0000, 8));
+
+        var pending = new PendingWritebackPages(state);
+        Assert.True(state.MayPendWriteback(0x10_0000, 8));
+        pending.Activate();
+        Assert.True(state.PendingLive);
+        Assert.False(state.MayPendWriteback(0x10_0000, 8));
+        Assert.False(state.MayPendWriteback(0, TrackerLayout.SpaceBytes));
+    }
+
+    [MacOSFact]
+    public void APendingPageIsMarkedAtOnceAndUnmarkedOnlyWhenPublishedUnclaimed()
+    {
+        using var channel = GpuRemoteChannel.Create(SharedMemoryRegion.CreateUniqueName("sesplit"), SplitSharedState.Layout);
+        var state = new SplitSharedState(channel);
+        var pending = new PendingWritebackPages(state);
+        pending.Activate();
+        const ulong Image = 0x4_0000_0000 + 0x3F000; // straddles a summary word: pages 63 and 64 of the block
+        const ulong Page = 0x1000;
+
+        // An image of two pages and a writeback over its second page and the next.
+        pending.Add(Image + 0x10, 2 * Page - 0x20);
+        Assert.True(state.MayPendWriteback(Image, 1));
+        Assert.True(state.MayPendWriteback(Image + Page + 0xFF8, 8));
+        Assert.False(state.MayPendWriteback(Image - 8, 8));
+        Assert.False(state.MayPendWriteback(Image + 2 * Page, 8));
+        pending.Add(Image + Page, 2 * Page);
+        Assert.Equal(2, pending.ClaimsAt(Image + Page));
+
+        // The image's claim ends: nothing changes until published, and then only its own page goes.
+        pending.Remove(Image + 0x10, 2 * Page - 0x20);
+        Assert.True(state.MayPendWriteback(Image, 8));
+        pending.Publish();
+        Assert.False(state.MayPendWriteback(Image, Page));
+        Assert.True(state.MayPendWriteback(Image + Page, 8));
+        Assert.True(state.MayPendWriteback(Image + 2 * Page, 8));
+
+        // Claimed again before the publish: the page stays marked.
+        pending.Remove(Image + Page, 2 * Page);
+        pending.Add(Image + 2 * Page, 8);
+        pending.Publish();
+        Assert.False(state.MayPendWriteback(Image, 2 * Page));
+        Assert.True(state.MayPendWriteback(Image + 2 * Page, 1));
+        pending.Remove(Image + 2 * Page, 8);
+        pending.Publish();
+        Assert.False(state.MayPendWriteback(Image - Page, 8 * Page));
+
+        // A release of what was never claimed changes nothing.
+        pending.Remove(Image, Page);
+        pending.Publish();
+        Assert.Equal(0, pending.ClaimsAt(Image));
+    }
+
+    [MacOSFact]
     public void AProcessWithoutTheBlockIsRefused()
     {
         using var channel = GpuRemoteChannel.Create(SharedMemoryRegion.CreateUniqueName("sesplit"));

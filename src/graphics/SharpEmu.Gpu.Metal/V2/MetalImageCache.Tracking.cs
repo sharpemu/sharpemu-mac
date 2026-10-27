@@ -133,6 +133,8 @@ internal sealed partial class MetalImageCache
         _slots.Erase(imageIdentifier);
         RetireImage(image);
         image.Epochs = null;
+        // Out of the cache no call finds it: its bytes are written back (and fenced) or dropped.
+        image.PendingWritebacks = null;
         Epochs.NoteBindingChanged();
     }
 

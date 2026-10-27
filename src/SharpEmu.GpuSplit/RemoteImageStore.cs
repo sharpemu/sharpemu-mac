@@ -22,8 +22,11 @@ namespace SharpEmu.GpuSplit;
 ///
 /// <para><b>Managed writes</b> are filtered by the GPU-interest summary first; GTA V makes over a
 /// million a second and the caches watch a few pages. One about to land
-/// (<see cref="MarkPreciseCpuWrite"/>) is a call, because a GPU-written image under it must reach
-/// guest memory before the write lands over it. From a thread that is answering the GPU process
+/// (<see cref="MarkPreciseCpuWrite"/>) is a call when the pending-writeback summary has a page
+/// under it, because a GPU-written image there must reach guest memory, or a writeback recorded
+/// there must land, before the write lands over it. Under no such page the call would only
+/// invalidate, which the write's ordered record does as well, so it is sent as a record
+/// (<see cref="SplitSharedState"/>, "Pending-writeback summary"). From a thread that is answering the GPU process
 /// or that runs inside a GPU worker bracket it is sent as a landed write instead: there the GPU
 /// worker cannot take the image's writeback, which is the in-process cache's own rule for a store
 /// from the worker. One that has landed (<see cref="MarkCpuWriteLanded"/>) is a record, handled
@@ -114,6 +117,15 @@ internal sealed unsafe class RemoteImageStore : IGuestImageStore, IGuestSpanObse
         SplitCrossingStats.Count(SplitCrossing.ManagedWriteInterest);
         if (RemoteGpuQueueRelay.CurrentBracket != 0 || SplitGpuSession.OnReverseServerThread)
         {
+            return SendLanded(address, size);
+        }
+
+        // Nothing GPU-written to put under the write: the record (ahead of every later submission)
+        // invalidates as the call would. Sent now, as well as after the write lands, for a caller
+        // that reports only the write about to land.
+        if (!_state.MayPendWriteback(address, size))
+        {
+            SplitCrossingStats.Count(SplitCrossing.ManagedWriteRecord);
             return SendLanded(address, size);
         }
 
