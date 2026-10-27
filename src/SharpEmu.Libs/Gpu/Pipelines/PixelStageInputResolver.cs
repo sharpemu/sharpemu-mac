@@ -160,14 +160,26 @@ public static class PixelStageInputResolver
             DepthExportFormat = shaderInterface.DepthExportFormat is var zFormat and > 0 and <= 9
                 ? (SharpEmu.ShaderCompiler.Gen5ColorExportFormat)zFormat
                 : null,
-            // Z_ORDER 0 is LATE_Z; EARLY_Z_THEN_LATE_Z, RE_Z and EARLY_Z_THEN_RE_Z (1..3) all test
-            // before the shader. A shader that kills or exports depth, stencil or coverage is
-            // decided after it ran, whatever the order says.
-            EarlyDepth = control.DepthExportOrder != 0 && !control.KillEnable && !control.DepthExportEnable &&
-                !control.StencilExportEnable && !control.MaskExportEnable,
+            EarlyDepth = TestsDepthBeforeShader(control),
             ExecuteOnNoop = control.ExecuteOnNoop,
         };
     }
+
+    // Whether the pixel function may declare [[early_fragment_tests]]: the guest tests depth before
+    // the shader AND skips the shader for a fragment that test rejects. That only changes what a
+    // shader with memory writes does (Metal already tests early for one without), and then it
+    // matters: the stores of a rejected fragment must happen exactly when the guest's do.
+    // - DEPTH_BEFORE_SHADER forces the test ahead of the shader whatever the other bits say
+    //   (Mesa RADV sets it with [earlydepthstencil] next to EXEC_ON_* = writes_memory).
+    // - Z_ORDER 1..3 (EARLY_Z_THEN_LATE_Z, RE_Z, EARLY_Z_THEN_RE_Z) test early too, but EXEC_ON_HIER_FAIL
+    //   and EXEC_ON_NOOP make the shader run for a rejected fragment, and then its stores happen:
+    //   those shaders stay on Metal's late order.
+    // - A shader that kills or exports depth, stencil or coverage is decided after it ran, and Metal
+    //   rejects depth or stencil outputs with the attribute.
+    internal static bool TestsDepthBeforeShader(in DepthShaderControlRegisters control) =>
+        !control.KillEnable && !control.DepthExportEnable && !control.StencilExportEnable && !control.MaskExportEnable &&
+        (control.DepthBeforeShader ||
+         (control.DepthExportOrder != 0 && !control.ExecuteOnHierFail && !control.ExecuteOnNoop));
 }
 
 // The arrays of the last pixel input resolved. Nothing writes a resolved input's arrays, and

@@ -261,22 +261,27 @@ public struct DepthShaderControlRegisters
     public bool DepthExportEnable;
     public bool StencilExportEnable;
     public bool MaskExportEnable;
-    public bool DualExportEnable;
+    // EXEC_ON_HIER_FAIL (bit 9) and EXEC_ON_NOOP (bit 10): the shader still runs for a fragment the
+    // early depth test or HiZ rejects, so its memory writes happen.
+    public bool ExecuteOnHierFail;
     public bool ExecuteOnNoop;
     public bool AlphaToMaskDisable;
+    // DEPTH_BEFORE_SHADER (bit 12): the depth test is forced ahead of the shader ([earlydepthstencil]).
+    public bool DepthBeforeShader;
 
     public static DepthShaderControlRegisters Decode(uint value) => new()
     {
-        RemainingBits = value & 0xFFFF_908Cu,
+        RemainingBits = value & 0xFFFF_808Cu,
         ConservativeDepthExport = (byte)RegisterField.Get(value, 13, 0x3),
         DepthExportOrder = (byte)RegisterField.Get(value, 4, 0x3),
         KillEnable = RegisterField.Bit(value, 6),
         DepthExportEnable = RegisterField.Bit(value, 0),
         StencilExportEnable = RegisterField.Bit(value, 1),
         MaskExportEnable = RegisterField.Bit(value, 8),
-        DualExportEnable = RegisterField.Bit(value, 9),
+        ExecuteOnHierFail = RegisterField.Bit(value, 9),
         ExecuteOnNoop = RegisterField.Bit(value, 10),
         AlphaToMaskDisable = RegisterField.Bit(value, 11),
+        DepthBeforeShader = RegisterField.Bit(value, 12),
     };
 }
 

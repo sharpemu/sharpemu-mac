@@ -73,5 +73,52 @@ public sealed class PixelDepthExportResolverTests : IDisposable
         Assert.False(info.EarlyDepth && control != 0);
     }
 
+    // DB_SHADER_CONTROL: Z_ORDER bits 4-5, KILL 6, MASK_EXPORT 8, EXEC_ON_HIER_FAIL 9, EXEC_ON_NOOP 10,
+    // DEPTH_BEFORE_SHADER 12. Metal tests depth early only where the guest does and skips the shader for
+    // the fragments it rejects: EXEC_ON_* make that shader run for them, so those stay late.
+    [Theory]
+    [InlineData(0x000u, false)]            // LATE_Z
+    [InlineData(0x010u, true)]             // EARLY_Z_THEN_LATE_Z
+    [InlineData(0x020u, true)]             // RE_Z
+    [InlineData(0x030u, true)]             // EARLY_Z_THEN_RE_Z
+    [InlineData(0x210u, false)]            // + EXEC_ON_HIER_FAIL
+    [InlineData(0x410u, false)]            // + EXEC_ON_NOOP
+    [InlineData(0x620u, false)]            // RE_Z + both
+    [InlineData(0x1000u, true)]            // DEPTH_BEFORE_SHADER alone
+    [InlineData(0x1630u, true)]            // DEPTH_BEFORE_SHADER wins over EXEC_ON_*
+    [InlineData(0x050u, false)]            // KILL_ENABLE
+    [InlineData(0x1050u, false)]           // KILL_ENABLE, even with DEPTH_BEFORE_SHADER
+    [InlineData(0x011u, false)]            // Z_EXPORT_ENABLE
+    [InlineData(0x012u, false)]            // STENCIL_TEST_VAL_EXPORT_ENABLE
+    [InlineData(0x110u, false)]            // MASK_EXPORT_ENABLE
+    [InlineData(0x8000u, false)]           // DUAL_QUAD_DISABLE and friends do not matter
+    [InlineData(0x8010u, true)]
+    public void EarlyDepthFollowsTheGuestsDepthOrderAndExecuteBits(uint control, bool early)
+    {
+        var shaderInterface = new ShaderInterfaceRegisters { DepthShaderControl = DepthShaderControlRegisters.Decode(control) };
+        var info = PixelStageInputResolver.Resolve(
+            new CpuContext(_memory, Generation.Gen5),
+            new RegisteredShader(MemoryBase, MemoryBase, 16, 0, 0, 0, 0, 0, 0),
+            shaderInterface,
+            new byte[PixelInputInfo.TargetCount],
+            new ColorComponentMap[PixelInputInfo.TargetCount],
+            inputCount: 0,
+            depthAspectBound: true,
+            stencilAspectBound: true);
+
+        Assert.Equal(early, info.EarlyDepth);
+    }
+
+    [Fact]
+    public void TheDecodedBitsMatchTheHardwareRegister()
+    {
+        var control = DepthShaderControlRegisters.Decode((1u << 9) | (1u << 12));
+        Assert.True(control.ExecuteOnHierFail);
+        Assert.True(control.DepthBeforeShader);
+        Assert.False(control.ExecuteOnNoop);
+        Assert.Equal(0u, control.RemainingBits);
+        Assert.True(DepthShaderControlRegisters.Decode(1u << 10).ExecuteOnNoop);
+    }
+
     public void Dispose() => _fatal.Dispose();
 }
