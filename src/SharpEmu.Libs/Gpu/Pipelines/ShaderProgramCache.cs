@@ -225,6 +225,7 @@ internal sealed class ShaderProgramCache
     private readonly bool _spirvDumpEnabled = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV"), "1", StringComparison.Ordinal);
 
     private readonly IRecipeDiagnosticSink? _recipeDiagnostics;
+    private readonly bool _captureReadHistory;
     private readonly ResourceReadBatchObserver _observeCachedReads;
     private readonly GuestWordReader _readGuestWord;
     private readonly GuestWordReader _readCleanGuestWord;
@@ -240,6 +241,9 @@ internal sealed class ShaderProgramCache
         _compiler = compiler;
         _host = host;
         _recipeDiagnostics = host.RecipeDiagnostics;
+        _captureReadHistory = _recipeDiagnostics is not null || _spirvDumpEnabled ||
+            Environment.GetEnvironmentVariable("SHARPEMU_GPU_TABLE_READ_TRACE") == "1" ||
+            Environment.GetEnvironmentVariable("SHARPEMU_GPU_MATERIALIZE_FATAL") == "1";
         _observeCachedReads = ObserveCachedTableReads;
         _readGuestWord = ReadGuestWord;
         _readCleanGuestWord = ReadCleanGuestWord;
@@ -274,11 +278,14 @@ internal sealed class ShaderProgramCache
     {
         var read = _host.TryReadResidentGuestBytes(address, destination, clean);
         ReadLog?.Bytes(address, read, destination);
-        if (read)
-            for (var offset = 0; offset <= destination.Length - sizeof(uint); offset += sizeof(uint))
-                RecordTableWord(address + (ulong)offset, true,
-                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]));
-        else RecordTableWord(address, false, 0);
+        if (_captureTableWords)
+        {
+            if (read)
+                for (var offset = 0; offset <= destination.Length - sizeof(uint); offset += sizeof(uint))
+                    RecordTableWord(address + (ulong)offset, true,
+                        System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]));
+            else RecordTableWord(address, false, 0);
+        }
         return read;
     }
 
@@ -440,8 +447,10 @@ internal sealed class ShaderProgramCache
         }
     }
 
-    private void RecordTableWord(ulong address, bool read, uint word) =>
-        RecordTableWord(address, read, word, _host.LastGuestTableRead);
+    private void RecordTableWord(ulong address, bool read, uint word)
+    {
+        if (_captureTableWords) RecordTableWord(address, read, word, _host.LastGuestTableRead);
+    }
 
     private void RecordTableWord(ulong address, bool read, uint word, GuestTableReadState state)
     {
@@ -472,7 +481,8 @@ internal sealed class ShaderProgramCache
         if (Environment.GetEnvironmentVariable("SHARPEMU_GPU_MATERIALIZE_FATAL") == "1")
             throw GpuFatal.Fatal($"Unreadable guest pointer: stage={source.Label} hash=0x{source.Hash:X16}. " +
                 DescribeTableReads(UnreadableGuestPointer.Address));
-        var before = DescribeTableReads(UnreadableGuestPointer.Address);
+        var before = _captureTableWords ? DescribeTableReads(UnreadableGuestPointer.Address) :
+            "read-history=disabled (SHARPEMU_GPU_TABLE_READ_TRACE=1 enables it)";
         if (!retried)
         {
             retried = true;
@@ -623,7 +633,7 @@ internal sealed class ShaderProgramCache
         MaterializingShader.Hash = source.Hash;
         var unreadableRetried = false;
         _tableWordCount = 0;
-        _captureTableWords = true;
+        _captureTableWords = _captureReadHistory;
         try
         {
             using (new RecipeMaterializationTimer(_recipeDiagnostics))

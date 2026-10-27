@@ -1825,15 +1825,21 @@ internal sealed partial class MetalRenderHost
     public bool TryReadGuestWord(ulong address, out uint word)
     {
         _wordReads++;
-        CaptureGuestTableRead(address, sizeof(uint), FinalGuestTablesEnabled ? "memory-final" : "legacy-word");
+        if (FinalReadRangeIsUnowned(address))
+            LastGuestTableRead = new("memory-final", 0, CompletedSerialHint, "none");
+        else
+            CaptureGuestTableRead(address, sizeof(uint), FinalGuestTablesEnabled ? "memory-final" : "legacy-word");
         if (FinalGuestTablesEnabled)
         {
             // Resolve prior writers before consulting overlays. B owns the recording
             // command buffer, so this can commit retained batches and deferred copies.
             var observed = LastGuestTableRead;
-            if (Volatile.Read(ref _owedHostLabels) != 0)
+            var synchronized = Volatile.Read(ref _owedHostLabels) != 0;
+            if (synchronized)
                 SynchronizeGuestTables();
-            if (_gpuWrites.MayCover(address, sizeof(uint)) || _imageCache.MayOwn(address, sizeof(uint)))
+            // The encoding owner has not issued a new writer since the observation.
+            // Synchronization can encode work, so only that path needs a fresh scan.
+            if (synchronized || observed.PendingSerial != 0 || observed.ImageOwned)
                 WaitForGuestBytes(address, sizeof(uint));
             LastGuestTableRead = observed;
             Span<byte> finalBytes = stackalloc byte[sizeof(uint)];
@@ -1868,6 +1874,14 @@ internal sealed partial class MetalRenderHost
     public bool TryReadCleanGuestWord(ulong address, out uint word)
     {
         word = 0;
+        if (FinalReadRangeIsUnowned(address))
+        {
+            LastGuestTableRead = new("clean-backing", 0, CompletedSerialHint, "none");
+            Span<byte> fresh = stackalloc byte[sizeof(uint)];
+            if (!_backing.TryReadBacking(address, fresh)) return false;
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(fresh);
+            return true;
+        }
         CaptureGuestTableRead(address, sizeof(uint), "clean-backing");
         if (FinalGuestTablesEnabled && GuestTableNotReady(address, sizeof(uint))) return false;
         if (_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)) || IsResidentRangePending(address, sizeof(uint)))
@@ -1897,6 +1911,11 @@ internal sealed partial class MetalRenderHost
 
     public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
     {
+        if (FinalReadRangeIsUnowned(address, (ulong)destination.Length))
+        {
+            LastGuestTableRead = new("resident-backing", 0, CompletedSerialHint, "none");
+            return _backing.TryReadBacking(address, destination);
+        }
         CaptureGuestTableRead(address, (ulong)destination.Length, "resident-backing");
         if (FinalGuestTablesEnabled && GuestTableNotReady(address, (ulong)destination.Length)) return false;
         if (destination.IsEmpty)
@@ -2098,8 +2117,10 @@ internal sealed partial class MetalRenderHost
     // A binding word a resource materialization would wait for (DeviceBindingLoads), asked
     // without waiting: a recorded store with a known range covers it. Bytes a GPU-modified
     // image owns are not offered: the device would read them before the image's writeback.
-    // Always offered, so words_waited counts under SHARPEMU_METAL_V2_WAIT_RESOURCE_WORDS=1 too.
-    public Func<ulong, bool>? ResourceWordPending => _resourceWordPending ??= IsResourceWordPending;
+    // Disabled deferral reads and waits through TryReadGuestWord. Do not probe GPU
+    // ownership (or read copy sources) for a diagnostic counter at every scalar load.
+    public Func<ulong, bool>? ResourceWordPending =>
+        DeviceBindingLoads.Enabled ? _resourceWordPending ??= IsResourceWordPending : null;
 
     private Func<ulong, BindingWordWriter>? _resourceWriter;
     public Func<ulong, BindingWordWriter>? ResourceWordWriter => _resourceWriter ??= BindingWriter;
@@ -2111,6 +2132,7 @@ internal sealed partial class MetalRenderHost
     }
 
     private bool IsResourceWordPending(ulong address) =>
+        !FinalReadRangeIsUnowned(address) &&
         _gpuWrites.MayCover(address, sizeof(uint)) &&
         !(_imageCache.MayOwn(address, sizeof(uint)) && _imageCache.HasGpuModifiedImageBytes(address, sizeof(uint))) &&
         IsDataWordPending(address) && !HasKnownBindingWord(address);
@@ -2124,8 +2146,9 @@ internal sealed partial class MetalRenderHost
     }
 
     private bool IsDataWordPending(ulong address) =>
+        !FinalReadRangeIsUnowned(address) &&
         _gpuWrites.MayCover(address, sizeof(uint)) &&
-        _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0 &&
+        PendingSerialHinted(address, sizeof(uint)) != 0 &&
         _gpuWrites.LastMatch.Origin != MetalGpuWriteOrigin.Unbounded;
 
     // Resource tables are read straight from the backing, so a WRITE_DATA that patched one

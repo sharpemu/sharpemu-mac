@@ -1756,7 +1756,7 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
-        var pending = _gpuWrites.PendingSerial(address, size, CompletedSerial);
+        var pending = PendingSerialHinted(address, size);
         if (pending != 0)
         {
             _bindingReadWriter = _gpuWrites.LastMatch;
@@ -2262,7 +2262,7 @@ internal sealed partial class MetalRenderHost :
         Console.Error.WriteLine(
             $"[METAL-V2][PERF] seconds={seconds.ToString("F2", culture)} submissions={_submissionsStarted} " +
             ComputeBatchCounters() +
-            $"{_issues?.FormatProfile()} {SharpEmu.Libs.VideoOut.GpuLockProfile.Format()} " +
+            $"{_issues?.FormatProfile() ?? "worker_split=0 issue_blocks=0 issue_records=0 issue_wakes=0 unresolved_writer_stalls=0"} {SharpEmu.Libs.VideoOut.GpuLockProfile.Format()} " +
             // Colour loads a full-screen first draw made dead (MetalPassLoads).
             $"load_elided={loadsElided} load_elided_mb={(loadElidedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"join_refused=[{joinRefusals}] load_refused=[{loadRefusals}] subset_joins={subsetJoins} subset_load_avoided_mb={(subsetLoadBytes / 1048576.0).ToString("F1", culture)} " +

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Pipelines;
+using SharpEmu.Libs.Gpu.GpuCommands;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -13,6 +14,47 @@ internal sealed partial class MetalRenderHost
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FINAL_GUEST_TABLES") != "0";
 
     public GuestTableReadState LastGuestTableRead { get; private set; } = new("none", 0, 0, "none");
+
+    // Only a negative ownership proof is reused, never the bytes. CPU writes
+    // remain visible on every scalar read, even when all ownership versions match.
+    internal bool FinalReadHintsEnabled { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FINAL_READ_HINTS") != "0";
+    private readonly ulong[] _finalReadLineAddress = new ulong[WordLineSlots];
+    private readonly ulong[] _finalReadLineGeneration = new ulong[WordLineSlots];
+    private readonly bool[] _finalReadLineUnowned = new bool[WordLineSlots];
+    private CommandReadToken _finalReadToken;
+    private long _finalReadLabelVersion;
+    private long _finalReadHintHits, _finalReadHintFills, _finalReadHintRefused;
+
+    private bool FinalReadRangeIsUnowned(ulong address, ulong size = sizeof(uint))
+    {
+        if (!FinalReadHintsEnabled || !FinalGuestTablesEnabled ||
+            _wordLineThread != Environment.CurrentManagedThreadId ||
+            Volatile.Read(ref _owedHostLabels) != 0 || size == 0 || size > (ulong)WordLineBytes ||
+            (address & (ulong)(WordLineBytes - 1)) > (ulong)WordLineBytes - size)
+            return false;
+
+        var token = CurrentCommandReadToken();
+        var labels = _labelOverlay.Version;
+        if (token != _finalReadToken || labels != _finalReadLabelVersion)
+        {
+            _finalReadToken = token;
+            _finalReadLabelVersion = labels;
+            InvalidateWordLines();
+        }
+        var line = address & ~(ulong)(WordLineBytes - 1);
+        var slot = (int)((line / (ulong)WordLineBytes) & (ulong)(WordLineSlots - 1));
+        if (_finalReadLineAddress[slot] != line || _finalReadLineGeneration[slot] != _wordLineGenerationCurrent)
+        {
+            _finalReadLineAddress[slot] = line;
+            _finalReadLineGeneration[slot] = _wordLineGenerationCurrent;
+            _finalReadLineUnowned[slot] = !GuestTableNotReady(line, (ulong)WordLineBytes);
+            _finalReadHintFills++;
+        }
+        if (_finalReadLineUnowned[slot]) { _finalReadHintHits++; return true; }
+        _finalReadHintRefused++;
+        return false;
+    }
 
     private void CaptureGuestTableRead(ulong address, ulong size, string path)
     {

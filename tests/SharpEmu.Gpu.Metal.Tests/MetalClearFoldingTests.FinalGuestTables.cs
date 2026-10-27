@@ -60,35 +60,47 @@ public sealed unsafe partial class MetalClearFoldingTests
         Assert.True(finished.IsSet);
     }
 
-    [Fact]
-    public void ARecycledCopySourceCannotAnswerAFinalDescriptorRead()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ARecycledCopySourceCannotAnswerAFinalDescriptorRead(bool deferBindingWords)
     {
         if (!RequireDevice()) return;
-        using var rig = new Rig(Device.Value);
-        var serial = RecordPendingCopy(rig);
-        var host = rig.Host;
-        host.FinalGuestTablesEnabled = true;
-        rig.WriteBacking32(CopySource, 0x3F000000);
-        Assert.False(host.TryReadResidentGuestBytes(CopyDestination, new byte[16], false));
-        Assert.False(host.TryReadCleanGuestWord(CopyDestination, out _));
-        Assert.True(host.ResourceWordPending!(CopyDestination));
-        Assert.True(host.TryReadGuestWord(CopyDestination, out var word));
-        // The test records a copy intent without executing a dispatch. Waiting must
-        // read the actual destination, never substitute the recycled source.
-        Assert.Equal(0x11111111u, word);
-        Assert.True(host.CompletedSerial >= serial);
-        Assert.Equal(0, host.CopyReadCounters.Reads);
-        Assert.Equal("memory-final", host.LastGuestTableRead.Path);
-        Assert.Equal(serial, host.LastGuestTableRead.PendingSerial);
+        var previous = DeviceBindingLoads.Enabled;
+        DeviceBindingLoads.Enabled = deferBindingWords;
+        try
+        {
+            using var rig = new Rig(Device.Value);
+            var serial = RecordPendingCopy(rig);
+            var host = rig.Host;
+            host.FinalGuestTablesEnabled = true;
+            rig.WriteBacking32(CopySource, 0x3F000000);
+            Assert.False(host.TryReadResidentGuestBytes(CopyDestination, new byte[16], false));
+            Assert.False(host.TryReadCleanGuestWord(CopyDestination, out _));
+            if (deferBindingWords) Assert.True(host.ResourceWordPending!(CopyDestination));
+            else Assert.Null(host.ResourceWordPending);
+            Assert.True(host.TryReadGuestWord(CopyDestination, out var word));
+            // The test records a copy intent without executing a dispatch. Waiting must
+            // read the actual destination, never substitute the recycled source.
+            Assert.Equal(0x11111111u, word);
+            Assert.True(host.CompletedSerial >= serial);
+            Assert.Equal(0, host.CopyReadCounters.Reads);
+            Assert.Equal("memory-final", host.LastGuestTableRead.Path);
+            Assert.Equal(serial, host.LastGuestTableRead.PendingSerial);
+        }
+        finally { DeviceBindingLoads.Enabled = previous; }
     }
 
-    [Fact]
-    public void FinalWordReadsObserveCpuRecyclingWithinAMaterializationScope()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FinalWordReadsObserveCpuRecyclingWithinAMaterializationScope(bool readHints)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
         host.FinalGuestTablesEnabled = true;
+        host.FinalReadHintsEnabled = readHints;
         host.BeginGuestWordReads();
         try
         {
@@ -99,6 +111,41 @@ public sealed unsafe partial class MetalClearFoldingTests
             rig.WriteBacking32(LineTable, 0x87654321);
             Assert.True(host.TryReadGuestWord(LineTable, out var after));
             Assert.Equal(0x87654321u, after);
+            Assert.True(host.TryReadCleanGuestWord(LineTable, out var clean));
+            Assert.Equal(0x87654321u, clean);
+            var resident = new byte[sizeof(uint)];
+            Assert.True(host.TryReadResidentGuestBytes(LineTable, resident, false));
+            Assert.Equal(0x87654321u, BitConverter.ToUInt32(resident));
+        }
+        finally { host.EndGuestWordReads(); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FinalReadHintsExpireWhenAGpuWriterAppearsInTheSameScope(bool readHints)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.FinalGuestTablesEnabled = true;
+        host.FinalReadHintsEnabled = readHints;
+        host.BeginGuestWordReads();
+        try
+        {
+            rig.WriteBacking32(CopyDestination, 17);
+            Assert.True(host.TryReadGuestWord(CopyDestination, out var before));
+            Assert.Equal(17u, before);
+
+            var serial = RecordPendingCopy(rig);
+            host.FinalGuestTablesEnabled = true;
+            rig.WriteBacking32(CopyDestination, 29);
+            Assert.False(host.TryReadCleanGuestWord(CopyDestination, out _));
+            Assert.False(host.TryReadResidentGuestBytes(CopyDestination, new byte[sizeof(uint)], false));
+            Assert.True(host.TryReadGuestWord(CopyDestination, out var after));
+            Assert.Equal(29u, after);
+            Assert.True(host.CompletedSerial >= serial);
+            Assert.Equal(0, host.CopyReadCounters.Reads);
         }
         finally { host.EndGuestWordReads(); }
     }

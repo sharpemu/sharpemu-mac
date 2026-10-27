@@ -398,8 +398,9 @@ internal static partial class MetalV2Presenter
     /// <returns>True when nothing is runnable and the worker should park.</returns>
     internal static bool RunWorkerStep(MetalRenderHost host, MetalGpuWorkerRelay relay)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var cpuStarted = DsTrace.SelfCpuNs();
+        var profile = host.HasIssueStream || RenderPhaseProfile.Enabled;
+        var started = profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        var cpuStarted = profile ? DsTrace.SelfCpuNs() : 0;
         try
         {
             using var pool = MetalAutoreleasePool.Enter();
@@ -407,7 +408,11 @@ internal static partial class MetalV2Presenter
             host.RunCommandStreamSlices(64);
             return !host.CommandStream.HasUnblockedPending && !relay.HasPendingCommands;
         }
-        finally { host.NoteIssueProducerTicks(System.Diagnostics.Stopwatch.GetTimestamp() - started, (long)(DsTrace.SelfCpuNs() - cpuStarted)); }
+        finally
+        {
+            if (profile)
+                host.NoteIssueProducerTicks(System.Diagnostics.Stopwatch.GetTimestamp() - started, (long)(DsTrace.SelfCpuNs() - cpuStarted));
+        }
     }
 
     private static void RunWorker()

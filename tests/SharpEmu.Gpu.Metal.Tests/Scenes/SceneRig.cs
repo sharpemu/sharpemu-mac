@@ -58,7 +58,7 @@ internal sealed unsafe class SceneRig : IDisposable
 
     public SceneRig(nint device, bool splitWorker = false, bool useEnvironment = false)
     {
-        if (useEnvironment) splitWorker = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") != "0";
+        if (useEnvironment) splitWorker = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") == "1";
         _splitWorker = splitWorker;
         _savedBackend = BackendFields.Select(field => field.GetValue(null)).ToArray();
         // A loud refusal ends the process in the emulator; here it fails the scene instead.

@@ -30,7 +30,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
     private OrderedCommandStreamHost? _issues;
     private SharpEmu.HLE.Host.HostBackgroundThread? _issueWorker;
     private bool _splitIssueWorker;
-    private static readonly bool SplitWorker = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") != "0";
+    private static readonly bool SplitWorker = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WORKER_SPLIT") == "1";
     private AgcExports.CommandStreamTranslation? _translation;
     private IMetalFlipTarget? _flipTarget;
     private long _lastProgressTicks;
@@ -50,12 +50,18 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
         _flipTarget = flipTarget;
         ApplyTranslationSwitches();
         _splitIssueWorker = splitWorker ?? SplitWorker;
-        _issues = new OrderedCommandStreamHost(this, _splitIssueWorker, () => _relay.HasPendingCommands,
-            MaintainIssueConsumer, SynchronizeShaderCode,
-            blocks: IssueLimit("SHARPEMU_METAL_V2_ISSUE_BLOCKS", 4, 2, 8),
-            itemsPerBlock: IssueLimit("SHARPEMU_METAL_V2_ISSUE_BLOCK_ITEMS", 64, 16, 128));
-        _commandStream = new CommandStreamQueue(_issues);
-        _issues.AttachQueue(_commandStream);
+        // Serial execution already owns the live interpreter banks and every target
+        // call. Only cross-thread issues (or explicit recipe capture) need snapshots,
+        // ownership acknowledgements and the issue consumer's identity planner.
+        if (_splitIssueWorker || _recipes is not null)
+        {
+            _issues = new OrderedCommandStreamHost(this, _splitIssueWorker, () => _relay.HasPendingCommands,
+                MaintainIssueConsumer, SynchronizeShaderCode,
+                blocks: IssueLimit("SHARPEMU_METAL_V2_ISSUE_BLOCKS", 4, 2, 8),
+                itemsPerBlock: IssueLimit("SHARPEMU_METAL_V2_ISSUE_BLOCK_ITEMS", 64, 16, 128));
+        }
+        _commandStream = new CommandStreamQueue((ICommandStreamHost?)_issues ?? this);
+        _issues?.AttachQueue(_commandStream);
         if (CommandStreamQueue.GpuCompletionWakeEnabled)
         {
             _completions.SetCompletionObserver(_commandStream.NotifyGpuCompletionObserved);
@@ -83,13 +89,26 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
             });
     }
 
-    internal void RunIssueRelays() => _issues!.RunPendingCommands();
+    internal void RunIssueRelays()
+    {
+        if (_issues is { } issues) issues.RunPendingCommands();
+        else if (_relay.HasPendingCommands) RunPendingCommands();
+    }
+    internal bool HasIssueStream => _issues is not null;
     internal void WakeIssueWorker() => _issues?.WakeConsumer();
-    internal void NoteIssueProducerTicks(long ticks, long cpuNanoseconds) => _issues?.NoteProducerTicks(ticks, cpuNanoseconds);
-    internal void RunOnIssueConsumer(Action action) => _issues!.ExecuteGuestMemoryOperation(action);
+    internal void NoteIssueProducerTicks(long ticks, long cpuNanoseconds)
+    {
+        if (_issues is { } issues) issues.NoteProducerTicks(ticks, cpuNanoseconds);
+        else RenderPhaseProfile.RecordWorkerService(RenderPhaseProfile.Worker.A, ticks, cpuNanoseconds);
+    }
+    internal void RunOnIssueConsumer(Action action)
+    {
+        if (_issues is { } issues) issues.ExecuteGuestMemoryOperation(action);
+        else action();
+    }
     internal void StopIssueWorker()
     {
-        _issues!.Stop();
+        _issues?.Stop();
         if (_issueWorker is { } worker && !worker.Join(5000))
             throw new TimeoutException("The Metal issue consumer did not stop.");
         _issueWorker = null;
@@ -2226,7 +2245,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost, ICommandIssu
     public void RunCommandStreamSlices(int maxSlices)
     {
         RunCommandStreamSlicesCore(maxSlices);
-        _issues!.Maintenance();
+        if (_issues is { } issues) issues.Maintenance();
+        else MaintainIssueConsumer();
     }
 
     private void RunCommandStreamSlicesCore(int maxSlices)

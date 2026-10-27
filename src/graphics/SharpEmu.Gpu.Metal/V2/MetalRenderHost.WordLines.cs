@@ -256,6 +256,9 @@ internal sealed partial class MetalRenderHost : IResourceDependencySource
 
     /// <summary>The word-line fields of the WAITS line; resets them.</summary>
     private string TakeWordLineCounters() =>
+        $" final_read_hint_hits={Interlocked.Exchange(ref _finalReadHintHits, 0)}" +
+        $" final_read_hint_fills={Interlocked.Exchange(ref _finalReadHintFills, 0)}" +
+        $" final_read_hint_refused={Interlocked.Exchange(ref _finalReadHintRefused, 0)}" +
         $" word_reads={Interlocked.Exchange(ref _wordReads, 0)}" +
         $" word_read_scopes={Interlocked.Exchange(ref _wordReadScopes, 0)}" +
         $" word_line_hits={Interlocked.Exchange(ref _wordLineHits, 0)}" +
