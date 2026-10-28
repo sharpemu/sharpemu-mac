@@ -107,11 +107,35 @@ public sealed class Gen5MslMrtzExportTests(ITestOutputHelper output)
         Assert.DoesNotContain("[[sample_mask]]", shader.Source, StringComparison.Ordinal);
     }
 
-    private static Gen5MslShader Compile(uint[] words, Gen5ColorExportFormat? format, bool stencil, bool sampleMask)
+    // The guest asked for the depth test before the shader, but a depth, stencil or coverage export decides
+    // the fragment after the shader ran, and Metal rejects depth or stencil outputs with
+    // [[early_fragment_tests]]: no export may get the attribute; without one the request's flag does.
+    [Theory]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(true, true, true, false)]
+    [InlineData(false, false, false, true)]
+    public void AnEarlyDepthRequestGetsTheAttributeOnlyWithoutDepthStencilOrCoverageExports(
+        bool depth, bool stencil, bool sampleMask, bool attribute)
+    {
+        var shader = Compile(Program([Depth, 0x1A5, 0xFFFF, 0], 0xF, 0), Gen5ColorExportFormat.Abgr32, stencil, sampleMask,
+            depth, earlyDepth: true);
+        Assert.Equal(attribute, shader.Source.Contains("[[early_fragment_tests]]", StringComparison.Ordinal));
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1")
+        {
+            Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out var error), $"{error}\n{shader.Source}");
+            MetalNative.ReleaseCollisionLibrary(library);
+        }
+    }
+
+    private static Gen5MslShader Compile(uint[] words, Gen5ColorExportFormat? format, bool stencil, bool sampleMask,
+        bool depth = false, bool earlyDepth = false)
     {
         var program = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("pixel-mrtz-export", words, 0, 0));
         var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Pixel, pixelDepthExportFormat: format,
-            pixelStencilExportEnable: stencil, pixelSampleMaskExportEnable: sampleMask);
+            pixelDepthExportEnable: depth, pixelStencilExportEnable: stencil, pixelSampleMaskExportEnable: sampleMask,
+            pixelEarlyDepth: earlyDepth);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         return shader;
     }

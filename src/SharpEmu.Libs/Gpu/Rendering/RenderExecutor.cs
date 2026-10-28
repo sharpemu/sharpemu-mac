@@ -1025,7 +1025,7 @@ public sealed partial class RenderExecutor
         var control = shaderInterface.DepthShaderControl;
         // The export format describes data; it does not enable shader execution.
         return control.KillEnable || control.DepthExportEnable || control.StencilExportEnable ||
-               control.MaskExportEnable || control.DualExportEnable || control.ExecuteOnNoop;
+               control.MaskExportEnable || control.ExecuteOnHierFail || control.ExecuteOnNoop;
     }
 
     private static bool HasActivePixelShader(RegisterBanks banks)
