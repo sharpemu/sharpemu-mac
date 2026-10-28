@@ -123,20 +123,28 @@ public sealed partial class ResourceMaterializationCache
             if (!_hasPrint || EntryPrint(built) is not { } print)
                 return null;
             var key = MixPrint(structure, print);
-            _recentByPrint.TryGetValue(key, out var previous);
+            Entry? previous;
             if (_recentByPrint.Count >= RecentCapacity)
             {
+                _recentByPrint.TryGetValue(key, out previous);
                 _recentByPrint.Clear();
                 RecentBytes -= _recentByPrintBytes;
                 _recentByPrintBytes = 0;
+                _recentByPrint[key] = built;
             }
-            else if (previous is not null)
+            else
             {
-                RecentBytes -= previous.EstimatedBytes;
-                _recentByPrintBytes -= previous.EstimatedBytes;
+                // One lookup: a miss whose print is new, the usual case, pays for one hash probe.
+                ref var slot = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_recentByPrint, key, out _);
+                previous = slot;
+                slot = built;
+                if (previous is not null)
+                {
+                    RecentBytes -= previous.EstimatedBytes;
+                    _recentByPrintBytes -= previous.EstimatedBytes;
+                }
             }
 
-            _recentByPrint[key] = built;
             RecentBytes += built.EstimatedBytes;
             _recentByPrintBytes += built.EstimatedBytes;
             return previous;
@@ -573,12 +581,33 @@ public sealed partial class ResourceMaterializationCache
         private static ulong MixPrint(ulong print, ulong value) =>
             System.Numerics.BitOperations.RotateLeft((print ^ value) * 0x9E37_79B9_7F4A_7C15UL, 29);
 
+        // Folds the words into the print in four independent lanes: one dependent chain of up to
+        // PrintWords multiplies was most of what a print cost.
+        private static ulong FoldPrint(ulong print, ReadOnlySpan<ulong> words)
+        {
+            ulong first = print, second = print ^ 0x1357_9BDF_2468_ACE1UL, third = print ^ 0x0F1E_2D3C_4B5A_6979UL,
+                fourth = print ^ 0x7A69_5847_3625_1403UL;
+            var index = 0;
+            for (; index + 4 <= words.Length; index += 4)
+            {
+                first = MixPrint(first, words[index]);
+                second = MixPrint(second, words[index + 1]);
+                third = MixPrint(third, words[index + 2]);
+                fourth = MixPrint(fourth, words[index + 3]);
+            }
+
+            for (; index < words.Length; index++)
+                first = MixPrint(first, words[index]);
+            return MixPrint(MixPrint(MixPrint(first, second), third), fourth);
+        }
+
         // The print of the descriptors the entry read through every candidate not rejected: what the
         // print of the same object drawn again is, wherever its table then lies. Null when none has one.
         private ulong? EntryPrint(Entry entry)
         {
             var print = PrintSeed;
             var any = false;
+            Span<ulong> words = stackalloc ulong[PrintWords];
             for (var index = 0; index < _candidates.Length; index++)
             {
                 var offsets = _printOffsets[index];
@@ -590,26 +619,54 @@ public sealed partial class ResourceMaterializationCache
                 var addressBase = RawBase(entry.UserData, candidate, entry.UserData[candidate.UserData]);
                 any = true;
                 print = MixPrint(print, (ulong)index);
-                foreach (var offset in offsets)
+                var found = words[..offsets.Length];
+                if (!TryRecordedRun(entry, addressBase, offsets, found))
                 {
-                    print = TryFindWord(entry, unchecked(addressBase + (ulong)offset), out var at)
-                        ? MixPrint(print, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(at, sizeof(uint))))
-                        : MixPrint(print, MissingWord);
+                    for (var word = 0; word < offsets.Length; word++)
+                    {
+                        found[word] = TryFindWord(entry, unchecked(addressBase + (ulong)offsets[word]), out var at)
+                            ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(at, sizeof(uint)))
+                            : MissingWord;
+                    }
                 }
+
+                print = FoldPrint(print, found);
             }
 
             return any ? print : null;
         }
 
+        // The words at the offsets when one recorded range holds them all, as a descriptor table's
+        // usually does: one search for the run instead of one per word, with the same words found.
+        private static bool TryRecordedRun(Entry entry, ulong addressBase, long[] offsets, Span<ulong> words)
+        {
+            var first = unchecked(addressBase + (ulong)offsets[0]);
+            if (!TryFindRange(entry, first, out var range, out var at))
+                return false;
+            var last = unchecked(first + (ulong)(offsets[^1] - offsets[0]));
+            if (last < first || last - entry.RangeAddresses[range] + sizeof(uint) > (ulong)entry.RangeLengths[range])
+                return false;
+            // A later range that starts inside the run would be where the search finds its words
+            // from there on (overlapping ranges, which only unaligned reads make).
+            if (range + 1 < entry.RangeAddresses.Length && entry.RangeAddresses[range + 1] <= last)
+                return false;
+            var bytes = entry.Bytes.AsSpan(at);
+            for (var word = 0; word < offsets.Length; word++)
+                words[word] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(offsets[word] - offsets[0])..]);
+            return true;
+        }
+
         // The print of the descriptors behind this draw's rebased pointers, read where they lie now;
         // zero when no rebased candidate has one. Words that cannot be read print as missing, the
-        // same for the lookup and for the entry stored after it.
+        // same for the lookup and for the entry stored after it. Remembered for TryRecallPrint.
         public ulong MemoryPrint(IReadOnlyList<uint> userData, ResidentGuestBytesReader reader, ref byte[] scratch)
         {
             if (!_hasPrint || Active.Length == 0)
                 return 0;
             var print = PrintSeed;
+            var bases = PrintSeed;
             var any = false;
+            Span<ulong> words = stackalloc ulong[PrintWords];
             for (var index = 0; index < _candidates.Length; index++)
             {
                 var offsets = _printOffsets[index];
@@ -621,21 +678,62 @@ public sealed partial class ResourceMaterializationCache
                 var addressBase = RawBase(userData, candidate, userData[candidate.UserData]);
                 any = true;
                 print = MixPrint(print, (ulong)index);
+                bases = MixPrint(bases, addressBase);
                 var length = (int)(offsets[^1] - offsets[0]) + sizeof(uint);
                 if (scratch.Length < length)
                     scratch = new byte[Math.Max(length, scratch.Length * 2)];
                 var bytes = scratch.AsSpan(0, length);
                 var start = (long)addressBase + offsets[0];
                 var read = start >= 0 && reader((ulong)start, bytes, false);
-                foreach (var offset in offsets)
+                var found = words[..offsets.Length];
+                for (var word = 0; word < offsets.Length; word++)
                 {
-                    print = read
-                        ? MixPrint(print, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(offset - offsets[0])..]))
-                        : MixPrint(print, MissingWord);
+                    found[word] = read
+                        ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(offsets[word] - offsets[0])..])
+                        : MissingWord;
                 }
+
+                print = FoldPrint(print, found);
             }
 
-            return any ? print : 0;
+            if (!any)
+                return 0;
+            (_printMemo ??= new (ulong, ulong[]?, ulong)[PrintMemoSlots])[MemoSlot(bases)] = (bases, Active, print);
+            return print;
+        }
+
+        // The print each recent set of rebased pointers gave (MemoryPrint), so a hit through the same
+        // pointers finds its key without reading the descriptors here and again in Validate. A recalled
+        // print only guesses the key: Entry.Matches and Validate still decide the hit, and when there
+        // is none the draw reads the print again. Allocated once a pointer with a print is rebased.
+        private const int PrintMemoSlots = 32;
+        private (ulong Bases, ulong[]? Active, ulong Print)[]? _printMemo;
+
+        private static int MemoSlot(ulong bases) => (int)(bases >> 59);
+
+        public bool TryRecallPrint(IReadOnlyList<uint> userData, out ulong print)
+        {
+            print = 0;
+            if (_printMemo is not { } memo || Active.Length == 0)
+                return false;
+            var bases = PrintSeed;
+            var any = false;
+            for (var index = 0; index < _candidates.Length; index++)
+            {
+                var candidate = _candidates[index];
+                if (_printOffsets[index].Length == 0 || !IsUsed(Active, candidate.UserData))
+                    continue;
+                if (candidate.UserData >= userData.Count || candidate.High >= userData.Count)
+                    return false;
+                bases = MixPrint(bases, RawBase(userData, candidate, userData[candidate.UserData]));
+                any = true;
+            }
+
+            ref readonly var slot = ref memo[MemoSlot(bases)];
+            if (!any || slot.Bases != bases || !ReferenceEquals(slot.Active, Active))
+                return false;
+            print = slot.Print;
+            return true;
         }
 
         // The window [start, start + size) of reads a candidate's base covers in this entry.
@@ -1294,7 +1392,19 @@ public sealed partial class ResourceMaterializationCache
             drawKey = DrawKeyOf(plan, inputs);
             _learnedUserData.TryGetValue(drawKey, out learned);
             rebase = RebaseOf(drawKey, plan);
-            key = KeyFor(drawKey, inputs, learned, rebase, residentReader);
+            key = KeyOf(drawKey, inputs.UserData, learned, rebase.Active);
+        }
+
+        if (rebase.TryRecallPrint(inputs.UserData, out var recalled) &&
+            TryRecalledHit(WithPrint(key, recalled), plan, inputs, residentReader, rebase, ref snapshot, ref specialization))
+        {
+            failure = default;
+            return true;
+        }
+
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CacheKey))
+        {
+            key = WithPrint(key, rebase.MemoryPrint(inputs.UserData, residentReader, ref _printScratch));
         }
 
         bool found;
@@ -1791,11 +1901,46 @@ public sealed partial class ResourceMaterializationCache
     // now (AddressRebase.MemoryPrint): objects drawn through moving tables keep apart, and the same
     // object finds its entry wherever its table lies this time.
     private ulong KeyFor(ulong drawKey, ResourceRuntimeInputs inputs, ulong[]? learned, AddressRebase rebase,
-        ResidentGuestBytesReader residentReader)
+        ResidentGuestBytesReader residentReader) =>
+        WithPrint(KeyOf(drawKey, inputs.UserData, learned, rebase.Active),
+            rebase.MemoryPrint(inputs.UserData, residentReader, ref _printScratch));
+
+    private static ulong WithPrint(ulong key, ulong print) => print == 0 ? key : key ^ (print * 0xC2B2_AE3D_27D4_EB4FUL);
+
+    // A hit under the key a recalled print gives (AddressRebase.TryRecallPrint), decided by the
+    // checks every hit passes. Anything short of a hit leaves the draw to the full path, which
+    // reads the print again and finds, refreshes or rebuilds the entry under the key it gives.
+    private bool TryRecalledHit(ulong key, ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+        ResidentGuestBytesReader residentReader, AddressRebase rebase, ref ResourceSnapshot snapshot,
+        ref ResourceSpecialization specialization)
     {
-        var key = KeyOf(drawKey, inputs.UserData, learned, rebase.Active);
-        var print = rebase.MemoryPrint(inputs.UserData, residentReader, ref _printScratch);
-        return print == 0 ? key : key ^ (print * 0xC2B2_AE3D_27D4_EB4FUL);
+        Entry cached;
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CacheFind))
+        {
+            if (!TryFind(key, plan, inputs, rebase.Active, out cached))
+                return false;
+        }
+
+        for (Entry? previous = null, variant = cached; variant is not null; previous = variant, variant = variant.Next)
+        {
+            if (!variant.Matches(plan, inputs, rebase.Active) || !rebase.AppliesTo(variant) ||
+                !Validate(variant, residentReader, rebase, inputs.UserData, false, out _, out _, out _, inputs.CompareResidentMemory))
+                continue;
+            if (previous is not null)
+            {
+                previous.Next = variant.Next;
+                variant.Next = cached;
+                Store(key, variant);
+            }
+
+            Hits++;
+            Interlocked.Increment(ref _totalHits);
+            snapshot = HitSnapshot(variant, inputs.UserData, rebase);
+            specialization = variant.Specialization;
+            return true;
+        }
+
+        return false;
     }
 
     // SHARPEMU_RESOURCE_CONTENT_KEY=0: no content print, so a rebased pointer's key holds every
