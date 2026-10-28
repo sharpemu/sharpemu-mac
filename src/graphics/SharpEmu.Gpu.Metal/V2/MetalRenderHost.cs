@@ -1568,7 +1568,9 @@ internal sealed partial class MetalRenderHost :
 
         // A packet-sized copy the host can do itself costs nothing and records no GPU
         // write, so the poll that usually follows it does not wait for a submission.
-        if (allowHost && CanWriteGuestOnHost(destination, size))
+        // Not when recorded work still writes the source: the host would have to read it,
+        // which waits for that work (a DMA of a count or a query result the GPU produced).
+        if (allowHost && CanWriteGuestOnHost(destination, size) && !HostCopyWouldWait(source, size))
         {
             CopyGuestBytesOnHost(destination, source, size);
             _imageCache.InvalidateMemory(destination, size);
@@ -1614,6 +1616,33 @@ internal sealed partial class MetalRenderHost :
         }
         _imageCache.InvalidateMemoryFromGpu(destination, size);
         NoteGuestMemoryWrite(destination, size, MetalGpuWriteOrigin.Copy);
+    }
+
+    // SHARPEMU_METAL_V2_HOST_COPY_PENDING_SOURCE=1 copies on the host even when recorded work
+    // still writes the source, which waits for that work, as before.
+    private static readonly bool HostCopyOfPendingSource =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_HOST_COPY_PENDING_SOURCE") == "1";
+
+    private long _hostCopiesDeclined;
+
+    // Whether reading the source of a copy on the host would wait for the GPU. The blit that runs
+    // instead reads it where the copy sits in the stream, after the work that writes it, which is
+    // the order the guest asked for; the destination it writes is a recorded write like any other.
+    private bool HostCopyWouldWait(ulong source, ulong size)
+    {
+        if (HostCopyOfPendingSource ||
+            (!_gpuWrites.MayCover(source, size) && !_imageCache.MayOwn(source, size)))
+        {
+            return false;
+        }
+
+        var wait = _imageCache.HasGpuModifiedImageBytes(source, size) || PendingSerialHinted(source, size) != 0;
+        if (wait)
+        {
+            Interlocked.Increment(ref _hostCopiesDeclined);
+        }
+
+        return wait;
     }
 
     private void CopyGuestBytesOnHost(ulong destination, ulong source, ulong size)
@@ -1789,6 +1818,30 @@ internal sealed partial class MetalRenderHost :
         }
     }
 
+    // SHARPEMU_METAL_V2_SPECULATIVE_WAITS=1 lets work done ahead of need (the pipeline look-ahead's
+    // program preparation, GpuFatal.IsSpeculative) wait for the GPU like the stream does.
+    private static readonly bool SpeculativeWaits =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_SPECULATIVE_WAITS") == "1";
+
+    private long _speculativeWaitsAbandoned;
+
+    // Work done ahead of need reads registers and memory the stream has not reached: bytes the GPU
+    // is still writing there may not even be the ones the stream will read, and the stream reads
+    // them itself when it gets there. So that work is abandoned (as a fatal condition in it is)
+    // instead of the worker waiting for the GPU on its behalf. Nothing has been recorded or waited
+    // for when this throws, so the stream's own read later sees exactly what it saw before.
+    private void AbandonSpeculativeWait(ulong address, ulong size)
+    {
+        if (SpeculativeWaits || !SharpEmu.Libs.Gpu.Scheduling.GpuFatal.IsSpeculative)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _speculativeWaitsAbandoned);
+        throw new SharpEmu.Libs.Gpu.Scheduling.GpuFatal.AbandonedWorkException(
+            $"A read ahead of the stream would wait for the GPU: address=0x{address:X16} size=0x{size:X}.");
+    }
+
     // Lands every recorded write into the range: an image's writeback, or a store or copy.
     private void WaitForGuestBytes(ulong address, ulong size)
     {
@@ -1796,6 +1849,7 @@ internal sealed partial class MetalRenderHost :
         _lastReadSize = size;
         if (_imageCache.HasGpuModifiedImageBytes(address, size))
         {
+            AbandonSpeculativeWait(address, size);
             // The writeback is recorded into the buffer being built, so this one has
             // to be committed before the bytes can be read.
             FlushGpuWrites(address, size, MetalWritebackCause.HostRead);
@@ -1808,6 +1862,7 @@ internal sealed partial class MetalRenderHost :
         var pending = PendingSerialHinted(address, size);
         if (pending != 0)
         {
+            AbandonSpeculativeWait(address, size);
             if (size <= SmallReadWaitBytes)
             {
                 ReportSmallReadWaitSite(address, size);
@@ -2444,6 +2499,8 @@ internal sealed partial class MetalRenderHost :
             .Append(" gpu_gds=").Append(TakeGpuGdsTransfers())
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
+            .Append(" host_copies_declined=").Append(Interlocked.Exchange(ref _hostCopiesDeclined, 0))
+            .Append(" speculative_waits_abandoned=").Append(Interlocked.Exchange(ref _speculativeWaitsAbandoned, 0))
             .Append(TakeCopyReadCounters())
             .Append(" inline_eop=").Append(TakeInlineCompletions())
             .Append(" gpu_labels=").Append(labels.GpuTimed)

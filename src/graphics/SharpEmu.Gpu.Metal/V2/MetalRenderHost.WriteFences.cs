@@ -26,11 +26,22 @@ namespace SharpEmu.Gpu.Metal.V2;
 // CPU writes is unchanged: pending command-processor and label bytes are still applied by the
 // callers, and every other user of the write ranges still sees the serial pending.
 //
+// Eager fences: a block is learned only after a read of it has waited for the whole buffer, so
+// the first read of a word, and every read of a word a ring buffer moves to a new block, paid the
+// full wait. By default any recorded write since the last fence asks for one, so the first read
+// waits for its writer too. The fence is still planted only where a commit was legal and no render
+// pass is open, so what it orders is exactly what the learned fence orders; only how often one is
+// planted changes (at most once per coalesced submission, CoalesceMaxSubmissions per buffer).
+//
 // SHARPEMU_METAL_V2_WRITE_FENCES=0 plants none and waits for whole command buffers again.
+// SHARPEMU_METAL_V2_EAGER_WRITE_FENCES=0 plants them only for blocks reads have waited on.
 internal sealed partial class MetalRenderHost
 {
     private static readonly bool WriteFencesDefault =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WRITE_FENCES") != "0";
+
+    private static readonly bool EagerWriteFencesDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EAGER_WRITE_FENCES") != "0";
 
     private static readonly nint SelNotifyListener = MetalNative.Selector("notifyListener:atValue:block:");
 
@@ -56,6 +67,9 @@ internal sealed partial class MetalRenderHost
 
     /// <summary>Whether reads may wait for a write fence instead of the whole command buffer.</summary>
     internal bool WriteFences { get; set; } = WriteFencesDefault;
+
+    /// <summary>Whether any recorded write asks for a fence, not only one into a block a read waited on.</summary>
+    internal bool EagerWriteFences { get; set; } = EagerWriteFencesDefault;
 
     /// <summary>Tests only: runs with the command buffer just after a fence is planted.</summary>
     internal Action<nint>? WriteFencePlantedHook { get; set; }
@@ -99,11 +113,22 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    // A recorded write: one into a block the CPU has waited on asks for a fence at the next boundary.
+    // A recorded write: any one (eager), or one into a block the CPU has waited on, asks for a fence
+    // at the next boundary.
     private void NoteFencedWrite(ulong address, ulong size)
     {
-        if (_writeFenceWanted || _observedReadBlocks.Count == 0 || !WriteFences || size == 0 ||
-            address > ulong.MaxValue - size)
+        if (_writeFenceWanted || !WriteFences || size == 0 || address > ulong.MaxValue - size)
+        {
+            return;
+        }
+
+        if (EagerWriteFences && !_writeFenceUnavailable)
+        {
+            _writeFenceWanted = true;
+            return;
+        }
+
+        if (_observedReadBlocks.Count == 0)
         {
             return;
         }

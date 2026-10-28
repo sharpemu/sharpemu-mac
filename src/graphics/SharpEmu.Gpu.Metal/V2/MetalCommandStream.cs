@@ -2353,9 +2353,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         uint dispatchInitiator)
     {
         _prefetchingPipeline = true;
+        var abandoned = Interlocked.Read(ref _speculativeWaitsAbandoned);
         try
         {
             _translation?.PrefetchDispatchPipeline(banks, groupsX, groupsY, groupsZ, dispatchInitiator);
+        }
+        catch (SharpEmu.Libs.Gpu.Scheduling.GpuFatal.AbandonedWorkException) when (
+            Interlocked.Read(ref _speculativeWaitsAbandoned) != abandoned)
+        {
+            // This dispatch reads bytes the GPU is still writing (AbandonSpeculativeWait): its
+            // pipeline is left to the dispatch itself, and the look-ahead goes on to the next one.
         }
         finally
         {
