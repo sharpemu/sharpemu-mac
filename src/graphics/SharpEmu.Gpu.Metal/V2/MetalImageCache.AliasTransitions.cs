@@ -39,10 +39,13 @@ internal sealed partial class MetalImageCache
         _aliasTransitionRefusals.Clear();
         var readRuns = Interlocked.Exchange(ref _aliasCpuReadRuns, 0);
         var readBytes = Interlocked.Exchange(ref _aliasCpuReadBytes, 0);
+        var consumers = TakeConsumerRuns();
         return $"alias_transitions=[fused:{counts.Fused},discarded:{counts.Discarded},round-trip:{counts.RoundTrip}] " +
             $"alias_mib=[fused:{Mb(counts.FusedBytes)},discarded:{Mb(counts.DiscardedBytes)},round-trip:{Mb(counts.RoundTripBytes)}] " +
             $"alias_transition_refused=[{refusals}] alias_cpu_read_runs={readRuns} " +
-            $"alias_cpu_read_requested_mib={Mb(readBytes)}";
+            $"alias_cpu_read_requested_mib={Mb(readBytes)} " +
+            $"consumer_runs=[published:{consumers.Runs},skipped:{consumers.AlreadyPublished},gpu_writes_kept:{consumers.GpuWritesKept}] " +
+            $"consumer_run_mib={Mb(consumers.RunBytes)}";
     }
 
     // The pass replaces every visible texel of this image. Refuse when an alias owns any

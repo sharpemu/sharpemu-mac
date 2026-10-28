@@ -1622,9 +1622,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>
     /// Writes every GPU-modified image that overlaps the range back into guest
     /// memory. Called before a buffer binding, an incompatible image request or a
-    /// host read can observe the bytes.
+    /// host read can observe the bytes. <paramref name="written"/> says the consumer also
+    /// writes them, and is followed by <see cref="InvalidateMemoryFromGpu"/> over the range.
     /// </summary>
-    public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause)
+    public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause, bool written = false)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.GpuWriteFlush);
         if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
@@ -1637,20 +1638,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             if (_slots.TryGet(imageIdentifier) is { } image && image.GpuOverlaps(address, size))
             {
-                var (start, end) = image.OverlapWithin(address, size);
-                if (AliasTransitionsEnabled && cause == MetalWritebackCause.HostRead &&
-                    !image.Description.HasStencil && !image.IsCpuDirty && image.FirstLevel == 0 &&
-                    image.Sparse is null && (start != 0 || end != image.Description.Data.Size))
+                if (TryPublishConsumerRunLocked(image, address, size, cause, written))
                 {
-                    if (image.IsPublished(start, end)) continue;
-                    if (TryWriteBackRun(image, start, end, cause, out var refusal))
-                    {
-                        _aliasCpuReadRuns++;
-                        _aliasCpuReadBytes += (long)(end - start);
-                        continue;
-                    }
-                    RefuseAliasTransition($"cpu-read-{refusal}");
+                    continue;
                 }
+
                 WriteBackToGuest(image, cause);
             }
         }
@@ -1697,6 +1689,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
         {
             if (_slots.TryGet(imageIdentifier) is not { } image || !image.Overlaps(address, size))
+            {
+                continue;
+            }
+
+            if (TryKeepGpuOwnershipOverGpuWriteLocked(image, address, size))
             {
                 continue;
             }
@@ -1934,6 +1931,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
         image.MarkPublished(aligned, alignedEnd);
         NoteOwnGuestWrite(description.Data.Address + aligned, alignedEnd - aligned);
+        // Fenced as a whole writeback is: a store that replaces the image without asking it
+        // for its bytes (DiscardFullyOverwrittenByCpuLocked) waits for this run to land first.
+        FenceWriteback(description.Data.Address + aligned, alignedEnd - aligned, context.SubmissionSerial, cause);
+        _writebackBytes += (long)(alignedEnd - aligned);
         _writebackCauses[(int)cause]++;
         _partialWritebacks++;
         _partialWritebackBytesSaved += (long)(description.Data.Size - (alignedEnd - aligned));
@@ -2793,6 +2794,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             context.ProfileEncoded(ProfileLabel("writeback", in description));
         }
         image.ClearGpuModified();
+        _writebackBytes += (long)written;
         // The retile is a GPU store into guest memory: until it completes the bytes
         // in guest memory are the old ones, so a read of them has to wait for it.
         NoteOwnGuestWrite(description.Data.Address, description.Data.Size);
