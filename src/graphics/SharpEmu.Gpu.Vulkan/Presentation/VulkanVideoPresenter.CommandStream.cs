@@ -1050,7 +1050,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 IndexedDrawTrace.OnFlip(version);
                 VisibilityResultTrace.OnFlip(version);
                 RenderDocCapture.OnGuestFlipBoundary(version);
-                VideoOutBackendServices.TraceGpuFlip(_guestMemory, handle, index, flipMode, flipArg, displayBuffer.Address, VideoOutBackendServices.GetFlipEventCount(requestId));
+                VideoOutBackendServices.TraceGpuFlip(_guestMemory, handle, index, flipMode, flipArg, displayBuffer.Address, requestId);
             }
             finally
             {

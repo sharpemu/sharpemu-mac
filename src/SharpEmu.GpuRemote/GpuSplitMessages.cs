@@ -489,6 +489,12 @@ public struct ReserveFlipResponse
     /// <summary>A's <c>IsHdrOutputRequested</c> after the reservation.</summary>
     public uint HdrRequested;
     public ulong RequestId;
+
+    /// <summary>
+    /// The display buffer the flip names, read with the reservation so the GPU process does not
+    /// ask for it in a second call (<see cref="DisplayBufferResponse.Found"/> is zero when none).
+    /// </summary>
+    public DisplayBufferResponse Buffer;
 }
 
 [StructLayout(LayoutKind.Sequential)]

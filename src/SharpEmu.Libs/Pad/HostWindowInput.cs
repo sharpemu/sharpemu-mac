@@ -21,6 +21,31 @@ public static class HostWindowInput
     /// <summary>Moves on every change of the state below; a reader polls it to find changes.</summary>
     public static long Version => Interlocked.Read(ref _version);
 
+    // Under Gate: moves the version and wakes a WaitForChange.
+    private static void Bump()
+    {
+        _version++;
+        Monitor.PulseAll(Gate);
+    }
+
+    /// <summary>
+    /// Blocks until <see cref="Version"/> differs from <paramref name="seen"/> or <paramref name="timeout"/>
+    /// passes; true when it changed. A change is seen as soon as it is made, not at the next poll.
+    /// </summary>
+    public static bool WaitForChange(long seen, TimeSpan timeout)
+    {
+        lock (Gate)
+        {
+            if (_version != seen)
+            {
+                return true;
+            }
+
+            _ = Monitor.Wait(Gate, timeout);
+            return _version != seen;
+        }
+    }
+
     /// <summary>
     /// The whole state at once, for the two-process split's GPU process, which owns the window and
     /// sends it to the guest process: the pressed keys (as many as fit), whether the window has
@@ -59,7 +84,7 @@ public static class HostWindowInput
                 PressedKeys.Add(key);
             }
 
-            _version++;
+            Bump();
         }
     }
 
@@ -70,7 +95,7 @@ public static class HostWindowInput
             _focused = true;
             _gamepadOutput = gamepadOutput;
             PressedKeys.Clear();
-            _version++;
+            Bump();
         }
 
         HostWindowInputSource.Set(Source);
@@ -86,7 +111,7 @@ public static class HostWindowInput
             _gamepadState = default;
             _gamepadOutput = null;
             PressedKeys.Clear();
-            _version++;
+            Bump();
         }
 
         HostWindowInputSource.Clear(Source);
@@ -102,7 +127,7 @@ public static class HostWindowInput
                 PressedKeys.Clear();
             }
 
-            _version++;
+            Bump();
         }
     }
 
@@ -119,7 +144,7 @@ public static class HostWindowInput
                 PressedKeys.Remove(virtualKey);
             }
 
-            _version++;
+            Bump();
         }
     }
 
@@ -130,7 +155,7 @@ public static class HostWindowInput
             _gamepadConnected = state.Connected;
             _gamepadName = name;
             _gamepadState = state;
-            _version++;
+            Bump();
         }
     }
 
@@ -141,7 +166,7 @@ public static class HostWindowInput
             _gamepadConnected = false;
             _gamepadName = null;
             _gamepadState = default;
-            _version++;
+            Bump();
         }
     }
 

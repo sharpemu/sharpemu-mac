@@ -136,12 +136,16 @@ public static class VideoOutBackendServices
             VideoOutExports.SetSelectedGpuName(gpuName);
     }
 
-    public static void TraceGpuFlip(ICpuMemory memory, int handle, int bufferIndex, int flipMode, long flipArg, ulong address, int flipEventCount)
+    // Takes the request id rather than its event count: under the split the count is a round trip
+    // into the guest process, and the remote bridge traces nothing, so only the in-process path
+    // reads it (a local lookup).
+    public static void TraceGpuFlip(ICpuMemory memory, int handle, int bufferIndex, int flipMode, long flipArg, ulong address, ulong requestId)
     {
         if (Bridge is { } bridge)
-            bridge.TraceGpuFlip(handle, bufferIndex, flipMode, flipArg, address, flipEventCount);
+            bridge.TraceGpuFlip(handle, bufferIndex, flipMode, flipArg, address, requestId);
         else
-            VideoOutExports.TraceGpuFlip(memory, handle, bufferIndex, flipMode, flipArg, address, flipEventCount);
+            VideoOutExports.TraceGpuFlip(
+                memory, handle, bufferIndex, flipMode, flipArg, address, VideoOutExports.GetFlipEventCount(requestId));
     }
 
     public static bool TryGetDisplayBufferInfo(int handle, int bufferIndex, out DisplayBufferInfo info)
@@ -210,7 +214,7 @@ public interface IVideoOutBackendBridge
 
     // The trace reads guest memory through the caller's memory in one process; across the
     // split it gets the flip's numbers only.
-    void TraceGpuFlip(int handle, int bufferIndex, int flipMode, long flipArg, ulong address, int flipEventCount);
+    void TraceGpuFlip(int handle, int bufferIndex, int flipMode, long flipArg, ulong address, ulong requestId);
 
     bool TryGetDisplayBufferInfo(int handle, int bufferIndex, out DisplayBufferInfo info);
 

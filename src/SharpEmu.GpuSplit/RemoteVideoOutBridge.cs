@@ -85,7 +85,10 @@ internal sealed class RemoteVideoOutBridge(SplitGpuHost host, string titleId, bo
 
     public void NotifyPresentationWindowClosed() => host.SendNotice(GpuSplitNotice.PresentationWindowClosed);
 
+    // Only a flip that names no buffer (-1) is released here; every other flip answers false without
+    // the guest's help, so it is not worth a round trip.
     public bool ReleaseNoBufferFlip(int bufferIndex, ulong requestId) =>
+        bufferIndex == -1 &&
         host.CallGuest(GpuRemoteReverseOpcode.ReleaseNoBufferFlip, new ReleaseNoBufferRequest { BufferIndex = bufferIndex, RequestId = requestId },
             out ValueResponse answer) &&
         answer.Value != 0;
@@ -95,12 +98,28 @@ internal sealed class RemoteVideoOutBridge(SplitGpuHost host, string titleId, bo
     public void SetSelectedGpuName(string gpuName) => host.SendNotice(GpuSplitNotice.SelectedGpuName, gpuName);
 
     // The trace reads guest memory and video-out state of the guest process; not carried yet.
-    public void TraceGpuFlip(int handle, int bufferIndex, int flipMode, long flipArg, ulong address, int flipEventCount)
+    public void TraceGpuFlip(int handle, int bufferIndex, int flipMode, long flipArg, ulong address, ulong requestId)
     {
     }
 
+    private readonly record struct ReservedBuffer(RemoteVideoOutBridge? Owner, int Handle, int BufferIndex, DisplayBufferResponse Wire);
+
+    // One reservation's buffer, consumed by the next lookup on this thread. Only the same
+    // bridge and slot may use it; an intervening lookup discards it and asks the guest.
+    [ThreadStatic]
+    private static ReservedBuffer t_reservedBuffer;
+
     public bool TryGetDisplayBufferInfo(int handle, int bufferIndex, out VideoOutExports.DisplayBufferInfo info)
     {
+        var reserved = t_reservedBuffer;
+        t_reservedBuffer = default;
+        if (ReferenceEquals(reserved.Owner, this) && reserved.Wire.Found != 0 &&
+            reserved.Handle == handle && reserved.BufferIndex == bufferIndex)
+        {
+            info = SplitConvert.FromWire(reserved.Wire);
+            return true;
+        }
+
         info = default;
         if (!host.CallGuest(GpuRemoteReverseOpcode.TryGetDisplayBuffer, new FlipSlotRequest { Handle = handle, BufferIndex = bufferIndex },
                 out DisplayBufferResponse answer) || answer.Found == 0)
@@ -123,6 +142,11 @@ internal sealed class RemoteVideoOutBridge(SplitGpuHost host, string titleId, bo
 
         _hdrRequested = answer.HdrRequested != 0;
         requestId = answer.RequestId;
+        // The display buffer this flip names came with the answer; the capture that follows on this
+        // thread takes it from here (see TryGetDisplayBufferInfo).
+        t_reservedBuffer = answer.Result == 0 && answer.Buffer.Found != 0
+            ? new ReservedBuffer(this, handle, bufferIndex, answer.Buffer)
+            : default;
         return answer.Result;
     }
 

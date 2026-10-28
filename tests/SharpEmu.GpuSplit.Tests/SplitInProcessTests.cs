@@ -268,6 +268,44 @@ public sealed unsafe class SplitInProcessTests
     }
 
     [MacOSFact]
+    public void AReservedDisplayBufferCannotCrossBridgeInstances() => CheckReservationInvalidation(crossBridge: true);
+
+    [MacOSFact]
+    public void AReservedDisplayBufferCannotSurviveAnInterveningSlotLookup() => CheckReservationInvalidation(crossBridge: false);
+
+    private static void CheckReservationInvalidation(bool crossBridge)
+    {
+        using var split = new InProcessSplit();
+        var bridge = split.Host.VideoOut!;
+        var other = new RemoteVideoOutBridge(split.Host, "other-session", false);
+        Exception? failure = null;
+        var caller = new Thread(() =>
+        {
+            try
+            {
+                {
+                    split.GuestSide.Calls.Clear();
+                    Assert.Equal(0, bridge.TryReserveFlipRequest(1, 2, 1, 42, gpuQueued: true, out _));
+                    if (crossBridge)
+                        Assert.True(other.TryGetDisplayBufferInfo(1, 2, out _));
+                    else
+                        Assert.True(bridge.TryGetDisplayBufferInfo(1, 3, out _));
+                    Assert.True(bridge.TryGetDisplayBufferInfo(1, 2, out _));
+                    // Reservation plus both lookups must ask the guest for their own buffer.
+                    Assert.Equal(3, split.GuestSide.Calls.Count(call => call.StartsWith("buffer ", StringComparison.Ordinal)));
+                }
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        }) { IsBackground = true };
+        caller.Start();
+        Assert.True(caller.Join(20_000));
+        Assert.Null(failure);
+    }
+
+    [MacOSFact]
     public void TheGpuSideReachesTheGuestsVideoOutState()
     {
         using var split = new InProcessSplit();
@@ -286,6 +324,11 @@ public sealed unsafe class SplitInProcessTests
                 Assert.Equal(1100, bridge.NextFlipPresentTimestamp(77, 1000));
                 Assert.True(bridge.TryGetDisplayBufferInfo(1, 2, out var buffer));
                 Assert.Equal(new VideoOutExports.DisplayBufferInfo(0x5000, 0x8000_0000, 0, 1920, 1080, 1920, 3), buffer);
+                // The reservation carried that buffer, so no second call was made for it; the
+                // next lookup of the slot asks the guest again, and a flip that names a buffer
+                // is never released without a call to the guest.
+                Assert.True(bridge.TryGetDisplayBufferInfo(1, 2, out _));
+                Assert.False(bridge.ReleaseNoBufferFlip(2, 77));
                 Assert.Equal(2, bridge.GetFlipEventCount(77));
                 Assert.True(bridge.ReleaseNoBufferFlip(-1, 77));
                 Assert.True(bridge.IsFlipPresentationPending(77));
@@ -310,7 +353,7 @@ public sealed unsafe class SplitInProcessTests
         Assert.True(caller.Join(20_000));
         Assert.Null(failure);
         Assert.Equal(
-            new[] { "reserve 1 2 1 42", "done 1 2", "can 77 1000", "next 77 1000", "buffer 1 2", "events 77", "release -1 77", "pending 77" },
+            new[] { "reserve 1 2 1 42", "buffer 1 2", "done 1 2", "can 77 1000", "next 77 1000", "buffer 1 2", "events 77", "release -1 77", "pending 77" },
             split.GuestSide.Calls);
 
         bridge.SetSelectedGpuName("Apple M5 Pro");

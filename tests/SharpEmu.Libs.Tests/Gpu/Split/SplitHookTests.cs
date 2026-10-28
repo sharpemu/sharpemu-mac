@@ -141,7 +141,7 @@ public sealed class SplitHookTests : IDisposable
         VideoOutBackendServices.CancelOutstandingFlips();
         VideoOutBackendServices.NotifyPresentationWindowClosed();
         VideoOutBackendServices.SetSelectedGpuName("Apple M5");
-        VideoOutBackendServices.TraceGpuFlip(null!, 1, 2, 3, 4, 0x5000, 1);
+        VideoOutBackendServices.TraceGpuFlip(null!, 1, 2, 3, 4, 0x5000, 1UL);
 
         Assert.Equal(
             new[]
@@ -340,7 +340,7 @@ public sealed class SplitHookTests : IDisposable
 
         public void SetSelectedGpuName(string gpuName) => Calls.Add($"gpu-name {gpuName}");
 
-        public void TraceGpuFlip(int handle, int bufferIndex, int flipMode, long flipArg, ulong address, int flipEventCount) =>
+        public void TraceGpuFlip(int handle, int bufferIndex, int flipMode, long flipArg, ulong address, ulong requestId) =>
             Calls.Add($"trace {handle} {bufferIndex} 0x{address:X}");
 
         public bool TryGetDisplayBufferInfo(int handle, int bufferIndex, out VideoOutExports.DisplayBufferInfo info)
