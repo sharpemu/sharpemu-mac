@@ -93,6 +93,16 @@ internal sealed unsafe class MetalTiler : IDisposable
     private static readonly nint SelNewComputePipeline = MetalNative.Selector("newComputePipelineStateWithFunction:error:");
     private static readonly nint SelSetConstantValue = MetalNative.Selector("setConstantValue:type:atIndex:");
     private static readonly nint SelComputeEncoder = MetalNative.Selector("computeCommandEncoder");
+    private static readonly nint SelComputeEncoderWithDispatchType =
+        MetalNative.Selector("computeCommandEncoderWithDispatchType:");
+    private static readonly nint SelMemoryBarrierScope = MetalNative.Selector("memoryBarrierWithScope:");
+    private const nint DispatchTypeConcurrent = 1;
+
+    // Experimental: paired synthetic timings showed several slower writeback shapes,
+    // so serial dispatch remains the default. SHARPEMU_METAL_V2_CONCURRENT_TILER=1
+    // enables overlap for further measurements; the dependency barriers stay in place.
+    internal static readonly bool ConcurrentDispatch =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CONCURRENT_TILER") == "1";
     private static readonly nint SelBlitEncoder = MetalNative.Selector("blitCommandEncoder");
     private static readonly nint SelEndEncoding = MetalNative.Selector("endEncoding");
     private static readonly nint SelSetPipeline = MetalNative.Selector("setComputePipelineState:");
@@ -198,10 +208,20 @@ internal sealed unsafe class MetalTiler : IDisposable
     /// <summary>Releases and makes purgeable the slabs idle since <paramref name="completedSerial"/>.</summary>
     public void TrimStaging(ulong completedSerial) => _staging.Trim(completedSerial);
 
-    public nint BeginCompute(IMetalSubmissionContext context)
+    /// <summary>
+    /// Opens a compute encoder for the tiler. A concurrent one lets its dispatches overlap:
+    /// one transfer is a dispatch per subresource (and per band of block rows), each writing
+    /// bytes no other one touches, and a serial encoder would drain the GPU between every
+    /// pair of them, which for the small levels of a mip chain is most of their time. A
+    /// caller that opens one concurrent puts a <see cref="Barrier"/> between a dispatch and
+    /// any later one that reads what it wrote.
+    /// </summary>
+    public nint BeginCompute(IMetalSubmissionContext context, bool concurrent = false)
     {
         context.ReleaseSharedEncoder();
-        var encoder = MetalNative.Send(context.CommandBuffer, SelComputeEncoder);
+        var encoder = concurrent && ConcurrentDispatch
+            ? MetalNative.Send(context.CommandBuffer, SelComputeEncoderWithDispatchType, DispatchTypeConcurrent)
+            : MetalNative.Send(context.CommandBuffer, SelComputeEncoder);
         MetalMemoryTelemetry.ComputeEncoders.Add();
         if (encoder == 0)
         {
@@ -210,6 +230,19 @@ internal sealed unsafe class MetalTiler : IDisposable
 
         context.EncoderStarted(encoder, render: false);
         return encoder;
+    }
+
+    /// <summary>
+    /// Orders the dispatches encoded after this behind the buffer writes of the ones before
+    /// it, in an encoder <see cref="BeginCompute"/> opened concurrent. A serial encoder
+    /// already orders them, so there it records nothing.
+    /// </summary>
+    public static void Barrier(nint encoder)
+    {
+        if (ConcurrentDispatch)
+        {
+            MetalV2Native.SendMemoryBarrierScope(encoder, SelMemoryBarrierScope, Mtl.BarrierScopeBuffers);
+        }
     }
 
     public nint BeginBlit(IMetalSubmissionContext context)
@@ -410,8 +443,9 @@ internal sealed unsafe class MetalTiler : IDisposable
     /// Moves tiled guest bytes straight into a texture (detile) or straight out of one
     /// (tile), one dispatch per transfer, through an unsigned-integer 2D-array view whose
     /// texel is the transfer's element. The caller decides that every transfer qualifies
-    /// (<see cref="MetalTilerShaders.SupportsTextureCopy"/>, no mip tail, one slice deep);
-    /// one that does not is a caller bug, not a fallback.
+    /// (<see cref="MetalTilerShaders.SupportsTextureCopy(uint, MetalTileDirection)"/>, one
+    /// slice deep); one that does not is a caller bug, not a fallback. A mip tail level is
+    /// placed inside its block exactly as the buffer kernels place it.
     /// </summary>
     public void EncodeTextureBlockCopies(
         nint encoder, MetalBufferSpan tiled, nint view, List<MetalTileTransfer> transfers, MetalTileDirection direction)
@@ -437,7 +471,7 @@ internal sealed unsafe class MetalTiler : IDisposable
         var subresource = stackalloc uint[2];
         foreach (ref readonly var transfer in CollectionsMarshal.AsSpan(transfers))
         {
-            if (!MetalTilerShaders.SupportsTextureCopy(transfer.BytesPerElement) || transfer.Tail || transfer.Depth != 1)
+            if (!MetalTilerShaders.SupportsTextureCopy(transfer.BytesPerElement, direction) || transfer.Depth != 1)
             {
                 throw GpuFatal.Fatal(
                     $"The texture tile transfer does not qualify: kind={(uint)transfer.Kind} bytes={transfer.BytesPerElement} " +

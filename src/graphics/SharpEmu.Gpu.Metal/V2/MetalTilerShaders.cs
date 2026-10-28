@@ -56,8 +56,15 @@ internal static class MetalTilerShaders
     public const uint SubresourceIndex = 4;
 
     // The element sizes a texture block copy carries: one, two or four 32-bit channels
-    // of the view, which is every colour texel the tiled transfers move whole.
+    // of the view, which is every colour texel the tiled transfers move whole. A detile
+    // also carries the one and two byte elements, through an 8 or 16-bit channel: each
+    // thread reads its element out of the guest dword and writes one texel. The tiling
+    // direction would have to merge neighbouring elements into a guest dword, which the
+    // buffer path's dword-wide kernel does without atomics, so it keeps those.
     public static bool SupportsTextureCopy(uint elementBytes) => elementBytes is 4 or 8 or 16;
+
+    public static bool SupportsTextureCopy(uint elementBytes, MetalTileDirection direction) =>
+        SupportsTextureCopy(elementBytes) || (direction == MetalTileDirection.Detile && elementBytes is 1 or 2);
 
     public const string DepthWriteback = "writeback_depth";
     public const string DepthWritebackArray = "writeback_depth_array";
@@ -626,7 +633,7 @@ internal static class MetalTilerShaders
         var any = false;
         foreach (var bytes in ElementSizes)
         {
-            if (SupportsTextureCopy(bytes) && TileGeometry.TryGetBlockLayout(kind, bytes, out _))
+            if (SupportsTextureCopy(bytes, direction) && TileGeometry.TryGetBlockLayout(kind, bytes, out _))
             {
                 AppendOffsetFunction(source, kind, bytes);
                 any = true;
@@ -649,21 +656,32 @@ internal static class MetalTilerShaders
         source.Append($"    constant TextureSubresource& subresource [[buffer({SubresourceIndex})]],\n");
         source.Append("    uint3 gid [[thread_position_in_grid]])\n{\n");
         source.Append("    if (gid.x >= args.width || gid.y >= args.height)\n    {\n        return;\n    }\n\n");
-        source.Append("    uint sy = gid.y + args.baseY;\n");
-        source.Append("    uint2 texel = uint2(gid.x, sy);\n");
+        // A mip tail level sits at (tailX, tailY) inside the one block the tail shares,
+        // exactly as the buffer kernel places it; its texels still start at the origin of
+        // its own level. A tail is never cut into block rows, so it has no baseY.
+        source.Append("    bool tail = args.tail != 0u;\n");
+        source.Append("    uint2 texel = uint2(gid.x, tail ? gid.y : gid.y + args.baseY);\n");
+        source.Append("    uint sx = tail ? gid.x + args.tailX : gid.x;\n");
+        source.Append("    uint sy = tail ? gid.y + args.tailY : texel.y;\n");
         foreach (var bytes in ElementSizes)
         {
-            if (!SupportsTextureCopy(bytes) || !TileGeometry.TryGetBlockLayout(kind, bytes, out var block))
+            if (!SupportsTextureCopy(bytes, direction) || !TileGeometry.TryGetBlockLayout(kind, bytes, out var block))
             {
                 continue;
             }
 
             source.Append($"    if (kElementBytes == {bytes}u)\n    {{\n");
-            source.Append($"        uint block = (gid.y >> {Log2(block.BlockHeight)}u) * args.blocksPerRow + " +
+            source.Append($"        uint block = tail ? 0u : (gid.y >> {Log2(block.BlockHeight)}u) * args.blocksPerRow + " +
                           $"(gid.x >> {Log2(block.BlockWidth)}u);\n");
-            source.Append($"        uint tiled = block * {block.BlockSize}u + tiled_offset_{bytes}(gid.x, sy, args.surfaceZ);\n");
+            source.Append($"        uint tiled = block * {block.BlockSize}u + tiled_offset_{bytes}(sx, sy, args.surfaceZ);\n");
             var words = bytes / 4;
-            if (detile)
+            if (detile && bytes < 4)
+            {
+                source.Append("        uint at = args.sourceBase + tiled;\n");
+                source.Append($"        uint value = (source[at >> 2] >> ((at & 3u) * 8u)) & {(bytes == 1 ? "0xffu" : "0xffffu")};\n");
+                source.Append("        surface.write(uint4(value, 0u, 0u, 0u), texel, subresource.slice, subresource.level);\n");
+            }
+            else if (detile)
             {
                 source.Append("        uint at = (args.sourceBase + tiled) >> 2;\n");
                 source.Append("        uint4 value = uint4(source[at], ");
