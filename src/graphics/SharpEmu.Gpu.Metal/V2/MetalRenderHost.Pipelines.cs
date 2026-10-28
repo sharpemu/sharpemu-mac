@@ -661,17 +661,14 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        new Thread(() =>
+        // The worker's own class: it waits for this one (MetalCompileThread).
+        MetalCompileThread.Start("SharpEmu Metal v2 library compile (needed now)", SharpEmu.HLE.Host.HostThreadQos.UserInteractive, () =>
         {
             if (MetalLibraryCompilePool.Shared.TryRunHere(job))
             {
                 Interlocked.Increment(ref _libraryInlineCompiles);
             }
-        })
-        {
-            IsBackground = true,
-            Name = "SharpEmu Metal v2 library compile (needed now)",
-        }.Start();
+        });
     }
 
     private void AwaitServingStores(MetalShaderModule? module)

@@ -90,7 +90,7 @@ internal sealed class MetalPipelineCompiler : IDisposable
 
     private readonly ConcurrentDictionary<object, Pending> _pending = new();
     private readonly BlockingCollection<Pending> _queue = new();
-    private readonly Thread[] _threads;
+    private readonly MetalCompileThread[] _threads;
     private readonly Action _onCompleted;
     private int _running;
     private long _started;
@@ -103,15 +103,12 @@ internal sealed class MetalPipelineCompiler : IDisposable
     public MetalPipelineCompiler(Action onCompleted, int parallelism)
     {
         _onCompleted = onCompleted;
-        _threads = new Thread[Math.Max(1, parallelism)];
+        _threads = new MetalCompileThread[Math.Max(1, parallelism)];
         for (var index = 0; index < _threads.Length; index++)
         {
-            _threads[index] = new Thread(Run)
-            {
-                IsBackground = true,
-                Name = $"SharpEmu Metal v2 pipeline compile {index}",
-            };
-            _threads[index].Start();
+            // A suspended packet or a waiting draw needs these: below the worker, above the background prewarm.
+            _threads[index] = MetalCompileThread.Start(
+                $"SharpEmu Metal v2 pipeline compile {index}", SharpEmu.HLE.Host.HostThreadQos.UserInitiated, Run);
         }
     }
 

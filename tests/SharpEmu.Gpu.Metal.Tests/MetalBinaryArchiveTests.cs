@@ -174,6 +174,28 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         Release(stored, archives, storedDescriptor, storedPixelLibrary, storedVertexLibrary, compiled, descriptor, pixelLibrary, vertexLibrary);
     }
 
+    // The shader prewarm skips a compute whose file is written (MetalShaderPrewarm): only a
+    // written file counts, in this session and the next.
+    [Fact]
+    public void AComputeLibraryIsStoredOnlyOnceItsFileIsWritten()
+    {
+        if (!RequireDevice()) return;
+        var computeKey = MetalBinaryArchive.LibraryKey(ComputeSource, usesPerVertexInputs: false);
+        var otherKey = MetalBinaryArchive.LibraryKey(ComputeSource + "\n// another\n", usesPerVertexInputs: false);
+        using (var writing = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget))
+        {
+            Assert.False(writing.IsStored(computeKey));
+            Assert.True(Store(writing, ComputeSource, "gen5_cs", Gen5MslStage.Compute, computeKey) > 0);
+            Assert.True(writing.IsStored(computeKey));
+            Assert.False(writing.IsStored(otherKey));
+            Assert.False(writing.IsStored(default));
+        }
+
+        using var reading = MetalBinaryArchive.Open(_root, Device.Value, "translator-a", Budget);
+        Assert.True(reading.IsStored(computeKey));
+        Assert.False(reading.IsStored(otherKey));
+    }
+
     [Fact]
     public void LibrariesStoredAloneDrawAndComputeWhatTheCompiledOnesDo()
     {
