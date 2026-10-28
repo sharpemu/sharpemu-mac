@@ -409,18 +409,27 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
             MetalNative.SendVoid(gather, SelEndEncoding);
         }
 
-        if (!pristine.IsValid)
+        if (pristine.IsValid)
         {
-            return;
+            EncodeSnapshot(commandBuffer, staging, pristine, ordering);
         }
+    }
 
+    /// <summary>
+    /// Fills a pristine copy from its staged copy on the GPU, in an encoder of its own that
+    /// <paramref name="ordering"/> runs before whatever is recorded after it: before the
+    /// shader that stores into the staged copy, so the pristine bytes are what was staged.
+    /// </summary>
+    public void EncodeSnapshot(nint commandBuffer, in MetalGuestRange staging, in MetalGuestRange pristine,
+        IMetalSubmissionContext? ordering = null)
+    {
         var snapshot = BlitEncoder(commandBuffer, ordering);
         try
         {
             MetalNative.SendCopyBuffer(
                 snapshot, SelCopyBuffer,
                 staging.Buffer, (nuint)staging.Offset,
-                pristine.Buffer, (nuint)pristine.Offset, (nuint)size);
+                pristine.Buffer, (nuint)pristine.Offset, (nuint)staging.Size);
         }
         finally
         {

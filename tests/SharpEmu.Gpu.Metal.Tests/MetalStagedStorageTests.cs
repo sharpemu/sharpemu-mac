@@ -225,6 +225,68 @@ public sealed unsafe class MetalStagedStorageTests(ITestOutputHelper output)
         }
     }
 
+    // A pristine twin the GPU copies from the staged copy, ahead of the shader's stores, is
+    // what the writeback compares against: the shader's bytes land, and a write from
+    // elsewhere after the copy was staged survives everywhere else.
+    [Fact]
+    public void AGpuSnapshotIsThePristineTheWritebackComparesAgainst()
+    {
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        using var backing = new ScatteredBacking();
+        using var harness = new MetalTransferHarness(Device.Value);
+        using var memory = new MetalGuestMemory(
+            Device.Value, backing, new ScatteredMemory(backing), WindowBytes, MaxWindowBytes);
+        var staged = new MetalStagedStorage(memory);
+        backing.TryWriteBacking(Address, Enumerable.Repeat((byte)0x11, (int)Size).ToArray());
+
+        harness.Begin();
+        var copy = memory.Stage(Address, Size);
+        var pristine = memory.Allocate(Size, 256, out var pristineBytes);
+        pristineBytes.Fill(0x77);
+        staged.EncodeSnapshot(harness.CommandBuffer, copy, pristine);
+        staged.Add(Address, Size, copy, pristine, written: true);
+        harness.Submit();
+        Assert.All(harness.Read(pristine.Buffer, pristine.Offset, Size), value => Assert.Equal((byte)0x11, value));
+
+        backing.TryWriteBacking(Address, Enumerable.Repeat((byte)0x22, (int)Size).ToArray());
+        harness.Begin();
+        var stored = new MetalGuestRange(copy.Buffer, copy.Offset + (Size / 2) - 4096, 8192, copy.GpuAddress);
+        var store = MetalNative.Send(harness.CommandBuffer, SelBlit);
+        Fill(store, stored, 0xCD);
+        MetalNative.SendVoid(store, SelEnd);
+        harness.Submit();
+
+        harness.Begin();
+        staged.Arm();
+        staged.EncodeWritebacks(harness.CommandBuffer);
+        harness.Submit();
+
+        var bytes = new byte[Size];
+        Assert.True(backing.TryReadBacking(Address, bytes));
+        for (var index = 0; index < bytes.Length; index++)
+        {
+            var inside = index >= (int)(Size / 2) - 4096 && index < (int)(Size / 2) + 4096;
+            Assert.Equal(inside ? (byte)0xCD : (byte)0x22, bytes[index]);
+        }
+    }
+
+    // The GPU copies the pristine twin only where the blit ends no pass, and ends a compute
+    // encoder only for a range it would stage on the GPU whole.
+    [Theory]
+    [InlineData(false, false, 64 * 1024, true)]
+    [InlineData(false, false, 64 * 1024 - 1, false)]
+    [InlineData(true, false, 64 * 1024 * 1024, false)]
+    [InlineData(false, true, 1024 * 1024, false)]
+    [InlineData(false, true, 4 * 1024 * 1024, true)]
+    public void TheGpuSnapshotsThePristineCopyOnlyWhereItEndsNoPass(bool renderOpen, bool computeOpen, ulong size, bool gpu)
+    {
+        Assert.Equal(gpu && MetalRenderHost.GpuPristine, MetalRenderHost.SnapshotsOnGpu(renderOpen, computeOpen, size));
+    }
+
     // A copy recorded after a GPU write to its bytes that has not run yet holds that write,
     // not what the CPU saw when it was recorded, and so does its pristine copy.
     [Fact]

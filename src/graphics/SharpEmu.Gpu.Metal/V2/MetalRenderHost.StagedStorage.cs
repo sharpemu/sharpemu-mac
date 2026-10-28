@@ -20,7 +20,7 @@ internal sealed partial class MetalRenderHost
     /// range, otherwise a staged copy that sees the GPU's earlier writes and whose stores
     /// reach guest memory (<see cref="MetalStagedStorage"/>).
     /// </summary>
-    private MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written)
+    internal MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageBufferResolve);
         OrderAfterDeferredCopies(address, size);
@@ -87,9 +87,15 @@ internal sealed partial class MetalRenderHost
                 context.ProfileEncoded($"stage storage bytes=0x{staging.Size:X}");
             }
         }
+        else if (SnapshotsOnGpu(_renderEncoder != 0, _computeEncoder != 0, staging.Size))
+        {
+            pristine = _guestMemory.Allocate(staging.Size, 256, out _);
+            SnapshotOnGpu(staging, pristine, null);
+        }
         else
         {
             pristine = _guestMemory.Duplicate(staging);
+            Interlocked.Add(ref _cpuPristineBytes, (long)staging.Size);
         }
 
         if (!pristine.IsValid)
@@ -149,6 +155,47 @@ internal sealed partial class MetalRenderHost
         return staging;
     }
 
+    // SHARPEMU_METAL_V2_GPU_PRISTINE=0 copies the pristine twin of a written staged copy on the CPU again.
+    internal static readonly bool GpuPristine =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GPU_PRISTINE") != "0";
+
+    // Below this a blit encoder costs the worker about what the memcpy does.
+    internal const ulong GpuPristineMinBytes = 64 * 1024;
+
+    private long _cpuPristineBytes;
+    private long _gpuPristines;
+    private long _gpuPristineBytes;
+
+    internal long GpuPristines => Interlocked.Read(ref _gpuPristines);
+
+    /// <summary>
+    /// True when the pristine twin of a written copy the CPU staged is better copied from it by the GPU: a
+    /// blit ahead of the shader that stores into the copy, instead of a second memcpy of the whole range on the
+    /// worker, which costs as much as staging it did. Never with a pass open, which the blit would end; with a
+    /// compute encoder open only from the size at which the GPU stages a written range whole anyway
+    /// (<see cref="WholeGatherMinBytes"/>), since the blit ends that encoder too.
+    /// </summary>
+    internal static bool SnapshotsOnGpu(bool renderOpen, bool computeOpen, ulong size) =>
+        GpuPristine && !renderOpen && size >= GpuPristineMinBytes && (!computeOpen || size >= WholeGatherMinBytes);
+
+    private void SnapshotOnGpu(in MetalGuestRange staging, in MetalGuestRange pristine, MetalStagedRangeCache.Entry? entry)
+    {
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
+        if (entry is not null)
+        {
+            // The blit reads and writes the entry's buffers in this submission.
+            _stagedRanges!.Touch(entry, context.SubmissionSerial);
+        }
+
+        StagedStorage.EncodeSnapshot(context.CommandBuffer, staging, pristine, context);
+        Interlocked.Increment(ref _gpuPristines);
+        Interlocked.Add(ref _gpuPristineBytes, (long)staging.Size);
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded($"snapshot staged storage bytes=0x{staging.Size:X}");
+        }
+    }
+
     private long _guestViewRefusedWrites;
 
     /// <summary>
@@ -183,7 +230,9 @@ internal sealed partial class MetalRenderHost
             $"guest_view_unmapped={v.Invalidated} guest_view_refused={v.CreateFailures} guest_view_unbacked={v.Unbacked} " +
             $"guest_view_refused_writes={Interlocked.Read(ref _guestViewRefusedWrites)} " +
             $"oversized_staged={_guestMemory.OversizedStaged} oversized_prefix={_guestMemory.OversizedInPlace} " +
-            $"gpu_staged={Interlocked.Read(ref _wholeGathers)} gpu_staged_mb={Interlocked.Read(ref _wholeGatherBytes) / (1024 * 1024)}";
+            $"gpu_staged={Interlocked.Read(ref _wholeGathers)} gpu_staged_mb={Interlocked.Read(ref _wholeGatherBytes) / (1024 * 1024)} " +
+            $"pristine_cpu_mb={Interlocked.Read(ref _cpuPristineBytes) / (1024 * 1024)} " +
+            $"pristine_gpu={Interlocked.Read(ref _gpuPristines)} pristine_gpu_mb={Interlocked.Read(ref _gpuPristineBytes) / (1024 * 1024)}";
     }
 
     /// <summary>
@@ -262,7 +311,15 @@ internal sealed partial class MetalRenderHost
         }
         else if (entry.Pristine.IsValid)
         {
-            bytes.CopyTo(new Span<byte>((void*)entry.PristineBuffer!.Contents, checked((int)size)));
+            if (SnapshotsOnGpu(_renderEncoder != 0, _computeEncoder != 0, size))
+            {
+                SnapshotOnGpu(entry.Staging, entry.Pristine, entry);
+            }
+            else
+            {
+                bytes.CopyTo(new Span<byte>((void*)entry.PristineBuffer!.Contents, checked((int)size)));
+                Interlocked.Add(ref _cpuPristineBytes, (long)size);
+            }
         }
     }
 
