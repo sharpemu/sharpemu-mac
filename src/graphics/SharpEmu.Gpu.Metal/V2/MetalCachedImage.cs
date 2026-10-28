@@ -110,6 +110,29 @@ internal sealed class MetalCachedImage : IDisposable
     public MetalImageEpochs? Epochs { get; set; }
 
     /// <summary>
+    /// The split GPU process's pending-writeback summary (MetalImageCache.PendingWritebacks), which
+    /// holds this image's pages while it is GPU-modified. Set while the image is in the cache;
+    /// setting it moves the claim, and null drops it.
+    /// </summary>
+    public IPendingWritebackPages? PendingWritebacks
+    {
+        get => _pendingWritebacks;
+        set
+        {
+            ReleasePendingWriteback();
+            _pendingWritebacks = value;
+            if (_gpuModified)
+            {
+                ClaimPendingWriteback();
+            }
+        }
+    }
+
+    private IPendingWritebackPages? _pendingWritebacks;
+    private ulong _pendingAddress;
+    private ulong _pendingSize;
+
+    /// <summary>
     /// Moves wherever this image bumps a count of <see cref="Epochs"/> (and where the cache changes
     /// its metadata): a memo of a binding of this image alone is stale once it moved.
     /// </summary>
@@ -664,6 +687,8 @@ internal sealed class MetalCachedImage : IDisposable
         var wasModified = _gpuModified;
         var wasDirty = _cpuDirty;
         var wasPublished = PublishedEnd > PublishedStart;
+        // Claimed before the image is GPU-modified: the guest process never sees it so unclaimed.
+        ClaimPendingWriteback();
         _gpuModified = true;
         _cpuDirty = false;
         DirtyStart = 0;
@@ -730,6 +755,7 @@ internal sealed class MetalCachedImage : IDisposable
     {
         var wasModified = _gpuModified;
         _gpuModified = false;
+        ReleasePendingWriteback();
         PublishedStart = 0;
         PublishedEnd = 0;
         if (wasModified)
@@ -752,6 +778,29 @@ internal sealed class MetalCachedImage : IDisposable
             MarkCpuDirty(MetalImageDirtyCause.CpuWrite);
             ClearGpuModified();
         }
+    }
+
+    private void ClaimPendingWriteback()
+    {
+        if (_pendingSize != 0 || _pendingWritebacks is not { } pending || ImageDescription.IsEmptyRange(Description.Data))
+        {
+            return;
+        }
+
+        _pendingAddress = Description.Data.Address;
+        _pendingSize = Description.Data.Size;
+        pending.Add(_pendingAddress, _pendingSize);
+    }
+
+    private void ReleasePendingWriteback()
+    {
+        if (_pendingSize == 0)
+        {
+            return;
+        }
+
+        _pendingWritebacks!.Remove(_pendingAddress, _pendingSize);
+        _pendingSize = 0;
     }
 
     /// <summary>

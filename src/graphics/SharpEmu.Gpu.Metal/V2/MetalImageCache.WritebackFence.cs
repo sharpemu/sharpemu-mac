@@ -165,6 +165,7 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        ClaimPendingFence(address, size, serial);
         lock (_fenceGate)
         {
             using var fenceHold = MeasureFenceHold();

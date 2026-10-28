@@ -30,7 +30,7 @@ internal sealed class InProcessSplit : IDisposable
     private readonly GpuProcessClient _client;
     private readonly Thread _loop;
 
-    public InProcessSplit(Action<GuestGpuMemory>? beforeStart = null, TimeSpan? inputPoll = null)
+    public InProcessSplit(Action<GuestGpuMemory>? beforeStart = null, TimeSpan? inputPoll = null, IGuestImageStore? gpuStore = null)
     {
         Guest = new SharedGuestMemory();
         _server = MacOSHost.ServeGuestMemory(Guest.Export, Guest.Table.Region, out var service);
@@ -43,7 +43,7 @@ internal sealed class InProcessSplit : IDisposable
             ComposeBackend = environment =>
             {
                 Environment = environment;
-                environment.Memory.AttachStores(null, GpuStore);
+                environment.Memory.AttachStores(null, gpuStore ?? GpuStore);
                 return Backend;
             },
             ConfigureVideo = options => ConfiguredVideo = options,

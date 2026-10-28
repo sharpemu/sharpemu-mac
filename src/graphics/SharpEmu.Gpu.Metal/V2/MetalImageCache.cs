@@ -186,6 +186,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         MetalBlockCubeDump.Peek ??= guestMemory.TryPeek;
         _pages = pages;
         _backing = backing;
+        if (backing is IPendingWritebackSource { PendingWritebacks: { } pendingWritebacks })
+        {
+            PendingWritebacks = pendingWritebacks;
+        }
+
         InitializeLossy();
         ConfigureMemoryPolicy(
             MetalImageBudgetSettings.FromEnvironment(MetalHostMemory.Physical),
@@ -2166,6 +2171,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         NoteRecreatedLocked(in admitted);
 
         image.Epochs = Epochs;
+        image.PendingWritebacks = _pendingWritebacks;
         var imageIdentifier = _slots.Insert(image);
         NoteImageSetChanged(image.Description.Data);
         Epochs.NoteBindingChanged();

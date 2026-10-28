@@ -44,6 +44,9 @@ public enum SplitCrossing
     ManagedWriteInterest,
     ManagedWriteCall,
     ProtectWait,
+    // Split only. Watched managed writes with no pending writeback under them, sent as a record
+    // instead of the call.
+    ManagedWriteRecord,
 }
 
 public static class SplitCrossingStats

@@ -37,6 +37,9 @@ public sealed class RegionLock
 
     public Held Hold() => new(this);
 
+    /// <summary>Runs at the end of every hold, with the lock still held. Null on every lock but the split GPU process's image cache.</summary>
+    public Action? BeforeRelease { get; set; }
+
     /// <summary>True when the calling thread is the one holding the lock.</summary>
     public bool IsHeldByCurrentThread => Volatile.Read(ref _owner) == Environment.CurrentManagedThreadId;
 
@@ -83,6 +86,7 @@ public sealed class RegionLock
             return;
         }
 
+        BeforeRelease?.Invoke();
         // Copy measurements before release; the next owner can then replace the lock's fields.
         var holdOperation = _holdOperation;
         var holdTicks = GpuMemoryAccessProfile.Enabled ? Stopwatch.GetTimestamp() - _holdStarted : 0;

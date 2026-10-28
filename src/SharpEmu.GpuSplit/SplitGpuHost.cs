@@ -291,7 +291,10 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
             _ = _guestMemory.Replica.Sync(start.ViewLogSequence);
             _space = new RemoteGuestAddressSpace(
                 _guestMemory.Mirror, _guestMemory.Translator, _guestMemory.Replica, _guestMemory.ChunkBytes,
-                _guestMemory.ObjectBytes, this, _state);
+                _guestMemory.ObjectBytes, this, _state)
+            {
+                PendingWritebacks = PendingWritebackPages.Enabled ? new PendingWritebackPages(_state) : null,
+            };
             _memory = new GuestGpuMemory(_space);
             _bridge = new RemoteVideoOutBridge(this, titleId, start.HdrRequested != 0);
             if (_options.InstallGlobals)
