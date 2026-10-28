@@ -110,6 +110,15 @@ public static partial class KernelEventQueueCompatExports
         public readonly KnoteList Active = new();
         public bool Deleted;
         public int Descriptor = -1;
+
+        // Guest waiters (sceKernelWaitEqueue / kevent) that have asked to block on this queue and have
+        // not resumed yet. Signal skips the scheduler scan while it is zero; see Signal for why that
+        // cannot lose a wake.
+        public int BlockedWaiters;
+
+        // Read/write-filter knotes in Knotes, mutated under Gate. A wait or poll only has descriptor
+        // readiness to refresh when this is non-zero.
+        public int DescriptorKnotes;
     }
 
     private struct Occurrence
@@ -280,8 +289,31 @@ public static partial class KernelEventQueueCompatExports
         // kevent(2) reports the count as its return value and failures through errno.
         public bool PosixResult { get; init; }
 
+        private int _armed;
+
+        // Counts this waiter against its queue until it resumes. Call before asking the scheduler to
+        // block: the increment must precede the scheduler's post-park TryWake check (see Signal).
+        public void Arm()
+        {
+            if (Interlocked.Exchange(ref _armed, 1) == 0)
+            {
+                Interlocked.Increment(ref State.BlockedWaiters);
+            }
+        }
+
+        // Idempotent; a waiter that never resumes (thread torn down) only leaves the count high, which
+        // keeps the scan on for that queue and is never unsafe.
+        public void Disarm()
+        {
+            if (Interlocked.Exchange(ref _armed, 0) == 1)
+            {
+                Interlocked.Decrement(ref State.BlockedWaiters);
+            }
+        }
+
         public int Resume()
         {
+            Disarm();
             KernelQueuedEvent[]? reservedEvents;
             int reservedCount;
             WaitCompletion completion;
@@ -836,7 +868,11 @@ public static partial class KernelEventQueueCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        RefreshDescriptorKnotes(state);
+        if (Volatile.Read(ref state.DescriptorKnotes) != 0)
+        {
+            RefreshDescriptorKnotes(state);
+        }
+
         var deliveredCount = DequeueEvents(ctx, state, eventsAddress, eventCapacity);
         if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
         {
@@ -866,19 +902,21 @@ public static partial class KernelEventQueueCompatExports
         var deadline = timeoutAddress == 0
             ? 0
             : GuestThreadExecution.ComputeDeadlineTimestamp(TimeSpan.FromMicroseconds(timeoutUsec));
+        var waiter = new EqueueWaiter
+        {
+            Ctx = ctx,
+            State = state,
+            EventsAddress = eventsAddress,
+            EventCapacity = eventCapacity,
+            OutCountAddress = outCountAddress,
+            WaiterId = waiterId,
+        };
+        waiter.Arm();
         if (GuestThreadExecution.RequestCurrentThreadBlock(
                 ctx,
                 "sceKernelWaitEqueue",
                 state.WakeKey,
-                new EqueueWaiter
-                {
-                    Ctx = ctx,
-                    State = state,
-                    EventsAddress = eventsAddress,
-                    EventCapacity = eventCapacity,
-                    OutCountAddress = outCountAddress,
-                    WaiterId = waiterId,
-                },
+                waiter,
                 deadline))
         {
             // The scheduler re-checks the waiter once the thread is parked, so an
@@ -896,6 +934,7 @@ public static partial class KernelEventQueueCompatExports
         }
 
         // A host thread parks on the queue monitor; every activation pulses it.
+        waiter.Disarm();
         var outcome = HostWait(state, deadline, eventCapacity, out var events, out var count);
         if (outcome == HostWaitOutcome.Deleted)
         {
@@ -1070,6 +1109,10 @@ public static partial class KernelEventQueueCompatExports
             ReferenceEquals(current, knote))
         {
             state.Knotes.Remove((knote.Ident, knote.Filter));
+            if (knote.Filter is KernelEventFilterRead or KernelEventFilterWrite)
+            {
+                state.DescriptorKnotes--;
+            }
         }
     }
 
@@ -1248,6 +1291,21 @@ public static partial class KernelEventQueueCompatExports
     }
 
     /// <summary>Wakes every waiter of the queue: guest threads by wake key.</summary>
+    /// <remarks>
+    /// The scheduler scan visits every guest thread under its gate, so it is skipped when no guest
+    /// waiter is registered. That is a store-buffering (Dekker) pair and cannot lose a wake:
+    /// <list type="bullet">
+    /// <item>Waiter: <c>BlockedWaiters++</c> (Interlocked, a full fence) happens before it asks to
+    /// block, and the scheduler re-checks <see cref="EqueueWaiter.TryWake"/> after parking the thread,
+    /// which reads the queue under <c>Gate</c>.</item>
+    /// <item>Signaller: the event is made visible under <c>Gate</c> before this call, then the full
+    /// fence below, then the read of <c>BlockedWaiters</c>.</item>
+    /// </list>
+    /// If this read sees zero, it precedes the waiter's increment in the fence order, so the event
+    /// was already published when the waiter's re-check took <c>Gate</c> and the re-check finds it
+    /// (the waiter is readied directly, no wake needed). If it sees non-zero, the scan runs as before.
+    /// A stale non-zero count only costs an unneeded scan.
+    /// </remarks>
     private static void Signal(Kqueue state, string? detail = null)
     {
         if (_logEqueue)
@@ -1258,8 +1316,17 @@ public static partial class KernelEventQueueCompatExports
                 $"generation={state.Generation}" + (detail is null ? string.Empty : $" {detail}"));
         }
 
+        Interlocked.MemoryBarrier();
+        if (Volatile.Read(ref state.BlockedWaiters) == 0)
+        {
+            return;
+        }
+
         _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(state.WakeKey);
     }
+
+    internal static int BlockedWaiterCountForTest(ulong handle) =>
+        TryGetLiveEventQueue(handle, out var state) ? Volatile.Read(ref state.BlockedWaiters) : -1;
 
     // ---- Registration API used by the other libraries ----
 
@@ -1337,6 +1404,11 @@ public static partial class KernelEventQueueCompatExports
         }
 
         state.Knotes[key] = knote;
+        if (filter is KernelEventFilterRead or KernelEventFilterWrite)
+        {
+            state.DescriptorKnotes++;
+        }
+
         created = true;
         return knote;
     }
@@ -1440,6 +1512,10 @@ public static partial class KernelEventQueueCompatExports
                 {
                     knote = new Knote(state, queuedEvent.Ident, queuedEvent.Filter) { Transient = true };
                     state.Knotes[key] = knote;
+                    if (queuedEvent.Filter is KernelEventFilterRead or KernelEventFilterWrite)
+                    {
+                        state.DescriptorKnotes++;
+                    }
                 }
 
                 knote.Injected = queuedEvent;

@@ -489,7 +489,11 @@ public static class PlayGoExports
             return OrbisPlayGoErrorBadSize;
         }
 
-        var loci = new byte[numberOfEntries];
+        // numberOfEntries is at most MaxPlayGoQueryEntries; the usual query is a handful of chunks,
+        // so keep those on the stack and fall back to the heap for a larger one.
+        Span<byte> lociStorage = numberOfEntries <= 256 ? stackalloc byte[256] : new byte[numberOfEntries];
+        var loci = lociStorage[..(int)numberOfEntries];
+        loci.Clear();
         for (uint i = 0; i < numberOfEntries; i++)
         {
             if (!ctx.TryReadUInt16(chunkIds + (i * sizeof(ushort)), out var chunkId))
@@ -516,13 +520,13 @@ public static class PlayGoExports
                 // Titles rely on this as an enumeration terminator: Monster Truck
                 // scans ids 0,1,2,... until BAD_CHUNK_ID, and answering OK for every
                 // id makes that scan wrap the ushort range and spin forever.
-                loci[i] = PlayGoLocusNotDownloaded;
+                loci[(int)i] = PlayGoLocusNotDownloaded;
                 return ctx.Memory.TryWrite(outLoci, loci)
                     ? OrbisPlayGoErrorBadChunkId
                     : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            loci[i] = PlayGoLocusLocalFast;
+            loci[(int)i] = PlayGoLocusLocalFast;
         }
 
         TracePlayGoLocus(ctx, numberOfEntries, chunkIds, outLoci);
@@ -990,9 +994,13 @@ public static class PlayGoExports
         }
     }
 
+    // SHARPEMU_LOG_PLAYGO=1 enables the playgo.* traces; read once, not per call.
+    private static readonly bool LogPlayGo =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PLAYGO"), "1", StringComparison.Ordinal);
+
     private static void TracePlayGo(string message)
     {
-        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PLAYGO"), "1", StringComparison.Ordinal))
+        if (LogPlayGo)
         {
             Console.Error.WriteLine($"[LOADER][TRACE] playgo.{message}");
         }
@@ -1000,7 +1008,7 @@ public static class PlayGoExports
 
     private static void TracePlayGoLocus(CpuContext ctx, uint entries, ulong chunkIds, ulong outLoci)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PLAYGO"), "1", StringComparison.Ordinal))
+        if (!LogPlayGo)
         {
             return;
         }

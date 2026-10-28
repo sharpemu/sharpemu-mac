@@ -197,9 +197,13 @@ public static class CxaGuardExports
         return ctx.TryWriteUInt64(guardPtr, newWord);
     }
 
+    // SHARPEMU_LOG_GUARDS=1 traces the __cxa_guard_* calls; read once, not per call.
+    private static readonly bool LogGuards =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUARDS"), "1", StringComparison.Ordinal);
+
     private static void LogGuardState(CpuContext ctx, string op, ulong guardPtr, bool initialized, bool inProgress)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUARDS"), "1", StringComparison.Ordinal))
+        if (!LogGuards)
         {
             return;
         }
@@ -211,7 +215,7 @@ public static class CxaGuardExports
 
     private static void LogGuardResult(string op, ulong guardPtr, int result, bool initialized, bool inProgress, int ownerThreadId)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUARDS"), "1", StringComparison.Ordinal))
+        if (!LogGuards)
         {
             return;
         }

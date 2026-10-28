@@ -36,6 +36,9 @@ public static partial class KernelMemoryCompatExports
     // SHARPEMU_MEMSET_INPLACE=0 sends every memset through the staged chunk loop again.
     private static readonly bool InPlaceMemsetEnabled =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_MEMSET_INPLACE"), "0", StringComparison.Ordinal);
+    // SHARPEMU_LOG_LIBC_ALLOC=1 traces every malloc/calloc/realloc/free; read once, not per call.
+    private static readonly bool LogLibcAllocations =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_LIBC_ALLOC"), "1", StringComparison.Ordinal);
     private static readonly GuestSpanFill<byte> FillWithByte = static (value, destination) =>
     {
         destination.Fill(value);
@@ -4712,7 +4715,7 @@ public static partial class KernelMemoryCompatExports
         ulong resultAddress = 0,
         int? errorCode = null)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_LIBC_ALLOC"), "1", StringComparison.Ordinal))
+        if (!LogLibcAllocations)
         {
             return;
         }

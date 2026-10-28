@@ -126,6 +126,12 @@ public static class AudioOut2Exports
         private readonly object _paceGate = new();
         private long _nextAdvanceTimestamp;
 
+        // Serialises the grains of this context (they share the ports' spare PCM buffers and must reach
+        // the host stream in order). Submitting holds it across the host stream's pacing wait, which can
+        // sleep up to a quarter of a second for ring space, so it is per context: one global gate made
+        // two contexts on two threads wait out each other's sleeps.
+        public readonly object SubmitGate = new();
+
         public ContextState(ulong handle, uint frequency, uint grainSamples, uint queueDepth, IHostAudioStream? backend)
         {
             Handle = handle;
@@ -294,7 +300,6 @@ public static class AudioOut2Exports
     private static string PrimaryBackendName = "none";
     private static string SecondaryBackendName = "none";
     private static ulong PrimaryContextHandle;
-    private static readonly object HostSubmitGate = new();
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
     private static int _chatEnabled;
 
@@ -1573,7 +1578,7 @@ public static class AudioOut2Exports
             return false;
         }
 
-        lock (HostSubmitGate)
+        lock (context.SubmitGate)
         {
             var mix = ArrayPool<float>.Shared.Rent(frames * 2);
             var output = ArrayPool<byte>.Shared.Rent(frames * AudioPcmConversion.OutputFrameSize);
