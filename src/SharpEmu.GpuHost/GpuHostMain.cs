@@ -100,9 +100,12 @@ public static class GpuHostMain
             // Calls that wait for the GPU (a frame boundary, a fault's writeback, a bracket) each
             // hold a thread; enough of them that a write fault never queues behind those.
             client.SyncThreadCount = 8;
+            // The ring and the calls are on the GPU worker's path (and on the guest's): they start
+            // at its class, which a thread CoreCLR creates cannot take later.
+            client.StartThread = static (name, stackBytes, body) => SharpEmu.HLE.Host.HostHelperThread.Start(name, stackBytes, body).Join;
 
             var exitCode = GpuProcessClient.ExitClean;
-            var ring = new Thread(() =>
+            var ring = SharpEmu.HLE.Host.HostHelperThread.Start("SharpEmu GPU host ring", 4 * 1024 * 1024, () =>
             {
                 try
                 {
@@ -113,12 +116,7 @@ public static class GpuHostMain
                     // Ends the pump below, after asking the window to close.
                     HostMainThread.Shutdown();
                 }
-            }, 4 * 1024 * 1024)
-            {
-                IsBackground = true,
-                Name = "SharpEmu GPU host ring",
-            };
-            ring.Start();
+            });
             HostMainThread.Pump();
             _ = ring.Join(TimeSpan.FromSeconds(5));
             return exitCode;

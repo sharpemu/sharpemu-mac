@@ -16,10 +16,13 @@ namespace SharpEmu.HLE.GuestMemory;
 ///
 /// <para>
 /// A hit costs one load of the table's mapping generation and one cached range check. Each of the
-/// <see cref="CacheSlots"/> slots holds one immutable range, so threads share the cache without a
-/// lock; a slot is good while the mapping generation it was read under is current, and protection
-/// changes do not move that generation. A miss reads the table under its sequence and caches the
-/// whole run of entries around the address whose addresses and offsets both continue.
+/// <see cref="CacheSlots"/> slots, picked by a hash of the address's 64 KiB block, holds one range
+/// under a sequence of its own, so threads share the cache without a lock and a miss allocates
+/// nothing; a slot is good while the mapping generation it was read under is current, and
+/// protection changes do not move that generation. Behind the slots each thread keeps the last
+/// range it read from the table, which serves the other blocks of a range the thread walks through.
+/// A miss reads the table under its sequence and caches the whole run of entries around the
+/// address whose addresses and offsets both continue.
 /// </para>
 ///
 /// <para>
@@ -33,25 +36,44 @@ namespace SharpEmu.HLE.GuestMemory;
 /// </summary>
 public sealed unsafe class GuestMirrorTranslator
 {
-    public const int CacheSlots = 64;
+    public const int CacheSlots = 1 << CacheBits;
 
-    // Slots are picked by the 64 KiB block of the address: the guest's own mapping granule.
+    private const int CacheBits = 10;
+
+    // Slots are picked by a hash of the 64 KiB block of the address, the guest's own mapping
+    // granule: buffers placed at a power-of-two stride would otherwise all land in one slot.
     private const int CacheShift = 16;
 
     private readonly GuestViewTableHeader* _header;
     private readonly GuestViewTableEntry* _entries;
     private readonly int _capacity;
-    private readonly CachedRange?[] _cache = new CachedRange?[CacheSlots];
+    private readonly Slot[] _cache = new Slot[CacheSlots];
     private long _hits;
     private long _misses;
 
-    private sealed class CachedRange(ulong start, ulong end, ulong offset, ulong generation)
+    // The last range the thread read from the table, for whichever translator it read it from.
+    [ThreadStatic]
+    private static LastRange t_last;
+
+    // One cached range under a sequence: odd while a writer fills it, so a reader that sees the
+    // same even sequence before and after its loads read one writer's range. An empty slot
+    // (End 0) holds no address.
+    private struct Slot
     {
-        public readonly ulong Start = start;
-        public readonly ulong End = end;
-        public readonly ulong Offset = offset;
-        public readonly ulong Generation = generation;
+        public long Sequence;
+        public ulong Start;
+        public ulong End;
+        public ulong Offset;
+        public ulong Generation;
     }
+
+    private struct LastRange
+    {
+        public GuestMirrorTranslator? Owner;
+        public CachedRange Range;
+    }
+
+    private readonly record struct CachedRange(ulong Start, ulong End, ulong Offset, ulong Generation);
 
     /// <summary>
     /// A translator over a mapped view table (often read-only) and a mirror of the backing it
@@ -157,17 +179,34 @@ public sealed unsafe class GuestMirrorTranslator
     private bool TryGetRange(ulong address, out CachedRange range)
     {
         var generation = Volatile.Read(ref _header->MappingGeneration);
-        ref var slot = ref _cache[(int)((address >> CacheShift) & (CacheSlots - 1))];
-        var cached = Volatile.Read(ref slot);
-        if (cached is not null && cached.Generation == generation && address >= cached.Start && address < cached.End)
+        ref var slot = ref _cache[SlotIndex(address)];
+        var sequence = Volatile.Read(ref slot.Sequence);
+        if ((sequence & 1) == 0)
+        {
+            // Acquire loads: none moves above the sequence read, and the second read stays below them.
+            range = new CachedRange(Volatile.Read(ref slot.Start), Volatile.Read(ref slot.End),
+                Volatile.Read(ref slot.Offset), Volatile.Read(ref slot.Generation));
+            if (Volatile.Read(ref slot.Sequence) == sequence && range.Generation == generation &&
+                address >= range.Start && address < range.End)
+            {
+                if (CountCacheAccesses) _hits++;
+                return true;
+            }
+        }
+
+        ref var last = ref t_last;
+        if (ReferenceEquals(last.Owner, this) && last.Range.Generation == generation &&
+            address >= last.Range.Start && address < last.Range.End)
         {
             if (CountCacheAccesses) _hits++;
-            range = cached;
+            range = last.Range;
+            // The slot answers the next address of this block without the thread's lookup.
+            Store(ref slot, range);
             return true;
         }
 
         if (CountCacheAccesses) _misses++;
-        range = null!;
+        range = default;
         if (!GuestViewTableReader.TryFind(_header, _entries, _capacity, address, joinRun: true, out var entry, out var readGeneration))
             return false;
         // A run reaching past the mirror is cut at its end; an address past it has no translation.
@@ -175,7 +214,26 @@ public sealed unsafe class GuestMirrorTranslator
         var size = Math.Min(entry.Size, MirrorBytes - entry.Offset);
         if (address - entry.Address >= size) return false;
         range = new CachedRange(entry.Address, entry.Address + size, entry.Offset, readGeneration);
-        Volatile.Write(ref slot, range);
+        last.Owner = this;
+        last.Range = range;
+        Store(ref slot, range);
         return true;
+    }
+
+    private static int SlotIndex(ulong address) =>
+        (int)(((address >> CacheShift) * 0x9E3779B97F4A7C15UL) >> (64 - CacheBits));
+
+    // A writer that finds the slot being filled leaves it to the other one.
+    private static void Store(ref Slot slot, in CachedRange range)
+    {
+        var sequence = Volatile.Read(ref slot.Sequence);
+        if ((sequence & 1) != 0 || Interlocked.CompareExchange(ref slot.Sequence, sequence + 1, sequence) != sequence)
+            return;
+        // The exchange is a full barrier: these stores are not seen before the odd sequence.
+        slot.Start = range.Start;
+        slot.End = range.End;
+        slot.Offset = range.Offset;
+        slot.Generation = range.Generation;
+        Volatile.Write(ref slot.Sequence, sequence + 2);
     }
 }

@@ -196,7 +196,7 @@ internal sealed class MetalCompletionQueue : IDisposable
     private readonly object _gate = new();
     private readonly object _wakeGate = new();
     private readonly List<(ulong Serial, Action Work)> _pending = new();
-    private readonly Thread _thread;
+    private readonly SharpEmu.HLE.Host.HostHelperThread _thread;
     private readonly Action _wakeHandler;
     private readonly bool _handlerBound;
     private ulong _publishedSerial;
@@ -217,12 +217,9 @@ internal sealed class MetalCompletionQueue : IDisposable
             _handlerBound
                 ? "[METAL-V2][INFO] Submission completions wake the host through a command-buffer handler."
                 : "[METAL-V2][INFO] Submission completions are polled on the shared event.");
-        _thread = new Thread(Run)
-        {
-            IsBackground = true,
-            Name = "SharpEmu Metal completion",
-        };
-        _thread.Start();
+        // TryApplyToCurrentThread in Run cannot raise a thread CoreCLR created: the class is set
+        // when the thread is made.
+        _thread = SharpEmu.HLE.Host.HostHelperThread.Start("SharpEmu Metal completion", 4 * 1024 * 1024, Run);
     }
 
     /// <summary>Whether a committed command buffer should carry the wakeup handler.</summary>

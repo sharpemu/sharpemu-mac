@@ -34,7 +34,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private readonly IConcurrentResolveHost _concurrent;
     private readonly object _lock = new();
     private readonly Queue<Job> _queue = new();
-    private readonly Thread _thread;
+    private readonly SharpEmu.HLE.Host.HostHelperThread _thread;
     private int _outstanding;
     private long _finished;
     private long _executedGate;
@@ -52,8 +52,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         _host = host;
         _fatal = host.Fatal;
         _concurrent = concurrent;
-        _thread = new Thread(Run) { IsBackground = true, Name = "SharpEmu program resolve" };
-        _thread.Start();
+        // The worker waits on this thread per draw: it runs at the worker's class, with the
+        // worker's stack, since it resolves what the worker would resolve itself.
+        _thread = SharpEmu.HLE.Host.HostHelperThread.Start("SharpEmu program resolve", 16 * 1024 * 1024, Run);
     }
 
     // The job of the draw the render thread runs now; set around each deferred draw.

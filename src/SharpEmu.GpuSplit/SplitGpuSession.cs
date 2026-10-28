@@ -58,7 +58,7 @@ public sealed class SplitGpuSession : IDisposable
     private readonly IDisposable? _process;
     private readonly IDisposable? _memoryServer;
     private readonly BlockingCollection<Action> _events = new();
-    private readonly List<Thread> _threads = new();
+    private readonly List<SharpEmu.HLE.Host.HostHelperThread> _threads = new();
     private readonly ManualResetEventSlim _ready = new(false);
     private int _readyStatus = GpuSplitStatus.NotReady;
     private string? _readyError;
@@ -712,12 +712,11 @@ public sealed class SplitGpuSession : IDisposable
         }
     }
 
-    private void StartThread(ThreadStart start, string name)
-    {
-        var thread = new Thread(start, 1024 * 1024) { IsBackground = true, Name = name };
-        _threads.Add(thread);
-        thread.Start();
-    }
+    // The inbound thread applies the protections the GPU worker waits for, the call servers answer
+    // its reads, and the events thread delivers its interrupts to the guest: all at the worker's
+    // class, which a thread CoreCLR creates cannot take later.
+    private void StartThread(Action start, string name) =>
+        _threads.Add(SharpEmu.HLE.Host.HostHelperThread.Start(name, 1024 * 1024, start));
 
     public void Dispose()
     {
@@ -738,7 +737,7 @@ public sealed class SplitGpuSession : IDisposable
         // The process's teardown unmaps the region: these threads must be off it first.
         foreach (var thread in _threads)
         {
-            if (thread != Thread.CurrentThread)
+            if (!thread.IsCurrentThread)
             {
                 _ = thread.Join(TimeSpan.FromSeconds(2));
             }
