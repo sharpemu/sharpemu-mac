@@ -467,18 +467,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         ulong programExitHandlerAddress)
     {
         var imageName = string.IsNullOrWhiteSpace(processImageName) ? "eboot.bin" : processImageName;
-        var arguments = new List<string>(3) { imageName };
-        var configuredArguments = Environment.GetEnvironmentVariable("SHARPEMU_GUEST_ARGS");
-        if (!string.IsNullOrWhiteSpace(configuredArguments))
-        {
-            // The PS5 entry-parameter ABI exposes three inline argv pointers.
-            // Two compatibility arguments are therefore safe without changing
-            // the fixed 0x20-byte structure expected by existing titles.
-            var compatibilityArguments = configuredArguments.Split(
-                (char[]?)null,
-                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            arguments.AddRange(compatibilityArguments.Take(2));
-        }
+        var arguments = new List<string> { imageName };
+        arguments.AddRange(SharpEmu.HLE.GuestArguments.Effective);
 
         var cursor = context[CpuRegister.Rsp];
         var argumentAddresses = new ulong[arguments.Count];
@@ -494,24 +484,30 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             argumentAddresses[index] = cursor;
         }
 
-        const ulong entryParamsSize = 0x20;
+        // The entry parameters: argc (32 bits, then padding), argv[] inline and NULL-terminated,
+        // then an empty environment. The libc start code reads argc at +0 and argv at +8. At
+        // least 0x20 bytes, the block every title has seen with up to two arguments.
+        var entryParamsSize = Math.Max(0x20UL, (ulong)(8 + 8 * (arguments.Count + 1) + 8));
         var entryParamsAddress = AlignDown(cursor - entryParamsSize, 16);
         if (!TryWriteUInt32(context, entryParamsAddress + 0x00, (uint)arguments.Count) ||
-            !TryWriteUInt32(context, entryParamsAddress + 0x04, 0) ||
-            !context.TryWriteUInt64(entryParamsAddress + 0x08, argumentAddresses[0]) ||
-            !context.TryWriteUInt64(
-                entryParamsAddress + 0x10,
-                argumentAddresses.Length > 1 ? argumentAddresses[1] : 0) ||
-            !context.TryWriteUInt64(
-                entryParamsAddress + 0x18,
-                argumentAddresses.Length > 2 ? argumentAddresses[2] : 0))
+            !TryWriteUInt32(context, entryParamsAddress + 0x04, 0))
         {
             return false;
         }
 
+        for (var slot = 0UL; 8 + slot * 8 < entryParamsSize; slot++)
+        {
+            var value = slot < (ulong)argumentAddresses.Length ? argumentAddresses[slot] : 0;
+            if (!context.TryWriteUInt64(entryParamsAddress + 8 + slot * 8, value))
+            {
+                return false;
+            }
+        }
+
+        SharpEmu.HLE.HleDataSymbols.ConfigureProcessArguments(arguments);
         if (arguments.Count > 1)
         {
-            Log.Debug($"Guest arguments: {string.Join(' ', arguments.Skip(1))}");
+            Log.Info($"Guest arguments: {string.Join(' ', arguments.Skip(1))}");
         }
 
         var entryStackPointer = entryParamsAddress - sizeof(ulong);

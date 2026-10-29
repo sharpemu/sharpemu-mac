@@ -1015,7 +1015,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--precompile-only] [--shader-prewarm-hold] [--shader-cache=<on|off>] [--shader-learn=<on|off>] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--precompile-only] [--shader-prewarm-hold] [--shader-cache=<on|off>] [--shader-learn=<on|off>] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--guest-args=<\"ARGS\">] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1133,6 +1133,13 @@ internal static partial class Program
                     return false;
                 }
                 windowModeOverride = windowMode;
+                continue;
+            }
+            if (TrySplitOption(argument, "--guest-args", out var guestArgumentsText))
+            {
+                // The title's own command line after argv[0], whitespace-separated; replaces
+                // SHARPEMU_GUEST_ARGS and, switch by switch, an engine adapter's defaults.
+                GuestArguments.SetUser(guestArgumentsText);
                 continue;
             }
             if (TrySplitOption(argument, "--resolution", out var resolutionText))
