@@ -30,6 +30,10 @@ public static class GpuHostMain
     public static int Main(string[] args)
     {
         SharpEmu.Logging.GcPauseLog.StartFromEnvironment();
+        // The guest process records the flip times (VideoOut's FrameTimeLog). This process inherits
+        // the variable and would open the same file: its own header, written later, truncated the
+        // guest's and moved every flip of the log by the GPU host's start time.
+        Environment.SetEnvironmentVariable("SHARPEMU_FRAME_TIMES", null);
         if (!OperatingSystem.IsMacOS())
         {
             Console.Error.WriteLine("[GPUHOST][ERROR] The GPU host runs only on macOS.");
