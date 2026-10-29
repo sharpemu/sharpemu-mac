@@ -188,6 +188,13 @@ public sealed unsafe class GuestFastPathStubTests
         GuestFastPath.PublishHostSelf(handle);
         GuestFastPath.PublishHostSelf(NewHandle());
         Assert.Equal(handle, harness.Call(0));
+
+        // A scheduler that forgot its threads (the loader's next session) sends the call back to
+        // the managed path, which registers the thread again and publishes afresh.
+        GuestFastPath.ForgetPublishedSelves();
+        Assert.Equal(RaxSentinel, harness.Call(0));
+        GuestFastPath.PublishHostSelf(handle);
+        Assert.Equal(handle, harness.Call(0));
     }
 
     [Fact]
