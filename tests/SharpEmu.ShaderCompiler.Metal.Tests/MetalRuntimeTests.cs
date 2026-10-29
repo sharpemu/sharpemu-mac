@@ -265,6 +265,25 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Wave64ReadLaneReadsItsOwnWaveInAGroupOfSeveralWaves()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        // A 256-thread group is four guest waves of 64 lanes, not eight simdgroups of 32:
+        // lane 63 is the wave's last thread. Each wave also leaves its loop after its own
+        // number of exchanges (wave + 1), which only a per-wave rendezvous survives.
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64GroupReadLane, new byte[2048],
+            waveLaneCount: 64, localSizeX: 256, threadsPerThreadgroup: 256);
+
+        for (var thread = 0; thread < 256; thread++)
+        {
+            var wave = (uint)thread >> 6;
+            Assert.Equal((wave + 1u) * (3u * (64u * wave + 63u) + 7u), ReadDword(result, thread * 8));
+            Assert.Equal(3u * (64u * wave + 5u) + 7u, ReadDword(result, thread * 8 + 4));
+        }
+    }
+
+    [Fact]
     public void Wave64FusedConstantLaneReadsReturnEachLanesValue()
     {
         if (SkipWithoutMetalDevice("the execution test")) return;
@@ -540,19 +559,21 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void Wave64InALargerWorkgroupTranslatesWithoutTheThreadgroupBridge()
+    public void Wave64InALargerWorkgroupBridgesEachWaveAtItsOwnPairBarrier()
     {
-        // The SPIR-V translator bridges only a 64-thread (one-wave) workgroup; a 256-thread
-        // group would share the half-indexed scratch between its four waves.
+        // A 64-thread (one-wave) group meets at threadgroup barriers; a 256-thread group's four
+        // waves each get their own scratch sets and pair-barrier counter.
         var bridged = Gen5ComputeFixtures.CompileRequestOrThrow(
             Gen5ComputeFixtures.Wave64Broadcast, waveLaneCount: 64, localSizeX: 64);
-        Assert.Contains("sharpemu_wave_scratch", bridged.Source);
+        Assert.Contains("sharpemu_wave_scratch[8]", bridged.Source);
+        Assert.DoesNotContain("sharpemu_wave_pair", bridged.Source);
 
         foreach (var fixture in new[] { Gen5ComputeFixtures.Wave64Broadcast, Gen5ComputeFixtures.Wave64ReadLane })
         {
             var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount: 64, localSizeX: 256);
-            Assert.DoesNotContain("sharpemu_wave_scratch", shader.Source);
-            Assert.DoesNotContain("threadgroup_barrier", shader.Source);
+            Assert.Contains("sharpemu_wave_scratch[32]", shader.Source);
+            Assert.Contains("sharpemu_wave_pair[4]", shader.Source);
+            Assert.Contains("sharpemu_wave_set = (sharpemu_tg_index >> 6u) * 8u", shader.Source);
         }
     }
 

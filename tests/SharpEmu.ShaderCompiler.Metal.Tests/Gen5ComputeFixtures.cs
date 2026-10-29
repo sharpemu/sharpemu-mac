@@ -378,6 +378,33 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 512);
 
+    // Four guest waves in one 256-thread group. v1 = 3 * thread + 7; each wave reads its lane 5
+    // once and its lane 63 once per trip of a scalar loop it runs wave + 1 times, so the waves
+    // leave the loop after different numbers of exchanges. Thread t stores at t * 8.
+    public static readonly Gen5ComputeFixture Wave64GroupReadLane = new(
+        "wave64-group-readlane",
+        [
+            0x7E0A0300,             // v_mov_b32 v5, v0                    thread in the group
+            0xD5430001, 0x021D0705, // v_mad_u32_u24 v1, v5, 3, 7
+            0x2C0C0A86,             // v_lshrrev_b32 v6, 6, v5             wave in the group
+            0x7E040506,             // v_readfirstlane_b32 s2, v6
+            0xD7600001, 0x00010B01, // v_readlane_b32 s1, v1, 5
+            0xBE830380,             // s_mov_b32 s3, 0
+            0xD7600000, 0x00017F01, // loop: v_readlane_b32 s0, v1, 63
+            0x80030003,             // s_add_u32 s3, s3, s0
+            0x8102C102,             // s_add_i32 s2, s2, -1
+            0xBF038002,             // s_cmp_ge_i32 s2, 0
+            0xBF85FFFA,             // s_cbranch_scc1 loop
+            0x7E040203,             // v_mov_b32 v2, s3
+            0x7E060201,             // v_mov_b32 v3, s1
+            0x34080A83,             // v_lshlrev_b32 v4, 3, v5
+            0xE0701000, 0x80020204, // buffer_store_dword v2, v4, s[8:11], 0 offen
+            0xE0701004, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen offset:4
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 2048);
+
     // v1 = 3 * lane + 7; three constant-lane reads in a row: lanes 63 and 5 (one fused
     // exchange) and lane 40 (its own).
     public static readonly Gen5ComputeFixture Wave64ReadLaneTriple = new(

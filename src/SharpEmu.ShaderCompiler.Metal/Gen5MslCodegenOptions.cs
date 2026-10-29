@@ -199,6 +199,11 @@ public sealed record Gen5MslCodegenOptions(
     /// regions, retaining device storage for other addresses. SHARPEMU_MSL_MESH_HOT_LDS=1.</summary>
     public bool MeshHotLds { get; init; }
 
+    /// <summary>Bridge every guest wave64 of a compute threadgroup of several whole waves
+    /// across its two simdgroups, instead of running each 32-wide simdgroup as a wave.
+    /// SHARPEMU_MSL_MULTIWAVE64=0 keeps the simdgroup waves.</summary>
+    public bool MultiWaveCompute64 { get; init; } = true;
+
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
         RegisterAllocation: Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGALLOC") != "0",
@@ -237,6 +242,7 @@ public sealed record Gen5MslCodegenOptions(
         BranchlessDwordLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_BRANCHLESS_LOADS") != "0",
         StaticScratchSlots = Environment.GetEnvironmentVariable("SHARPEMU_MSL_STATIC_SCRATCH") != "0",
         MeshExitJoin = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_EXIT_JOIN") == "1",
+        MultiWaveCompute64 = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MULTIWAVE64") != "0",
         MeshDeviceLdsThresholdBytes = uint.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_THRESHOLD"), out var threshold)
                 ? Math.Min(threshold, 16384u) : 12288u,

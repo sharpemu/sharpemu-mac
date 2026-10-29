@@ -405,15 +405,69 @@ public static partial class Gen5MslTranslator
         /// 32-wide Apple simdgroups (compute only; graphics stages run a wave as one
         /// simdgroup or a single lane regardless of guest wave size, and the host
         /// requests wave32 for them, as it does for the SPIR-V translator).
-        /// Only a one-wave (64-thread) workgroup is bridged, the SPIR-V translator's
-        /// scope: the bridge's barriers are threadgroup-wide, and the waves of a larger
-        /// workgroup take their own trip counts through the wave-uniform loops that hold
-        /// them, so a barrier inside one would never be met by the other waves and the
-        /// GPU hangs. Larger workgroups run each 32-wide simdgroup as a wave.</summary>
+        /// A one-wave (64-thread) workgroup meets at threadgroup barriers; a workgroup of
+        /// several whole waves at each wave's pair barrier (<see cref="IsBridgedComputeWaves"/>).
+        /// Any other workgroup runs each 32-wide simdgroup as a wave.</summary>
         private bool IsWave64 =>
-            (_waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
-                (ulong)_localSizeX * _localSizeY * _localSizeZ == 64) ||
+            (_waveLaneCount == 64 && _stage == Gen5MslStage.Compute && ComputeThreads == 64) ||
+            IsBridgedComputeWaves ||
             IsBridgedMeshWave64;
+
+        private ulong ComputeThreads => (ulong)_localSizeX * _localSizeY * _localSizeZ;
+
+        /// <summary>A wave64 compute workgroup of several whole waves, each bridged across its
+        /// two simdgroups. Run as 32-wide simdgroup waves, a program that needs its whole wave
+        /// computes something else: GTA V's BVH-build radix sort scans its 256-thread digit
+        /// histogram with row shifts, a V_READLANE of lane 63 and an EXEC of lanes 32..63, and
+        /// with half of each wave's sum lost every sort pass scattered its keys over each other.
+        /// The waves of such a group take their own trip counts through the wave-uniform loops
+        /// that hold their exchanges, so a threadgroup barrier there would never be met by the
+        /// other waves; each wave's halves meet at the wave's own pair barrier instead, as a
+        /// bridged mesh wave's do (<see cref="Wave64Barrier"/>). A group that can run only some of
+        /// its lanes keeps simdgroup waves: a half with no thread would never count in at its
+        /// partner's barrier, and so does one whose LDS leaves no threadgroup memory for the
+        /// waves' slots and counters. The hull launch is one wave per group.
+        /// SHARPEMU_MSL_MULTIWAVE64=0 keeps simdgroup waves for every group.</summary>
+        private bool IsBridgedComputeWaves =>
+            _options.MultiWaveCompute64 && _waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
+            _request.Tessellation is null && ComputeThreads is > 64 and <= 1024 && ComputeThreads % 64 == 0 &&
+            (ProgramUsesLds ? _computeLdsDwords : 0u) + (WaveScratchDwords + 1) * (ComputeThreads / 64) <= LdsDwordCount &&
+            !ComputeGroupCanBePartial;
+
+        private bool? _programUsesLds;
+
+        /// <summary>Whether the program declares guest LDS (what TryCompile gathers into
+        /// _usesLds), known before the wave layout has to be.</summary>
+        private bool ProgramUsesLds => _programUsesLds ??=
+            _request.Program.Instructions.Any(static instruction =>
+                (instruction.Control is Gen5DataShareControl { Gds: false } &&
+                    instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32" or "DsPermuteB32" or "DsNop")) ||
+                instruction.Control is Gen5BufferMemoryControl { Lds: true }) ||
+            _request.Memory.Entries.Any(static memory =>
+                memory.AddressSpace is FlatAddressSpace.Shared or FlatAddressSpace.SharedOrPrivate);
+
+        /// <summary>A thread count the dispatch supplies, or a fixed one that ends inside a
+        /// group on some axis, leaves some of a group's threads out.</summary>
+        private bool ComputeGroupCanBePartial
+        {
+            get
+            {
+                static bool EndsInside(uint count, uint size) =>
+                    count != ShaderCompileRequest.UnboundedThreadCount && count % size != 0;
+
+                return _request.Bindings is { UsesDispatchThreadLimits: true } ||
+                    EndsInside(_request.ThreadCountX, _localSizeX) ||
+                    EndsInside(_request.ThreadCountY, _localSizeY) ||
+                    EndsInside(_request.ThreadCountZ, _localSizeZ);
+            }
+        }
+
+        /// <summary>The bridged waves of one threadgroup that meet at pair barriers.</summary>
+        private bool UsesWavePairBarrier => IsBridgedMeshWave64 || IsBridgedComputeWaves;
+
+        private uint BridgedWavesPerThreadgroup => IsBridgedMeshWave64
+            ? Mesh.WavesPerThreadgroup
+            : (uint)(ComputeThreads / 64);
 
         /// <summary>An amplified wave64 mesh subgroup (Prospero's mesh shader): its threads are
         /// numbered (merged-wave subgroup id &lt;&lt; 6) + lane and each exports its own vertex and
@@ -431,7 +485,7 @@ public static partial class Gen5MslTranslator
         /// The wait gives up after <see cref="PairBarrierSpinLimit"/> polls and reports a step
         /// cap: a half whose partner never comes then runs on with stale exchanges instead of
         /// spinning until the GPU watchdog discards the whole command buffer.</summary>
-        private string Wave64Barrier => IsBridgedMeshWave64
+        private string Wave64Barrier => UsesWavePairBarrier
             ? "{ simdgroup_barrier(mem_flags::mem_threadgroup); sharpemu_wave_gen += 2u; " +
               "if ((sharpemu_lane & 31u) == 0u) { atomic_fetch_add_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], 1u, memory_order_relaxed); } " +
               "for (uint sharpemu_pair_spins = 0u; atomic_load_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], memory_order_relaxed) < sharpemu_wave_gen;) " +
@@ -981,18 +1035,29 @@ public static partial class Gen5MslTranslator
                 if (DeclaresWaveScratch && !AliasesWaveScratchIntoLds)
                 {
                     // Two sets of slots, alternated per exchange (see
-                    // Gen5MslTranslator.WaveExchange.cs). Indexed only by half,
-                    // so correct for a one-wave (64-thread) workgroup — larger
-                    // workgroups would need per-wave scratch (matches the SPIR-V
-                    // translator's bridge scope).
-                    source.AppendLine($"    threadgroup uint sharpemu_wave_scratch[{WaveScratchDwords}];");
+                    // Gen5MslTranslator.WaveExchange.cs), for each wave of the group.
+                    source.AppendLine($"    threadgroup uint sharpemu_wave_scratch[{ComputeWaveScratchDwords}];");
                 }
 
                 if (DeclaresWaveScratch)
                 {
-                    source.AppendLine("    uint sharpemu_wave_set = 0u;");
+                    source.AppendLine(IsBridgedComputeWaves
+                        ? $"    uint sharpemu_wave_set = (sharpemu_tg_index >> 6u) * {WaveScratchDwords}u;"
+                        : "    uint sharpemu_wave_set = 0u;");
                 }
 
+                if (IsBridgedComputeWaves)
+                {
+                    // Each wave's pair-barrier counter, zeroed before any wave counts in.
+                    // Every thread of the group exists (the group cannot be partial), so
+                    // the one threadgroup barrier is met.
+                    var waves = BridgedWavesPerThreadgroup;
+                    source.AppendLine($"    threadgroup atomic_uint sharpemu_wave_pair[{waves}];");
+                    source.AppendLine("    uint sharpemu_wave_gen = 0u;");
+                    source.AppendLine(
+                        $"    if (sharpemu_tg_index < {waves}u) {{ atomic_store_explicit(&sharpemu_wave_pair[sharpemu_tg_index], 0u, memory_order_relaxed); }}");
+                    source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
+                }
             }
             else if (IsBridgedMeshWave64)
             {
@@ -1080,7 +1145,7 @@ public static partial class Gen5MslTranslator
                 // accesses are bounds-masked into the same allocation, so this trades
                 // a rare top-of-LDS collision for a compilable pipeline.
                 source.AppendLine(
-                    $"    threadgroup uint* sharpemu_wave_scratch = &sharpemu_lds[{_computeLdsDwords - WaveScratchDwords}u];");
+                    $"    threadgroup uint* sharpemu_wave_scratch = &sharpemu_lds[{_computeLdsDwords - ComputeWaveScratchDwords}u];");
             }
 
             if (_stage == Gen5MslStage.Mesh)
@@ -1527,8 +1592,9 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"    s[{VccHiRegister}] = 0u;");
             if (IsWave64)
             {
-                // A bridged wave is exactly one 64-thread threadgroup, and
-                // dispatchThreadgroups always launches every thread of it, so at
+                // A bridged wave is one 64-thread threadgroup, or a whole wave of a
+                // group that cannot be partial, and dispatchThreadgroups always
+                // launches every thread of it, so at
                 // entry (before the dispatcher masks any off) all 64 lanes are
                 // active: the mask is a constant and needs no ballot, no bridge and
                 // none of its two threadgroup barriers.
