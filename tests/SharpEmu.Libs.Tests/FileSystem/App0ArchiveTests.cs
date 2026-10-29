@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.FileSystem;
+using SharpEmu.Libs.Kernel;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.FileSystem;
@@ -123,6 +124,51 @@ public sealed class App0ArchiveTests : IDisposable
             Assert.IsType<FileStream>(onDisk);
             Assert.Equal(2, onDisk.Length);
         }
+    }
+
+    [Fact]
+    public void AnEntryLookupAnswersFilesDirectoriesAndReplacedContent()
+    {
+        Assert.True(App0Archive.TryGetEntry(Path.Combine(_root, "data", "level.bin"), out var isDirectory, out var size));
+        Assert.False(isDirectory);
+        Assert.Equal(3_000UL, size);
+        Assert.True(App0Archive.TryGetEntry(Path.Combine(_root, "data", "movies"), out isDirectory, out _));
+        Assert.True(isDirectory);
+        Assert.False(App0Archive.TryGetEntry(Path.Combine(_root, "data", "missing.bin"), out _, out _));
+
+        // The overlay is process-wide; the entry is keyed by this test's own temporary path.
+        var replaced = Path.Combine(_root, "sce_sys", "param.json");
+        App0FileOverlay.Replace(replaced, [1, 2, 3], "test");
+        Assert.True(App0Archive.TryGetEntry(replaced, out _, out size));
+        Assert.Equal(3UL, size);
+        Assert.True(App0Archive.TryGetFile(replaced, out size));
+        Assert.Equal(3UL, size);
+    }
+
+    [Fact]
+    public void TheKernelSizesArchivedPathsWithoutThemOnDisk()
+    {
+        var level = Path.Combine(_root, "data", "level.bin");
+        Assert.True(KernelMemoryCompatExports.TryGetAprFileSize(level, out var size));
+        Assert.Equal(3_000UL, size);
+        // Cached: the same answer for a repeated query.
+        Assert.True(KernelMemoryCompatExports.TryGetAprFileSize(level, out size));
+        Assert.Equal(3_000UL, size);
+        Assert.True(KernelMemoryCompatExports.TryGetAprFileSize(Path.Combine(_root, "DATA", "Movies"), out size));
+        Assert.Equal(65536UL, size);
+        Assert.False(KernelMemoryCompatExports.TryGetAprFileSize(Path.Combine(_root, "data", "missing.bin"), out _));
+
+        // An extracted file is the archive's, so either source gives the same size.
+        var eboot = Path.Combine(_root, "eboot.bin");
+        Assert.True(App0Archive.Extract(eboot));
+        Assert.True(KernelMemoryCompatExports.TryGetAprFileSize(eboot, out size));
+        Assert.Equal(100_000UL, size);
+
+        // A file only on disk still comes from the host.
+        var local = Path.Combine(_root, "local.bin");
+        File.WriteAllBytes(local, new byte[42]);
+        Assert.True(KernelMemoryCompatExports.TryGetAprFileSize(local, out size));
+        Assert.Equal(42UL, size);
     }
 
     [Fact]
