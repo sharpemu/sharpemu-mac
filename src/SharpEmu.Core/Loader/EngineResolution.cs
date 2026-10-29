@@ -60,6 +60,7 @@ internal static class EngineResolution
         var app0 = App0Root;
         Run("Unity", () => UnityResolutionAdapter.Apply(memory, segments, app0, width, height));
         Run("UE", () => UnrealSceneResolutionAdapter.Apply(segments, app0, width, height));
+        Run("KEX", () => KexResolutionPatch.Apply(memory, segments, width, height));
     }
 
     private static void Run(string engine, Action adapter)
