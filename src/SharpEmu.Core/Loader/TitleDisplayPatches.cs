@@ -228,7 +228,7 @@ internal static class TitleDisplayPatches
         ArgumentNullException.ThrowIfNull(memory);
         ArgumentNullException.ThrowIfNull(programHeaders);
         var strategy = SelectedStrategy;
-        if (strategy == Strategy.Off || width == 0 || height == 0)
+        if (strategy == Strategy.Off || !EngineResolution.IsEnabled || width == 0 || height == 0)
         {
             return false;
         }
@@ -266,6 +266,21 @@ internal static class TitleDisplayPatches
         }
 
         GuestBytePatcher.Apply(memory, programHeaders, imageBase, patches);
+        if (strategy == Strategy.DisplayMode)
+        {
+            var profile = DisplayModeFor(titleId)!;
+            EngineResolution.Report(
+                "Bluepoint",
+                $"display mode {profile.ModeFor(width, height)}",
+                profile.HdWidth,
+                profile.HdHeight,
+                $"scene {Math.Min(width, profile.HdWidth)}x{Math.Min(height, profile.HdHeight)}");
+        }
+        else
+        {
+            EngineResolution.Report("Bluepoint", "compiled display sizes", width, height, $"{patches.Count} sites");
+        }
+
         Console.Error.WriteLine(strategy == Strategy.DisplayMode
             ? $"[LOADER][INFO] {titleId}: starts in its display mode {DisplayModeFor(titleId)!.ModeFor(width, height)} " +
               $"for a {width}x{height} display ({patches.Count} sites, {EnvironmentVariable}=mode)."
