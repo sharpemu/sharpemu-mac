@@ -20,11 +20,11 @@ internal readonly record struct OverlayStats(
 /// formatted with the invariant culture so the title does not change with the system locale.
 /// </summary>
 /// <remarks>
-/// Title format, left to right, separated by " | ":
-/// <c>FPS 26.8 (37.3 ms) | 1920x1080 | CPU 38% (guest 30, gpu 8) | GPU 71% | MEM 6.1 GB (gpu proc 3.2, VRAM 4.8) | TIME 00:06:37</c>.
-/// CPU is a share of the whole machine; "guest" and "gpu" are the two processes' shares of it.
-/// MEM is both processes' physical footprint; "gpu proc" is the GPU process's part and VRAM is
-/// the Metal device's allocation. The parenthesised memory figures use the unit of the total.
+/// Title format, left to right, separated by " · ":
+/// <c>26.8 FPS (37.3 ms) · 1920×1080 · CPU 38% · GPU 71% · RAM 6.1 GB · VRAM 4.8 GB · 00:06:37</c>.
+/// CPU is the guest and GPU processes together, as a share of the whole machine. RAM is both
+/// processes' physical footprint and VRAM is the Metal device's allocation. A figure that is not
+/// known yet is left out (resolution, VRAM) or shown as "?" or "N/A".
 /// </remarks>
 internal static class OverlayText
 {
@@ -33,46 +33,25 @@ internal static class OverlayText
 
     public static string FormatTitle(in OverlayStats stats)
     {
-        var fps = Number(stats.Fps, "0.0");
-        var frame = stats.Fps > 0 ? $" ({Number(1000.0 / stats.Fps, "0.0")} ms)" : string.Empty;
-        var resolution = stats.RenderWidth > 0 && stats.RenderHeight > 0
-            ? string.Create(CultureInfo.InvariantCulture, $" | {stats.RenderWidth}x{stats.RenderHeight}")
-            : string.Empty;
-        return $"FPS {fps}{frame}{resolution} | CPU {FormatCpu(stats.Resources)} | GPU {PerfOverlay.FormatUsage(stats.GpuBusyPercent)} | " +
-            $"MEM {FormatMemory(stats.Resources, stats.GpuAllocatedBytes)} | TIME {FormatElapsed(stats.ElapsedSeconds)}";
-    }
-
-    /// <summary>"38% (guest 30, gpu 8)" with a guest process, "38%" without one.</summary>
-    public static string FormatCpu(in ResourceSample sample)
-    {
-        var total = FormatPercent(sample.TotalCpuPercent);
-        return sample.Split
-            ? $"{total} (guest {FormatPercent(sample.GuestCpuPercent, suffix: false)}, gpu {FormatPercent(sample.GpuProcessCpuPercent, suffix: false)})"
-            : total;
-    }
-
-    /// <summary>"6.1 GB (gpu proc 3.2, VRAM 4.8)", or "6.1 GB (VRAM 4.8)" when one process does both.</summary>
-    public static string FormatMemory(in ResourceSample sample, ulong? gpuAllocatedBytes)
-    {
-        if (sample.TotalFootprintBytes is not { } bytes)
+        var parts = new List<string>(7)
         {
-            return "N/A";
+            stats.Fps > 0 ? $"{Number(stats.Fps, "0.0")} FPS ({Number(1000.0 / stats.Fps, "0.0")} ms)" : "0.0 FPS",
+        };
+        if (stats.RenderWidth > 0 && stats.RenderHeight > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{stats.RenderWidth}\u00D7{stats.RenderHeight}"));
         }
 
-        var gigabytes = bytes >= GiB;
-        var text = FormatBytes(bytes);
-        var parts = new List<string>(2);
-        if (sample.Split && sample.GpuProcessFootprintBytes is { } gpuProcess)
+        parts.Add($"CPU {FormatPercent(stats.Resources.TotalCpuPercent)}");
+        parts.Add($"GPU {PerfOverlay.FormatUsage(stats.GpuBusyPercent)}");
+        parts.Add($"RAM {(stats.Resources.TotalFootprintBytes is { } footprint ? FormatBytes(footprint) : "N/A")}");
+        if (stats.GpuAllocatedBytes is { } vram)
         {
-            parts.Add($"gpu proc {Scaled(gpuProcess, gigabytes)}");
+            parts.Add($"VRAM {FormatBytes(vram)}");
         }
 
-        if (gpuAllocatedBytes is { } vram)
-        {
-            parts.Add($"VRAM {Scaled(vram, gigabytes)}");
-        }
-
-        return parts.Count == 0 ? text : $"{text} ({string.Join(", ", parts)})";
+        parts.Add(FormatElapsed(stats.ElapsedSeconds));
+        return string.Join(" \u00B7 ", parts);
     }
 
     /// <summary>"6.1 GB" from 1 GiB up, "640 MB" below.</summary>

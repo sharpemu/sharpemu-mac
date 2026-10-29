@@ -23,6 +23,7 @@ internal sealed class GpuBusyTracker
     private readonly object _gate = new();
     private Interval[] _intervals = new Interval[256];
     private int _count;
+    private double _countedUntil = double.NegativeInfinity;
     private bool _hasSamples;
 
     /// <summary>True once any interval has been recorded; false means the backend does not report GPU time.</summary>
@@ -60,9 +61,11 @@ internal sealed class GpuBusyTracker
     }
 
     /// <summary>
-    /// Returns the seconds of [windowStart, windowEnd] covered by at least one recorded interval,
-    /// and forgets everything up to windowEnd. A command buffer still running at windowEnd keeps
-    /// its remainder for the next window, so consecutive windows count every instant once.
+    /// Returns the GPU seconds recorded since the previous call, up to windowEnd, that no earlier
+    /// call counted, at most the window's length. A command buffer reaches the tracker when its
+    /// completion is handled, which can be seconds after it ran, so its time counts in the window
+    /// it is recorded in rather than being clipped away. One still running at windowEnd keeps its
+    /// remainder for the next window. Every instant counts once.
     /// </summary>
     public double TakeBusySeconds(double windowStart, double windowEnd)
     {
@@ -74,19 +77,26 @@ internal sealed class GpuBusyTracker
         lock (_gate)
         {
             Merge();
+            // The first window counts nothing from before it; later ones count from where the last left off.
+            var countedUntil = double.IsNegativeInfinity(_countedUntil) ? windowStart : _countedUntil;
             var busy = 0.0;
             var kept = 0;
             for (var index = 0; index < _count; index++)
             {
                 var interval = _intervals[index];
-                busy += Math.Max(0, Math.Min(interval.End, windowEnd) - Math.Max(interval.Start, windowStart));
+                busy += Math.Max(0, Math.Min(interval.End, windowEnd) - Math.Max(interval.Start, countedUntil));
                 if (interval.End > windowEnd)
                 {
                     _intervals[kept++] = new Interval(Math.Max(interval.Start, windowEnd), interval.End);
                 }
+                else
+                {
+                    countedUntil = Math.Max(countedUntil, interval.End);
+                }
             }
 
             _count = kept;
+            _countedUntil = countedUntil;
             return Math.Min(busy, windowEnd - windowStart);
         }
     }

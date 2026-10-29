@@ -39,11 +39,26 @@ public sealed class GpuBusyTrackerTests
     }
 
     [Fact]
-    public void IntervalsAreClippedToTheWindow()
+    public void TheFirstWindowCountsNothingFromBeforeIt()
     {
         var tracker = new GpuBusyTracker();
         tracker.Record(0.9, 1.3);
-        Assert.Equal(0.1, tracker.TakeBusySeconds(1.0 - 0.1, 1.0), 9);
+        Assert.Equal(0.3, tracker.TakeBusySeconds(1.0, 2.0), 9);
+    }
+
+    [Fact]
+    public void ABufferRecordedAfterItsWindowClosedCountsInTheNextOne()
+    {
+        var tracker = new GpuBusyTracker();
+        tracker.Record(0.1, 0.3);
+        Assert.Equal(0.2, tracker.TakeBusySeconds(0, 1), 9);
+        // Ran 0.4 to 0.9, but its completion was handled after the first window closed.
+        tracker.Record(0.4, 0.9);
+        tracker.Record(1.2, 1.5);
+        Assert.Equal(0.8, tracker.TakeBusySeconds(1, 2), 9);
+        // Already counted: a later window does not count it again.
+        tracker.Record(0.4, 0.9);
+        Assert.Equal(0, tracker.TakeBusySeconds(2, 3), 9);
     }
 
     [Fact]

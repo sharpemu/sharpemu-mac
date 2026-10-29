@@ -169,7 +169,7 @@ public static partial class VideoOutExports
             var gpuSuffix = string.IsNullOrWhiteSpace(_selectedGpuName)
                 ? string.Empty
                 : $" · {_selectedGpuName}";
-            return $"SharpEmu · {BuildInfo.CommitSha ?? "dev"} - {_applicationWindowTitle}{gpuSuffix}";
+            return $"SharpEmu {BuildInfo.CommitSha ?? "unknown"} · {_applicationWindowTitle}{gpuSuffix}";
         }
     }
 
@@ -180,10 +180,9 @@ public static partial class VideoOutExports
             return;
         }
 
-        var backendSuffix = $" ({GuestGpu.Current.BackendName})";
         lock (_stateGate)
         {
-            _selectedGpuName = $"{gpuName.Trim()}{backendSuffix}";
+            _selectedGpuName = gpuName.Trim();
         }
     }
 

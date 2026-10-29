@@ -60,7 +60,6 @@ public sealed class OverlayStatsTests
         Assert.False(sample.Split);
         Assert.Equal(25.0, sample.TotalCpuPercent, 9);
         Assert.Equal(GiB, sample.TotalFootprintBytes);
-        Assert.Equal("25%", OverlayText.FormatCpu(sample));
     }
 
     [Fact]
@@ -71,8 +70,7 @@ public sealed class OverlayStatsTests
         Assert.True(double.IsNaN(sample.GuestCpuPercent));
         Assert.True(double.IsNaN(sample.TotalCpuPercent));
         Assert.Null(sample.TotalFootprintBytes);
-        Assert.Equal("? (guest ?, gpu 0)", OverlayText.FormatCpu(sample));
-        Assert.Equal("N/A", OverlayText.FormatMemory(sample, null));
+        Assert.Contains("CPU ? · GPU N/A · RAM N/A", OverlayText.FormatTitle(new OverlayStats(0, 0, 0, sample, double.NaN, null, 0)));
     }
 
     [Fact]
@@ -116,8 +114,7 @@ public sealed class OverlayStatsTests
         var resources = new ResourceSample(true, 38.0, 30.0, 8.0, (ulong)(2.9 * GiB), (ulong)(3.2 * GiB));
         var stats = new OverlayStats(26.8, 1920, 1080, resources, 71.2, (ulong)(4.8 * GiB), 397);
         Assert.Equal(
-            "FPS 26.8 (37.3 ms) | 1920x1080 | CPU 38% (guest 30, gpu 8) | GPU 71% | " +
-            "MEM 6.1 GB (gpu proc 3.2, VRAM 4.8) | TIME 00:06:37",
+            "26.8 FPS (37.3 ms) · 1920×1080 · CPU 38% · GPU 71% · RAM 6.1 GB · VRAM 4.8 GB · 00:06:37",
             OverlayText.FormatTitle(stats));
     }
 
@@ -127,15 +124,8 @@ public sealed class OverlayStatsTests
         var resources = new ResourceSample(false, 3.0, double.NaN, 3.0, null, 800 * MiB);
         var stats = new OverlayStats(0, 0, 0, resources, double.NaN, null, 0);
         Assert.Equal(
-            "FPS 0.0 | CPU 3% | GPU N/A | MEM 800 MB | TIME 00:00:00",
+            "0.0 FPS · CPU 3% · GPU N/A · RAM 800 MB · 00:00:00",
             OverlayText.FormatTitle(stats));
-    }
-
-    [Fact]
-    public void MemoryBelowOneGigabyteUsesMegabytesThroughout()
-    {
-        var resources = new ResourceSample(true, 0, 0, 0, 500 * MiB, 140 * MiB);
-        Assert.Equal("640 MB (gpu proc 140, VRAM 300)", OverlayText.FormatMemory(resources, 300 * MiB));
     }
 
     [Fact]
@@ -147,8 +137,8 @@ public sealed class OverlayStatsTests
             CultureInfo.CurrentCulture = new CultureInfo("de-DE");
             var resources = new ResourceSample(true, 38.0, 30.0, 8.0, 3 * GiB, 3 * GiB);
             var title = OverlayText.FormatTitle(new OverlayStats(26.8, 0, 0, resources, 50, null, 0));
-            Assert.StartsWith("FPS 26.8 (37.3 ms) | CPU 38%", title);
-            Assert.Contains("MEM 6.0 GB (gpu proc 3.0)", title);
+            Assert.StartsWith("26.8 FPS (37.3 ms) · CPU 38%", title);
+            Assert.Contains("RAM 6.0 GB", title);
         }
         finally
         {
