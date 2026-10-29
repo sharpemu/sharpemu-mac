@@ -1724,6 +1724,10 @@ public static partial class KernelMemoryCompatExports
             {
                 stream = archived;
             }
+            else if (access == FileAccess.Read && !IsMutatingOpen(flags) && App0FileOverlay.TryGet(hostPath, out var overlay))
+            {
+                stream = new App0OverlayFileStream(hostPath, GuestFileShare, overlay);
+            }
             else
             {
                 EnsureOpenParentDirectoryExists(guestPath, hostPath, flags);
@@ -8104,7 +8108,11 @@ public static partial class KernelMemoryCompatExports
             return false;
         }
 
-        var size = isDirectory ? 65536L : (long)archive.GetFileSize(node);
+        var size = isDirectory
+            ? 65536L
+            : App0FileOverlay.TryGet(hostPath, out var overlay) && overlay.Content is { } content
+                ? content.Length
+                : (long)archive.GetFileSize(node);
         var archiveTime = File.GetLastWriteTimeUtc(archive.Path);
         return TryWriteKernelStat(
             ctx,

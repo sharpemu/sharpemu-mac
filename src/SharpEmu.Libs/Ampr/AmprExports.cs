@@ -128,6 +128,7 @@ public static partial class AmprExports
     {
         private readonly SafeFileHandle? _handle;
         private readonly ZArchiveFileStream? _archived;
+        private readonly App0FileOverlay.Entry? _overlay;
         private long _nextSequentialOffset = -1;
         // One cache ownership reference plus one reference for each active read.
         private int _references = 1;
@@ -143,6 +144,9 @@ public static partial class AmprExports
                 Length = archived.Length;
                 return;
             }
+
+            // A host file the overlay substitutes or patches.
+            _overlay = App0FileOverlay.TryGet(path, out var overlay) ? overlay : null;
 
             _handle = File.OpenHandle(
                 path,
@@ -160,8 +164,22 @@ public static partial class AmprExports
 
         public long Length { get; }
 
-        public int Read(Span<byte> buffer, long offset) =>
-            _archived?.ReadAt(buffer, offset) ?? RandomAccess.Read(_handle!, buffer, offset);
+        public int Read(Span<byte> buffer, long offset)
+        {
+            if (_archived is not null)
+            {
+                return _archived.ReadAt(buffer, offset);
+            }
+
+            if (_overlay?.Content is not null)
+            {
+                return _overlay.ReadContent(buffer, offset);
+            }
+
+            var read = RandomAccess.Read(_handle!, buffer, offset);
+            _overlay?.Apply(buffer, offset, read);
+            return read;
+        }
 
         /// <summary>
         /// Asks the kernel to start pulling in the bytes after a read that

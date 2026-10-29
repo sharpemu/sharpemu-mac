@@ -37,6 +37,32 @@ public sealed class SpanSnapshot(ulong[] starts, ulong[] ends)
         end = 0;
         return false;
     }
+
+    // The first part of [address, limit) that a span holds, clipped to the range.
+    public bool TryGetFirstOverlap(ulong address, ulong limit, out ulong start, out ulong end)
+    {
+        var index = Array.BinarySearch(starts, address);
+        if (index < 0)
+        {
+            index = ~index - 1;
+        }
+
+        if (index < 0 || ends[index] <= address)
+        {
+            index++;
+        }
+
+        if (index < starts.Length && starts[index] < limit)
+        {
+            start = Math.Max(address, starts[index]);
+            end = Math.Min(limit, ends[index]);
+            return true;
+        }
+
+        start = 0;
+        end = 0;
+        return false;
+    }
 }
 
 public sealed class SpanSet

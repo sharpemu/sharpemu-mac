@@ -26,6 +26,13 @@ public static class SplitGpuComposition
     /// <summary>The running session, once the GPU host started.</summary>
     public static SplitGpuSession? Session => Volatile.Read(ref _session);
 
+    /// <summary>
+    /// Stops the GPU host and waits for it to exit. Call once the guest has stopped and before the
+    /// runtime unmaps guest memory: a host still running queued command streams would otherwise
+    /// read pages that are gone and end on a fatal.
+    /// </summary>
+    public static void Shutdown() => Interlocked.Exchange(ref _session, null)?.Dispose();
+
     public static void Register()
     {
         // The name stays the build's backend name: SHARPEMU_GPU_BACKEND=Metal still matches.

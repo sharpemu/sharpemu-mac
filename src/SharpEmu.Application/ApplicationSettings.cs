@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Application;
@@ -86,8 +87,12 @@ public sealed class ApplicationSettings
     public string HdrMode { get; set; } = "Auto";
 
     // What the guest is told the display is, which is what decides how much pixel work a
-    // title does. Not the window size: see GuestDisplayResolution.
-    public string GuestDisplayResolution { get; set; } = "1080p";
+    // title does. "Auto" is the console output mode that fits Resolution; 720p, 1080p, 1440p
+    // or 2160p pin one. Stored under a new key: the old "GuestDisplayResolution" key was
+    // written as "1080p" by every save although nothing let a user choose it, and reading it
+    // would keep pinning the guest to 1080p whatever Resolution says.
+    [JsonPropertyName("GuestDisplayOverride")]
+    public string GuestDisplayResolution { get; set; } = "Auto";
 
     public bool OverlayEnabled { get; set; } = true;
     public string OverlayCorner { get; set; } = "TopRight";
@@ -201,7 +206,7 @@ public sealed class ApplicationSettings
         settings.ScalingMode = NormalizeChoice(settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         settings.HdrMode = NormalizeChoice(settings.HdrMode, "Auto", "On", "Off");
         settings.GuestDisplayResolution = NormalizeChoice(
-            settings.GuestDisplayResolution, "1080p", "720p", "1440p", "2160p");
+            settings.GuestDisplayResolution, "Auto", "720p", "1080p", "1440p", "2160p");
         settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Guest", "Host", "Skip");
         settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
         settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "TitleBar", "Full", "Minimal");

@@ -251,6 +251,35 @@ public sealed unsafe class SplitInProcessTests
     }
 
     [MacOSFact]
+    public void AProtectionThatRunsPastTheGuestsSpansLandsOnTheRegisteredPart()
+    {
+        using var split = new InProcessSplit();
+        var address = split.Guest.Address;
+        // A registers the first chunk only. The GPU side's guard also covers the next one (a watch
+        // over a partly resident texture runs across pages A does not register), so one protection
+        // request spans both.
+        split.GuestMemory.Register(address, SharedGuestMemory.Chunk, ReadWrite);
+        split.GpuMemory.Register(address + SharedGuestMemory.Chunk, SharedGuestMemory.Chunk, ReadWrite);
+
+        var watcher = new Thread(() => split.GpuMemory.Pages.AddWatch(address, 2 * SharedGuestMemory.Chunk, blockReads: false));
+        watcher.Start();
+        Assert.True(watcher.Join(10_000));
+        Assert.Equal(GuestPageProtection.Read, split.GuestSpace.Last(address).Access);
+
+        // Dropping the watch gives the registered chunk its rights back: a guest store there must
+        // not keep faulting on a protection no watch holds.
+        var remover = new Thread(() => split.GpuMemory.Pages.RemoveWatch(address, 2 * SharedGuestMemory.Chunk, blockReads: false));
+        remover.Start();
+        Assert.True(remover.Join(10_000));
+        // A request that gives rights back is not waited for where it is made.
+        Wait.Until(() => split.GuestSpace.Last(address).Access == ReadWrite, "the watch's protection dropped");
+
+        // Memory A does not register is never protected.
+        Assert.DoesNotContain(split.GuestSpace.Protections, protection =>
+            protection.Address + protection.Size > address + SharedGuestMemory.Chunk);
+    }
+
+    [MacOSFact]
     public void AMappingChangeParksTheWorkerAndUnregistersOnIt()
     {
         using var split = new InProcessSplit();
