@@ -102,7 +102,7 @@ public sealed class ResourceMaterializerTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void IncompatibleImageCapturePreservesFailureAndPublishedState(bool captureEnabled)
+    public void AnIncompatibleIndirectCandidateReadsAsNullAndIsCaptured(bool captureEnabled)
     {
         var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false));
         uint[] userData = [0x1000, 224 << 16, 2, 0, 0x2000, 16 << 16, 4, 0, 7];
@@ -120,11 +120,12 @@ public sealed class ResourceMaterializerTests
         var previousSpecialization = specialization;
         var captures = new List<IndirectImageFailure>();
 
-        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization,
-            out var failureKind, captureEnabled ? captures.Add : null));
-        Assert.Equal(ResourceMaterializationFailure.IncompatibleImageCandidates, failureKind);
-        Assert.Same(previousSnapshot, snapshot);
-        Assert.Same(previousSpecialization, specialization);
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization,
+            out var failureKind, captureEnabled ? captures.Add : null), $"materialize {failureKind}");
+        Assert.NotSame(previousSnapshot, snapshot);
+        Assert.NotSame(previousSpecialization, specialization);
+        Assert.Single(snapshot.Images, image => image.All(word => word == 0));
+        Assert.Equal(specialization.Images[0].Dimension, specialization.Images[1].Dimension);
         if (captureEnabled)
         {
             var failure = Assert.Single(captures);
@@ -183,11 +184,13 @@ public sealed class ResourceMaterializerTests
         var inputs = Inputs(registers, readMemory: ReadWord, readCleanMemory: ReadWord);
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
-        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
         var baselineAddresses = addresses.ToArray();
         addresses.Clear();
         var captures = new List<IndirectImageFailure>();
-        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, captures.Add));
+        snapshot = new ResourceSnapshot();
+        specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, captures.Add));
         Assert.Equal(baselineAddresses, addresses);
         var reads = Assert.Single(captures).ScalarReads.Where(read => read.InstructionAddress == 0xF00).ToArray();
         Assert.Equal(2, reads.Length);
