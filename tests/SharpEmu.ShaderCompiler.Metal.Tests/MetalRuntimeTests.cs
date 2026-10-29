@@ -283,6 +283,37 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
         }
     }
 
+    [Theory]
+    [InlineData(64u)]
+    [InlineData(256u)]
+    public void Wave64LdsAtomicReturnsCountInLaneOrderAcrossBothHalves(uint threads)
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        // The wave's upper simdgroup used to race its lower one to the shared word, so lane 32
+        // could read a count below lane 31's (a few rounds in fifty). Within each wave the counts
+        // go up lane by lane; another wave of the group may add between the two halves.
+        for (var round = 0; round < 50; round++)
+        {
+            var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64LdsAddRank, new byte[1024],
+                waveLaneCount: 64, localSizeX: threads, threadsPerThreadgroup: threads, localDataShareDwords: 64);
+            for (var wave = 0; wave < threads / 64; wave++)
+            {
+                var first = ReadDword(result, wave * 256);
+                for (var lane = 1; lane < 64; lane++)
+                {
+                    var count = ReadDword(result, (wave * 64 + lane) * 4);
+                    var previous = ReadDword(result, (wave * 64 + lane - 1) * 4);
+                    Assert.True(count > previous, $"round {round} wave {wave} lane {lane}: {count} after {previous}");
+                    if (threads == 64)
+                    {
+                        Assert.Equal((uint)lane, count - first);
+                    }
+                }
+            }
+        }
+    }
+
     [Fact]
     public void Wave64FusedConstantLaneReadsReturnEachLanesValue()
     {
@@ -756,9 +787,9 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     private static byte[] ExecuteRequestOrThrow(Gen5ComputeFixture fixture, byte[] buffer,
-        uint waveLaneCount = 32, uint localSizeX = 32, uint threadsPerThreadgroup = 1)
+        uint waveLaneCount = 32, uint localSizeX = 32, uint threadsPerThreadgroup = 1, uint localDataShareDwords = 0)
     {
-        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount, localSizeX);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount, localSizeX, localDataShareDwords);
         if (!MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError))
         {
             throw new InvalidOperationException($"[{fixture.Name}] {compileError}\n{shader.Source}");

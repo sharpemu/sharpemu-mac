@@ -3689,6 +3689,11 @@ public static partial class Gen5MslTranslator
             var index = Temp("uint", LdsIndex(address, control.SingleOffsetBytes));
             var first = Temp("uint", RawSource(instruction, 1));
             var second = takesThreeSources ? Temp("uint", RawSource(instruction, 2)) : "0u";
+            if (IsWave64 && HasSharedLds && instruction.Destinations.Count > 0)
+            {
+                return EmitDataShareAtomicInLaneOrder(instruction, name, index, first, second);
+            }
+
             BeginExecGuard();
             var original = EmitLockedDataShareAtomicWord(name, index, first, second);
             if (instruction.Destinations.Count > 0)
@@ -3696,6 +3701,38 @@ public static partial class Gen5MslTranslator
                 Line($"v[{instruction.Destinations[0].Value}] = {original};");
             }
 
+            EndExecGuard();
+            return true;
+        }
+
+        /// <summary>A returning LDS atomic of a bridged wave64, its lanes 0..31 before its lanes
+        /// 32..63. A wave's lanes that hit one word see each other's updates in lane order on
+        /// the hardware, and a program may rank by it: GTA V's BVH-build radix sort takes each
+        /// key's place among its wave's equal digits from DS_ADD_RTN_U32 on a shared counter,
+        /// which keeps every pass stable. A simdgroup's lanes keep that order, but the wave's two
+        /// simdgroups race, and keys the upper half ranked first changed places with the lower
+        /// half's. So the lower half goes first, the halves meet, then the upper half goes, and
+        /// they meet again before the wave's next access. The meetings are at statement level,
+        /// which every lane of a bridged wave reaches.</summary>
+        private bool EmitDataShareAtomicInLaneOrder(
+            Gen5ShaderInstruction instruction, string name, string index, string first, string second)
+        {
+            var original = Temp("uint", "0u");
+            foreach (var half in new[] { "sharpemu_lane < 32u", "sharpemu_lane >= 32u" })
+            {
+                Line($"if ({half})");
+                Line("{");
+                _indent++;
+                BeginExecGuard();
+                Line($"{original} = {EmitLockedDataShareAtomicWord(name, index, first, second)};");
+                EndExecGuard();
+                _indent--;
+                Line("}");
+                Line(Wave64Barrier);
+            }
+
+            BeginExecGuard();
+            Line($"v[{instruction.Destinations[0].Value}] = {original};");
             EndExecGuard();
             return true;
         }

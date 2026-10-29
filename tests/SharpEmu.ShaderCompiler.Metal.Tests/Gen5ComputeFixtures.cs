@@ -405,6 +405,22 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 2048);
 
+    // Every thread adds one to LDS word 0 and stores what it read at thread * 4: the lanes of
+    // a wave read their own counts in lane order.
+    public static readonly Gen5ComputeFixture Wave64LdsAddRank = new(
+        "wave64-lds-add-rank",
+        [
+            0x7E020280,             // v_mov_b32 v1, 0
+            0x7E040281,             // v_mov_b32 v2, 1
+            0xD8800000, 0x03000201, // ds_add_rtn_u32 v3, v1, v2
+            0xBF8CC07F,             // s_waitcnt lgkmcnt(0)
+            0x34080082,             // v_lshlrev_b32 v4, 2, v0
+            0xE0701000, 0x80020304, // buffer_store_dword v3, v4, s[8:11], 0 offen
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 1024);
+
     // v1 = 3 * lane + 7; three constant-lane reads in a row: lanes 63 and 5 (one fused
     // exchange) and lane 40 (its own).
     public static readonly Gen5ComputeFixture Wave64ReadLaneTriple = new(
