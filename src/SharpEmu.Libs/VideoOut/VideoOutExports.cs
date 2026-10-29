@@ -594,6 +594,27 @@ public static partial class VideoOutExports
             $"{DisplayBufferVerdict(width, height, advertised, Volatile.Read(ref _displayQueried) != 0)} " +
             $"(advertised {advertised.Width}x{advertised.Height}, " +
             $"class {HostVideoHost.CurrentOptions.GuestResolutionClass}).");
+        if (Volatile.Read(ref _expectedDisplayBufferSource) is { } source &&
+            (width != _expectedDisplayBufferWidth || height != _expectedDisplayBufferHeight))
+        {
+            Console.Error.WriteLine(
+                $"[VIDEO-OUT][WARN] resolution: {source} set the display buffers to " +
+                $"{_expectedDisplayBufferWidth}x{_expectedDisplayBufferHeight}, but the title registered {width}x{height}: " +
+                "the patch missed a site.");
+        }
+    }
+
+    private static string? _expectedDisplayBufferSource;
+    private static uint _expectedDisplayBufferWidth;
+    private static uint _expectedDisplayBufferHeight;
+
+    /// <summary>Called by a loader patch that rewrote a title's compiled display-buffer size, so
+    /// the registration can confirm the title actually took it.</summary>
+    public static void ExpectDisplayBuffer(uint width, uint height, string source)
+    {
+        _expectedDisplayBufferWidth = width;
+        _expectedDisplayBufferHeight = height;
+        Volatile.Write(ref _expectedDisplayBufferSource, source);
     }
 
     // Set once the title reads the display through sceVideoOutGetOutputStatus(WithVrr) or

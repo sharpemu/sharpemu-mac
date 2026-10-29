@@ -62,6 +62,7 @@ internal static class EngineResolution
         Run("UE", () => UnrealSceneResolutionAdapter.Apply(segments, app0, width, height));
         Run("KEX", () => KexResolutionPatch.Apply(memory, segments, width, height));
         Run("RAGE", () => RageResolutionPatch.Apply(memory, segments, width, height));
+        Run("small engine", () => PackedDisplaySizeScanner.Apply(memory, segments, width, height));
     }
 
     private static void Run(string engine, Action adapter)
