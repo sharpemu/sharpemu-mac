@@ -30,7 +30,12 @@ internal static class UnrealBackBufferPatch
     internal readonly record struct Site(ulong NameAddress, ulong ImmediateAddress, uint CurrentValue);
 
     internal static bool IsEnabled =>
+        EngineResolution.IsEnabled &&
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_UE_BACKBUFFER_PATCH"), "0", StringComparison.Ordinal);
+
+    /// <summary>Whether the image registers the PS5 back-buffer variables: an Unreal executable.</summary>
+    internal static bool HasUnrealSignature(IReadOnlyList<EngineResolution.Segment> segments) =>
+        TryFindName([.. segments.Select(segment => (segment.Start, segment.Bytes, segment.Executable))], WidthVariable, out _);
 
     /// <summary>Rewrites the compiled back-buffer defaults to <paramref name="width"/> x
     /// <paramref name="height"/>. Returns true when both were rewritten.</summary>
@@ -95,7 +100,7 @@ internal static class UnrealBackBufferPatch
 
         if (w.CurrentValue == width && h.CurrentValue == height)
         {
-            Console.WriteLine($"[LOADER] Unreal back-buffer default already {width}x{height}; nothing to patch.");
+            EngineResolution.Report("UE", "back buffer", width, height, "the title's own size");
             return true;
         }
 
@@ -110,10 +115,12 @@ internal static class UnrealBackBufferPatch
             return false;
         }
 
-        Console.WriteLine(
-            $"[LOADER] Unreal back-buffer default {w.CurrentValue}x{h.CurrentValue} -> {width}x{height} " +
-            $"(PS5.DefaultBackBufferWidth at 0x{w.ImmediateAddress:X}, PS5.DefaultBackBufferHeight at 0x{h.ImmediateAddress:X}); " +
-            "SHARPEMU_UE_BACKBUFFER_PATCH=0 disables.");
+        EngineResolution.Report(
+            "UE",
+            "back buffer",
+            width,
+            height,
+            $"PS5.DefaultBackBuffer {w.CurrentValue}x{h.CurrentValue} at 0x{w.ImmediateAddress:X}/0x{h.ImmediateAddress:X}");
         return true;
     }
 

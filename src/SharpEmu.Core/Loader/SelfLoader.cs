@@ -358,6 +358,7 @@ public sealed class SelfLoader : ISelfLoader
         {
             GuestBytePatcher.ApplyFromEnvironment(virtualMemory, programHeaders, imageBase);
             ApplyTitleDisplayPatch(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId);
+            EngineResolution.ApplyMainExecutable(virtualMemory, programHeaders, imageBase);
         }
 
         // Before the red-zone pass: it only rewrites immediates in place, and the red-zone pass moves

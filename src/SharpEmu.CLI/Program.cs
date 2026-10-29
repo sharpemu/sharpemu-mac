@@ -1018,7 +1018,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--precompile-only] [--shader-prewarm-hold] [--shader-cache=<on|off>] [--shader-learn=<on|off>] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--precompile-only] [--shader-prewarm-hold] [--shader-cache=<on|off>] [--shader-learn=<on|off>] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--guest-args=<\"ARGS\">] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1136,6 +1136,13 @@ internal static partial class Program
                     return false;
                 }
                 windowModeOverride = windowMode;
+                continue;
+            }
+            if (TrySplitOption(argument, "--guest-args", out var guestArgumentsText))
+            {
+                // The title's own command line after argv[0], whitespace-separated; replaces
+                // SHARPEMU_GUEST_ARGS and, switch by switch, an engine adapter's defaults.
+                GuestArguments.SetUser(guestArgumentsText);
                 continue;
             }
             if (TrySplitOption(argument, "--resolution", out var resolutionText))
@@ -1614,12 +1621,13 @@ internal static partial class Program
         return Enum.IsDefined(mode);
     }
 
-    /// <summary>The display the guest is told about: 720p, 1080p, 1440p or 2160p. Four-K is the
-    /// one a title can spend four times the pixel work on, so it is opt-in.</summary>
+    /// <summary>The display the guest is told about: auto (the output mode that fits
+    /// --resolution) or a pinned 720p, 1080p, 1440p or 2160p.</summary>
     private static bool TryParseDisplayResolution(string value, out GuestDisplayResolution resolution)
     {
         resolution = value.Trim().ToLowerInvariant() switch
         {
+            "auto" => GuestDisplayResolution.Auto,
             "720p" or "720" or "hd720" or "1280x720" => GuestDisplayResolution.Hd720,
             "1080p" or "1080" or "fhd" or "hd" or "1920x1080" => GuestDisplayResolution.Hd,
             "1440p" or "1440" or "qhd" or "2560x1440" => GuestDisplayResolution.Qhd,
