@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE.FileSystem;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Logging;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.FileSystem;
@@ -169,6 +170,23 @@ public sealed class App0ArchiveTests : IDisposable
         File.WriteAllBytes(local, new byte[42]);
         Assert.True(KernelMemoryCompatExports.TryGetAprFileSize(local, out size));
         Assert.Equal(42UL, size);
+    }
+
+    [Fact]
+    public void TheCacheLivesInTheDataRootByDefault()
+    {
+        Assert.Equal(
+            Path.Combine(SharpEmuPaths.UserPath("zar-cache"), "game"),
+            ZArchiveCache.GetCacheRoot(Path.Combine(_directory, "game.zar")));
+    }
+
+    [Fact]
+    public void ExtractionLeavesNoTemporaryFileBehind()
+    {
+        var movie = Path.Combine(_root, "data", "movies", "intro.bk2");
+        Assert.True(App0Archive.Extract(movie));
+
+        Assert.Equal(["intro.bk2"], Directory.GetFiles(Path.GetDirectoryName(movie)!).Select(Path.GetFileName));
     }
 
     [Fact]

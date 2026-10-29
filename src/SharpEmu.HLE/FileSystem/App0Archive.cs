@@ -167,7 +167,9 @@ public static class App0Archive
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(hostPath))!);
-        var temporary = hostPath + ".partial";
+        // Per process: the cache folder is shared by every build and process using the data root,
+        // and two of them extracting the same file must not open one temporary file between them.
+        var temporary = $"{hostPath}.{Environment.ProcessId}.partial";
         using (var target = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
         {
             source.CopyTo(target, ZArchive.BlockSize);
