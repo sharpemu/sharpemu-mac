@@ -38,7 +38,7 @@ jobs:
       version: ${{ steps.vars.outputs.version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Two commits are enough for the change filter below: on pull
           # requests HEAD is the merge commit and HEAD^1 is the base.
@@ -109,7 +109,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Run REUSE lint
         uses: fsfe/reuse-action@v6
@@ -140,10 +140,10 @@ jobs:
       TEST_RESULTS_DIR: ${{ github.workspace }}/artifacts/test-results
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.103
           cache: true
@@ -244,7 +244,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

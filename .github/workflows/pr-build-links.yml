@@ -34,7 +34,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Post or update the artifact-links comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const run = context.payload.workflow_run;
