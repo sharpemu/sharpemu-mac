@@ -283,17 +283,20 @@ public sealed class ZArchive : IDisposable
         var count = (int)Math.Min((ulong)destination.Length, node.FileSize - offset);
         var position = node.FileOffset + offset;
         var written = 0;
-        lock (_gate)
+        while (written < count)
         {
-            while (written < count)
+            var block = position / BlockSize;
+            var within = (int)(position % BlockSize);
+            var step = Math.Min(count - written, BlockSize - within);
+            // One block at a time: a read of hundreds of megabytes would otherwise hold every other
+            // reader of the archive, a small streaming read included, until all of it was loaded.
+            lock (_gate)
             {
-                var block = position / BlockSize;
-                var within = (int)(position % BlockSize);
-                var step = Math.Min(count - written, BlockSize - within);
                 LoadBlock(block).AsSpan(within, step).CopyTo(destination[written..]);
-                written += step;
-                position += (ulong)step;
             }
+
+            written += step;
+            position += (ulong)step;
         }
 
         return written;

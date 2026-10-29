@@ -129,6 +129,27 @@ public sealed class ZArchiveTests : IDisposable
     }
 
     [Fact]
+    public void ConcurrentReadsOfOneArchiveEachGetTheirOwnBytes()
+    {
+        // Together larger than the block cache, so the readers also evict each other's blocks.
+        var first = Pattern(3_000_000, 21);
+        var second = Pattern(2_500_000, 22);
+        using var archive = ZArchive.Open(Write(("a.bin", first), ("b.bin", second)))!;
+
+        Parallel.For(0, 8, worker =>
+        {
+            var (name, expected) = worker % 2 == 0 ? ("a.bin", first) : ("b.bin", second);
+            var node = archive.LookUp(name);
+            var actual = new byte[expected.Length];
+            for (var round = 0; round < 4; round++)
+            {
+                Assert.Equal(expected.Length, archive.Read(node, 0, actual));
+                Assert.Equal(expected, actual);
+            }
+        });
+    }
+
+    [Fact]
     public void AFileThatIsNotAnArchiveDoesNotOpen()
     {
         var path = Path.Combine(_directory, "plain.zar");
