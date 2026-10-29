@@ -662,7 +662,16 @@ public sealed class SplitGpuSession : IDisposable
             return;
         }
 
-        Detach();
+        try
+        {
+            Detach();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The runtime already tore guest memory down: there is no guest left to stop.
+            return;
+        }
+
         RestoreGuestProtections();
         _guest.OnGpuProcessLost("The GPU process exited unexpectedly.");
     }

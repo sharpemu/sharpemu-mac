@@ -346,6 +346,9 @@ internal static partial class Program
                 {
                     Console.CancelKeyPress -= cancelHandler;
                 }
+
+                // The runtime unmaps guest memory when it is disposed; the GPU process must be gone first.
+                GpuComposition.Shutdown();
             }
 
             Log.Info($"SharpEmu execution completed. Result={result} (0x{(int)result:X8})");
