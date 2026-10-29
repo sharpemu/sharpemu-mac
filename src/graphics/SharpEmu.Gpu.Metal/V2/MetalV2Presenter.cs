@@ -251,6 +251,10 @@ internal static partial class MetalV2Presenter
         {
             VideoOutBackendServices.SetSelectedGpuName(name);
         }
+
+        // The window title's VRAM figure: the whole device allocation, read once per refresh.
+        PerfOverlay.SetGpuAllocatedBytesProvider(static () =>
+            _device == 0 ? 0UL : MetalV2Native.SendValue64(_device, SelCurrentAllocatedSize));
     }
 
     public static void EnsureStarted(uint width, uint height)
@@ -1272,6 +1276,7 @@ internal static partial class MetalV2Presenter
         {
             // The presenter owns one retain per queued or presented frame.
             MetalNative.Send(texture, MetalNative.Selector("retain"));
+            PerfOverlay.SetRenderResolution(width, height);
             lock (_frameGate)
             {
                 _pendingFrames.Enqueue(new PendingFrame(texture, width, height, requestId, serial, isHdr));

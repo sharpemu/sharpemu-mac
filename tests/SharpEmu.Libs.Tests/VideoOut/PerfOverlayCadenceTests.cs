@@ -39,7 +39,7 @@ public sealed class PerfOverlayCadenceTests
         var summary = PerfOverlay.GetTitleBarSummary();
         var match = Regex.Match(summary, @"^FPS ([0-9]+(?:[.,][0-9]+)?)");
         Assert.True(match.Success, summary);
-        return double.Parse(match.Groups[1].Value, CultureInfo.CurrentCulture);
+        return double.Parse(match.Groups[1].Value.Replace(',', '.'), CultureInfo.InvariantCulture);
     }
 
     private static FieldInfo Field(string name) => typeof(PerfOverlay)

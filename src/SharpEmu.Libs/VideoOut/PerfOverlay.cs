@@ -26,6 +26,11 @@ public static class PerfOverlay
 
     private static readonly PerformanceOverlayState DisplayState = new();
     private static IGpuUsage? _gpuUsage;
+    private static readonly GpuBusyTracker GpuBusy = new();
+    private static OverlayResourceSampler? _resources;
+    private static int _guestProcessId;
+    private static Func<ulong>? _gpuAllocatedBytes;
+    private static long _renderResolution;
 
     private static long _lastPresentTimestamp;
     private static long _lastSubmitTimestamp;
@@ -59,8 +64,6 @@ public static class PerfOverlay
     private static int _gen0PerWindow;
     private static int _gen1PerWindow;
     private static int _gen2PerWindow;
-    private static double _cpuPercent;
-    private static TimeSpan _lastCpuTime = GetProcessCpuTime();
     private static string _line1 = string.Empty;
     private static string _line2 = string.Empty;
     private static string _line3 = string.Empty;
@@ -69,7 +72,7 @@ public static class PerfOverlay
     private static string _line6 = string.Empty;
     private static string _minimalLine1 = string.Empty;
     private static string _minimalLine2 = string.Empty;
-    private static string _minimalSummary = "FPS 0.0 | CPU 0% | GPU N/A | TIME 00:00:00";
+    private static string _minimalSummary = "FPS 0.0 | CPU 0% | GPU N/A | MEM N/A | TIME 00:00:00";
 
     public static bool Enabled => DisplayState.Enabled;
     public static bool DrawOnScreen => DisplayState.DrawOnScreen;
@@ -84,11 +87,35 @@ public static class PerfOverlay
     public static void Configure(HostVideoOptions options)
     {
         _gpuUsage?.Dispose();
-        _gpuUsage = OperatingSystem.IsMacOS() ? new MacGpuUsage() : new WindowsGpuUsage();
+        _gpuUsage = OperatingSystem.IsMacOS() ? new MacGpuUsage(GpuBusy) : new WindowsGpuUsage();
+        _resources = OverlayResourceSampler.CreateForCurrentProcess(Volatile.Read(ref _guestProcessId));
         DisplayState.Configure(options,
             string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_OVERLAY"), "0", StringComparison.Ordinal));
         _sessionStartTimestamp = Stopwatch.GetTimestamp();
+        // The CPU and GPU sampling windows start here, so the first one is not stretched back to startup.
+        _statsWindowStart = Stopwatch.GetTimestamp();
     }
+
+    /// <summary>
+    /// Names the guest process when the guest and the GPU run as two processes, so the overlay's
+    /// CPU and memory cover both. Call before <see cref="Configure"/>; leave unset (0) when one
+    /// process does both.
+    /// </summary>
+    public static void SetGuestProcessId(int processId) => Volatile.Write(ref _guestProcessId, processId);
+
+    /// <summary>
+    /// Records the GPU execution interval of one command buffer (seconds on the mach absolute
+    /// clock, i.e. Metal's GPUStartTime and GPUEndTime). The overlay's GPU percentage is the
+    /// union of these intervals over its window, so overlapping buffers are not counted twice.
+    /// </summary>
+    public static void RecordGpuBusy(double startSeconds, double endSeconds) => GpuBusy.Record(startSeconds, endSeconds);
+
+    /// <summary>Supplies the size of the GPU device's allocations (MTLDevice.currentAllocatedSize), read once per refresh.</summary>
+    public static void SetGpuAllocatedBytesProvider(Func<ulong>? provider) => Volatile.Write(ref _gpuAllocatedBytes, provider);
+
+    /// <summary>Records the size of the latest guest frame presented, shown as the render resolution.</summary>
+    public static void SetRenderResolution(uint width, uint height) =>
+        Volatile.Write(ref _renderResolution, ((long)width << 32) | height);
 
     /// <summary>Releases the GPU-usage sampler.</summary>
     /// <remarks>Platform contract; the host window calls this when it closes.</remarks>
@@ -277,49 +304,59 @@ public static class PerfOverlay
             _lastGen1 = gen1;
             _lastGen2 = gen2;
 
-            var cpuTime = GetProcessCpuTime();
-            // Normalize across logical processors (Task Manager convention):
-            // raw process time / wall time reads 100% per fully busy core.
-            _cpuPercent = (cpuTime - _lastCpuTime).TotalSeconds / seconds * 100.0 /
-                Environment.ProcessorCount;
-            _lastCpuTime = cpuTime;
+            // CPU and memory of the whole emulator (guest process plus this GPU process), as
+            // a share of machine capacity; see OverlayResourceSampler.
+            _resources ??= OverlayResourceSampler.CreateForCurrentProcess(Volatile.Read(ref _guestProcessId));
+            var resources = _resources.Sample(seconds);
 
             var drawsPerFrame = _fps > 0 ? _drawsPerSecond / _fps : 0;
             var sessionStart = Interlocked.Read(ref _sessionStartTimestamp);
             var elapsedSeconds = sessionStart == 0
                 ? 0L
                 : (long)((now - sessionStart) / (double)Stopwatch.Frequency);
-            var elapsedHours = elapsedSeconds / 3600;
-            var elapsedMinutes = elapsedSeconds / 60 % 60;
-            var elapsedRemainingSeconds = elapsedSeconds % 60;
             _line1 = $"FPS {_fps:0.0}  PRES {_presentFps:0.0}  {msLabel}";
             _line2 = $"DRAWS {_drawsPerSecond:0}/S  {drawsPerFrame:0}/F  Q {pendingWork}+{inFlightSubmissions}";
             _line3 = $"ALLOC {_allocatedMbPerSecond:0.0} MB/S  GC {_gen0PerWindow}/{_gen1PerWindow}/{_gen2PerWindow}";
-            var heapMb = GC.GetTotalMemory(false) / (1024 * 1024);
             var guestBufferMb = Interlocked.Read(ref _guestBufferCacheBytes) / (1024 * 1024);
             var guestImageMemoryInMiB = Interlocked.Read(ref _guestImageCacheBytes) / (1024 * 1024);
             var liveAllocations = Volatile.Read(ref _liveDeviceAllocations);
             var peakAllocations = Volatile.Read(ref _peakDeviceAllocations);
-            var gpuPercent = _gpuUsage?.Percent ?? double.NaN;
             _gpuUsage?.RequestSample();
+            var gpuPercent = _gpuUsage?.Percent ?? double.NaN;
             var gpuLabel = FormatUsage(gpuPercent);
-            var timeLabel = $"{elapsedHours:00}:{elapsedMinutes:00}:{elapsedRemainingSeconds:00}";
-            _line4 = $"MEM {heapMb}M BUF {guestBufferMb}M IMG {guestImageMemoryInMiB}M";
-            _line5 = $"CPU {_cpuPercent:0}%  GPU {gpuLabel}";
+            var resolution = Volatile.Read(ref _renderResolution);
+            var stats = new OverlayStats(
+                _fps,
+                (uint)(resolution >> 32),
+                (uint)resolution,
+                resources,
+                gpuPercent,
+                ReadGpuAllocatedBytes(),
+                elapsedSeconds);
+            var timeLabel = OverlayText.FormatElapsed(elapsedSeconds);
+            var cpuLabel = OverlayText.FormatPercent(resources.TotalCpuPercent);
+            _line4 = $"MEM {(resources.TotalFootprintBytes is { } total ? OverlayText.FormatBytes(total) : "N/A")}  BUF {guestBufferMb}M IMG {guestImageMemoryInMiB}M";
+            _line5 = $"CPU {cpuLabel}  GPU {gpuLabel}";
             _line6 = $"TIME {timeLabel}  GPUALLOC {liveAllocations}/{peakAllocations}";
-            _minimalLine1 = $"FPS {_fps:0.0}  CPU {_cpuPercent:0}%";
+            _minimalLine1 = $"FPS {_fps:0.0}  CPU {cpuLabel}";
             _minimalLine2 = $"GPU {gpuLabel}  TIME {timeLabel}";
-            _minimalSummary = $"FPS {_fps:0.0} | CPU {_cpuPercent:0}% | GPU {gpuLabel} | TIME {timeLabel}";
+            _minimalSummary = OverlayText.FormatTitle(stats);
         }
     }
 
     internal static string FormatUsage(double percent) =>
         double.IsFinite(percent) ? $"{Math.Clamp(percent, 0, 100):0}%" : "N/A";
 
-    private static TimeSpan GetProcessCpuTime()
+    private static ulong? ReadGpuAllocatedBytes()
     {
-        var usage = Environment.CpuUsage;
-        return usage.UserTime + usage.PrivilegedTime;
+        var provider = Volatile.Read(ref _gpuAllocatedBytes);
+        if (provider is null)
+        {
+            return null;
+        }
+
+        var bytes = provider();
+        return bytes == 0 ? null : bytes;
     }
 
     private static void DrawFrameGraph(Span<byte> bgra, int x, int y, int width, int height)

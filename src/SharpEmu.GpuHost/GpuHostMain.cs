@@ -66,6 +66,9 @@ public static class GpuHostMain
 
         MirrorConsoleToLogFile();
 
+        // The window title's CPU and memory cover the guest process as well as this one.
+        PerfOverlay.SetGuestProcessId(parent);
+
         // Before anything can post the window: the presenter runs it on this thread.
         HostMainThread.Enable();
         GpuProcessClient client;
