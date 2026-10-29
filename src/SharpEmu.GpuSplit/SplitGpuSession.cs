@@ -455,32 +455,42 @@ public sealed class SplitGpuSession : IDisposable
         Post(() => _guest.Input(focused, keys, gamepad, name));
     }
 
-    // On the inbound thread, in request order. The GPU host only asks for memory it mirrors from
-    // this process's spans; one no longer registered here (unmapped meanwhile) is left alone.
+    // On the inbound thread, in request order. The GPU host asks for memory it mirrors from this
+    // process's spans, and a request is applied to the parts of its range this process still
+    // registers; the rest (unmapped meanwhile, or never mapped: a watch over a partly resident
+    // texture runs across the holes) is left alone. Skipping the whole request instead would leave
+    // a watch's protection on the registered pages after the watch is gone.
     private void Apply(in ProtectRequestMessage request)
     {
         try
         {
             var space = _memory.AddressSpace;
-            if (!_memory.Covers(request.Address, request.Size))
+            var end = request.Address + request.Size;
+            var registered = false;
+            var failed = false;
+            for (var cursor = request.Address; cursor < end && _memory.TryGetFirstRegistered(cursor, end - cursor, out var start, out var stop);
+                 cursor = stop)
+            {
+                registered = true;
+                var applied = (request.Flags & ProtectRequestFlags.Derived) != 0 && space is IGuestDerivedProtectionAddressSpace derived
+                    ? derived.TryApplyDerivedProtection(start, stop - start, (GuestPageProtection)request.GuestAccess,
+                        (GuestPageProtection)request.Access, (request.Flags & ProtectRequestFlags.OrdinaryEnrollment) != 0)
+                    : space.TryProtect(start, stop - start, (GuestPageProtection)request.Access);
+                failed |= !applied;
+            }
+
+            if (!registered)
             {
                 Interlocked.Increment(ref _protectsSkipped);
             }
+            else if (!failed)
+            {
+                Interlocked.Increment(ref _protectsApplied);
+            }
             else
             {
-                var applied = (request.Flags & ProtectRequestFlags.Derived) != 0 && space is IGuestDerivedProtectionAddressSpace derived
-                    ? derived.TryApplyDerivedProtection(request.Address, request.Size, (GuestPageProtection)request.GuestAccess,
-                        (GuestPageProtection)request.Access, (request.Flags & ProtectRequestFlags.OrdinaryEnrollment) != 0)
-                    : space.TryProtect(request.Address, request.Size, (GuestPageProtection)request.Access);
-                if (applied)
-                {
-                    Interlocked.Increment(ref _protectsApplied);
-                }
-                else
-                {
-                    Report($"Page protection #{request.Sequence} (0x{request.Address:X16}+0x{request.Size:X} -> " +
-                        $"{(GuestPageProtection)request.Access}) could not be applied.");
-                }
+                Report($"Page protection #{request.Sequence} (0x{request.Address:X16}+0x{request.Size:X} -> " +
+                    $"{(GuestPageProtection)request.Access}) could not be applied.");
             }
         }
         catch (Exception exception)
