@@ -562,6 +562,7 @@ public static partial class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
+        NoteDisplayQueried();
         Span<byte> status = stackalloc byte[VideoOutOutputStatusSize];
         WriteOutputStatus(status, HostVideoHost.CurrentOptions.GuestResolutionClass,
             port.RefreshRate, HostVideoHost.IsHdrOutputSupported);
@@ -588,15 +589,41 @@ public static partial class VideoOutExports
         port.RegisteredWidth = width;
         port.RegisteredHeight = height;
         var advertised = HostVideoHost.CurrentOptions.GuestDisplaySize;
-        var verdict = width == advertised.Width && height == advertised.Height
-            ? "matches the advertised display"
-            : width > advertised.Width || height > advertised.Height
-                ? "exceeds the advertised display, so the title picked its own resolution"
-                : "is below the advertised display";
         Console.Error.WriteLine(
-            $"[VIDEO-OUT][INFO] display buffer {width}x{height} {verdict} " +
+            $"[VIDEO-OUT][INFO] display buffer {width}x{height} " +
+            $"{DisplayBufferVerdict(width, height, advertised, Volatile.Read(ref _displayQueried) != 0)} " +
             $"(advertised {advertised.Width}x{advertised.Height}, " +
             $"class {HostVideoHost.CurrentOptions.GuestResolutionClass}).");
+    }
+
+    // Set once the title reads the display through sceVideoOutGetOutputStatus(WithVrr) or
+    // sceVideoOutGetResolutionStatus, the only queries that carry it.
+    private static int _displayQueried;
+
+    private static void NoteDisplayQueried() => Volatile.Write(ref _displayQueried, 1);
+
+    /// <summary>What a registered display buffer says about the title's resolution choice. A
+    /// buffer above the advertised display is the title's own size: either it never asked
+    /// what the display is (the size is compiled in) or it asked and sized from something
+    /// else. Neither can be moved by what the display queries answer; the presenter scales
+    /// the buffer to the output.</summary>
+    internal static string DisplayBufferVerdict(uint width, uint height, (uint Width, uint Height) advertised, bool queried)
+    {
+        if (width == advertised.Width && height == advertised.Height)
+        {
+            return "matches the advertised display";
+        }
+
+        if (width <= advertised.Width && height <= advertised.Height)
+        {
+            return "is below the advertised display";
+        }
+
+        return queried
+            ? "exceeds the advertised display: the title read the display and sized from something else, " +
+              "so it renders at its own resolution and the presenter scales it to the output"
+            : "exceeds the advertised display: the title never asked for the display, so its size is " +
+              "compiled in and the presenter scales it to the output";
     }
 
     internal static void WriteOutputStatus(Span<byte> status, int resolutionClass, uint refreshRate,
