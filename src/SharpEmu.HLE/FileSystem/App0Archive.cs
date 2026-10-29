@@ -87,7 +87,9 @@ public static class App0Archive
             return false;
         }
 
-        size = archive.GetFileSize(node);
+        size = App0FileOverlay.TryGet(hostPath, out var overlay) && overlay.Content is { } content
+            ? (ulong)content.Length
+            : archive.GetFileSize(node);
         return true;
     }
 
@@ -111,6 +113,12 @@ public static class App0Archive
     public static Stream OpenReadOrFile(string hostPath, FileShare share = FileShare.Read) =>
         !File.Exists(hostPath) && OpenRead(hostPath) is { } archived
             ? archived
+            : OpenHostFileRead(hostPath, share);
+
+    // A host file opened for reading, through the overlay when it has an entry for the path.
+    public static FileStream OpenHostFileRead(string hostPath, FileShare share) =>
+        App0FileOverlay.TryGet(hostPath, out var overlay)
+            ? new App0OverlayFileStream(hostPath, share, overlay)
             : new FileStream(hostPath, FileMode.Open, FileAccess.Read, share);
 
     // Writes the archive file a host path names to that path, for host code that opens files itself.
@@ -241,13 +249,15 @@ public sealed class ZArchiveFileStream : Stream
     private readonly ZArchive _archive;
     private readonly int _node;
     private readonly long _length;
+    private readonly App0FileOverlay.Entry? _overlay;
     private long _position;
 
     public ZArchiveFileStream(ZArchive archive, int node, string name)
     {
         _archive = archive;
         _node = node;
-        _length = (long)archive.GetFileSize(node);
+        _overlay = App0FileOverlay.TryGet(name, out var overlay) ? overlay : null;
+        _length = _overlay?.Content is { } content ? content.Length : (long)archive.GetFileSize(node);
         Name = name;
     }
 
@@ -268,8 +278,23 @@ public sealed class ZArchiveFileStream : Stream
     }
 
     // Reads at an offset without moving the position, like a positional read on a file handle.
-    public int ReadAt(Span<byte> buffer, long offset) =>
-        offset < 0 ? throw new ArgumentOutOfRangeException(nameof(offset)) : _archive.Read(_node, (ulong)offset, buffer);
+    public int ReadAt(Span<byte> buffer, long offset)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        if (_overlay is null)
+        {
+            return _archive.Read(_node, (ulong)offset, buffer);
+        }
+
+        if (_overlay.Content is not null)
+        {
+            return _overlay.ReadContent(buffer, offset);
+        }
+
+        var read = _archive.Read(_node, (ulong)offset, buffer);
+        _overlay.Apply(buffer, offset, read);
+        return read;
+    }
 
     public override int Read(Span<byte> buffer)
     {
