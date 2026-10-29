@@ -59,6 +59,7 @@ internal static class EngineResolution
         var segments = ReadSegments(memory, programHeaders, imageBase);
         var app0 = App0Root;
         Run("Unity", () => UnityResolutionAdapter.Apply(memory, segments, app0, width, height));
+        Run("UE", () => UnrealSceneResolutionAdapter.Apply(segments, app0, width, height));
     }
 
     private static void Run(string engine, Action adapter)
