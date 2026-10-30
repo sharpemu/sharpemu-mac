@@ -90,8 +90,11 @@ public static partial class Gen5MslTranslator
             return false;
         }
 
-        if (!new CompilationContext(request, options ?? Gen5MslCodegenOptions.FromEnvironment)
-                .TryCompile(out shader, out error))
+        options ??= Gen5MslCodegenOptions.FromEnvironment;
+        var context = new CompilationContext(request, options);
+        if (!context.TryCompile(out shader, out error) &&
+            (!context.HalfLocalLoopExchanged ||
+             !new CompilationContext(request, options with { HalfLocalWaveLoops = false }).TryCompile(out shader, out error)))
         {
             return false;
         }

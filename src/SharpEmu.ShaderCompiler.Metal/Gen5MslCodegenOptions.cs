@@ -204,6 +204,16 @@ public sealed record Gen5MslCodegenOptions(
     /// SHARPEMU_MSL_MULTIWAVE64=0 keeps the simdgroup waves.</summary>
     public bool MultiWaveCompute64 { get; init; } = true;
 
+    /// <summary>In a bridged multi-wave compute group, meet at a threadgroup barrier for the
+    /// exchanges of blocks every wave runs alike, instead of at the wave's pair barrier
+    /// (Gen5MslTranslator.GroupWaves.cs). SHARPEMU_MSL_GROUP_BARRIERS=0 keeps the pair barriers.</summary>
+    public bool GroupUniformBarriers { get; init; } = true;
+
+    /// <summary>In a bridged multi-wave compute group, run a lane-local loop that branches only
+    /// on EXEC in each half on its own, without exchanging EXEC per trip
+    /// (Gen5MslTranslator.GroupWaves.cs). SHARPEMU_MSL_HALF_LOOPS=0 exchanges per trip.</summary>
+    public bool HalfLocalWaveLoops { get; init; } = true;
+
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
         RegisterAllocation: Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGALLOC") != "0",
@@ -243,6 +253,8 @@ public sealed record Gen5MslCodegenOptions(
         StaticScratchSlots = Environment.GetEnvironmentVariable("SHARPEMU_MSL_STATIC_SCRATCH") != "0",
         MeshExitJoin = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_EXIT_JOIN") == "1",
         MultiWaveCompute64 = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MULTIWAVE64") != "0",
+        GroupUniformBarriers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GROUP_BARRIERS") != "0",
+        HalfLocalWaveLoops = Environment.GetEnvironmentVariable("SHARPEMU_MSL_HALF_LOOPS") != "0",
         MeshDeviceLdsThresholdBytes = uint.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_THRESHOLD"), out var threshold)
                 ? Math.Min(threshold, 16384u) : 12288u,

@@ -485,14 +485,21 @@ public static partial class Gen5MslTranslator
         /// exchanges (their scalar state is the same), so each waits only for its partner.
         /// The wait gives up after <see cref="PairBarrierSpinLimit"/> polls and reports a step
         /// cap: a half whose partner never comes then runs on with stale exchanges instead of
-        /// spinning until the GPU watchdog discards the whole command buffer.</summary>
+        /// spinning until the GPU watchdog discards the whole command buffer. Between polls the
+        /// waiting half reads a device word: a poll of threadgroup memory alone comes straight
+        /// back, and halves polling that tightly kept the core's issue slots from the partners
+        /// they waited for (Gen5MslTranslator.GroupWaves.cs).</summary>
         private string Wave64Barrier => UsesWavePairBarrier
             ? "{ simdgroup_barrier(mem_flags::mem_threadgroup); sharpemu_wave_gen += 2u; " +
               "if ((sharpemu_lane & 31u) == 0u) { atomic_fetch_add_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], 1u, memory_order_relaxed); } " +
               "for (uint sharpemu_pair_spins = 0u; atomic_load_explicit(&sharpemu_wave_pair[sharpemu_tg_index >> 6u], memory_order_relaxed) < sharpemu_wave_gen;) " +
-              $"{{ if (++sharpemu_pair_spins == {PairBarrierSpinLimit}u) {{ {StepCapReportCall} break; }} }} " +
+              $"{{ if (++sharpemu_pair_spins == {PairBarrierSpinLimit}u) {{ {StepCapReportCall} break; }} {PairBarrierBackoff} }} " +
               "simdgroup_barrier(mem_flags::mem_threadgroup); }"
             : "threadgroup_barrier(mem_flags::mem_threadgroup);";
+
+        private const string PairBarrierBackoff =
+            $"if ({ResourcesName}.{Gen5MslArgumentLayout.StepReportName} != nullptr) " +
+            $"{{ (void)atomic_load_explicit({ResourcesName}.{Gen5MslArgumentLayout.StepReportName}, memory_order_relaxed); }}";
 
         // Polls of the partner's count before a pair barrier gives up: milliseconds, where a
         // partner that is coming arrives within one block of guest code.
@@ -670,6 +677,7 @@ public static partial class Gen5MslTranslator
                 // that changes the signature in the compute stage, but keeping the
                 // order body-then-wrap matches how the pixel/vertex stages need it
                 // (their IO discovery happens during block translation).
+                FindHalfLocalLoops(blocks);
                 if (!TryEmitBlocks(blocks, out error))
                 {
                     return false;
@@ -677,6 +685,11 @@ public static partial class Gen5MslTranslator
 
                 // Needs every block's text, so it cannot run during emission.
                 ResolveMaskBallots(blocks);
+                if (!HalfLocalLoopsHoldNoExchange())
+                {
+                    error = "a loop run by each half of a wave on its own still exchanges between them";
+                    return false;
+                }
                 NoteWaveScratchUse();
 
                 var source = new StringBuilder();
@@ -1194,7 +1207,7 @@ public static partial class Gen5MslTranslator
                 EmitMeshDispatcher(body, BuildDispatcherSwitchBody(blocks, baseIndent: 3));
             }
             else if (_options.StructuredControlFlow &&
-                TryBuildStructuredBody(blocks, out structuredBuilder))
+                TryBuildComputeStructuredBody(blocks, out structuredBuilder))
             {
                 structured = true;
             }
@@ -1873,6 +1886,13 @@ public static partial class Gen5MslTranslator
                     {
                         error = $"unsupported conditional branch {instruction.Opcode}";
                         return false;
+                    }
+
+                    if (IsHalfLocalLoopBlock(blockIndex) && instruction.Opcode is "SCbranchExecz" or "SCbranchExecnz")
+                    {
+                        // Each half leaves the loop when its own lanes are done
+                        // (Gen5MslTranslator.GroupWaves.cs).
+                        condition = HalfLocalExecCondition(zero: instruction.Opcode == "SCbranchExecz");
                     }
 
                     var fallthrough = blockIndex + 1;
