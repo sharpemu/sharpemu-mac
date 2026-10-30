@@ -252,6 +252,8 @@ public partial class MainWindow
             {
                 toggle.IsChecked = IsEnvironmentEnabled(effective.EnvironmentToggles, name);
             }
+
+            LoadGameEnvironmentSettings(effective.EnvironmentToggles, effective.GuestDisplayResolution);
         }
         finally
         {
@@ -285,7 +287,7 @@ public partial class MainWindow
             ScalingMode = SelectedComboText(GameScalingModeBox, "Fit"),
             VSync = GameVSyncToggle.IsChecked == true,
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
-            GuestDisplayResolution = PerGameSettings.Load(_gameSettingsTitleId)?.GuestDisplayResolution,
+            GuestDisplayResolution = SelectedComboText(GameGuestResolutionBox, "1080p"),
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
             OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),
             OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),
@@ -397,6 +399,7 @@ public partial class MainWindow
             }
         }
 
+        StoreGameEnvironmentSettings(entries);
         return entries;
     }
 
@@ -430,7 +433,8 @@ public partial class MainWindow
     private static bool IsKnownGameEnvironmentEntry(string entry)
     {
         var name = entry.Split('=', 2, StringSplitOptions.TrimEntries)[0];
-        return GameEnvironmentToggleNames.Contains(name, StringComparer.OrdinalIgnoreCase);
+        return GameEnvironmentToggleNames.Contains(name, StringComparer.OrdinalIgnoreCase) ||
+            EnvironmentSettings.IsManagedEntry(entry);
     }
 
     private void SetGameOptionsSection(int section, bool animateIndicator = true)

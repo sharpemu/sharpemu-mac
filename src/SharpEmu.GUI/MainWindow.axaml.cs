@@ -361,6 +361,7 @@ public partial class MainWindow : Window
         ConsoleToggle.IsCheckedChanged += (_, _) => UpdateEmbeddedConsoleVisibility();
         WireOptionsNavigation();
         WireGameOptions();
+        BuildEnvironmentSettingRows();
         HideUnsupportedPlatformOptions();
 
         // The settings page edits _settings live, so a launch started while
@@ -1492,6 +1493,7 @@ public partial class MainWindow : Window
         RefreshChoices(_binkPlaybackChoices);
         RefreshChoices(_overlayModeChoices);
         RefreshChoices(_overlayCornerChoices);
+        RefreshEnvironmentSettingChoices();
     }
 
     private static void RefreshChoices(IEnumerable<LocalizedChoice> choices)
@@ -1562,6 +1564,7 @@ public partial class MainWindow : Window
         OverlayModeBox.SelectedIndex = ChoiceIndex(_settings.OverlayMode, "Full", "Minimal", "TitleBar");
         OverlayCornerBox.SelectedIndex = ChoiceIndex(_settings.OverlayCorner, "TopLeft", "TopRight", "BottomRight", "BottomLeft");
         UpdateLogFilePathText();
+        ApplyEnvironmentSettingsToControls();
     }
 
     private static string SelectedComboText(ComboBox comboBox, string fallback) =>
@@ -1871,23 +1874,7 @@ public partial class MainWindow : Window
 
     private void OpenLogsFolder()
     {
-        try
-        {
-            var root = EmulatorLogsRoot();
-            Directory.CreateDirectory(root);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = OperatingSystem.IsWindows() ? "explorer.exe" : OperatingSystem.IsMacOS() ? "open" : "xdg-open",
-                Arguments = $"\"{root}\"",
-                UseShellExecute = false,
-            });
-        }
-        catch (Exception ex)
-        {
-            AppendConsoleLine(
-                Localization.Instance.Format("Status.CouldNotOpenFolder", ex.Message),
-                WarningLineBrush);
-        }
+        OpenFolder(EmulatorLogsRoot());
     }
 
     private async Task SelectLogFilePathAsync()
