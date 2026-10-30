@@ -36,67 +36,66 @@ Options page section transitions and content layout
     <Setter Property="RenderTransform" Value="translateY(0px)" />
   </Style>
 
-  <!-- Inset grouped card: the group Border clips and outlines, its StackPanel lays the rows
-       out one hairline apart (the 1px gaps show the group background), rows are opaque.
-       Every SettingRow / header placed in an optionsGroup picks this up. -->
   <Style Selector="Border.optionsGroup">
-    <Setter Property="Background" Value="{StaticResource GroupHairlineBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="10" />
-    <Setter Property="ClipToBounds" Value="True" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Padding" Value="0" />
-    <Setter Property="Margin" Value="0,0,0,14" />
-  </Style>
-  <Style Selector="Border.optionsGroup > StackPanel">
-    <Setter Property="Spacing" Value="1" />
   </Style>
 
-  <!-- Section header: small, semibold, sits as the first row of its card -->
   <Style Selector="TextBlock.optionsGroupHeader">
-    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontSize" Value="12" />
     <Setter Property="FontWeight" Value="SemiBold" />
-    <Setter Property="LetterSpacing" Value="0.5" />
-    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-    <Setter Property="Background" Value="{StaticResource GroupBrush}" />
-    <Setter Property="Padding" Value="16,12,16,6" />
+    <Setter Property="Foreground" Value="#8CFFFFFF" />
+    <Setter Property="Margin" Value="2,0,0,10" />
   </Style>
 
-  <!-- Rows are separated by the card hairline now -->
   <Style Selector="Border.optionsGroupDivider">
-    <Setter Property="IsVisible" Value="False" />
-    <Setter Property="Margin" Value="0" />
+    <Setter Property="Height" Value="1" />
+    <Setter Property="Margin" Value="0,18,0,18" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="Background">
+      <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+        <GradientStop Offset="0" Color="#00FFFFFF" />
+        <GradientStop Offset="0.06" Color="#2EFFFFFF" />
+        <GradientStop Offset="0.55" Color="#14FFFFFF" />
+        <GradientStop Offset="1" Color="#00FFFFFF" />
+      </LinearGradientBrush>
+    </Setter>
   </Style>
 
   <Style Selector="Border.optionsInfoRow">
-    <Setter Property="MinHeight" Value="52" />
-    <Setter Property="Padding" Value="16,10" />
-    <Setter Property="CornerRadius" Value="0" />
-    <Setter Property="Background" Value="{StaticResource GroupBrush}" />
-    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="MinHeight" Value="70" />
+    <Setter Property="Padding" Value="18,12" />
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="Background" Value="#06FFFFFF" />
+    <Setter Property="BorderBrush" Value="#0AFFFFFF" />
+    <Setter Property="BorderThickness" Value="1" />
   </Style>
 
   <Style Selector="ComboBox.optionValue, settingsControls|SplitNumericUpDown.optionValue, TextBox.optionValue">
     <Setter Property="Width" Value="190" />
-    <Setter Property="MinHeight" Value="30" />
-    <Setter Property="CornerRadius" Value="7" />
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="FontSize" Value="13" />
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
   </Style>
 
   <Style Selector="TextBox.optionValue">
-    <Setter Property="Padding" Value="10,0" />
+    <Setter Property="Padding" Value="17,0" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="TextAlignment" Value="Left" />
     <Setter Property="ClipToBounds" Value="True" />
+    <Setter Property="FocusAdorner" Value="{x:Null}" />
   </Style>
 
   <Style Selector="TextBox.optionValue /template/ Border#PART_BorderElement">
-    <Setter Property="CornerRadius" Value="7" />
+    <Setter Property="CornerRadius" Value="14" />
     <Setter Property="ClipToBounds" Value="True" />
+    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
   </Style>
 
   <!-- The outer split-input surface owns hover and focus animation -->
@@ -114,29 +113,29 @@ Options page section transitions and content layout
   </Style>
 
   <Style Selector="Button.optionAction">
-    <Setter Property="MinWidth" Value="0" />
-    <Setter Property="MinHeight" Value="30" />
-    <Setter Property="Padding" Value="14,0" />
+    <Setter Property="MinWidth" Value="156" />
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="Padding" Value="18,0" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="VerticalAlignment" Value="Center" />
-    <Setter Property="CornerRadius" Value="7" />
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    <Setter Property="FontSize" Value="13" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="White" />
     <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="FocusAdorner" Value="{x:Null}" />
   </Style>
 
   <Style Selector="Button.optionAction /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Background"
-                         Duration="0:0:0.15"
+                         Duration="0:0:0.18"
                          Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
@@ -144,6 +143,7 @@ Options page section transitions and content layout
 
   <Style Selector="Button.optionAction:pointerover /template/ ContentPresenter#PART_ContentPresenter,
                    Button.optionAction:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ControlFillHoverBrush}" />
+    <Setter Property="Background" Value="#20FFFFFF" />
+    <Setter Property="BorderBrush" Value="Transparent" />
   </Style>
 </Styles>

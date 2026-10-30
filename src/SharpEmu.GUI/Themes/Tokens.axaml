@@ -2,59 +2,31 @@
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 Shared colors and brushes used throughout the launcher.
-
-The accent brushes are placeholders: App.axaml.cs replaces their colours with the
-platform accent (the macOS system accent colour) and keeps them current. They stay
-SolidColorBrush instances so existing StaticResource users update in place.
 -->
 
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <FontFamily x:Key="MaterialSymbolsRounded">avares://SharpEmu.GUI/Assets/Fonts/MaterialSymbolsRounded-400.ttf#Material Symbols Rounded</FontFamily>
 
-  <!-- Text face. App.axaml.cs swaps in the macOS system font when Skia can resolve it. -->
-  <FontFamily x:Key="AppFontFamily">Inter, Segoe UI, sans-serif</FontFamily>
-
   <Color x:Key="SystemAccentColor">#7C5CFC</Color>
 
-  <!-- Neutral palette: macOS dark. Window < card < elevated. -->
-  <SolidColorBrush x:Key="BgBrush" Color="#141416" />
-  <SolidColorBrush x:Key="ChromeBrush" Color="#101012" />
-  <SolidColorBrush x:Key="CardBrush" Color="#1C1C1F" />
-  <SolidColorBrush x:Key="CardBorderBrush" Color="#14FFFFFF" />
-  <SolidColorBrush x:Key="ElevatedBrush" Color="#232327" />
-  <SolidColorBrush x:Key="GameOptionsMenuBrush" Color="#161618" />
-  <SolidColorBrush x:Key="GroupBrush" Color="#1D1D21" />
-  <SolidColorBrush x:Key="GroupHairlineBrush" Color="#14FFFFFF" />
-  <SolidColorBrush x:Key="ControlFillBrush" Color="#14FFFFFF" />
-  <SolidColorBrush x:Key="ControlFillHoverBrush" Color="#1FFFFFFF" />
-  <SolidColorBrush x:Key="SegmentTrackBrush" Color="#0FFFFFFF" />
-  <SolidColorBrush x:Key="SegmentSelectedBrush" Color="#2BFFFFFF" />
-  <SolidColorBrush x:Key="TextBrush" Color="#F5F5F7" />
-  <SolidColorBrush x:Key="SecondaryTextBrush" Color="#A1A1A6" />
-  <SolidColorBrush x:Key="MutedBrush" Color="#8E8E93" />
-  <SolidColorBrush x:Key="SettingsDescriptionBrush" Color="#8E8E93" />
-  <SolidColorBrush x:Key="FaintBrush" Color="#6E6E73" />
-
+  <SolidColorBrush x:Key="BgBrush" Color="#0C0C0C" />
+  <SolidColorBrush x:Key="ChromeBrush" Color="#070707" />
+  <SolidColorBrush x:Key="CardBrush" Color="#161616" />
+  <SolidColorBrush x:Key="CardBorderBrush" Color="#12FFFFFF" />
+  <SolidColorBrush x:Key="ElevatedBrush" Color="#1E1E1E" />
+  <SolidColorBrush x:Key="GameOptionsMenuBrush" Color="#1B1B1B" />
+  <SolidColorBrush x:Key="TextBrush" Color="#F7F8FB" />
+  <SolidColorBrush x:Key="SecondaryTextBrush" Color="#C0C5CF" />
+  <SolidColorBrush x:Key="MutedBrush" Color="#777F8E" />
+  <SolidColorBrush x:Key="SettingsDescriptionBrush" Color="#8A8A8A" />
+  <SolidColorBrush x:Key="FaintBrush" Color="#4D5461" />
   <SolidColorBrush x:Key="AccentBrush" Color="#7C5CFC" />
   <SolidColorBrush x:Key="AccentHoverBrush" Color="#8F73FF" />
-  <SolidColorBrush x:Key="AccentPressedBrush" Color="#6A4BE6" />
-  <SolidColorBrush x:Key="AccentSoftBrush" Color="#337C5CFC" />
-  <SolidColorBrush x:Key="AccentForegroundBrush" Color="#FFFFFF" />
-
-  <SolidColorBrush x:Key="DangerBrush" Color="#FF453A" />
-  <SolidColorBrush x:Key="DangerHoverBrush" Color="#FF6961" />
-  <SolidColorBrush x:Key="SuccessBrush" Color="#32D74B" />
-  <SolidColorBrush x:Key="InfoBrush" Color="#64D2FF" />
+  <SolidColorBrush x:Key="DangerBrush" Color="#FF646E" />
+  <SolidColorBrush x:Key="DangerHoverBrush" Color="#FF858D" />
+  <SolidColorBrush x:Key="SuccessBrush" Color="#66F2A3" />
+  <SolidColorBrush x:Key="InfoBrush" Color="#64A7FF" />
   <SolidColorBrush x:Key="TileHoverBrush" Color="#0BFFFFFF" />
   <SolidColorBrush x:Key="TileSelectedBrush" Color="#12FFFFFF" />
-
-  <!-- Keyboard / gamepad focus ring shared by every focusable control. -->
-  <FocusAdornerTemplate x:Key="AccentFocusAdorner">
-    <Border BorderBrush="{StaticResource AccentBrush}"
-            BorderThickness="2"
-            CornerRadius="9"
-            Margin="-2"
-            IsHitTestVisible="False" />
-  </FocusAdornerTemplate>
 </ResourceDictionary>

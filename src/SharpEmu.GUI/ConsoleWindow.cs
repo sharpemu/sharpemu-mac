@@ -40,21 +40,14 @@ public sealed class ConsoleWindow : Window
         Height = settings.ConsoleWindowHeight;
         MinWidth = 520;
         MinHeight = 320;
-        Background = new SolidColorBrush(Color.Parse("#141416"));
+        Background = new SolidColorBrush(Color.Parse("#0D1017"));
         Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://SharpEmu.GUI/Assets/SharpEmu.ico")));
 
         _searchBox = new TextBox
         {
             PlaceholderText = loc.Get("Console.SearchWatermark"),
-            Width = 280,
+            Width = 320,
             Margin = new Thickness(0, 0, 12, 0),
-            InnerLeftContent = new TextBlock
-            {
-                Classes = { "materialSymbol", "compact" },
-                Text = "search",
-                Margin = new Thickness(9, 0, 0, 0),
-                Foreground = new SolidColorBrush(Color.Parse("#8E8E93")),
-            },
         };
         _autoScrollCheck = new CheckBox
         {
@@ -68,12 +61,14 @@ public sealed class ConsoleWindow : Window
         {
             Classes = { "ghost" },
             Content = loc.Get("Console.Copy"),
+            Padding = new Thickness(10, 4),
             Margin = new Thickness(0, 0, 8, 0),
         };
         var clearButton = new Button
         {
             Classes = { "ghost" },
             Content = loc.Get("Console.Clear"),
+            Padding = new Thickness(10, 4),
         };
         copyButton.Click += async (_, _) => await CopyAsync();
         clearButton.Click += (_, _) => clear();
@@ -84,7 +79,7 @@ public sealed class ConsoleWindow : Window
             Classes = { "console" },
             ItemsSource = _visibleLines,
             BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(Color.Parse("#14FFFFFF")),
+            BorderBrush = new SolidColorBrush(Color.Parse("#232B3A")),
             ItemTemplate = new FuncDataTemplate<LogLine>((_, _) =>
             {
                 var text = new TextBlock { TextWrapping = TextWrapping.NoWrap };
@@ -96,13 +91,13 @@ public sealed class ConsoleWindow : Window
 
         Content = new Grid
         {
-            Margin = new Thickness(16, 12, 16, 16),
+            Margin = new Thickness(12),
             RowDefinitions = new RowDefinitions("Auto,*"),
             Children =
             {
                 new Grid
                 {
-                    Margin = new Thickness(0, 0, 0, 12),
+                    Margin = new Thickness(0, 0, 0, 8),
                     ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto"),
                     Children =
                     {

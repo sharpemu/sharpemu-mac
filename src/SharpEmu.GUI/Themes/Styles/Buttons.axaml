@@ -1,170 +1,101 @@
 <!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
-Shared launcher button variants and the page switcher (segmented control).
-Controls are 30pt tall with an 8pt radius; icons are 16pt inside buttons.
+Shared launcher button variants and page switcher styles.
 -->
 
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-  <!-- Base: quiet filled button -->
-  <Style Selector="Button">
-    <Setter Property="MinHeight" Value="30" />
-    <Setter Property="Padding" Value="14,0" />
-    <Setter Property="CornerRadius" Value="8" />
-    <Setter Property="FontSize" Value="13" />
-    <Setter Property="FontWeight" Value="Medium" />
-    <Setter Property="VerticalContentAlignment" Value="Center" />
-  </Style>
-  <Style Selector="Button:disabled">
-    <Setter Property="Opacity" Value="0.45" />
-  </Style>
-
-  <!-- Primary -->
   <Style Selector="Button.accent">
     <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
-    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="White" />
     <Setter Property="FontWeight" Value="SemiBold" />
-  </Style>
-  <Style Selector="Button.accent /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
-    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="22,10" />
+    <Setter Property="CornerRadius" Value="8" />
   </Style>
   <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
-  </Style>
-  <Style Selector="Button.accent:pressed /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource AccentPressedBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
-  </Style>
-  <Style Selector="Button.accent:disabled /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+    <Setter Property="Foreground" Value="White" />
   </Style>
 
   <Style Selector="Button.danger">
     <Setter Property="Background" Value="{StaticResource DangerBrush}" />
     <Setter Property="Foreground" Value="White" />
-    <Setter Property="BorderThickness" Value="0" />
     <Setter Property="FontWeight" Value="SemiBold" />
-  </Style>
-  <Style Selector="Button.danger /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource DangerBrush}" />
-    <Setter Property="Foreground" Value="White" />
-    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="22,10" />
+    <Setter Property="CornerRadius" Value="8" />
   </Style>
   <Style Selector="Button.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource DangerHoverBrush}" />
     <Setter Property="Foreground" Value="White" />
   </Style>
-  <Style Selector="Button.danger:disabled /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource DangerBrush}" />
-    <Setter Property="Foreground" Value="White" />
-  </Style>
 
-  <!-- Secondary: filled with a hairline -->
-  <Style Selector="Button.ghost, ToggleButton.ghost">
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
+  <Style Selector="Button.ghost">
+    <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
     <Setter Property="BorderThickness" Value="1" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="Padding" Value="12,7" />
+    <Setter Property="CornerRadius" Value="8" />
   </Style>
-  <Style Selector="Button.ghost /template/ ContentPresenter#PART_ContentPresenter,
-                   ToggleButton.ghost /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-  </Style>
-  <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                   ToggleButton.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ControlFillHoverBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-  </Style>
-  <Style Selector="Button.ghost:pressed /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
-  </Style>
-  <Style Selector="Button.ghost:disabled /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-  </Style>
-  <Style Selector="ToggleButton.ghost:checked /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource AccentSoftBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+  <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
-  <!-- Square icon button: 30pt, same radius and fill as the other header controls -->
-  <Style Selector="Button.iconGhost, ToggleButton.iconGhost">
-    <Setter Property="Width" Value="30" />
-    <Setter Property="Height" Value="30" />
-    <Setter Property="MinHeight" Value="0" />
+  <Style Selector="Button.iconGhost">
+    <Setter Property="Width" Value="32" />
+    <Setter Property="Height" Value="32" />
     <Setter Property="Padding" Value="0" />
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
+    <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="CornerRadius" Value="8" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
-  <Style Selector="Button.iconGhost /template/ ContentPresenter#PART_ContentPresenter,
-                   ToggleButton.iconGhost /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
-  </Style>
-  <Style Selector="Button.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                   ToggleButton.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ControlFillHoverBrush}" />
+  <Style Selector="Button.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
-  <Style Selector="ToggleButton.iconGhost:checked /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource AccentSoftBrush}" />
+
+  <Style Selector="ToggleButton.ghost">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="Padding" Value="12,7" />
+    <Setter Property="CornerRadius" Value="8" />
+  </Style>
+  <Style Selector="ToggleButton.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="ToggleButton.ghost:checked /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
     <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
-  <!-- Segmented control: pill track, selected segment filled. Plain buttons (not
-       TabItem) so Fluent draws no underline. Used for the Library / Trophies /
-       Settings switcher. -->
-  <Style Selector="Border.segmentTrack">
-    <Setter Property="Background" Value="{StaticResource SegmentTrackBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="9" />
-    <Setter Property="Padding" Value="2" />
-    <Setter Property="Height" Value="32" />
-  </Style>
+  <!-- Top-level page switcher (Library / Options): plain transparent
+       buttons, not TabItem, so there is no Fluent selected-tab underline.
+       The active page is conveyed by brightness alone; LB/RB gamepad
+       hints flank the pair. -->
   <Style Selector="Button.segment">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
-    <Setter Property="FontSize" Value="13" />
-    <Setter Property="FontWeight" Value="SemiBold" />
-    <Setter Property="MinHeight" Value="0" />
-    <Setter Property="Height" Value="26" />
-    <Setter Property="Padding" Value="12,0" />
-    <Setter Property="CornerRadius" Value="7" />
-  </Style>
-  <Style Selector="Button.segment /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="Transparent" />
-    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Background"
-                         Duration="0:0:0.15"
-                         Easing="CubicEaseOut" />
-      </Transitions>
-    </Setter>
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+    <Setter Property="FontSize" Value="22" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="Padding" Value="6,4" />
+    <Setter Property="CornerRadius" Value="8" />
   </Style>
   <Style Selector="Button.segment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#0DFFFFFF" />
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
-  <Style Selector="Button.segment.active /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource SegmentSelectedBrush}" />
+  <Style Selector="Button.segment.active">
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 </Styles>

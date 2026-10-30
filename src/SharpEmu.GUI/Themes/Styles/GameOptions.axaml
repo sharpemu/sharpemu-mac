@@ -57,24 +57,23 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="Opacity" Value="1" />
   </Style>
 
-  <!-- Primary Play / Stop button of the selected-game bar. -->
   <Style Selector="Button.playButton">
-    <Setter Property="MinHeight" Value="36" />
-    <Setter Property="MinWidth" Value="112" />
-    <Setter Property="Padding" Value="18,0" />
-    <Setter Property="CornerRadius" Value="9" />
-    <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+    <Setter Property="MinHeight" Value="54" />
+    <Setter Property="MinWidth" Value="200" />
+    <Setter Property="Padding" Value="34,13" />
+    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="Background" Value="White" />
+    <Setter Property="Foreground" Value="#111111" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="FontSize" Value="14" />
-    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="FontWeight" Value="Bold" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
 
   <Style Selector="Button.playButton:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+    <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+    <Setter Property="Foreground" Value="White" />
   </Style>
 
   <Style Selector="Button.playButton.danger">
@@ -85,10 +84,6 @@ Contextual per-game options reveal, actions, and selected-game motion.
   <Style Selector="Button.playButton.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource DangerHoverBrush}" />
     <Setter Property="Foreground" Value="White" />
-  </Style>
-
-  <Style Selector="Button.playButton.danger TextBlock.playGlyph">
-    <Setter Property="Text" Value="stop" />
   </Style>
 
   <Style Selector="Button.optionsCircle, ToggleButton.optionsCircle">
@@ -116,11 +111,10 @@ Contextual per-game options reveal, actions, and selected-game motion.
 
   <Style Selector="TextBlock.selectedGameTitle">
     <Setter Property="FontSize" Value="28" />
-    <Setter Property="FontWeight" Value="Bold" />
   </Style>
 
   <Style Selector="Grid.selectedDetailsHost.gridLayout TextBlock.selectedGameTitle">
-    <Setter Property="FontSize" Value="20" />
+    <Setter Property="FontSize" Value="26" />
   </Style>
 
   <Style Selector="Border.selectedDetailsDivider">
@@ -137,33 +131,18 @@ Contextual per-game options reveal, actions, and selected-game motion.
     </Setter>
   </Style>
 
-  <!-- Secondary icon buttons of the selected-game bar share the header control look. -->
+  <Style Selector="Grid.selectedDetailsHost Button.playButton">
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="MinWidth" Value="168" />
+    <Setter Property="Padding" Value="28,10" />
+    <Setter Property="FontSize" Value="15" />
+  </Style>
+
   <Style Selector="Grid.selectedDetailsHost Button.optionsCircle,
                    Grid.selectedDetailsHost ToggleButton.optionsCircle">
-    <Setter Property="Width" Value="36" />
-    <Setter Property="Height" Value="36" />
-    <Setter Property="MinHeight" Value="0" />
-    <Setter Property="CornerRadius" Value="9" />
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
-  </Style>
-  <Style Selector="Grid.selectedDetailsHost Button.optionsCircle /template/ ContentPresenter#PART_ContentPresenter,
-                   Grid.selectedDetailsHost ToggleButton.optionsCircle /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
-  </Style>
-  <Style Selector="Grid.selectedDetailsHost Button.optionsCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                   Grid.selectedDetailsHost ToggleButton.optionsCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ControlFillHoverBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-  </Style>
-  <Style Selector="Grid.selectedDetailsHost ToggleButton.optionsCircle:checked /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource AccentSoftBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="Width" Value="44" />
+    <Setter Property="Height" Value="44" />
+    <Setter Property="CornerRadius" Value="22" />
   </Style>
 
   <Style Selector="Button.gameOptionsLaunch">

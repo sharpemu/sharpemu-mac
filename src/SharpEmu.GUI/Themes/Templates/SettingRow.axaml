@@ -7,33 +7,32 @@ Control theme for the shared launcher settings row.
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:local="clr-namespace:SharpEmu.GUI">
-  <!-- A row of an inset grouped card (see Border.optionsGroup in Options.axaml): opaque
-       so the group's hairline shows between rows, with no corners or border of its own. -->
   <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
-    <Setter Property="MinHeight" Value="52" />
+    <Setter Property="MinHeight" Value="70" />
     <Setter Property="Template">
       <ControlTemplate>
         <Border x:Name="PART_RowSurface"
                 Classes="settingRowSurface"
-                Background="{StaticResource GroupBrush}"
-                BorderBrush="Transparent"
-                BorderThickness="2,0,0,0"
-                Padding="14,10,16,10">
+                Background="#06FFFFFF"
+                BorderBrush="#0AFFFFFF"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="18,12">
           <Border.Transitions>
             <Transitions>
               <BrushTransition Property="Background"
-                               Duration="0:0:0.15"
+                               Duration="0:0:0.18"
                                Easing="CubicEaseOut" />
               <BrushTransition Property="BorderBrush"
-                               Duration="0:0:0.15"
+                               Duration="0:0:0.18"
                                Easing="CubicEaseOut" />
             </Transitions>
           </Border.Transitions>
           <Grid ColumnDefinitions="*,Auto">
-            <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,18,0">
+            <StackPanel VerticalAlignment="Center" Spacing="3" Margin="0,0,18,0">
               <TextBlock x:Name="PART_Label"
                          Text="{TemplateBinding Label}"
-                         FontSize="13"
+                         FontSize="14"
                          FontWeight="Medium"
                          TextWrapping="Wrap"
                          Foreground="{StaticResource TextBrush}" />
@@ -41,8 +40,8 @@ Control theme for the shared launcher settings row.
                          FontSize="11"
                          FontWeight="Normal"
                          Foreground="{StaticResource SettingsDescriptionBrush}"
-                         LineHeight="15"
-                         MaxWidth="620"
+                         LineHeight="16"
+                         MaxWidth="690"
                          HorizontalAlignment="Left"
                          TextAlignment="Left"
                          TextWrapping="Wrap"
@@ -56,10 +55,9 @@ Control theme for the shared launcher settings row.
         </Border>
       </ControlTemplate>
     </Setter>
-    <!-- Gamepad focus row: accent edge and tint instead of a white outline -->
     <Style Selector="^.controllerFocus /template/ Border#PART_RowSurface">
-      <Setter Property="Background" Value="#242428" />
-      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+      <Setter Property="Background" Value="#16FFFFFF" />
+      <Setter Property="BorderBrush" Value="#C8FFFFFF" />
     </Style>
   </ControlTheme>
 </ResourceDictionary>

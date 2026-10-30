@@ -15,7 +15,7 @@ Shared card, badge, hint and cover surfaces.
   </Style>
 
   <Style Selector="Border.pill">
-    <Setter Property="Background" Value="{StaticResource ControlFillBrush}" />
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
     <Setter Property="CornerRadius" Value="999" />
     <Setter Property="Padding" Value="10,3" />
   </Style>
@@ -28,12 +28,12 @@ Shared card, badge, hint and cover surfaces.
     <Setter Property="BorderThickness" Value="1" />
   </Style>
   <Style Selector="Border.badge.running">
-    <Setter Property="Background" Value="#1E32D74B" />
-    <Setter Property="BorderBrush" Value="#5532D74B" />
+    <Setter Property="Background" Value="#1E46C46B" />
+    <Setter Property="BorderBrush" Value="#5546C46B" />
   </Style>
   <Style Selector="Border.badge.key">
-    <Setter Property="Background" Value="#1E64D2FF" />
-    <Setter Property="BorderBrush" Value="#5564D2FF" />
+    <Setter Property="Background" Value="#1E58A6FF" />
+    <Setter Property="BorderBrush" Value="#5558A6FF" />
   </Style>
 
   <!-- Gamepad shoulder-button hint chip (LB/RB, L1/R1). -->
@@ -41,8 +41,6 @@ Shared card, badge, hint and cover surfaces.
     <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
     <Setter Property="CornerRadius" Value="6" />
     <Setter Property="Padding" Value="8,3" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="BorderThickness" Value="1" />
   </Style>
 
   <Style Selector="Border.coverShadow">
