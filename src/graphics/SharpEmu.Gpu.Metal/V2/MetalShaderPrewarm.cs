@@ -951,6 +951,8 @@ internal static class MetalShaderPrewarm
     {
         _stopping = true;
         Gate.Cancel();
+        // Before the static precompile, whose stub vertex functions it uses.
+        MetalUnstoredLibraries.Stop();
         MetalStaticPrecompile.Stop();
         MetalLibraryPrewarm.Stop();
         MetalDeviceDataLoadsStore.Stop();

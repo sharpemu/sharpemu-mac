@@ -704,6 +704,42 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         Assert.True(reopened.IsStored(key));
     }
 
+    // A library compiled from MSL that no pipeline is made from (a prewarm's, or a module the
+    // game creates and never draws) is stored from its source once noted, after the delay a
+    // pipeline has to store it first, and the next start loads it instead of compiling it.
+    [Fact]
+    public void ALibraryNoPipelineStoredIsStoredFromItsSourceAndLoadsAtTheNextOpen()
+    {
+        if (!RequireDevice()) return;
+        var device = Device.Value;
+        var key = MetalBinaryArchive.LibraryKey(PixelSource, usesPerVertexInputs: false);
+        var delay = MetalUnstoredLibraries.Delay;
+        MetalUnstoredLibraries.Delay = TimeSpan.FromHours(1);
+        try
+        {
+            using (var archive = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
+            {
+                Assert.False(archive.IsStored(key));
+                MetalUnstoredLibraries.Note(archive, device, key, PixelSource, usesPerVertexInputs: false);
+                MetalUnstoredLibraries.Drain(TimeSpan.FromHours(1));
+                Assert.False(archive.IsStored(key));
+                Assert.True(MetalUnstoredLibraries.Drain(TimeSpan.Zero) >= 1);
+                Assert.True(archive.IsStored(key));
+            }
+
+            using var reopened = MetalBinaryArchive.Open(_root, device, "translator-a", Budget);
+            var library = reopened.TryLoadLibrary(key);
+            Assert.NotEqual(0, library);
+            var function = Function(library, "gen5_ps");
+            MetalNative.SendVoid(function, MetalNative.Selector("release"));
+            MetalNative.SendVoid(library, MetalNative.Selector("release"));
+        }
+        finally
+        {
+            MetalUnstoredLibraries.Delay = delay;
+        }
+    }
+
     private static long Store(MetalBinaryArchive archive, string source, string entry, Gen5MslStage stage, UInt128 key)
     {
         var bytes = MetalStaticPrecompile.Store(archive, Device.Value, new Gen5MslShader(source, entry, stage, 1), key, out var error);

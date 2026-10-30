@@ -568,11 +568,21 @@ internal static class MetalStaticPrecompile
     /// fragment's inputs as its outputs, or a mesh pipeline. Everything is released before
     /// it returns. The file's bytes, or -1 (with the reason, or none when skipped).
     /// </summary>
-    internal static long Store(MetalBinaryArchive archive, nint device, Gen5MslShader shader, UInt128 key, out string? error)
+    internal static long Store(MetalBinaryArchive archive, nint device, Gen5MslShader shader, UInt128 key, out string? error) =>
+        Store(archive, device, shader.Source, shader.EntryPoint, shader.UsesPerVertexInputs, shader.UsesMipStatisticsConstant, key, out error);
+
+    /// <summary>As <see cref="Store(MetalBinaryArchive, nint, Gen5MslShader, UInt128, out string?)"/>, from the shader's parts.</summary>
+    internal static long Store(
+        MetalBinaryArchive archive,
+        nint device,
+        string source,
+        string entry,
+        bool usesPerVertexInputs,
+        bool usesMipStatisticsConstant,
+        UInt128 key,
+        out string? error)
     {
         error = null;
-        var source = shader.Source;
-        var entry = shader.EntryPoint;
         var kind = entry switch
         {
             "gen5_cs" => MetalBinaryArchive.PipelineKind.Compute,
@@ -594,7 +604,7 @@ internal static class MetalStaticPrecompile
 
         nint stub = 0;
         var ownsStub = false;
-        if (stubSource is not null && (stub = StubVertex(device, stubSource, shader.UsesPerVertexInputs, out ownsStub, out error)) == 0)
+        if (stubSource is not null && (stub = StubVertex(device, stubSource, usesPerVertexInputs, out ownsStub, out error)) == 0)
         {
             return -1;
         }
@@ -605,7 +615,7 @@ internal static class MetalStaticPrecompile
         nint descriptor = 0;
         try
         {
-            library = MetalRenderHost.TryCompileLibrary(device, source, shader.UsesPerVertexInputs, out var compileError, out _, askArchive: false);
+            library = MetalRenderHost.TryCompileLibrary(device, source, usesPerVertexInputs, out var compileError, out _, askArchive: false);
             if (library == 0)
             {
                 error = compileError;
@@ -613,7 +623,7 @@ internal static class MetalStaticPrecompile
             }
 
             nint functionError = 0;
-            function = shader.UsesMipStatisticsConstant
+            function = usesMipStatisticsConstant
                 ? MetalRenderHost.NewMipStatisticsFunction(library, entry, enabled: false, out functionError)
                 : MetalNative.Send(library, SelNewFunctionWithName, MetalNative.NsString(entry));
             if (function == 0)

@@ -530,6 +530,11 @@ internal sealed partial class MetalRenderHost
                 {
                     error = MetalNative.DescribeError(compileError);
                 }
+                else if (askArchive && archiveKey != default && MetalBinaryArchive.For(device) is { } owner)
+                {
+                    // Stored by the pipeline made from it, or else later (MetalUnstoredLibraries).
+                    MetalUnstoredLibraries.Note(owner, device, archiveKey, source, usesPerVertexInputs);
+                }
 
                 return library;
             }
