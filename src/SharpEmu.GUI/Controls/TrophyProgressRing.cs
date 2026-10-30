@@ -15,6 +15,24 @@ internal sealed class TrophyProgressRing : Control
     public static readonly StyledProperty<double> ThicknessProperty =
         AvaloniaProperty.Register<TrophyProgressRing, double>(nameof(Thickness), 8);
 
+    private static readonly IBrush TrackBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255));
+
+    private static readonly IBrush FillBrush = new LinearGradientBrush
+    {
+        StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+        EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
+        GradientStops =
+        {
+            new GradientStop(Color.Parse("#8FE3FF"), 0),
+            new GradientStop(Color.Parse("#9B7CFF"), 0.55),
+            new GradientStop(Color.Parse("#FF8FD8"), 1),
+        },
+    };
+
+    // The pens only change with the thickness, so a count-up animation does not rebuild them every frame.
+    private Pen? _trackPen;
+    private Pen? _fillPen;
+
     static TrophyProgressRing()
     {
         AffectsRender<TrophyProgressRing>(ValueProperty, ThicknessProperty);
@@ -42,25 +60,20 @@ internal sealed class TrophyProgressRing : Control
         }
 
         var center = new Point(Bounds.Width / 2, Bounds.Height / 2);
-        context.DrawEllipse(null, new Pen(new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)), Thickness), center, radius, radius);
+        if (_trackPen is null || _trackPen.Thickness != Thickness)
+        {
+            _trackPen = new Pen(TrackBrush, Thickness);
+            _fillPen = new Pen(FillBrush, Thickness, lineCap: PenLineCap.Round);
+        }
+
+        context.DrawEllipse(null, _trackPen, center, radius, radius);
         var fraction = Math.Clamp(Value / 100, 0, 1);
         if (fraction <= 0)
         {
             return;
         }
 
-        var brush = new LinearGradientBrush
-        {
-            StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-            EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
-            GradientStops =
-            {
-                new GradientStop(Color.Parse("#8FE3FF"), 0),
-                new GradientStop(Color.Parse("#9B7CFF"), 0.55),
-                new GradientStop(Color.Parse("#FF8FD8"), 1),
-            },
-        };
-        var pen = new Pen(brush, Thickness, lineCap: PenLineCap.Round);
+        var pen = _fillPen!;
         if (fraction >= 0.9999)
         {
             context.DrawEllipse(null, pen, center, radius, radius);

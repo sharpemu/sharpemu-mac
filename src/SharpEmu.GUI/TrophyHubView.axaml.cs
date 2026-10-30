@@ -38,7 +38,8 @@ public partial class TrophyHubView : UserControl
     }
 
     private static readonly Color Gold = Color.Parse("#F2B93B");
-    private static readonly TimeSpan PageSettleTime = TimeSpan.FromMilliseconds(320);
+    private const double HeroSpinSeconds = 1.1;
+    private static readonly TimeSpan PageSettleTime = TimeSpan.FromMilliseconds(260);
     private static readonly IBrush SecondaryText = new SolidColorBrush(Color.Parse("#A8ADB7"));
     private static readonly IBrush CardBrush = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255));
     private static readonly IBrush CompleteCardBrush = new LinearGradientBrush
@@ -55,13 +56,14 @@ public partial class TrophyHubView : UserControl
     private IReadOnlyList<GameEntry> _games = [];
     private readonly List<(Border Card, GameSummary Summary)> _cards = [];
     private readonly List<(Border Chip, Sort Sort)> _sortChips = [];
-    private readonly DispatcherTimer _idle = new() { Interval = TimeSpan.FromMilliseconds(16) };
     private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
     private IReadOnlyList<GameSummary> _summaries = [];
     private Sort _sort = Sort.Recent;
     private int _selected = -1;
     private double _shownAt;
     private bool _wasShown;
+    private bool _active;
+    private bool _heroPending;
     private bool _animated;
     private string _signature = string.Empty;
     private long _stamp;
@@ -91,26 +93,46 @@ public partial class TrophyHubView : UserControl
                 e.Handled = true;
             }
         };
+    }
 
-        _idle.Tick += (_, _) =>
+    private void RequestHeroFrame()
+    {
+        if (_heroPending || TopLevel.GetTopLevel(this) is not { } topLevel)
         {
-            if (!IsEffectivelyVisible)
-            {
-                _idle.Stop();
-                return;
-            }
+            return;
+        }
 
-            if (!_wasShown)
-            {
-                _wasShown = true;
-                _shownAt = _clock.Elapsed.TotalSeconds;
-            }
+        _heroPending = true;
+        topLevel.RequestAnimationFrame(HeroFrame);
+    }
 
-            var t = _clock.Elapsed.TotalSeconds - _shownAt;
-            HeroMedal.Spin = t < 1.4 ? (1 - (1 - Math.Pow(1 - t / 1.4, 4))) * Math.PI * 4 : 0;
-            var cycle = (t - 1.2) % 4.5;
-            HeroMedal.Glint = t > 1.2 && cycle < 0.9 ? cycle / 0.9 : -1;
-        };
+    // The medal only needs frames while it spins or glints; between glints a timer wakes it up.
+    private void HeroFrame(TimeSpan now)
+    {
+        _heroPending = false;
+        if (!_active || !IsEffectivelyVisible)
+        {
+            return;
+        }
+
+        if (!_wasShown)
+        {
+            _wasShown = true;
+            _shownAt = _clock.Elapsed.TotalSeconds;
+        }
+
+        var t = _clock.Elapsed.TotalSeconds - _shownAt;
+        HeroMedal.Spin = t < HeroSpinSeconds ? Math.Pow(1 - t / HeroSpinSeconds, 4) * Math.PI * 4 : 0;
+        var cycle = (t - 1.0) % 4.5;
+        HeroMedal.Glint = t > 1.0 && cycle < 0.9 ? cycle / 0.9 : -1;
+        if (t < HeroSpinSeconds || HeroMedal.Glint >= 0)
+        {
+            RequestHeroFrame();
+            return;
+        }
+
+        var wait = 1.0 + 4.5 * Math.Ceiling((t - 1.0) / 4.5) - t;
+        DispatcherTimer.RunOnce(RequestHeroFrame, TimeSpan.FromSeconds(Math.Max(0.05, wait)));
     }
 
     public async Task ShowAsync(IReadOnlyList<GameEntry> games)
@@ -118,7 +140,8 @@ public partial class TrophyHubView : UserControl
         _games = games;
         SearchBox.PlaceholderText = Localization.Instance.Get("Trophies.SearchWatermark");
         BuildSortChips();
-        _idle.Start();
+        _active = true;
+        RequestHeroFrame();
         await LoadAsync();
     }
 
@@ -131,7 +154,7 @@ public partial class TrophyHubView : UserControl
         _stamp = 0;
         _selected = -1;
         _animated = false;
-        _idle.Stop();
+        _active = false;
     }
 
     public bool HandleKey(Key key)
@@ -196,7 +219,9 @@ public partial class TrophyHubView : UserControl
         }
 
         LoadingState.IsVisible = _summaries.Count == 0;
-        await Task.Delay(PageSettleTime);
+
+        // Load while the page slides in; the cards are only built once the slide has settled.
+        var settle = Task.Delay(PageSettleTime);
         var summaries = await Task.Run(() =>
         {
             var loaded = games
@@ -211,6 +236,7 @@ public partial class TrophyHubView : UserControl
             TrophyCache.Save();
             return loaded;
         });
+        await settle;
 
         _stamp = stamp;
         LoadingState.IsVisible = false;
@@ -299,9 +325,9 @@ public partial class TrophyHubView : UserControl
         var total = summaries.Sum(s => s.Trophies.Count);
         var percent = total == 0 ? 0 : earned * 100.0 / total;
         TotalOfText.Text = Localization.Instance.Format("Trophies.HubSummary", earned, total, summaries.Count);
-        var duration = TimeSpan.FromMilliseconds(_animated ? 400 : 1300);
-        TrophyUi.Animate(_animated ? earned : 0, earned, duration, value => TotalEarnedText.Text = ((int)Math.Round(value)).ToString());
-        TrophyUi.Animate(_animated ? percent : 0, percent, duration, value => TotalRing.Value = value);
+        var duration = TimeSpan.FromMilliseconds(_animated ? 300 : 800);
+        TrophyUi.Animate(TotalEarnedText, _animated ? earned : 0, earned, duration, value => TotalEarnedText.Text = ((int)Math.Round(value)).ToString());
+        TrophyUi.Animate(TotalRing, _animated ? percent : 0, percent, duration, value => TotalRing.Value = value);
         TotalGrades.Children.Clear();
         for (var grade = 1; grade <= 4; grade++)
         {
@@ -439,7 +465,7 @@ public partial class TrophyHubView : UserControl
 
         var ring = new Grid { Width = 44, Height = 44, VerticalAlignment = VerticalAlignment.Center };
         var progressRing = new TrophyProgressRing { Thickness = 4 };
-        TrophyUi.Animate(_animated ? summary.Percent : 0, summary.Percent, TimeSpan.FromMilliseconds(_animated ? 1 : 1100), value => progressRing.Value = value);
+        TrophyUi.Animate(progressRing, _animated ? summary.Percent : 0, summary.Percent, TimeSpan.FromMilliseconds(_animated ? 1 : 700), value => progressRing.Value = value);
         ring.Children.Add(progressRing);
         ring.Children.Add(new TextBlock
         {
