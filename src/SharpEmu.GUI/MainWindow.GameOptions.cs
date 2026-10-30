@@ -211,7 +211,7 @@ public partial class MainWindow
             GameLogToFileToggle.IsChecked = effective.LogToFile;
             GameWindowModeBox.SelectedItem = FindChoice(
                 _windowModeChoices,
-                effective.WindowMode,
+                PlatformWindowMode(effective.WindowMode),
                 "Windowed");
             GameScalingModeBox.SelectedItem = FindChoice(
                 _scalingModeChoices,
@@ -285,6 +285,7 @@ public partial class MainWindow
             ScalingMode = SelectedComboText(GameScalingModeBox, "Fit"),
             VSync = GameVSyncToggle.IsChecked == true,
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
+            GuestDisplayResolution = PerGameSettings.Load(_gameSettingsTitleId)?.GuestDisplayResolution,
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
             OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),
             OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),

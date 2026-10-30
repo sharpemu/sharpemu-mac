@@ -88,12 +88,7 @@ public partial class MainWindow : Window
         LocalizedChoice.FromKey("Error", "Options.LogLevel.Error"),
         LocalizedChoice.FromKey("Critical", "Options.LogLevel.Critical"),
     ];
-    private readonly LocalizedChoice[] _windowModeChoices =
-    [
-        LocalizedChoice.FromKey("Windowed", "Options.WindowMode.Windowed"),
-        LocalizedChoice.FromKey("Borderless", "Options.WindowMode.Borderless"),
-        LocalizedChoice.FromKey("Exclusive", "Options.WindowMode.Exclusive"),
-    ];
+    private readonly LocalizedChoice[] _windowModeChoices = CreateWindowModeChoices();
     private readonly LocalizedChoice[] _scalingModeChoices =
     [
         LocalizedChoice.FromKey("Fit", "Options.Scaling.Fit"),
@@ -126,6 +121,27 @@ public partial class MainWindow : Window
         LocalizedChoice.FromKey("Guest", "Options.Env.BinkPlayback.Guest"),
         LocalizedChoice.FromKey("Skip", "Options.Env.BinkPlayback.Skip"),
     ];
+    // macOS has one native fullscreen, so Exclusive would just be a second name for Borderless.
+    private static LocalizedChoice[] CreateWindowModeChoices()
+    {
+        var choices = new List<LocalizedChoice>
+        {
+            LocalizedChoice.FromKey("Windowed", "Options.WindowMode.Windowed"),
+            LocalizedChoice.FromKey("Borderless", "Options.WindowMode.Borderless"),
+        };
+        if (!OperatingSystem.IsMacOS())
+        {
+            choices.Add(LocalizedChoice.FromKey("Exclusive", "Options.WindowMode.Exclusive"));
+        }
+
+        return choices.ToArray();
+    }
+
+    private static string PlatformWindowMode(string windowMode) =>
+        OperatingSystem.IsMacOS() && string.Equals(windowMode, "Exclusive", StringComparison.OrdinalIgnoreCase)
+            ? "Borderless"
+            : windowMode;
+
     private readonly List<GameEntry> _allGames = new();
     private readonly ObservableCollection<GameEntry> _visibleGames = new();
     private readonly LibraryTileCollection _libraryTiles;
@@ -345,6 +361,7 @@ public partial class MainWindow : Window
         ConsoleToggle.IsCheckedChanged += (_, _) => UpdateEmbeddedConsoleVisibility();
         WireOptionsNavigation();
         WireGameOptions();
+        HideUnsupportedPlatformOptions();
 
         // The settings page edits _settings live, so a launch started while
         // it is open already uses the new values.
@@ -1298,7 +1315,7 @@ public partial class MainWindow : Window
 
     private void OnPreviewKeyDown(object? sender, KeyEventArgs args)
     {
-        // The session runs in its own SDL window and takes keyboard focus with
+        // The session runs in its own window and takes keyboard focus with
         // it, so launcher buttons no longer see game input and nothing has to
         // be swallowed here. Kept as the wired handler because the launcher
         // still needs a preview hook for its own shortcuts.
@@ -1532,7 +1549,8 @@ public partial class MainWindow : Window
             _settings.EnvironmentToggles.Contains("SHARPEMU_RENDERDOC");
         EnvDisableVkImplicitLayersToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("SHARPEMU_VK_DISABLE_IMPLICITS");
-        WindowModeBox.SelectedIndex = ChoiceIndex(_settings.WindowMode, "Windowed", "Borderless", "Exclusive");
+        WindowModeBox.SelectedIndex = ChoiceIndex(
+            PlatformWindowMode(_settings.WindowMode), "Windowed", "Borderless", "Exclusive");
         LoadHostDisplayOptions();
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         VSyncToggle.IsChecked = _settings.VSync;
@@ -3146,7 +3164,7 @@ public partial class MainWindow : Window
         _runningGameTitleId = null;
         UpdateDiscordPresence();
         UpdateEmbeddedConsoleVisibility();
-        Console.Error.WriteLine("[GUI][INFO] Waiting for the SDL game process to exit.");
+        Console.Error.WriteLine("[GUI][INFO] Waiting for the game process to exit.");
     }
 
     /// <summary>
