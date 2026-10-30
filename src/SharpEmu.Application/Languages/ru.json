@@ -153,6 +153,12 @@
 
   "Options.Language.Label": "Язык эмулятора",
   "Options.Language.Desc": "Язык интерфейса лаунчера. Изменение применяется сразу.",
+  "Options.Theme.Label": "Тема",
+  "Options.Theme.Desc": "Цвета интерфейса лаунчера. Изменение применяется сразу.",
+  "Options.Theme.Graphite": "Графит",
+  "Options.Theme.Oled": "Чёрный OLED",
+  "Options.Theme.Midnight": "Полночь",
+  "Options.Theme.Violet": "Фиолетовая",
 
   "Common.On": "Включено",
   "Common.Off": "Выключено",

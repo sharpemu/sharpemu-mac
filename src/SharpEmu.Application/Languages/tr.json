@@ -119,6 +119,12 @@
 
   "Options.Language.Label": "Emülatör dili",
   "Options.Language.Desc": "Başlatıcı genelinde kullanılan dil. Hemen uygulanır.",
+  "Options.Theme.Label": "Tema",
+  "Options.Theme.Desc": "Başlatıcı genelinde kullanılan renkler. Hemen uygulanır.",
+  "Options.Theme.Graphite": "Grafit",
+  "Options.Theme.Oled": "OLED siyah",
+  "Options.Theme.Midnight": "Gece yarısı",
+  "Options.Theme.Violet": "Mor",
 
   "Common.On": "Açık",
   "Common.Off": "Kapalı",

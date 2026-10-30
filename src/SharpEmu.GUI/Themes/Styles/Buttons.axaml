@@ -12,7 +12,7 @@ at least 44 pt tall.
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <Style Selector="Button.accent">
     <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
     <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="SemiBold" />
     <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
@@ -22,9 +22,13 @@ at least 44 pt tall.
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
+  <!-- Set on the presenter too: the stock template otherwise paints string content white. -->
+  <Style Selector="Button.accent /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+  </Style>
   <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
   </Style>
   <Style Selector="Button.accent:pressed /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource AccentPressedBrush}" />
@@ -140,7 +144,7 @@ at least 44 pt tall.
   </Style>
   <Style Selector="Button.segment.active /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    <Setter Property="BoxShadow" Value="0 6 0 -3 #7C5CFC" />
+    <Setter Property="BoxShadow" Value="{DynamicResource SegmentUnderlineShadow}" />
   </Style>
 
   <!-- Pressed: one step lighter than hover, never the stock grey. -->

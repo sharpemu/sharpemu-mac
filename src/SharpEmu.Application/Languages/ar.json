@@ -96,6 +96,12 @@
 
   "Options.Language.Label": "لغة المحاكي",
   "Options.Language.Desc": "اللغة المستخدمة في جميع أنحاء المشغل. تُطبق فوراً.",
+  "Options.Theme.Label": "السمة",
+  "Options.Theme.Desc": "الألوان المستخدمة في جميع أنحاء المشغل. تُطبق فوراً.",
+  "Options.Theme.Graphite": "جرافيت",
+  "Options.Theme.Oled": "أسود OLED",
+  "Options.Theme.Midnight": "منتصف الليل",
+  "Options.Theme.Violet": "بنفسجي",
 
   "Common.On": "تشغيل",
   "Common.Off": "إيقاف",

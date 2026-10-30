@@ -109,6 +109,12 @@
 
   "Options.Language.Label": "Idioma do emulador",
   "Options.Language.Desc": "Idioma usado em toda a interface do emulador. A alteração é aplicada imediatamente.",
+  "Options.Theme.Label": "Tema",
+  "Options.Theme.Desc": "Cores usadas em toda a interface do emulador. A alteração é aplicada imediatamente.",
+  "Options.Theme.Graphite": "Grafite",
+  "Options.Theme.Oled": "Preto OLED",
+  "Options.Theme.Midnight": "Meia-noite",
+  "Options.Theme.Violet": "Violeta",
 
   "Common.On": "Ativado",
   "Common.Off": "Desativado",

@@ -502,7 +502,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   Margin="0,0,0,24"
                   Padding="20,12"
                   CornerRadius="{StaticResource RadiusLg}"
-                  Background="#F01C1928"
+                  Background="{StaticResource ToastBrush}"
                   BorderBrush="{StaticResource CardBorderBrush}"
                   BorderThickness="1"
                   BoxShadow="{StaticResource SheetShadow}"
@@ -1413,6 +1413,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 <StackPanel>
                   <Border Classes="optionsGroup">
                     <StackPanel Spacing="8">
+                      <local:SettingRow x:Name="ThemeRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Theme.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Theme.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ComboBox x:Name="ThemeBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  Width="210"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+
                       <local:SettingRow x:Name="LanguageRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Language.Label], Source={x:Static local:Localization.Instance}}"
@@ -1992,13 +2004,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
             VerticalAlignment="Bottom"
             IsHitTestVisible="False"
             IsVisible="False"
+            Background="{StaticResource HintBarFadeBrush}"
             ZIndex="100">
-      <Border.Background>
-        <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
-          <GradientStop Offset="0" Color="#000E0D14" />
-          <GradientStop Offset="1" Color="#F20E0D14" />
-        </LinearGradientBrush>
-      </Border.Background>
       <StackPanel x:Name="ControllerHintItems"
                   Orientation="Horizontal"
                   Spacing="32"

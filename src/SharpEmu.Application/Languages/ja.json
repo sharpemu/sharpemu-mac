@@ -96,6 +96,12 @@
 
   "Options.Language.Label": "エミュレータの言語",
   "Options.Language.Desc": "ランチャー全体で使用される言語。変更はすぐに適用されます。",
+  "Options.Theme.Label": "テーマ",
+  "Options.Theme.Desc": "ランチャー全体で使用される色。変更はすぐに適用されます。",
+  "Options.Theme.Graphite": "グラファイト",
+  "Options.Theme.Oled": "OLED ブラック",
+  "Options.Theme.Midnight": "ミッドナイト",
+  "Options.Theme.Violet": "バイオレット",
 
   "Common.On": "オン",
   "Common.Off": "オフ",

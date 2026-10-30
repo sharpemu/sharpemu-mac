@@ -63,7 +63,7 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="Padding" Value="30,0" />
     <Setter Property="CornerRadius" Value="999" />
     <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="Bold" />
@@ -71,9 +71,13 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
 
+  <Style Selector="Button.playButton /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.gameOptionsLaunch /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+  </Style>
   <Style Selector="Button.playButton:pointerover /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
   </Style>
   <Style Selector="Button.playButton:pressed /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource AccentPressedBrush}" />
@@ -147,14 +151,14 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="CornerRadius" Value="999" />
     <Setter Property="Background" Value="{StaticResource AccentBrush}" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
     <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="Bold" />
   </Style>
 
   <Style Selector="Button.gameOptionsLaunch:pointerover /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
   </Style>
   <Style Selector="Button.gameOptionsLaunch:pressed /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource AccentPressedBrush}" />

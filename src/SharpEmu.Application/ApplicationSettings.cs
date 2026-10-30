@@ -59,6 +59,9 @@ public sealed class ApplicationSettings
     /// <summary>UI language, matching a file code under Languages/ (e.g. "en", "tr").</summary>
     public string Language { get; set; } = "en";
 
+    /// <summary>Launcher colour theme: Graphite, Oled, Midnight or Violet.</summary>
+    public string LauncherTheme { get; set; } = "Graphite";
+
     public string ConsoleLanguage { get; set; } = "EnglishUS";
 
     /// <summary>Publish launcher/game status to Discord Rich Presence.</summary>

@@ -96,6 +96,12 @@
 
   "Options.Language.Label": "Taal van de emulator",
   "Options.Language.Desc": "Taal die in de hele launcher wordt gebruikt. Wordt direct toegepast.",
+  "Options.Theme.Label": "Thema",
+  "Options.Theme.Desc": "Kleuren die in de hele launcher worden gebruikt. Wordt direct toegepast.",
+  "Options.Theme.Graphite": "Grafiet",
+  "Options.Theme.Oled": "OLED-zwart",
+  "Options.Theme.Midnight": "Middernacht",
+  "Options.Theme.Violet": "Violet",
 
   "Common.On": "Aan",
   "Common.Off": "Uit",

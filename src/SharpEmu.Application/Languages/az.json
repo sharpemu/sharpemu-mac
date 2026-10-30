@@ -142,6 +142,12 @@
 
   "Options.Language.Label": "Emulyatorun dili",
   "Options.Language.Desc": "Başladıcı daxilində istifadə olunan dil. Dərhal tətbiq olunur.",
+  "Options.Theme.Label": "Mövzu",
+  "Options.Theme.Desc": "Başladıcı daxilində istifadə olunan rənglər. Dərhal tətbiq olunur.",
+  "Options.Theme.Graphite": "Qrafit",
+  "Options.Theme.Oled": "OLED qara",
+  "Options.Theme.Midnight": "Gecəyarısı",
+  "Options.Theme.Violet": "Bənövşəyi",
 
   "Common.On": "Aktiv",
   "Common.Off": "Deaktiv",

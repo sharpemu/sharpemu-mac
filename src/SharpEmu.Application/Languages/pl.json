@@ -155,6 +155,12 @@
 
   "Options.Language.Label": "Język emulatora",
   "Options.Language.Desc": "Język używany w całym launcherze. Działa natychmiast.",
+  "Options.Theme.Label": "Motyw",
+  "Options.Theme.Desc": "Kolory używane w całym launcherze. Działa natychmiast.",
+  "Options.Theme.Graphite": "Grafit",
+  "Options.Theme.Oled": "Czerń OLED",
+  "Options.Theme.Midnight": "Północ",
+  "Options.Theme.Violet": "Fiolet",
 
   "Common.On": "Włącz",
   "Common.Off": "Wyłącz",

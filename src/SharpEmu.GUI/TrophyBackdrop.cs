@@ -29,17 +29,7 @@ internal sealed class TrophyBackdrop : Grid
         Children.Add(_b);
         Children.Add(new Border
         {
-            Background = new LinearGradientBrush
-            {
-                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-                EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
-                GradientStops =
-                {
-                    new GradientStop(Color.Parse("#801B1B1B"), 0),
-                    new GradientStop(Color.Parse("#E01B1B1B"), 0.45),
-                    new GradientStop(Color.Parse("#FA1B1B1B"), 1),
-                },
-            },
+            Background = LauncherThemes.Brush("TrophyBackdropFadeBrush"),
         });
     }
 

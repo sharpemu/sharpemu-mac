@@ -96,6 +96,12 @@
 
   "Options.Language.Label": "Emulator-Sprache",
   "Options.Language.Desc": "Sprache der Benutzeroberfläche. Wird sofort angewendet.",
+  "Options.Theme.Label": "Design",
+  "Options.Theme.Desc": "Farben der Benutzeroberfläche. Wird sofort angewendet.",
+  "Options.Theme.Graphite": "Graphit",
+  "Options.Theme.Oled": "OLED-Schwarz",
+  "Options.Theme.Midnight": "Mitternacht",
+  "Options.Theme.Violet": "Violett",
 
   "Common.On": "An",
   "Common.Off": "Aus",

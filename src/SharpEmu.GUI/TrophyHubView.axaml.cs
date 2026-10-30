@@ -40,7 +40,7 @@ public partial class TrophyHubView : UserControl
     private static readonly Color Gold = Color.Parse("#F2B93B");
     private const double HeroSpinSeconds = 1.1;
     private static readonly TimeSpan PageSettleTime = TimeSpan.FromMilliseconds(260);
-    private static readonly IBrush SecondaryText = new SolidColorBrush(Color.Parse("#CFCBDD"));
+    private static readonly IBrush SecondaryText = LauncherThemes.Brush("SecondaryTextBrush");
     private static readonly IBrush CardBrush = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255));
     private static readonly IBrush CompleteCardBrush = new LinearGradientBrush
     {
@@ -330,7 +330,7 @@ public partial class TrophyHubView : UserControl
             CornerRadius = new CornerRadius(44),
             HorizontalAlignment = HorizontalAlignment.Center,
             Margin = new Thickness(0, 0, 0, 8),
-            Background = new SolidColorBrush(Color.Parse("#2A2639")),
+            Background = LauncherThemes.Brush("FieldBrush"),
             Child = new TextBlock
             {
                 Classes = { "materialSymbol" },

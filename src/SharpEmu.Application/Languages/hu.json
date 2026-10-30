@@ -109,6 +109,12 @@
 
   "Options.Language.Label": "Emulátor nyelve",
   "Options.Language.Desc": "Az indítóban használt nyelv. Azonnal érvénybe lép.",
+  "Options.Theme.Label": "Téma",
+  "Options.Theme.Desc": "Az indítóban használt színek. Azonnal érvénybe lép.",
+  "Options.Theme.Graphite": "Grafit",
+  "Options.Theme.Oled": "OLED fekete",
+  "Options.Theme.Midnight": "Éjfél",
+  "Options.Theme.Violet": "Ibolya",
 
   "Common.On": "Be",
   "Common.Off": "Ki",

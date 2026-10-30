@@ -155,6 +155,12 @@
 
   "Options.Language.Label": "Emulaatori keel",
   "Options.Language.Desc": "Käivitis kasutatav keel. Rakendub kohe.",
+  "Options.Theme.Label": "Teema",
+  "Options.Theme.Desc": "Käivitis kasutatavad värvid. Rakendub kohe.",
+  "Options.Theme.Graphite": "Grafiit",
+  "Options.Theme.Oled": "OLED must",
+  "Options.Theme.Midnight": "Kesköö",
+  "Options.Theme.Violet": "Violetne",
 
   "Common.On": "Sisse",
   "Common.Off": "Välja",

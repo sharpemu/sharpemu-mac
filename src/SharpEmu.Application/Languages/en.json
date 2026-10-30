@@ -168,6 +168,12 @@
 
   "Options.Language.Label": "Emulator language",
   "Options.Language.Desc": "Language used throughout the launcher. Applies immediately.",
+  "Options.Theme.Label": "Theme",
+  "Options.Theme.Desc": "Colours used throughout the launcher. Applies immediately.",
+  "Options.Theme.Graphite": "Graphite",
+  "Options.Theme.Oled": "OLED black",
+  "Options.Theme.Midnight": "Midnight",
+  "Options.Theme.Violet": "Violet",
 
   "Common.On": "On",
   "Common.Off": "Off",
