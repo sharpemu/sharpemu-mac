@@ -97,6 +97,7 @@ public static partial class VideoOutExports
     private static int _frameDumpCount;
     private static long _nextFrameDumpIndex;
     private static string _applicationWindowTitle = "VideoOut";
+    private static string? _applicationTitle;
     private static string _selectedGpuName = string.Empty;
     private static string _applicationTitleId = "UNKNOWN";
     private static readonly bool _logFrameRate =
@@ -149,6 +150,7 @@ public static partial class VideoOutExports
                 ? "UNKNOWN"
                 : titleId.Trim();
             _applicationWindowTitle = $"{application}{versionSuffix}";
+            _applicationTitle = string.IsNullOrWhiteSpace(title) ? null : title.Trim();
         }
 
         RenderDocCapture.SetCaptureDirectory(GetApplicationTitleId());
@@ -162,10 +164,28 @@ public static partial class VideoOutExports
         }
     }
 
+    /// <summary>The running title's display name from its param data, or null before one loads.</summary>
+    public static string? ApplicationTitle
+    {
+        get
+        {
+            lock (_stateGate)
+            {
+                return _applicationTitle;
+            }
+        }
+    }
+
     internal static string GetWindowTitle()
     {
         lock (_stateGate)
         {
+            // A game window is named for the game alone; build and GPU details are in the log.
+            if (_applicationTitle is { } title)
+            {
+                return title;
+            }
+
             var gpuSuffix = string.IsNullOrWhiteSpace(_selectedGpuName)
                 ? string.Empty
                 : $" · {_selectedGpuName}";
