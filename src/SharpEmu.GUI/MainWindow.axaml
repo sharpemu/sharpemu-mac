@@ -1137,7 +1137,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <StackPanel>
                         <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Debug], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_PROFILE_PERFORMANCE"
+                                          Label="{Binding [Setting.Env.ProfilePerformance.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_PROFILE_PERFORMANCE"
                                           Description="{Binding [Options.Env.PerformanceProfile.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1145,7 +1145,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"
+                                          Label="{Binding [Setting.Env.ProfilePerformanceFrameTrace.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"
                                           Description="{Binding [Options.Env.PerformanceFrameTrace.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1153,14 +1153,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_STRICT_COMPUTE"
+                                          Label="{Binding [Setting.Env.StrictCompute.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_STRICT_COMPUTE"
                                           Description="{Binding [Options.Env.StrictCompute.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
                           <ToggleSwitch x:Name="GameStrictComputeToggle" Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_RENDERDOC"
+                                          Label="{Binding [Setting.Env.Renderdoc.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_RENDERDOC"
                                           Description="{Binding [Options.Env.RenderDoc.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1168,7 +1168,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_VK_DISABLE_IMPLICITS"
+                                          Label="{Binding [Setting.Env.VkDisableImplicits.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_VK_DISABLE_IMPLICITS"
                                           Description="{Binding [Options.Env.DisableVkImplicitLayers.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1176,7 +1176,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_VK_VALIDATION"
+                                          Label="{Binding [Setting.Env.VkValidation.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_VK_VALIDATION"
                                           Description="{Binding [Options.Env.VkValidation.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1184,19 +1184,19 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_DUMP_SPIRV"
+                                          Label="{Binding [Setting.Env.DumpSpirv.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_DUMP_SPIRV"
                                           Description="{Binding [Options.Env.DumpSpirv.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
                           <ToggleSwitch x:Name="GameEnvDumpSpirvToggle"
                                         Classes="optionToggle" />
                         </local:SettingRow>
-                        <local:SettingRow Classes="optionRow" Label="SHARPEMU_SKIP_RT"
+                        <local:SettingRow Classes="optionRow" Label="{Binding [Setting.Env.SkipRt.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_SKIP_RT"
                                           Description="{Binding [Options.Env.SkipRt.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
                           <ToggleSwitch x:Name="GameEnvSkipRtToggle" Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_LOG_DIRECT_MEMORY"
+                                          Label="{Binding [Setting.Env.LogDirectMemory.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_LOG_DIRECT_MEMORY"
                                           Description="{Binding [Options.Env.LogDirectMemory.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1204,7 +1204,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_LOG_IO"
+                                          Label="{Binding [Setting.Env.LogIo.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_LOG_IO"
                                           Description="{Binding [Options.Env.LogIo.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1212,7 +1212,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_LOG_NP"
+                                          Label="{Binding [Setting.Env.LogNp.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_LOG_NP"
                                           Description="{Binding [Options.Env.LogNp.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1226,7 +1226,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
                         <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.General], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_BTHID_UNAVAILABLE"
+                                          Label="{Binding [Setting.Env.BthidUnavailable.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_BTHID_UNAVAILABLE"
                                           Description="{Binding [Options.Env.Bthid.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1234,7 +1234,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
+                                          Label="{Binding [Setting.Env.DisableImportLoopGuard.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
                                           Description="{Binding [Options.Env.LoopGuard.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1242,7 +1242,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_WRITABLE_APP0"
+                                          Label="{Binding [Setting.Env.WritableApp0.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_WRITABLE_APP0"
                                           Description="{Binding [Options.Env.WritableApp0.Desc],
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
@@ -1830,58 +1830,58 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <Border Classes="optionsGroupDivider" />
 
                       <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Debug], Source={x:Static local:Localization.Instance}}" />
-                      <local:SettingRow x:Name="PerformanceProfileRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_PROFILE_PERFORMANCE"
+                      <local:SettingRow x:Name="PerformanceProfileRow" Classes="optionRow" Label="{Binding [Setting.Env.ProfilePerformance.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_PROFILE_PERFORMANCE"
                                         Description="{Binding [Options.Env.PerformanceProfile.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="PerformanceProfileToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="PerformanceFrameTraceRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"
+                      <local:SettingRow x:Name="PerformanceFrameTraceRow" Classes="optionRow" Label="{Binding [Setting.Env.ProfilePerformanceFrameTrace.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"
                                         Description="{Binding [Options.Env.PerformanceFrameTrace.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="PerformanceFrameTraceToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_STRICT_COMPUTE"
+                      <local:SettingRow Classes="optionRow" Label="{Binding [Setting.Env.StrictCompute.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_STRICT_COMPUTE"
                                         Description="{Binding [Options.Env.StrictCompute.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="StrictComputeToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvRenderDocRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_RENDERDOC"
+                      <local:SettingRow x:Name="EnvRenderDocRow" Classes="optionRow" Label="{Binding [Setting.Env.Renderdoc.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_RENDERDOC"
                                         Description="{Binding [Options.Env.RenderDoc.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvRenderDocToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
                       <local:SettingRow Classes="optionRow"
-                                        LabelFontFamily="Consolas,monospace"
-                                        Label="SHARPEMU_VK_DISABLE_IMPLICITS"
+                                       
+                                        Label="{Binding [Setting.Env.VkDisableImplicits.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_VK_DISABLE_IMPLICITS"
                                         Description="{Binding [Options.Env.DisableVkImplicitLayers.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvDisableVkImplicitLayersToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvVkValidationRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_VK_VALIDATION"
+                      <local:SettingRow x:Name="EnvVkValidationRow" Classes="optionRow" Label="{Binding [Setting.Env.VkValidation.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_VK_VALIDATION"
                                         Description="{Binding [Options.Env.VkValidation.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvVkValidationToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvDumpSpirvRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DUMP_SPIRV"
+                      <local:SettingRow x:Name="EnvDumpSpirvRow" Classes="optionRow" Label="{Binding [Setting.Env.DumpSpirv.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_DUMP_SPIRV"
                                         Description="{Binding [Options.Env.DumpSpirv.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvDumpSpirvToggle" Classes="optionToggle" />
                       </local:SettingRow>
-                      <local:SettingRow Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_SKIP_RT"
+                      <local:SettingRow Classes="optionRow" Label="{Binding [Setting.Env.SkipRt.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_SKIP_RT"
                                         Description="{Binding [Options.Env.SkipRt.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvSkipRtToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLogDirectMemoryRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_DIRECT_MEMORY"
+                      <local:SettingRow x:Name="EnvLogDirectMemoryRow" Classes="optionRow" Label="{Binding [Setting.Env.LogDirectMemory.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_LOG_DIRECT_MEMORY"
                                         Description="{Binding [Options.Env.LogDirectMemory.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLogIoRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_IO"
+                      <local:SettingRow x:Name="EnvLogIoRow" Classes="optionRow" Label="{Binding [Setting.Env.LogIo.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_LOG_IO"
                                         Description="{Binding [Options.Env.LogIo.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvLogIoToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLogNpRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_NP"
+                      <local:SettingRow x:Name="EnvLogNpRow" Classes="optionRow" Label="{Binding [Setting.Env.LogNp.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_LOG_NP"
                                         Description="{Binding [Options.Env.LogNp.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvLogNpToggle" Classes="optionToggle" />
                       </local:SettingRow>
@@ -1901,17 +1901,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvBthidRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_BTHID_UNAVAILABLE"
+                      <local:SettingRow x:Name="EnvBthidRow" Classes="optionRow" Label="{Binding [Setting.Env.BthidUnavailable.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_BTHID_UNAVAILABLE"
                                         Description="{Binding [Options.Env.Bthid.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvBthidToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLoopGuardRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
+                      <local:SettingRow x:Name="EnvLoopGuardRow" Classes="optionRow" Label="{Binding [Setting.Env.DisableImportLoopGuard.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
                                         Description="{Binding [Options.Env.LoopGuard.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvLoopGuardToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvWritableApp0Row" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_WRITABLE_APP0"
+                      <local:SettingRow x:Name="EnvWritableApp0Row" Classes="optionRow" Label="{Binding [Setting.Env.WritableApp0.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_WRITABLE_APP0"
                                         Description="{Binding [Options.Env.WritableApp0.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvWritableApp0Toggle" Classes="optionToggle" />
                       </local:SettingRow>

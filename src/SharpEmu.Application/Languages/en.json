@@ -396,5 +396,20 @@
   "Setting.ShaderCacheFolder.Confirm": "Click again to clear",
   "Setting.ShaderCacheFolder.Cleared": "[GUI][INFO] Compiled shader files cleared.",
   "Setting.ShaderCacheFolder.ClearFailed": "[GUI][WARN] Could not clear the compiled shader files: {0}",
-  "Setting.ShaderCacheFolder.Running": "[GUI][WARN] Close the running game before clearing compiled shader files."
+  "Setting.ShaderCacheFolder.Running": "[GUI][WARN] Close the running game before clearing compiled shader files.",
+
+  "Setting.Env.ProfilePerformance.Label": "Performance profiling",
+  "Setting.Env.ProfilePerformanceFrameTrace.Label": "Frame pacing trace",
+  "Setting.Env.StrictCompute.Label": "Strict shader checks",
+  "Setting.Env.Renderdoc.Label": "RenderDoc capture",
+  "Setting.Env.VkDisableImplicits.Label": "Disable Vulkan implicit layers",
+  "Setting.Env.VkValidation.Label": "Vulkan validation layers",
+  "Setting.Env.DumpSpirv.Label": "Dump compiled shaders",
+  "Setting.Env.SkipRt.Label": "Skip ray-tracing shaders",
+  "Setting.Env.LogDirectMemory.Label": "Log direct memory",
+  "Setting.Env.LogIo.Label": "Log file access",
+  "Setting.Env.LogNp.Label": "Log PSN calls",
+  "Setting.Env.BthidUnavailable.Label": "Report Bluetooth HID as unavailable",
+  "Setting.Env.DisableImportLoopGuard.Label": "Disable import loop guard",
+  "Setting.Env.WritableApp0.Label": "Writable game folder (/app0)"
 }
