@@ -55,15 +55,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
           </Transitions>
         </Image.Transitions>
       </Image>
-      <Border>
-        <Border.Background>
-          <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
-            <GradientStop Offset="0" Color="#730C0C0C" />
-            <GradientStop Offset="0.55" Color="#BF0C0C0C" />
-            <GradientStop Offset="1" Color="#EB0C0C0C" />
-          </LinearGradientBrush>
-        </Border.Background>
-      </Border>
+      <Border Background="{StaticResource ArtScrimBrush}" />
     </Panel>
 
     <!-- Title bar; hidden in fullscreen (F11) so the game gets the whole screen. On macOS
@@ -75,10 +67,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
           Background="{StaticResource ChromeBrush}">
       <StackPanel x:Name="TitleBarBrand" Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
         <Image Source="avares://SharpEmu.GUI/Assets/SharpEmu.ico" Width="20" Height="20"
+               VerticalAlignment="Center"
                RenderOptions.BitmapInterpolationMode="HighQuality" />
-        <TextBlock Text="SharpEmu" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
-        <Border Classes="pill">
-          <TextBlock x:Name="VersionText" Text="v0.0.1" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+        <TextBlock Text="SharpEmu" FontSize="{StaticResource FontSizeDescription}" FontWeight="SemiBold" VerticalAlignment="Center" />
+        <Border Classes="pill" MinHeight="22" Padding="8,0">
+          <TextBlock x:Name="VersionText" Text="v0.0.1" />
         </Border>
       </StackPanel>
       <StackPanel x:Name="WindowChromeButtons"
@@ -89,7 +82,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 Classes="windowChrome"
                 ToolTip.Tip="Minimize"
                 AutomationProperties.Name="Minimize window">
-          <TextBlock Classes="materialSymbol compact windowChromeGlyph"
+          <TextBlock Classes="materialSymbol compact"
                      Text="minimize" />
         </Button>
         <Button x:Name="MaximizeButton"
@@ -97,21 +90,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 ToolTip.Tip="Restore"
                 AutomationProperties.Name="Restore window">
           <TextBlock x:Name="MaximizeGlyph"
-                     Classes="materialSymbol compact windowChromeGlyph"
+                     Classes="materialSymbol compact"
                      Text="filter_none" />
         </Button>
         <Button x:Name="CloseButton"
                 Classes="windowChrome windowClose"
                 ToolTip.Tip="Close"
                 AutomationProperties.Name="Close window">
-          <TextBlock Classes="materialSymbol windowChromeGlyph windowCloseGlyph"
+          <TextBlock Classes="materialSymbol compact"
                      Text="close" />
         </Button>
       </StackPanel>
     </Grid>
 
     <!-- Main content -->
-    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20">
+    <Grid x:Name="MainContent" Grid.Row="1" Margin="40,16,40,24">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
         <RowDefinition Height="*" MinHeight="160" />
@@ -122,22 +115,24 @@ SPDX-License-Identifier: GPL-2.0-or-later
            per-game settings, keeping both views in one visual system -->
       <Border x:Name="OptionsPageSurface"
               Grid.RowSpan="4"
-              Margin="-32,-24,-32,-20"
+              Margin="-40,-16,-40,-24"
               Background="{StaticResource GameOptionsMenuBrush}"
               IsVisible="False" />
       <local:TrophyBackdrop x:Name="TrophyBackdropHost"
                             Grid.RowSpan="4"
-                            Margin="-32,-24,-32,-20"
+                            Margin="-40,-16,-40,-24"
                             IsVisible="False" />
 
-      <!-- Library / Options page switcher, with the library toolbar sharing
-           the same row on the right. Plain buttons (not TabItem) so there is
-           no underline; LB/RB hint chips flank the pair and the gamepad's
-           shoulder buttons actually switch pages from anywhere. -->
-      <Grid x:Name="ContentToolbar" Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,20">
-        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-          <Border Classes="padHint" VerticalAlignment="Center">
-            <TextBlock Text="LB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
+      <!-- Page titles with the library toolbar on the same row. Every child is
+           centred on the one 56 pt row and every toolbar control is 44 pt tall.
+           Plain buttons (not TabItem) so there is no Fluent tab chrome; the L1/R1
+           keycaps appear only while a controller is connected and the shoulder
+           buttons switch pages from anywhere. -->
+      <Grid x:Name="ContentToolbar" Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Height="56" Margin="0,0,0,16">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center"
+                    Margin="-14,0,0,0">
+          <Border x:Name="PageHintL1" Classes="padHint" IsVisible="False" Margin="0,0,8,0">
+            <TextBlock Text="L1" />
           </Border>
           <Button x:Name="LibraryTabButton"
                   Classes="segment active"
@@ -148,39 +143,38 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <Button x:Name="OptionsTabButton"
                   Classes="segment"
                   Content="{Binding [Page.Options], Source={x:Static local:Localization.Instance}}" />
-          <Border Classes="padHint" VerticalAlignment="Center">
-            <TextBlock Text="RB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
+          <Border x:Name="PageHintR1" Classes="padHint" IsVisible="False" Margin="8,0,0,0">
+            <TextBlock Text="R1" />
           </Border>
         </StackPanel>
 
-        <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="8"
+        <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="12"
                     VerticalAlignment="Center">
-          <Border Background="Transparent"
-                  BorderBrush="{StaticResource CardBorderBrush}"
-                  BorderThickness="1" CornerRadius="8"
-                  Height="32" Padding="2,0,6,0" VerticalAlignment="Center">
-            <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+          <Border Background="{StaticResource ElevatedBrush}"
+                  CornerRadius="{StaticResource RadiusMd}"
+                  Height="44" Padding="4,0,18,0" VerticalAlignment="Center">
+            <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
               <Button x:Name="TitleMusicMuteButton"
                       Classes="iconGhost"
-                      Width="28" Height="28" BorderThickness="0"
+                      Width="36" Height="36" Background="Transparent"
                       VerticalAlignment="Center">
                 <TextBlock x:Name="TitleMusicMuteGlyph"
                            Classes="materialSymbol compact"
                            Text="volume_up" />
               </Button>
               <Slider x:Name="TitleMusicVolumeSlider"
-                      Width="76" Height="28"
+                      Width="96" Height="28"
                       Minimum="0" Maximum="100"
                       SmallChange="1" LargeChange="10"
                       VerticalAlignment="Center"
                       ToolTip.Tip="{Binding [Library.Music.Volume], Source={x:Static local:Localization.Instance}}">
                 <Slider.Resources>
-                  <GridLength x:Key="SliderPreContentMargin">7</GridLength>
-                  <GridLength x:Key="SliderPostContentMargin">7</GridLength>
-                  <x:Double x:Key="SliderHorizontalHeight">24</x:Double>
-                  <x:Double x:Key="SliderHorizontalThumbWidth">14</x:Double>
-                  <x:Double x:Key="SliderHorizontalThumbHeight">14</x:Double>
-                  <CornerRadius x:Key="SliderThumbCornerRadius">7</CornerRadius>
+                  <GridLength x:Key="SliderPreContentMargin">8</GridLength>
+                  <GridLength x:Key="SliderPostContentMargin">8</GridLength>
+                  <x:Double x:Key="SliderHorizontalHeight">28</x:Double>
+                  <x:Double x:Key="SliderHorizontalThumbWidth">16</x:Double>
+                  <x:Double x:Key="SliderHorizontalThumbHeight">16</x:Double>
+                  <CornerRadius x:Key="SliderThumbCornerRadius">8</CornerRadius>
                 </Slider.Resources>
               </Slider>
             </StackPanel>
@@ -194,12 +188,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
           </Button>
           <TextBox x:Name="SearchBox"
                    PlaceholderText="{Binding [Library.SearchWatermark], Source={x:Static local:Localization.Instance}}"
-                   Width="240"
+                   Width="280"
                    VerticalAlignment="Center" />
           <Button x:Name="OpenFileButton"
-                  Classes="ghost"
-                  Content="{Binding [Library.OpenFile], Source={x:Static local:Localization.Instance}}"
-                  VerticalAlignment="Center" />
+                  Classes="toolbarAction"
+                  Content="{Binding [Library.OpenFile], Source={x:Static local:Localization.Instance}}" />
         </StackPanel>
       </Grid>
 
@@ -230,58 +223,51 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           Header="{Binding [Library.Context.Launch], Source={x:Static local:Localization.Instance}}"
                           FontWeight="SemiBold">
                   <MenuItem.Icon>
-                    <TextBlock Text="▶" FontSize="11" Foreground="{StaticResource AccentHoverBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="play_arrow" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxOpenFolder"
                           Header="{Binding [Library.Context.OpenFolder], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="📂" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="folder_open" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <Separator />
                 <MenuItem x:Name="CtxCopyPath"
                           Header="{Binding [Library.Context.CopyPath], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="⧉" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="content_copy" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxCopyTitleId"
                           Header="{Binding [Library.Context.CopyTitleId], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="⧉" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="tag" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxPackZar"
                           Header="{Binding [Library.Context.PackZar], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="▣" FontSize="12" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="inventory_2" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxTrophies"
                           Header="{Binding [Library.Context.Trophies], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="🏆" FontSize="12" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="emoji_events" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <Separator />
                 <MenuItem x:Name="CtxGameSettings"
                           Header="{Binding [Library.Context.GameSettings], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="⚙" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="settings" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxPatches"
                           Header="{Binding [Library.Context.Patches], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <PathIcon Width="14" Height="14" Foreground="{StaticResource MutedBrush}"
-                              Data="M9,3 H3 V9 H5 A3,3 0 1 1 5,15 H3 V21 H9 V19 A3,3 0 1 1 15,19 V21 H21 V15 H19 A3,3 0 1 0 19,9 H21 V3 H15 V5 A3,3 0 1 1 9,5 Z" />
+                    <TextBlock Classes="materialSymbol compact" Text="extension" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <Separator />
@@ -289,8 +275,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           Header="{Binding [Library.Context.Remove], Source={x:Static local:Localization.Instance}}"
                           Foreground="{StaticResource DangerHoverBrush}">
                   <MenuItem.Icon>
-                    <TextBlock Text="✕" FontSize="12" Foreground="{StaticResource DangerHoverBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="delete" Foreground="{StaticResource DangerBrush}" />
                   </MenuItem.Icon>
                 </MenuItem>
               </ContextMenu>
@@ -307,7 +292,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <Panel>
                         <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
                           <TextBlock Text="{Binding Initials}" FontSize="38" FontWeight="Light"
-                                     Foreground="#C4E8ECF4"
+                                     Foreground="{StaticResource SecondaryTextBrush}"
                                      HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <Image Source="{Binding Cover}"
@@ -337,21 +322,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                            x:CompileBindings=False}">
                   <StackPanel HorizontalAlignment="Center"
                               VerticalAlignment="Center"
-                              Spacing="12">
+                              Spacing="14">
                     <Border Classes="addFolderTileIcon">
-                      <TextBlock Classes="addFolderGlyph addFolderIconGlyph"
-                                 Text="+"
-                                 FontSize="34"
-                                 FontWeight="Light"
-                                 LineHeight="34"
-                                 HorizontalAlignment="Center"
-                                 VerticalAlignment="Center" />
+                      <TextBlock Classes="materialSymbol large addFolderGlyph"
+                                 Text="add" />
                     </Border>
                     <TextBlock Classes="addFolderGlyph"
                                Text="{Binding [Library.AddFolder],
                                               Source={x:Static local:Localization.Instance},
                                               x:CompileBindings=False}"
-                               FontSize="12"
+                               FontSize="{StaticResource FontSizeDescription}"
                                FontWeight="SemiBold"
                                HorizontalAlignment="Center" />
                   </StackPanel>
@@ -359,11 +339,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
               </DataTemplate>
             </ListBox.DataTemplates>
             </ListBox>
+            <!-- Superseded by the Add folder tile at the end of the rail; kept hidden. -->
             <Button x:Name="CarouselAddFolderButton"
                     Classes="ghost"
                     HorizontalAlignment="Left"
                     VerticalAlignment="Top"
                     IsVisible="False"
+                    IsTabStop="False"
                     AutomationProperties.Name="{Binding [Library.AddFolder], Source={x:Static local:Localization.Instance}}">
               <StackPanel Orientation="Horizontal" Spacing="8">
                 <TextBlock Text="+"
@@ -389,7 +371,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 ColumnSpacing="20"
                 HorizontalAlignment="Stretch"
                 VerticalAlignment="Top"
-                Margin="4,0,4,10">
+                Margin="0,0,0,12">
             <Grid.Transitions>
               <Transitions>
                 <DoubleTransition Property="Opacity"
@@ -398,25 +380,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                Duration="0:0:0.18" />
               </Transitions>
             </Grid.Transitions>
-            <StackPanel Grid.Column="0" Spacing="7" VerticalAlignment="Center">
+            <StackPanel Grid.Column="0" Spacing="10" VerticalAlignment="Center">
               <TextBlock Classes="selectedGameTitle"
                          Text="{Binding Name}"
                          FontWeight="SemiBold"
-                         TextWrapping="Wrap"
                          TextTrimming="CharacterEllipsis"
                          MaxLines="1" />
               <StackPanel Orientation="Horizontal" Spacing="8">
                 <Border Classes="pill" IsVisible="{Binding HasTitleId}">
-                  <TextBlock Text="{Binding TitleId}" FontSize="11" FontWeight="SemiBold"
-                             Foreground="{StaticResource MutedBrush}" />
+                  <TextBlock Text="{Binding TitleId}" />
                 </Border>
                 <Border Classes="pill" IsVisible="{Binding HasVersion}">
-                  <TextBlock Text="{Binding VersionText}" FontSize="11" FontWeight="SemiBold"
-                             Foreground="{StaticResource MutedBrush}" />
+                  <TextBlock Text="{Binding VersionText}" />
                 </Border>
                 <Border Classes="pill">
-                  <TextBlock Text="{Binding SizeText}" FontSize="11" FontWeight="SemiBold"
-                             Foreground="{StaticResource MutedBrush}" />
+                  <TextBlock Text="{Binding SizeText}" />
                 </Border>
               </StackPanel>
             </StackPanel>
@@ -429,11 +407,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       Classes="playButton"
                       Content="Launch"
                       IsEnabled="False" />
-              <TextBlock Text="|"
-                         Foreground="{StaticResource MutedBrush}"
-                         FontSize="22"
-                         VerticalAlignment="Center"
-                         Margin="-4,0" />
               <Button x:Name="LaunchCustomEnvButton"
                       Classes="optionsCircle"
                       ToolTip.Tip="{Binding [Launch.CustomEnv], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
@@ -469,16 +442,44 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     Classes="selectedDetailsDivider" />
           </Grid>
 
-          <!-- Empty state -->
-          <StackPanel x:Name="EmptyState" Grid.RowSpan="2"
-                      Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
-                      IsVisible="False">
-            <TextBlock Text="🎮" FontSize="44" HorizontalAlignment="Center" Opacity="0.7" />
-            <TextBlock x:Name="EmptyStateTitle" Text="Your library is empty" FontSize="18" FontWeight="SemiBold"
-                       HorizontalAlignment="Center" />
-            <TextBlock x:Name="EmptyStateHint" Text="Add a folder containing your games to get started."
-                       FontSize="13" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
-          </StackPanel>
+          <!-- Empty state: a centred card, so the text never sits on the key art. -->
+          <Border x:Name="EmptyState" Grid.RowSpan="2"
+                  Classes="card"
+                  Width="460"
+                  Padding="40,36"
+                  Background="{StaticResource CardBrush}"
+                  BoxShadow="{StaticResource SheetShadow}"
+                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                  IsVisible="False">
+            <StackPanel Spacing="12" HorizontalAlignment="Center">
+              <Border Width="88" Height="88" CornerRadius="44"
+                      Background="{StaticResource FieldBrush}"
+                      HorizontalAlignment="Center"
+                      Margin="0,0,0,8">
+                <TextBlock Classes="materialSymbol" Text="sports_esports"
+                           FontSize="40" LineHeight="48"
+                           Foreground="{StaticResource SecondaryTextBrush}" />
+              </Border>
+              <TextBlock x:Name="EmptyStateTitle" Text="Your library is empty"
+                         FontSize="{StaticResource FontSizeSubtitle}" FontWeight="SemiBold"
+                         TextAlignment="Center" HorizontalAlignment="Center" />
+              <TextBlock x:Name="EmptyStateHint" Text="Add a folder containing your games to get started."
+                         FontSize="{StaticResource FontSizeBody}" LineHeight="22"
+                         Foreground="{StaticResource SecondaryTextBrush}"
+                         TextAlignment="Center" TextWrapping="Wrap" HorizontalAlignment="Center" />
+              <Button x:Name="EmptyStateAddFolderButton"
+                      Classes="playButton"
+                      HorizontalAlignment="Center"
+                      Margin="0,12,0,0"
+                      AutomationProperties.Name="{Binding [Library.AddFolder], Source={x:Static local:Localization.Instance}}">
+                <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center">
+                  <TextBlock Classes="materialSymbol" Text="add" />
+                  <TextBlock Text="{Binding [Library.AddFolder], Source={x:Static local:Localization.Instance}}"
+                             VerticalAlignment="Center" />
+                </StackPanel>
+              </Button>
+            </StackPanel>
+          </Border>
 
           <!-- Loading state: covers the grid while a scan (initial load,
                rescan, or a just-added folder) is in flight, so the screen
@@ -499,12 +500,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   HorizontalAlignment="Center"
                   VerticalAlignment="Bottom"
                   Margin="0,0,0,24"
-                  Padding="18,10"
-                  CornerRadius="18"
-                  Background="#F01B1B1B"
+                  Padding="20,12"
+                  CornerRadius="{StaticResource RadiusLg}"
+                  Background="#F01C1928"
                   BorderBrush="{StaticResource CardBorderBrush}"
                   BorderThickness="1"
-                  BoxShadow="0 6 24 0 #80000000"
+                  BoxShadow="{StaticResource SheetShadow}"
                   IsHitTestVisible="False"
                   IsVisible="False">
             <StackPanel Orientation="Horizontal" Spacing="12">
@@ -543,33 +544,33 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   Background="Transparent">
             <Grid RowDefinitions="Auto,*">
               <Border Grid.Row="1"
-                      Margin="-32,0,-32,-20"
+                      Margin="-40,0,-40,-24"
                       Background="{StaticResource GameOptionsMenuBrush}" />
               <Border Grid.Row="1"
                       Height="1"
-                      Margin="-32,0,-32,0"
+                      Margin="-40,0,-40,0"
                       ZIndex="1"
                       IsHitTestVisible="False"
                       VerticalAlignment="Top"
-                      BoxShadow="0 18 42 0 #A6000000" />
+                      BoxShadow="0 8 32 0 #66000000" />
 
               <!-- Anchor the cover to the actual menu-surface boundary so it
                    overlaps both the key art and the settings surface -->
               <Border Grid.Row="1"
                       Width="180"
                       Height="180"
-                      Margin="52,-152,0,0"
+                      Margin="0,-152,0,0"
                       ZIndex="2"
                       HorizontalAlignment="Left"
                       VerticalAlignment="Top"
-                      BoxShadow="0 26 54 0 #D1000000">
+                      BoxShadow="{StaticResource SheetShadow}">
                 <Border Classes="coverClip"
                         Background="{Binding PlaceholderBrush}">
                   <Panel>
                     <TextBlock Text="{Binding Initials}"
                                FontSize="28"
                                FontWeight="Medium"
-                               Foreground="#A6FFFFFF"
+                               Foreground="{StaticResource SecondaryTextBrush}"
                                HorizontalAlignment="Center"
                                VerticalAlignment="Center"
                                IsVisible="{Binding !HasCover}" />
@@ -580,27 +581,27 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </Border>
               </Border>
 
-              <Border Padding="260,18,32,24">
+              <Border Padding="268,24,40,24" Margin="-40,0,-40,0"
+                      Background="{StaticResource ArtScrimBrush}">
                 <Grid ColumnDefinitions="*,Auto,Auto"
-                      ColumnSpacing="34">
-                  <StackPanel Spacing="3"
+                      ColumnSpacing="40">
+                  <StackPanel Spacing="6"
                               VerticalAlignment="Center">
                     <TextBlock Text="{Binding Name}"
-                               FontSize="42"
+                               FontSize="{StaticResource FontSizeDisplay}"
                                FontWeight="SemiBold"
                                TextTrimming="CharacterEllipsis" />
                     <TextBlock Text="{Binding Path}"
                                MaxWidth="620"
                                HorizontalAlignment="Left"
-                               FontSize="11"
+                               FontSize="{StaticResource FontSizeCaption}"
                                Foreground="{StaticResource SecondaryTextBrush}"
-                               Opacity="0.8"
                                TextTrimming="CharacterEllipsis" />
                   </StackPanel>
 
                   <StackPanel Grid.Column="1"
                               Orientation="Horizontal"
-                              Spacing="34"
+                              Spacing="40"
                               VerticalAlignment="Center">
                     <StackPanel Spacing="4"
                                 IsVisible="{Binding HasVersion}">
@@ -609,7 +610,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                 Source={x:Static local:Localization.Instance},
                                                 x:CompileBindings=False}" />
                       <TextBlock Classes="gameStatValue"
-                                 FontSize="15"
                                  Text="{Binding VersionText}" />
                     </StackPanel>
                     <StackPanel Spacing="4">
@@ -618,7 +618,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                 Source={x:Static local:Localization.Instance},
                                                 x:CompileBindings=False}" />
                       <TextBlock Classes="gameStatValue"
-                                 FontSize="15"
                                  Text="{Binding SizeText}" />
                     </StackPanel>
                     <StackPanel Spacing="4"
@@ -628,7 +627,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                 Source={x:Static local:Localization.Instance},
                                                 x:CompileBindings=False}" />
                       <TextBlock Classes="gameStatValue"
-                                 FontSize="15"
                                  Text="{Binding TitleId}" />
                     </StackPanel>
                   </StackPanel>
@@ -649,11 +647,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </Grid>
               </Border>
 
-              <Grid Grid.Row="1"
-                    Margin="32,12,32,8"
-                    ColumnDefinitions="220,*"
-                    ColumnSpacing="54">
-                <Grid Margin="0,62,0,0"
+              <Grid x:Name="GameOptionsBody"
+                    Grid.Row="1"
+                    Margin="0,16,0,8"
+                    ColumnDefinitions="260,*"
+                    ColumnSpacing="48">
+                <Grid Margin="0,48,0,0"
                       RowDefinitions="Auto,*">
                   <Button x:Name="GameOptionsLaunchButton"
                           Classes="gameOptionsLaunch">
@@ -662,7 +661,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 HorizontalAlignment="Center"
                                 VerticalAlignment="Center">
                       <TextBlock Classes="materialSymbol"
-                                 VerticalAlignment="Center"
                                  Text="play_arrow" />
                       <TextBlock VerticalAlignment="Center"
                                  Text="{Binding [Library.Context.Launch],
@@ -673,7 +671,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
                   <ScrollViewer x:Name="GameOptionsNavScroll"
                                 Grid.Row="1"
-                                Margin="0,12,0,0"
+                                Margin="-24,4,-24,0"
+                                Padding="24,12"
                                 HorizontalScrollBarVisibility="Disabled"
                                 VerticalScrollBarVisibility="Hidden"
                                 BringIntoViewOnFocusChange="True">
@@ -691,7 +690,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                               IsHitTestVisible="False"
                               VerticalAlignment="Top" />
 
-                      <StackPanel>
+                      <StackPanel Spacing="6">
                         <Button x:Name="GameOptionsGeneralNav"
                                 Classes="optionsNav active"
                                 AutomationProperties.Name="{Binding [Options.General],
@@ -778,10 +777,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </Grid>
 
                 <Grid Grid.Column="1"
-                      Margin="0,36,0,0">
+                      Margin="0,48,0,0"
+                      MaxWidth="960"
+                      HorizontalAlignment="Left">
                 <ScrollViewer x:Name="GameOptionsGeneralPanel"
                               Classes="optionsSectionPanel active">
-                  <StackPanel Spacing="12">
+                  <StackPanel Spacing="8">
                     <Border Classes="optionsGroup">
                       <StackPanel Spacing="8">
                         <local:SettingRow x:Name="GameStrictRow"
@@ -798,15 +799,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </StackPanel>
                     </Border>
 
-                    <WrapPanel Margin="0,12,0,0"
-                               ItemWidth="260"
-                               ItemHeight="54"
-                               Orientation="Horizontal">
+                    <UniformGrid Margin="0,16,-12,-12"
+                                 Columns="2">
                       <Button x:Name="GameOptionsOpenFolderButton"
                               Classes="gameAction"
-                              Margin="0,0,10,10">
+                              Margin="0,0,12,12">
                         <StackPanel Orientation="Horizontal"
-                                    Spacing="11">
+                                    Spacing="14">
                           <TextBlock Classes="materialSymbol"
                                      Text="folder_open" />
                           <TextBlock Text="{Binding [Library.Context.OpenFolder],
@@ -817,9 +816,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </Button>
                       <Button x:Name="GameOptionsCopyPathButton"
                               Classes="gameAction"
-                              Margin="0,0,10,10">
+                              Margin="0,0,12,12">
                         <StackPanel Orientation="Horizontal"
-                                    Spacing="11">
+                                    Spacing="14">
                           <TextBlock Classes="materialSymbol"
                                      Text="content_copy" />
                           <TextBlock Text="{Binding [Library.Context.CopyPath],
@@ -830,9 +829,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </Button>
                       <Button x:Name="GameOptionsCopyTitleIdButton"
                               Classes="gameAction"
-                              Margin="0,0,10,10">
+                              Margin="0,0,12,12">
                         <StackPanel Orientation="Horizontal"
-                                    Spacing="11">
+                                    Spacing="14">
                           <TextBlock Classes="materialSymbol"
                                      Text="tag" />
                           <TextBlock Text="{Binding [Library.Context.CopyTitleId],
@@ -843,9 +842,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </Button>
                       <Button x:Name="GameOptionsRemoveButton"
                               Classes="gameAction dangerAction"
-                              Margin="0,0,10,10">
+                              Margin="0,0,12,12">
                         <StackPanel Orientation="Horizontal"
-                                    Spacing="11">
+                                    Spacing="14">
                           <TextBlock Classes="materialSymbol"
                                      Text="delete" />
                           <TextBlock Text="{Binding [Library.Context.Remove],
@@ -854,7 +853,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                      VerticalAlignment="Center" />
                         </StackPanel>
                       </Button>
-                    </WrapPanel>
+                    </UniformGrid>
                   </StackPanel>
                 </ScrollViewer>
 
@@ -1210,26 +1209,27 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Border>
         </Grid>
 
-        <local:TrophyPage x:Name="TrophyPageHost" IsVisible="False" Margin="32,14,32,16" />
+        <local:TrophyPage x:Name="TrophyPageHost" IsVisible="False" Margin="0,8,0,0" />
 
         <!-- Options page: stable local navigation keeps each settings group
              focused while preserving every setting from the current launcher -->
         <Grid x:Name="OptionsPage"
               IsVisible="False"
-              ColumnDefinitions="244,*"
-              ColumnSpacing="42"
-              Margin="32,14,32,16">
+              ColumnDefinitions="260,*"
+              ColumnSpacing="48"
+              Margin="0,8,0,0">
           <Border Grid.Column="0" Classes="optionsNavSurface">
-            <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+            <ScrollViewer Margin="-24,-12,-24,-12"
+                          Padding="24,12"
+                          HorizontalScrollBarVisibility="Disabled"
                           VerticalScrollBarVisibility="Hidden">
               <Grid x:Name="OptionsNavHost">
                 <Border x:Name="OptionsNavIndicator"
                         Classes="optionsNavIndicator"
-                        Height="54"
                         VerticalAlignment="Top"
                         IsHitTestVisible="False" />
 
-                <StackPanel>
+                <StackPanel Spacing="6">
                   <Button x:Name="OptionsGeneralNav" Classes="optionsNav active">
                     <Grid ColumnDefinitions="36,*">
                       <TextBlock Grid.Column="0"
@@ -1475,11 +1475,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="LatestCommitLabel"
                                        Text="{Binding [About.Github.LatestCommitLabel], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="14"
+                                       FontSize="{StaticResource FontSizeBody}"
                                        FontWeight="Medium" />
                             <TextBlock x:Name="LatestCommitDescription"
                                        Text="{Binding [About.Github.LatestCommitDescription], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="11"
+                                       FontSize="{StaticResource FontSizeDescription}"
                                        Foreground="{StaticResource SettingsDescriptionBrush}"
                                        TextWrapping="Wrap" />
                           </StackPanel>
@@ -1487,7 +1487,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   x:Name="LatestCommitHashText"
                                   Classes="optionAction"
                                   Content="Loading…"
-                                  FontSize="12"
+                                  FontSize="{StaticResource FontSizeDescription}"
                                   FontFamily="Consolas,monospace"
                                   VerticalAlignment="Center"
                                   IsEnabled="False" />
@@ -1505,11 +1505,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="UpdateLabel"
                                        Text="{Binding [Updater.Label], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="14"
+                                       FontSize="{StaticResource FontSizeBody}"
                                        FontWeight="Medium" />
                             <TextBlock x:Name="UpdateStatusText"
                                        Text="Current build: dev"
-                                       FontSize="11"
+                                       FontSize="{StaticResource FontSizeDescription}"
                                        Foreground="{StaticResource SettingsDescriptionBrush}"
                                        TextWrapping="Wrap" />
                           </StackPanel>
@@ -1532,11 +1532,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="GithubLabel"
                                        Text="{Binding [About.Github.Label], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="14"
+                                       FontSize="{StaticResource FontSizeBody}"
                                        FontWeight="Medium" />
                             <TextBlock x:Name="GithubDesc"
                                        Text="{Binding [About.Github.Desc], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="11"
+                                       FontSize="{StaticResource FontSizeDescription}"
                                        Foreground="{StaticResource SettingsDescriptionBrush}"
                                        TextWrapping="Wrap" />
                           </StackPanel>
@@ -1559,11 +1559,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="DiscordServerLabel"
                                       Text="{Binding [About.Discord.Label], Source={x:Static local:Localization.Instance}}"
-                                      FontSize="14"
+                                      FontSize="{StaticResource FontSizeBody}"
                                       FontWeight="Medium" />
                             <TextBlock x:Name="DiscordServerDesc"
                                       Text="{Binding [About.Discord.Desc], Source={x:Static local:Localization.Instance}}"
-                                      FontSize="11"
+                                      FontSize="{StaticResource FontSizeDescription}"
                                       Foreground="{StaticResource SettingsDescriptionBrush}"
                                       TextWrapping="Wrap" />
                           </StackPanel>
@@ -1730,8 +1730,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Label="{Binding [Options.Env.TrophyTest.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Env.TrophyTest.Desc], Source={x:Static local:Localization.Instance}}">
                         <StackPanel Orientation="Horizontal" Spacing="8">
-                          <ComboBox x:Name="TrophyTestGameBox" Width="220" PlaceholderText="Game" />
-                          <ComboBox x:Name="TrophyTestTrophyBox" Width="260" PlaceholderText="Trophy" />
+                          <ComboBox x:Name="TrophyTestGameBox" Width="190" PlaceholderText="Game" />
+                          <ComboBox x:Name="TrophyTestTrophyBox" Width="170" PlaceholderText="Trophy" />
                           <Button x:Name="TrophyTestButton"
                                   Classes="accent"
                                   Content="{Binding [Options.Env.TrophyTest.Show], Source={x:Static local:Localization.Instance}}" />
@@ -1983,5 +1983,28 @@ SPDX-License-Identifier: GPL-2.0-or-later
               Cursor="BottomRightCorner"
               PointerPressed="OnResizeHandlePointerPressed" />
     </Panel>
+
+    <!-- Contextual controller hints along the bottom edge; shown only while a
+         controller is connected and listing only what is mapped right now. -->
+    <Border x:Name="ControllerHintBar"
+            Grid.Row="1"
+            Height="80"
+            VerticalAlignment="Bottom"
+            IsHitTestVisible="False"
+            IsVisible="False"
+            ZIndex="100">
+      <Border.Background>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+          <GradientStop Offset="0" Color="#000E0D14" />
+          <GradientStop Offset="1" Color="#F20E0D14" />
+        </LinearGradientBrush>
+      </Border.Background>
+      <StackPanel x:Name="ControllerHintItems"
+                  Orientation="Horizontal"
+                  Spacing="32"
+                  HorizontalAlignment="Right"
+                  VerticalAlignment="Bottom"
+                  Margin="0,0,40,16" />
+    </Border>
   </Grid>
 </Window>

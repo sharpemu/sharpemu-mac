@@ -40,7 +40,7 @@ public partial class TrophyHubView : UserControl
     private static readonly Color Gold = Color.Parse("#F2B93B");
     private const double HeroSpinSeconds = 1.1;
     private static readonly TimeSpan PageSettleTime = TimeSpan.FromMilliseconds(260);
-    private static readonly IBrush SecondaryText = new SolidColorBrush(Color.Parse("#A8ADB7"));
+    private static readonly IBrush SecondaryText = new SolidColorBrush(Color.Parse("#CFCBDD"));
     private static readonly IBrush CardBrush = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255));
     private static readonly IBrush CompleteCardBrush = new LinearGradientBrush
     {
@@ -302,12 +302,7 @@ public partial class TrophyHubView : UserControl
 
         if (_cards.Count == 0)
         {
-            GameList.Children.Add(new TextBlock
-            {
-                Text = Localization.Instance.Get(_summaries.Count == 0 ? "Trophies.None" : "Trophies.NoMatch"),
-                Foreground = SecondaryText,
-                FontSize = 13,
-            });
+            GameList.Children.Add(BuildEmptyState(noGames: _summaries.Count == 0));
             return;
         }
 
@@ -317,6 +312,54 @@ public partial class TrophyHubView : UserControl
         }
 
         Select(Math.Clamp(_selected, 0, _cards.Count - 1));
+    }
+
+    /// <summary>Centred empty state: no trophy games yet, or nothing matching the search.</summary>
+    private static StackPanel BuildEmptyState(bool noGames)
+    {
+        var panel = new StackPanel
+        {
+            Spacing = 10,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 72, 0, 0),
+        };
+        panel.Children.Add(new Border
+        {
+            Width = 88,
+            Height = 88,
+            CornerRadius = new CornerRadius(44),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 8),
+            Background = new SolidColorBrush(Color.Parse("#2A2639")),
+            Child = new TextBlock
+            {
+                Classes = { "materialSymbol" },
+                Text = "emoji_events",
+                FontSize = 40,
+                LineHeight = 48,
+                Foreground = SecondaryText,
+            },
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = Localization.Instance.Get(noGames ? "Trophies.HubEmpty.Title" : "Trophies.NoMatch"),
+            FontSize = 20,
+            FontWeight = FontWeight.SemiBold,
+            HorizontalAlignment = HorizontalAlignment.Center,
+        });
+        if (noGames)
+        {
+            panel.Children.Add(new TextBlock
+            {
+                Text = Localization.Instance.Get("Trophies.HubEmpty.Hint"),
+                FontSize = 16,
+                Foreground = SecondaryText,
+                TextAlignment = TextAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center,
+            });
+        }
+
+        return panel;
     }
 
     private void RenderTotals(IReadOnlyList<GameSummary> summaries)
@@ -416,7 +459,7 @@ public partial class TrophyHubView : UserControl
                 {
                     Text = Localization.Instance.Format("Trophies.Progress", summary.Earned, summary.Trophies.Count, (int)Math.Round(summary.Percent)),
                     Foreground = SecondaryText,
-                    FontSize = 13.5,
+                    FontSize = 14,
                     VerticalAlignment = VerticalAlignment.Center,
                 },
             },
@@ -428,7 +471,7 @@ public partial class TrophyHubView : UserControl
             {
                 Text = Localization.Instance.Format("Trophies.Latest", latest.Name, latest.UnlockedAtUtc!.Value.ToLocalTime().ToString("d")),
                 Foreground = SecondaryText,
-                FontSize = 13.5,
+                FontSize = 14,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 VerticalAlignment = VerticalAlignment.Center,
             });

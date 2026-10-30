@@ -189,7 +189,7 @@ public partial class MainWindow : Window
     private GameEntry? _lastSelectedGame;
     private double _libraryRailRowHeight = 188;
     private double _libraryGridRowHeight = 216;
-    private const double CarouselLeadingPadding = 20;
+    private const double CarouselLeadingPadding = 24;
     private const double CarouselItemMargin = 12;
     private bool _carouselAnimating;
     private readonly TranslateTransform _carouselTransform = new();
@@ -282,6 +282,7 @@ public partial class MainWindow : Window
             _settings.Save();
         };
         CarouselAddFolderButton.Click += (_, _) => StartAddFolderFromTile();
+        EmptyStateAddFolderButton.Click += (_, _) => StartAddFolderFromTile();
         GameList.AddHandler(PointerPressedEvent, OnCarouselPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
         GameList.AddHandler(PointerMovedEvent, OnCarouselPointerMoved, RoutingStrategies.Tunnel, handledEventsToo: true);
         GameList.AddHandler(PointerReleasedEvent, OnCarouselPointerReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
@@ -572,13 +573,13 @@ public partial class MainWindow : Window
     {
         _isLibraryGridLayout = grid;
         var selectedTile = GameList.SelectedItem;
-        _libraryTiles.IncludeAddFolderTile = grid;
+        _libraryTiles.IncludeAddFolderTile = true;
         if (selectedTile is GameEntry && !ReferenceEquals(GameList.SelectedItem, selectedTile))
         {
             GameList.SelectedItem = selectedTile;
         }
 
-        CarouselAddFolderButton.IsVisible = !grid;
+        CarouselAddFolderButton.IsVisible = false;
         SetClass(GameList, "gridLayout", grid);
         UpdateCarouselPadding();
         SetClass(LibrarySelectedDetails, "gridLayout", grid);
@@ -606,7 +607,6 @@ public partial class MainWindow : Window
         Resources["LibraryRailItemHeight"] = metrics.RailItemHeight;
         Resources["LibraryGridItemHeight"] = metrics.GridItemHeight;
         _libraryRailRowHeight = metrics.RailItemHeight + 16 + 48;
-        CarouselAddFolderButton.Margin = new Thickness(0, metrics.RailItemHeight + 24, 0, 0);
         _libraryGridRowHeight = metrics.GridItemHeight + 16;
         UpdateCarouselPadding();
         Dispatcher.UIThread.Post(
@@ -681,12 +681,17 @@ public partial class MainWindow : Window
         {
             var section = index;
             buttons[index].Click += (_, _) => SetOptionsSection(section);
-            buttons[index].PointerEntered += (_, _) => SetOptionsNavigationIndicator(section);
-            buttons[index].GotFocus += (_, _) => SetOptionsNavigationIndicator(section);
+            // Moving focus onto a section selects it (console settings behaviour); the
+            // selected fill follows the section, never the pointer or the focus ring.
+            buttons[index].GotFocus += (_, e) =>
+            {
+                if (e.NavigationMethod != NavigationMethod.Pointer && section != _optionsSectionIndex)
+                {
+                    SetOptionsSection(section);
+                }
+            };
         }
 
-        OptionsNavHost.PointerExited += (_, _) =>
-            SetOptionsNavigationIndicator(_optionsSectionIndex);
         SetOptionsSection(0);
     }
 
@@ -912,7 +917,15 @@ public partial class MainWindow : Window
         if (!LauncherGamepad.TryGetState(out var pad))
         {
             _previousPadButtons = HostGamepadButtons.None;
+            SetGamepadConnected(false);
             return;
+        }
+
+        SetGamepadConnected(true);
+        RefreshControllerHints();
+        if ((pad.Buttons & ~_previousPadButtons) != HostGamepadButtons.None)
+        {
+            SetPadNavigation(true);
         }
 
         if (!IsActive)
@@ -957,29 +970,12 @@ public partial class MainWindow : Window
 
         if (ShouldNavigate(left, ref _navLeftNextAt, now))
         {
-            MoveSelection(-1);
-            ReturnFocusFromCarouselAddFolder();
+            MoveSelection(-1, fromPad: true);
         }
 
         if (ShouldNavigate(right, ref _navRightNextAt, now))
         {
-            MoveSelection(1);
-            ReturnFocusFromCarouselAddFolder();
-        }
-
-        if (!_isLibraryGridLayout)
-        {
-            var up = (pad.Buttons & HostGamepadButtons.Up) != 0 || pad.LeftY < 64;
-            var down = (pad.Buttons & HostGamepadButtons.Down) != 0 || pad.LeftY > 192;
-            if (ShouldNavigate(down, ref _navDownNextAt, now))
-            {
-                CarouselAddFolderButton.Focus(NavigationMethod.Directional);
-            }
-
-            if (ShouldNavigate(up, ref _navUpNextAt, now))
-            {
-                ReturnFocusFromCarouselAddFolder();
-            }
+            MoveSelection(1, fromPad: true);
         }
 
         if (_isLibraryGridLayout)
@@ -990,19 +986,19 @@ public partial class MainWindow : Window
 
             if (ShouldNavigate(up, ref _navUpNextAt, now))
             {
-                MoveSelection(-rowStep);
+                MoveSelection(-rowStep, fromPad: true);
             }
 
             if (ShouldNavigate(down, ref _navDownNextAt, now))
             {
-                MoveSelection(rowStep);
+                MoveSelection(rowStep, fromPad: true);
             }
         }
 
         var pressed = pad.Buttons & ~_previousPadButtons;
         if ((pressed & HostGamepadButtons.Cross) != 0)
         {
-            if (!_isLibraryGridLayout && CarouselAddFolderButton.IsFocused)
+            if (_visibleGames.Count == 0)
             {
                 StartAddFolderFromTile();
             }
@@ -1010,6 +1006,11 @@ public partial class MainWindow : Window
             {
                 LaunchSelected();
             }
+        }
+
+        if ((pressed & HostGamepadButtons.Triangle) != 0 && _visibleGames.Count > 0)
+        {
+            OpenSelectedGameSettings();
         }
 
         _previousPadButtons = pad.Buttons;
@@ -1068,7 +1069,7 @@ public partial class MainWindow : Window
         return columns;
     }
 
-    private void MoveSelection(int delta)
+    private void MoveSelection(int delta, bool fromPad = false)
     {
         var index = GameList.SelectedIndex < 0
             ? 0
@@ -1077,7 +1078,7 @@ public partial class MainWindow : Window
         GameList.ScrollIntoView(index);
         if (GameList.IsKeyboardFocusWithin && GameList.ContainerFromIndex(index) is { } container)
         {
-            container.Focus(NavigationMethod.Unspecified);
+            container.Focus(fromPad ? NavigationMethod.Directional : NavigationMethod.Unspecified);
         }
     }
 
@@ -1113,14 +1114,6 @@ public partial class MainWindow : Window
         FocusLibrarySelection();
         await RescanLibraryAsync();
         FocusLibrarySelection();
-    }
-
-    private void ReturnFocusFromCarouselAddFolder()
-    {
-        if (CarouselAddFolderButton.IsFocused)
-        {
-            FocusLibrarySelection();
-        }
     }
 
     private void ReportGuiRenderer()
@@ -1160,13 +1153,18 @@ public partial class MainWindow : Window
                 }
 
                 AnchorCarouselSelection(animate: false);
-                if (GameList.SelectedIndex >= 0 && GameList.ContainerFromIndex(GameList.SelectedIndex) is { } container)
+                var method = _gamepadConnected ? NavigationMethod.Directional : NavigationMethod.Unspecified;
+                if (_visibleGames.Count == 0)
                 {
-                    container.Focus(NavigationMethod.Unspecified);
+                    EmptyStateAddFolderButton.Focus(method);
+                }
+                else if (GameList.SelectedIndex >= 0 && GameList.ContainerFromIndex(GameList.SelectedIndex) is { } container)
+                {
+                    container.Focus(method);
                 }
                 else
                 {
-                    GameList.Focus(NavigationMethod.Unspecified);
+                    GameList.Focus(method);
                 }
             },
             DispatcherPriority.Loaded);
@@ -1320,6 +1318,31 @@ public partial class MainWindow : Window
         // it, so launcher buttons no longer see game input and nothing has to
         // be swallowed here. Kept as the wired handler because the launcher
         // still needs a preview hook for its own shortcuts.
+        if (args.KeyDeviceType == KeyDeviceType.Gamepad || args.Handled ||
+            args.Key is not (Key.Up or Key.Down or Key.Left or Key.Right or Key.Enter or Key.Escape) ||
+            ControllerSettings() is not { } layout ||
+            FocusManager?.GetFocusedElement() is TextBox or ComboBoxItem or ComboBox { IsDropDownOpen: true })
+        {
+            return;
+        }
+
+        // The arrow keys drive the settings screens exactly like the D-pad. The first
+        // key press only brings focus into the page (onto Launch or the current section).
+        var focusedBefore = FocusManager?.GetFocusedElement();
+        EnsureControllerFocus(layout.Root);
+        if (!ReferenceEquals(focusedBefore, FocusManager?.GetFocusedElement()) && args.Key != Key.Escape)
+        {
+            args.Handled = true;
+        }
+        else if (SettingsControllerKey(layout, args.Key))
+        {
+            args.Handled = true;
+        }
+        else if (args.Key == Key.Escape && _isGameSettingsOpen)
+        {
+            CloseGameSettings();
+            args.Handled = true;
+        }
     }
 
     private void BeginWindowClosing()
@@ -2032,6 +2055,7 @@ public partial class MainWindow : Window
         if (showLoadingState)
         {
             EmptyState.IsVisible = false;
+            GameList.IsVisible = false;
             LoadingState.IsVisible = true;
         }
         else if (addingFolder)
@@ -2707,6 +2731,7 @@ public partial class MainWindow : Window
         }
 
         EmptyState.IsVisible = _visibleGames.Count == 0;
+        GameList.IsVisible = _visibleGames.Count != 0;
         UpdateEmptyStateTexts();
 
         if (!ReferenceEquals(selectedBefore, selectedAfter))

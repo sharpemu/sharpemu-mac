@@ -1,7 +1,11 @@
 <!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
-Options page section transitions and content layout
+Options page section transitions and content layout.
+
+Settings content is one column of readable width (MaxWidth 960). Each section
+scroller extends 28/20 pt past the column on every side and pads its content by
+the same amount, so a focused row's ring, glow and scale-up are never clipped.
 -->
 
 <Styles xmlns="https://github.com/avaloniaui"
@@ -10,12 +14,15 @@ Options page section transitions and content layout
   <Style Selector="Border.optionsContentSurface">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="ClipToBounds" Value="True" />
+    <Setter Property="MaxWidth" Value="1120" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
   </Style>
 
   <Style Selector="ScrollViewer.optionsSectionPanel">
     <Setter Property="Opacity" Value="0" />
     <Setter Property="RenderTransform" Value="translateY(22px)" />
+    <Setter Property="Margin" Value="-28,-20,-28,-20" />
+    <Setter Property="Padding" Value="28,20,28,20" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="HorizontalScrollBarVisibility" Value="Disabled" />
     <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
@@ -43,46 +50,40 @@ Options page section transitions and content layout
   </Style>
 
   <Style Selector="TextBlock.optionsGroupHeader">
-    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeDescription}" />
     <Setter Property="FontWeight" Value="SemiBold" />
-    <Setter Property="Foreground" Value="#8CFFFFFF" />
-    <Setter Property="Margin" Value="2,0,0,10" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+    <Setter Property="Margin" Value="4,0,0,12" />
   </Style>
 
   <Style Selector="Border.optionsGroupDivider">
     <Setter Property="Height" Value="1" />
-    <Setter Property="Margin" Value="0,18,0,18" />
+    <Setter Property="Margin" Value="0,28,0,28" />
     <Setter Property="HorizontalAlignment" Value="Stretch" />
-    <Setter Property="Background">
-      <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
-        <GradientStop Offset="0" Color="#00FFFFFF" />
-        <GradientStop Offset="0.06" Color="#2EFFFFFF" />
-        <GradientStop Offset="0.55" Color="#14FFFFFF" />
-        <GradientStop Offset="1" Color="#00FFFFFF" />
-      </LinearGradientBrush>
-    </Setter>
+    <Setter Property="Background" Value="{StaticResource CardBorderBrush}" />
   </Style>
 
   <Style Selector="Border.optionsInfoRow">
-    <Setter Property="MinHeight" Value="70" />
-    <Setter Property="Padding" Value="18,12" />
-    <Setter Property="CornerRadius" Value="14" />
-    <Setter Property="Background" Value="#06FFFFFF" />
-    <Setter Property="BorderBrush" Value="#0AFFFFFF" />
+    <Setter Property="MinHeight" Value="{StaticResource RowHeight}" />
+    <Setter Property="Padding" Value="24,14" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="Background" Value="{StaticResource CardBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
     <Setter Property="BorderThickness" Value="1" />
   </Style>
 
+  <!-- Every value control in the right-hand column shares one width and height. -->
   <Style Selector="ComboBox.optionValue, settingsControls|SplitNumericUpDown.optionValue, TextBox.optionValue">
-    <Setter Property="Width" Value="190" />
-    <Setter Property="MinHeight" Value="44" />
-    <Setter Property="CornerRadius" Value="14" />
-    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="Width" Value="260" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
   </Style>
 
   <Style Selector="TextBox.optionValue">
-    <Setter Property="Padding" Value="17,0" />
+    <Setter Property="Padding" Value="16,0" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="TextAlignment" Value="Left" />
@@ -91,20 +92,21 @@ Options page section transitions and content layout
   </Style>
 
   <Style Selector="TextBox.optionValue /template/ Border#PART_BorderElement">
-    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
     <Setter Property="ClipToBounds" Value="True" />
-    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
   </Style>
 
-  <!-- The outer split-input surface owns hover and focus animation -->
+  <!-- The outer split-input surface owns hover and focus -->
   <Style Selector="TextBox.splitNumericTextBox /template/ Border#PART_BorderElement,
                    TextBox.splitNumericTextBox:pointerover /template/ Border#PART_BorderElement,
                    TextBox.splitNumericTextBox:focus /template/ Border#PART_BorderElement">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="BoxShadow" Value="none" />
   </Style>
 
   <Style Selector="ToggleSwitch.optionToggle">
@@ -112,38 +114,23 @@ Options page section transitions and content layout
     <Setter Property="VerticalAlignment" Value="Center" />
   </Style>
 
+  <!-- Button inside a settings row (About links, environment actions). -->
   <Style Selector="Button.optionAction">
-    <Setter Property="MinWidth" Value="156" />
-    <Setter Property="MinHeight" Value="44" />
-    <Setter Property="Padding" Value="18,0" />
+    <Setter Property="MinWidth" Value="160" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Padding" Value="20,0" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="VerticalAlignment" Value="Center" />
-    <Setter Property="CornerRadius" Value="12" />
-    <Setter Property="Background" Value="#12FFFFFF" />
-    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="Medium" />
-    <Setter Property="FocusAdorner" Value="{x:Null}" />
   </Style>
 
-  <Style Selector="Button.optionAction /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#12FFFFFF" />
-    <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Background"
-                         Duration="0:0:0.18"
-                         Easing="CubicEaseOut" />
-      </Transitions>
-    </Setter>
-  </Style>
-
-  <Style Selector="Button.optionAction:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                   Button.optionAction:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#20FFFFFF" />
-    <Setter Property="BorderBrush" Value="Transparent" />
+  <Style Selector="Button.optionAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
   </Style>
 </Styles>
