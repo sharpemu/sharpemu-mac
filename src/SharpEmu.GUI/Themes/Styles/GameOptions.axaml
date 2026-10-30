@@ -61,7 +61,7 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="Height" Value="52" />
     <Setter Property="MinWidth" Value="180" />
     <Setter Property="Padding" Value="30,0" />
-    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="CornerRadius" Value="26" />
     <Setter Property="Background" Value="{StaticResource AccentBrush}" />
     <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
     <Setter Property="BorderThickness" Value="0" />
@@ -127,8 +127,10 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="CornerRadius" Value="24" />
   </Style>
 
+  <!-- Inter is drawn for text sizes; display sizes read better a touch tighter. -->
   <Style Selector="TextBlock.selectedGameTitle">
     <Setter Property="FontSize" Value="34" />
+    <Setter Property="LetterSpacing" Value="-0.6" />
   </Style>
 
   <Style Selector="Grid.selectedDetailsHost.gridLayout TextBlock.selectedGameTitle">
@@ -148,7 +150,7 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="Padding" Value="20,0" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
-    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="CornerRadius" Value="26" />
     <Setter Property="Background" Value="{StaticResource AccentBrush}" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />

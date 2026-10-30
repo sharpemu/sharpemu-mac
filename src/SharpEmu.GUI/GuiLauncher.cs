@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using Avalonia.Media;
 using SharpEmu.Logging;
 
 namespace SharpEmu.GUI;
@@ -38,6 +39,9 @@ public static class GuiLauncher
             .UsePlatformDetect()
 #endif
             .WithInterFont()
+            // Popups, menus and tooltips are their own top levels and don't inherit the
+            // window's font, so the bundled Inter is made the app-wide default.
+            .With(new FontManagerOptions { DefaultFamilyName = "fonts:Inter#Inter" })
             .LogToTrace();
 
     private static void WriteCrashLog(Exception ex)

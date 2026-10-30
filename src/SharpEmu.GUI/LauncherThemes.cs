@@ -139,6 +139,9 @@ internal static class LauncherThemes
         Tint(app, "TrophyBackdropFadeBrush", Color.Parse(palette.Menu));
 
         app.Resources["SystemAccentColor"] = accent;
+        app.Resources["AccentGlowShadow"] = new BoxShadows(
+            new BoxShadow { OffsetY = 1, Color = Color.FromArgb(0x59, 0xFF, 0xFF, 0xFF), IsInset = true },
+            [new BoxShadow { OffsetY = 8, Blur = 28, Spread = -4, Color = Color.FromArgb(0x80, accent.R, accent.G, accent.B) }]);
         app.Resources["SegmentUnderlineShadow"] = new BoxShadows(new BoxShadow
         {
             OffsetY = 6,

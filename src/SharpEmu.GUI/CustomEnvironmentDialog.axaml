@@ -39,7 +39,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
              Grid.Row="3"
              AcceptsReturn="True"
              TextWrapping="NoWrap"
-             FontFamily="Consolas,monospace"
+             FontFamily="Consolas, Menlo, monospace"
              FontSize="13"
              VerticalContentAlignment="Top"
              PlaceholderText="{Binding [Launch.CustomEnv.Placeholder], Source={x:Static local:Localization.Instance}}" />

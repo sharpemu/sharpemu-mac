@@ -150,7 +150,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
         <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="12"
                     VerticalAlignment="Center">
-          <Border Background="{StaticResource ElevatedBrush}"
+          <Border Classes="glass"
                   CornerRadius="{StaticResource RadiusMd}"
                   Height="44" Padding="4,0,18,0" VerticalAlignment="Center">
             <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
@@ -180,18 +180,19 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </StackPanel>
           </Border>
           <Button x:Name="LibraryLayoutButton"
-                  Classes="iconGhost"
+                  Classes="iconGhost glass"
                   VerticalAlignment="Center">
             <TextBlock x:Name="LibraryLayoutGlyph"
                        Classes="materialSymbol compact"
                        Text="grid_view" />
           </Button>
           <TextBox x:Name="SearchBox"
+                   Classes="glass"
                    PlaceholderText="{Binding [Library.SearchWatermark], Source={x:Static local:Localization.Instance}}"
                    Width="280"
                    VerticalAlignment="Center" />
           <Button x:Name="OpenFileButton"
-                  Classes="toolbarAction"
+                  Classes="toolbarAction glass"
                   Content="{Binding [Library.OpenFile], Source={x:Static local:Localization.Instance}}" />
         </StackPanel>
       </Grid>
@@ -408,14 +409,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       Content="Launch"
                       IsEnabled="False" />
               <Button x:Name="LaunchCustomEnvButton"
-                      Classes="optionsCircle"
+                      Classes="optionsCircle glass"
                       ToolTip.Tip="{Binding [Launch.CustomEnv], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
                       AutomationProperties.Name="{Binding [Launch.CustomEnv], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
                 <TextBlock Classes="materialSymbol"
                            Text="keyboard_arrow_down" />
               </Button>
               <Button x:Name="GameSettingsButton"
-                      Classes="optionsCircle"
+                      Classes="optionsCircle glass"
                       ToolTip.Tip="{Binding [Library.Context.GameSettings],
                                             Source={x:Static local:Localization.Instance},
                                             x:CompileBindings=False}"
@@ -426,7 +427,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                            Text="more_horiz" />
               </Button>
               <ToggleButton x:Name="ConsoleToggle"
-                            Classes="optionsCircle"
+                            Classes="optionsCircle glass"
                             ToolTip.Tip="{Binding [Launch.Console],
                                                   Source={x:Static local:Localization.Instance},
                                                   x:CompileBindings=False}"
@@ -1500,7 +1501,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   Classes="optionAction"
                                   Content="Loading…"
                                   FontSize="{StaticResource FontSizeDescription}"
-                                  FontFamily="Consolas,monospace"
+                                  FontFamily="Consolas, Menlo, monospace"
                                   VerticalAlignment="Center"
                                   IsEnabled="False" />
                         </Grid>

@@ -8,7 +8,7 @@ Console list typography and compact item spacing.
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <Style Selector="ListBox.console">
     <Setter Property="Background" Value="#0B0E14" />
-    <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Courier New, monospace" />
+    <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Menlo, Courier New, monospace" />
     <Setter Property="FontSize" Value="12" />
   </Style>
   <Style Selector="ListBox.console ListBoxItem">
