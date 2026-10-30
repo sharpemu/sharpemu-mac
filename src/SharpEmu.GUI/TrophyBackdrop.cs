@@ -93,9 +93,8 @@ internal sealed class TrophyBackdrop : Grid
         {
             Stretch = Stretch.UniformToFill,
             Opacity = 0,
-            Transitions = [new DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(500) }],
+            Transitions = [new DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(350) }],
         };
-        RenderOptions.SetBitmapInterpolationMode(image, Avalonia.Media.Imaging.BitmapInterpolationMode.HighQuality);
         return image;
     }
 

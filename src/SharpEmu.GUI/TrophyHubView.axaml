@@ -46,7 +46,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <StackPanel x:Name="SortBar" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" />
         <Border x:Name="SearchFrame"
                 Grid.Column="1"
-                Width="240"
+                Width="260"
                 Height="32"
                 CornerRadius="16"
                 Padding="14,0,6,0"
@@ -59,10 +59,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <Setter Property="Background" Value="#1FFFFFFF" />
             </Style>
             <Style Selector="Border#SearchFrame:focus-within">
-              <Setter Property="Width" Value="300" />
               <Setter Property="Background" Value="#24FFFFFF" />
               <Setter Property="BorderBrush" Value="#40FFFFFF" />
-                          </Style>
+            </Style>
             <Style Selector="TextBox#SearchBox /template/ Border#PART_BorderElement">
               <Setter Property="Background" Value="Transparent" />
               <Setter Property="BorderThickness" Value="0" />
@@ -78,7 +77,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
           </Border.Styles>
           <Border.Transitions>
             <Transitions>
-              <DoubleTransition Property="Width" Duration="0:0:0.22" Easing="CubicEaseOut" />
               <BrushTransition Property="Background" Duration="0:0:0.18" />
               <BrushTransition Property="BorderBrush" Duration="0:0:0.18" />
             </Transitions>

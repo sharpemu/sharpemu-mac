@@ -8,7 +8,6 @@ using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
-using Avalonia.Media.Transformation;
 using Avalonia.Threading;
 using SharpEmu.GUI.Controls;
 using SharpEmu.Libs.Np;
@@ -24,11 +23,13 @@ public partial class TrophyGameView : UserControl
         Locked,
     }
 
+    // 72 dip icons: twice that is sharp on a 2x display and mip-maps down cleanly on a 1x one.
+    private const int IconPixels = 144;
+
     private string _gameDirectory = string.Empty;
     private string _titleId = string.Empty;
     private readonly DispatcherTimer _refreshTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly Dictionary<int, (Bitmap? Sharp, Bitmap? Soft)> _icons = [];
-    private readonly Dictionary<int, (Image Image, bool Hidden)> _iconImages = [];
     private readonly HashSet<int> _revealed = [];
     private readonly List<(Border Chip, Filter Filter)> _filterChips = [];
     private IReadOnlyList<TrophyEntry> _trophies = [];
@@ -59,13 +60,16 @@ public partial class TrophyGameView : UserControl
 
     public void Show(GameEntry game, string gameDirectory)
     {
+        if (!string.Equals(_gameDirectory, gameDirectory, StringComparison.Ordinal))
+        {
+            _icons.Clear();
+        }
+
         _gameDirectory = gameDirectory;
         _titleId = game.TitleId ?? string.Empty;
         GameNameText.Text = game.Name;
         CoverImage.Source = game.Cover;
         CoverFrame.IsVisible = game.Cover is not null;
-        _icons.Clear();
-        _iconImages.Clear();
         _revealed.Clear();
         _earnedBefore = [];
         _trophies = [];
@@ -107,7 +111,6 @@ public partial class TrophyGameView : UserControl
         TrophyList.Children.Clear();
         GradeCounts.Children.Clear();
         CoverImage.Source = null;
-        _iconImages.Clear();
         foreach (var (sharp, soft) in _icons.Values)
         {
             sharp?.Dispose();
@@ -173,6 +176,22 @@ public partial class TrophyGameView : UserControl
             return;
         }
 
+        // Decode before building the rows so they never pop their icons in while the list animates.
+        var missing = trophies.Where(t => !_icons.ContainsKey(t.Id)).ToArray();
+        if (missing.Length > 0)
+        {
+            var decoded = await Task.Run(() => DecodeIcons(missing));
+            if (gameDirectory != _gameDirectory)
+            {
+                return;
+            }
+
+            foreach (var (id, icon) in decoded)
+            {
+                _icons[id] = icon;
+            }
+        }
+
         _lastSignature = signature;
         var earnedNow = trophies.Where(t => t.Unlocked).Select(t => t.Id).ToHashSet();
         var fresh = force ? new HashSet<int>() : earnedNow.Except(_earnedBefore).ToHashSet();
@@ -186,32 +205,25 @@ public partial class TrophyGameView : UserControl
         RenderSummary();
         RenderList(stagger: !_opened, fresh);
         _opened = true;
+    }
 
-        var missing = trophies.Where(t => !_icons.ContainsKey(t.Id)).ToArray();
-        if (missing.Length > 0)
+    private static (int Id, (Bitmap? Sharp, Bitmap? Soft) Icon)[] DecodeIcons(TrophyEntry[] trophies)
+    {
+        var decoded = new (int Id, (Bitmap? Sharp, Bitmap? Soft) Icon)[trophies.Length];
+        var options = new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 2, 1, 6) };
+        Parallel.For(0, trophies.Length, options, i =>
         {
-            var decoded = await Task.Run(() => missing.Select(t => (t.Id, Icon: (TrophyUi.LoadIcon(t.IconPng), t.Hidden ? TrophyUi.LoadIcon(t.IconPng, 10) : null))).ToArray());
-            if (gameDirectory != _gameDirectory)
-            {
-                return;
-            }
-
-            foreach (var (id, icon) in decoded)
-            {
-                _icons[id] = icon;
-                if (_iconImages.TryGetValue(id, out var shown))
-                {
-                    shown.Image.Source = shown.Hidden ? icon.Item2 : icon.Item1;
-                }
-            }
-        }
+            var trophy = trophies[i];
+            decoded[i] = (trophy.Id, (TrophyUi.LoadIcon(trophy.IconPng, IconPixels), trophy.Hidden ? TrophyUi.LoadIcon(trophy.IconPng, 10) : null));
+        });
+        return decoded;
     }
 
     private void RenderSummary()
     {
         var earned = _trophies.Count(t => t.Unlocked);
         var percent = _trophies.Count == 0 ? 0 : earned * 100.0 / _trophies.Count;
-        TrophyUi.Animate(_shownPercent, percent, TimeSpan.FromMilliseconds(_opened ? 600 : 1200), value =>
+        TrophyUi.Animate(ProgressRing, _shownPercent, percent, TimeSpan.FromMilliseconds(_opened ? 350 : 800), value =>
         {
             PercentText.Text = $"{Math.Round(value)}%";
             ProgressRing.Value = value;
@@ -334,8 +346,8 @@ public partial class TrophyGameView : UserControl
                 if (index >= 0)
                 {
                     var replacement = BuildRow(trophy);
-                    TrophyUi.FlipIn(replacement);
                     TrophyList.Children[index] = replacement;
+                    TrophyUi.FlipIn(replacement, row.Bounds.Size);
                 }
             };
         }
@@ -347,8 +359,13 @@ public partial class TrophyGameView : UserControl
     {
         _icons.TryGetValue(trophy.Id, out var icon);
         var image = new Image { Source = hidden ? icon.Soft : icon.Sharp, Stretch = Stretch.UniformToFill };
-        RenderOptions.SetBitmapInterpolationMode(image, BitmapInterpolationMode.HighQuality);
-        _iconImages[trophy.Id] = (image, hidden);
+
+        // The sharp icons are decoded at the displayed size; only the tiny blurred hidden ones need smooth upscaling.
+        if (hidden)
+        {
+            RenderOptions.SetBitmapInterpolationMode(image, BitmapInterpolationMode.HighQuality);
+        }
+
         if (hidden)
         {
             image.Opacity = 0.35;
@@ -443,20 +460,41 @@ public partial class TrophyGameView : UserControl
 
     private static void Celebrate(Border row, int grade)
     {
-        var (light, mid, _) = TrophyMedal.Palette(grade);
-        var background = row.Background;
-        var border = row.BorderBrush;
-        TrophyUi.Animate(0, 1, TimeSpan.FromMilliseconds(1800), t =>
+        if (row.Child is not Grid content)
         {
-            var pulse = 0.5 + 0.5 * Math.Cos(t * Math.PI * 4);
-            row.Background = new SolidColorBrush(mid, 0.12 + 0.25 * pulse * (1 - t));
-            row.BorderBrush = new SolidColorBrush(light, 0.4 + 0.6 * (1 - t));
-            if (t >= 1)
+            return;
+        }
+
+        // A highlight layer fades on the render thread; the row's own brushes are never touched.
+        var (light, mid, _) = TrophyMedal.Palette(grade);
+        var highlight = new Border
+        {
+            IsHitTestVisible = false,
+            CornerRadius = new CornerRadius(18),
+            Margin = new Thickness(-1, -15, -15, -15),
+            BorderThickness = new Thickness(1),
+            Background = new SolidColorBrush(mid, 0.37),
+            BorderBrush = new SolidColorBrush(light),
+        };
+        Grid.SetColumnSpan(highlight, 2);
+        content.Children.Add(highlight);
+        TrophyUi.WithVisual(highlight, visual =>
+        {
+            const int steps = 30;
+            var pulse = visual.Compositor.CreateScalarKeyFrameAnimation();
+            pulse.Target = "Opacity";
+            pulse.Duration = TimeSpan.FromMilliseconds(1500);
+            for (var i = 0; i <= steps; i++)
             {
-                row.Background = background;
-                row.BorderBrush = border;
+                var t = (double)i / steps;
+                var beat = 0.5 + 0.5 * Math.Cos(t * Math.PI * 4);
+                pulse.InsertKeyFrame((float)t, (float)((1 - t) * (0.45 + 0.55 * beat)));
             }
-        });
+
+            visual.StartAnimation("Opacity", pulse);
+        }, () => content.Children.Remove(highlight));
+
+        DispatcherTimer.RunOnce(() => content.Children.Remove(highlight), TimeSpan.FromMilliseconds(1600));
         row.BringIntoView();
     }
 }
