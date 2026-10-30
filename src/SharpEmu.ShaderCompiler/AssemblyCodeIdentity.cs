@@ -18,9 +18,14 @@ namespace SharpEmu.ShaderCompiler;
 /// the debug directory names), so every commit gave every assembly a new one, and every
 /// start after any commit threw away the shader lists and learned loads of the build
 /// before it, compiling Demon's Souls' libraries cold again. This hashes the metadata
-/// with the module id and the assembly-level attribute values blanked, every method
-/// body and every field's initial data; type, member and string-literal changes all
-/// reach the metadata, and code changes reach a body.
+/// with the module id, the assembly-level attribute values and the RVAs of method bodies
+/// and field data blanked, then every method body, every field's initial data and every
+/// embedded resource by content; type, member and string-literal changes all reach the
+/// metadata, and code changes reach a body. The IL image and the osx-x64 and osx-arm64
+/// ReadyToRun images of one build therefore share it, and so do builds that changed only
+/// other assemblies: with the RVAs in, every bundle build gave the GPU host's translators
+/// a new stamp, and each start after one dropped the title's library list and prewarm
+/// progress and wrote a new set of pipeline segments.
 /// </summary>
 public static class AssemblyCodeIdentity
 {
@@ -71,6 +76,22 @@ public static class AssemblyCodeIdentity
             Array.Clear(bytes, blobs + MetadataTokens.GetHeapOffset(value), prefix + length);
         }
 
+        // Where a method body or a field's data sits is the image's layout, not its code:
+        // ReadyToRun places them after native code it compiles per target and against the
+        // assemblies referenced, so the osx-x64 and osx-arm64 images of one build, and
+        // images of builds that changed only another assembly, list other RVAs for the same
+        // bodies. The bodies and the data are hashed by content below.
+        foreach (var table in (ReadOnlySpan<TableIndex>)[TableIndex.MethodDef, TableIndex.FieldRva])
+        {
+            var offset = reader.GetTableMetadataOffset(table);
+            var rowSize = reader.GetTableRowSize(table);
+            for (var row = 0; row < reader.GetTableRowCount(table); row++)
+            {
+                // The RVA is each row's first column, four bytes.
+                Array.Clear(bytes, offset + row * rowSize, sizeof(uint));
+            }
+        }
+
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData(bytes);
         Span<byte> number = stackalloc byte[sizeof(int)];
@@ -102,6 +123,34 @@ public static class AssemblyCodeIdentity
             BitConverter.TryWriteBytes(number, size);
             hash.AppendData(number);
             hash.AppendData(section.GetContent(0, size).AsSpan());
+        }
+
+        // Embedded resources are code too: the MSL translator renders its prelude and fixed
+        // shaders from .msl templates it embeds. Each is a length-prefixed blob in the
+        // resources directory.
+        var resources = pe.PEHeaders.CorHeader?.ResourcesDirectory ?? default;
+        if (resources.Size > 0)
+        {
+            foreach (var handle in reader.ManifestResources)
+            {
+                var resource = reader.GetManifestResource(handle);
+                if (!resource.Implementation.IsNil)
+                {
+                    continue;
+                }
+
+                var data = pe.GetSectionData(resources.RelativeVirtualAddress + (int)resource.Offset);
+                if (data.Length < sizeof(int))
+                {
+                    continue;
+                }
+
+                var content = data.GetContent(0, sizeof(int)).AsSpan();
+                var size = Math.Min(BitConverter.ToInt32(content), data.Length - sizeof(int));
+                BitConverter.TryWriteBytes(number, size);
+                hash.AppendData(number);
+                hash.AppendData(data.GetContent(sizeof(int), Math.Max(size, 0)).AsSpan());
+            }
         }
 
         return Convert.ToHexStringLower(hash.GetHashAndReset());
