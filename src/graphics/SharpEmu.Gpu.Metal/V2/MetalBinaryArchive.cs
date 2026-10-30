@@ -533,9 +533,15 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// added to the current segment when no loaded archive had it, and written as the
     /// library file of either stage key that has none. The descriptor is retained until
     /// the writer is done with it. The two stages' entry points must differ, so each file's
-    /// library has one function of the name its module asks for.
+    /// library has one function of the name its module asks for. The pair is listed under
+    /// <paramref name="pixelPairKey"/> when given (<see cref="LodStatisticsKey"/>: the same
+    /// pixel library makes another pipeline with its counters), while the library file keeps
+    /// the key a library load asks for: written under the counters' key, the pixel library
+    /// of every pipeline made only with counters missed at each start and compiled again
+    /// from its MSL, and its file was never read.
     /// </summary>
-    public void NoteRenderPipeline(nint descriptor, PipelineKind kind, UInt128 vertexKey, UInt128 pixelKey, bool missed)
+    public void NoteRenderPipeline(
+        nint descriptor, PipelineKind kind, UInt128 vertexKey, UInt128 pixelKey, bool missed, UInt128? pixelPairKey = null)
     {
         if (descriptor == 0 || Volatile.Read(ref _disposed) != 0)
         {
@@ -553,7 +559,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
 
         MetalNative.Send(descriptor, SelRetain);
-        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, PairKey(vertexKey, pixelKey))))
+        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, PairKey(vertexKey, pixelPairKey ?? pixelKey))))
         {
             MetalNative.SendVoid(descriptor, SelRelease);
             Forget(vertex);

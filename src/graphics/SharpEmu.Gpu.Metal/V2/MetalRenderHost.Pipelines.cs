@@ -1114,8 +1114,9 @@ internal sealed partial class MetalRenderHost
                     descriptor,
                     mesh is null ? MetalBinaryArchive.PipelineKind.Render : MetalBinaryArchive.PipelineKind.Mesh,
                     vertexArchiveKey,
-                    pixelArchiveKey,
-                    missed);
+                    pixelModule?.ArchiveKey ?? default,
+                    missed,
+                    pixelArchiveKey);
             }
 
             if (state == 0)

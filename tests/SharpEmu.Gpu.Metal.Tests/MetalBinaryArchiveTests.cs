@@ -634,6 +634,40 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         Assert.Null(MetalStaticPrecompile.StubVertexSource("kernel void gen5_cs() {}"));
     }
 
+    // A pipeline made only with the pixel library's LOD statistics counters is listed under
+    // the counters' pair, while the library file keeps the key a library load asks for.
+    [Fact]
+    public void ThePixelLibraryOfAPipelineWithCountersIsStoredUnderItsOwnKey()
+    {
+        if (!RequireDevice()) return;
+        var device = Device.Value;
+        var vertexKey = MetalBinaryArchive.LibraryKey(VertexSource, usesPerVertexInputs: false);
+        var pixelKey = MetalBinaryArchive.LibraryKey(PixelSource, usesPerVertexInputs: false);
+        var countersKey = MetalBinaryArchive.LodStatisticsKey(pixelKey, counters: true);
+        Assert.NotEqual(pixelKey, countersKey);
+        var vertexLibrary = Compile(VertexSource);
+        var pixelLibrary = Compile(PixelSource);
+        var descriptor = RenderDescriptor(Function(vertexLibrary, "gen5_vs"), Function(pixelLibrary, "gen5_ps"));
+        using (var writing = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
+        {
+            Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
+            writing.NoteRenderPipeline(
+                descriptor, MetalBinaryArchive.PipelineKind.Render, vertexKey, pixelKey, missed: true, pixelPairKey: countersKey);
+            writing.Flush(wait: true);
+            Assert.Equal(2, writing.Counters.LibrariesWritten);
+        }
+
+        using var reading = MetalBinaryArchive.Open(_root, device, "translator-a", Budget);
+        Assert.True(reading.WaitLoaded(TimeSpan.FromSeconds(10)));
+        var storedPixelLibrary = reading.TryLoadLibrary(pixelKey);
+        Assert.NotEqual(0, storedPixelLibrary);
+        Assert.False(reading.HasLibrary(countersKey));
+        Assert.Equal(0, reading.AcquirePipelineArchives(vertexKey, pixelKey));
+        var archives = reading.AcquirePipelineArchives(vertexKey, countersKey);
+        Assert.NotEqual(0, archives);
+        Release(archives, storedPixelLibrary, descriptor, pixelLibrary, vertexLibrary);
+    }
+
     private static long Store(MetalBinaryArchive archive, string source, string entry, Gen5MslStage stage, UInt128 key)
     {
         var bytes = MetalStaticPrecompile.Store(archive, Device.Value, new Gen5MslShader(source, entry, stage, 1), key, out var error);
