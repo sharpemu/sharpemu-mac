@@ -2,46 +2,50 @@
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 Control theme for the shared launcher settings row.
+
+The whole row is the focus target: when the control inside it takes keyboard or
+D-pad focus the row gets the :rowfocus pseudo-class (see SettingRow.cs) and
+draws the shared white ring. Hover only brightens the fill.
 -->
 
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:local="clr-namespace:SharpEmu.GUI">
   <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
-    <Setter Property="MinHeight" Value="70" />
+    <Setter Property="MinHeight" Value="{StaticResource RowHeight}" />
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="none" />
+    <Setter Property="ClipToBounds" Value="False" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform"
+                                       Duration="0:0:0.15"
+                                       Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
     <Setter Property="Template">
       <ControlTemplate>
         <Border x:Name="PART_RowSurface"
                 Classes="settingRowSurface"
-                Background="#06FFFFFF"
-                BorderBrush="#0AFFFFFF"
+                Background="{StaticResource CardBrush}"
+                BorderBrush="{StaticResource CardBorderBrush}"
                 BorderThickness="1"
-                CornerRadius="14"
-                Padding="18,12">
-          <Border.Transitions>
-            <Transitions>
-              <BrushTransition Property="Background"
-                               Duration="0:0:0.18"
-                               Easing="CubicEaseOut" />
-              <BrushTransition Property="BorderBrush"
-                               Duration="0:0:0.18"
-                               Easing="CubicEaseOut" />
-            </Transitions>
-          </Border.Transitions>
+                CornerRadius="{StaticResource RadiusMd}"
+                Padding="24,14">
           <Grid ColumnDefinitions="*,Auto">
-            <StackPanel VerticalAlignment="Center" Spacing="3" Margin="0,0,18,0">
+            <StackPanel VerticalAlignment="Center" Spacing="4" Margin="0,0,24,0">
               <TextBlock x:Name="PART_Label"
                          Text="{TemplateBinding Label}"
-                         FontSize="14"
+                         FontSize="{StaticResource FontSizeBody}"
                          FontWeight="Medium"
                          TextWrapping="Wrap"
                          Foreground="{StaticResource TextBrush}" />
               <TextBlock Text="{TemplateBinding Description}"
-                         FontSize="11"
+                         FontSize="{StaticResource FontSizeDescription}"
                          FontWeight="Normal"
                          Foreground="{StaticResource SettingsDescriptionBrush}"
-                         LineHeight="16"
-                         MaxWidth="690"
+                         LineHeight="20"
+                         MaxWidth="560"
                          HorizontalAlignment="Left"
                          TextAlignment="Left"
                          TextWrapping="Wrap"
@@ -55,9 +59,16 @@ Control theme for the shared launcher settings row.
         </Border>
       </ControlTemplate>
     </Setter>
-    <Style Selector="^.controllerFocus /template/ Border#PART_RowSurface">
-      <Setter Property="Background" Value="#16FFFFFF" />
-      <Setter Property="BorderBrush" Value="#C8FFFFFF" />
+    <Style Selector="^:pointerover /template/ Border#PART_RowSurface">
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    </Style>
+    <Style Selector="^:rowfocus">
+      <Setter Property="RenderTransform" Value="scale(1.015)" />
+      <Setter Property="ZIndex" Value="3" />
+    </Style>
+    <Style Selector="^:rowfocus /template/ Border#PART_RowSurface">
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="BoxShadow" Value="{StaticResource FocusRingShadow}" />
     </Style>
   </ControlTheme>
 </ResourceDictionary>

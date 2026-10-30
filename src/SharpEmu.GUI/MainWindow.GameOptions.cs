@@ -3,6 +3,7 @@
 
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.VisualTree;
 using SharpEmu.Libs.VideoOut;
 
@@ -65,29 +66,19 @@ public partial class MainWindow
                     CloseGameSettings();
                 }
             };
-            navigationButtons[index].PointerEntered += (_, _) =>
+            // Moving focus onto a section selects it (console settings behaviour); the
+            // selected fill follows the section, never the pointer or the focus ring.
+            navigationButtons[index].GotFocus += (_, e) =>
             {
-                if (_isGameSettingsOpen)
+                if (_isGameSettingsOpen &&
+                    e.NavigationMethod != NavigationMethod.Pointer &&
+                    section < GameOptionsSectionPanels().Length &&
+                    section != _gameOptionsSectionIndex)
                 {
-                    SetGameOptionsNavigationIndicator(section);
-                }
-            };
-            navigationButtons[index].GotFocus += (_, _) =>
-            {
-                if (_isGameSettingsOpen)
-                {
-                    SetGameOptionsNavigationIndicator(section);
+                    SetGameOptionsSection(section);
                 }
             };
         }
-
-        GameOptionsNavHost.PointerExited += (_, _) =>
-        {
-            if (_isGameSettingsOpen)
-            {
-                SetGameOptionsNavigationIndicator(_gameOptionsSectionIndex);
-            }
-        };
 
         GameOptionsLaunchButton.Click += (_, _) =>
         {
@@ -161,7 +152,7 @@ public partial class MainWindow
         GameList.IsHitTestVisible = false;
         LibraryToolbar.IsHitTestVisible = false;
         GameOptionsOverlay.IsHitTestVisible = true;
-        GameOptionsGeneralNav.Focus();
+        GameOptionsLaunchButton.Focus(_gamepadConnected ? NavigationMethod.Directional : NavigationMethod.Unspecified);
     }
 
     private void CloseGameSettings(bool restoreLibrary = true)

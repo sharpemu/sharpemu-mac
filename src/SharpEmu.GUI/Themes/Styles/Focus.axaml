@@ -1,0 +1,79 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+One focus treatment for every focusable element, readable from across a room:
+a crisp 2 px white ring with a soft white glow, plus a small scale-up.
+
+The ring is an outer box shadow (it never shifts layout) and appears at once;
+only the scale animates (transform, 150 ms). It shows for :focus-visible, i.e.
+keyboard or D-pad navigation, never for a mouse click. Hover is a separate,
+much weaker fill change defined next to each control.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:SharpEmu.GUI">
+  <Style Selector="Button, ToggleButton, ComboBox, ComboBoxItem, ListBoxItem">
+    <Setter Property="FocusAdorner" Value="{x:Null}" />
+  </Style>
+
+  <Style Selector="Button, ToggleButton, ComboBox">
+    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    <Setter Property="RenderTransform" Value="none" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform"
+                                       Duration="0:0:0.15"
+                                       Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <Style Selector="Button:focus-visible, ToggleButton:focus-visible, ComboBox:focus-visible">
+    <Setter Property="RenderTransform" Value="scale(1.02)" />
+    <Setter Property="ClipToBounds" Value="False" />
+    <Setter Property="ZIndex" Value="3" />
+  </Style>
+  <Style Selector="Button:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="BoxShadow" Value="{StaticResource FocusRingShadow}" />
+    <Setter Property="ClipToBounds" Value="False" />
+  </Style>
+  <Style Selector="ComboBox:focus-visible /template/ Border#Background,
+                   TextBox:focus /template/ Border#PART_BorderElement">
+    <Setter Property="BoxShadow" Value="{StaticResource FocusRingShadow}" />
+    <Setter Property="ClipToBounds" Value="False" />
+  </Style>
+  <!-- The theme tints a focused combo with the accent; keep the field colour instead. -->
+  <Style Selector="ComboBox:focus-visible /template/ Border#Background, ComboBox:focus /template/ Border#Background">
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+  </Style>
+  <Style Selector="ComboBox:focus-visible:pointerover /template/ Border#Background">
+    <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
+  </Style>
+  <Style Selector="ComboBox /template/ Border#HighlightBackground">
+    <Setter Property="IsVisible" Value="False" />
+  </Style>
+  <!-- Items inside a scrolling popup: the ring is drawn inside so it is never clipped. -->
+  <Style Selector="ComboBoxItem:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="BoxShadow" Value="inset 0 0 0 2 #FFFFFFFF" />
+    <Setter Property="Background" Value="#26FFFFFF" />
+  </Style>
+  <Style Selector="TextBox:focus">
+    <Setter Property="ZIndex" Value="3" />
+  </Style>
+
+  <!-- Inside a settings row the whole row is the focus target, so the control
+       itself stays quiet. -->
+  <Style Selector="local|SettingRow ComboBox:focus-visible, local|SettingRow Button:focus-visible, local|SettingRow ToggleButton:focus-visible">
+    <Setter Property="RenderTransform" Value="none" />
+  </Style>
+  <Style Selector="local|SettingRow Button:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
+                   local|SettingRow ToggleButton:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="BoxShadow" Value="none" />
+  </Style>
+  <Style Selector="local|SettingRow ComboBox:focus-visible /template/ Border#Background,
+                   local|SettingRow TextBox:focus /template/ Border#PART_BorderElement">
+    <Setter Property="BoxShadow" Value="none" />
+  </Style>
+</Styles>
