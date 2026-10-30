@@ -125,6 +125,7 @@ internal static class Mtl
     // MTLTessellationControlPointIndexType.
     public const nuint TessellationFactorStepFunctionConstant = 0;
     public const nuint TessellationFactorStepFunctionPerPatch = 1;
+    public const nuint TessellationFactorStepFunctionPerPatchAndPerInstance = 3;
     public const nuint TessellationPartitionModePow2 = 0;
     public const nuint TessellationPartitionModeInteger = 1;
     public const nuint TessellationPartitionModeFractionalOdd = 2;

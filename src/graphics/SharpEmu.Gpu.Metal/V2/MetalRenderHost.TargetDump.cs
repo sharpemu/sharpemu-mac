@@ -205,30 +205,56 @@ internal sealed partial class MetalRenderHost
         Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} {streams}");
         // What the pixel stage samples, by guest address: a composite that shows stale
         // or unrelated pictures read the wrong surface, which only the addresses tell.
-        var fragment = _stageBindings[StageFragment];
-        var images = new System.Text.StringBuilder();
-        for (var index = 0; index < fragment.ImageCount && index < fragment.Textures.Length; index++)
+        string StageImages(int stage)
         {
-            var texture = fragment.Textures[index];
-            images.Append(" t").Append(index).Append('=');
-            if (_imageCache.TryGetImage(fragment.Images[index], out var image))
+            var bindings = _stageBindings[stage];
+            var images = new System.Text.StringBuilder();
+            for (var index = 0; index < bindings.ImageCount && index < bindings.Textures.Length; index++)
             {
-                ref readonly var d = ref image.Description;
-                images.Append(CultureInfo.InvariantCulture, $"{d.PixelFormat}/{d.TileMode}/{d.Extent.Width}x{d.Extent.Height}@{d.Data.Address:X}+{d.Data.Size:X}");
-            }
-            else
-            {
-                images.Append("uncached");
+                var texture = bindings.Textures[index];
+                images.Append(" t").Append(index).Append('=');
+                if (_imageCache.TryGetImage(bindings.Images[index], out var image))
+                {
+                    ref readonly var d = ref image.Description;
+                    images.Append(CultureInfo.InvariantCulture,
+                        $"{d.PixelFormat}/{d.TileMode}/{d.Extent.Width}x{d.Extent.Height}{(d.Extent.Depth > 1 ? $"x{d.Extent.Depth}" : string.Empty)}@{d.Data.Address:X}+{d.Data.Size:X}");
+                }
+                else
+                {
+                    images.Append("uncached");
+                }
+
+                if (texture != 0)
+                {
+                    images.Append(CultureInfo.InvariantCulture,
+                        $"[host {MetalV2Native.SendValue(texture, SelWidth)}x{MetalV2Native.SendValue(texture, SelHeight)} 0x{texture:X}]");
+                }
             }
 
-            if (texture != 0)
+            return $"={bindings.ImageCount}{images}";
+        }
+
+        Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} ps_images{StageImages(StageFragment)}");
+        // And what the vertex stage samples (a wind field, a height map), when it samples anything.
+        if (_stageBindings[StageVertex].ImageCount != 0)
+        {
+            Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} vs_images{StageImages(StageVertex)}");
+        }
+
+        // The attachments, by guest surface: a target the pixel stage writes but the pass never
+        // shows (no host view, or another surface than the guest's) is lost to every later pass.
+        var attachments = new System.Text.StringBuilder();
+        for (var index = 0; index < _renderingState.ColorAttachmentCount; index++)
+        {
+            var view = (nint)_renderingState.ColorAttachments[index].View.Handle;
+            attachments.Append(CultureInfo.InvariantCulture, $" c{index}={_renderingState.ColorAttachments[index].Format}/0x{view:X}");
+            if (_targetDescriptions.TryGetValue(view, out var described))
             {
-                images.Append(CultureInfo.InvariantCulture,
-                    $"[host {MetalV2Native.SendValue(texture, SelWidth)}x{MetalV2Native.SendValue(texture, SelHeight)} 0x{texture:X}]");
+                attachments.Append('[').Append(described).Append(']');
             }
         }
 
-        Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} ps_images={fragment.ImageCount}{images}");
+        Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} attachments={_renderingState.ColorAttachmentCount}{attachments}");
         if (entry?.VertexLayout is { Length: > 0 } layout)
         {
             Console.Error.WriteLine($"[METAL-V2][DRAW]   #{_drawStateLines} layout{layout}");
@@ -348,6 +374,9 @@ internal sealed partial class MetalRenderHost
             _targetDumps + _snapshots.Count >= _maxTargetDumps ||
             !TryDescribeDumpFormat(pixelFormat, out var sourceBytes, out _))
         {
+            // Say what was left out, so a pass whose odd-format input is the suspect still names it.
+            Console.Error.WriteLine(
+                $"[METAL-V2][DUMP] skipped {label} tex=0x{texture:X} {width}x{height} fmt={pixelFormat}");
             return true;
         }
 
@@ -494,7 +523,7 @@ internal sealed partial class MetalRenderHost
     /// the wrong element size or swizzle is wrong in exactly those fields.
     /// </summary>
     private void NotePendingInputDump(
-        nint texture, SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier identifier, int index, ImageRole role)
+        nint texture, SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier identifier, int index, ImageRole role, bool compute = false)
     {
         if (!DumpTargetsEnabled || !_dumpThisFlip || !_dumpInputs || texture == 0)
         {
@@ -524,7 +553,8 @@ internal sealed partial class MetalRenderHost
             $"-at{description.Data.Address:X}";
         // A compute encoder's inputs are copied when it ends, like its storage images:
         // nothing inside it writes them, so that copy is what its dispatches read.
-        if (_dumpSnapshots && _computeEncoder != 0)
+        // A dispatch's bindings can land before its encoder opens; the encoder that opens for it copies them.
+        if (_dumpSnapshots && (_computeEncoder != 0 || compute))
         {
             // The program is named once the dispatch is recorded (NoteDispatchState):
             // the bindings are applied before the pipeline is known here.
@@ -537,6 +567,13 @@ internal sealed partial class MetalRenderHost
             // Inputs are described in the log only; their pixels at the flip would be
             // the misleading end-of-frame state this mode exists to avoid.
             Console.Error.WriteLine($"[METAL-V2][DUMP] input {label} tex=0x{texture:X} seq={_snapshotSerial}");
+            return;
+        }
+
+        // SNAPSHOT_MATCH narrows the inputs dumped at the flip as well, so one texture a late
+        // pass samples is reached before the frame's budget of pending dumps is spent.
+        if (_snapshotMatch is not null && !Array.Exists(_snapshotMatch, token => label.Contains(token, StringComparison.Ordinal)))
+        {
             return;
         }
 
@@ -559,6 +596,11 @@ internal sealed partial class MetalRenderHost
         _dumpThisFlip = _dumpTriggerPath is not null
             ? TakeDumpTrigger()
             : flip >= _dumpAfterFlips && DumpWindowOpen && (flip - _dumpAfterFlips) % _dumpEveryFlips == 0;
+        if (_dumpThisFlip)
+        {
+            DumpGuestRanges();
+            DumpTextureStats();
+        }
         if (_pendingDumps.Count == 0)
         {
             return;
@@ -573,6 +615,40 @@ internal sealed partial class MetalRenderHost
     }
 
     private static bool DumpTargetsEnabled => _dumpTargetsDirectory is not null;
+
+    // SHARPEMU_METAL_V2_DUMP_GUEST_RANGES=<address>:<bytes>[,...] (hex): each sampled frame also writes
+    // those guest bytes as the CPU sees them, so a tiled surface uploaded from guest memory can be
+    // detiled offline and compared with the texture the host made of it.
+    private static readonly (ulong Address, int Bytes)[] _dumpGuestRanges = ParseGuestRanges(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DUMP_GUEST_RANGES"));
+
+    private static (ulong, int)[] ParseGuestRanges(string? text) =>
+        (text ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(entry => entry.Split(':'))
+            .Where(parts => parts.Length == 2 &&
+                ulong.TryParse(parts[0].Replace("0x", string.Empty), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _) &&
+                int.TryParse(parts[1].Replace("0x", string.Empty), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _))
+            .Select(parts => (ulong.Parse(parts[0].Replace("0x", string.Empty), NumberStyles.HexNumber, CultureInfo.InvariantCulture),
+                int.Parse(parts[1].Replace("0x", string.Empty), NumberStyles.HexNumber, CultureInfo.InvariantCulture)))
+            .ToArray();
+
+    private void DumpGuestRanges()
+    {
+        foreach (var (address, bytes) in _dumpGuestRanges)
+        {
+            var data = new byte[bytes];
+            if (!TryReadGuest(address, data))
+            {
+                Console.Error.WriteLine($"[METAL-V2][DUMP] guest range 0x{address:X}+0x{bytes:X} unreadable");
+                continue;
+            }
+
+            Directory.CreateDirectory(_dumpTargetsDirectory!);
+            var path = Path.Combine(_dumpTargetsDirectory!, $"guest-{address:X}-{bytes:X}-flip{_dumpFlipIndex}.bin");
+            File.WriteAllBytes(path, data);
+            Console.Error.WriteLine($"[METAL-V2][DUMP] guest range 0x{address:X}+0x{bytes:X} -> {path}");
+        }
+    }
 
     // SHARPEMU_METAL_V2_DUMP_TRIGGER=<file>: dump the frame after the one during which the file
     // appears, then delete it - a script that has just pointed the camera at the broken object
@@ -1042,6 +1118,36 @@ internal sealed partial class MetalRenderHost
                         target[i + 1] = source[i + 1];
                         target[i + 2] = source[i + 2];
                         target[i + 3] = 255;
+                    }
+                };
+                return true;
+            // Two 8-bit channels (packed G-buffer pairs): the bytes as red and green, opaque.
+            case MtlFormat.Rg8Unorm:
+            case MtlFormat.Rg8Uint:
+                sourceBytes = 2;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0, o = 0; i + 1 < source.Length; i += 2, o += 4)
+                    {
+                        target[o] = source[i];
+                        target[o + 1] = source[i + 1];
+                        target[o + 2] = 0;
+                        target[o + 3] = 255;
+                    }
+                };
+                return true;
+            // Two 16-bit unorm or uint channels: the high byte of each as red and green.
+            case MtlFormat.Rg16Unorm:
+            case MtlFormat.Rg16Uint:
+                sourceBytes = 4;
+                convert = static (source, target) =>
+                {
+                    for (int i = 0, o = 0; i + 3 < source.Length; i += 4, o += 4)
+                    {
+                        target[o] = source[i + 1];
+                        target[o + 1] = source[i + 3];
+                        target[o + 2] = 0;
+                        target[o + 3] = 255;
                     }
                 };
                 return true;

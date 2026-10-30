@@ -456,9 +456,11 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (IsEmulatedTessellation(banks, out var controlPoints))
+        if (IsEmulatedTessellation(banks, out var controlPoints, out var quadPatches))
         {
-            DrawTessellated(submitId, banks, in arguments, controlPoints);
+            var tessellated = new TessellatedDraw(arguments.IndexCount, arguments.InstanceCount, arguments.FirstInstance,
+                (int)userConfig.IndexOffset + arguments.BaseVertex, arguments.IndexAddress, arguments.IndexTypeAndSize, Indexed: true);
+            DrawTessellated(submitId, banks, in tessellated, controlPoints, quadPatches);
             TraceDisposition("tessellated");
             return;
         }
@@ -734,6 +736,23 @@ public sealed partial class RenderExecutor
         if (!HasValidVertexShader(shader))
         {
             TraceDrawTargets(banks, "missing-vertex-shader");
+            return;
+        }
+
+        if (IsEmulatedTessellation(banks, out var controlPoints, out var quadPatches))
+        {
+            if (arguments.IndirectArgumentsAddress != 0)
+            {
+                // The hull kernel's patches are counted from the draw's counts.
+                DrawAutoWithCpuArguments(submitId, banks, in arguments);
+                return;
+            }
+
+            var patchVertexOffset = (int)arguments.FirstVertex +
+                (arguments.OffsetSource == DrawOffsetSource.IndirectArguments ? 0 : (int)userConfig.IndexOffset);
+            var tessellated = new TessellatedDraw(arguments.VertexCount, arguments.InstanceCount, arguments.FirstInstance, patchVertexOffset);
+            DrawTessellated(submitId, banks, in tessellated, controlPoints, quadPatches);
+            TraceDrawTargets(banks, "tessellated");
             return;
         }
 

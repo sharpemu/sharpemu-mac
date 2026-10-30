@@ -670,6 +670,27 @@ internal static class MetalShaderPrewarm
         Graphics?.WriteFirstFrame();
     }
 
+    // SHARPEMU_SLOW_COMPILE_DIR=<dir>: the MSL of each compute a compile or a wait on one took seconds over, for compiling
+    // it again offline.
+    private static readonly string? SlowCompileDirectory = Environment.GetEnvironmentVariable("SHARPEMU_SLOW_COMPILE_DIR");
+
+    private static void DumpSlowSource(MetalCompiledGuestShader shader)
+    {
+        if (SlowCompileDirectory is null || shader.Shader.Source.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(SlowCompileDirectory);
+            File.WriteAllText(Path.Combine(SlowCompileDirectory, $"{Identity(shader)}.metal"), shader.Shader.Source);
+        }
+        catch (IOException)
+        {
+        }
+    }
+
     /// <summary>
     /// Waits while the prewarm compiles this module's source, so a dispatch that comes for
     /// a compute the background prewarm has in hand takes its cached library instead of
@@ -686,7 +707,16 @@ internal static class MetalShaderPrewarm
             !_utilityCompiles.ContainsKey(compiling))
         {
             var started = Stopwatch.GetTimestamp();
-            compiling.Wait();
+            if (!compiling.Wait(10_000))
+            {
+                // A compile the game waits on for this long holds the frame (and every packet behind it).
+                Console.Error.WriteLine(
+                    $"[METAL-V2][PREWARM-WAIT] a compute's library waits >10 s on the prewarm compiling it: payload={Identity(shader)} " +
+                    $"entry={shader.Shader.EntryPoint} source_chars={shader.Shader.Source.Length}");
+                DumpSlowSource(shader);
+                compiling.Wait();
+            }
+
             MetalCompileScheduler.NotePrewarmWait(Stopwatch.GetTimestamp() - started);
         }
     }
@@ -798,12 +828,22 @@ internal static class MetalShaderPrewarm
         }
 
         _inFlight[identity] = compiling;
+        var compileStarted = Stopwatch.GetTimestamp();
         try
         {
             CompileComputePipeline(record, metal, device);
         }
         finally
         {
+            var compileSeconds = (Stopwatch.GetTimestamp() - compileStarted) / (double)Stopwatch.Frequency;
+            if (compileSeconds > 5)
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][PREWARM-SLOW] a compute compile took {compileSeconds:F1} s: payload={identity} " +
+                    $"entry={metal.Shader.EntryPoint} source_chars={metal.Shader.Source.Length}");
+                DumpSlowSource(metal);
+            }
+
             _inFlight.TryRemove(identity, out _);
             _utilityCompiles.TryRemove(compiling, out _);
             compiling.Set();

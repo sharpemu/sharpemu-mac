@@ -116,6 +116,13 @@ public sealed class CommandSubmission
     // SHARPEMU_GPU_CLOBBER_DIAG: host timestamp of the enqueue, for the age at a fatal.
     internal long EnqueuedTicks { get; set; }
 
+    // SHARPEMU_SLICE_PROFILE: when the last slice suspended the submission, and on what address.
+    internal long ParkedTicks { get; set; }
+
+    internal ulong ParkedAddress { get; set; }
+
+    internal uint ParkedOpcode { get; set; }
+
     // Snapshots captured at submit time; the processor never reads them.
     public object? GeometrySnapshots { get; }
 

@@ -51,6 +51,30 @@ public sealed class GuestPixelFormatsTests
     }
 
     [Fact]
+    public void NarrowSrgbFormats_AreSrgbOnlyWhenTheBackendHasThem()
+    {
+        var saved = GuestPixelFormats.NarrowSrgbFormats;
+        try
+        {
+            GuestPixelFormats.NarrowSrgbFormats = false;
+            Assert.Equal(GpuFormat.R8Unorm, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8Srgb));
+            Assert.Equal(GpuFormat.R8G8Unorm, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8_8Srgb));
+
+            GuestPixelFormats.NarrowSrgbFormats = true;
+            Assert.Equal(GpuFormat.R8Srgb, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8Srgb));
+            Assert.Equal(GpuFormat.R8G8Srgb, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8_8Srgb));
+            Assert.Equal(GpuFormat.R8Unorm, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8UNorm));
+            // Written through a storage view, an sRGB image takes its linear twin.
+            Assert.Equal(GpuFormat.R8Unorm, ViewFormatRules.SrgbStorageFormat(GpuFormat.R8Srgb));
+            Assert.Equal(GpuFormat.R8G8Unorm, ViewFormatRules.SrgbStorageFormat(GpuFormat.R8G8Srgb));
+        }
+        finally
+        {
+            GuestPixelFormats.NarrowSrgbFormats = saved;
+        }
+    }
+
+    [Fact]
     public void ComponentMaps_ComposeAndMask()
     {
         Assert.True(ColorComponentMap.Identity.IsIdentity);

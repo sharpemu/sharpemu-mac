@@ -46,6 +46,50 @@ public static partial class ResourceMaterializer
         public bool UnboundedSelector;
     }
 
+    // A counted loop's counter against its bound, ordered as the loop's comparison orders them.
+    internal static bool CounterWithinLimit(uint counter, uint bound, bool inclusive, bool signed) =>
+        signed
+            ? inclusive ? (int)counter <= (int)bound : (int)counter < (int)bound
+            : inclusive ? counter <= bound : counter < bound;
+
+    // Direct candidates in record order over a table whose end the guest does not state (DirectRecordsMayEnd):
+    // the records the host can read are a prefix, found by a binary search, and read together; the first record
+    // past the end of the guest's table and every later one read as null.
+    private static bool TryReadRecordsUpToTheEnd(ShaderResourcePlan plan, uint[] sources, ResourceRuntimeInputs inputs,
+        out List<DescriptorWords> descriptors)
+    {
+        bool Readable(int index) =>
+            RuntimeValueEvaluator.EvaluateSources(plan, [sources[index]], inputs, [], evaluateTable: false, out _, out _);
+
+        var readable = 0;
+        if (sources.Length != 0 && Readable(0))
+        {
+            var low = 1;
+            var high = sources.Length;
+            while (low < high)
+            {
+                var middle = low + (high - low) / 2;
+                if (Readable(middle)) low = middle + 1;
+                else high = middle;
+            }
+            readable = low;
+        }
+
+        descriptors = [];
+        if (readable != 0 &&
+            !RuntimeValueEvaluator.EvaluateSources(plan, sources[..readable], inputs, [], evaluateTable: false, out descriptors, out _))
+        {
+            // A hole inside the table: one at a time.
+            descriptors = sources[..readable].Select(source =>
+                RuntimeValueEvaluator.EvaluateSources(plan, [source], inputs, [], evaluateTable: false, out var one, out _)
+                    ? one[0] : DescriptorWords.Empty(8)).ToList();
+        }
+
+        for (var index = readable; index < sources.Length; index++)
+            descriptors.Add(DescriptorWords.Empty(8));
+        return true;
+    }
+
     private sealed class MaterializedSnapshot
     {
         public uint[][] Buffers = [];
@@ -66,6 +110,7 @@ public static partial class ResourceMaterializer
         public uint Resource;
         public ulong Address;
         public uint DynamicOffsetBase;
+        public uint RecordStride = 32;
         public List<uint[]> Descriptors = [];
         public int[] Entries = [];
         // Entries read as null before classification, by reason.
@@ -91,9 +136,19 @@ public static partial class ResourceMaterializer
     // Diagnostics: bindless table memo hits, words that changed, keys not kept, and tables not wholly read.
     public static long BindlessMemoHits, BindlessMemoChanged, BindlessMemoAbsent, BindlessMemoUnread, BindlessMemoClassHits;
 
+    // A table of records (RecordStride above 32) is kept whatever its size: each of a material's textures is a table
+    // of its own, and the host would make every draw's device handles anew.
     private const int BindlessMemoMinEntries = 256;
-    private const int BindlessMemoCapacity = 32;
-    private static readonly Dictionary<(ulong Address, ulong Entries, bool R128, uint DynamicOffsetBase), BindlessTableMemo> BindlessMemos = [];
+    private const int BindlessMemoCapacity = 512;
+    // The words the kept tables hold together (128 MiB): a few descriptor heaps of 65536 entries fill it.
+    private const long BindlessMemoWordBudget = 32L << 20;
+    private static long BindlessMemoWords;
+    private static readonly Dictionary<(ulong Address, ulong Entries, bool R128, uint DynamicOffsetBase, uint RecordStride), BindlessTableMemo> BindlessMemos = [];
+
+    // SHARPEMU_TRACE_BINDLESS_TABLES=1: each V#-described table's reach - the V#, its offset and record stride, the key
+    // bound and the entries enumerated - so a table cut short can be told from one the guest made small.
+    private static readonly bool TraceBindlessTables =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_BINDLESS_TABLES") == "1";
     private static readonly Lock BindlessMemoGate = new();
 
     // One bounded runtime V# table resolved for this draw: the distinct candidate descriptors
@@ -247,15 +302,47 @@ public static partial class ResourceMaterializer
                 var cleanInputs = inputs.WithReader(inputs.ReadCleanMemory);
                 if (indirect.DirectCandidates is { } directCandidates)
                 {
-                    if (!RuntimeValueEvaluator.EvaluateSources(plan, directCandidates.Select(candidate => candidate.Source).ToArray(),
-                        cleanInputs, [], evaluateTable: false, out var descriptors, out _))
+                    // A counted loop reads only the records below its bound; the others stay null and unread. A bound
+                    // the host cannot read leaves every record null, as the access read before it had candidates.
+                    var reached = directCandidates.Select(_ => true).ToArray();
+                    if (indirect.DirectLimitSource is { } limitSource)
+                    {
+                        var readable = RuntimeValueEvaluator.EvaluateSources(plan, [limitSource], cleanInputs, [], evaluateTable: false,
+                            out var bounds, out _);
+                        var bound = readable ? bounds[0].Dwords[0] : 0u;
+                        if (readable && directCandidates[^1].Counter is { } lastCounter &&
+                            CounterWithinLimit(lastCounter + 1, bound, indirect.DirectLimitInclusive, indirect.DirectLimitSigned) &&
+                            Interlocked.Increment(ref LoopBoundWarnings) <= 8)
+                        {
+                            Console.Error.WriteLine(
+                                $"[SHADER][WARN] A counted loop reads records past its {directCandidates.Count} candidates: hash=0x{plan.Hash:X16} " +
+                                $"image={imageIndex} bound={bound}; the later records read the first record's image.");
+                        }
+                        for (var candidateIndex = 0; candidateIndex < reached.Length; candidateIndex++)
+                        {
+                            reached[candidateIndex] = directCandidates[candidateIndex].Counter is not { } counter ||
+                                readable && CounterWithinLimit(counter, bound, indirect.DirectLimitInclusive, indirect.DirectLimitSigned);
+                        }
+                    }
+
+                    var reachedSources = directCandidates.Where((_, candidateIndex) => reached[candidateIndex])
+                        .Select(candidate => candidate.Source).ToArray();
+                    List<DescriptorWords> reachedDescriptors;
+                    if (indirect.DirectRecordsMayEnd)
+                    {
+                        if (!TryReadRecordsUpToTheEnd(plan, reachedSources, cleanInputs, out reachedDescriptors))
+                            return false;
+                    }
+                    else if (!RuntimeValueEvaluator.EvaluateSources(plan, reachedSources, cleanInputs, [], evaluateTable: false,
+                        out reachedDescriptors, out _))
                     {
                         return false;
                     }
                     var directTable = new IndirectImageTable { Resource = (uint)imageIndex };
-                    for (var candidateIndex = 0; candidateIndex < descriptors.Count; candidateIndex++)
+                    var nextReached = 0;
+                    for (var candidateIndex = 0; candidateIndex < directCandidates.Count; candidateIndex++)
                     {
-                        var descriptor = descriptors[candidateIndex];
+                        var descriptor = reached[candidateIndex] ? reachedDescriptors[nextReached++] : DescriptorWords.Empty(8);
                         if (!UsableTableCandidate(descriptor.Dwords, image))
                             descriptor = DescriptorWords.Empty(8);
                         var existing = directTable.Descriptors.FindIndex(candidate => candidate.SameAs(descriptor));
@@ -341,6 +428,9 @@ public static partial class ResourceMaterializer
                 var descriptor = values[cursor++];
                 if (!ValidImageDescriptor(descriptor.Dwords, image.R128))
                 {
+                    TraceInvalidDescriptor(plan, imageIndex, descriptor.Dwords);
+                    TraceZeroDescriptor(plan, imageIndex, image.Source, descriptor.Dwords, inputs,
+                        activeSources.Length == 0 || activeSources[image.Source]);
                     descriptor = DescriptorWords.Empty(descriptor.DwordCount);
                 }
 
@@ -585,6 +675,32 @@ public static partial class ResourceMaterializer
 
     private static readonly HashSet<uint> NulledSampledFormats = new();
 
+    // Whether a compare access reads a mipmapped image, and so compares in the shader (see BuildSpecialization).
+    // SHARPEMU_TRACE_MIPMAPPED_COMPARE=1 names each such program and image once.
+    private static readonly bool TracesMipmappedCompare = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_MIPMAPPED_COMPARE") == "1";
+    private static readonly HashSet<(ulong, int)> TracedMipmappedCompares = new();
+
+    private static bool MipmappedCompare(ulong hash, int image, ReadOnlySpan<uint> descriptor)
+    {
+        if (!GuestImageFormat.IsMipmapped(descriptor))
+        {
+            return false;
+        }
+
+        if (TracesMipmappedCompare)
+        {
+            lock (TracedMipmappedCompares)
+            {
+                if (TracedMipmappedCompares.Add((hash, image)))
+                {
+                    Console.Error.WriteLine($"[SHADER][MIPMAPPED-COMPARE] hash=0x{hash:X16} image={image} words={string.Join(",", descriptor.ToArray().Select(word => $"{word:X8}"))}");
+                }
+            }
+        }
+
+        return true;
+    }
+
     private static void ReportNulledSampledFormat(uint format)
     {
         lock (NulledSampledFormats)
@@ -614,6 +730,100 @@ public static partial class ResourceMaterializer
                 return false;
         }
         return true;
+    }
+
+    // SHARPEMU_TRACE_NULL_DESCRIPTORS=1: an image whose descriptor holds something but reads as null
+    // because the host rejects it (type, format or slice range), once per program and image, with its words.
+    private static readonly bool TraceNullDescriptors =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_NULL_DESCRIPTORS") == "1";
+
+    private static readonly HashSet<(ulong, int)> TracedInvalidDescriptors = [];
+    private static int LoopBoundWarnings;
+    private static readonly HashSet<ulong> TracedZeroNeighbourhoods = [];
+
+    private static void TraceInvalidDescriptor(ShaderResourcePlan plan, int imageIndex, uint[] words)
+    {
+        if (!TraceNullDescriptors || words.All(word => word == 0))
+        {
+            return;
+        }
+
+        lock (TracedInvalidDescriptors)
+        {
+            if (!TracedInvalidDescriptors.Add((plan.Hash, imageIndex)))
+            {
+                return;
+            }
+        }
+
+        Console.Error.WriteLine(
+            $"[SHADER][INVALID-DESCRIPTOR] hash=0x{plan.Hash:X16} stage={plan.Stage} image={imageIndex} " +
+            $"type={GuestImageFormat.ImageTypeOf(words)} format={GuestImageFormat.FormatOf(words)} words=" +
+            string.Join(",", words.Select(word => word.ToString("X8", System.Globalization.CultureInfo.InvariantCulture))));
+    }
+
+    // SHARPEMU_TRACE_NULL_DESCRIPTORS=1 as well: an image whose descriptor is all zero, once per program and image,
+    // with the guest addresses its descriptor was read from (none when it is user data).
+    private static void TraceZeroDescriptor(ShaderResourcePlan plan, int imageIndex, uint source, uint[] words,
+        ResourceRuntimeInputs inputs, bool active)
+    {
+        if (!TraceNullDescriptors || words.Any(word => word != 0))
+        {
+            return;
+        }
+
+        lock (TracedInvalidDescriptors)
+        {
+            if (!TracedInvalidDescriptors.Add((plan.Hash, imageIndex)))
+            {
+                return;
+            }
+        }
+
+        var addresses = new List<ulong>();
+        var reader = inputs.ReadMemory;
+        bool Recording(ulong address, out uint word)
+        {
+            addresses.Add(address);
+            word = 0;
+            return reader is not null && reader(address, out word);
+        }
+
+        var again = RuntimeValueEvaluator.EvaluateSources(plan, [source], inputs.WithReader(Recording), [], evaluateTable: false,
+            out var reevaluated, out _);
+        var clean = inputs.ReadCleanMemory is not null && RuntimeValueEvaluator.EvaluateSources(plan, [source],
+            inputs.WithReader(inputs.ReadCleanMemory), [], evaluateTable: false, out var cleanEvaluated, out _)
+            ? string.Join(",", cleanEvaluated[0].Dwords.Select(word => word.ToString("X8", System.Globalization.CultureInfo.InvariantCulture)))
+            : "unreadable";
+        var dwordKinds = string.Join(",", plan.DescriptorSources[(int)source].Dwords.Select(dword => dword.Kind.ToString()).Distinct());
+        Console.Error.WriteLine(
+            $"[SHADER][ZERO-DESCRIPTOR] hash=0x{plan.Hash:X16} stage={plan.Stage} image={imageIndex} active={active} " +
+            $"branches={plan.ResourceBranches.Count} kinds={dwordKinds} again=" +
+            (again ? string.Join(",", reevaluated[0].Dwords.Select(word => word.ToString("X8", System.Globalization.CultureInfo.InvariantCulture))) : "failed") +
+            $" clean={clean} reads=" +
+            (addresses.Count == 0 ? "none" : string.Join(",", addresses.Distinct().Take(12).Select(address => $"0x{address:X}"))));
+        if (addresses.Count == 0 || reader is null)
+            return;
+
+        // The descriptor's neighbourhood (a table of default textures, say) once per address, and whether the GPU
+        // has writes pending over the descriptor and the pointer that named it.
+        var descriptorAddress = addresses[^1] & ~0x1Ful;
+        lock (TracedZeroNeighbourhoods)
+        {
+            if (!TracedZeroNeighbourhoods.Add(descriptorAddress))
+                return;
+        }
+
+        var neighbourhood = new List<string>();
+        for (var offset = -0x80L; offset < 0x80; offset += sizeof(uint))
+        {
+            var address = (ulong)((long)descriptorAddress + offset);
+            neighbourhood.Add(reader(address, out var word) ? word.ToString("X8", System.Globalization.CultureInfo.InvariantCulture) : "--------");
+        }
+
+        Console.Error.WriteLine(
+            $"[SHADER][ZERO-DESCRIPTOR] around=0x{descriptorAddress - 0x80:X} pending_descriptor={inputs.DataWritePending?.Invoke(descriptorAddress)} " +
+            $"pending_pointer={inputs.DataWritePending?.Invoke(addresses[0])} words={string.Join(" ", neighbourhood)}");
     }
 
     private static bool ValidImageDescriptor(ReadOnlySpan<uint> descriptor, bool r128)
@@ -939,9 +1149,16 @@ public static partial class ResourceMaterializer
         var baseAddress = (((ulong)(words[1] & 0xFFFFu) << 32) | words[0]) & AddressMask;
         var stride = (words[1] >> 16) & 0x3FFFu;
         var size = stride == 0 ? words[2] : (ulong)stride * words[2];
-        var entries = size > indirect.TableOffset ? (size - indirect.TableOffset + 31) >> 5 : 0;
+        var recordStride = indirect.RecordStride;
+        var entries = size > indirect.TableOffset ? (size - indirect.TableOffset + recordStride - 1) / recordStride : 0;
         if (indirect.KeyBound != 0)
             entries = Math.Min(entries, indirect.KeyBound);
+        if (TraceBindlessTables)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][BINDLESS-TABLE] V#=[{string.Join(",", words.Select(word => word.ToString("X8")))}] size=0x{size:X} " +
+                $"tableOffset=0x{indirect.TableOffset:X} recordStride={recordStride} keyBound={indirect.KeyBound} entries={entries}");
+        }
 
         if (baseAddress > AddressMask - indirect.TableOffset)
             return false;
@@ -949,6 +1166,7 @@ public static partial class ResourceMaterializer
 
         result.Address = tableAddress;
         result.DynamicOffsetBase = indirect.DynamicOffsetBase;
+        result.RecordStride = recordStride;
         if (entries > MaxBindlessImageEntries)
         {
             // A V# reaching further than any device table (an unbounded one, say) names no
@@ -962,6 +1180,11 @@ public static partial class ResourceMaterializer
         var readableWords = entries == 0 ? 0 : (int)Math.Min((size - indirect.TableOffset) / sizeof(uint), int.MaxValue);
         var table = new uint[entries * 8];
         bool[]? unreadable = null;
+        if (recordStride != 32)
+        {
+            unreadable = ReadRecordDescriptors(tableAddress, entries, recordStride, readableWords, table, inputs);
+            readableWords = 0;
+        }
         readableWords = Math.Min(readableWords, table.Length);
         if (readableWords != 0)
         {
@@ -980,9 +1203,10 @@ public static partial class ResourceMaterializer
             }
         }
 
-        var memoKey = (tableAddress, entries, r128, indirect.DynamicOffsetBase);
-        var memoized = unreadable is null && entries >= BindlessMemoMinEntries;
-        if (unreadable is not null && entries >= BindlessMemoMinEntries) BindlessMemoUnread++;
+        var memoKey = (tableAddress, entries, r128, indirect.DynamicOffsetBase, recordStride);
+        var memoKept = entries >= BindlessMemoMinEntries || recordStride != 32;
+        var memoized = unreadable is null && memoKept;
+        if (unreadable is not null && memoKept) BindlessMemoUnread++;
         if (memoized)
         {
             lock (BindlessMemoGate)
@@ -1045,15 +1269,63 @@ public static partial class ResourceMaterializer
             };
             lock (BindlessMemoGate)
             {
-                if (BindlessMemos.Count >= BindlessMemoCapacity && !BindlessMemos.ContainsKey(memoKey))
-                    BindlessMemos.Remove(BindlessMemos.Keys.First());
+                if (BindlessMemos.Remove(memoKey, out var replaced))
+                    BindlessMemoWords -= replaced.Words.Length;
+                while (BindlessMemos.Count != 0 &&
+                    (BindlessMemos.Count >= BindlessMemoCapacity || BindlessMemoWords + table.Length > BindlessMemoWordBudget))
+                {
+                    var oldest = BindlessMemos.Keys.First();
+                    BindlessMemoWords -= BindlessMemos[oldest].Words.Length;
+                    BindlessMemos.Remove(oldest);
+                }
+
                 BindlessMemos[memoKey] = memo;
+                BindlessMemoWords += table.Length;
             }
 
             result.Memo = memo;
         }
 
         return true;
+    }
+
+    // The descriptors of a V# table of records, one at the same offset in each: the records' bytes in one resident
+    // read where they can be, one clean read a dword otherwise. A dword past the V# reads as zero, as the scalar
+    // load returns it; the entries with a dword the guest has not mapped, or the GPU has written, come back marked.
+    private static bool[]? ReadRecordDescriptors(ulong tableAddress, ulong entries, uint recordStride, int readableWords,
+        uint[] table, ResourceRuntimeInputs inputs)
+    {
+        if (entries == 0)
+            return null;
+
+        var spanWords = (int)Math.Min(((entries - 1) * recordStride + 32) / sizeof(uint), int.MaxValue);
+        var span = new uint[spanWords];
+        var spanReadable = Math.Min(readableWords, spanWords);
+        bool[]? unreadable = null;
+        var resident = spanReadable != 0 && inputs.ReadResidentMemory is not null &&
+            inputs.ReadResidentMemory(tableAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(span.AsSpan(0, spanReadable)), true);
+        for (var entry = 0; entry < (int)entries; entry++)
+        {
+            var first = (int)((ulong)entry * recordStride / sizeof(uint));
+            for (var word = 0; word < 8; word++)
+            {
+                var at = first + word;
+                if (at >= spanReadable)
+                    continue;
+                if (resident)
+                {
+                    table[entry * 8 + word] = span[at];
+                }
+                else if (!TryReadCleanWord(tableAddress, (ulong)at * sizeof(uint), inputs, out table[entry * 8 + word]))
+                {
+                    unreadable ??= new bool[entries];
+                    unreadable[entry] = true;
+                    break;
+                }
+            }
+        }
+
+        return unreadable;
     }
 
     private readonly record struct ImageDescriptorKey(ulong W01, ulong W23, ulong W45, ulong W67)
@@ -1359,8 +1631,13 @@ public static partial class ResourceMaterializer
             var axes = (words[0] & 0x7) == MirrorOnceBorder ? 1u : 0u;
             axes |= ((words[0] >> 3) & 0x7) == MirrorOnceBorder ? 2u : 0u;
             axes |= ((words[0] >> 6) & 0x7) == MirrorOnceBorder ? 4u : 0u;
+            // A min/max filter mode reduces only a footprint of several texels: a point filter reads one.
+            var reduction = (words[0] >> 29) & 0x3;
+            var linear = ((words[2] >> 20) & 0x1) != 0 || ((words[2] >> 22) & 0x1) != 0;
+            reduction = reduction is 1 or 2 && linear ? reduction : 0;
             specialized[index] = new SamplerSpecialization(
-                (int)(words[2] << 18) >> 18, axes, axes != 0 ? words[3] >> 30 : 0);
+                (int)(words[2] << 18) >> 18, axes, axes != 0 ? words[3] >> 30 : 0, (words[0] & (1u << 20)) != 0,
+                reduction, reduction != 0 && ((words[2] >> 26) & 0x3) == 2);
             any |= specialized[index] != default;
         }
 
@@ -1489,6 +1766,7 @@ public static partial class ResourceMaterializer
             mappingCursor += BindlessMappingWords;
             snapshot.FlattenedTable[(int)mappingOffset] = (uint)classified.Entries.Length;
             snapshot.FlattenedTable[(int)mappingOffset + 1] = classified.DynamicOffsetBase;
+            snapshot.FlattenedTable[(int)mappingOffset + 2] = classified.RecordStride;
             var variantImages = new uint[classified.Variants.Count];
             for (var variant = 0; variant < classified.Variants.Count; variant++)
             {
@@ -1518,10 +1796,15 @@ public static partial class ResourceMaterializer
             {
                 lock (BindlessMemoGate)
                 {
-                    if (classified.Output is { } previous && previous.Slot == (uint)slot &&
-                        ReferenceEquals(previous.Descriptors, classified.Descriptors) &&
-                        previous.VariantImages.AsSpan().SequenceEqual(variantImages))
-                        output = previous;
+                    foreach (var previous in classified.Outputs)
+                    {
+                        if (previous.Slot == (uint)slot && ReferenceEquals(previous.Descriptors, classified.Descriptors) &&
+                            previous.VariantImages.AsSpan().SequenceEqual(variantImages))
+                        {
+                            output = previous;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -1538,7 +1821,12 @@ public static partial class ResourceMaterializer
                 };
                 if (classified.Memoized)
                 {
-                    lock (BindlessMemoGate) classified.Output = output;
+                    lock (BindlessMemoGate)
+                    {
+                        if (classified.Outputs.Count >= BindlessOutputsKept)
+                            classified.Outputs.RemoveAt(0);
+                        classified.Outputs.Add(output);
+                    }
                 }
             }
 
@@ -1730,10 +2018,15 @@ public static partial class ResourceMaterializer
                 ConversionFormat = conversionFormat,
                 ShaderSwizzle = shaderSwizzle,
                 NumericClass = numericClass,
-                // Only 2D, 2D-array and cube views of a depth-equivalent format get a host depth
-                // binding; every other compare access tests texels with the S# function in the shader.
+                // Only 2D, 2D-array and cube views of a single-level depth-equivalent format get a host
+                // depth binding; every other compare access tests texels with the S# function in the shader.
+                // A depth target is one level, so a mipmapped surface's levels were written as colour, and
+                // a host depth twin of it never holds them (a mipmapped depth surface is not transferred):
+                // Ghost of Tsushima's terrain culler compare-gathers its R32F depth pyramid at the level of
+                // each triangle's size, and every test past level 0 read empty and culled the triangle.
                 EmulatedCompareFunction = !storage && baseImage.DepthCompare &&
-                    (!GuestImageFormat.HasDepthEquivalent(format) || dimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray))
+                    (!GuestImageFormat.HasDepthEquivalent(format) || MipmappedCompare(plan.Hash, index, descriptor) ||
+                     dimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray))
                     ? SamplerCompareFunction(info, snapshot, baseIndex)
                     : -1,
                 PackedFormat = baseImage.Packed ? format : DescriptorConstants.InvalidFormat,
@@ -1977,21 +2270,27 @@ public static partial class ResourceMaterializer
     }
 
     // The flattened words a bindless table takes: its entry count and the key of entry zero.
-    private const int BindlessMappingWords = 2;
+    // The table's entry count, the key of its first entry and the bytes from one entry to the next.
+    private const int BindlessMappingWords = 3;
+
+    // The placements of one memoized table whose output tables are kept for reuse.
+    private const int BindlessOutputsKept = 8;
 
     private sealed class BindlessClassification
     {
         public uint Resource;
         public uint DynamicOffsetBase;
+        public uint RecordStride = 32;
         public ulong Address;
         public List<ImageSpecialization> Variants = [];
         public uint[][] Descriptors = [];
         public byte[] DescriptorVariants = [];
         public int[] Entries = [];
         // A memoized classification is shared by every draw that reads the same table words the same way;
-        // its last output table is reused when a draw places it the same.
+        // an output table is reused when a draw places it the same. Programs that share a table (Ghost of
+        // Tsushima's material programs, one table a texture) place it differently, so a few are kept.
         public bool Memoized;
-        public BindlessImageTable? Output;
+        public readonly List<BindlessImageTable> Outputs = [];
     }
 
     private static readonly HashSet<(ulong Plan, uint Resource, string Reason)> ReportedBindlessNulls = [];
@@ -2108,7 +2407,8 @@ public static partial class ResourceMaterializer
                 ConversionFormat = conversionFormat,
                 ShaderSwizzle = conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : baseImage.ShaderSwizzle,
                 Cube = cube,
-                EmulatedCompareFunction = baseImage.DepthCompare && !GuestImageFormat.HasDepthEquivalent(format)
+                EmulatedCompareFunction = baseImage.DepthCompare &&
+                    (!GuestImageFormat.HasDepthEquivalent(format) || GuestImageFormat.IsMipmapped(descriptor))
                     ? SamplerCompareFunction(info, snapshot, (uint)root)
                     : -1,
             };
@@ -2199,6 +2499,7 @@ public static partial class ResourceMaterializer
         {
             Resource = table.Resource,
             DynamicOffsetBase = table.DynamicOffsetBase,
+            RecordStride = table.RecordStride,
             Address = table.Address,
             Variants = variants,
             Descriptors = [.. descriptors],
@@ -2386,6 +2687,9 @@ public static partial class ResourceMaterializer
                 info.Samplers[index].LodBias = specialization.Samplers[index].LodBias;
                 info.Samplers[index].MirrorOnceBorderAxes = specialization.Samplers[index].MirrorOnceBorderAxes;
                 info.Samplers[index].BorderColorType = specialization.Samplers[index].BorderColorType;
+                info.Samplers[index].ForceDegamma = specialization.Samplers[index].ForceDegamma;
+                info.Samplers[index].Reduction = specialization.Samplers[index].Reduction;
+                info.Samplers[index].ReductionAcrossLevels = specialization.Samplers[index].ReductionAcrossLevels;
             }
         }
 

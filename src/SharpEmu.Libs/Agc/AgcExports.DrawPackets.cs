@@ -105,7 +105,40 @@ public static partial class AgcExports
         }
 
         TraceAgc($"agc.dcb_set_num_instances buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} count={instanceCount}");
+        TraceNumInstancesCaller(ctx, commandAddress, instanceCount);
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    // SHARPEMU_TRACE_NUM_INSTANCES=<min>: each new (caller's caller, count) pair at or above min, once, so the game code
+    // that decides a draw's instance count can be found and disassembled.
+    private static readonly uint _traceNumInstancesMin =
+        uint.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_NUM_INSTANCES"), out var min) ? min : uint.MaxValue;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong, uint), byte> _tracedNumInstances = new();
+
+    private static void TraceNumInstancesCaller(CpuContext ctx, ulong commandAddress, uint instanceCount)
+    {
+        if (instanceCount < _traceNumInstancesMin)
+        {
+            return;
+        }
+
+        _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out var returnAddress);
+        _ = ctx.TryReadUInt64(ctx[CpuRegister.Rbp] + sizeof(ulong), out var callerAddress);
+        if (_tracedNumInstances.Count < 4096 && _tracedNumInstances.TryAdd((callerAddress, instanceCount), 0))
+        {
+            // SHARPEMU_TRACE_NUM_INSTANCES_WATCH=<hex>: also the qword there, for following a count table's pointer.
+            var watch = 0UL;
+            if (ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_NUM_INSTANCES_WATCH"),
+                    System.Globalization.NumberStyles.HexNumber, null, out var watchAddress))
+            {
+                _ = ctx.TryReadUInt64(watchAddress, out watch);
+            }
+
+            Console.Error.WriteLine(
+                $"[AGC][NUM-INSTANCES] t={TraceSeconds()} count={instanceCount} cmd=0x{commandAddress:X16} " +
+                $"ret=0x{returnAddress:X16} frames={KernelSyncTraceFormatter.FormatFrameChain(ctx)} watch=0x{watch:X} " +
+                $"r12=0x{ctx[CpuRegister.R12]:X} r13=0x{ctx[CpuRegister.R13]:X}");
+        }
     }
 
     [SysAbiExport(

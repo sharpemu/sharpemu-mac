@@ -22,7 +22,8 @@ internal enum Gen5MslPreludes
     Bvh = 1 << 6,
     MipStatistics = 1 << 7,
     ScalarConstants = 1 << 8,
-    All = (1 << 9) - 1,
+    DecodedFormatLoads = 1 << 9,
+    All = (1 << 10) - 1,
 }
 
 // Compiles shader requests into Metal source with argument-buffer bindings.
@@ -392,6 +393,8 @@ public static partial class Gen5MslTranslator
         private bool _usesLds;
         private uint _scratchDwordCount;
         private bool _usesFormatLoads;
+        private int _formatBufferLoads;
+        private bool _usesDecodedFormatLoads;
         private bool _usesBufferOffset;
         // A GLC load or store: the program carries coherent_load_prelude.
         private bool _usesCoherentLoads;
@@ -428,12 +431,31 @@ public static partial class Gen5MslTranslator
         /// its lanes keeps simdgroup waves: a half with no thread would never count in at its
         /// partner's barrier, and so does one whose LDS leaves no threadgroup memory for the
         /// waves' slots and counters. The hull launch is one wave per group.
-        /// SHARPEMU_MSL_MULTIWAVE64=0 keeps simdgroup waves for every group.</summary>
+        /// Ghost of Tsushima's tiled light culler (csB52D742B, 16x16 groups) is the other case:
+        /// it totals each tile's lights over a wave from lanes 31 and 63 and places them with
+        /// V_MBCNT over a 64-bit VCC, and as eight wave32s the total doubled and the halves wrote
+        /// their lights over each other's (<see cref="ReadsUpperLaneByNumber"/>).
+        /// SHARPEMU_MSL_MULTIWAVE64=0 (<see cref="Gen5MslCodegenOptions.MultiWaveCompute64"/>)
+        /// bridges only a program that reads an upper lane by number; SHARPEMU_BRIDGE_COMPUTE_WAVES=0
+        /// (<see cref="Gen5MslCodegenOptions.BridgeComputeWaves"/>) keeps simdgroup waves for every
+        /// group.</summary>
         private bool IsBridgedComputeWaves =>
-            _options.MultiWaveCompute64 && _waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
+            _options.BridgeComputeWaves && _waveLaneCount == 64 && _stage == Gen5MslStage.Compute &&
             _request.Tessellation is null && ComputeThreads is > 64 and <= 1024 && ComputeThreads % 64 == 0 &&
             (ProgramUsesLds ? _computeLdsDwords : 0u) + (WaveScratchDwords + 1) * (ComputeThreads / 64) <= LdsDwordCount &&
-            !ComputeGroupCanBePartial;
+            !ComputeGroupCanBePartial &&
+            (_options.MultiWaveCompute64 || ReadsUpperLaneByNumber);
+
+        private bool? _readsUpperLaneByNumber;
+
+        /// <summary>Whether the program combines a wave64's halves itself: a V_READLANE of a
+        /// constant lane 32..63 (an inline constant 32..63, or a literal whose lane bits are).</summary>
+        private bool ReadsUpperLaneByNumber => _readsUpperLaneByNumber ??=
+            _request.Program.Instructions.Any(static instruction =>
+                instruction.Opcode == "VReadlaneB32" && instruction.Sources.Count > 1 &&
+                instruction.Sources[1] is var lane &&
+                ((lane.Kind == Gen5OperandKind.EncodedConstant && lane.Value is >= 160 and <= 191) ||
+                    (lane.Kind == Gen5OperandKind.LiteralConstant && (lane.Value & 63u) >= 32)));
 
         private bool? _programUsesLds;
 
@@ -591,6 +613,10 @@ public static partial class Gen5MslTranslator
 
                     _usesFormatLoads |= IsFormatBufferLoad(instruction.Opcode) ||
                         IsFormatBufferStore(instruction.Opcode);
+                    if (instruction.Opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal))
+                    {
+                        _formatBufferLoads++;
+                    }
                     _usesShaderClock |= instruction.Opcode is "SMemtime" or "SMemrealtime";
                     if (instruction.Control is Gen5InterpolationControl interpolationControl)
                     {
@@ -927,7 +953,7 @@ public static partial class Gen5MslTranslator
                     source.AppendLine(
                         $"// tessellator: partition={tessellator.Partition} " +
                         $"output={(tessellator.OutputClockwise ? "cw" : "ccw")} max={tessellator.MaxFactor}");
-                    source.AppendLine($"[[patch(triangle, {tessellator.ControlPoints})]]");
+                    source.AppendLine($"[[patch({(tessellator.Quad ? "quad" : "triangle")}, {tessellator.ControlPoints})]]");
                 }
 
                 source.AppendLine($"vertex Gen5VsOut {EntryPointName}(");
@@ -1007,11 +1033,12 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    uint3 sharpemu_group_id [[threadgroup_position_in_grid]],");
             }
 
-            if (_stage == Gen5MslStage.Vertex && _request.Tessellation is { Role: Gen5TessellationRole.Domain })
+            if (_stage == Gen5MslStage.Vertex && _request.Tessellation is { Role: Gen5TessellationRole.Domain } patchDomain)
             {
                 source.AppendLine("    uint sharpemu_patch_id [[patch_id]],");
-                source.AppendLine("    float3 sharpemu_patch_position [[position_in_patch]],");
+                source.AppendLine($"    {(patchDomain.Quad ? "float2" : "float3")} sharpemu_patch_position [[position_in_patch]],");
                 source.AppendLine("    uint sharpemu_instance_id [[instance_id]],");
+                source.AppendLine($"    constant uint* sharpemu_domain_launch [[buffer({Gen5TessellationLaunch.DomainLaunchBufferIndex})]],");
             }
             else if (_stage == Gen5MslStage.Vertex)
             {
@@ -1381,6 +1408,11 @@ public static partial class Gen5MslTranslator
                 preludes |= Gen5MslPreludes.BufferOffset;
             }
 
+            if (_usesDecodedFormatLoads)
+            {
+                preludes |= Gen5MslPreludes.DecodedFormatLoads;
+            }
+
             if (_usesCoherentLoads)
             {
                 preludes |= Gen5MslPreludes.CoherentLoads;
@@ -1416,7 +1448,8 @@ public static partial class Gen5MslTranslator
         // device-address page table.
         internal static void AppendLeadingPreludes(StringBuilder source, Gen5MslPreludes preludes)
         {
-            if ((preludes & Gen5MslPreludes.FormatLoads) != 0)
+            // The decoder (format_load_prelude.msl) reads the format tables.
+            if ((preludes & (Gen5MslPreludes.FormatLoads | Gen5MslPreludes.DecodedFormatLoads)) != 0)
             {
                 EmitFormatLoadPrelude(source);
             }
@@ -1445,6 +1478,11 @@ public static partial class Gen5MslTranslator
             if ((preludes & Gen5MslPreludes.BufferOffset) != 0)
             {
                 source.Append(MslTemplates.Render("buffer_offset_prelude"));
+            }
+
+            if ((preludes & Gen5MslPreludes.DecodedFormatLoads) != 0)
+            {
+                source.Append(MslTemplates.Render("format_load_prelude"));
             }
 
             if ((preludes & (Gen5MslPreludes.CoherentLoads | Gen5MslPreludes.PairLocks)) != 0)
@@ -1623,11 +1661,12 @@ public static partial class Gen5MslTranslator
         }
 
         // The merged local/hull wave as the hardware's hull stage starts it (Gen5TessellationLaunch):
-        // one wave64 per threadgroup over PatchesPerGroup patches. s2 is the threadgroup's off-chip
-        // offset, s3 the merged wave info (local and hull thread counts, one control point each), s4
-        // its tessellation-factor offset; v0 the patch, v1 the patch within the group and the control
-        // point, v2 the local half's vertex index, v3 its thread within the group (its LDS slot), v5
-        // the instance. s[0:1] and the user data come from the layout like any user data.
+        // one wave64 per threadgroup over PatchesPerGroup patches of the draw's instances, instance
+        // after instance. s2 is the threadgroup's off-chip offset, s3 the merged wave info (local and
+        // hull thread counts, one control point each), s4 its tessellation-factor offset; v0 the patch
+        // within its instance, v1 the patch within the group and the control point, v2 the local
+        // half's vertex index, v3 its thread within the group (its LDS slot), v5 the instance. s[0:1]
+        // and the user data come from the layout like any user data.
         private static void EmitHullLaunchState(StringBuilder source, Gen5TessellationLaunch hull)
         {
             var patches = hull.PatchesPerGroup;
@@ -1640,25 +1679,30 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"    s[2] = sharpemu_group_id.x * {hull.OffchipBlockBytes}u;");
             source.AppendLine("    s[3] = sharpemu_hull_points | (sharpemu_hull_points << 8);");
             source.AppendLine($"    s[4] = sharpemu_hull_first * {hull.FactorBytesPerPatch}u;");
-            source.AppendLine($"    v[0] = sharpemu_hull_first + sharpemu_hull_lane / {points}u;");
+            source.AppendLine($"    uint sharpemu_hull_patch = sharpemu_hull_first + sharpemu_hull_lane / {points}u;");
+            source.AppendLine("    uint sharpemu_hull_instance_patches = max(sharpemu_hull_launch[2], 1u);");
+            source.AppendLine("    uint sharpemu_hull_instance_patch = sharpemu_hull_patch % sharpemu_hull_instance_patches;");
+            source.AppendLine("    v[0] = sharpemu_hull_instance_patch;");
             source.AppendLine($"    v[1] = (sharpemu_hull_lane / {points}u) | ((sharpemu_hull_lane % {points}u) << 8);");
             source.AppendLine("    v[2] = sharpemu_hull_lane < sharpemu_hull_points");
-            source.AppendLine($"        ? sharpemu_hull_vertices[sharpemu_hull_first * {points}u + sharpemu_hull_lane] : 0u;");
+            source.AppendLine($"        ? sharpemu_hull_vertices[sharpemu_hull_instance_patch * {points}u + sharpemu_hull_lane % {points}u] : 0u;");
             source.AppendLine("    v[3] = sharpemu_hull_lane;");
-            source.AppendLine("    v[5] = sharpemu_hull_launch[1];");
+            source.AppendLine("    v[5] = sharpemu_hull_launch[1] + sharpemu_hull_patch / sharpemu_hull_instance_patches;");
             source.AppendLine("    active = true;");
         }
 
-        // The domain program at one point the tessellator made: its barycentric u and v in v5/v6, the
+        // The domain program at one point the tessellator made: its u and v in v5/v6 (barycentric, or a quad's), the
         // patch within its hull threadgroup in v7, the patch in v8 and that group's off-chip offset in s4.
+        // The hull kernel ran over every instance's patches, instance after instance.
         private static void EmitDomainLaunchState(StringBuilder source, Gen5TessellationLaunch domain)
         {
             var patches = domain.PatchesPerGroup;
+            source.AppendLine("    uint sharpemu_domain_patch = (sharpemu_instance_id - sharpemu_domain_launch[1]) * sharpemu_domain_launch[0] + sharpemu_patch_id;");
             source.AppendLine("    v[5] = as_type<uint>(sharpemu_patch_position.x);");
             source.AppendLine("    v[6] = as_type<uint>(sharpemu_patch_position.y);");
-            source.AppendLine($"    v[7] = sharpemu_patch_id % {patches}u;");
+            source.AppendLine($"    v[7] = sharpemu_domain_patch % {patches}u;");
             source.AppendLine("    v[8] = sharpemu_patch_id;");
-            source.AppendLine($"    s[4] = (sharpemu_patch_id / {patches}u) * {domain.OffchipBlockBytes}u;");
+            source.AppendLine($"    s[4] = (sharpemu_domain_patch / {patches}u) * {domain.OffchipBlockBytes}u;");
         }
 
         private static void EmitComputeSystemRegister(
@@ -2848,6 +2892,28 @@ public static partial class Gen5MslTranslator
                 Line("{");
                 _indent++;
             }
+            // A program with many of these loads calls the decoder (format_load_prelude.msl).
+            if (memory.Decode is not null && byteAddress.Contiguous &&
+                _options.DecodedFormatLoadThreshold > 0 && _formatBufferLoads >= _options.DecodedFormatLoadThreshold)
+            {
+                _usesDecodedFormatLoads = true;
+                var decoded = Temp("uint4", memory.Decode(byteAddress.Base, word3, componentCount));
+                var decodedValues = new string[componentCount];
+                for (var destination = 0; destination < decodedValues.Length; destination++)
+                {
+                    decodedValues[destination] = $"{decoded}[{destination}]";
+                }
+
+                StoreFormatLoadComponents(vectorData, decodedValues, d16, numberFormat);
+                if (dwordRun || packedRun)
+                {
+                    _indent--;
+                    Line("}");
+                }
+
+                return;
+            }
+
             // A format the table cannot decode reads every destination as zero there.
             var valid = memory.ZeroInvalidFormat ? Temp("bool", $"{dataFormat} != 0u") : null;
             var canonical = new string[4];
@@ -3175,11 +3241,14 @@ public static partial class Gen5MslTranslator
         // takes (address, bytes); the word load takes (address, bytes, in bounds) and reads
         // the unaligned word holding those bytes; LoadWords, when present, loads a run of
         // whole dwords. ZeroInvalidFormat reads a format the table cannot decode as zero.
+        // Decode, when present, is the whole general decoder of a contiguous element as one
+        // call (address, word 3, components): the destination values as a uint4.
         private readonly record struct FormatMemory(
             Func<string, string, string> ElementInBounds,
             Func<string, string, string, string> LoadWord,
             Func<uint, string, string>? LoadWords,
-            bool ZeroInvalidFormat);
+            bool ZeroInvalidFormat,
+            Func<string, string, uint, string>? Decode = null);
 
         // A GLC load reads its words through the coherent helpers (coherent_load_prelude).
         private FormatMemory BindingFormatMemory(int bindingIndex, bool glc = false)
@@ -3191,7 +3260,11 @@ public static partial class Gen5MslTranslator
                     ? $"sharpemu_load_word_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address})"
                     : LoadWord(bindingIndex, address),
                 (count, address) => $"sharpemu_load_words{(glc ? "_coherent" : string.Empty)}<{count}>(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address})",
-                ZeroInvalidFormat: false);
+                ZeroInvalidFormat: false,
+                Decode: glc
+                    ? null
+                    : (address, word3, count) =>
+                        $"sharpemu_format_load_decoded(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address}, {word3}, {count}u)");
         }
 
         private string LoadFormatComponent(

@@ -160,7 +160,7 @@ public sealed class ShaderPrewarmList : IDisposable
     public static string FirstFrameFileName => Stem + ".first-frame";
 
     private const uint Magic = 0x57504553;
-    private const uint FormatVersion = 6;
+    private const uint FormatVersion = 8;
     private const byte CodeKind = 1;
     private const byte ComputeKind = 2;
     private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);
@@ -810,6 +810,9 @@ public sealed class ShaderPrewarmList : IDisposable
             writer.Write(sampler.LodBias);
             writer.Write(sampler.MirrorOnceBorderAxes);
             writer.Write(sampler.BorderColorType);
+            writer.Write(sampler.ForceDegamma);
+            writer.Write(sampler.Reduction);
+            writer.Write(sampler.ReductionAcrossLevels);
         }
 
         writer.Flush();
@@ -883,7 +886,8 @@ public sealed class ShaderPrewarmList : IDisposable
         ReadWords(reader, payload.Length, specialization.SamplerDescriptorGroups);
         for (var count = CheckedCount(reader.ReadInt32(), payload.Length); count > 0; count--)
         {
-            specialization.Samplers.Add(new SamplerSpecialization(reader.ReadInt32(), reader.ReadUInt32(), reader.ReadUInt32()));
+            specialization.Samplers.Add(new SamplerSpecialization(
+                reader.ReadInt32(), reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadBoolean(), reader.ReadUInt32(), reader.ReadBoolean()));
         }
 
         return new ComputePrewarmRecord

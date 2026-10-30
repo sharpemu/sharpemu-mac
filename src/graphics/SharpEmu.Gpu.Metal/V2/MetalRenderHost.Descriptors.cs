@@ -484,6 +484,22 @@ internal sealed partial class MetalRenderHost
             prepared.MemoPages[index] = _imageCache.RequestPageVersions(in request);
         }
 
+        if (storage && MetalImageCache.TraceStencilTwins && request.Description.PixelFormat == GpuFormat.R8Uint &&
+            request.Description.Samples > 1)
+        {
+            _imageCache.TraceStencilTwin(in request, storage: true);
+        }
+
+        if (!storage && _imageCache.TryFindStencilTwin(in request, out var stencilTwin))
+        {
+            // A multisampled depth image's stencil read as 8-bit integers: its own stencil view.
+            prepared.Images[index] = stencilTwin;
+            prepared.Requests[index] = request;
+            prepared.IsStorage[index] = false;
+            prepared.Textures[index] = 0;
+            return;
+        }
+
         var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
         resolution = resolution with { Request = request };
         var found = _imageCache.GetImage(imageIdentifier);
@@ -493,6 +509,30 @@ internal sealed partial class MetalRenderHost
         prepared.Requests[index] = request;
         prepared.IsStorage[index] = storage;
         prepared.Textures[index] = 0;
+        TraceImageBinding(prepared, index, words, in request, found.Description);
+    }
+
+    // SHARPEMU_TRACE_IMAGE_BINDINGS=<hash>[,...]: what each image of those programs resolves to, once per
+    // image and address, for checking the texture a culling or lighting pass actually samples.
+    private static readonly HashSet<ulong> _traceImageBindingHashes = ParseDumpBufferHashesFrom("SHARPEMU_TRACE_IMAGE_BINDINGS");
+    private readonly HashSet<(ulong, int, ulong)> _tracedImageBindings = new();
+    // SHARPEMU_TRACE_IMAGE_BINDINGS_MAX=<n>: lines before the trace stops (default 256), for tracing a whole corpus.
+    private static readonly int _traceImageBindingsMax =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_IMAGE_BINDINGS_MAX"), out var max) && max > 0 ? max : 256;
+
+    private void TraceImageBinding(MetalStageBindings prepared, int index, uint[] words, in ImageRequest request, object description)
+    {
+        if (_traceImageBindingHashes.Count == 0 || !_traceImageBindingHashes.Contains(prepared.Program.Hash) ||
+            _tracedImageBindings.Count >= _traceImageBindingsMax || !_tracedImageBindings.Add((prepared.Program.Hash, index, request.Description.Data.Address)))
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[METAL-V2][IMAGE-BINDING] flip={_flips} hash=0x{prepared.Program.Hash:X16} image={index} " +
+            $"words=[{string.Join(',', words.Select(word => $"{word:X8}"))}] at=0x{request.Description.Data.Address:X} size=0x{request.Description.Data.Size:X} " +
+            $"format={request.Description.PixelFormat}/{request.Description.GuestFormat} extent={request.Description.Extent.Width}x{request.Description.Extent.Height} " +
+            $"tile={request.Description.TileMode} resources={request.Description.Resources} view={request.View} role={request.Role}");
     }
 
     private nint ResolveSampler(
@@ -763,7 +803,7 @@ internal sealed partial class MetalRenderHost
                         identifier, request with { Role = role }, out stage.TextureIds[index]);
                 }
 
-                NotePendingInputDump(stage.Textures[index], identifier, index, role);
+                NotePendingInputDump(stage.Textures[index], identifier, index, role, stage.Program.Stage == ShaderStageKind.Compute);
                 BindStorageMipViews(stage, info.Images[index], identifier, request with { Role = role }, index);
             }
         }
@@ -814,6 +854,9 @@ internal sealed partial class MetalRenderHost
             var written = info.Buffers[index].Written;
             FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
             var range = ResolveStorageBuffer(descriptor.Address, size, written);
+            TraceBufferUser(stage, $"storage[{index}]{(written ? " written" : string.Empty)}", descriptor.Address, size);
+            TraceRecordChain(stage, index, descriptor.Address, size);
+            TraceBufferAtCompletion(stage, index, descriptor.Address, size);
             if (written)
             {
                 using var writtenScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenBuffer);
@@ -871,6 +914,28 @@ internal sealed partial class MetalRenderHost
     /// submission still writing them. The twin of the Vulkan presenter's
     /// <c>BindDeviceAddressRanges</c>.
     /// </summary>
+    // SHARPEMU_METAL_V2_TRACE_BIG_DEVICE_RANGES=<MB> (diagnostic): each program's device-address range of at least that
+    // size, once per program and handle (a range over a GPU-written image writes the whole image back first).
+    private static readonly ulong _traceBigDeviceRangeBytes =
+        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRACE_BIG_DEVICE_RANGES"), out var bigRangeMegabytes)
+            ? bigRangeMegabytes << 20 : 0;
+
+    private readonly HashSet<(ulong, uint)> _tracedBigDeviceRanges = new();
+
+    // SHARPEMU_METAL_V2_TRACE_DEVICE_RANGE_OVERLAP=<hex base>:<hex size>: with the above set, the ranges that overlap these
+    // bytes instead, of any size.
+    private static readonly (ulong Base, ulong Size) _traceDeviceRangeOverlap = ParseRangeOverlap(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRACE_DEVICE_RANGE_OVERLAP"));
+
+    private static (ulong, ulong) ParseRangeOverlap(string? text)
+    {
+        var parts = (text ?? string.Empty).Split(':');
+        return parts.Length == 2 &&
+            ulong.TryParse(parts[0], System.Globalization.NumberStyles.HexNumber, null, out var start) &&
+            ulong.TryParse(parts[1], System.Globalization.NumberStyles.HexNumber, null, out var length)
+            ? (start, length) : (0, 0);
+    }
+
     private void BindDeviceAddressRanges(
         MetalStageBindings stage, ShaderResourceInfo info, ResourceSnapshot snapshot)
     {
@@ -905,9 +970,28 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = ClampMappedSize(range.Base, range.Size);
+            TraceBufferUser(stage, $"device_address h{range.Handle}{(range.Written ? " written" : string.Empty)}", range.Base, size);
+            if (_traceBigDeviceRangeBytes != 0 &&
+                (_traceDeviceRangeOverlap.Size != 0
+                    ? range.Base < _traceDeviceRangeOverlap.Base + _traceDeviceRangeOverlap.Size && _traceDeviceRangeOverlap.Base < range.Base + size
+                    : size >= _traceBigDeviceRangeBytes) &&
+                _tracedBigDeviceRanges.Count < 64 && _tracedBigDeviceRanges.Add((stage.Program.Hash, range.Handle)))
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][BIG-DEVICE-RANGE] stage={stage.Program.Stage} hash=0x{stage.Program.Hash:X16} h{range.Handle} " +
+                    $"base=0x{range.Base:X} size=0x{size:X} planned_size=0x{range.Size:X}{(range.Written ? " written" : string.Empty)}");
+            }
             OrderAfterDeferredCopies(range.Base, size);
             OrderAfterStagedStores(range.Base, size);
+            var bigWritebacks = _imageCache.BigWritebacks;
             FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor, range.Written);
+            if (_imageCache.BigWritebacks != bigWritebacks && _tracedBigDeviceRanges.Count < 64 &&
+                _tracedBigDeviceRanges.Add((stage.Program.Hash, range.Handle | 0x8000_0000u)))
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][BIG-WRITEBACK-RANGE] stage={stage.Program.Stage} hash=0x{stage.Program.Hash:X16} h{range.Handle} " +
+                    $"base=0x{range.Base:X} size=0x{size:X}{(range.Written ? " written" : string.Empty)} ranges={snapshot.DeviceAddressRanges.Length}");
+            }
             if (!range.Written)
             {
                 continue;
@@ -929,13 +1013,109 @@ internal sealed partial class MetalRenderHost
         // The program stores through the page table and no evaluated range says where.
         // Conservative is the only correct answer: every later read of any guest address
         // waits for this submission.
+        _unboundedProducer = stage.Program.Hash;
         NoteUnboundedGuestMemoryWrite();
         _deviceAddressWrites++;
         MetalV2Diagnostics.WarnOnce(
-            "device-address-unbounded",
+            $"device-address-unbounded-{stage.Program.Hash:X16}",
             $"A shader stores through the device-address page table with no evaluated range, so every " +
             $"later guest read waits for its submission: hash=0x{stage.Program.Hash:X16} " +
-            $"unplanned={unplanned} ranges={snapshot.DeviceAddressRanges.Length}.");
+            $"unplanned={unplanned} ranges={snapshot.DeviceAddressRanges.Length} [" +
+            string.Join(", ", snapshot.DeviceAddressRanges.Select(static range =>
+                $"h{range.Handle} {(range.Planned ? "planned" : "unplanned")} {(range.Written ? "written" : "read")} " +
+                $"0x{range.Base:X}+0x{range.Size:X}")) + "].");
+    }
+
+    // SHARPEMU_TRACE_BUFFER_USER=<hex>: each program that binds a buffer or device range over that address,
+    // once per program and binding, for naming the shader behind a GPU-written table the CPU reads back.
+    private static readonly ulong _traceBufferUserAddress =
+        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_BUFFER_USER"),
+            System.Globalization.NumberStyles.HexNumber, null, out var traced) ? traced : 0;
+    private readonly HashSet<(ulong, string)> _tracedBufferUsers = new();
+
+    // SHARPEMU_TRACE_RECORD_CHAIN=<hash>:<buffer>:<stride>:<count>:<pointer offset>:<target offset> (hex): for the
+    // first flips that bind it, each record's pointer and the eight dwords at pointer + target offset, for reading
+    // the descriptor a program loads through a per-record object it selects at run time.
+    private static readonly ulong[] _traceRecordChain =
+        (Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RECORD_CHAIN") ?? string.Empty)
+            .Split(':', StringSplitOptions.RemoveEmptyEntries)
+            .Select(part => ulong.TryParse(part, System.Globalization.NumberStyles.HexNumber, null, out var value) ? value : 0)
+            .ToArray();
+    private int _tracedRecordChains;
+
+    private void TraceRecordChain(MetalStageBindings stage, int index, ulong address, ulong size)
+    {
+        if (_traceRecordChain.Length != 6 || stage.Program.Hash != _traceRecordChain[0] || (ulong)index != _traceRecordChain[1] ||
+            _tracedRecordChains >= 6)
+        {
+            return;
+        }
+
+        _tracedRecordChains++;
+        var text = new System.Text.StringBuilder($"[METAL-V2][RECORD-CHAIN] flip={_flips} hash=0x{stage.Program.Hash:X16} buffer={index} base=0x{address:X} size=0x{size:X}");
+        Span<byte> pointer = stackalloc byte[8];
+        Span<byte> target = stackalloc byte[32];
+        for (ulong record = 0; record < _traceRecordChain[3] && (record + 1) * _traceRecordChain[2] <= size; record++)
+        {
+            var at = address + record * _traceRecordChain[2] + _traceRecordChain[4];
+            var value = _guestMemory.TryPeek(at, pointer) ? BitConverter.ToUInt64(pointer) : 0;
+            text.Append($"\n  record {record} ptr=0x{value:X}");
+            if (value != 0 && _guestMemory.TryPeek(value + _traceRecordChain[5], target))
+            {
+                text.Append(" words=[");
+                for (var word = 0; word < 8; word++)
+                {
+                    text.Append($"{BitConverter.ToUInt32(target[(word * 4)..]):X8}{(word < 7 ? "," : "]")}");
+                }
+            }
+        }
+
+        Console.Error.WriteLine(text.ToString());
+    }
+
+    // SHARPEMU_TRACE_BUFFER_AT_COMPLETION=<hash>:<buffer>:<bytes>:<dir> (bytes hex): once the submission that binds it
+    // completes, that buffer's first bytes as guest memory then holds them, to <dir>/<hash>-buf<n>-flip<f>-<k>.bin -
+    // what a GPU pass left in a list another pass reads, which a bind-time dump cannot show.
+    private static readonly string[] _traceBufferAtCompletion =
+        (Environment.GetEnvironmentVariable("SHARPEMU_TRACE_BUFFER_AT_COMPLETION") ?? string.Empty).Split(':');
+    private int _tracedBuffersAtCompletion;
+
+    private void TraceBufferAtCompletion(MetalStageBindings stage, int index, ulong address, ulong size)
+    {
+        if (_traceBufferAtCompletion.Length != 4 || _tracedBuffersAtCompletion >= 400 ||
+            !ulong.TryParse(_traceBufferAtCompletion[0], System.Globalization.NumberStyles.HexNumber, null, out var hash) ||
+            hash != stage.Program.Hash || _traceBufferAtCompletion[1] != index.ToString(System.Globalization.CultureInfo.InvariantCulture) ||
+            !ulong.TryParse(_traceBufferAtCompletion[2], System.Globalization.NumberStyles.HexNumber, null, out var bytes))
+        {
+            return;
+        }
+
+        var serial = _tracedBuffersAtCompletion++;
+        var flip = Interlocked.Read(ref _flips);
+        var directory = _traceBufferAtCompletion[3];
+        var length = (int)Math.Min(bytes, size);
+        _completions.Enqueue(SubmissionSerial, () =>
+        {
+            var contents = new byte[length];
+            if (_guestMemory.TryPeek(address, contents))
+            {
+                Directory.CreateDirectory(directory);
+                File.WriteAllBytes(Path.Combine(directory, $"{hash:X16}-buf{index}-flip{flip}-{serial}.bin"), contents);
+            }
+        });
+    }
+
+    private void TraceBufferUser(MetalStageBindings stage, string what, ulong address, ulong size)
+    {
+        if (_traceBufferUserAddress == 0 || _traceBufferUserAddress < address || _traceBufferUserAddress - address >= size ||
+            _tracedBufferUsers.Count >= 256 || !_tracedBufferUsers.Add((stage.Program.Hash, what)))
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[METAL-V2][BUFFER-USER] flip={_flips} stage={stage.Program.Stage} hash=0x{stage.Program.Hash:X16} {what} " +
+            $"base=0x{address:X} size=0x{size:X} offset=0x{_traceBufferUserAddress - address:X}");
     }
 
     // SHARPEMU_METAL_V2_DUMP_BUFFERS=<hash>[,<hash>...]: what one program's scalar and
@@ -1053,7 +1233,7 @@ internal sealed partial class MetalRenderHost
 
         Console.Error.WriteLine(string.Format(
             System.Globalization.CultureInfo.InvariantCulture,
-            "[METAL-V2][BUF] hash=0x{0:X16} stage={1} buf={2} addr=0x{3:X16} stride={4} records={5} " +
+            "[METAL-V2][BUF] flip={17} pending={18} hash=0x{0:X16} stage={1} buf={2} addr=0x{3:X16} stride={4} records={5} " +
             "fmt={6} req=0x{7:X} size=0x{8:X} window={9} resolved={10} read={11} " +
             "buffer=0x{12:X}+0x{13:X} same={14}\n  cpu={15}\n  gpu={16}",
             hash,
@@ -1072,7 +1252,9 @@ internal sealed partial class MetalRenderHost
             range.Offset,
             device is not null && host.AsSpan().SequenceEqual(device),
             DescribeDwords(host),
-            device is null ? "private" : DescribeDwords(device)));
+            device is null ? "private" : DescribeDwords(device),
+            Interlocked.Read(ref _flips),
+            PendingSerialHinted(descriptor.Address, size)));
     }
 
     /// <summary>The first bytes the GPU sees behind a resolved range, or null when the
@@ -1431,6 +1613,27 @@ internal sealed partial class MetalRenderHost
         imageCursor += (int)field.Count;
     }
 
+    // Under SHARPEMU_METAL_V2_TRACE_INDIRECT_DISPATCH, the scalar words a traced program reads from
+    // its flattened table: what the host evaluated from guest memory when it bound the program.
+    private int _tracedFlattenedTables;
+    private long _flattenedTableBinds;
+
+    private void TraceFlattenedTable(MetalStageBindings stage)
+    {
+        if (_traceIndirectDispatchHashes.Count == 0 || stage.Program is not { } program ||
+            !_traceIndirectDispatchHashes.Contains(program.Hash) || _tracedFlattenedTables >= 40 ||
+            _flattenedTableBinds++ % 50 != 0)
+        {
+            return;
+        }
+
+        _tracedFlattenedTables++;
+        var words = stage.StageResources.Resources.FlattenedResourceTable;
+        Console.Error.WriteLine(
+            $"[METAL-V2][INDIRECT-DISPATCH] table hash=0x{program.Hash:X16} words={words.Length} " +
+            string.Join(",", words.Select(word => word.ToString("X", System.Globalization.CultureInfo.InvariantCulture))));
+    }
+
     private ulong PointerFieldValue(MetalStageBindings stage, DescriptorBindingKind kind)
     {
         switch (kind)
@@ -1446,6 +1649,7 @@ internal sealed partial class MetalRenderHost
                     ? ReachFeedbackAddress()
                     : MetalNative.SendGpuAddress(_guestMemory.NullBuffer, SelGpuAddress);
             case DescriptorBindingKind.FlattenedResourceTable:
+                TraceFlattenedTable(stage);
                 return UploadFlattenedTable(stage.StageResources.Resources.FlattenedResourceTable, stage.Program.FlattenedTableMinimumWords);
             case DescriptorBindingKind.ShaderData:
                 if (HasGpuThreadLimits(stage) && !stage.Program.Bindings!.UsesPushData)

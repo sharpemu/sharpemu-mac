@@ -81,4 +81,8 @@ public static class GuestImageFormat
     public static uint ImageTypeOf(ReadOnlySpan<uint> descriptor) => (descriptor[3] >> 28) & 0xF;
 
     public static uint FormatOf(ReadOnlySpan<uint> descriptor) => (descriptor[1] >> 20) & 0x1FF;
+
+    /// <summary>Whether the image has levels past the first: MAX_MIP (word 5 bits 7:4), or LAST_LEVEL for a 128-bit T#.</summary>
+    public static bool IsMipmapped(ReadOnlySpan<uint> descriptor) =>
+        (descriptor.Length >= 8 ? (descriptor[5] >> 4) & 0xF : (descriptor[3] >> 16) & 0xF) != 0;
 }

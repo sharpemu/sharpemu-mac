@@ -468,6 +468,39 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            if (samplerInfo is { Reduction: not 0 } reducing && kind == "float")
+            {
+                if (hasCompare || imageClass.DepthCompare || imageClass.Cube || imageClass.Dimension == ImageDimension.Dim3D ||
+                    pastMirror is not null)
+                {
+                    ShaderCompilerWarnings.WarnOnce(
+                        $"sampler-reduction:{opcode}:{imageClass.Dimension}:{imageClass.Cube}",
+                        $"{opcode} through a min/max filter-mode sampler of a {(imageClass.Cube ? "cube" : imageClass.Dimension)} image " +
+                        $"{(hasCompare ? "with a compare " : string.Empty)}is filtered as a blend.");
+                }
+                else
+                {
+                    // The level the hardware filters at: the explicit one, the one the derivatives give, or in a fragment
+                    // function the one the sampler computes; raised to the _CL clamp.
+                    var level = explicitLod && !useGradients
+                        ? lod
+                        : useGradients
+                            ? GradientLod(texture, imageClass, gradientX, gradientY)
+                            : _stage == Gen5MslStage.Pixel
+                                ? Temp("float", $"{texture}.calculate_unclamped_lod({samplerName}, {(spatialComponents == 1 ? $"float2({coordinates}, 0.5f)" : coordinates)}) + {bias}")
+                                : "0.0f";
+                    if (clamp is not null && !(explicitLod && !useGradients))
+                    {
+                        level = Temp("float", $"max({level}, {clamp})");
+                    }
+
+                    var planar = spatialComponents == 1 ? Temp("float2", $"float2({coordinates}, 0.5f)") : coordinates;
+                    sampled = EmitReducedSample(texture, samplerName, imageClass, planar, layerArgument, level, offset, reducing);
+                    sampled = ForceDegamma(sampled, samplerInfo, kind);
+                    return true;
+                }
+            }
+
             var offsetArgument = string.Empty;
             if (offset is not null)
             {
@@ -524,6 +557,7 @@ public static partial class Gen5MslTranslator
                 sampled = Temp($"vec<{kind}, 4>", $"{pastMirror} ? {BorderColour(kind, samplerInfo!.BorderColorType)} : {sampled}");
             }
 
+            sampled = ForceDegamma(sampled, samplerInfo, kind);
             if (hasCompare)
             {
                 // A color format has no host depth view: its first channel is compared with
@@ -537,6 +571,117 @@ public static partial class Gen5MslTranslator
             }
 
             return true;
+        }
+
+        // FORCE_DEGAMMA converts the filtered colour from sRGB to linear whatever the texture's format; alpha is linear
+        // already. Per sampler: one texture sampled through two samplers may decode in one only.
+        private string ForceDegamma(string sampled, SamplerResource? samplerInfo, string kind)
+        {
+            if (samplerInfo is not { ForceDegamma: true } || kind != "float")
+            {
+                return sampled;
+            }
+
+            var encoded = Temp("float3", $"metal::max({sampled}.rgb, 0.0f)");
+            var linear = Temp("float3",
+                $"metal::select(metal::powr(({encoded} + 0.055f) / 1.055f, 2.4f), {encoded} / 12.92f, {encoded} <= 0.04045f)");
+            return Temp("vec<float, 4>", $"float4({linear}, {sampled}.a)");
+        }
+
+        // A min/max FILTER_MODE sampler returns, per component, the minimum or maximum of the texels its filter weighs
+        // rather than their weighted sum. Metal samplers only blend, so each texel of the footprint is read by an
+        // explicit-level sample at its centre through the same host sampler (its addressing and border apply, and a
+        // linear filter there weighs that texel alone), and the texels of nonzero weight are reduced: the 2x2 of the
+        // nearest level, or of the two levels a linear mip filter blends, the second one only when it weighs.
+        private string EmitReducedSample(
+            string texture,
+            string samplerName,
+            MslImageClass imageClass,
+            string coordinates,
+            string layerArgument,
+            string level,
+            string? offset,
+            SamplerResource sampler)
+        {
+            var result = Temp("vec<float, 4>", sampler.Reduction == 1 ? "float4(INFINITY)" : "float4(-INFINITY)");
+            if (!sampler.ReductionAcrossLevels)
+            {
+                EmitReducedFootprint(result, texture, samplerName, imageClass, coordinates, layerArgument, NearestMip(level, texture), offset, sampler.Reduction, null);
+                return result;
+            }
+
+            var last = Temp("float", $"(float)({texture}.get_num_mip_levels() - 1u)");
+            var clamped = Temp("float", $"metal::clamp({level}, 0.0f, {last})");
+            var first = Temp("uint", $"(uint)metal::floor({clamped})");
+            var second = Temp("uint", $"metal::min({first} + 1u, {texture}.get_num_mip_levels() - 1u)");
+            EmitReducedFootprint(result, texture, samplerName, imageClass, coordinates, layerArgument, first, offset, sampler.Reduction, null);
+            EmitReducedFootprint(
+                result, texture, samplerName, imageClass, coordinates, layerArgument, second, offset, sampler.Reduction,
+                $"{clamped} > (float){first}");
+            return result;
+        }
+
+        private void EmitReducedFootprint(
+            string result,
+            string texture,
+            string samplerName,
+            MslImageClass imageClass,
+            string coordinates,
+            string layerArgument,
+            string mip,
+            string? offset,
+            uint reduction,
+            string? weighs)
+        {
+            var oneDimensional = imageClass.SpatialComponents == 1;
+            var size = Temp(
+                "float2",
+                oneDimensional
+                    ? $"float2((float){ImageExtentQuery(texture, imageClass, 0, mip)}, 1.0f)"
+                    : $"float2((float){ImageExtentQuery(texture, imageClass, 0, mip)}, (float){ImageExtentQuery(texture, imageClass, 1, mip)})");
+            var position = Temp("float2", $"{coordinates} * {size} - 0.5f");
+            var corner = Temp("float2", $"floor({position})");
+            var fraction = Temp("float2", $"{position} - {corner}");
+            if (offset is not null)
+            {
+                Line($"{corner} += float2({offset});");
+            }
+
+            if (oneDimensional)
+            {
+                // One row: the second footprint row weighs nothing.
+                Line($"{corner}.y = 0.0f;");
+                Line($"{fraction}.y = 0.0f;");
+            }
+
+            var reduce = reduction == 1 ? "metal::fmin" : "metal::fmax";
+            for (var texel = 0; texel < 4; texel++)
+            {
+                var column = texel & 1;
+                var row = texel >> 1;
+                // The first column and row always weigh (1 - fraction > 0); the second ones only past the centre.
+                var conditions = new List<string>();
+                if (weighs is not null)
+                {
+                    conditions.Add(weighs);
+                }
+
+                if (column == 1)
+                {
+                    conditions.Add($"{fraction}.x > 0.0f");
+                }
+
+                if (row == 1)
+                {
+                    conditions.Add($"{fraction}.y > 0.0f");
+                }
+
+                var centre = $"({corner} + float2({column}.0f, {row}.0f) + 0.5f) / {size}";
+                var value = $"{texture}.sample({samplerName}, {centre}{layerArgument}, metal::level((float){mip}))";
+                Line(conditions.Count == 0
+                    ? $"{result} = {reduce}({result}, {value});"
+                    : $"if ({string.Join(" && ", conditions)}) {result} = {reduce}({result}, {value});");
+            }
         }
 
         // GATHER4*: the four texels of the 2x2 footprint a bilinear filter would read, one

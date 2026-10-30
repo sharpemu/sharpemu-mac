@@ -179,6 +179,12 @@ public sealed record Gen5MslCodegenOptions(
     /// SHARPEMU_MSL_PACKED_FORMAT_LOADS=0 restores component loads; partial trailing elements retain the decoder.</summary>
     public bool PackedFormatLoads { get; init; } = true;
 
+    /// <summary>A program with at least this many BUFFER_LOAD_FORMAT_* decodes the formats only known on the device
+    /// through one helper (format_load_prelude.msl) instead of inline at every load, which Metal compiles in seconds
+    /// instead of minutes for a program with hundreds. The whole-dword fast path stays inline. Below it the program is
+    /// emitted as before. SHARPEMU_MSL_DECODED_FORMAT_LOADS=N sets it; 0 never calls the helper.</summary>
+    public int DecodedFormatLoadThreshold { get; init; } = 16;
+
     /// <summary>Experimental guarded forwarding of the last 128-bit LDS write in a
     /// single-wave mesh subgroup. SHARPEMU_MSL_MESH_LDS_FORWARDING=1.</summary>
     public bool MeshLdsForwarding { get; init; }
@@ -199,9 +205,16 @@ public sealed record Gen5MslCodegenOptions(
     /// regions, retaining device storage for other addresses. SHARPEMU_MSL_MESH_HOT_LDS=1.</summary>
     public bool MeshHotLds { get; init; }
 
-    /// <summary>Bridge every guest wave64 of a compute threadgroup of several whole waves
-    /// across its two simdgroups, instead of running each 32-wide simdgroup as a wave.
-    /// SHARPEMU_MSL_MULTIWAVE64=0 keeps the simdgroup waves.</summary>
+    /// <summary>Bridge the guest wave64s of a compute threadgroup of several whole waves, each
+    /// across its two simdgroups, instead of running each 32-wide simdgroup as a wave
+    /// (Gen5MslTranslator's IsBridgedComputeWaves). SHARPEMU_BRIDGE_COMPUTE_WAVES=0 runs every
+    /// multi-wave compute group as simdgroup waves.</summary>
+    public bool BridgeComputeWaves { get; init; } = true;
+
+    /// <summary>With <see cref="BridgeComputeWaves"/>, bridge every such group (GTA V's BVH-build
+    /// radix sort needs its whole waves for row shifts, an EXEC of lanes 32..63 and LDS totals)
+    /// rather than only a program that reads a lane 32..63 by number (Ghost of Tsushima's light
+    /// culler). SHARPEMU_MSL_MULTIWAVE64=0 bridges only those programs.</summary>
     public bool MultiWaveCompute64 { get; init; } = true;
 
     /// <summary>In a bridged multi-wave compute group, meet at a threadgroup barrier for the
@@ -246,12 +259,16 @@ public sealed record Gen5MslCodegenOptions(
         UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "1",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
+        DecodedFormatLoadThreshold = int.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_DECODED_FORMAT_LOADS"), out var decodedLoads)
+                ? Math.Max(decodedLoads, 0) : 16,
         MeshLdsForwarding = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_FORWARDING") == "1",
         ScalarConstantBuffers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS") != "0",
         MeshHotLds = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_HOT_LDS") == "1",
         BranchlessDwordLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_BRANCHLESS_LOADS") != "0",
         StaticScratchSlots = Environment.GetEnvironmentVariable("SHARPEMU_MSL_STATIC_SCRATCH") != "0",
         MeshExitJoin = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_EXIT_JOIN") == "1",
+        BridgeComputeWaves = Environment.GetEnvironmentVariable("SHARPEMU_BRIDGE_COMPUTE_WAVES") != "0",
         MultiWaveCompute64 = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MULTIWAVE64") != "0",
         GroupUniformBarriers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GROUP_BARRIERS") != "0",
         HalfLocalWaveLoops = Environment.GetEnvironmentVariable("SHARPEMU_MSL_HALF_LOOPS") != "0",

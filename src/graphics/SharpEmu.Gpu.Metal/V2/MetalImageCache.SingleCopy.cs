@@ -13,6 +13,27 @@ internal sealed partial class MetalImageCache
     // Caller holds the lock.
     internal void ForEachImageLocked(Action<MetalCachedImage> visit) => _slots.ForEach((_, image) => visit(image));
 
+    // The textures of the images at a guest address, retained for the caller (SHARPEMU_METAL_V2_DUMP_TEXTURE_STATS).
+    internal List<(nint Texture, string Described)> RetainTexturesAt(ulong address)
+    {
+        var found = new List<(nint, string)>();
+        using (_lock.Hold())
+        {
+            _slots.ForEach((_, image) =>
+            {
+                ref readonly var described = ref image.Description;
+                if (described.Data.Address == address && image.Texture != 0)
+                {
+                    found.Add((MetalNative.Send(image.Texture, MetalNative.Selector("retain")),
+                        $"{described.PixelFormat} {described.Extent.Width}x{described.Extent.Height} levels={described.Resources.Levels} " +
+                        $"layers={described.Resources.Layers} v{image.ContentVersion} gpuModified={image.IsGpuModified} cpuDirty={image.IsCpuDirty}"));
+                }
+            });
+        }
+
+        return found;
+    }
+
     /// <summary>
     /// Caller holds the lock. True when <paramref name="image"/> is the only image over guest
     /// [address, address + size) by page, and nothing else the cache knows of reads or writes

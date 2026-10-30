@@ -1,0 +1,44 @@
+// The general decoder of a BUFFER_LOAD_FORMAT_* from a bound buffer whose descriptor word 3
+// is only known on the device, as one helper instead of inline at every load: each memory
+// component's layout, bounds, word and conversion (canonical, with W = 1 when the format has
+// no W), then the destination swizzle over the components count selects. A destination
+// selecting a memory component reads its constant when any selected component is past the
+// binding. Inline, a shader with hundreds of these loads takes Metal minutes to compile
+// (Black Myth: Wukong has computes with over 500); called, seconds.
+static uint4 sharpemu_format_load_decoded(device uint* b, uint bytes, uint addr, uint word3, uint count)
+{
+    uint entry = sharpemu_gfx10_formats[(word3 >> 12) & 0x7Fu];
+    uint dfmt = entry & 0xFFu;
+    uint nfmt = (entry >> 8) & 0xFFu;
+    uint one = sharpemu_format_one(nfmt);
+    uint4 canonical = uint4(0u);
+    bool4 bounds = bool4(true);
+    for (uint component = 0u; component < 4u; component++)
+    {
+        uint byteOff = 0u;
+        uint bitOff = 0u;
+        uint bits = 0u;
+        sharpemu_format_layout(dfmt, component, byteOff, bitOff, bits);
+        uint componentBytes = (bitOff + bits + 7u) >> 3u;
+        bounds[component] = bits == 0u ||
+            (componentBytes <= bytes && (addr + byteOff) <= bytes - componentBytes);
+        uint packed = sharpemu_load_word(b, bytes, addr + byteOff);
+        uint raw = bits == 0u ? 0u : extract_bits(packed, bitOff, bits);
+        uint missing = component == 3u ? one : 0u;
+        canonical[component] = bits == 0u ? missing : sharpemu_format_convert(raw, bits, nfmt, dfmt);
+    }
+    bool inBounds = true;
+    for (uint destination = 0u; destination < count; destination++)
+    {
+        uint selector = (word3 >> (destination * 3u)) & 7u;
+        inBounds = inBounds && (selector < 4u || bounds[selector - 4u]);
+    }
+    uint4 result = uint4(0u);
+    for (uint destination = 0u; destination < count; destination++)
+    {
+        uint selector = (word3 >> (destination * 3u)) & 7u;
+        uint fill = selector == 1u ? one : 0u;
+        result[destination] = !inBounds || selector < 4u ? fill : canonical[selector - 4u];
+    }
+    return result;
+}

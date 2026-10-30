@@ -34,6 +34,7 @@ public static class GpuHostMain
         // the variable and would open the same file: its own header, written later, truncated the
         // guest's and moved every flip of the log by the GPU host's start time.
         Environment.SetEnvironmentVariable("SHARPEMU_FRAME_TIMES", null);
+        SharpEmu.CLI.AllocationProfiler.StartIfRequested();
         if (!OperatingSystem.IsMacOS())
         {
             Console.Error.WriteLine("[GPUHOST][ERROR] The GPU host runs only on macOS.");

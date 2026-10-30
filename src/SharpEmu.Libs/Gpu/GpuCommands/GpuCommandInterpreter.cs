@@ -42,6 +42,11 @@ public sealed partial class GpuCommandInterpreter
 
     // DSTRACE SLICE: packets run so far, read by the queue around a slice.
     internal ulong DsPacketSerial => _packetSerial;
+
+    // The packet the interpreter last read and how deep in indirect buffers (SHARPEMU_TRACE_BOUNDARY_WAITS).
+    internal ulong LastPacketAddress;
+    internal int LastPacketDepth;
+    internal (uint Header, uint W1, uint W2, uint W3) LastPacketWords;
     private ulong _lastWriteAddress;
     private ulong _lastWriteValue;
     private int _lastWriteLength;
@@ -449,6 +454,12 @@ public sealed partial class GpuCommandInterpreter
             }
 
             var packetAddress = cursor.Address + ((ulong)cursor.Offset * sizeof(uint));
+            if (CommandStreamQueue.TraceBoundaryWaits)
+            {
+                LastPacketAddress = packetAddress;
+                LastPacketDepth = cursorIndex;
+            }
+
             // The header and the body of a packet are consecutive, and almost every
             // packet is short, so one read of a small window covers both. Reading the
             // header on its own first doubled the number of guest reads the command
@@ -461,6 +472,11 @@ public sealed partial class GpuCommandInterpreter
             }
 
             var header = window[0];
+            if (CommandStreamQueue.TraceBoundaryWaits)
+            {
+                LastPacketWords = (header, window.Length > 1 ? window[1] : 0u, window.Length > 2 ? window[2] : 0u, window.Length > 3 ? window[3] : 0u);
+            }
+
             if (PacketProfile.Enabled)
             {
                 PacketProfile.RecordHeaderRead();

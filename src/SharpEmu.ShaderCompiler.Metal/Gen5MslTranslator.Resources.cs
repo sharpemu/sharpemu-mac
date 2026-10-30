@@ -2360,10 +2360,12 @@ public static partial class Gen5MslTranslator
                 variantElements.Add((variant, (uint)variantElement));
             }
 
+            // The table's entry count, its first entry's key and the bytes from one entry to the next.
             var mapping = imageInfo.IndirectMappingOffset;
             var count = Temp("uint", LoadFlattenedWord($"{mapping}u"));
             var first = Temp("uint", LoadFlattenedWord($"{mapping + 1}u"));
-            var entry = Temp("uint", $"({key} - {first}) >> 5u");
+            var recordStride = Temp("uint", LoadFlattenedWord($"{mapping + 2}u"));
+            var entry = Temp("uint", $"{recordStride} == 32u ? ({key} - {first}) >> 5u : ({key} - {first}) / max({recordStride}, 1u)");
             var index = Temp("uint", $"{entry} < {count} ? {entry} : {count}");
             var table = Temp($"device const {BindlessEntryStruct}*",
                 $"{ResourcesName}.{Gen5MslArgumentLayout.BindlessImagesName}[{imageInfo.BindlessSlot}u]");
@@ -2580,8 +2582,53 @@ public static partial class Gen5MslTranslator
         // every per-slot counter read the slot at the start of the share - Ghost of Tsushima's
         // grass draws took their instance count from a word that is never reset, and drew more
         // instances each frame until the frame took seconds.
-        private string GlobalDataShareAddress(Gen5ShaderInstruction instruction) =>
-            $"(({RawSource(instruction, 0)}) + ({ScalarExpression(M0Register)} >> 16u))";
+        // SHARPEMU_MSL_GDS_M0_BASE=0 leaves M0 out again, for comparison. SHARPEMU_MSL_TRACE_GDS=1
+        // names each program that addresses the share this way, with the instruction that last set
+        // M0 before the access, once per program and opcode.
+        private static readonly bool GdsM0Base = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GDS_M0_BASE") != "0";
+        private static readonly bool TraceGdsAddressing = Environment.GetEnvironmentVariable("SHARPEMU_MSL_TRACE_GDS") == "1";
+        private static readonly HashSet<(ulong, string)> TracedGdsAddressing = [];
+
+        private string GlobalDataShareAddress(Gen5ShaderInstruction instruction)
+        {
+            if (TraceGdsAddressing)
+            {
+                TraceGlobalDataShareAddressing(instruction);
+            }
+
+            return GdsM0Base
+                ? $"(({RawSource(instruction, 0)}) + ({ScalarExpression(M0Register)} >> 16u))"
+                : RawSource(instruction, 0);
+        }
+
+        private void TraceGlobalDataShareAddressing(Gen5ShaderInstruction instruction)
+        {
+            lock (TracedGdsAddressing)
+            {
+                if (!TracedGdsAddressing.Add((_request.Hash, instruction.Opcode)))
+                {
+                    return;
+                }
+            }
+
+            var setter = "none";
+            foreach (var candidate in _request.Program.Instructions)
+            {
+                if (candidate.Pc >= instruction.Pc)
+                {
+                    break;
+                }
+
+                if (candidate.Destinations.Any(static destination =>
+                        destination.Kind == Gen5OperandKind.ScalarRegister && destination.Value == M0Register))
+                {
+                    setter = $"0x{candidate.Pc:X4} {candidate.Opcode} {string.Join(", ", candidate.Sources.Select(static source => $"{source.Kind}:{source.Value:X}"))}";
+                }
+            }
+
+            Console.Error.WriteLine(
+                $"[MSL][GDS-M0] hash=0x{_request.Hash:X16} stage={_stage} pc=0x{instruction.Pc:X4} op={instruction.Opcode} m0_set_by=[{setter}]");
+        }
 
         private static string GlobalDataShareIndex(string address, uint offsetBytes) =>
             offsetBytes == 0 ? $"({address}) >> 2u" : $"(({address}) + {offsetBytes}u) >> 2u";

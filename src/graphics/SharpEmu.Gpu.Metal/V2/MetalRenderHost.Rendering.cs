@@ -1011,6 +1011,16 @@ internal sealed partial class MetalRenderHost
         ChooseElidedLoads(in state, upcoming, upcomingVertexCount, upcomingFirstVertex);
         ResolveDeferredRefreshes(in state);
         var commandBuffer = EnsureCommandBuffer();
+        // A depth target with more samples than the pass rasterises with is drawn through a
+        // one-sample proxy (MetalRenderHost.MixedSampleDepth), filled before the pass begins.
+        var depthLevel = _depthAttachmentLevel;
+        var depthSlice = _depthAttachmentSlice;
+        ref readonly var attachedDepth = ref state.DepthStencilAttachment;
+        var depthTexture = attachedDepth.View.Handle != 0 && (attachedDepth.HasDepth || attachedDepth.HasStencil)
+            ? AttachDepthTexture(commandBuffer, (nint)attachedDepth.View.Handle, state.Samples,
+                attachedDepth.HasDepth && attachedDepth.DepthClear, attachedDepth.HasStencil && attachedDepth.StencilClear,
+                ref depthLevel, ref depthSlice)
+            : 0;
         var descriptor = MetalNative.Send(
             MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("alloc")),
             MetalNative.Selector("init"));
@@ -1071,9 +1081,9 @@ internal sealed partial class MetalRenderHost
             {
                 attached = true;
                 var depth = MetalNative.Send(descriptor, SelDepthAttachment);
-                MetalNative.SendVoid(depth, SelSetTexture, (nint)depthStencil.View.Handle);
-                MetalV2Native.SendVoidValue(depth, SelSetLevel, _depthAttachmentLevel);
-                MetalV2Native.SendVoidValue(depth, SelSetSlice, _depthAttachmentSlice);
+                MetalNative.SendVoid(depth, SelSetTexture, depthTexture);
+                MetalV2Native.SendVoidValue(depth, SelSetLevel, depthLevel);
+                MetalV2Native.SendVoidValue(depth, SelSetSlice, depthSlice);
                 MetalV2Native.SendVoidValue(
                     depth, SelSetLoadAction, depthStencil.DepthClear ? Mtl.LoadActionClear : Mtl.LoadActionLoad);
                 MetalV2Native.SendVoidValue(depth, SelSetStoreAction, PendingStoreAction);
@@ -1088,9 +1098,9 @@ internal sealed partial class MetalRenderHost
             {
                 attached = true;
                 var stencil = MetalNative.Send(descriptor, SelStencilAttachment);
-                MetalNative.SendVoid(stencil, SelSetTexture, (nint)depthStencil.View.Handle);
-                MetalV2Native.SendVoidValue(stencil, SelSetLevel, _depthAttachmentLevel);
-                MetalV2Native.SendVoidValue(stencil, SelSetSlice, _depthAttachmentSlice);
+                MetalNative.SendVoid(stencil, SelSetTexture, depthTexture);
+                MetalV2Native.SendVoidValue(stencil, SelSetLevel, depthLevel);
+                MetalV2Native.SendVoidValue(stencil, SelSetSlice, depthSlice);
                 MetalV2Native.SendVoidValue(
                     stencil, SelSetLoadAction, depthStencil.StencilClear ? Mtl.LoadActionClear : Mtl.LoadActionLoad);
                 MetalV2Native.SendVoidValue(stencil, SelSetStoreAction, PendingStoreAction);
@@ -1125,6 +1135,7 @@ internal sealed partial class MetalRenderHost
                 MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetArrayLength, state.Layers);
             }
 
+            CentreFirstDepthSample(descriptor, state.Samples, depthTexture);
             _tinyPass = IsTinyPass(in state);
             if (PpProbe && _tinyPass)
             {
@@ -1281,6 +1292,7 @@ internal sealed partial class MetalRenderHost
             PassProfileClose();
         }
 
+        FinishMixedDepth();
         _renderingActive = false;
         _renderingState = default;
         _renderPassSerial++;
@@ -1897,6 +1909,26 @@ internal sealed partial class MetalRenderHost
         ProfileWork(entry, "draw-indirect", "indirect");
     }
 
+    // SHARPEMU_METAL_V2_FORCE_INDIRECT_INSTANCES: the draw runs directly with the index count and first index
+    // its arguments hold in guest memory now and the forced instance count, to see what a GPU-written count hides.
+    private unsafe bool TryForceIndirectDraw(MetalPipelineEntry entry, uint instances)
+    {
+        var bytes = new byte[20];
+        if (_tracedIndirectArguments == 0 || !TryReadGuest(_tracedIndirectArguments, bytes))
+        {
+            return false;
+        }
+
+        var indexCount = BitConverter.ToUInt32(bytes, 0);
+        var firstIndex = BitConverter.ToUInt32(bytes, 8);
+        var vertexOffset = BitConverter.ToInt32(bytes, 12);
+        var indexBytes = _indexType == Mtl.IndexTypeUInt32 ? 4UL : 2UL;
+        MetalV2Native.SendDrawIndexedBaseVertex(
+            _renderEncoder, SelDrawIndexedPrimitives, entry.PrimitiveType, indexCount, _indexType, _indexBuffer,
+            (nuint)(_indexOffset + (firstIndex * indexBytes)), instances, vertexOffset, 0);
+        return true;
+    }
+
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1924,6 +1956,13 @@ internal sealed partial class MetalRenderHost
             DrawRectanglesIndexedIndirect(entry, arguments);
             CountDraw(started);
             ProfileWork(entry, "draw-indexed-rect-indirect", "indirect");
+            return;
+        }
+
+        if (MetalV2Diagnostics.ForcedIndirectInstances(entry.VertexHash) is { } forced && TryForceIndirectDraw(entry, forced))
+        {
+            CountDraw(started);
+            ProfileWork(entry, "draw-indexed-indirect", "forced");
             return;
         }
 
@@ -2006,6 +2045,60 @@ internal sealed partial class MetalRenderHost
             entry,
             "dispatch",
             WorkShape.Groups(groupsX, groupsY, groupsZ, entry.ThreadsPerThreadgroup));
+        TraceDispatchGds();
+    }
+
+    // SHARPEMU_METAL_V2_TRACE_INDIRECT_DISPATCH=<hash>[,<hash>...]: the group counts those programs'
+    // indirect dispatches read, as the GPU sees them where the dispatch sits (the work before it is
+    // waited for), so a dispatch over a GPU-built list that does nothing shows whether its count was zero.
+    private static readonly HashSet<ulong> _traceIndirectDispatchHashes =
+        ParseDumpBufferHashesFrom("SHARPEMU_METAL_V2_TRACE_INDIRECT_DISPATCH");
+    private int _tracedIndirectDispatches;
+    private long _indirectTraceCalls;
+
+    // One in every so many traced dispatches is reported, so a run reaches the scenes after the title.
+    private bool TakeIndirectTraceSample() => _indirectTraceCalls++ % 149 == 0 && _tracedIndirectDispatches++ < 400;
+
+    private void TraceIndirectDispatch(ulong argumentsAddress)
+    {
+        if (_traceIndirectDispatchHashes.Count == 0 || _pendingComputePipeline is not { } entry ||
+            !_traceIndirectDispatchHashes.Contains(entry.VertexHash) || !TakeIndirectTraceSample())
+        {
+            return;
+        }
+
+        FlushAndWaitForGpu();
+        Span<uint> groups = stackalloc uint[3];
+        var read = TryReadGuest(argumentsAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(groups));
+        Console.Error.WriteLine(
+            $"[METAL-V2][INDIRECT-DISPATCH] hash=0x{entry.VertexHash:X16} args=0x{argumentsAddress:X} " +
+            (read ? $"groups={groups[0]}x{groups[1]}x{groups[2]}" : "unreadable") + $" gds[0x928..]={TracedGdsWindow()}");
+    }
+
+    // The data share words Ghost of Tsushima's tile classification appends to, as the GPU left them.
+    private string TracedGdsWindow()
+    {
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(_guestMemory.GdsWords());
+        var parts = new string[(0x978 - 0x928) / 4];
+        for (var index = 0; index < parts.Length; index++)
+        {
+            parts[index] = words[0x928 / 4 + index].ToString("X", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return string.Join(",", parts);
+    }
+
+    // A traced program's direct dispatch: the data share once it has run.
+    private void TraceDispatchGds()
+    {
+        if (_traceIndirectDispatchHashes.Count == 0 || _pendingComputePipeline is not { } entry ||
+            !_traceIndirectDispatchHashes.Contains(entry.VertexHash) || !TakeIndirectTraceSample())
+        {
+            return;
+        }
+
+        FlushAndWaitForGpu();
+        Console.Error.WriteLine($"[METAL-V2][INDIRECT-DISPATCH] ran hash=0x{entry.VertexHash:X16} gds[0x928..]={TracedGdsWindow()}");
     }
 
     public bool TryDispatchIndirect(ulong argumentsAddress)
@@ -2018,6 +2111,7 @@ internal sealed partial class MetalRenderHost
 
         // The GPU reads the group counts where the dispatch sits in the stream.
         OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint));
+        TraceIndirectDispatch(argumentsAddress);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var encoder = EnsureComputeEncoder();
         var entry = _pendingComputePipeline ??

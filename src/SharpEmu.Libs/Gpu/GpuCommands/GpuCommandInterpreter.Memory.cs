@@ -197,6 +197,25 @@ public sealed partial class GpuCommandInterpreter
         }
     }
 
+    // SHARPEMU_TRACE_GPU_CLOCKS=<n>: the first n clock values the stream samples, with the gap since the last one, so the
+    // durations a title measures from its timestamps can be read off.
+    private static readonly int TracedClockLimit =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GPU_CLOCKS"), out var tracedClocks) ? tracedClocks : 0;
+    private static int _tracedClocks;
+    private static ulong _lastTracedClock;
+
+    private void TraceClock(string source, ulong destination, ulong clock)
+    {
+        if (TracedClockLimit == 0 || Interlocked.Increment(ref _tracedClocks) > TracedClockLimit)
+        {
+            return;
+        }
+
+        var last = Interlocked.Exchange(ref _lastTracedClock, clock);
+        Console.Error.WriteLine(
+            $"[GPU][CLOCK] {source} submit={SubmitId} dst=0x{destination:X} value={clock} since_last_us={(last == 0 ? 0 : (long)(clock - last) / 100.0):F1}");
+    }
+
     internal void WriteReferenceClock(ulong destination, uint byteCount)
     {
         if (destination == 0 || byteCount is not (sizeof(uint) or sizeof(ulong)) || (destination & (byteCount - 1u)) != 0)
@@ -205,6 +224,7 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var clock = GpuReferenceClock.Read();
+        TraceClock("copy", destination, clock);
         if (_host.DefersEndOfPipeLabel(EndOfPipeWriteKind.ClockWrite) &&
             (byteCount == sizeof(ulong) || _host.DefersEndOfPipeLabel(EndOfPipeWriteKind.Write32)))
         {

@@ -330,12 +330,49 @@ internal sealed partial class MetalRenderHost
     // Command memory and polled words on the command thread: bytes a queued fill or copy writes wait
     // for it; bytes an image the GPU drew into, a pending GPU write or a command-processor or label
     // write owns are read by the worker; the rest are read here.
+    // SHARPEMU_METAL_V2_CT_READ_REASONS=1 (diagnostic): every two seconds, why the command thread's reads went to
+    // the worker: GPU-drawn image bytes, a pending shader store, a pending command-processor write, a pending label.
+    private static readonly bool CommandThreadReadReasons =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CT_READ_REASONS") == "1";
+
+    private readonly long[] _ctReadReasons = new long[5];
+    private long _ctReadReasonsReported;
+
+    private void NoteCommandThreadReadReason(ulong address, ulong size)
+    {
+        var image = _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size);
+        var store = IsGpuWritePendingConcurrent(address, size);
+        var cp = _cpOverlay.Count != 0 &&
+            _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None;
+        var label = _labelOverlay.Count != 0 &&
+            _labelOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None;
+        _ctReadReasons[0]++;
+        if (image) _ctReadReasons[1]++;
+        if (store) _ctReadReasons[2]++;
+        if (cp) _ctReadReasons[3]++;
+        if (label) _ctReadReasons[4]++;
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (now - _ctReadReasonsReported >= 2 * System.Diagnostics.Stopwatch.Frequency)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][CT-READS] to_worker={_ctReadReasons[0]} image={_ctReadReasons[1]} store={_ctReadReasons[2]} " +
+                $"cp_write={_ctReadReasons[3]} label={_ctReadReasons[4]} last=0x{address:X}+0x{size:X}");
+            Array.Clear(_ctReadReasons);
+            _ctReadReasonsReported = now;
+        }
+    }
+
     private bool ReadOnCommandThread(ulong address, Span<byte> destination)
     {
         var size = (ulong)destination.Length;
         _commandThread!.WaitForPendingRange(address, size);
         if (IsOwnedConcurrent(ConcurrentQuery.Word, address, size))
         {
+            if (CommandThreadReadReasons)
+            {
+                NoteCommandThreadReadReason(address, size);
+            }
+
             return ReadOnWorker(address, destination, (at, bytes) => TryReadGuest(at, bytes));
         }
 

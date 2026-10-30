@@ -219,6 +219,94 @@ public sealed class TextureSceneTests(ITestOutputHelper output) : SceneTestBase(
         check.Done();
     }
 
+    // FORCE_DEGAMMA converts the filtered colour from sRGB to linear: halfway between the red and the green level, a
+    // 0.5 of each decodes to 0.214 (decoding the texels before the filter would leave 0.5, as 0 and 1 decode to themselves).
+    [Fact]
+    public void ForceDegammaSamplerDecodesTheFilteredColour()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var chain = MipChain(rig, 64, out _);
+        var pm4 = new ScenePm4();
+        var decoded = Draw(rig, pm4, 16, 16, SampleL, MipTexture(chain),
+            Descriptors.Sampler(mipFilter: 2, minFilter: 1, magFilter: 1, forceDegamma: true), UvQuad(16, 16, 0, 0, 16, 16, 0, 0, 1, 1), 0.5f);
+        var plain = Draw(rig, pm4, 16, 16, SampleL, MipTexture(chain),
+            Descriptors.Sampler(mipFilter: 2, minFilter: 1, magFilter: 1), UvQuad(16, 16, 0, 0, 16, 16, 0, 0, 1, 1), 0.5f);
+        rig.Submit(pm4);
+        var half = MathF.Pow((0.5f + 0.055f) / 1.055f, 2.4f);
+        var check = new Check();
+        Region(check, "force-degamma sampler", Read(rig, decoded), 16, 16, [half, half, 0f, 1f], 0.03f);
+        Region(check, "ordinary sampler", Read(rig, plain), 16, 16, [0.5f, 0.5f, 0f, 1f], 0.03f);
+        check.Done();
+    }
+
+    // A min/max FILTER_MODE sampler (S# word 0, bits 30:29) returns per component the minimum or maximum of the texels its
+    // bilinear filter weighs. Ghost of Tsushima's volumetric fog reads the farthest depth of a tile so; a blend of the sky
+    // with the ground in front of it stopped the froxel march short of the ground, and the froxels it skipped showed as
+    // white rims along every silhouette.
+    [Theory]
+    [InlineData(1u, "min")]
+    [InlineData(2u, "max")]
+    public void AReductionSamplerReturnsTheMinimumOrMaximumOfItsFootprint(uint filterMode, string name)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var texels = new byte[8 * 8 * 4];
+        for (var j = 0; j < 8; j++)
+        {
+            for (var i = 0; i < 8; i++)
+            {
+                BitConverter.TryWriteBytes(texels.AsSpan(((j * 8) + i) * 4), GatherTexel(i, j));
+            }
+        }
+
+        var image = rig.LinearImage(8, 8, 4, texels);
+        uint[] texture = Descriptors.Texture(image, Rgba8, 8, 8);
+        // u * 8 - 0.5 = x + 0.25: the footprint of pixel x is texels x and x + 1, each weighing.
+        var pm4 = new ScenePm4();
+        var reduced = Draw(rig, pm4, 16, 16, SampleL, texture, Descriptors.Sampler(magFilter: 1, minFilter: 1, filterMode: filterMode),
+            UvQuad(16, 16, 0, 0, 8, 8, 0.25f / 8, 0.25f / 8, 1 + (0.25f / 8), 1 + (0.25f / 8)));
+        rig.Submit(pm4);
+        var pixels = Read(rig, reduced);
+        var check = new Check();
+        float[] C(int i, int j) => Unpack(GatherTexel(Math.Min(i, 7), Math.Min(j, 7)));
+        for (var y = 0; y < 8; y++)
+        {
+            for (var x = 0; x < 8; x++)
+            {
+                float[][] footprint = [C(x, y), C(x + 1, y), C(x, y + 1), C(x + 1, y + 1)];
+                var expected = Enumerable.Range(0, 4)
+                    .Select(component => filterMode == 1 ? footprint.Min(texel => texel[component]) : footprint.Max(texel => texel[component]))
+                    .ToArray();
+                check.Colour($"{name} px({x},{y})", Pixel(pixels, 16, x, y), expected, 0.003f);
+            }
+        }
+
+        check.Done();
+    }
+
+    // With a linear mip filter the reduction spans both levels: halfway between the red and the green level the minimum
+    // is black and the maximum yellow, where a blend gives half of each.
+    [Theory]
+    [InlineData(1u, 0f, 0f)]
+    [InlineData(2u, 1f, 1f)]
+    public void AReductionSamplerWithALinearMipFilterReducesBothLevels(uint filterMode, float red, float green)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var chain = MipChain(rig, 64, out _);
+        var pm4 = new ScenePm4();
+        var reduced = Draw(rig, pm4, 16, 16, SampleL, MipTexture(chain),
+            Descriptors.Sampler(mipFilter: 2, minFilter: 1, magFilter: 1, filterMode: filterMode), UvQuad(16, 16, 0, 0, 16, 16, 0, 0, 1, 1), 0.5f);
+        var level = Draw(rig, pm4, 16, 16, SampleL, MipTexture(chain),
+            Descriptors.Sampler(mipFilter: 2, minFilter: 1, magFilter: 1, filterMode: filterMode), UvQuad(16, 16, 0, 0, 16, 16, 0, 0, 1, 1), 1f);
+        rig.Submit(pm4);
+        var check = new Check();
+        Region(check, "between levels", Read(rig, reduced), 16, 16, [red, green, 0f, 1f], 0.003f);
+        Region(check, "on a level", Read(rig, level), 16, 16, Unpack(LevelColours[1]), 0.003f);
+        check.Done();
+    }
+
     [Fact]
     public void ScreenDerivativesPickTheLevelFromTheQuadSize()
     {

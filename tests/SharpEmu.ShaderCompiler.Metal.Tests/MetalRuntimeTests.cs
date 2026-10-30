@@ -606,6 +606,25 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
             Assert.Contains("sharpemu_wave_pair[4]", shader.Source);
             Assert.Contains("sharpemu_wave_set = (sharpemu_tg_index >> 6u) * 8u", shader.Source);
         }
+
+        // SHARPEMU_MSL_MULTIWAVE64=0 bridges only a program that combines the halves itself
+        // (V_READLANE of lane 63); SHARPEMU_BRIDGE_COMPUTE_WAVES=0 bridges none.
+        static string Source(Gen5ComputeFixture fixture, Gen5MslCodegenOptions options)
+        {
+            var request = Gen5ComputeFixtures.CreateComputeRequest(fixture, waveLaneCount: 64, localSizeX: 256);
+            Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options), error);
+            return shader.Source;
+        }
+
+        var upperLaneOnly = Gen5MslCodegenOptions.FromEnvironment with { MultiWaveCompute64 = false };
+        var broadcast = Source(Gen5ComputeFixtures.Wave64Broadcast, upperLaneOnly);
+        Assert.DoesNotContain("sharpemu_wave_scratch", broadcast);
+        Assert.DoesNotContain("threadgroup_barrier", broadcast);
+        var readLane = Source(Gen5ComputeFixtures.Wave64ReadLane, upperLaneOnly);
+        Assert.Contains("sharpemu_wave_scratch[32]", readLane);
+        Assert.Contains("sharpemu_wave_pair[4]", readLane);
+        Assert.DoesNotContain("sharpemu_wave_pair",
+            Source(Gen5ComputeFixtures.Wave64ReadLane, Gen5MslCodegenOptions.FromEnvironment with { BridgeComputeWaves = false }));
     }
 
     [Fact]

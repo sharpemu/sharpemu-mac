@@ -142,6 +142,8 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests(ITestOutputHelper ou
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        // The fill below stands for a transfer that ends the encoder, as a fill did before it could be a dispatch.
+        host.FillsShareCompute = false;
         // The encoder-boundary mode, where copies land at the next boundary rather than the commit.
         host.LabelsAtCommit = false;
         Assert.True(host.DefersCopiesInCompute);
@@ -175,6 +177,63 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests(ITestOutputHelper ou
         Assert.Equal(0x77u, rig.Backing.Read32(filled));
     }
 
+    /// <summary>
+    /// A fill recorded while a compute encoder is open is a dispatch in that encoder: the encoder stays open, and
+    /// fills over the same bytes land in stream order.
+    /// </summary>
+    [Fact]
+    public void AFillInsideAnOpenComputeEncoderStaysInItAndLandsInOrder()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        Assert.True(host.FillsShareCompute);
+        const ulong filled = GuestBase + 0x10000;
+
+        _ = host.EnsureComputeEncoder();
+        var before = host.FillsInEncoder;
+        // Both are over the size a fill is staged as a command-processor write at.
+        host.FillBufferInOrder(filled, 0x4000, 0x11);
+        host.FillBufferInOrder(filled + 0x2000, 0x2000, 0x22);
+        Assert.True(host.ComputeEncoderOpen);
+        Assert.Equal(before + 2, host.FillsInEncoder);
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(0x11u, rig.Backing.Read32(filled));
+        Assert.Equal(0x11u, rig.Backing.Read32(filled + 0x1FFC));
+        Assert.Equal(0x22u, rig.Backing.Read32(filled + 0x2000));
+        Assert.Equal(0x22u, rig.Backing.Read32(filled + 0x3FFC));
+    }
+
+    /// <summary>
+    /// A fill over bytes a label held for the encoder's end will write cannot be a dispatch in that encoder (the label
+    /// would land after it): it ends the encoder, the label lands at that boundary and the fill after it.
+    /// </summary>
+    [Fact]
+    public void AFillOverAHeldLabelEndsTheOpenComputeEncoderFirst()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.LabelsAtCommit = false;
+        Assert.True(host.DefersCopiesInCompute);
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 2));
+        Assert.Equal(1, host.DeferredLabelCopyCount);
+        var before = host.FillsInEncoder;
+        host.FillBufferInOrder(WindowedLabel, 0x2000, 0x77);
+        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(before, host.FillsInEncoder);
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(0x0000007700000077UL, rig.Backing.Read64(WindowedLabel));
+    }
+
     // Held to the commit, label copies inside and outside an open encoder wait for it and land
     // behind one barrier, in stream order. A transfer over other bytes leaves them held; one
     // over their bytes lands them first (MetalClearFoldingTests.AGpuWriteRecordedAfterTheOwedBytes...).
@@ -184,6 +243,8 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests(ITestOutputHelper ou
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        // The fill below stands for a transfer that ends the encoder, as a fill did before it could be a dispatch.
+        host.FillsShareCompute = false;
         host.LabelsAtCommit = true;
         const ulong filled = GuestBase + 0x10000;
         _ = host.TakeLabelBarriers();
@@ -1198,6 +1259,8 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests(ITestOutputHelper ou
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        // The fill below stands for a transfer that ends the encoder, as a fill did before it could be a dispatch.
+        host.FillsShareCompute = false;
         // The encoder-boundary mode, where copies land at the next boundary rather than the commit.
         host.LabelsAtCommit = false;
         const ulong dump = WindowedLabel + 0x1000;

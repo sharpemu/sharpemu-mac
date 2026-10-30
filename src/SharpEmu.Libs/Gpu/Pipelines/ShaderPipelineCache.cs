@@ -255,9 +255,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     // What a hull program hands each threadgroup's patches to the domain stage in, and the factor
     // ring's bytes per patch: GTA V's programs address a 32 KiB off-chip block per threadgroup
-    // (patch constants grow down from 0x8000) and write four factor dwords per triangle patch.
+    // (patch constants grow down from 0x8000) and write four factor dwords per triangle patch; a quad
+    // patch has six (four edges, two inside).
     public const uint TessellationOffchipBlockBytes = 0x8000;
-    public const uint TessellationFactorBytesPerPatch = 16;
+
+    public static uint TessellationFactorBytesPerPatch(bool quad) => quad ? 24u : 16u;
 
     public static uint TessellationPatchesPerGroup(uint controlPoints) =>
         controlPoints == 0 ? 0 : HullWaveLanes / controlPoints;
@@ -283,29 +285,46 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool depthBound,
         bool depthAspectBound,
         bool stencilAspectBound,
-        uint controlPoints)
+        uint controlPoints,
+        bool quad)
     {
-        // VGT_TF_PARAM: PARTITIONING [4:2], TOPOLOGY [7:5] (2 = triangles wound clockwise, 3 =
-        // counter-clockwise; RenderExecutor.IsEmulatedTessellation takes no other).
+        // VGT_TF_PARAM: TYPE [1:0] (1 = triangles, 2 = quads), PARTITIONING [4:2], TOPOLOGY [7:5] (2 =
+        // triangles wound clockwise, 3 = counter-clockwise; RenderExecutor.IsEmulatedTessellation takes no other).
         var parameter = shaderInterface.TessellationFactorParameter;
         var domain = new Gen5TessellationLaunch(
             Gen5TessellationRole.Domain, TessellationPatchesPerGroup(controlPoints), controlPoints,
-            TessellationOffchipBlockBytes, TessellationFactorBytesPerPatch,
+            TessellationOffchipBlockBytes, TessellationFactorBytesPerPatch(quad),
             (Gen5TessellationPartition)((parameter >> 2) & 0x3),
             OutputClockwise: ((parameter >> 5) & 0x7) == 2,
-            TessellationMaxFactor(shaderInterface.MaxTessellationLevel));
+            TessellationMaxFactor(shaderInterface.MaxTessellationLevel),
+            quad);
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            var started = TraceTessellationPrograms ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             var graphics = ResolveGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive,
                 depthBound, depthAspectBound, stencilAspectBound, triangleList: true, mesh: null, tessellation: domain);
+            var resolved = TraceTessellationPrograms ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             var hull = graphics.Available
                 ? PrepareHullProgram(vertex, domain with { Role = Gen5TessellationRole.Hull })
                 : new ComputeProgram { Available = false };
+            if (TraceTessellationPrograms && _tracedTessellationPrograms++ < 200)
+            {
+                var frequency = (double)System.Diagnostics.Stopwatch.Frequency;
+                Console.Error.WriteLine(
+                    $"[GPU][TESS-PROGRAMS] graphics_ms={(resolved - started) * 1000 / frequency:F2} " +
+                    $"hull_ms={(System.Diagnostics.Stopwatch.GetTimestamp() - resolved) * 1000 / frequency:F2}");
+            }
+
             return new TessellationPrograms(graphics, hull);
         }
     }
+
+    // SHARPEMU_TRACE_TESSELLATION_TIMES=1 also splits the program lookup of each tessellated draw.
+    private static readonly bool TraceTessellationPrograms =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TESSELLATION_TIMES") == "1";
+    private int _tracedTessellationPrograms;
 
     // The merged local/hull program as a compute kernel of one guest wave64. Its hull half reloads
     // its user data through SPI_SHADER_USER_DATA_ADDR_HS in s[0:1], so that pointer is user data, as
