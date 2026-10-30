@@ -18,13 +18,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <Grid Margin="24" RowDefinitions="Auto,Auto,Auto,*,Auto,Auto">
     <TextBlock Grid.Row="0"
                Text="{Binding [Launch.CustomEnv.Title], Source={x:Static local:Localization.Instance}}"
-               FontSize="24"
-               FontWeight="Bold" />
+               FontSize="20"
+               FontWeight="SemiBold" />
 
     <TextBlock Grid.Row="1"
-               Margin="0,8,0,16"
+               Margin="0,6,0,16"
                Text="{Binding [Launch.CustomEnv.Desc], Source={x:Static local:Localization.Instance}}"
-               Foreground="{StaticResource MutedBrush}"
+               Foreground="{StaticResource SecondaryTextBrush}"
                TextWrapping="Wrap" />
 
     <Button x:Name="DocumentationButton"
@@ -32,14 +32,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
             Classes="ghost"
             HorizontalAlignment="Left"
             Margin="0,0,0,12"
-            Padding="0,4"
             Content="{Binding [Launch.CustomEnv.Documentation], Source={x:Static local:Localization.Instance}}" />
 
     <TextBox x:Name="EnvironmentTextBox"
              Grid.Row="3"
              AcceptsReturn="True"
              TextWrapping="NoWrap"
-             FontFamily="Consolas,monospace"
+             FontFamily="SF Mono, Menlo, Consolas, monospace"
              FontSize="13"
              VerticalContentAlignment="Top"
              PlaceholderText="{Binding [Launch.CustomEnv.Placeholder], Source={x:Static local:Localization.Instance}}" />

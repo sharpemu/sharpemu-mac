@@ -7,8 +7,15 @@ Window and text defaults shared by all launcher views.
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <Style Selector="Window">
-    <Setter Property="FontFamily" Value="Inter, Segoe UI, sans-serif" />
+    <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}" />
+    <Setter Property="FontSize" Value="13" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
+  <!-- Accent focus ring for keyboard and gamepad (XYFocus) navigation. Controls that
+       draw their own focus state set FocusAdorner to null themselves. -->
+  <Style Selector="Button, ToggleButton, CheckBox, ComboBox, Slider, ToggleSwitch">
+    <Setter Property="FocusAdorner" Value="{StaticResource AccentFocusAdorner}" />
   </Style>
 
   <Style Selector="TextBlock.materialSymbol">
@@ -16,20 +23,26 @@ Window and text defaults shared by all launcher views.
     <Setter Property="FontFeatures" Value="+liga" />
     <Setter Property="FontSize" Value="18" />
     <Setter Property="FontWeight" Value="Normal" />
-    <Setter Property="LineHeight" Value="20" />
+    <Setter Property="LineHeight" Value="18" />
     <Setter Property="VerticalAlignment" Value="Center" />
     <Setter Property="TextAlignment" Value="Center" />
   </Style>
 
+  <!-- Icon sizes: 16 (compact, inside controls), 18 (default), 20 (large). -->
   <Style Selector="TextBlock.materialSymbol.compact">
     <Setter Property="FontSize" Value="16" />
-    <Setter Property="LineHeight" Value="18" />
+    <Setter Property="LineHeight" Value="16" />
+  </Style>
+
+  <Style Selector="TextBlock.materialSymbol.large">
+    <Setter Property="FontSize" Value="20" />
+    <Setter Property="LineHeight" Value="20" />
   </Style>
 
   <Style Selector="TextBlock.sectionTitle">
     <Setter Property="FontSize" Value="11" />
     <Setter Property="FontWeight" Value="SemiBold" />
-    <Setter Property="LetterSpacing" Value="1.5" />
+    <Setter Property="LetterSpacing" Value="0.6" />
     <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
   </Style>
 

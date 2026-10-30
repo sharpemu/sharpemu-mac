@@ -18,7 +18,7 @@
   "Options.OverlayCorner.BottomLeft": "Bottom left",
 
   "Page.Library": "Library",
-  "Page.Options": "Options",
+  "Page.Options": "Settings",
   "Page.Trophies": "Trophies",
   "Page.GameCount.One": "1 game",
   "Page.GameCount.Other": "{0} games",
@@ -55,11 +55,13 @@
   "Library.Pack.DeleteSkipped": "Done. The game folder is kept because the archive could not be confirmed to hold all of it.",
   "Library.Pack.DeleteFailed": "The archive is ready, but deleting the game folder failed: {0}",
 
-  "Library.Empty.Title": "Your library is empty",
-  "Library.Empty.Hint": "Add a folder containing your games to get started.",
+  "Library.Empty.Title": "No games yet",
+  "Library.Empty.Hint": "Add a folder that contains your games, or open a single game file.",
   "Library.Empty.SearchTitle": "No games match your search",
   "Library.Empty.SearchHint": "Nothing in the library matches “{0}”.",
   "Library.Empty.AddFolder": "＋ Add game folder",
+  "Library.Empty.AddFolderAction": "Add Game Folder…",
+  "Library.Empty.OpenFileAction": "Open Game File…",
 
   "Library.Loading": "Loading library…",
   "Library.ScanningFolder": "Scanning folder…",
