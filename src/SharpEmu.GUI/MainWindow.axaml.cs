@@ -89,9 +89,13 @@ public partial class MainWindow : Window
         LocalizedChoice.FromKey("Critical", "Options.LogLevel.Critical"),
     ];
     private readonly LocalizedChoice[] _windowModeChoices = CreateWindowModeChoices();
-    private readonly LocalizedChoice[] _themeChoices = Array.ConvertAll(
-        LauncherThemes.All,
-        palette => LocalizedChoice.FromKey(palette.Id, $"Options.Theme.{palette.Id}"));
+    private readonly LocalizedChoice[] _themeChoices =
+    [
+        .. Array.ConvertAll(
+            LauncherThemes.All,
+            palette => LocalizedChoice.FromKey(palette.Id, $"Options.Theme.{palette.Id}")),
+        LocalizedChoice.FromKey(LauncherThemes.CustomId, "Options.Theme.Custom"),
+    ];
     private readonly LocalizedChoice[] _scalingModeChoices =
     [
         LocalizedChoice.FromKey("Fit", "Options.Scaling.Fit"),
@@ -389,11 +393,7 @@ public partial class MainWindow : Window
         };
         AutoUpdateToggle.IsCheckedChanged += (_, _) =>
             _settings.CheckForUpdatesOnStartup = AutoUpdateToggle.IsChecked == true;
-        ThemeBox.SelectionChanged += (_, _) =>
-        {
-            _settings.LauncherTheme = SelectedComboText(ThemeBox, LauncherThemes.DefaultId);
-            LauncherThemes.Apply(_settings.LauncherTheme);
-        };
+        InitializeThemeControls();
         ConsoleLanguageBox.SelectionChanged += (_, _) =>
             _settings.ConsoleLanguage = SelectedComboText(ConsoleLanguageBox, "EnglishUS");
         WindowModeBox.SelectionChanged += (_, _) => _settings.WindowMode = SelectedComboText(WindowModeBox, "Windowed");
@@ -1105,7 +1105,7 @@ public partial class MainWindow : Window
         ToolTip.SetTip(VersionText, BuildInfo.Banner);
 
         _settings = GuiSettings.Load();
-        LauncherThemes.Apply(_settings.LauncherTheme);
+        ApplyLauncherTheme();
         Localization.Instance.Load(_settings.Language);
         PopulateLanguageBox();
         ApplyLocalization();
@@ -1589,7 +1589,7 @@ public partial class MainWindow : Window
             PlatformWindowMode(_settings.WindowMode), "Windowed", "Borderless", "Exclusive");
         LoadHostDisplayOptions();
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
-        ThemeBox.SelectedIndex = Array.IndexOf(LauncherThemes.All, LauncherThemes.Find(_settings.LauncherTheme));
+        SyncThemeControls();
         VSyncToggle.IsChecked = _settings.VSync;
         PortableDataToggle.IsEnabled = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent() ||
             SharpEmu.Logging.SharpEmuPaths.CanWriteExecutableDirectory();

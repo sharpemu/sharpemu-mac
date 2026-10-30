@@ -1432,6 +1432,56 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   VerticalAlignment="Center" />
                       </local:SettingRow>
 
+                      <local:SettingRow x:Name="CustomBackgroundRow"
+                                        Classes="optionRow"
+                                        IsVisible="False"
+                                        Label="{Binding [Options.Theme.Background.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Theme.Background.Desc], Source={x:Static local:Localization.Instance}}">
+                        <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                          <StackPanel x:Name="CustomBackgroundSwatches" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" />
+                          <TextBox x:Name="CustomBackgroundHex" Classes="hexField" />
+                        </StackPanel>
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="CustomAccentRow"
+                                        Classes="optionRow"
+                                        IsVisible="False"
+                                        Label="{Binding [Options.Theme.Accent.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Theme.Accent.Desc], Source={x:Static local:Localization.Instance}}">
+                        <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                          <StackPanel x:Name="CustomAccentSwatches" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" />
+                          <TextBox x:Name="CustomAccentHex" Classes="hexField" />
+                        </StackPanel>
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="GlassOpacityRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Theme.Glass.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Theme.Glass.Desc], Source={x:Static local:Localization.Instance}}">
+                        <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                          <Slider x:Name="GlassOpacitySlider"
+                                  Classes="appearanceSlider"
+                                  Minimum="30" Maximum="100"
+                                  SmallChange="5" LargeChange="10"
+                                  TickFrequency="5" IsSnapToTickEnabled="True" />
+                          <TextBlock x:Name="GlassOpacitySliderValue" Classes="sliderValue" />
+                        </StackPanel>
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="ThemeContrastRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Theme.Contrast.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Theme.Contrast.Desc], Source={x:Static local:Localization.Instance}}">
+                        <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                          <Slider x:Name="ThemeContrastSlider"
+                                  Classes="appearanceSlider"
+                                  Minimum="-50" Maximum="50"
+                                  SmallChange="5" LargeChange="10"
+                                  TickFrequency="5" IsSnapToTickEnabled="True" />
+                          <TextBlock x:Name="ThemeContrastSliderValue" Classes="sliderValue" />
+                        </StackPanel>
+                      </local:SettingRow>
+
                       <local:SettingRow x:Name="LanguageRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Language.Label], Source={x:Static local:Localization.Instance}}"

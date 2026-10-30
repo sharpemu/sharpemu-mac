@@ -32,6 +32,17 @@ internal sealed record LauncherPalette(
     string AccentForeground);
 
 /// <summary>
+/// Everything the user picks about the launcher's look: the theme, the custom theme's
+/// two colours, glass opacity (percent) and contrast (-50 to +50).
+/// </summary>
+internal sealed record LauncherAppearance(
+    string? Theme,
+    string? CustomBackground = null,
+    string? CustomAccent = null,
+    int GlassOpacity = LauncherThemes.DefaultGlassOpacity,
+    int Contrast = 0);
+
+/// <summary>
 /// The launcher themes. Applying one repaints the brush instances declared in
 /// Themes/Tokens.axaml in place, so every StaticResource user follows the change
 /// without a restart.
@@ -39,6 +50,15 @@ internal sealed record LauncherPalette(
 internal static class LauncherThemes
 {
     public const string DefaultId = "Graphite";
+    public const string CustomId = "Custom";
+    public const string DefaultCustomBackground = "#121212";
+    public const string DefaultCustomAccent = "#2E7CF6";
+    public const int DefaultGlassOpacity = 75;
+    public const int MinGlassOpacity = 30;
+    public const int MaxContrast = 50;
+
+    // Text, rims and focus rings are drawn light, so a custom background is kept dark.
+    private const byte MaxCustomBackgroundChannel = 0x40;
 
     public static readonly LauncherPalette[] All =
     [
@@ -83,20 +103,160 @@ internal static class LauncherThemes
     public static LauncherPalette Find(string? id) =>
         Array.Find(All, palette => string.Equals(palette.Id, id, StringComparison.OrdinalIgnoreCase)) ?? All[0];
 
+    public static bool IsCustom(string? id) => string.Equals(id, CustomId, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Parses #RRGGBB (or RRGGBB); anything else is rejected.</summary>
+    public static bool TryParseHex(string? text, out Color color)
+    {
+        color = default;
+        var hex = text?.Trim().TrimStart('#');
+        return hex is { Length: 6 } &&
+            hex.All(Uri.IsHexDigit) &&
+            Color.TryParse("#" + hex, out color);
+    }
+
+    /// <summary>
+    /// Builds a full palette from a background and an accent: surfaces step up from
+    /// the background in the same increments as Graphite, text is light, and the
+    /// accent's hover, pressed, tint and foreground colours follow from the accent.
+    /// </summary>
+    public static LauncherPalette Derive(string? background, string? accent)
+    {
+        if (!TryParseHex(background, out var bg))
+        {
+            bg = Color.Parse(DefaultCustomBackground);
+        }
+
+        if (!TryParseHex(accent, out var ac))
+        {
+            ac = Color.Parse(DefaultCustomAccent);
+        }
+
+        bg = Darken(bg);
+        var text = Color.Parse("#F5F5F5");
+        return new LauncherPalette(
+            Id: CustomId,
+            Background: Hex(bg),
+            Chrome: Hex(Mix(bg, Colors.Black, 0.4)),
+            Menu: Hex(Mix(bg, Colors.White, 0.034)),
+            Card: Hex(Mix(bg, Colors.White, 0.068)),
+            Elevated: Hex(Mix(bg, Colors.White, 0.101)),
+            RaisedHover: Hex(Mix(bg, Colors.White, 0.148)),
+            Field: Hex(Mix(bg, Colors.White, 0.135)),
+            FieldHover: Hex(Mix(bg, Colors.White, 0.181)),
+            Overlay: Hex(Mix(bg, Colors.White, 0.084)),
+            Text: Hex(text),
+            SecondaryText: Hex(Mix(text, bg, 0.2)),
+            Description: Hex(Mix(text, bg, 0.33)),
+            Muted: Hex(Mix(text, bg, 0.4)),
+            Faint: Hex(Mix(text, bg, 0.62)),
+            Accent: Hex(ac),
+            AccentHover: Hex(Mix(ac, Colors.White, 0.15)),
+            AccentPressed: Hex(Mix(ac, Colors.Black, 0.15)),
+            AccentTint: $"#38{ac.R:X2}{ac.G:X2}{ac.B:X2}",
+            AccentForeground: Luminance(ac) > 0.45 ? "#111111" : "#FFFFFF");
+    }
+
+    /// <summary>
+    /// Stretches (positive) or softens (negative) a palette: surfaces move away from or
+    /// toward the background, and secondary text moves toward or away from primary text.
+    /// Zero returns the palette unchanged.
+    /// </summary>
+    public static LauncherPalette AdjustContrast(LauncherPalette palette, int contrast)
+    {
+        var amount = Math.Clamp(contrast, -MaxContrast, MaxContrast) / (double)MaxContrast;
+        if (amount == 0)
+        {
+            return palette;
+        }
+
+        var bg = Color.Parse(palette.Background);
+        var text = Color.Parse(palette.Text);
+        string Surface(string hex) => Hex(Extend(bg, Color.Parse(hex), 1 + (0.6 * amount)));
+        string Tier(string hex) => Hex(Extend(text, Color.Parse(hex), 1 - (0.5 * amount)));
+        return palette with
+        {
+            Menu = Surface(palette.Menu),
+            Card = Surface(palette.Card),
+            Elevated = Surface(palette.Elevated),
+            RaisedHover = Surface(palette.RaisedHover),
+            Field = Surface(palette.Field),
+            FieldHover = Surface(palette.FieldHover),
+            Overlay = Surface(palette.Overlay),
+            SecondaryText = Tier(palette.SecondaryText),
+            Description = Tier(palette.Description),
+            Muted = Tier(palette.Muted),
+            Faint = Tier(palette.Faint),
+        };
+    }
+
+    // The point at `scale` times the distance from `origin` to `color`, clamped per channel.
+    private static Color Extend(Color origin, Color color, double scale)
+    {
+        static byte Channel(byte from, byte to, double factor) =>
+            (byte)Math.Clamp(Math.Round(from + ((to - from) * factor)), 0, 255);
+
+        return Color.FromRgb(
+            Channel(origin.R, color.R, scale),
+            Channel(origin.G, color.G, scale),
+            Channel(origin.B, color.B, scale));
+    }
+
+    private static Color Darken(Color color)
+    {
+        var max = Math.Max(color.R, Math.Max(color.G, color.B));
+        if (max <= MaxCustomBackgroundChannel)
+        {
+            return color;
+        }
+
+        var scale = (double)MaxCustomBackgroundChannel / max;
+        return Color.FromRgb(
+            (byte)Math.Round(color.R * scale),
+            (byte)Math.Round(color.G * scale),
+            (byte)Math.Round(color.B * scale));
+    }
+
+    private static Color WithAlpha(Color color, double alpha) =>
+        Color.FromArgb((byte)Math.Round(alpha * 255), color.R, color.G, color.B);
+
+    private static Color Mix(Color from, Color to, double amount) => Color.FromRgb(
+        (byte)Math.Round(from.R + (to.R - from.R) * amount),
+        (byte)Math.Round(from.G + (to.G - from.G) * amount),
+        (byte)Math.Round(from.B + (to.B - from.B) * amount));
+
+    // WCAG relative luminance.
+    private static double Luminance(Color color)
+    {
+        static double Channel(byte value)
+        {
+            var c = value / 255.0;
+            return c <= 0.03928 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
+        }
+
+        return (0.2126 * Channel(color.R)) + (0.7152 * Channel(color.G)) + (0.0722 * Channel(color.B));
+    }
+
+    private static string Hex(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+
     /// <summary>Resolves a token brush so code-built views share the themed instance.</summary>
     public static IBrush Brush(string key) =>
         Avalonia.Application.Current?.TryGetResource(key, null, out var value) == true && value is IBrush brush
             ? brush
             : Brushes.Transparent;
 
-    public static void Apply(string? id)
+    public static void Apply(LauncherAppearance appearance)
     {
         if (Avalonia.Application.Current is not { } app)
         {
             return;
         }
 
-        var palette = Find(id);
+        var palette = AdjustContrast(
+            IsCustom(appearance.Theme)
+                ? Derive(appearance.CustomBackground, appearance.CustomAccent)
+                : Find(appearance.Theme),
+            appearance.Contrast);
         var background = Color.Parse(palette.Background);
         var overlay = Color.Parse(palette.Overlay);
         var field = Color.Parse(palette.Field);
@@ -138,12 +298,13 @@ internal static class LauncherThemes
         Tint(app, "HintBarFadeBrush", background);
         Tint(app, "TrophyBackdropFadeBrush", Color.Parse(palette.Menu));
 
-        // Glass is the theme's raised colour, mostly opaque: tinted like the theme and
-        // calm enough over bright key art that labels stay readable.
+        // Glass is the theme's raised colour, mostly opaque by default: tinted like the
+        // theme and calm enough over bright key art that labels stay readable.
         var raised = Color.Parse(palette.RaisedHover);
-        Paint(app, "GlassBrush", Color.FromArgb(0xBF, raised.R, raised.G, raised.B));
-        Paint(app, "GlassHoverBrush", Color.FromArgb(0xD9, fieldHover.R, fieldHover.G, fieldHover.B));
-        Paint(app, "GlassPressedBrush", Color.FromArgb(0xF2, fieldHover.R, fieldHover.G, fieldHover.B));
+        var opacity = Math.Clamp(appearance.GlassOpacity, MinGlassOpacity, 100) / 100.0;
+        Paint(app, "GlassBrush", WithAlpha(raised, opacity));
+        Paint(app, "GlassHoverBrush", WithAlpha(fieldHover, Math.Min(1, opacity + 0.1)));
+        Paint(app, "GlassPressedBrush", WithAlpha(fieldHover, Math.Min(1, opacity + 0.2)));
 
         app.Resources["SystemAccentColor"] = accent;
     }

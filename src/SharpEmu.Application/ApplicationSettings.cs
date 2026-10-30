@@ -59,8 +59,20 @@ public sealed class ApplicationSettings
     /// <summary>UI language, matching a file code under Languages/ (e.g. "en", "tr").</summary>
     public string Language { get; set; } = "en";
 
-    /// <summary>Launcher colour theme: Graphite, Oled, Midnight or Violet.</summary>
+    /// <summary>Launcher colour theme: Graphite, Oled, Midnight, Violet or Custom.</summary>
     public string LauncherTheme { get; set; } = "Graphite";
+
+    /// <summary>Custom theme background, #RRGGBB.</summary>
+    public string CustomThemeBackground { get; set; } = "#121212";
+
+    /// <summary>Custom theme accent, #RRGGBB.</summary>
+    public string CustomThemeAccent { get; set; } = "#2E7CF6";
+
+    /// <summary>Opacity of the glass controls over key art, 30-100 percent.</summary>
+    public int GlassOpacity { get; set; } = 75;
+
+    /// <summary>Theme contrast from -50 (softer) to +50 (stronger); 0 is the theme as designed.</summary>
+    public int ThemeContrast { get; set; }
 
     public string ConsoleLanguage { get; set; } = "EnglishUS";
 
