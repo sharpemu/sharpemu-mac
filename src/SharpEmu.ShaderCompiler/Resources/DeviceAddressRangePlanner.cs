@@ -55,6 +55,7 @@ public static class DeviceAddressRangePlanner
                 if (memory.AddressSpace != FlatAddressSpace.Global ||
                     ExcludesGlobalAddress(plan, memory.Pc, handle.Operands[1]))
                 {
+                    memory.OutsideGuestMemory = true;
                     continue;
                 }
             }

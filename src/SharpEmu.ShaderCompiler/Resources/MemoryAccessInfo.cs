@@ -112,6 +112,12 @@ public sealed class MemoryAccessInfo
     // device-address planner; such an access is routed per lane like the hardware
     // and has no device-address range of its own.
     public FlatAddressSpace AddressSpace { get; set; }
+    // A store or atomic through the device-address page table (ResourceTracker.NoteDeviceAddresses).
+    public bool DeviceWrite { get; set; }
+    // A FLAT access the device-address planner found never addresses a guest page: its
+    // address lies in an aperture, or past the 48 bits a guest address has. It gets no
+    // range, and as a store it writes no guest memory.
+    public bool OutsideGuestMemory { get; set; }
     // A scalar buffer load whose descriptor only exists on the device: the shader reads
     // through the descriptor in its registers instead of a host-bound buffer.
     public bool DeviceDescriptor { get; set; }
