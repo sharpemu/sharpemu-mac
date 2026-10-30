@@ -76,7 +76,7 @@ internal sealed partial class MetalImageCache
     /// Gives an image created compressible the full usage of its format when something
     /// needs a usage it lacks: a new texture, a device copy of every subresource into it,
     /// and the old texture retired once the copy and everything that bound it are done.
-    /// A usage the format cannot have at all (an sRGB format is never writable) is left
+    /// A usage the format cannot have at all (an sRGB format off an Apple GPU is not writable) is left
     /// to the caller, which reports it as it always has. Caller holds the lock.
     /// </summary>
     private void EnsureTextureUsageLocked(MetalCachedImage image, ulong needed)

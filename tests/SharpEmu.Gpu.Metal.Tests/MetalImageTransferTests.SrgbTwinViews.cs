@@ -44,6 +44,23 @@ public sealed partial class MetalImageTransferTests
         Assert.False(MetalGuestFormats.AreSrgbTwins(MtlPixelFormat.Bc3Rgba, MtlPixelFormat.Bc3Rgba));
     }
 
+    // Demon's Souls bakes the character-creation face into an sRGB render target and makes
+    // its mips through a linear storage view of it; Metal leaves a store to a texture
+    // created without the shader-write usage undefined, so an Apple GPU, which stores to
+    // sRGB, creates the target writable.
+    [Fact]
+    public void AnSrgbColourImageIsWritableWhereTheDeviceStoresSrgb()
+    {
+        var target = Color2D(GuestPixelFormat.Bits8_8_8_8Srgb, GpuFormat.R8G8B8A8Srgb,
+            2048, 2048, 12, 1, GuestTileMode.RenderTarget);
+        Assert.NotEqual(0u, (uint)(MetalImageTransfer.UsageOf(target, MtlPixelFormat.Rgba8UnormSrgb, srgbWritable: true) &
+            MtlTextureUsage.ShaderWrite));
+        Assert.Equal(0u, (uint)(MetalImageTransfer.UsageOf(target, MtlPixelFormat.Rgba8UnormSrgb) &
+            MtlTextureUsage.ShaderWrite));
+        Assert.Equal(0u, (uint)(MetalImageTransfer.UsageOf(BlockDescription(GpuFormat.BC3SrgbBlock, GuestPixelFormat.Bc3Srgb),
+            MtlPixelFormat.Bc3RgbaSrgb, srgbWritable: true) & MtlTextureUsage.ShaderWrite));
+    }
+
     [Theory]
     [InlineData(GpuFormat.BC3UnormBlock, GuestPixelFormat.Bc3UNorm, GpuFormat.BC3SrgbBlock, MtlFormat.Bc3RgbaSrgb)]
     [InlineData(GpuFormat.BC3SrgbBlock, GuestPixelFormat.Bc3Srgb, GpuFormat.BC3UnormBlock, MtlFormat.Bc3Rgba)]
