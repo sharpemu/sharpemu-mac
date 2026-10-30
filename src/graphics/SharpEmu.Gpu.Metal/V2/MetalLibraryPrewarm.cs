@@ -70,10 +70,10 @@ internal static class MetalLibraryPrewarm
     /// <summary>
     /// Whether a compiled library is kept for the module that asks for it. The hold-until-done
     /// and precompile-only modes compile and release instead (MetalShaderPrecompile): the
-    /// guest is held meanwhile, so nothing would take them before they went idle, and the
-    /// module that asks later is a hit in macOS's shader cache.
+    /// static precompile holds the guest after them, so nothing would take them before they
+    /// went idle, and the module that asks later is a hit in macOS's shader cache.
     /// </summary>
-    internal static bool KeepLibraries { get; set; } = !MetalShaderPrecompile.Current.HoldsUntilComplete;
+    internal static bool KeepLibraries { get; set; } = !MetalShaderPrecompile.Current.HoldsForStatic;
 
     private sealed class Slot(ulong key, bool usesPerVertexInputs, byte[] compressed)
     {

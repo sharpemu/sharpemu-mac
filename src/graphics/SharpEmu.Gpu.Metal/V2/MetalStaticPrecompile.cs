@@ -161,7 +161,7 @@ internal static class MetalStaticPrecompile
         // Utility unless the guest is held until it completes (MetalCompileThread).
         MetalCompileThread.Start(
             "SharpEmu static shader precompile",
-            Precompile.HoldsUntilComplete ? SharpEmu.HLE.Host.HostThreadQos.UserInitiated : SharpEmu.HLE.Host.HostThreadQos.Utility,
+            Precompile.HoldsForStatic ? SharpEmu.HLE.Host.HostThreadQos.UserInitiated : SharpEmu.HLE.Host.HostThreadQos.Utility,
             () =>
             {
                 try
@@ -259,7 +259,7 @@ internal static class MetalStaticPrecompile
 
     private static void Run(nint device, string metalDirectory, string stamp, IGuestGpuBackend compiler)
     {
-        var hold = Precompile.HoldsUntilComplete;
+        var hold = Precompile.HoldsForStatic;
         if (MetalBinaryArchive.For(device) is not { } archive)
         {
             Console.Error.WriteLine("[LOADER][INFO] Shader precompile (static): off, the binary archive is off.");
