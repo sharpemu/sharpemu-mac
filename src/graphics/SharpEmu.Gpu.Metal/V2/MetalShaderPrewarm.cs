@@ -843,6 +843,12 @@ internal static class MetalShaderPrewarm
             }
 
             Interlocked.Increment(ref _compiled);
+            // Stored like a dispatch's (NewComputePipelineState), so the next start finds it
+            // archived above and compiles nothing: a compute the session never dispatched
+            // was otherwise compiled again at every start (Demon's Souls: some 155 a start,
+            // most of a minute of the prewarm's threads).
+            MetalBinaryArchive.For(device)?.CaptureCompute(
+                MetalBinaryArchive.LibraryKey(metal.Shader.Source, metal.Shader.UsesPerVertexInputs), function);
         }
         catch (Exception exception)
         {
