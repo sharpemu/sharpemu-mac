@@ -70,6 +70,28 @@ at least 44 pt tall.
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
+  <!-- Inline text link (opens documentation): no fill, brightens on hover. -->
+  <Style Selector="Button.link">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="Foreground" Value="{StaticResource SettingsDescriptionBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeDescription}" />
+    <Setter Property="FontWeight" Value="Medium" />
+  </Style>
+  <Style Selector="Button.link /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Foreground" Value="{StaticResource SettingsDescriptionBrush}" />
+  </Style>
+  <Style Selector="Button.link:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.link:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+
   <Style Selector="Button.iconGhost">
     <Setter Property="Width" Value="{StaticResource ControlHeight}" />
     <Setter Property="Height" Value="{StaticResource ControlHeight}" />

@@ -60,45 +60,113 @@ internal static class LauncherThemes
     // Text, rims and focus rings are drawn light, so a custom background is kept dark.
     private const byte MaxCustomBackgroundChannel = 0x40;
 
+    // The built-in themes. The scale-based ones use Radix Colors' dark scales
+    // (radix-ui.com/colors), each neutral paired with the accent Radix pairs it with;
+    // Catppuccin Mocha, Nord and Tokyo Night use those schemes' published colours.
     public static readonly LauncherPalette[] All =
     [
         // Neutral greys with a white primary action, the PS5 look.
-        new(
-            Id: "Graphite",
-            Background: "#121212", Chrome: "#0A0A0A", Menu: "#1A1A1A",
-            Card: "#222222", Elevated: "#2A2A2A", RaisedHover: "#353535",
-            Field: "#323232", FieldHover: "#3D3D3D", Overlay: "#262626",
-            Text: "#F5F5F5", SecondaryText: "#CCCCCC", Description: "#ABABAB", Muted: "#9C9C9C", Faint: "#646464",
-            Accent: "#F2F2F2", AccentHover: "#FFFFFF", AccentPressed: "#D4D4D4", AccentTint: "#24FFFFFF",
-            AccentForeground: "#111111"),
+        FromScale(
+            "Graphite",
+            ["#111111", "#191919", "#222222", "#2A2A2A", "#313131", "#3A3A3A",
+             "#484848", "#606060", "#6E6E6E", "#7B7B7B", "#B4B4B4", "#EEEEEE"],
+            accent: "#F2F2F2", accentHover: "#FFFFFF", accentForeground: "#111111", tintAlpha: 0x24),
         // True black surfaces for OLED panels.
         new(
             Id: "Oled",
             Background: "#000000", Chrome: "#000000", Menu: "#0A0A0A",
             Card: "#161616", Elevated: "#1E1E1E", RaisedHover: "#2A2A2A",
             Field: "#262626", FieldHover: "#323232", Overlay: "#1C1C1C",
-            Text: "#F5F5F5", SecondaryText: "#CCCCCC", Description: "#ABABAB", Muted: "#9C9C9C", Faint: "#5E5E5E",
+            Text: "#F5F5F5", SecondaryText: "#CCCCCC", Description: "#B4B4B4", Muted: "#9C9C9C", Faint: "#5E5E5E",
             Accent: "#F2F2F2", AccentHover: "#FFFFFF", AccentPressed: "#D4D4D4", AccentTint: "#24FFFFFF",
             AccentForeground: "#000000"),
-        // Deep navy with a console-blue accent.
+        // Radix slate and blue: cool blue-grey surfaces.
+        FromScale(
+            "Midnight",
+            ["#111113", "#18191B", "#212225", "#272A2D", "#2E3135", "#363A3F",
+             "#43484E", "#5A6169", "#696E77", "#777B84", "#B0B4BA", "#EDEEF0"],
+            accent: "#0090FF", accentHover: "#3B9EFF", accentForeground: "#FFFFFF"),
+        // Radix mauve and violet.
+        FromScale(
+            "Violet",
+            ["#121113", "#1A191B", "#232225", "#2B292D", "#323035", "#3C393F",
+             "#49474E", "#625F69", "#6F6D78", "#7C7A85", "#B5B2BC", "#EEEEF0"],
+            accent: "#6E56CF", accentHover: "#7D66D9", accentForeground: "#FFFFFF"),
+        // Radix sage and teal.
+        FromScale(
+            "Forest",
+            ["#101211", "#171918", "#202221", "#272A29", "#2E3130", "#373B39",
+             "#444947", "#5B625F", "#63706B", "#717D79", "#ADB5B2", "#ECEEED"],
+            accent: "#12A594", accentHover: "#0EB39E", accentForeground: "#FFFFFF"),
+        // Radix sand and amber.
+        FromScale(
+            "Ember",
+            ["#111110", "#191918", "#222221", "#2A2A28", "#31312E", "#3B3A37",
+             "#494844", "#62605B", "#6F6D66", "#7C7B74", "#B5B3AD", "#EEEEEC"],
+            accent: "#FFC53D", accentHover: "#FFD60A", accentForeground: "#111110"),
+        // Catppuccin Mocha (catppuccin.com/palette) with its blue accent.
         new(
-            Id: "Midnight",
-            Background: "#0B1020", Chrome: "#070B16", Menu: "#0F1528",
-            Card: "#161D33", Elevated: "#1D2540", RaisedHover: "#26304F",
-            Field: "#242D4A", FieldHover: "#2E3858", Overlay: "#1A2138",
-            Text: "#F3F6FB", SecondaryText: "#C7D0E0", Description: "#A6B0C4", Muted: "#95A0B6", Faint: "#5C6680",
-            Accent: "#2E7CF6", AccentHover: "#4A90FF", AccentPressed: "#1F66D6", AccentTint: "#382E7CF6",
-            AccentForeground: "#FFFFFF"),
-        // Violet-tinted neutrals with a violet accent.
+            Id: "Catppuccin",
+            Background: "#1E1E2E", Chrome: "#11111B", Menu: "#181825",
+            Card: "#26263A", Elevated: "#313244", RaisedHover: "#3B3D52",
+            Field: "#313244", FieldHover: "#45475A", Overlay: "#2A2B3D",
+            Text: "#CDD6F4", SecondaryText: "#BAC2DE", Description: "#A6ADC8", Muted: "#9399B2", Faint: "#6C7086",
+            Accent: "#89B4FA", AccentHover: "#B4BEFE", AccentPressed: "#7497D4", AccentTint: "#3389B4FA",
+            AccentForeground: "#11111B"),
+        // Nord (nordtheme.com): Polar Night surfaces, Snow Storm text, Frost accent.
         new(
-            Id: "Violet",
-            Background: "#0E0D14", Chrome: "#09080E", Menu: "#13111A",
-            Card: "#17151F", Elevated: "#201D2B", RaisedHover: "#292537",
-            Field: "#2A2639", FieldHover: "#353049", Overlay: "#1C1928",
-            Text: "#F5F5F7", SecondaryText: "#CFCBDD", Description: "#B4AFC6", Muted: "#A29DB6", Faint: "#6C677E",
-            Accent: "#7C5CFC", AccentHover: "#9378FF", AccentPressed: "#6845E8", AccentTint: "#2E7C5CFC",
-            AccentForeground: "#FFFFFF"),
+            Id: "Nord",
+            Background: "#2E3440", Chrome: "#242933", Menu: "#323846",
+            Card: "#3B4252", Elevated: "#434C5E", RaisedHover: "#4C566A",
+            Field: "#434C5E", FieldHover: "#4C566A", Overlay: "#3B4252",
+            Text: "#ECEFF4", SecondaryText: "#E5E9F0", Description: "#D8DEE9", Muted: "#B1BACB", Faint: "#7B88A1",
+            Accent: "#88C0D0", AccentHover: "#8FBCBB", AccentPressed: "#6FA3B3", AccentTint: "#3388C0D0",
+            AccentForeground: "#2E3440"),
+        // Tokyo Night (github.com/folke/tokyonight.nvim, night style).
+        new(
+            Id: "TokyoNight",
+            Background: "#1A1B26", Chrome: "#16161E", Menu: "#1F2030",
+            Card: "#24283B", Elevated: "#292E42", RaisedHover: "#343A55",
+            Field: "#292E42", FieldHover: "#343A55", Overlay: "#24283B",
+            Text: "#C0CAF5", SecondaryText: "#A9B1D6", Description: "#9AA5CE", Muted: "#828BB8", Faint: "#565F89",
+            Accent: "#7AA2F7", AccentHover: "#8DB0FA", AccentPressed: "#6788D2", AccentTint: "#337AA2F7",
+            AccentForeground: "#16161E"),
     ];
+
+    // Maps a 12-step dark scale (Radix roles: 1-2 backgrounds, 3-5 element fills,
+    // 6-8 borders, 9-10 solids, 11-12 text) onto the launcher's surfaces and text tiers.
+    private static LauncherPalette FromScale(
+        string id,
+        string[] scale,
+        string accent,
+        string accentHover,
+        string accentForeground,
+        byte tintAlpha = 0x33)
+    {
+        Color Step(int step) => Color.Parse(scale[step - 1]);
+        var ac = Color.Parse(accent);
+        return new LauncherPalette(
+            Id: id,
+            Background: scale[0],
+            Chrome: Hex(Mix(Step(1), Colors.Black, 0.35)),
+            Menu: scale[1],
+            Card: scale[2],
+            Elevated: scale[3],
+            RaisedHover: scale[4],
+            Field: scale[4],
+            FieldHover: scale[5],
+            Overlay: Hex(Mix(Step(3), Step(4), 0.5)),
+            Text: Hex(Mix(Step(12), Colors.White, 0.4)),
+            SecondaryText: Hex(Mix(Step(11), Step(12), 0.35)),
+            Description: scale[10],
+            Muted: Hex(Mix(Step(10), Step(11), 0.5)),
+            Faint: scale[7],
+            Accent: accent,
+            AccentHover: accentHover,
+            AccentPressed: Hex(Mix(ac, Colors.Black, 0.15)),
+            AccentTint: $"#{tintAlpha:X2}{ac.R:X2}{ac.G:X2}{ac.B:X2}",
+            AccentForeground: accentForeground);
+    }
 
     public static LauncherPalette Find(string? id) =>
         Array.Find(All, palette => string.Equals(palette.Id, id, StringComparison.OrdinalIgnoreCase)) ?? All[0];
@@ -295,7 +363,6 @@ internal static class LauncherThemes
         Paint(app, "ComboBoxDropDownGlyphForegroundFocusedPressed", text);
 
         Tint(app, "ArtScrimBrush", background);
-        Tint(app, "HintBarFadeBrush", background);
         Tint(app, "TrophyBackdropFadeBrush", Color.Parse(palette.Menu));
 
         // Glass is the theme's raised colour, mostly opaque by default: tinted like the

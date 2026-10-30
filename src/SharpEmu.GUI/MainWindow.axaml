@@ -418,8 +418,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       Classes="optionsCircle glass"
                       ToolTip.Tip="{Binding [Launch.CustomEnv], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
                       AutomationProperties.Name="{Binding [Launch.CustomEnv], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                <!-- { } for "environment variables"; a chevron read as a dropdown. -->
                 <TextBlock Classes="materialSymbol"
-                           Text="keyboard_arrow_down" />
+                           Text="data_object" />
               </Button>
               <Button x:Name="GameSettingsButton"
                       Classes="optionsCircle glass"
@@ -550,7 +551,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <Border Grid.Row="1"
                   Background="Transparent">
             <Grid RowDefinitions="Auto,*">
-              <Border Grid.Row="1"
+              <Border x:Name="GameOptionsMenuSurface"
+                      Grid.Row="1"
                       Margin="-40,0,-40,-24"
                       Background="{StaticResource GameOptionsMenuBrush}" />
               <Border Grid.Row="1"
@@ -654,15 +656,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </Grid>
               </Border>
 
+              <!-- The section column fills the width, so every section's cards share one
+                   width and line up with the header's close button. -->
               <Grid x:Name="GameOptionsBody"
                     Grid.Row="1"
                     Margin="0,16,0,8"
-                    ColumnDefinitions="260,*"
                     ColumnSpacing="48">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="260" />
+                  <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
                 <Grid Margin="0,48,0,0"
                       RowDefinitions="Auto,*">
                   <Button x:Name="GameOptionsLaunchButton"
-                          Classes="gameOptionsLaunch">
+                          Classes="gameOptionsLaunch"
+                          ZIndex="1">
                     <StackPanel Orientation="Horizontal"
                                 Spacing="8"
                                 HorizontalAlignment="Center"
@@ -678,8 +686,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
                   <ScrollViewer x:Name="GameOptionsNavScroll"
                                 Grid.Row="1"
-                                Margin="-24,4,-24,0"
-                                Padding="24,12"
+                                Margin="-28,-4,-28,-28"
                                 HorizontalScrollBarVisibility="Disabled"
                                 VerticalScrollBarVisibility="Hidden"
                                 BringIntoViewOnFocusChange="True">
@@ -690,6 +697,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </Style>
                     </ScrollViewer.Styles>
                     <Grid x:Name="GameOptionsNavHost"
+                          Margin="28"
                           Background="Transparent"
                           VerticalAlignment="Top">
                       <Border x:Name="GameOptionsNavIndicator"
@@ -697,7 +705,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                               IsHitTestVisible="False"
                               VerticalAlignment="Top" />
 
-                      <StackPanel Spacing="6">
+                      <StackPanel Spacing="4">
                         <Button x:Name="GameOptionsGeneralNav"
                                 Classes="optionsNav active"
                                 AutomationProperties.Name="{Binding [Options.General],
@@ -784,9 +792,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </Grid>
 
                 <Grid Grid.Column="1"
-                      Margin="0,48,0,0"
-                      MaxWidth="960"
-                      HorizontalAlignment="Left">
+                      Margin="0,48,0,0">
                 <ScrollViewer x:Name="GameOptionsGeneralPanel"
                               Classes="optionsSectionPanel active">
                   <StackPanel Spacing="8">
@@ -1226,11 +1232,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
               ColumnSpacing="48"
               Margin="0,8,0,0">
           <Border Grid.Column="0" Classes="optionsNavSurface">
-            <ScrollViewer Margin="-24,-12,-24,-12"
-                          Padding="24,12"
+            <ScrollViewer x:Name="OptionsNavScroll"
+                          Margin="-28"
                           HorizontalScrollBarVisibility="Disabled"
                           VerticalScrollBarVisibility="Hidden">
-              <Grid x:Name="OptionsNavHost">
+              <Grid x:Name="OptionsNavHost" Margin="28">
                 <Border x:Name="OptionsNavIndicator"
                         Classes="optionsNavIndicator"
                         VerticalAlignment="Top"
@@ -1936,44 +1942,49 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     Cursor="SizeNorthSouth"
                     IsVisible="False" />
 
-      <!-- Console (collapsible) -->
-      <Border Grid.Row="3" x:Name="ConsolePanel" Classes="card" Padding="0"
+      <!-- Console (collapsible): one themed surface, a compact icon toolbar and the
+           log on the theme background. -->
+      <Border Grid.Row="3" x:Name="ConsolePanel" Classes="consolePanel"
               IsVisible="False">
         <Grid RowDefinitions="Auto,*">
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
-            <TextBlock x:Name="ConsoleSectionTitle" Classes="sectionTitle"
-                       Text="{Binding [Console.Title], Source={x:Static local:Localization.Instance}}"
-                       VerticalAlignment="Center" />
-            <TextBox Grid.Column="1" FontSize="12" Margin="0,0,12,0" x:Name="ConsoleSearchBox"
-                    PlaceholderText="{Binding [Console.SearchWatermark], Source={x:Static local:Localization.Instance}}"
-                    Width="320" />
-            <CheckBox Grid.Column="2" x:Name="AutoScrollCheck"
-                    Content="{Binding [Console.AutoScroll], Source={x:Static local:Localization.Instance}}"
-                    IsChecked="True"
-                    FontSize="12" Margin="0,0,12,0" />
-            <Button Grid.Column="3" x:Name="DetachConsoleButton" Classes="ghost"
-                    Content="{Binding [Console.Split], Source={x:Static local:Localization.Instance}}"
-                    FontSize="12"
-                    Padding="10,4" Margin="0,0,8,0" />
-            <Button Grid.Column="4" x:Name="CopyLogButton" Classes="ghost"
-                    Content="{Binding [Console.Copy], Source={x:Static local:Localization.Instance}}"
-                    FontSize="12"
-                    Padding="10,4" Margin="0,0,8,0" />
-            <Button Grid.Column="5" x:Name="ClearLogButton" Classes="ghost"
-                    Content="{Binding [Console.Clear], Source={x:Static local:Localization.Instance}}"
-                    FontSize="12"
-                    Padding="10,4" Margin="0,0,8,0" />
-            <Button Grid.Column="6"
-                    x:Name="CloseConsoleButton"
-                    Classes="ghost"
-                    Content="×"
-                    AutomationProperties.Name="{Binding [Launch.Console],
-                                                        Source={x:Static local:Localization.Instance}}"
-                    FontSize="16"
-                    Padding="10,2" />
+          <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="18,10,10,10">
+            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+              <TextBlock Classes="materialSymbol compact" Text="terminal"
+                         Foreground="{StaticResource SecondaryTextBrush}" VerticalAlignment="Center" />
+              <TextBlock x:Name="ConsoleSectionTitle" Classes="consoleTitle"
+                         Text="{Binding [Console.Title], Source={x:Static local:Localization.Instance}}" />
+            </StackPanel>
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4">
+              <TextBox x:Name="ConsoleSearchBox" Classes="consoleSearch" Margin="0,0,6,0"
+                       PlaceholderText="{Binding [Console.SearchWatermark], Source={x:Static local:Localization.Instance}}" />
+              <ToggleButton x:Name="AutoScrollCheck" Classes="consoleTool" IsChecked="True"
+                            ToolTip.Tip="{Binding [Console.AutoScroll], Source={x:Static local:Localization.Instance}}"
+                            AutomationProperties.Name="{Binding [Console.AutoScroll], Source={x:Static local:Localization.Instance}}">
+                <TextBlock Classes="materialSymbol compact" Text="vertical_align_bottom" />
+              </ToggleButton>
+              <Button x:Name="DetachConsoleButton" Classes="consoleTool"
+                      ToolTip.Tip="{Binding [Console.Split], Source={x:Static local:Localization.Instance}}"
+                      AutomationProperties.Name="{Binding [Console.Split], Source={x:Static local:Localization.Instance}}">
+                <TextBlock Classes="materialSymbol compact" Text="open_in_new" />
+              </Button>
+              <Button x:Name="CopyLogButton" Classes="consoleTool"
+                      ToolTip.Tip="{Binding [Console.Copy], Source={x:Static local:Localization.Instance}}"
+                      AutomationProperties.Name="{Binding [Console.Copy], Source={x:Static local:Localization.Instance}}">
+                <TextBlock Classes="materialSymbol compact" Text="content_copy" />
+              </Button>
+              <Button x:Name="ClearLogButton" Classes="consoleTool"
+                      ToolTip.Tip="{Binding [Console.Clear], Source={x:Static local:Localization.Instance}}"
+                      AutomationProperties.Name="{Binding [Console.Clear], Source={x:Static local:Localization.Instance}}">
+                <TextBlock Classes="materialSymbol compact" Text="delete_sweep" />
+              </Button>
+              <Button x:Name="CloseConsoleButton" Classes="consoleTool"
+                      ToolTip.Tip="{Binding [Library.Patches.Close], Source={x:Static local:Localization.Instance}}"
+                      AutomationProperties.Name="{Binding [Launch.Console], Source={x:Static local:Localization.Instance}}">
+                <TextBlock Classes="materialSymbol compact" Text="close" />
+              </Button>
+            </StackPanel>
           </Grid>
-          <ListBox Grid.Row="1" x:Name="ConsoleList" Classes="console" BorderThickness="0,1,0,0"
-                   BorderBrush="{StaticResource CardBorderBrush}" CornerRadius="0,0,12,12">
+          <ListBox Grid.Row="1" x:Name="ConsoleList" Classes="console">
             <ListBox.ItemTemplate>
               <DataTemplate x:DataType="local:LogLine" x:CompileBindings="True">
                 <TextBlock Text="{Binding Text}" Foreground="{Binding Brush}" TextWrapping="NoWrap" />
@@ -2053,6 +2064,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
               PointerPressed="OnResizeHandlePointerPressed" />
     </Panel>
 
+    <!-- Modal sheets (custom environment, patches, packing) open in the window, not in
+         windows of their own, so the controller and the title bar stay with the launcher. -->
+    <local:SheetHost x:Name="Sheets"
+                     Grid.Row="1"
+                     ZIndex="50" />
+
     <!-- Contextual controller hints along the bottom edge; shown only while a
          controller is connected and listing only what is mapped right now. -->
     <Border x:Name="ControllerHintBar"
@@ -2061,14 +2078,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
             VerticalAlignment="Bottom"
             IsHitTestVisible="False"
             IsVisible="False"
-            Background="{StaticResource HintBarFadeBrush}"
             ZIndex="100">
       <StackPanel x:Name="ControllerHintItems"
                   Orientation="Horizontal"
                   Spacing="32"
                   HorizontalAlignment="Right"
                   VerticalAlignment="Bottom"
-                  Margin="0,0,40,16" />
+                  Margin="0,0,40,20" />
     </Border>
   </Grid>
 </Window>

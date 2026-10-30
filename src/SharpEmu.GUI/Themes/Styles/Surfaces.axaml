@@ -74,4 +74,31 @@ Shared card, badge, hint and cover surfaces.
     <Setter Property="ClipToBounds" Value="True" />
     <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
   </Style>
+
+  <!-- In-window sheets (SheetHost): a dimmed scrim and a floating card. -->
+  <Style Selector="Border.sheetScrim">
+    <Setter Property="Background" Value="#A6000000" />
+  </Style>
+  <Style Selector="Border.sheetCard">
+    <Setter Property="Margin" Value="40" />
+    <Setter Property="Background" Value="{StaticResource OverlayBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="BoxShadow" Value="{StaticResource SheetShadow}" />
+  </Style>
+  <Style Selector="TextBlock.sheetTitle">
+    <Setter Property="FontSize" Value="22" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="LetterSpacing" Value="-0.3" />
+  </Style>
+
+  <!-- Multi-line monospace field (custom environment variables). -->
+  <Style Selector="TextBox.codeEditor">
+    <Setter Property="Height" Value="220" />
+    <Setter Property="Padding" Value="16,14" />
+    <Setter Property="FontFamily" Value="Menlo, Consolas, monospace" />
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="VerticalContentAlignment" Value="Top" />
+  </Style>
 </Styles>

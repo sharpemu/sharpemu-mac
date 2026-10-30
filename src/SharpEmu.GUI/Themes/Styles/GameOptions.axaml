@@ -197,4 +197,10 @@ Contextual per-game options reveal, actions, and selected-game motion.
   <Style Selector="Button.gameAction.dangerAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="#33FF7A86" />
   </Style>
+
+  <!-- The game's menu shares its height with the header band, so its rows are a step
+       shorter than the Options page's and all five fit above the hint bar. -->
+  <Style Selector="Grid#GameOptionsNavHost Button.optionsNav, Grid#GameOptionsNavHost Border.optionsNavIndicator">
+    <Setter Property="Height" Value="48" />
+  </Style>
 </Styles>

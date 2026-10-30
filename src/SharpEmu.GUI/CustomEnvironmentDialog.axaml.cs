@@ -6,7 +6,7 @@ using System.Diagnostics;
 
 namespace SharpEmu.GUI;
 
-public partial class CustomEnvironmentDialog : Window
+public partial class CustomEnvironmentDialog : SheetView
 {
     private readonly string? _titleId;
 
@@ -28,6 +28,8 @@ public partial class CustomEnvironmentDialog : Window
         CancelButton.Click += (_, _) => Close(null);
         PlayButton.Click += (_, _) => Play();
     }
+
+    public override Control? InitialFocus => EnvironmentTextBox;
 
     public event Action<IReadOnlyList<string>>? SaveGlobalRequested;
     public event Action<string, IReadOnlyList<string>>? SaveGameRequested;

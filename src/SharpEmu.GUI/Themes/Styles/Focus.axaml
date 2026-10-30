@@ -59,8 +59,10 @@ much weaker fill change defined next to each control.
     <Setter Property="BoxShadow" Value="inset 0 0 0 2 #FFFFFFFF" />
     <Setter Property="Background" Value="#26FFFFFF" />
   </Style>
+  <!-- The ring is drawn outside the field; a clipping TextBox left only its corners. -->
   <Style Selector="TextBox:focus">
     <Setter Property="ZIndex" Value="3" />
+    <Setter Property="ClipToBounds" Value="False" />
   </Style>
 
   <!-- Inside a settings row the whole row is the focus target, so the control

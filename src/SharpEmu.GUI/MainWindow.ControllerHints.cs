@@ -15,7 +15,8 @@ namespace SharpEmu.GUI;
 /// </summary>
 public partial class MainWindow
 {
-    private const double HintBarClearance = 64;
+    private const double HintBarClearance = 56;
+    private const double MainContentBottomMargin = 24;
 
     private bool _gamepadConnected;
     private string? _hintKey;
@@ -24,6 +25,7 @@ public partial class MainWindow
     {
         Library,
         LibraryEmpty,
+        Sheet,
         Menu,
         Content,
         Launch,
@@ -45,11 +47,13 @@ public partial class MainWindow
         _hintKey = null;
         SetPadNavigation(connected);
 
-        // Keep page content clear of the hint bar while it is showing.
-        var bottom = connected ? HintBarClearance : 0;
-        OptionsPage.Margin = new Thickness(0, 8, 0, bottom);
-        TrophyPageHost.Margin = new Thickness(0, 8, 0, bottom);
-        GameOptionsBody.Margin = new Thickness(0, 16, 0, bottom > 0 ? bottom : 8);
+        // The bar gets its own strip at the bottom: every page, list and the console end
+        // above it instead of scrolling underneath. The options surface still reaches the
+        // window edge so the strip matches the page behind it.
+        var bottom = MainContentBottomMargin + (connected ? HintBarClearance : 0);
+        MainContent.Margin = new Thickness(40, 16, 40, bottom);
+        OptionsPageSurface.Margin = new Thickness(-40, -16, -40, -bottom);
+        GameOptionsMenuSurface.Margin = new Thickness(-40, 0, -40, -bottom);
 
         if (connected && _activePageIndex == 0 && !_isGameSettingsOpen)
         {
@@ -64,6 +68,11 @@ public partial class MainWindow
         if (focused is ComboBoxItem or ComboBox { IsDropDownOpen: true })
         {
             return HintContext.Choices;
+        }
+
+        if (Sheets.Top is not null)
+        {
+            return HintContext.Sheet;
         }
 
         if (_isGameSettingsOpen || _activePageIndex == 1)
@@ -121,6 +130,10 @@ public partial class MainWindow
                 items.Add(HintItem(PadSymbol.Cross, Hint("Change")));
                 items.Add(HintItem(PadSymbol.Circle, Hint("Back")));
                 break;
+            case HintContext.Sheet:
+                items.Add(HintItem(PadSymbol.Cross, Hint("Select")));
+                items.Add(HintItem(PadSymbol.Circle, Hint("Close")));
+                break;
             case HintContext.Launch:
                 items.Add(HintItem(PadSymbol.Cross, Hint("Launch")));
                 items.Add(HintItem(PadSymbol.Circle, Hint("Close")));
@@ -135,7 +148,7 @@ public partial class MainWindow
                 break;
         }
 
-        if (context != HintContext.Choices)
+        if (context is not (HintContext.Choices or HintContext.Sheet))
         {
             items.Add(ShoulderHintItem(Hint("SwitchPage")));
         }

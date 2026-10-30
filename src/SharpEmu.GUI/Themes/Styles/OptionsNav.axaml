@@ -16,7 +16,8 @@ Two independent states:
     <Setter Property="Padding" Value="0" />
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="VerticalAlignment" Value="Top" />
+    <!-- Full page height: a nav sized to its rows left the last row's ring no room. -->
+    <Setter Property="VerticalAlignment" Value="Stretch" />
   </Style>
 
   <Style Selector="Border.optionsNavIndicator">

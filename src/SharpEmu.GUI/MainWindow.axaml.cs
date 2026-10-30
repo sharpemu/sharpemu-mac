@@ -484,6 +484,12 @@ public partial class MainWindow : Window
 
         LauncherGamepad.EnsureStarted();
         InitializeController();
+        Sheets.Covered = MainContent;
+        foreach (var viewer in OptionsSectionPanels().Concat(GameOptionsSectionPanels()).OfType<ScrollViewer>()
+                     .Append(OptionsNavScroll).Append(GameOptionsNavScroll))
+        {
+            EdgeFade.Attach(viewer);
+        }
         _gamepadTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(16),
@@ -952,6 +958,14 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (Sheets.Top is not null)
+        {
+            // A sheet is modal: the shoulder buttons stay put and the pad drives the sheet.
+            PollControllerPage(pad, pad.Buttons & ~_previousPadButtons);
+            _previousPadButtons = pad.Buttons;
+            return;
+        }
+
         var shoulderPressed = pad.Buttons & ~_previousPadButtons;
         var shownOrder = new[] { 0, 2, 1 };
         var shown = Array.IndexOf(shownOrder, _activePageIndex);
@@ -1327,7 +1341,7 @@ public partial class MainWindow : Window
         // it, so launcher buttons no longer see game input and nothing has to
         // be swallowed here. Kept as the wired handler because the launcher
         // still needs a preview hook for its own shortcuts.
-        if (args.KeyDeviceType == KeyDeviceType.Gamepad || args.Handled ||
+        if (args.KeyDeviceType == KeyDeviceType.Gamepad || args.Handled || Sheets.Top is not null ||
             args.Key is not (Key.Up or Key.Down or Key.Left or Key.Right or Key.Enter or Key.Escape) ||
             ControllerSettings() is not { } layout ||
             FocusManager?.GetFocusedElement() is TextBox or ComboBoxItem or ComboBox { IsDropDownOpen: true })
@@ -1362,6 +1376,7 @@ public partial class MainWindow : Window
         }
 
         _isClosing = true;
+        Sheets.CloseAll();
         Interlocked.Increment(ref _libraryScanGeneration);
         Interlocked.Increment(ref _detailLoadGeneration);
         _consoleFlushTimer.Stop();
@@ -2590,7 +2605,7 @@ public partial class MainWindow : Window
         dialog.MuteMusicChanged += SetTitleMusicMuted;
         try
         {
-            if (await dialog.ShowDialog<bool>(this))
+            if (await Sheets.ShowAsync(dialog) is true)
             {
                 AppendConsoleLine(loc.Format("Status.PackedZar", destination), SuccessLineBrush);
             }
@@ -3006,7 +3021,7 @@ public partial class MainWindow : Window
             settings.Save(titleId);
         };
 
-        var customEntries = await dialog.ShowDialog<IReadOnlyList<string>?>(this);
+        var customEntries = await Sheets.ShowAsync(dialog) as IReadOnlyList<string>;
         if (customEntries is not null && !_isRunning)
         {
             Launch(game.Path, game.Name, game.TitleId, customEntries);
@@ -3077,6 +3092,11 @@ public partial class MainWindow : Window
             _appliedEnvironmentVariables.Add(name);
         }
 
+        // The child also reads this from the settings files; passing the resolved value keeps the
+        // game's override authoritative even when its title id cannot be read back from disk.
+        Environment.SetEnvironmentVariable("SHARPEMU_DISPLAY_RESOLUTION", effective.GuestDisplayResolution);
+        _appliedEnvironmentVariables.Add("SHARPEMU_DISPLAY_RESOLUTION");
+
         // Whether a graphics loader needs configuring at all, and which variables that takes,
         // is the composed backend's business; the GUI only has to undo what was set.
         foreach (var name in RenderDocCapture.ApplyGraphicsLoaderEnvironment())
@@ -3091,7 +3111,7 @@ public partial class MainWindow : Window
 
         // An absent switch now enables the guard opt-out by default; send 0 for a disabled GUI toggle.
         Environment.SetEnvironmentVariable("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
-            effective.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD") ? "1" : "0");
+            EnvironmentOverrides.IsSet(effective.EnvironmentToggles, "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD") ? "1" : "0");
         _appliedEnvironmentVariables.Add("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
 
         Environment.SetEnvironmentVariable("SHARPEMU_SKIP_RT",

@@ -77,7 +77,8 @@ public partial class MainWindow
     }
 
     private Control? ControllerRoot() =>
-        _isGameSettingsOpen ? GameOptionsOverlay
+        Sheets.Top is { } sheet ? sheet
+        : _isGameSettingsOpen ? GameOptionsOverlay
         : _activePageIndex == 1 ? OptionsPage
         : _activePageIndex == 2 ? TrophyPageHost
         : null;
@@ -139,7 +140,8 @@ public partial class MainWindow
     private sealed record SettingsLayout(Control Root, Button[] Navigation, Control[] Panels, Func<int> Section, Action<int> SetSection, Button? Launch = null);
 
     private SettingsLayout? ControllerSettings() =>
-        _isGameSettingsOpen
+        Sheets.Top is not null ? null
+        : _isGameSettingsOpen
             ? new SettingsLayout(GameOptionsOverlay, GameOptionsNavigationButtons(), GameOptionsSectionPanels(), () => _gameOptionsSectionIndex, section => SetGameOptionsSection(section), GameOptionsLaunchButton)
             : _activePageIndex == 1
                 ? new SettingsLayout(OptionsPage, OptionsNavigationButtons(), OptionsSectionPanels(), () => _optionsSectionIndex, SetOptionsSection)

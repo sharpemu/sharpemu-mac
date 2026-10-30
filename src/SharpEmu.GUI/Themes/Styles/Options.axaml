@@ -14,18 +14,21 @@ the same amount, so a focused row's ring, glow and scale-up are never clipped.
   <Style Selector="Border.optionsContentSurface">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="MaxWidth" Value="1120" />
     <Setter Property="HorizontalAlignment" Value="Stretch" />
   </Style>
 
   <Style Selector="ScrollViewer.optionsSectionPanel">
     <Setter Property="Opacity" Value="0" />
     <Setter Property="RenderTransform" Value="translateY(22px)" />
-    <Setter Property="Margin" Value="-28,-20,-28,-20" />
-    <Setter Property="Padding" Value="28,20,28,20" />
+    <!-- 28 pt on every side is room for the focus ring's glow, so a focused row at
+         the top or bottom of the list is never clipped by the scroll viewport. The
+         room is a margin on the content, not ScrollViewer padding: padding is left
+         out of the scroll extent, so the last rows could never be scrolled into view. -->
+    <Setter Property="Margin" Value="-28" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="HorizontalScrollBarVisibility" Value="Disabled" />
-    <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+    <!-- Scrolls by wheel and D-pad; the edge fade (EdgeFade.cs) shows there is more. -->
+    <Setter Property="VerticalScrollBarVisibility" Value="Hidden" />
     <Setter Property="Transitions">
       <Transitions>
         <DoubleTransition Property="Opacity"
@@ -36,6 +39,10 @@ the same amount, so a focused row's ring, glow and scale-up are never clipped.
                                        Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
+  </Style>
+
+  <Style Selector="ScrollViewer.optionsSectionPanel > StackPanel">
+    <Setter Property="Margin" Value="28" />
   </Style>
 
   <Style Selector="ScrollViewer.optionsSectionPanel.active">

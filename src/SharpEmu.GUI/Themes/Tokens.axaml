@@ -89,11 +89,6 @@ Shadows belong to floating layers (sheets, menus, toasts, dialogs) alone.
     <GradientStop Offset="0.45" Color="#E01A1A1A" />
     <GradientStop Offset="1" Color="#FA1A1A1A" />
   </LinearGradientBrush>
-  <!-- Fade under the controller hint bar. -->
-  <LinearGradientBrush x:Key="HintBarFadeBrush" StartPoint="0%,0%" EndPoint="0%,100%">
-    <GradientStop Offset="0" Color="#00121212" />
-    <GradientStop Offset="1" Color="#F2121212" />
-  </LinearGradientBrush>
 
   <!-- Radius scale: chips 6, buttons/inputs/rows 10, cards/tiles/panels 14. -->
   <CornerRadius x:Key="RadiusSm">6</CornerRadius>
