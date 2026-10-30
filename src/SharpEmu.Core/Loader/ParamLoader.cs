@@ -65,7 +65,8 @@ public static class Ps5ParamJsonReader
         if (root.ValueKind != JsonValueKind.Object)
             return (null, null, null);
 
-        var titleId = GetString(root, "titleId");
+        // Some dumps' param.json has the content id and no title id field.
+        var titleId = GetString(root, "titleId") ?? TitleIdFromContentId(GetString(root, "contentId"));
 
         string? ver =
             GetString(root, "contentVersion")
@@ -118,6 +119,61 @@ public static class Ps5ParamJsonReader
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The title id inside a content id, "UP8103-PPSA18454_00-0936750542714392" → "PPSA18454":
+    /// the nine characters after the region and publisher, before the "_00". Null when
+    /// <paramref name="contentId"/> is not one.
+    /// </summary>
+    public static string? TitleIdFromContentId(string? contentId)
+    {
+        if (contentId is null)
+        {
+            return null;
+        }
+
+        var value = contentId.Trim();
+        if (value.Length < 19 || value[6] != '-' || value[16] != '_')
+        {
+            return null;
+        }
+
+        var titleId = value.Substring(7, 9);
+        return titleId.AsSpan(0, 4).IndexOfAnyExceptInRange('A', 'Z') < 0 &&
+               titleId.AsSpan(4).IndexOfAnyExceptInRange('0', '9') < 0
+            ? titleId
+            : null;
+    }
+
+    /// <summary>
+    /// The title id of the first content id in a dump's contentids.json (a JSON array of
+    /// content ids at the application root), for dumps without a param.json that has one.
+    /// </summary>
+    public static string? TryReadContentIdsTitleId(byte[] data)
+    {
+        if (data == null || data.Length == 0)
+            return null;
+        try
+        {
+            ReadOnlyMemory<byte> json = data;
+            if (json.Span.StartsWith("\uFEFF"u8))
+                json = json[3..];
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                return null;
+            foreach (var element in doc.RootElement.EnumerateArray())
+            {
+                if (element.ValueKind == JsonValueKind.String && TitleIdFromContentId(element.GetString()) is { } titleId)
+                    return titleId;
+            }
+
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     // kernel.flexibleMemorySize: the title's flexible memory budget in bytes.
