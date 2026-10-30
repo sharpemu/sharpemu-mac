@@ -73,6 +73,7 @@ internal static class MetalStaticPrecompile
     internal const double ArchiveShare = 0.6;
 
     private const int MaxLoggedFailures = 8;
+    internal const int MaxOtherDoneFiles = 3;
     private const int MaxStubVertices = 64;
     private const nuint PixelFormatDepth32Float = 252;
     private const nuint PixelFormatDepth32FloatStencil8 = 260;
@@ -799,12 +800,16 @@ internal static class MetalStaticPrecompile
         try
         {
             Directory.CreateDirectory(metalDirectory);
-            foreach (var other in Directory.EnumerateFiles(metalDirectory, "static-precompile-*.done"))
+            // The lists of other translator builds are kept, the most recently written first, up
+            // to MaxOtherDoneFiles, as the library and prewarm lists are: a start of a build
+            // that is used again (one checkout's, then another's) would otherwise translate
+            // every unit again behind the game (The Oregon Trail: 1399 programs over 126 s).
+            foreach (var other in new DirectoryInfo(metalDirectory).GetFiles("static-precompile-*.done")
+                         .Where(file => !string.Equals(file.Name, name, StringComparison.Ordinal))
+                         .OrderByDescending(static file => file.LastWriteTimeUtc)
+                         .Skip(MaxOtherDoneFiles))
             {
-                if (!string.Equals(Path.GetFileName(other), name, StringComparison.Ordinal))
-                {
-                    File.Delete(other);
-                }
+                other.Delete();
             }
 
             var file = new FileStream(Path.Combine(metalDirectory, name), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);

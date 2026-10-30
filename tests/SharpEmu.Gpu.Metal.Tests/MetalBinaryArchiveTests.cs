@@ -668,6 +668,42 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         Release(archives, storedPixelLibrary, descriptor, pixelLibrary, vertexLibrary);
     }
 
+    // A file no start used (loaded, opened or written) for the unused age goes at the next
+    // open, whatever wrote it; a used one stays.
+    [Fact]
+    public void AFileUnusedForTheUnusedAgeIsRemovedAtOpen()
+    {
+        if (!RequireDevice()) return;
+        var device = Device.Value;
+        var key = MetalBinaryArchive.LibraryKey(ComputeSource, usesPerVertexInputs: false);
+        WriteComputeLibrary(device, key);
+        string directory;
+        string used;
+        using (var archive = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
+        {
+            directory = archive.Directory;
+            used = Path.Combine(archive.LibraryDirectory, key.ToString("x32", System.Globalization.CultureInfo.InvariantCulture) + ".mtla");
+        }
+
+        Assert.True(File.Exists(used));
+        var unusedLibrary = Path.Combine(directory, "libraries", new string('a', 32) + ".mtla");
+        var unusedSegment = Path.Combine(directory, "pipelines-0123456789abcdef-00000.mtla");
+        File.Copy(used, unusedLibrary);
+        File.Copy(used, unusedSegment);
+        var old = DateTime.UtcNow - TimeSpan.FromDays(31);
+        File.SetLastWriteTimeUtc(unusedLibrary, old);
+        File.SetLastWriteTimeUtc(unusedSegment, old);
+        File.SetLastWriteTimeUtc(used, DateTime.UtcNow - TimeSpan.FromDays(29));
+
+        using var reopened = MetalBinaryArchive.Open(_root, device, "translator-a", Budget, TimeSpan.FromDays(30));
+        Assert.False(File.Exists(unusedLibrary));
+        Assert.False(File.Exists(unusedSegment));
+        Assert.True(File.Exists(used));
+        Assert.Equal(2, reopened.Removed.UnusedFiles);
+        Assert.Equal(2 * new FileInfo(used).Length, reopened.Removed.UnusedBytes);
+        Assert.True(reopened.IsStored(key));
+    }
+
     private static long Store(MetalBinaryArchive archive, string source, string entry, Gen5MslStage stage, UInt128 key)
     {
         var bytes = MetalStaticPrecompile.Store(archive, Device.Value, new Gen5MslShader(source, entry, stage, 1), key, out var error);
