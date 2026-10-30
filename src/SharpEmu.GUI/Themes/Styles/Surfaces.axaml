@@ -10,20 +10,29 @@ Shared card, badge, hint and cover surfaces.
     <Setter Property="Background" Value="{StaticResource CardBrush}" />
     <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="12" />
-    <Setter Property="Padding" Value="16" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="Padding" Value="20" />
   </Style>
 
+  <!-- Metadata chip (title id, version, size): 13 pt on a raised fill, 28 pt tall. -->
   <Style Selector="Border.pill">
     <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-    <Setter Property="CornerRadius" Value="999" />
-    <Setter Property="Padding" Value="10,3" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusSm}" />
+    <Setter Property="Padding" Value="10,0" />
+    <Setter Property="MinHeight" Value="28" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.pill > TextBlock">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+    <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+    <Setter Property="VerticalAlignment" Value="Center" />
   </Style>
 
   <!-- Session status/hotkey badges: the title-id pill geometry with a
        tinted fill so state (RUNNING) and keys (F11) read at a glance. -->
   <Style Selector="Border.badge">
-    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusSm}" />
     <Setter Property="Padding" Value="8,2" />
     <Setter Property="BorderThickness" Value="1" />
   </Style>
@@ -36,19 +45,30 @@ Shared card, badge, hint and cover surfaces.
     <Setter Property="BorderBrush" Value="#5558A6FF" />
   </Style>
 
-  <!-- Gamepad shoulder-button hint chip (LB/RB, L1/R1). -->
+  <!-- Gamepad shoulder-button keycap (L1/R1): shown only while a controller is connected. -->
   <Style Selector="Border.padHint">
-    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-    <Setter Property="CornerRadius" Value="6" />
-    <Setter Property="Padding" Value="8,3" />
+    <Setter Property="Background" Value="#26FFFFFF" />
+    <Setter Property="BorderBrush" Value="#59FFFFFF" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusSm}" />
+    <Setter Property="MinWidth" Value="36" />
+    <Setter Property="Height" Value="26" />
+    <Setter Property="Padding" Value="8,0" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.padHint > TextBlock">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
   </Style>
 
   <Style Selector="Border.coverShadow">
-    <Setter Property="CornerRadius" Value="10" />
-    <Setter Property="BoxShadow" Value="0 6 14 0 #55000000" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
   </Style>
   <Style Selector="Border.coverClip">
-    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
     <Setter Property="ClipToBounds" Value="True" />
     <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
   </Style>

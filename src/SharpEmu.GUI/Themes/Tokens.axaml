@@ -1,32 +1,95 @@
 <!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
-Shared colors and brushes used throughout the launcher.
+Design tokens for the launcher: palette, type scale, radii and spacing.
+
+The launcher is read from a couch, so the scale is generous and every neutral is
+tinted toward the brand violet. Elevation is expressed by lightness:
+background < surface < raised < overlay. Hairline borders use one alpha and only
+appear on surfaces and rows; filled buttons carry no border. Shadows belong to
+floating layers (sheets, menus, toasts, dialogs) alone.
 -->
 
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <FontFamily x:Key="MaterialSymbolsRounded">avares://SharpEmu.GUI/Assets/Fonts/MaterialSymbolsRounded-400.ttf#Material Symbols Rounded</FontFamily>
 
-  <Color x:Key="SystemAccentColor">#7C5CFC</Color>
-
-  <SolidColorBrush x:Key="BgBrush" Color="#0C0C0C" />
-  <SolidColorBrush x:Key="ChromeBrush" Color="#070707" />
-  <SolidColorBrush x:Key="CardBrush" Color="#161616" />
-  <SolidColorBrush x:Key="CardBorderBrush" Color="#12FFFFFF" />
-  <SolidColorBrush x:Key="ElevatedBrush" Color="#1E1E1E" />
-  <SolidColorBrush x:Key="GameOptionsMenuBrush" Color="#1B1B1B" />
-  <SolidColorBrush x:Key="TextBrush" Color="#F7F8FB" />
-  <SolidColorBrush x:Key="SecondaryTextBrush" Color="#C0C5CF" />
-  <SolidColorBrush x:Key="MutedBrush" Color="#777F8E" />
-  <SolidColorBrush x:Key="SettingsDescriptionBrush" Color="#8A8A8A" />
-  <SolidColorBrush x:Key="FaintBrush" Color="#4D5461" />
-  <SolidColorBrush x:Key="AccentBrush" Color="#7C5CFC" />
-  <SolidColorBrush x:Key="AccentHoverBrush" Color="#8F73FF" />
-  <SolidColorBrush x:Key="DangerBrush" Color="#FF646E" />
-  <SolidColorBrush x:Key="DangerHoverBrush" Color="#FF858D" />
-  <SolidColorBrush x:Key="SuccessBrush" Color="#66F2A3" />
-  <SolidColorBrush x:Key="InfoBrush" Color="#64A7FF" />
+  <!-- Neutrals -->
+  <SolidColorBrush x:Key="BgBrush" Color="#0E0D14" />
+  <SolidColorBrush x:Key="ChromeBrush" Color="#09080E" />
+  <SolidColorBrush x:Key="CardBrush" Color="#17151F" />
+  <SolidColorBrush x:Key="ElevatedBrush" Color="#201D2B" />
+  <SolidColorBrush x:Key="RaisedHoverBrush" Color="#292537" />
+  <!-- Fills for controls that sit on a card or row (combo boxes, fields, row buttons). -->
+  <SolidColorBrush x:Key="FieldBrush" Color="#2A2639" />
+  <SolidColorBrush x:Key="FieldHoverBrush" Color="#353049" />
+  <SolidColorBrush x:Key="GameOptionsMenuBrush" Color="#13111A" />
+  <SolidColorBrush x:Key="OverlayBrush" Color="#1C1928" />
+  <SolidColorBrush x:Key="CardBorderBrush" Color="#14FFFFFF" />
   <SolidColorBrush x:Key="TileHoverBrush" Color="#0BFFFFFF" />
   <SolidColorBrush x:Key="TileSelectedBrush" Color="#12FFFFFF" />
+
+  <!-- Text: primary, secondary (>= 7:1 on every surface), muted (>= 4.5:1). -->
+  <SolidColorBrush x:Key="TextBrush" Color="#F5F5F7" />
+  <SolidColorBrush x:Key="SecondaryTextBrush" Color="#CFCBDD" />
+  <SolidColorBrush x:Key="SettingsDescriptionBrush" Color="#B4AFC6" />
+  <SolidColorBrush x:Key="MutedBrush" Color="#A29DB6" />
+  <SolidColorBrush x:Key="FaintBrush" Color="#6C677E" />
+
+  <!-- Brand accent: used for the primary action, switch-on, progress and selected fills. -->
+  <Color x:Key="SystemAccentColor">#7C5CFC</Color>
+  <SolidColorBrush x:Key="AccentBrush" Color="#7C5CFC" />
+  <SolidColorBrush x:Key="AccentHoverBrush" Color="#9378FF" />
+  <SolidColorBrush x:Key="AccentPressedBrush" Color="#6845E8" />
+  <SolidColorBrush x:Key="AccentTintBrush" Color="#2E7C5CFC" />
+
+  <!-- Semantic colours tuned for dark surfaces. -->
+  <SolidColorBrush x:Key="DangerBrush" Color="#FF7A86" />
+  <SolidColorBrush x:Key="DangerHoverBrush" Color="#FF98A1" />
+  <SolidColorBrush x:Key="DangerTintBrush" Color="#1FFF7A86" />
+  <SolidColorBrush x:Key="SuccessBrush" Color="#5DE3A4" />
+  <SolidColorBrush x:Key="WarningBrush" Color="#F5C46E" />
+  <SolidColorBrush x:Key="InfoBrush" Color="#6DAEFF" />
+
+  <!-- Focus is the strongest thing on screen: a crisp white ring with a soft glow. -->
+  <SolidColorBrush x:Key="FocusRingBrush" Color="#FFFFFF" />
+  <BoxShadows x:Key="FocusRingShadow">0 0 0 2 #FFFFFFFF, 0 0 22 4 #4DFFFFFF</BoxShadows>
+  <BoxShadows x:Key="SelectedRingShadow">0 0 0 2 #B3FFFFFF</BoxShadows>
+  <BoxShadows x:Key="SheetShadow">0 8 32 0 #66000000</BoxShadows>
+
+  <!-- Scrim that keeps text legible on any key art. -->
+  <LinearGradientBrush x:Key="ArtScrimBrush" StartPoint="0%,0%" EndPoint="0%,100%">
+    <GradientStop Offset="0" Color="#D90E0D14" />
+    <GradientStop Offset="0.4" Color="#CC0E0D14" />
+    <GradientStop Offset="1" Color="#F20E0D14" />
+  </LinearGradientBrush>
+
+  <!-- Radius scale: chips 6, buttons/inputs/rows 10, cards/tiles/panels 14. -->
+  <CornerRadius x:Key="RadiusSm">6</CornerRadius>
+  <CornerRadius x:Key="RadiusMd">10</CornerRadius>
+  <CornerRadius x:Key="RadiusLg">14</CornerRadius>
+
+  <!-- Type scale (pt): caption 13, description 14, body 16, subtitle 20, title 28, display 40. -->
+  <x:Double x:Key="FontSizeCaption">13</x:Double>
+  <x:Double x:Key="FontSizeDescription">14</x:Double>
+  <x:Double x:Key="FontSizeBody">16</x:Double>
+  <x:Double x:Key="FontSizeSubtitle">20</x:Double>
+  <x:Double x:Key="FontSizeTitle">28</x:Double>
+  <x:Double x:Key="FontSizeDisplay">40</x:Double>
+
+  <!-- Metrics: one page gutter, one control height. -->
+  <x:Double x:Key="ControlHeight">44</x:Double>
+  <x:Double x:Key="RowHeight">72</x:Double>
+
+  <!-- The stock combo box tints itself with the system accent while focused; pin it to the field colours. -->
+  <SolidColorBrush x:Key="ComboBoxBackground" Color="#2A2639" />
+  <SolidColorBrush x:Key="ComboBoxBackgroundUnfocused" Color="#2A2639" />
+  <SolidColorBrush x:Key="ComboBoxBackgroundPointerOver" Color="#353049" />
+  <SolidColorBrush x:Key="ComboBoxBackgroundPressed" Color="#353049" />
+  <SolidColorBrush x:Key="ComboBoxBackgroundBorderBrushFocused" Color="Transparent" />
+  <SolidColorBrush x:Key="ComboBoxBackgroundBorderBrushUnfocused" Color="Transparent" />
+  <SolidColorBrush x:Key="ComboBoxForegroundFocused" Color="#F5F5F7" />
+  <SolidColorBrush x:Key="ComboBoxForegroundFocusedPressed" Color="#F5F5F7" />
+  <SolidColorBrush x:Key="ComboBoxDropDownGlyphForegroundFocused" Color="#F5F5F7" />
+  <SolidColorBrush x:Key="ComboBoxDropDownGlyphForegroundFocusedPressed" Color="#F5F5F7" />
 </ResourceDictionary>
