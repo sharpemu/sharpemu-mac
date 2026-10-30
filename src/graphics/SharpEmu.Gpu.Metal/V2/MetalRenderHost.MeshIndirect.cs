@@ -118,7 +118,8 @@ internal sealed partial class MetalRenderHost
         $"indirect_cpu_waits={Interlocked.Exchange(ref _indirectCpuWaits, 0)} " +
         $"indirect_batches={Interlocked.Exchange(ref _indirectLaunchBatches, 0)} " +
         $"indirect_written={Interlocked.Exchange(ref _indirectLaunchesWritten, 0)} " +
-        $"indirect_reused={Interlocked.Exchange(ref _indirectLaunchesReused, 0)}";
+        $"indirect_reused={Interlocked.Exchange(ref _indirectLaunchesReused, 0)} " +
+        $"dispatch_threads_gpu={TakeThreadIndirectDispatches()}";
 
     /// <summary>Passes an indirect launch ended that would otherwise have continued; reported and reset.</summary>
     internal long TakeIndirectPassEnds() => Interlocked.Exchange(ref _passEndIndirect, 0);

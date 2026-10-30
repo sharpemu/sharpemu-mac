@@ -2824,6 +2824,7 @@ internal sealed partial class MetalRenderHost :
         _completions.Dispose();
         DisposeNativeOcclusion();
         DisposeLabelScatter();
+        DisposeThreadDispatch();
         DisposeOcclusionAudit();
         DisposeWriteFences();
         DisposeHostMovie();

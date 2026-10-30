@@ -1122,6 +1122,14 @@ internal sealed partial class MetalRenderHost
         Span<uint> pushData = stackalloc uint[(int)PushData.DwordCount];
         pushData.Clear();
         var hasPushData = false;
+        // Thread limits the GPU writes (TryDispatchThreadsIndirect): their block is this
+        // dispatch's own, neither found by content nor offered to later bindings.
+        var gpuLimitsPushDword = -1;
+        if (bindPoint == GpuBindPoint.Compute)
+        {
+            _threadLimitsTarget = default;
+        }
+
         foreach (var prepared in stages)
         {
             var stage = (MetalStageBindings)prepared;
@@ -1142,6 +1150,10 @@ internal sealed partial class MetalRenderHost
                 }
 
                 hasPushData = true;
+                if (HasGpuThreadLimits(stage))
+                {
+                    gpuLimitsPushDword = (int)(layout.PushDataStartDword + layout.DispatchThreadLimitsDword);
+                }
             }
 
             stage.Committed = true;
@@ -1151,7 +1163,17 @@ internal sealed partial class MetalRenderHost
         {
             var pushBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(pushData);
             MetalGuestRange range;
-            if (ArgumentBufferReuse && _pushRegions.TryFind(pushBytes, _submissionSerial, out var found))
+            if (gpuLimitsPushDword >= 0)
+            {
+                range = _guestMemory.Allocate(PushData.ByteSize, 256, out var span);
+                pushBytes.CopyTo(span);
+                _threadLimitsTarget = range with
+                {
+                    Offset = range.Offset + ((ulong)gpuLimitsPushDword * sizeof(uint)),
+                    Size = 3 * sizeof(uint),
+                };
+            }
+            else if (ArgumentBufferReuse && _pushRegions.TryFind(pushBytes, _submissionSerial, out var found))
             {
                 range = found;
             }
@@ -1426,6 +1448,11 @@ internal sealed partial class MetalRenderHost
             case DescriptorBindingKind.FlattenedResourceTable:
                 return UploadFlattenedTable(stage.StageResources.Resources.FlattenedResourceTable, stage.Program.FlattenedTableMinimumWords);
             case DescriptorBindingKind.ShaderData:
+                if (HasGpuThreadLimits(stage) && !stage.Program.Bindings!.UsesPushData)
+                {
+                    return UploadShaderDataForGpuLimits(stage);
+                }
+
                 return UploadDwords(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount));
             case DescriptorBindingKind.MipStatistics:
                 return LodStatisticsAddress();
@@ -1557,6 +1584,29 @@ internal sealed partial class MetalRenderHost
         padded.Clear();
         table.CopyTo(padded);
         return UploadDwords(padded);
+    }
+
+    // A compute stage whose thread limits the GPU writes (DispatchThreadLimits.FromIndirectArguments).
+    private static bool HasGpuThreadLimits(MetalStageBindings stage) =>
+        stage.Program.Stage == ShaderStageKind.Compute &&
+        stage.Program.Bindings is { UsesDispatchThreadLimits: true } &&
+        stage.StageResources.ThreadLimits is { FromIndirectArguments: true };
+
+    // The shader-data block of such a stage: a region of its own, whose limits the GPU writes.
+    private ulong UploadShaderDataForGpuLimits(MetalStageBindings stage)
+    {
+        var layout = stage.Program.Bindings!;
+        var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(
+            stage.ShaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
+        var range = _guestMemory.Allocate((ulong)Math.Max(bytes.Length, 16), 256, out var span);
+        span.Clear();
+        bytes.CopyTo(span);
+        _threadLimitsTarget = range with
+        {
+            Offset = range.Offset + ((ulong)layout.DispatchThreadLimitsDword * sizeof(uint)),
+            Size = 3 * sizeof(uint),
+        };
+        return range.GpuAddress;
     }
 
     private ulong UploadDwords(ReadOnlySpan<uint> words)

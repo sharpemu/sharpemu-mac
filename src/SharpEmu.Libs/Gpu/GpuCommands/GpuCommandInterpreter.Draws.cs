@@ -276,10 +276,12 @@ public sealed partial class GpuCommandInterpreter
 
     // Group counts written by an earlier shader are only in GPU memory; reading them
     // here waits for the GPU. When the host dispatches indirectly they stay there.
-    // Thread-unit dispatches still need the counts to convert them to groups.
+    // Thread-unit dispatches stay there too when the host also converts them to groups
+    // on the GPU; otherwise the counts are read here and converted on the CPU.
     private void DispatchIndirectAt(ulong argumentsAddress, uint dispatchInitiator)
     {
-        if (_host.ResolvesIndirectDispatchOnGpu && (dispatchInitiator & DispatchInitiatorUseThreadDimensions) == 0)
+        if (_host.ResolvesIndirectDispatchOnGpu &&
+            ((dispatchInitiator & DispatchInitiatorUseThreadDimensions) == 0 || _host.ResolvesThreadIndirectDispatchOnGpu))
         {
             DispatchDirect(0, 0, 0, dispatchInitiator, argumentsAddress);
             return;
