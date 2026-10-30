@@ -54,11 +54,26 @@ static inline float sharpemu_bvh_min(float a, float b)
 
 // The node's dwords, resolved once when the node sits inside one page and dword by
 // dword (each through the page table) when it straddles one. An unmapped dword reads
-// zero and records the page in the fault bitmap, like every device-address read.
+// zero and records the page in the fault bitmap, like every device-address read. A node
+// is 64-byte aligned, so one inside a page is read 16 bytes at a time: the dword-wise
+// loads took a sixth of GTA V's traversal time.
 static inline void sharpemu_bvh_fetch(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint count, thread uint* words)
 {
     bool valid = false;
     device uint* span = sharpemu_resolve_device_span(ranges, range_count, faults, fault_words, cache, address, count * 4u, valid);
+    if (valid && (address & 15ul) == 0ul)
+    {
+        device const uint4* quads = (device const uint4*)span;
+        for (uint quad = 0u; quad < (count >> 2u); quad++)
+        {
+            uint4 value = quads[quad];
+            words[quad * 4u] = value.x;
+            words[quad * 4u + 1u] = value.y;
+            words[quad * 4u + 2u] = value.z;
+            words[quad * 4u + 3u] = value.w;
+        }
+        return;
+    }
     for (uint index = 0u; index < count; index++)
     {
         words[index] = valid ? span[index] : sharpemu_load_device_dword(ranges, range_count, faults, fault_words, cache, address + (ulong)index * 4ul);
@@ -128,7 +143,9 @@ static inline uint4 sharpemu_bvh_box_test(thread uint* child, thread const float
 }
 
 // Box nodes: four child pointers, then per child min.xyz and max.xyz as floats, or as
-// halves packed low half first (GPURT BoxNode1_0, UncompressBBoxFromUint3).
+// halves packed low half first (GPURT BoxNode1_0, UncompressBBoxFromUint3). The halves
+// widen in hardware, exact for every half but a NaN, whose payload the slab test never
+// looks at (it only asks isnan).
 static inline uint4 sharpemu_bvh_box(thread const uint* node, bool fp16, uint grow, bool sort, float extent, float3 origin, float3 inv_dir)
 {
     uint child[4] = { node[0], node[1], node[2], node[3] };
@@ -136,7 +153,7 @@ static inline uint4 sharpemu_bvh_box(thread const uint* node, bool fp16, uint gr
     for (uint slot = 0u; slot < 24u; slot++)
     {
         bound[slot] = fp16
-            ? sharpemu_bvh_half((node[4u + (slot >> 1)] >> ((slot & 1u) * 16u)) & 0xFFFFu)
+            ? float(as_type<half2>(node[4u + (slot >> 1)])[slot & 1u])
             : as_type<float>(node[4u + slot]);
     }
     return sharpemu_bvh_box_test(child, bound, grow, sort, extent, origin, inv_dir);
