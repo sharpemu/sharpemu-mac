@@ -2551,7 +2551,10 @@ public partial class MainWindow : Window
         var options = new FilePickerSaveOptions
         {
             Title = loc.Get("Dialog.SaveZar"),
-            SuggestedFileName = SuggestedArchiveName(Path.GetFileName(gameFolder), game.TitleId, game.Version) + ".zar",
+            // The macOS save panel always appends the selected type's extension, so a suggested
+            // name that already ends in .zar would show as name.zar.zar there.
+            SuggestedFileName = SuggestedArchiveName(Path.GetFileName(gameFolder), game.TitleId, game.Version) +
+                (OperatingSystem.IsMacOS() ? "" : ".zar"),
             DefaultExtension = "zar",
             FileTypeChoices = [new FilePickerFileType(loc.Get("Dialog.ZarFiles")) { Patterns = ["*.zar"] }],
         };
