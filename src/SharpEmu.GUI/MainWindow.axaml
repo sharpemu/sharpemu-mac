@@ -66,13 +66,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
       </Border>
     </Panel>
 
-    <!-- Title bar; hidden in fullscreen (F11) so the game gets the whole screen. -->
+    <!-- Title bar; hidden in fullscreen (F11) so the game gets the whole screen. On macOS
+         the window keeps its native traffic lights over this bar (UseNativeWindowChrome). -->
     <Grid x:Name="TitleBar"
           Grid.Row="0"
           Height="44"
           ColumnDefinitions="*,Auto"
           Background="{StaticResource ChromeBrush}">
-      <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
+      <StackPanel x:Name="TitleBarBrand" Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
         <Image Source="avares://SharpEmu.GUI/Assets/SharpEmu.ico" Width="20" Height="20"
                RenderOptions.BitmapInterpolationMode="HighQuality" />
         <TextBlock Text="SharpEmu" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />

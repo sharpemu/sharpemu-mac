@@ -296,6 +296,7 @@ public partial class MainWindow : Window
             Dispatcher.UIThread.Post(() => AnchorCarouselSelection(animate: false), DispatcherPriority.Loaded);
         };
 
+        UseNativeWindowChrome();
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
         TitleBar.DoubleTapped += OnTitleBarDoubleTapped;
         MinimizeButton.Click += (_, _) => WindowState = WindowState.Minimized;
@@ -1360,6 +1361,34 @@ public partial class MainWindow : Window
         }
     }
 
+    // Left inset that keeps the brand clear of the macOS traffic lights, and the AppKit
+    // title bar height they are centred in.
+    private const double TrafficLightInset = 78;
+    private const double NativeTitleBarHeight = 30;
+
+    private bool _nativeWindowChrome;
+
+    /// <summary>
+    /// macOS keeps its system window frame: the content extends under a transparent title bar
+    /// and AppKit draws the traffic lights over <see cref="TitleBar"/>, so the drawn caption
+    /// buttons and resize grips are hidden. Other platforms keep the frameless custom chrome.
+    /// </summary>
+    private void UseNativeWindowChrome()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        _nativeWindowChrome = true;
+        WindowDecorations = WindowDecorations.Full;
+        ExtendClientAreaToDecorationsHint = true;
+        TitleBar.Height = NativeTitleBarHeight;
+        ExtendClientAreaTitleBarHeightHint = NativeTitleBarHeight;
+        WindowChromeButtons.IsVisible = false;
+        TitleBarBrand.Margin = new Thickness(TrafficLightInset, 0, 16, 0);
+    }
+
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)
     {
         if (e.Source is Visual source &&
@@ -1417,7 +1446,7 @@ public partial class MainWindow : Window
 
         if (ResizeHandles is { } handles)
         {
-            handles.IsVisible = CanResize && WindowState == WindowState.Normal;
+            handles.IsVisible = !_nativeWindowChrome && CanResize && WindowState == WindowState.Normal;
         }
     }
 
@@ -1909,6 +1938,9 @@ public partial class MainWindow : Window
         candidates.Add(Path.Combine(baseDirectory, exeName));
         candidates.Add(Path.Combine(baseDirectory, "win-x64", exeName));
         candidates.Add(Path.Combine(baseDirectory, "..", exeName));
+        // The native arm64 GUI host (SharpEmu.GuiHost): in a build tree the x64 emulator sits
+        // in the sibling RID folder; in the bundle it is "..", above.
+        candidates.Add(Path.Combine(baseDirectory, "..", "osx-x64", exeName));
 
         _emulatorExePath = candidates.FirstOrDefault(File.Exists) is { } found
             ? Path.GetFullPath(found)
