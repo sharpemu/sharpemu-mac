@@ -647,6 +647,12 @@ internal sealed partial class MetalRenderHost
         ref readonly var open = ref _renderingState;
         for (var index = 0; index < open.ColorAttachmentCount; index++)
         {
+            if (index < 32 && (_passScratchMask & (1u << index)) != 0)
+            {
+                // A stand-in was created with its store action named.
+                continue;
+            }
+
             var discard = hasNext
                 ? NextPassClearsColorAttachment(in next, index)
                 : index < MaxColorAttachments && NotedClearCoversAttachment(
@@ -940,6 +946,7 @@ internal sealed partial class MetalRenderHost
 
         var foldedClear = FoldPendingClearsInto(in state);
         var upcoming = _upcomingPipeline;
+        var scratchMask = ScratchAttachmentMask(in state, upcoming);
         var upcomingVertexCount = _upcomingVertexCount;
         var upcomingFirstVertex = _upcomingFirstVertex;
         _upcomingPipeline = null;
@@ -949,13 +956,14 @@ internal sealed partial class MetalRenderHost
         // An attachment still waiting for its upload was not the open pass's target when
         // that pass began, so the pass cannot be continued: it is resolved below instead.
         var continues = !foldedClear && _pendingClears.Count == 0 && !_imageCache.HasDeferredRefreshes &&
-            CanContinuePass(in state);
+            scratchMask == _passScratchMask && CanContinuePass(in state);
         if (continues && (launch is not { } requested || TryTakePreparedLaunch(requested)))
         {
             return;
         }
 
         if (!continues && launch is null && !foldedClear && _pendingClears.Count == 0 &&
+            scratchMask == 0 && _passScratchMask == 0 &&
             !_imageCache.HasDeferredRefreshes && (TryJoinDepthOnly(in state, upcoming) || TryJoinColorSubset(in state, upcoming)))
         {
             return;
@@ -1036,6 +1044,16 @@ internal sealed partial class MetalRenderHost
             {
                 ref readonly var attachment = ref state.ColorAttachments[index];
                 var slot = MetalNative.SendAtIndex(colors, SelObjectAtIndex, (nuint)index);
+                if ((scratchMask & (1u << index)) != 0)
+                {
+                    // Never loaded or stored: the guest's texture is only the draw's resource.
+                    MetalNative.SendVoid(slot, SelSetTexture,
+                        ScratchTarget((nint)attachment.View.Handle, _attachmentWidths[index], _attachmentHeights[index]));
+                    MetalV2Native.SendVoidValue(slot, SelSetLoadAction, Mtl.LoadActionDontCare);
+                    MetalV2Native.SendVoidValue(slot, SelSetStoreAction, Mtl.StoreActionDontCare);
+                    continue;
+                }
+
                 MetalNative.SendVoid(slot, SelSetTexture, (nint)attachment.View.Handle);
                 MetalV2Native.SendVoidValue(slot, SelSetLevel, index < _attachmentCount ? _attachmentLevels[index] : 0);
                 MetalV2Native.SendVoidValue(slot, SelSetSlice, index < _attachmentCount ? _attachmentSlices[index] : 0);
@@ -1199,6 +1217,7 @@ internal sealed partial class MetalRenderHost
                 $"depth={passDepth.HasDepth} depth_clear={passDepth.DepthClear} stencil={passDepth.HasStencil}.");
         }
         _passAttachmentCount = _attachmentCount;
+        _passScratchMask = scratchMask;
         Array.Copy(_attachmentLevels, _passLevels, MaxColorAttachments);
         Array.Copy(_attachmentSlices, _passSlices, MaxColorAttachments);
         Array.Copy(_attachmentDepthPlanes, _passDepthPlanes, MaxColorAttachments);
@@ -1288,6 +1307,7 @@ internal sealed partial class MetalRenderHost
             OcclusionAuditClose();
             EndAndReleaseEncoder(_renderEncoder, render: true);
             _renderEncoder = 0;
+            _passScratchMask = 0;
             NativeOcclusionFinish();
             PassProfileClose();
         }
