@@ -79,12 +79,24 @@ public static class App0Archive
         return node != ZArchive.InvalidNode;
     }
 
-    public static bool TryGetFile(string hostPath, out ulong size)
+    public static bool TryGetFile(string hostPath, out ulong size) =>
+        TryGetEntry(hostPath, out var isDirectory, out size) && !isDirectory;
+
+    // What the archive holds at a host path, in one lookup: a directory, or a file and the size a read
+    // of it sees (the overlay's, when that replaces the file).
+    public static bool TryGetEntry(string hostPath, out bool isDirectory, out ulong size)
     {
         size = 0;
-        if (!TryResolve(hostPath, out var archive, out var node) || !archive.IsFile(node))
+        isDirectory = false;
+        if (!TryResolve(hostPath, out var archive, out var node))
         {
             return false;
+        }
+
+        if (archive.IsDirectory(node))
+        {
+            isDirectory = true;
+            return true;
         }
 
         size = App0FileOverlay.TryGet(hostPath, out var overlay) && overlay.Content is { } content
@@ -155,7 +167,9 @@ public static class App0Archive
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(hostPath))!);
-        var temporary = hostPath + ".partial";
+        // Per process: the cache folder is shared by every build and process using the data root,
+        // and two of them extracting the same file must not open one temporary file between them.
+        var temporary = $"{hostPath}.{Environment.ProcessId}.partial";
         using (var target = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
         {
             source.CopyTo(target, ZArchive.BlockSize);

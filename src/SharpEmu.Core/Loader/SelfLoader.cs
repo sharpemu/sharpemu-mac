@@ -451,19 +451,39 @@ public sealed class SelfLoader : ISelfLoader
             }
         }
 
+        (string? Title, string? TitleId, string? Version) applicationInfo = default;
         if (foundPath == null)
         {
             Console.WriteLine("[LOADER] param.json not found (no root path / unknown layout).");
-            return default;
+        }
+        else
+        {
+            applicationInfo = Ps5ParamJsonReader.TryReadPs5Param(fs, foundPath);
+            flexibleMemorySize = Ps5ParamJsonReader.TryReadFlexibleMemorySize(fs, foundPath);
+            Console.WriteLine($"[LOADER] Loading param.json at {foundPath}");
         }
 
-        var applicationInfo = Ps5ParamJsonReader.TryReadPs5Param(fs, foundPath);
-        flexibleMemorySize = Ps5ParamJsonReader.TryReadFlexibleMemorySize(fs, foundPath);
-        Console.WriteLine($"[LOADER] Loading param.json at {foundPath}");
-        Console.WriteLine(
-            $"[LOADER] Title: {applicationInfo.Title ?? "(unknown)"}, " +
-            $"TitleId: {applicationInfo.TitleId ?? "(unknown)"}, " +
-            $"Version: {applicationInfo.Version ?? "(unknown)"}");
+        // A dump without a title id in param.json (Poppy Playtime Chapter 1 has no param.json
+        // at all) still names its content in contentids.json; without it the title shared
+        // the UNKNOWN pipeline cache, save data and settings with every other such dump.
+        var contentIdsPath = string.IsNullOrEmpty(mountRoot) ? "contentids.json" : $"{mountRoot}/contentids.json";
+        if (string.IsNullOrWhiteSpace(applicationInfo.TitleId) &&
+            fs.Exists(contentIdsPath) &&
+            fs.TryReadAllBytes(contentIdsPath, out var contentIds) &&
+            Ps5ParamJsonReader.TryReadContentIdsTitleId(contentIds) is { } contentTitleId)
+        {
+            applicationInfo.TitleId = contentTitleId;
+            Console.WriteLine($"[LOADER] Title id {contentTitleId} from {contentIdsPath}");
+        }
+
+        if (foundPath != null || applicationInfo.TitleId != null)
+        {
+            Console.WriteLine(
+                $"[LOADER] Title: {applicationInfo.Title ?? "(unknown)"}, " +
+                $"TitleId: {applicationInfo.TitleId ?? "(unknown)"}, " +
+                $"Version: {applicationInfo.Version ?? "(unknown)"}");
+        }
+
         return applicationInfo;
     }
 

@@ -73,6 +73,7 @@ internal static class MetalStaticPrecompile
     internal const double ArchiveShare = 0.6;
 
     private const int MaxLoggedFailures = 8;
+    internal const int MaxOtherDoneFiles = 3;
     private const int MaxStubVertices = 64;
     private const nuint PixelFormatDepth32Float = 252;
     private const nuint PixelFormatDepth32FloatStencil8 = 260;
@@ -160,7 +161,7 @@ internal static class MetalStaticPrecompile
         // Utility unless the guest is held until it completes (MetalCompileThread).
         MetalCompileThread.Start(
             "SharpEmu static shader precompile",
-            Precompile.HoldsUntilComplete ? SharpEmu.HLE.Host.HostThreadQos.UserInitiated : SharpEmu.HLE.Host.HostThreadQos.Utility,
+            Precompile.HoldsForStatic ? SharpEmu.HLE.Host.HostThreadQos.UserInitiated : SharpEmu.HLE.Host.HostThreadQos.Utility,
             () =>
             {
                 try
@@ -258,7 +259,7 @@ internal static class MetalStaticPrecompile
 
     private static void Run(nint device, string metalDirectory, string stamp, IGuestGpuBackend compiler)
     {
-        var hold = Precompile.HoldsUntilComplete;
+        var hold = Precompile.HoldsForStatic;
         if (MetalBinaryArchive.For(device) is not { } archive)
         {
             Console.Error.WriteLine("[LOADER][INFO] Shader precompile (static): off, the binary archive is off.");
@@ -567,11 +568,21 @@ internal static class MetalStaticPrecompile
     /// fragment's inputs as its outputs, or a mesh pipeline. Everything is released before
     /// it returns. The file's bytes, or -1 (with the reason, or none when skipped).
     /// </summary>
-    internal static long Store(MetalBinaryArchive archive, nint device, Gen5MslShader shader, UInt128 key, out string? error)
+    internal static long Store(MetalBinaryArchive archive, nint device, Gen5MslShader shader, UInt128 key, out string? error) =>
+        Store(archive, device, shader.Source, shader.EntryPoint, shader.UsesPerVertexInputs, shader.UsesMipStatisticsConstant, key, out error);
+
+    /// <summary>As <see cref="Store(MetalBinaryArchive, nint, Gen5MslShader, UInt128, out string?)"/>, from the shader's parts.</summary>
+    internal static long Store(
+        MetalBinaryArchive archive,
+        nint device,
+        string source,
+        string entry,
+        bool usesPerVertexInputs,
+        bool usesMipStatisticsConstant,
+        UInt128 key,
+        out string? error)
     {
         error = null;
-        var source = shader.Source;
-        var entry = shader.EntryPoint;
         var kind = entry switch
         {
             "gen5_cs" => MetalBinaryArchive.PipelineKind.Compute,
@@ -593,7 +604,7 @@ internal static class MetalStaticPrecompile
 
         nint stub = 0;
         var ownsStub = false;
-        if (stubSource is not null && (stub = StubVertex(device, stubSource, shader.UsesPerVertexInputs, out ownsStub, out error)) == 0)
+        if (stubSource is not null && (stub = StubVertex(device, stubSource, usesPerVertexInputs, out ownsStub, out error)) == 0)
         {
             return -1;
         }
@@ -604,7 +615,7 @@ internal static class MetalStaticPrecompile
         nint descriptor = 0;
         try
         {
-            library = MetalRenderHost.TryCompileLibrary(device, source, shader.UsesPerVertexInputs, out var compileError, out _, askArchive: false);
+            library = MetalRenderHost.TryCompileLibrary(device, source, usesPerVertexInputs, out var compileError, out _, askArchive: false);
             if (library == 0)
             {
                 error = compileError;
@@ -612,7 +623,7 @@ internal static class MetalStaticPrecompile
             }
 
             nint functionError = 0;
-            function = shader.UsesMipStatisticsConstant
+            function = usesMipStatisticsConstant
                 ? MetalRenderHost.NewMipStatisticsFunction(library, entry, enabled: false, out functionError)
                 : MetalNative.Send(library, SelNewFunctionWithName, MetalNative.NsString(entry));
             if (function == 0)
@@ -799,12 +810,16 @@ internal static class MetalStaticPrecompile
         try
         {
             Directory.CreateDirectory(metalDirectory);
-            foreach (var other in Directory.EnumerateFiles(metalDirectory, "static-precompile-*.done"))
+            // The lists of other translator builds are kept, the most recently written first, up
+            // to MaxOtherDoneFiles, as the library and prewarm lists are: a start of a build
+            // that is used again (one checkout's, then another's) would otherwise translate
+            // every unit again behind the game (The Oregon Trail: 1399 programs over 126 s).
+            foreach (var other in new DirectoryInfo(metalDirectory).GetFiles("static-precompile-*.done")
+                         .Where(file => !string.Equals(file.Name, name, StringComparison.Ordinal))
+                         .OrderByDescending(static file => file.LastWriteTimeUtc)
+                         .Skip(MaxOtherDoneFiles))
             {
-                if (!string.Equals(Path.GetFileName(other), name, StringComparison.Ordinal))
-                {
-                    File.Delete(other);
-                }
+                other.Delete();
             }
 
             var file = new FileStream(Path.Combine(metalDirectory, name), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);

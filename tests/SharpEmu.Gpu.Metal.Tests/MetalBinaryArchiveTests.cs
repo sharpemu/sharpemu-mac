@@ -634,6 +634,112 @@ public sealed class MetalBinaryArchiveTests(ITestOutputHelper output) : IDisposa
         Assert.Null(MetalStaticPrecompile.StubVertexSource("kernel void gen5_cs() {}"));
     }
 
+    // A pipeline made only with the pixel library's LOD statistics counters is listed under
+    // the counters' pair, while the library file keeps the key a library load asks for.
+    [Fact]
+    public void ThePixelLibraryOfAPipelineWithCountersIsStoredUnderItsOwnKey()
+    {
+        if (!RequireDevice()) return;
+        var device = Device.Value;
+        var vertexKey = MetalBinaryArchive.LibraryKey(VertexSource, usesPerVertexInputs: false);
+        var pixelKey = MetalBinaryArchive.LibraryKey(PixelSource, usesPerVertexInputs: false);
+        var countersKey = MetalBinaryArchive.LodStatisticsKey(pixelKey, counters: true);
+        Assert.NotEqual(pixelKey, countersKey);
+        var vertexLibrary = Compile(VertexSource);
+        var pixelLibrary = Compile(PixelSource);
+        var descriptor = RenderDescriptor(Function(vertexLibrary, "gen5_vs"), Function(pixelLibrary, "gen5_ps"));
+        using (var writing = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
+        {
+            Assert.True(writing.WaitLoaded(TimeSpan.FromSeconds(10)));
+            writing.NoteRenderPipeline(
+                descriptor, MetalBinaryArchive.PipelineKind.Render, vertexKey, pixelKey, missed: true, pixelPairKey: countersKey);
+            writing.Flush(wait: true);
+            Assert.Equal(2, writing.Counters.LibrariesWritten);
+        }
+
+        using var reading = MetalBinaryArchive.Open(_root, device, "translator-a", Budget);
+        Assert.True(reading.WaitLoaded(TimeSpan.FromSeconds(10)));
+        var storedPixelLibrary = reading.TryLoadLibrary(pixelKey);
+        Assert.NotEqual(0, storedPixelLibrary);
+        Assert.False(reading.HasLibrary(countersKey));
+        Assert.Equal(0, reading.AcquirePipelineArchives(vertexKey, pixelKey));
+        var archives = reading.AcquirePipelineArchives(vertexKey, countersKey);
+        Assert.NotEqual(0, archives);
+        Release(archives, storedPixelLibrary, descriptor, pixelLibrary, vertexLibrary);
+    }
+
+    // A file no start used (loaded, opened or written) for the unused age goes at the next
+    // open, whatever wrote it; a used one stays.
+    [Fact]
+    public void AFileUnusedForTheUnusedAgeIsRemovedAtOpen()
+    {
+        if (!RequireDevice()) return;
+        var device = Device.Value;
+        var key = MetalBinaryArchive.LibraryKey(ComputeSource, usesPerVertexInputs: false);
+        WriteComputeLibrary(device, key);
+        string directory;
+        string used;
+        using (var archive = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
+        {
+            directory = archive.Directory;
+            used = Path.Combine(archive.LibraryDirectory, key.ToString("x32", System.Globalization.CultureInfo.InvariantCulture) + ".mtla");
+        }
+
+        Assert.True(File.Exists(used));
+        var unusedLibrary = Path.Combine(directory, "libraries", new string('a', 32) + ".mtla");
+        var unusedSegment = Path.Combine(directory, "pipelines-0123456789abcdef-00000.mtla");
+        File.Copy(used, unusedLibrary);
+        File.Copy(used, unusedSegment);
+        var old = DateTime.UtcNow - TimeSpan.FromDays(31);
+        File.SetLastWriteTimeUtc(unusedLibrary, old);
+        File.SetLastWriteTimeUtc(unusedSegment, old);
+        File.SetLastWriteTimeUtc(used, DateTime.UtcNow - TimeSpan.FromDays(29));
+
+        using var reopened = MetalBinaryArchive.Open(_root, device, "translator-a", Budget, TimeSpan.FromDays(30));
+        Assert.False(File.Exists(unusedLibrary));
+        Assert.False(File.Exists(unusedSegment));
+        Assert.True(File.Exists(used));
+        Assert.Equal(2, reopened.Removed.UnusedFiles);
+        Assert.Equal(2 * new FileInfo(used).Length, reopened.Removed.UnusedBytes);
+        Assert.True(reopened.IsStored(key));
+    }
+
+    // A library compiled from MSL that no pipeline is made from (a prewarm's, or a module the
+    // game creates and never draws) is stored from its source once noted, after the delay a
+    // pipeline has to store it first, and the next start loads it instead of compiling it.
+    [Fact]
+    public void ALibraryNoPipelineStoredIsStoredFromItsSourceAndLoadsAtTheNextOpen()
+    {
+        if (!RequireDevice()) return;
+        var device = Device.Value;
+        var key = MetalBinaryArchive.LibraryKey(PixelSource, usesPerVertexInputs: false);
+        var delay = MetalUnstoredLibraries.Delay;
+        MetalUnstoredLibraries.Delay = TimeSpan.FromHours(1);
+        try
+        {
+            using (var archive = MetalBinaryArchive.Open(_root, device, "translator-a", Budget))
+            {
+                Assert.False(archive.IsStored(key));
+                MetalUnstoredLibraries.Note(archive, device, key, PixelSource, usesPerVertexInputs: false);
+                MetalUnstoredLibraries.Drain(TimeSpan.FromHours(1));
+                Assert.False(archive.IsStored(key));
+                Assert.True(MetalUnstoredLibraries.Drain(TimeSpan.Zero) >= 1);
+                Assert.True(archive.IsStored(key));
+            }
+
+            using var reopened = MetalBinaryArchive.Open(_root, device, "translator-a", Budget);
+            var library = reopened.TryLoadLibrary(key);
+            Assert.NotEqual(0, library);
+            var function = Function(library, "gen5_ps");
+            MetalNative.SendVoid(function, MetalNative.Selector("release"));
+            MetalNative.SendVoid(library, MetalNative.Selector("release"));
+        }
+        finally
+        {
+            MetalUnstoredLibraries.Delay = delay;
+        }
+    }
+
     private static long Store(MetalBinaryArchive archive, string source, string entry, Gen5MslStage stage, UInt128 key)
     {
         var bytes = MetalStaticPrecompile.Store(archive, Device.Value, new Gen5MslShader(source, entry, stage, 1), key, out var error);

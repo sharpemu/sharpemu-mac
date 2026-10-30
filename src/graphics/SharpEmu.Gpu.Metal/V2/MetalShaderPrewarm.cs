@@ -17,10 +17,11 @@ namespace SharpEmu.Gpu.Metal.V2;
 
 /// <summary>
 /// Holds the guest at its first splash hide, GPU submission or flip until the shader
-/// prewarm has been decided and has compiled what the guest needs first (every recorded
-/// compute, or those of its first frame once a session has recorded them; see
-/// MetalShaderPrewarm.HoldFirst), so the first frames do not wait on cold compiles. The
-/// window keeps presenting the splash meanwhile. SHARPEMU_SHADER_PREWARM_WAIT=0 opts out.
+/// prewarm has been decided and has compiled what it holds for: everything past sessions
+/// recorded by default, or with SHARPEMU_SHADER_PREWARM_HOLD=first the programs of the
+/// first frame once a session has recorded them (MetalShaderPrecompile,
+/// MetalShaderPrewarm.HoldFirst), so the game does not wait on cold compiles. The window
+/// keeps presenting the splash and the progress meanwhile. SHARPEMU_SHADER_PREWARM_WAIT=0 opts out.
 /// The v2 twin of the Vulkan presenter's WaitForShaderPrewarm.
 /// </summary>
 internal sealed class MetalShaderPrewarmGate(bool disabled)
@@ -540,12 +541,11 @@ internal static class MetalShaderPrewarm
     }
 
     /// <summary>
-    /// SHARPEMU_SHADER_PREWARM_HOLD=all holds the guest for every recorded compute, as
-    /// before there was a first-frame list.
+    /// Every recorded compute and graphics program holds the guest unless
+    /// SHARPEMU_SHADER_PREWARM_HOLD=first (MetalShaderPrecompile): then only those of the
+    /// first frame do.
     /// </summary>
-    private static readonly bool HoldsForEveryCompute =
-        Environment.GetEnvironmentVariable("SHARPEMU_SHADER_PREWARM_HOLD") == "all" ||
-        MetalShaderPrecompile.Current.HoldsUntilComplete;
+    private static readonly bool HoldsForEveryCompute = MetalShaderPrecompile.Current.HoldsUntilComplete;
 
     private static MetalShaderPrecompile Precompile => MetalShaderPrecompile.Current;
 
@@ -584,7 +584,7 @@ internal static class MetalShaderPrewarm
     /// </summary>
     private static bool CompletePrecompile()
     {
-        if (Precompile.HoldsUntilComplete && !Precompile.Completed)
+        if (Precompile.HoldsForStatic && !Precompile.Completed)
         {
             // The programs only found in the game's files come last.
             MetalStaticPrecompile.WaitForCompletion();
@@ -843,6 +843,12 @@ internal static class MetalShaderPrewarm
             }
 
             Interlocked.Increment(ref _compiled);
+            // Stored like a dispatch's (NewComputePipelineState), so the next start finds it
+            // archived above and compiles nothing: a compute the session never dispatched
+            // was otherwise compiled again at every start (Demon's Souls: some 155 a start,
+            // most of a minute of the prewarm's threads).
+            MetalBinaryArchive.For(device)?.CaptureCompute(
+                MetalBinaryArchive.LibraryKey(metal.Shader.Source, metal.Shader.UsesPerVertexInputs), function);
         }
         catch (Exception exception)
         {
@@ -945,6 +951,8 @@ internal static class MetalShaderPrewarm
     {
         _stopping = true;
         Gate.Cancel();
+        // Before the static precompile, whose stub vertex functions it uses.
+        MetalUnstoredLibraries.Stop();
         MetalStaticPrecompile.Stop();
         MetalLibraryPrewarm.Stop();
         MetalDeviceDataLoadsStore.Stop();

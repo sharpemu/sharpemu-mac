@@ -7970,7 +7970,7 @@ public static partial class KernelMemoryCompatExports
             cachePath.StartsWith(Path.TrimEndingDirectorySeparator(app0Root) + Path.DirectorySeparatorChar, HostFsPath.Comparison);
     }
 
-    private static bool TryGetAprFileSize(string hostPath, out ulong size)
+    internal static bool TryGetAprFileSize(string hostPath, out ulong size)
     {
         var profile = FileIoProfile.Begin();
         var found = TryGetAprFileSizeCore(hostPath, out size);
@@ -7998,6 +7998,24 @@ public static partial class KernelMemoryCompatExports
         }
 
         if (_aprMissingImagePaths.ContainsKey(cachePath))
+        {
+            return false;
+        }
+
+        // An archive-mounted app0 has almost none of its files on disk, and the ones it has were
+        // extracted from the archive, so the archive's answer is the disk's. Asking it first skips a
+        // host directory listing and a stat that both miss for nearly every asset: Demon's Souls
+        // sizes each of its ~250k files once while it loads.
+        try
+        {
+            if (App0Archive.TryGetEntry(cachePath, out var archivedDirectory, out var archivedSize))
+            {
+                size = archivedDirectory ? 65536 : archivedSize;
+                _aprFileSizeCache.TryAdd(cachePath, size);
+                return true;
+            }
+        }
+        catch
         {
             return false;
         }
@@ -8031,13 +8049,7 @@ public static partial class KernelMemoryCompatExports
                 return true;
             }
 
-            if (App0Archive.TryGetFile(cachePath, out size))
-            {
-                _aprFileSizeCache.TryAdd(cachePath, size);
-                return true;
-            }
-
-            if (!new DirectoryInfo(cachePath).Exists && !App0Archive.IsDirectory(cachePath))
+            if (!new DirectoryInfo(cachePath).Exists)
             {
                 if (IsUnderApp0(cachePath))
                 {

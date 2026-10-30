@@ -350,6 +350,23 @@ internal static partial class MetalV2Presenter
     /// </summary>
     public static void StopWorker()
     {
+        try
+        {
+            StopWorkerAndWait();
+        }
+        finally
+        {
+            // The title's binary archive writes its last segment here, while the session is
+            // closing, rather than at process exit: the split's GPU host is terminated a few
+            // seconds after the guest asks it to exit, and an archive left to ProcessExit lost
+            // that race in most sessions (Demon's Souls' every one), dropping the pipelines
+            // added since the last flush.
+            MetalBinaryArchive.Stop();
+        }
+    }
+
+    private static void StopWorkerAndWait()
+    {
         Thread? worker;
         SharpEmu.HLE.Host.HostQosThread? workerQos;
         lock (_gate)

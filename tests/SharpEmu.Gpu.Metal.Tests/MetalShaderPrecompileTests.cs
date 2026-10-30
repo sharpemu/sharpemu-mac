@@ -13,8 +13,10 @@ namespace SharpEmu.Gpu.Metal.Tests;
 public sealed class MetalShaderPrecompileTests(ITestOutputHelper output)
 {
     [Theory]
-    [InlineData(null, null, (int)MetalPrecompileMode.Off)]
-    [InlineData(null, "all", (int)MetalPrecompileMode.Off)]
+    [InlineData(null, null, (int)MetalPrecompileMode.Recorded)]
+    [InlineData(null, "all", (int)MetalPrecompileMode.Recorded)]
+    [InlineData(null, "first", (int)MetalPrecompileMode.Off)]
+    [InlineData(null, "FIRST", (int)MetalPrecompileMode.Off)]
     [InlineData(null, "complete", (int)MetalPrecompileMode.Hold)]
     [InlineData(null, "COMPLETE", (int)MetalPrecompileMode.Hold)]
     [InlineData("1", null, (int)MetalPrecompileMode.Exit)]
@@ -54,6 +56,20 @@ public sealed class MetalShaderPrecompileTests(ITestOutputHelper output)
         var precompile = new MetalShaderPrecompile(MetalPrecompileMode.Hold, () => exits++, () => (1, 1));
         Assert.True(precompile.HoldsUntilComplete);
         Assert.False(precompile.Complete("detail"));
+        Assert.Equal(0, exits);
+    }
+
+    // The default holds for what past sessions recorded, not for the static precompile.
+    [Fact]
+    public void TheRecordedModeHoldsForTheRecordedProgramsAndNotTheStaticPrecompile()
+    {
+        var exits = 0;
+        var precompile = new MetalShaderPrecompile(MetalPrecompileMode.Recorded, () => exits++, () => (1, 1));
+        Assert.True(precompile.HoldsUntilComplete);
+        Assert.False(precompile.HoldsForStatic);
+        Assert.True(new MetalShaderPrecompile(MetalPrecompileMode.Hold, () => { }, () => (1, 1)).HoldsForStatic);
+        Assert.False(precompile.Complete("detail"));
+        Assert.True(precompile.Completed);
         Assert.Equal(0, exits);
     }
 
