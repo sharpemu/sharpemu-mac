@@ -120,7 +120,7 @@ internal sealed partial class MetalRenderHost
 
         // The pixel function with its colour outputs moved (ColorRemap -> library and function),
         // built the first time a subset join needs that remap of this program.
-        public Dictionary<(uint Remap, bool LodStatistics), (nint Library, nint Function)>? RemappedFunctions;
+        public Dictionary<(uint Remap, bool LodStatistics), (nint Library, nint Function, UInt128 ArchiveKey)>? RemappedFunctions;
 
         // The binary archive keys of the library and of the rectangle-list library (zero
         // with no archive): the pipeline made from them stores them under these.
@@ -970,14 +970,23 @@ internal sealed partial class MetalRenderHost
                     MetalV2Formats.TopologyClass(parameters.Topology));
             }
 
+            // The library the fragment function comes from: a remapped pixel function is another
+            // library, and storing the pipeline's under the module's key would hand the module
+            // the remapped outputs at the next start.
+            var pixelLibraryKey = pixelModule?.ArchiveKey ?? default;
             if (pixelModule is not null)
             {
-                MetalNative.SendVoid(
-                    descriptor,
-                    MetalNative.Selector("setFragmentFunction:"),
-                    description.ColorRemap != 0
-                        ? RequireRemappedPixelFunction(pixelModule, description.ColorRemap, description.LodStatistics)
-                        : PixelFunctionOf(pixelModule, description.LodStatistics));
+                nint pixelFunction;
+                if (description.ColorRemap != 0)
+                {
+                    (pixelFunction, pixelLibraryKey) = RequireRemappedPixelFunction(pixelModule, description.ColorRemap, description.LodStatistics);
+                }
+                else
+                {
+                    pixelFunction = PixelFunctionOf(pixelModule, description.LodStatistics);
+                }
+
+                MetalNative.SendVoid(descriptor, MetalNative.Selector("setFragmentFunction:"), pixelFunction);
             }
 
             if (parameters.AlphaToCoverageEnable && !MetalV2Diagnostics.IgnoreAlphaToCoverage)
@@ -1119,7 +1128,7 @@ internal sealed partial class MetalRenderHost
                     descriptor,
                     mesh is null ? MetalBinaryArchive.PipelineKind.Render : MetalBinaryArchive.PipelineKind.Mesh,
                     vertexArchiveKey,
-                    pixelModule?.ArchiveKey ?? default,
+                    pixelLibraryKey,
                     missed,
                     pixelArchiveKey);
             }
