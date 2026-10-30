@@ -359,8 +359,12 @@ public sealed partial class RenderExecutor
             {
                 attachmentSamples = target.Samples;
             }
-            else if (attachmentSamples != target.Samples)
+            else if (attachmentSamples != target.Samples &&
+                (DropMixedSampleDepth || attachmentSamples > target.Samples || !_host.SupportsMixedDepthSamples))
             {
+                // Otherwise colour with fewer samples than its depth (EQAA: Ghost of Tsushima's
+                // checkerboard G-buffer) is drawn at the colour's count, and the host stands in for
+                // the depth target with one of that many samples.
                 if (!DropMixedSampleDepth)
                 {
                     throw _host.Fatal($"Mixed color and depth sample counts are not supported: color={attachmentSamples} depth={target.Samples}.");

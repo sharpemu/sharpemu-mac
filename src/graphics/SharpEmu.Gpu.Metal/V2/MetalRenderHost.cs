@@ -168,6 +168,7 @@ internal sealed partial class MetalRenderHost :
         _relay = relay;
         PerVertexPixelInputsSupported = SupportsApple10Features(device);
         DepthBoundsTestSupported = SupportsApple10Features(device);
+        GuestPixelFormats.NarrowSrgbFormats = SupportsNarrowSrgb(device);
         _sharedEvent = MetalNative.Send(device, SelNewSharedEvent);
         if (_sharedEvent == 0)
         {
@@ -308,6 +309,16 @@ internal sealed partial class MetalRenderHost :
     public bool DepthBoundsInPipelineState => false;
 
     private const nint GpuFamilyApple10 = 1010;
+
+    // R8Unorm_sRGB and RG8Unorm_sRGB exist on Apple GPUs only (MTLGPUFamilyApple1 and later).
+    private const nint GpuFamilyApple1 = 1001;
+
+    private static bool SupportsNarrowSrgb(nint device)
+    {
+        var supportsFamily = MetalNative.Selector("supportsFamily:");
+        return MetalNative.SendBool(device, MetalNative.Selector("respondsToSelector:"), supportsFamily) &&
+            MetalNative.SendBool(device, supportsFamily, GpuFamilyApple1);
+    }
 
     private static bool SupportsApple10Features(nint device)
     {
@@ -1110,6 +1121,16 @@ internal sealed partial class MetalRenderHost :
         Interlocked.Add(ref _gpuWaitTicks, finished - started);
         _waitsByReason[(int)reason]++;
         _waitTicksByReason[(int)reason] += finished - started;
+        if (WaitOrigins && reason == MetalWaitReason.ReadRange)
+        {
+            var match = _gpuWrites.LastMatch;
+            var key = match.Origin == MetalGpuWriteOrigin.Unbounded
+                ? $"Unbounded(0x{_unboundedProducer:X16})"
+                : match.Origin.ToString();
+            key += $"<-0x{SharpEmu.ShaderCompiler.Resources.MaterializingShader.Hash:X16}";
+            _waitOrigins[key] = _waitOrigins.GetValueOrDefault(key) + 1;
+        }
+
         var frequency = System.Diagnostics.Stopwatch.Frequency;
         if (finished - started <= frequency / 50 || _slowWaitReports >= 4)
         {
@@ -1162,6 +1183,29 @@ internal sealed partial class MetalRenderHost :
         if (MetalV2Diagnostics.WaitTrace)
         {
             line.Append($" reader=0x{SharpEmu.ShaderCompiler.Resources.MaterializingShader.Hash:X16}");
+        }
+
+        if (MetalV2Diagnostics.WaitStack)
+        {
+            // The emulator frames that asked for the read, innermost first.
+            line.Append(" stack=");
+            var frames = new System.Diagnostics.StackTrace(1, false).GetFrames();
+            var shown = 0;
+            foreach (var frame in frames)
+            {
+                var method = frame.GetMethod();
+                var type = method?.DeclaringType?.FullName;
+                if (method is null || type is null || !type.StartsWith("SharpEmu.", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                line.Append(shown++ == 0 ? string.Empty : "<").Append(type[(type.LastIndexOf('.') + 1)..]).Append('.').Append(method.Name);
+                if (shown == 14)
+                {
+                    break;
+                }
+            }
         }
 
         Console.Error.WriteLine(line.ToString());
@@ -1280,6 +1324,15 @@ internal sealed partial class MetalRenderHost :
         NotePendingCopyDestination(address, size, origin, serial, sequence);
         NoteFencedWrite(address, size);
     }
+
+    // SHARPEMU_METAL_V2_WAIT_ORIGINS=1: every host read that waited, counted by the write record
+    // it waited for (an unbounded one by the program that made it) and the program whose
+    // resources were being read (0: a command-processor read), printed with each PERF window.
+    private static readonly bool WaitOrigins =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_ORIGINS") == "1";
+
+    private readonly Dictionary<string, int> _waitOrigins = new(StringComparer.Ordinal);
+    private ulong _unboundedProducer;
 
     /// <summary>
     /// Recorded work stores into guest memory without a known destination. Only the
@@ -1497,6 +1550,14 @@ internal sealed partial class MetalRenderHost :
 
         // A label held for the commit over these bytes lands first, so the fill overwrites it in stream order.
         OrderAfterDeferredCopies(address, size);
+        if (TryFillInComputeEncoder(address, size, value, in range))
+        {
+            _imageCache.InvalidateMemoryFromGpu(address, size);
+            NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.Fill);
+            Interlocked.Increment(ref _gpuFills);
+            return;
+        }
+
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestFill);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
@@ -2313,6 +2374,33 @@ internal sealed partial class MetalRenderHost :
 
     public BufferBinding NullBuffer => new((ulong)_guestMemory.NullBuffer, 0);
 
+    // SHARPEMU_TRACE_RING_BINDINGS=<lo>-<hi> (hex, diagnostic): each buffer binding over that range after flip 300, with
+    // the host buffer and offset it resolved to and whether that is guest memory in place, for telling whether a
+    // writer and a later reader of the same guest bytes in one command buffer see one copy.
+    private static readonly (ulong Low, ulong High) TracedRingRange = ParseTracedRingRange(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RING_BINDINGS"));
+    private int _tracedRingBindings;
+
+    private static (ulong, ulong) ParseTracedRingRange(string? text)
+    {
+        var parts = (text ?? string.Empty).Split('-');
+        return parts.Length == 2 &&
+            ulong.TryParse(parts[0], System.Globalization.NumberStyles.HexNumber, null, out var low) &&
+            ulong.TryParse(parts[1], System.Globalization.NumberStyles.HexNumber, null, out var high)
+            ? (low, high)
+            : (0, 0);
+    }
+
+    private void TraceRingBinding(ulong address, ulong size, bool isWritten, MetalGuestRange range)
+    {
+        if (TracedRingRange.High == 0 || _flips < 300 || address >= TracedRingRange.High || address + size <= TracedRingRange.Low ||
+            _tracedRingBindings++ > 4000)
+            return;
+        Console.Error.WriteLine(
+            $"[METAL-V2][RING-BINDING] flip={_flips} serial={SubmissionSerial} {(isWritten ? "write" : "read")} addr=0x{address:X} size=0x{size:X} " +
+            $"buffer=0x{(ulong)range.Buffer:X} offset=0x{range.Offset:X} inplace={_guestMemory.IsInPlace(range)}");
+    }
+
     public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
     {
         // A buffer binding sees guest memory, so any image that owns these bytes
@@ -2330,6 +2418,7 @@ internal sealed partial class MetalRenderHost :
             return NullBuffer;
         }
 
+        TraceRingBinding(address, size, isWritten, range);
         _slotTrap?.NoteBinding(
             isWritten ? "binding(write)" : "binding(read)",
             address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
@@ -2457,7 +2546,7 @@ internal sealed partial class MetalRenderHost :
             (SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.DcbHashEnabled
                 ? $"dcbhash_checks={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashChecks} dcbhash_mismatches={SharpEmu.Libs.Gpu.GpuCommands.GpuStreamDiagnostics.HashMismatches} "
                 : string.Empty) +
-            $"draws={draws} passes={passes} flushes={flushes} flush_by=[{flushBy}] flush_deferred={TakeDeferredStreamFlushes()} " +
+            $"draws={draws} passes={passes} mixed_depth_passes={TakeMixedDepthPasses()} flushes={flushes} flush_by=[{flushBy}] flush_deferred={TakeDeferredStreamFlushes()} " +
             // Page-guard write watches held, and the most one page reached (the guard fails past 127).
             $"page_watches={pageWatches} page_watch_peak={pageWatchPeak} " +
             $"draw_ms={(drawTicks * 1000.0 / frequency).ToString("F1", culture)} " +
@@ -2523,6 +2612,12 @@ internal sealed partial class MetalRenderHost :
             (_meshletCache?.TakeCounters() ?? "meshlet_draws=0") + " " + TakeIndirectCounters());
         _slowWaitReports = 0;
         ResetSlowCompletionReports();
+        if (WaitOrigins && _waitOrigins.Count != 0)
+        {
+            Console.Error.WriteLine("[METAL-V2][WAIT-ORIGINS] " + string.Join(' ',
+                _waitOrigins.OrderByDescending(static pair => pair.Value).Take(12).Select(static pair => $"{pair.Key}={pair.Value}")));
+            _waitOrigins.Clear();
+        }
         var reasons = new System.Text.StringBuilder();
         for (var index = 0; index < MetalWaitReasons.Count; index++)
         {
@@ -2553,6 +2648,7 @@ internal sealed partial class MetalRenderHost :
         var clocks = TakeClockLabelCounters();
         reasons.Append(" host_fills=").Append(Interlocked.Exchange(ref _hostFills, 0))
             .Append(" gpu_fills=").Append(Interlocked.Exchange(ref _gpuFills, 0))
+            .Append(" fills_in_encoder=").Append(Interlocked.Exchange(ref _fillsInEncoder, 0))
             .Append(" gpu_gds=").Append(TakeGpuGdsTransfers())
             .Append(" cleared_fills=").Append(Interlocked.Exchange(ref _absorbedFills, 0))
             .Append(" host_copies=").Append(Interlocked.Exchange(ref _hostCopies, 0))
@@ -2602,6 +2698,8 @@ internal sealed partial class MetalRenderHost :
                 $"descriptors={bindless.Descriptors} lookups={bindless.Lookups} image_set={_imageCache.ImageSetVersion} " +
                 $"new_tables={BindlessNewTables} full={BindlessFullResolves} partial={BindlessPartialResolves} " +
                 $"wide={BindlessWideChanges} invalid={BindlessInvalidEntries} declared={BindlessDeclaredTextures} resident={BindlessResidentTextures} " +
+                $"table_memo_hits={BindlessTableMemoHits} memo_miss=[unset={BindlessMemoMissUnset} deferred={BindlessMemoMissDeferred} " +
+                $"binding={BindlessMemoMissBinding} image_set={BindlessMemoMissImageSet}] " +
                 $"memo_hits={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoHits} memo_changed={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoChanged} " +
                 $"memo_absent={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoAbsent} memo_unread={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoUnread} " +
                 $"memo_class={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoClassHits}");
@@ -2821,6 +2919,7 @@ internal sealed partial class MetalRenderHost :
         _completions.Dispose();
         DisposeNativeOcclusion();
         DisposeLabelScatter();
+        DisposeFillWords();
         DisposeOcclusionAudit();
         DisposeWriteFences();
         DisposeHostMovie();

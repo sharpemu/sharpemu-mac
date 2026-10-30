@@ -28,6 +28,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- SHARPEMU_ALLOC_PROFILE / _TYPES: the CLI's allocation histogram, for this process's heap. -->
+    <Compile Include="..\SharpEmu.CLI\AllocationProfiler.cs" Link="AllocationProfiler.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\SharpEmu.GpuRemote\SharpEmu.GpuRemote.csproj" />
     <ProjectReference Include="..\SharpEmu.GpuSplit\SharpEmu.GpuSplit.csproj" />
     <ProjectReference Include="..\graphics\SharpEmu.Gpu.Metal\SharpEmu.Gpu.Metal.csproj" />

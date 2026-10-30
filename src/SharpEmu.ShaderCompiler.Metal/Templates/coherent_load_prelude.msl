@@ -22,16 +22,28 @@ static inline uint sharpemu_coherent_word_at(device uint* b, uint index)
     return atomic_load_explicit((device atomic_uint*)(b + index), memory_order_relaxed);
 }
 
+// sharpemu_load_tail's coherent twin: the bytes of a straddling dword inside the binding.
+static inline uint sharpemu_load_tail_coherent(device uint* b, uint bytes, uint aligned)
+{
+    if (aligned >= bytes)
+    {
+        return 0u;
+    }
+    uint inside = bytes - aligned;
+    uint value = sharpemu_coherent_word_at(b, aligned >> 2);
+    return inside >= 4u ? value : value & ((1u << (inside * 8u)) - 1u);
+}
+
 static inline uint sharpemu_load_word_coherent(device uint* b, uint bytes, uint addr)
 {
     if ((addr & 3u) == 0u)
     {
-        return addr + 4u <= bytes ? sharpemu_coherent_word_at(b, addr >> 2) : 0u;
+        return addr + 4u <= bytes ? sharpemu_coherent_word_at(b, addr >> 2) : sharpemu_load_tail_coherent(b, bytes, addr);
     }
     uint shift = (addr & 3u) * 8u;
     uint aligned = addr & ~3u;
-    uint low = sharpemu_load_dword_coherent(b, bytes, aligned);
-    uint high = sharpemu_load_dword_coherent(b, bytes, aligned + 4u);
+    uint low = sharpemu_load_tail_coherent(b, bytes, aligned);
+    uint high = sharpemu_load_tail_coherent(b, bytes, aligned + 4u);
     return (low >> shift) | (high << (32u - shift));
 }
 

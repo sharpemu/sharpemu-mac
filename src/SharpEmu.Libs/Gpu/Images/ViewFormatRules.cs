@@ -269,6 +269,8 @@ public static class ViewFormatRules
     public static GpuFormat SrgbStorageFormat(GpuFormat imageFormat) => imageFormat switch
     {
         GpuFormat.R8G8B8A8Srgb or GpuFormat.B8G8R8A8Srgb => GpuFormat.R8G8B8A8Unorm,
+        GpuFormat.R8Srgb => GpuFormat.R8Unorm,
+        GpuFormat.R8G8Srgb => GpuFormat.R8G8Unorm,
         _ => GpuFormat.Undefined,
     };
 

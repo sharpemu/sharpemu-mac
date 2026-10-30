@@ -36,8 +36,11 @@ public sealed class Gen5MslTessellationLaunchTests(ITestOutputHelper output)
         Assert.Contains("s4 = sharpemu_hull_first * 16u;", source, StringComparison.Ordinal);
         // Relative patch [7:0], control point [12:8]; the local half's vertex from the host's ids.
         Assert.Contains("v1 = (sharpemu_hull_lane / 3u) | ((sharpemu_hull_lane % 3u) << 8);", source, StringComparison.Ordinal);
-        Assert.Contains("? sharpemu_hull_vertices[sharpemu_hull_first * 3u + sharpemu_hull_lane] : 0u;", source, StringComparison.Ordinal);
-        Assert.Contains("v5 = sharpemu_hull_launch[1];", source, StringComparison.Ordinal);
+        // Every instance's patches, instance after instance: the patch within its instance, its vertices, the instance.
+        Assert.Contains("uint sharpemu_hull_instance_patch = sharpemu_hull_patch % sharpemu_hull_instance_patches;", source, StringComparison.Ordinal);
+        Assert.Contains("v0 = sharpemu_hull_instance_patch;", source, StringComparison.Ordinal);
+        Assert.Contains("? sharpemu_hull_vertices[sharpemu_hull_instance_patch * 3u + sharpemu_hull_lane % 3u] : 0u;", source, StringComparison.Ordinal);
+        Assert.Contains("v5 = sharpemu_hull_launch[1] + sharpemu_hull_patch / sharpemu_hull_instance_patches;", source, StringComparison.Ordinal);
         // Not the ordinary compute launch.
         Assert.DoesNotContain("v0 = sharpemu_local_id.x;", source, StringComparison.Ordinal);
     }
@@ -58,15 +61,37 @@ public sealed class Gen5MslTessellationLaunchTests(ITestOutputHelper output)
         // u and v, the patch within its hull group, the patch, and that group's off-chip offset.
         Assert.Contains("v5 = as_type<uint>(sharpemu_patch_position.x);", source, StringComparison.Ordinal);
         Assert.Contains("v6 = as_type<uint>(sharpemu_patch_position.y);", source, StringComparison.Ordinal);
-        Assert.Contains("v7 = sharpemu_patch_id % 21u;", source, StringComparison.Ordinal);
+        // The patch among every instance's patches the hull kernel ran over.
+        Assert.Contains("constant uint* sharpemu_domain_launch [[buffer(2)]]", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "uint sharpemu_domain_patch = (sharpemu_instance_id - sharpemu_domain_launch[1]) * sharpemu_domain_launch[0] + sharpemu_patch_id;",
+            source, StringComparison.Ordinal);
+        Assert.Contains("v7 = sharpemu_domain_patch % 21u;", source, StringComparison.Ordinal);
         Assert.Contains("v8 = sharpemu_patch_id;", source, StringComparison.Ordinal);
-        Assert.Contains("s4 = (sharpemu_patch_id / 21u) * 32768u;", source, StringComparison.Ordinal);
+        Assert.Contains("s4 = (sharpemu_domain_patch / 21u) * 32768u;", source, StringComparison.Ordinal);
+    }
+
+    // Ghost of Tsushima's tessellated meshes: quad patches of 4 control points, 16 patches a group.
+    [Fact]
+    public void AQuadDomainProgramTakesTheSquaresUAndV()
+    {
+        var source = Compile(ShaderStage.Vertex,
+            new Gen5TessellationLaunch(Gen5TessellationRole.Domain, 16, 4, 0x8000, 24,
+                Gen5TessellationPartition.FractionalOdd, MaxFactor: 15, Quad: true));
+
+        Assert.Contains("// tessellator: partition=FractionalOdd output=ccw max=15\n[[patch(quad, 4)]]\nvertex Gen5VsOut",
+            source.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        Assert.Contains("float2 sharpemu_patch_position [[position_in_patch]],", source, StringComparison.Ordinal);
+        Assert.Contains("v5 = as_type<uint>(sharpemu_patch_position.x);", source, StringComparison.Ordinal);
+        Assert.Contains("v6 = as_type<uint>(sharpemu_patch_position.y);", source, StringComparison.Ordinal);
+        Assert.Contains("v7 = sharpemu_domain_patch % 16u;", source, StringComparison.Ordinal);
     }
 
     [Theory]
-    [InlineData(Gen5TessellationRole.Hull)]
-    [InlineData(Gen5TessellationRole.Domain)]
-    public void MetalCompilesBothStages(Gen5TessellationRole role)
+    [InlineData(Gen5TessellationRole.Hull, false)]
+    [InlineData(Gen5TessellationRole.Domain, false)]
+    [InlineData(Gen5TessellationRole.Domain, true)]
+    public void MetalCompilesBothStages(Gen5TessellationRole role, bool quad)
     {
         if (!MetalNative.IsAvailable)
         {
@@ -78,7 +103,9 @@ public sealed class Gen5MslTessellationLaunchTests(ITestOutputHelper output)
         }
 
         var shader = CompileShader(role == Gen5TessellationRole.Hull ? ShaderStage.Compute : ShaderStage.Vertex,
-            new Gen5TessellationLaunch(role, 21, 3, 0x8000, 16, Gen5TessellationPartition.FractionalOdd, OutputClockwise: true, MaxFactor: 15));
+            quad
+                ? new Gen5TessellationLaunch(role, 16, 4, 0x8000, 24, Gen5TessellationPartition.FractionalOdd, MaxFactor: 15, Quad: true)
+                : new Gen5TessellationLaunch(role, 21, 3, 0x8000, 16, Gen5TessellationPartition.FractionalOdd, OutputClockwise: true, MaxFactor: 15));
         Assert.True(MetalNative.TryCompileLibrary(shader.Source, out _, out var error), $"Metal rejected the {role} MSL: {error}\n{shader.Source}");
     }
 

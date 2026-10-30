@@ -103,6 +103,35 @@ public sealed unsafe class MetalCompressibleTargetTests(ITestOutputHelper output
         Assert.Equal(0x05020304u, swizzle);
     }
 
+    // A compressed texture has no pixel-format-view usage, but a view in its own format still takes
+    // the descriptor's swizzle: a BC4 mask read through (R,R,R,1) must not come back with G and B zero.
+    [Fact]
+    public void ACompressedTextureKeepsTheSwizzleOfItsDescriptor()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var request = rig.Request(ImageAddress, GpuFormat.BC4UnormBlock, ImageRole.Texture);
+        var description = request.Description;
+        description.GuestFormat = GuestPixelFormat.Bc4UNorm;
+        description.BytesPerBlock = 8;
+        description.Data = new GuestSpan(ImageAddress, (ulong)(Side / 4) * (Side / 4) * 8);
+        description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = description.Data.Size, Pitch = Side, Height = Side };
+        var replicate = request.View with
+        {
+            Mapping = new GpuComponentMapping(
+                GpuComponentSwizzle.R, GpuComponentSwizzle.R, GpuComponentSwizzle.R, GpuComponentSwizzle.One),
+        };
+        request = new ImageRequest(description, replicate, ImageRole.Texture);
+        var identifier = rig.Cache.FindImage(ref request);
+
+        var texture = rig.Cache.AcquireTextureView(identifier, request);
+
+        Assert.Equal(0UL, rig.Cache.GetImage(identifier).Shape.Usage & Mtl.TextureUsagePixelFormatView);
+        // MTLTextureSwizzleChannels, one byte per channel: Red=2, One=1.
+        var swizzle = (uint)MetalNative.Send(texture, MetalNative.Selector("swizzle"));
+        Assert.Equal(0x01020202u, swizzle);
+    }
+
     [Fact]
     public void AnImageMadeAgainOverTheSameBytesStartsWithTheUsageItNeeded()
     {

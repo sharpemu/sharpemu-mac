@@ -280,6 +280,13 @@ internal sealed class ShaderProgramCache
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), ShaderCodeCapture> _codeCaptures = new();
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
     // Draws that re-bind unchanged resources reuse the last materialization.
+    // SHARPEMU_RESOURCE_CACHE_BYPASS=<hash>[,...] (diagnostic): those programs materialize every draw, the rest use the cache.
+    private static readonly HashSet<ulong> CacheBypassed =
+        (Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_BYPASS") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(text => ulong.TryParse(text, System.Globalization.NumberStyles.HexNumber, null, out var hash) ? hash : 0)
+            .Where(hash => hash != 0).ToHashSet();
+
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
     // SHARPEMU_RESOURCE_CACHE_KEYS=<n> sets the keys per generation (SHARPEMU_RESOURCE_CACHE_MB the bytes).
     private readonly ResourceMaterializationCache? _materializations =
@@ -607,7 +614,8 @@ internal sealed class ShaderProgramCache
             _host.BeginGuestWordReads();
             try
             {
-                materialized = _materializations is not null && captureIndirectImageFailure is null
+                materialized = _materializations is not null && captureIndirectImageFailure is null &&
+                    !CacheBypassed.Contains(entry.Plan.Hash)
                     ? _materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
                         out materializationFailure)
                     : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,

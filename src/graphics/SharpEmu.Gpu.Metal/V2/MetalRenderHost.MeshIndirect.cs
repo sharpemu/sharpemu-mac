@@ -214,6 +214,7 @@ internal sealed partial class MetalRenderHost
     public void PrepareIndirectDraw(in PipelineHandle pipeline, ulong argumentsAddress, BufferBinding arguments, bool indexed, uint indexLimit)
     {
         _requestedLaunch = null;
+        _tracedIndirectArguments = argumentsAddress;
         var entry = RequirePipelineEntry(in pipeline);
         if (entry.RectangleStates is not null && indexed)
         {

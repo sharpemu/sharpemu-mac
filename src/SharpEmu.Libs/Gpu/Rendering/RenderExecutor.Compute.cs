@@ -293,7 +293,11 @@ public sealed partial class RenderExecutor
             TraceFrameDispatch(hasStorageWrites ? "dispatched-writes" : "dispatched", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
             TraceRangeWriters(input.Stage, program.Hash, groupsX, groupsY, groupsZ);
             var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
-            if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
+            if (SkippedComputePrograms.Contains(program.Hash) || LiveSkips.Contains(program.Hash))
+            {
+                // SHARPEMU_SKIP_CS: what the program contributes, by its absence.
+            }
+            else if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
             {
                 _host.Dispatch(physicalGroups[0], physicalGroups[1], physicalGroups[2]);
             }
@@ -322,30 +326,127 @@ public sealed partial class RenderExecutor
 
     private int _tracedWriters;
 
-    private void TraceRangeWriters(ShaderStageResources stage, ulong hash, uint groupsX, uint groupsY, uint groupsZ)
+    // SHARPEMU_TRACE_WRITERS_LIMIT=<n>: how many lines the trace writes (default 4000).
+    private static readonly int TracedWriterLimit =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_WRITERS_LIMIT"), out var limit) && limit > 0 ? limit : 4000;
+    private readonly HashSet<ulong> _tracedDeviceWriters = [];
+
+    // The draws whose colour or depth targets start inside the traced range (SHARPEMU_TRACE_WRITERS).
+    private void TraceTargetWriters(ref DrawState state, ulong pixelHash, ShaderStageResources vertexStage)
     {
-        if (TracedWriterRange.High == 0 || stage.Program is not { } program || _tracedWriters > 4000)
+        TraceStencilState(ref state, pixelHash);
+        if (TracedWriterRange.High == 0 || _tracedWriters > TracedWriterLimit)
             return;
 
         var hits = new System.Text.StringBuilder();
-        var descriptors = stage.Resources.Buffers;
-        for (var i = 0; i < program.Buffers.Length && i < descriptors.Length; i++)
+        foreach (ref readonly var color in BoundColors(ref state))
         {
-            if (!program.Buffers[i].Written || descriptors[i].Length < 4)
-                continue;
-            var descriptor = BufferDescriptorWords.From(descriptors[i]);
-            if (descriptor.Footprint() is not { } footprint || descriptor.Address == 0)
-                continue;
-            if (descriptor.Address < TracedWriterRange.High && TracedWriterRange.Low < descriptor.Address + footprint)
-                hits.Append($" buf{i}=0x{descriptor.Address:X}+0x{footprint:X}");
+            var address = color.Resolution.BaseAddress;
+            if (address < TracedWriterRange.High && TracedWriterRange.Low <= address)
+                hits.Append($" color{color.Slot}=0x{address:X}");
         }
 
-        if (hits.Length == 0 && !program.WritesDeviceAddresses)
+        if (state.Depth.HasTarget)
+        {
+            var address = state.Depth.Target.Target.Request.Description.Data.Address;
+            if (address < TracedWriterRange.High && TracedWriterRange.Low <= address)
+                hits.Append($" depth=0x{address:X}");
+        }
+
+        // The buffers its vertex program reads from inside the range: a list a dispatch built.
+        AppendTracedBuffers(hits, vertexStage, written: false, prefix: "vsbuf");
+        if (hits.Length == 0)
+            return;
+
+        _tracedWriters++;
+        Console.Error.WriteLine($"[GPU][WRITERS] draw vs=0x{vertexStage.Program?.Hash ?? 0:X16} ps=0x{pixelHash:X16}{hits}");
+    }
+
+    // SHARPEMU_TRACE_STENCIL=1: each distinct depth/stencil state a pixel program draws with, once, with its depth target.
+    private static readonly bool TraceStencil = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_STENCIL") == "1";
+    private readonly HashSet<(ulong, DepthStencilState)> _tracedStencil = [];
+
+    private void TraceStencilState(ref DrawState state, ulong pixelHash)
+    {
+        if (!TraceStencil || !state.Depth.HasTarget || _tracedStencil.Count > 2000)
+            return;
+        var depth = state.Depth.Target.State;
+        if (!_tracedStencil.Add((pixelHash, depth)))
+            return;
+        Console.Error.WriteLine(
+            $"[GPU][STENCIL] ps=0x{pixelHash:X16} depth=0x{state.Depth.Target.Target.Request.Description.Data.Address:X} " +
+            $"test={depth.DepthTestEnabled} write={depth.DepthWriteEnabled} cmp={depth.DepthCompare} stencil={depth.StencilTestEnabled} " +
+            $"clear={depth.StencilClearEnabled}:{depth.StencilClearValue} front={depth.FrontOperations} {depth.FrontMasks} back={depth.BackOperations} {depth.BackMasks}");
+    }
+
+    // Under SHARPEMU_TRACE_STENCIL, each distinct colour blend state a pixel program draws with, once.
+    private readonly HashSet<(ulong, string)> _tracedBlend = [];
+
+    private void TraceBlendState(ref DrawState state, ContextRegisters context, ulong pixelHash)
+    {
+        if (!TraceStencil || _tracedBlend.Count > 2000)
+            return;
+        var text = new System.Text.StringBuilder();
+        foreach (ref readonly var color in BoundColors(ref state))
+        {
+            var blend = context.BlendControls[color.Slot];
+            text.Append($" slot{color.Slot}@0x{color.Resolution.BaseAddress:X}:mask=0x{context.ColorWriteMaskForSlot(color.Slot):X}" +
+                (blend.Enable ? $",blend={blend.ColorSourceFactor}/{blend.ColorFunction}/{blend.ColorDestinationFactor}" +
+                    (blend.SeparateAlpha ? $"|{blend.AlphaSourceFactor}/{blend.AlphaFunction}/{blend.AlphaDestinationFactor}" : string.Empty)
+                    : ",noblend"));
+        }
+
+        var line = text.ToString();
+        if (_tracedBlend.Add((pixelHash, line)))
+            Console.Error.WriteLine($"[GPU][BLEND] ps=0x{pixelHash:X16}{line}");
+    }
+
+    private void TraceRangeWriters(ShaderStageResources stage, ulong hash, uint groupsX, uint groupsY, uint groupsZ)
+    {
+        if (TracedWriterRange.High == 0 || stage.Program is not { } program || _tracedWriters > TracedWriterLimit)
+            return;
+
+        var hits = new System.Text.StringBuilder();
+        AppendTracedBuffers(hits, stage, written: true, prefix: "buf");
+        // And the ones it only reads, which name the consumers of what an earlier dispatch wrote.
+        AppendTracedBuffers(hits, stage, written: false, prefix: "rbuf");
+
+        // Storage images it writes, by the base their T# names (bits 39:8 in dword 0, 47:40 in dword 1).
+        var images = stage.Resources.Images;
+        for (var i = 0; i < program.Images.Length && i < images.Length; i++)
+        {
+            if (!program.Images[i].Written || images[i].Length < 2)
+                continue;
+            var address = (((ulong)(images[i][1] & 0xFFu) << 32) | images[i][0]) << 8;
+            if (address != 0 && address < TracedWriterRange.High && TracedWriterRange.Low <= address)
+                hits.Append($" img{i}=0x{address:X}");
+        }
+
+        // A dispatch that only stores through device addresses is named once, not every time.
+        if (hits.Length == 0 && (!program.WritesDeviceAddresses || !_tracedDeviceWriters.Add(hash)))
             return;
 
         _tracedWriters++;
         Console.Error.WriteLine(
             $"[GPU][WRITERS] hash=0x{hash:X16} groups={groupsX}x{groupsY}x{groupsZ} device_stores={program.WritesDeviceAddresses}{hits}");
+    }
+
+    // The stage's buffers over the traced range that it writes (or only reads).
+    private static void AppendTracedBuffers(System.Text.StringBuilder hits, ShaderStageResources stage, bool written, string prefix)
+    {
+        if (stage.Program is not { } program)
+            return;
+        var descriptors = stage.Resources.Buffers;
+        for (var i = 0; i < program.Buffers.Length && i < descriptors.Length; i++)
+        {
+            if (program.Buffers[i].Written != written || descriptors[i].Length < 4)
+                continue;
+            var descriptor = BufferDescriptorWords.From(descriptors[i]);
+            if (descriptor.Footprint() is not { } footprint || descriptor.Address == 0)
+                continue;
+            if (descriptor.Address < TracedWriterRange.High && TracedWriterRange.Low < descriptor.Address + footprint)
+                hits.Append($" {prefix}{i}=0x{descriptor.Address:X}+0x{footprint:X}");
+        }
     }
 
     // Under a dump-triggered frame, what became of each dispatch: a pass that never ran leaves

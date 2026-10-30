@@ -410,6 +410,12 @@ public sealed partial class GpuCommandInterpreter
             return payloadDwords;
         }
 
+        if (address == TraceConditionalExecuteAddress && Interlocked.Increment(ref _tracedConditionalExecutes) <= 48)
+        {
+            TraceConditionalBlock(packet.PacketAddress, address, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes),
+                packet.PacketAddress + (payloadDwords + 1) * sizeof(uint), executeCount);
+        }
+
         if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes) != 0)
         {
             return payloadDwords;
@@ -417,6 +423,53 @@ public sealed partial class GpuCommandInterpreter
 
         TraceSkippedPackets("conditional-execute", packet.PacketAddress + (payloadDwords + 1) * sizeof(uint), executeCount, (uint)address);
         return payloadDwords + executeCount;
+    }
+
+    // SHARPEMU_TRACE_COND_EXEC=<hex address> (diagnostic): the first COND_EXECs reading that dword, with its value
+    // and the opcodes of the block they guard (an indirect buffer's own packets in braces).
+    private static readonly ulong TraceConditionalExecuteAddress =
+        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_COND_EXEC"), System.Globalization.NumberStyles.HexNumber, null,
+            out var conditionalAddress) ? conditionalAddress : 0;
+    private static int _tracedConditionalExecutes;
+
+    private void TraceConditionalBlock(ulong packetAddress, ulong address, uint value, ulong blockAddress, uint dwords)
+    {
+        string Describe(ulong at, uint count, int depth)
+        {
+            var buffer = new byte[Math.Min(count, 4096u) * sizeof(uint)];
+            if (buffer.Length == 0 || !_host.TryReadGuest(at, buffer)) return "unreadable";
+            var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(buffer);
+            var text = new System.Text.StringBuilder();
+            for (var offset = 0; offset < words.Length;)
+            {
+                var header = words[offset];
+                if ((header >> 30) != 3)
+                {
+                    text.Append($" stop:0x{header:X8}");
+                    break;
+                }
+
+                var opcode = (header >> 8) & 0xFF;
+                var body = (int)((header >> 16) & 0x3FFF) + 1;
+                text.Append(opcode == PacketOpcode.Nop ? $" 10:{PacketHeader.CustomCode(header):X2}/{body}" : $" {opcode:X2}");
+                if (opcode == PacketOpcode.IndirectBuffer && body == 3 && offset + 3 < words.Length && depth == 0)
+                {
+                    var target = words[offset + 1] | ((ulong)(words[offset + 2] & 0xFFFF) << 32);
+                    text.Append($"{{{Describe(target, words[offset + 3] & 0xFFFFF, 1)} }}");
+                }
+
+                offset += body + 1;
+            }
+
+            return text.ToString();
+        }
+
+        var raw = new byte[Math.Min(dwords, 32u) * sizeof(uint)];
+        var rawText = _host.TryReadGuest(blockAddress, raw)
+            ? string.Join(" ", System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(raw).ToArray().Select(static word => $"{word:X8}"))
+            : "unreadable";
+        Console.Error.WriteLine(
+            $"[GPU][COND-EXEC] q={QueueId} packet=0x{packetAddress:X} reads=0x{address:X} value=0x{value:X} dwords={dwords}:{Describe(blockAddress, dwords, 0)} raw={rawText}");
     }
 
     internal uint SetPredicationPacket(in PacketContext packet, ReadOnlySpan<uint> payload)

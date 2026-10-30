@@ -40,7 +40,7 @@ public sealed partial class ResourceMaterializationCache
         {
             var count = plan.TableReads.Count;
             if (count == 0 || plan.IndirectImages.Count != 0 || plan.BufferCandidateTables.Count != 0 ||
-                plan.RequiresSpecializationMemory)
+                plan.DeviceDescriptorTables.Count != 0 || plan.RequiresSpecializationMemory)
                 return null;
 
             var kinds = new ScalarValueKind[count];

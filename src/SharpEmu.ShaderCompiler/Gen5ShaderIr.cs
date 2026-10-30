@@ -181,7 +181,7 @@ public enum Gen5TessellationRole : byte
 {
     // The merged local/hull program: one guest wave64 per threadgroup of PatchesPerGroup patches.
     Hull,
-    // The domain (export) program: a post-tessellation vertex function over triangle patches.
+    // The domain (export) program: a post-tessellation vertex function over triangle or quad patches.
     Domain,
 }
 
@@ -211,11 +211,19 @@ public sealed record Gen5TessellationLaunch(
     uint FactorBytesPerPatch,
     Gen5TessellationPartition Partition = Gen5TessellationPartition.Integer,
     bool OutputClockwise = false,
-    uint MaxFactor = 16)
+    uint MaxFactor = 16,
+    // VGT_TF_PARAM.TYPE's quad domain (Ghost of Tsushima) rather than its triangle one: four edge
+    // factors and two inside ones per patch, and the domain program's u and v span a square.
+    bool Quad = false)
 {
-    // The hull kernel's launch dwords (patch count, first instance) and the control points' vertex ids.
+    // The hull kernel's launch dwords (patch count, first instance, patches of one instance) and one
+    // instance's control points' vertex ids.
     public const int HullLaunchBufferIndex = 2;
     public const int HullVertexBufferIndex = 3;
+
+    // The domain program's launch dwords (patches of one instance, the draw's first instance): a
+    // vertex-buffer slot, which a domain program (it fetches no vertex attributes) leaves free.
+    public const int DomainLaunchBufferIndex = 2;
 }
 
 public readonly record struct Gen5ComputeSystemRegisters(

@@ -465,7 +465,7 @@ public sealed class CommandStreamQueue
             Console.Error.WriteLine(
                 $"[GPU][QTRACE] admit q={submission.QueueId} sub={submission.SubmissionId} kind={submission.Kind} " +
                 $"addr=0x{submission.Address:X16} dwords={submission.DwordCount} pending={_queues[submission.QueueId].Count}");
-        if (GpuClobberDiagnostics.Enabled)
+        if (GpuClobberDiagnostics.Enabled || SliceProfileEnabled)
         {
             submission.EnqueuedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         }
@@ -559,6 +559,29 @@ public sealed class CommandStreamQueue
         }
     }
 
+    // SHARPEMU_TRACE_BOUNDARY_WAITS=1 (diagnostic): a frame boundary wait that lasts past 5 s says, every 5 s, which
+    // ticket it waits for, how far the worker has retired them and what heads the queues.
+    internal static readonly bool TraceBoundaryWaits = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_BOUNDARY_WAITS") == "1";
+
+    private CommandSubmission? _runningSubmission;
+
+    private string DescribeRunning()
+    {
+        if (_runningSubmission is not { } running)
+        {
+            return " running=none";
+        }
+
+        var interpreter = running.Kind is CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary
+            ? null
+            : GetInterpreter(running.QueueId);
+        return $" running=q{running.QueueId}/sub={running.SubmissionId}/{running.Kind}@0x{running.Address:X}+{running.DwordCount}" +
+            (interpreter is null ? string.Empty
+                : $" packet=0x{interpreter.LastPacketAddress:X} depth={interpreter.LastPacketDepth} serial={interpreter.DsPacketSerial}" +
+                  $" words=[{interpreter.LastPacketWords.Header:X8} {interpreter.LastPacketWords.W1:X8} {interpreter.LastPacketWords.W2:X8} {interpreter.LastPacketWords.W3:X8}]" +
+                  $" opcode=0x{(interpreter.LastPacketWords.Header >> 8) & 0xFF:X2}");
+    }
+
     // The waiting half of Done: blocks while more than the allowed boundaries up to and including
     // this ticket's are still ahead of the worker. A boundary queued after it does not extend the wait.
     public IdleOutcome WaitDone(long ticket)
@@ -568,9 +591,20 @@ public sealed class CommandStreamQueue
             var dsSuspend = DsTrace.Gpu && DsTrace.Armed;
             var dsPending = ticket - _boundariesRetired;
             var dsStarted = dsSuspend ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            var lastReport = waitStarted;
             while (_outcome == IdleOutcome.Completed && ticket - _boundariesRetired > _boundariesInFlight)
             {
-                WaitLocked(Timeout.Infinite);
+                WaitLocked(TraceBoundaryWaits ? 1000 : Timeout.Infinite);
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (TraceBoundaryWaits && now - lastReport >= 5 * System.Diagnostics.Stopwatch.Frequency)
+                {
+                    lastReport = now;
+                    Console.Error.WriteLine(
+                        $"[GPU][BOUNDARY-WAIT] ticket={ticket} retired={_boundariesRetired} queued={_boundaryTickets} " +
+                        $"in_flight={_boundariesInFlight} waited_s={(now - waitStarted) / (double)System.Diagnostics.Stopwatch.Frequency:F0} " +
+                        $"processing={_processing} submissions={_submissionCount} barriers={_controlBarriers.Count}{DescribeRunning()}{DescribeHeads()}");
+                }
             }
 
             if (dsSuspend)
@@ -1376,6 +1410,7 @@ public sealed class CommandStreamQueue
         CommandSubmission? submission = null;
         ControlBarrier? control = null;
         var sliceWakeGeneration = 0UL;
+        var sliceStartTicks = 0L;
         // DSTRACE SLICE: entry and exit of a slice that ran a submission.
         var dsSlice = DsTrace.Gpu && DsTrace.Armed;
         var dsStarted = dsSlice ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
@@ -1416,6 +1451,11 @@ public sealed class CommandStreamQueue
             }
 
             _processing = true;
+            if (TraceBoundaryWaits)
+            {
+                _runningSubmission = submission;
+            }
+
             _processingThread = Thread.CurrentThread;
             _activePreparation = submission?.Preparation;
             // What this slice is about to wait for may change while it runs, and the wake
@@ -1426,6 +1466,20 @@ public sealed class CommandStreamQueue
                 submission.Kind is not (CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary))
                 SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.ProcessingStarted, submission.QueueId,
                     submission.SubmissionId, submission.Address, submission.DwordCount, _submissionCount);
+            if (SliceProfileEnabled && submission is not null)
+            {
+                sliceStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (!submission.Started && submission.EnqueuedTicks != 0)
+                {
+                    NoteSliceQueued(submission.QueueId, sliceStartTicks - submission.EnqueuedTicks);
+                }
+
+                if (submission.ParkedTicks != 0)
+                {
+                    NoteParked(submission.QueueId, submission.ParkedAddress, submission.ParkedOpcode, sliceStartTicks - submission.ParkedTicks);
+                    submission.ParkedTicks = 0;
+                }
+            }
         }
 
         if (control is not null)
@@ -1589,7 +1643,96 @@ public sealed class CommandStreamQueue
             DsEmitSlice(submission!, result, dsStarted, dsCpuStarted, dsPacketsStarted);
         }
 
+        if (sliceStartTicks != 0)
+        {
+            var sliceEndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (result != SliceResult.Completed)
+            {
+                submission!.ParkedTicks = sliceEndTicks;
+                submission.ParkedAddress = submission.Wait.Kind == CommandWaitKind.GuestMemory ? submission.Wait.Address : (ulong)submission.Wait.Kind;
+                Span<byte> header = stackalloc byte[sizeof(uint)];
+                submission.ParkedOpcode = _host.TryReadGuest(submission.Commands.CurrentPacketAddress, header)
+                    ? (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(header) >> 8) & 0xFF |
+                      (PacketHeader.CustomCode(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(header)) << 8)
+                    : 0xFFFF;
+            }
+
+            NoteSliceRun(submission!.QueueId, sliceEndTicks - sliceStartTicks);
+        }
+
         return result;
+    }
+
+    // SHARPEMU_SLICE_PROFILE=1 (diagnostic): every two seconds, per queue, the slices run with their total and
+    // longest time, and how long submissions waited from admission to their first slice. Only the slice thread
+    // touches these.
+    private static readonly bool SliceProfileEnabled = Environment.GetEnvironmentVariable("SHARPEMU_SLICE_PROFILE") == "1";
+    private readonly long[] _profileSlices = new long[QueueCount];
+    private readonly long[] _profileSliceTicks = new long[QueueCount];
+    private readonly long[] _profileSliceMaxTicks = new long[QueueCount];
+    private readonly long[] _profileStarts = new long[QueueCount];
+    private readonly long[] _profileQueuedTicks = new long[QueueCount];
+    private readonly long[] _profileQueuedMaxTicks = new long[QueueCount];
+    private long _profileReportTicks;
+
+    private void NoteSliceQueued(int queueId, long ticks)
+    {
+        _profileStarts[queueId]++;
+        _profileQueuedTicks[queueId] += ticks;
+        _profileQueuedMaxTicks[queueId] = Math.Max(_profileQueuedMaxTicks[queueId], ticks);
+    }
+
+    // Time from a slice that suspended to the submission's next slice, by queue and wait address (or wait kind).
+    private readonly Dictionary<(int Queue, ulong Address, uint Opcode), (long Count, long Ticks)> _profileParks = new();
+
+    private void NoteParked(int queueId, ulong address, uint opcode, long ticks)
+    {
+        var key = (queueId, address, opcode);
+        _profileParks.TryGetValue(key, out var parked);
+        _profileParks[key] = (parked.Count + 1, parked.Ticks + ticks);
+    }
+
+    private void NoteSliceRun(int queueId, long ticks)
+    {
+        _profileSlices[queueId]++;
+        _profileSliceTicks[queueId] += ticks;
+        _profileSliceMaxTicks[queueId] = Math.Max(_profileSliceMaxTicks[queueId], ticks);
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_profileReportTicks == 0)
+        {
+            _profileReportTicks = now;
+        }
+
+        if (now - _profileReportTicks < 2 * System.Diagnostics.Stopwatch.Frequency)
+        {
+            return;
+        }
+
+        var ms = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        var line = new System.Text.StringBuilder($"[GPU][SLICES] window_ms={(now - _profileReportTicks) * ms:F0}");
+        for (var queue = 0; queue < QueueCount; queue++)
+        {
+            if (_profileSlices[queue] == 0 && _profileStarts[queue] == 0)
+            {
+                continue;
+            }
+
+            line.Append($" q{queue}=[slices={_profileSlices[queue]} run_ms={_profileSliceTicks[queue] * ms:F1} " +
+                $"max_ms={_profileSliceMaxTicks[queue] * ms:F1} starts={_profileStarts[queue]} " +
+                $"queued_avg_ms={(_profileStarts[queue] == 0 ? 0 : _profileQueuedTicks[queue] * ms / _profileStarts[queue]):F2} " +
+                $"queued_max_ms={_profileQueuedMaxTicks[queue] * ms:F1}]");
+            _profileSlices[queue] = _profileSliceTicks[queue] = _profileSliceMaxTicks[queue] = 0;
+            _profileStarts[queue] = _profileQueuedTicks[queue] = _profileQueuedMaxTicks[queue] = 0;
+        }
+
+        foreach (var (key, parked) in _profileParks.OrderByDescending(static entry => entry.Value.Ticks).Take(6))
+        {
+            line.Append($" park q{key.Queue}@0x{key.Address:X}/op{key.Opcode:X2}={parked.Count}/{parked.Ticks * ms:F0}ms");
+        }
+
+        _profileParks.Clear();
+        Console.Error.WriteLine(line.ToString());
+        _profileReportTicks = now;
     }
 
     private void DsEmitSlice(CommandSubmission submission, SliceResult result, long started, ulong cpuStarted, ulong packetsStarted)

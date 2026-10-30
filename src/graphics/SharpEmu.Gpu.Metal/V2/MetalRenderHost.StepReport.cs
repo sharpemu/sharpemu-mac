@@ -22,6 +22,7 @@ internal sealed partial class MetalRenderHost
     // may fill (SHARPEMU_MSL_STEPCAP_PROBE).
     private const int StepReportStride = 8;
     private const int MaxStepCapReports = 64;
+    private long _stepCapTotalTicks;
 
     // SHARPEMU_MSL_PC_PROBE in log mode (<hash>:<pc>:log:<regs>..., several separated by ';'): each
     // probed program's report pointer goes to its own region after the slots, a counter followed by
@@ -218,6 +219,15 @@ internal sealed partial class MetalRenderHost
             _stepCapTotalBySlot[slot] += hits;
             if (_stepCapReports >= MaxStepCapReports)
             {
+                // Past the cap, a probed program's running total every two seconds says when it still runs.
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (now - _stepCapTotalTicks > 2 * System.Diagnostics.Stopwatch.Frequency)
+                {
+                    _stepCapTotalTicks = now;
+                    Console.Error.WriteLine(string.Format(CultureInfo.InvariantCulture,
+                        "[METAL-V2][STEP-CAP] running hash=0x{0:X16} total={1}", _stepReportHashBySlot[slot], _stepCapTotalBySlot[slot]));
+                }
+
                 continue;
             }
 

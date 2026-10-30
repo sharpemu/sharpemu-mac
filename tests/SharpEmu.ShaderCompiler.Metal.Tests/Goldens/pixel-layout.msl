@@ -301,6 +301,22 @@ static inline uint4 sharpemu_load_dwords(device uint* b, uint bytes, uint addr)
     return result;
 }
 
+// The dword at an aligned address with only its bytes past the binding's end zero. A format
+// whose elements are narrower than a dword checks each element against the end, not the dword
+// it sits in: the last one or two bytes of a binding whose size is not a multiple of four are
+// still in range (Ghost of Tsushima's cloth weights, one byte a particle in a 494-byte buffer;
+// read as zero, its last two particles looked pinned and their constraints divided by zero).
+static inline uint sharpemu_load_tail(device uint* b, uint bytes, uint aligned)
+{
+    if (aligned >= bytes)
+    {
+        return 0u;
+    }
+    uint inside = bytes - aligned;
+    uint value = b[aligned >> 2];
+    return inside >= 4u ? value : value & ((1u << (inside * 8u)) - 1u);
+}
+
 // A dword a format access may straddle, assembled from the two it spans. Only the
 // format path needs this: a descriptor's stride is a byte count, so a component can
 // start at any byte.
@@ -308,12 +324,12 @@ static inline uint sharpemu_load_word(device uint* b, uint bytes, uint addr)
 {
     if ((addr & 3u) == 0u)
     {
-        return addr + 4u <= bytes ? b[addr >> 2] : 0u;
+        return addr + 4u <= bytes ? b[addr >> 2] : sharpemu_load_tail(b, bytes, addr);
     }
     uint shift = (addr & 3u) * 8u;
     uint aligned = addr & ~3u;
-    uint low = sharpemu_load_dword(b, bytes, aligned);
-    uint high = sharpemu_load_dword(b, bytes, aligned + 4u);
+    uint low = sharpemu_load_tail(b, bytes, aligned);
+    uint high = sharpemu_load_tail(b, bytes, aligned + 4u);
     return (low >> shift) | (high << (32u - shift));
 }
 

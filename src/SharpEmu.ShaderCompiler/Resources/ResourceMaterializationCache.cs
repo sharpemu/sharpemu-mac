@@ -1408,12 +1408,64 @@ public sealed partial class ResourceMaterializationCache
         {
             var success = MaterializeCore(plan, inputs, residentReader, ref snapshot, ref specialization, out failure, ref timing);
             if (success && Misses == missesBefore) _consecutiveMisses = 0;
+            if (success && VerifiedHashes.Count != 0 && VerifiedHashes.Contains(plan.Hash))
+                VerifyAgainstFresh(plan, inputs, snapshot);
             return success;
         }
         finally
         {
             timing.Complete(plan);
         }
+    }
+
+    // SHARPEMU_RESOURCE_CACHE_VERIFY=<hash> (diagnostic): every materialization of that program is done again without the
+    // cache and the two snapshots compared, so a cached binding that no longer matches guest memory is named.
+    private static readonly HashSet<ulong> VerifiedHashes =
+        (Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_VERIFY") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(text => ulong.TryParse(text, System.Globalization.NumberStyles.HexNumber, null, out var hash) ? hash : 0)
+            .Where(hash => hash != 0).ToHashSet();
+    private static int _verifyReports;
+    private static long _verifyCalls;
+
+    private static void VerifyAgainstFresh(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot cached)
+    {
+        var fresh = new ResourceSnapshot();
+        var freshSpecialization = new ResourceSpecialization();
+        var calls = Interlocked.Increment(ref _verifyCalls);
+        if (!ResourceMaterializer.Materialize(plan, inputs, ref fresh, ref freshSpecialization))
+            return;
+        var differences = new List<string>();
+        void Compare(string name, uint[][] a, uint[][] b)
+        {
+            for (var index = 0; index < Math.Max(a.Length, b.Length); index++)
+            {
+                var left = index < a.Length ? a[index] : [];
+                var right = index < b.Length ? b[index] : [];
+                if (!left.AsSpan().SequenceEqual(right))
+                    differences.Add($"{name}[{index}] cached={string.Join(",", left.Select(word => word.ToString("X")))} " +
+                        $"fresh={string.Join(",", right.Select(word => word.ToString("X")))}");
+            }
+        }
+
+        Compare("buffer", cached.Buffers, fresh.Buffers);
+        Compare("image", cached.Images, fresh.Images);
+        Compare("sampler", cached.Samplers, fresh.Samplers);
+        Compare("table", [cached.FlattenedResourceTable], [fresh.FlattenedResourceTable]);
+        if (cached.DeviceAddressRanges.Length != fresh.DeviceAddressRanges.Length ||
+            !cached.DeviceAddressRanges.AsSpan().SequenceEqual(fresh.DeviceAddressRanges))
+            differences.Add("device-address ranges differ");
+        if (differences.Count == 0)
+        {
+            if (calls % 200 == 0)
+                Console.Error.WriteLine($"[SHADER][CACHE-VERIFY] hash=0x{plan.Hash:X16} calls={calls} all match");
+            return;
+        }
+
+        if (Interlocked.Increment(ref _verifyReports) > 60)
+            return;
+        Console.Error.WriteLine($"[SHADER][CACHE-VERIFY] hash=0x{plan.Hash:X16} calls={calls} {differences.Count} differ: " +
+            string.Join(" | ", differences.Take(6)));
     }
 
     private bool MaterializeCore(
@@ -2876,10 +2928,11 @@ public sealed partial class ResourceMaterializationCache
         {
             _reads.Clear();
             // Retain ordinary descriptor walks without keeping unusually large
-            // tables alive for the lifetime of the renderer.
-            if (_reads.Capacity > 16384)
+            // tables alive for the lifetime of the renderer. Ghost of Tsushima's GPU-driven
+            // draws walk 8-22 thousand words each: dropping those at 16 Ki made every such
+            // draw grow the list from nothing, half of the GPU host's allocation.
+            if (_reads.Capacity > MaxRetainedReads)
                 _reads.Capacity = 0;
-            if (_sortScratch.Length > 16384) _sortScratch = [];
             _reader = null;
             _cleanReader = null;
             _residentReader = null;
@@ -3002,51 +3055,151 @@ public sealed partial class ResourceMaterializationCache
         private bool[] _scratchTableOnly = [];
         private byte[] _scratchBytes = [];
         private int[] _scratchBaseWords = [];
+        private const int MaxRetainedReads = 1 << 20;
+        private ulong[] _sortKeys = [];
+        private (ulong Address, uint Word, bool Clean, bool Table)[] _sortedReads = [];
 
-        private (ulong Address, uint Word, bool Clean, bool Table)[] _sortScratch = [];
+        // By address, through keys of address << n | index sorted as plain integers: a comparison delegate (or an
+        // interface comparer the sort is not specialised for) cost a call per compare, and this sort was a third
+        // of Ghost of Tsushima's program-resolve thread. Equal addresses keep their order.
+        private List<int> _runBounds = new();
+        private List<int> _mergedBounds = new();
+        private (ulong Address, uint Word, bool Clean, bool Table)[] _mergeScratch = [];
+        private const int MaxMergedRuns = 64;
 
-        // Descriptor evaluation followed by table evaluation usually records two ordered runs.
-        // Merge those runs in linear time; irregular graphs still use the general sort.
+        // Reads arrive as a few ascending runs (a table walked in order, then the descriptors it names): the runs
+        // merged pairwise sort them in n log(runs). A pixel program of Ghost of Tsushima's GPU-driven draws records
+        // 8-22 thousand reads in 5-22 runs per draw, and some programs over 600 thousand.
+        private bool TryMergeRuns(Span<(ulong Address, uint Word, bool Clean, bool Table)> reads)
+        {
+            var bounds = _runBounds;
+            bounds.Clear();
+            bounds.Add(0);
+            for (var index = 1; index < reads.Length; index++)
+            {
+                if (reads[index].Address < reads[index - 1].Address)
+                {
+                    bounds.Add(index);
+                    if (bounds.Count > MaxMergedRuns)
+                        return false;
+                }
+            }
+
+            bounds.Add(reads.Length);
+            Span<(ulong Address, uint Word, bool Clean, bool Table)> source, target;
+            if (reads.Length > MaxRetainedReads)
+            {
+                // Rare and huge: not kept past this sort.
+                source = new (ulong, uint, bool, bool)[reads.Length];
+                target = new (ulong, uint, bool, bool)[reads.Length];
+            }
+            else
+            {
+                if (_sortedReads.Length < reads.Length)
+                    _sortedReads = new (ulong, uint, bool, bool)[Math.Max(reads.Length, Math.Min(_sortedReads.Length * 2, MaxRetainedReads))];
+                if (_mergeScratch.Length < reads.Length)
+                    _mergeScratch = new (ulong, uint, bool, bool)[_sortedReads.Length];
+                source = _sortedReads.AsSpan(0, reads.Length);
+                target = _mergeScratch.AsSpan(0, reads.Length);
+            }
+
+            reads.CopyTo(source);
+            while (bounds.Count > 2)
+            {
+                var merged = _mergedBounds;
+                merged.Clear();
+                for (var run = 0; run + 1 < bounds.Count; run += 2)
+                {
+                    var low = bounds[run];
+                    var middle = bounds[run + 1];
+                    var high = run + 2 < bounds.Count ? bounds[run + 2] : middle;
+                    merged.Add(low);
+                    int left = low, right = middle, into = low;
+                    while (left < middle && right < high)
+                        target[into++] = source[right].Address < source[left].Address ? source[right++] : source[left++];
+                    source[left..middle].CopyTo(target[into..]);
+                    into += middle - left;
+                    source[right..high].CopyTo(target[into..]);
+                }
+
+                merged.Add(reads.Length);
+                (_runBounds, _mergedBounds) = (merged, bounds);
+                bounds = merged;
+                var swap = source;
+                source = target;
+                target = swap;
+            }
+
+            source.CopyTo(reads);
+            return true;
+        }
+
+        // SHARPEMU_TRACE_READ_SORT=1 (diagnostic): every 4096th sort, the read count and its ascending runs.
+        private static readonly bool TraceReadSort = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_READ_SORT") == "1";
+        private static int _readSorts;
+        private static int _hugeReadReports;
+
         private void SortReads()
         {
-            var split = -1;
-            for (var index = 1; index < _reads.Count; index++)
+            var count = _reads.Count;
+            var reads = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_reads);
+            if (TraceReadSort && ((Interlocked.Increment(ref _readSorts) & 4095) == 0 || (count > 4096 && _readSorts % 64 == 0)))
             {
-                if (_reads[index - 1].Address <= _reads[index].Address) continue;
-                if (split >= 0)
+                var runs = 1;
+                var distinct = 1;
+                for (var index = 1; index < count; index++)
                 {
-                    ResourceMaterializationProfile.CountRead(ResourceMaterializationProfile.ReadCounter.SortedReadLists);
-                    _reads.Sort(static (left, right) => left.Address.CompareTo(right.Address));
-                    return;
+                    runs += reads[index].Address < reads[index - 1].Address ? 1 : 0;
+                    distinct += reads[index].Address != reads[index - 1].Address ? 1 : 0;
                 }
-                split = index;
+
+                Console.Error.WriteLine($"[RES][READ-SORT] reads={count} runs={runs} changes={distinct}");
             }
-            if (split < 0)
+
+            if (TryMergeRuns(reads))
+                return;
+
+            var indexBits = 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)Math.Max(count - 1, 1));
+            ulong highest = 0;
+            foreach (var read in reads)
+                highest |= read.Address;
+            if (System.Numerics.BitOperations.LeadingZeroCount(highest) < indexBits)
             {
-                ResourceMaterializationProfile.CountRead(ResourceMaterializationProfile.ReadCounter.OrderedReadLists);
+                _reads.Sort((left, right) => left.Address.CompareTo(right.Address));
                 return;
             }
 
-            ResourceMaterializationProfile.CountRead(ResourceMaterializationProfile.ReadCounter.MergedReadLists);
-            var reads = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_reads);
-            if (_sortScratch.Length < reads.Length)
-                _sortScratch = new (ulong, uint, bool, bool)[Math.Max(reads.Length, _sortScratch.Length * 2)];
-            reads.CopyTo(_sortScratch);
-            int left = 0, right = split, output = 0;
-            while (left < split && right < reads.Length)
-                reads[output++] = _sortScratch[left].Address <= _sortScratch[right].Address
-                    ? _sortScratch[left++] : _sortScratch[right++];
-            _sortScratch.AsSpan(left, split - left).CopyTo(reads[output..]);
-            output += split - left;
-            _sortScratch.AsSpan(right, reads.Length - right).CopyTo(reads[output..]);
+            var huge = count > MaxRetainedReads;
+            if (!huge && _sortKeys.Length < count)
+                _sortKeys = new ulong[Math.Max(count, Math.Min(_sortKeys.Length * 2, MaxRetainedReads))];
+            if (!huge && _sortedReads.Length < count)
+                _sortedReads = new (ulong, uint, bool, bool)[Math.Max(count, Math.Min(_sortedReads.Length * 2, MaxRetainedReads))];
+
+            Span<ulong> keys = huge ? new ulong[count] : _sortKeys.AsSpan(0, count);
+            var indexMask = (1ul << indexBits) - 1;
+            for (var index = 0; index < count; index++)
+                keys[index] = (reads[index].Address << indexBits) | (uint)index;
+            keys.Sort();
+            Span<(ulong Address, uint Word, bool Clean, bool Table)> sorted = huge ? new (ulong, uint, bool, bool)[count] : _sortedReads.AsSpan(0, count);
+            for (var index = 0; index < count; index++)
+                sorted[index] = reads[(int)(keys[index] & indexMask)];
+            sorted.CopyTo(reads);
         }
 
         public Entry Build(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot snapshot,
             ResourceSpecialization specialization, IReadOnlyList<int> memoryBases, ulong[]? usedUserData = null,
             Entry? like = null)
         {
-            using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.RecorderSort))
-                SortReads();
+            // Reads mostly arrive in address order; sorting a sorted list was ~5% of a draw-heavy render thread.
+            var ordered = true;
+            for (var index = 1; ordered && index < _reads.Count; index++)
+                ordered = _reads[index - 1].Address <= _reads[index].Address;
+            if (TraceReadSort && _reads.Count > 4096 && Interlocked.Increment(ref _hugeReadReports) <= 64)
+                Console.Error.WriteLine($"[RES][READ-HUGE] hash=0x{plan.Hash:X16} stage={plan.Stage} reads={_reads.Count} ordered={ordered} " +
+                    $"first=0x{_reads[0].Address:X} last=0x{_reads[^1].Address:X} table_reads={_reads.Count(static read => read.Table)}");
+            if (!ordered)
+                using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.RecorderSort))
+                    SortReads();
             // Count unique words and contiguous ranges first, then fill the
             // retained arrays directly. Temporary lists previously duplicated
             // every recorded byte and range on each cache miss.

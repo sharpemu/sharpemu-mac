@@ -172,7 +172,8 @@ public interface IShaderPipelineProvider
         bool depthBound,
         bool depthAspectBound,
         bool stencilAspectBound,
-        uint controlPoints) => null;
+        uint controlPoints,
+        bool quad) => null;
 
     // The dispatch dimensions are groups, or threads when the initiator counts threads.
     ComputeProgram GetComputeProgram(

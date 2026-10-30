@@ -45,6 +45,40 @@ internal static class MetalV2Diagnostics
     private static readonly HashSet<ulong> LoosenEqualVertexHashes = ParseHashes(
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOOSEN_EQUAL_VS"));
 
+    // SHARPEMU_METAL_V2_DEPTH_ALWAYS_VS=<vertex hash>[,...]: draws with these vertex programs pass the depth test
+    // whatever their compare (writes unchanged), to see the whole of geometry the scene's depth hides.
+    private static readonly HashSet<ulong> DepthAlwaysVertexHashes = ParseHashes(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEPTH_ALWAYS_VS"));
+
+    public static bool PassesDepthFor(ulong vertexHash) =>
+        DepthAlwaysVertexHashes.Count != 0 && DepthAlwaysVertexHashes.Contains(vertexHash);
+
+    // SHARPEMU_METAL_V2_FORCE_INDIRECT_INSTANCES=<vertex hash>:<instances>[,...]: indexed indirect draws with these vertex
+    // programs run that many instances whatever their arguments' count, to see what a zero count leaves out.
+    private static readonly Dictionary<ulong, uint> ForcedIndirectInstanceCounts = ParseForcedInstances(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FORCE_INDIRECT_INSTANCES"));
+
+    public static uint? ForcedIndirectInstances(ulong vertexHash) =>
+        ForcedIndirectInstanceCounts.Count != 0 && ForcedIndirectInstanceCounts.TryGetValue(vertexHash, out var count) ? count : null;
+
+    private static Dictionary<ulong, uint> ParseForcedInstances(string? text)
+    {
+        var counts = new Dictionary<ulong, uint>();
+        foreach (var part in (text ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var pieces = part.Split(':');
+            if (pieces.Length == 2 &&
+                ulong.TryParse(pieces[0].Replace("0x", string.Empty, StringComparison.OrdinalIgnoreCase),
+                    System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var hash) &&
+                uint.TryParse(pieces[1], out var count))
+            {
+                counts[hash] = count;
+            }
+        }
+
+        return counts;
+    }
+
     // SHARPEMU_METAL_V2_LOOSEN_EQUAL_TO=ge|le: what a loosened EQUAL becomes (default ALWAYS). GREATER-OR-EQUAL
     // or LESS-OR-EQUAL keeps the prepass depth occluding everything else, and which of the two lets a
     // draw's fragments through says on which side of its prepass depth its own positions land.
@@ -55,6 +89,10 @@ internal static class MetalV2Diagnostics
             "le" => SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp.LessOrEqual,
             _ => SharpEmu.Libs.Gpu.Abstractions.GpuCompareOp.Always,
         };
+
+    // SHARPEMU_METAL_V2_LOOSEN_EQUAL_WRITE=1: a loosened EQUAL also writes depth, so a snapshot after the pass holds
+    // the depth the draw's own positions give, to set beside the prepass depth it was meant to match.
+    public static readonly bool LoosenEqualWrites = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LOOSEN_EQUAL_WRITE") == "1";
 
     // SHARPEMU_METAL_V2_LOG_STENCIL_VS=<vertex hash>[,...] (or "all"): each depth/stencil state made for draws with
     // these vertex programs is logged once with its stencil compare, operations, masks and reference.
@@ -217,6 +255,10 @@ internal static class MetalV2Diagnostics
     public static readonly bool WaitTrace =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_TRACE"), "1", StringComparison.Ordinal) ||
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EOP_TRACE"), "1", StringComparison.Ordinal);
+
+    // SHARPEMU_METAL_V2_WAIT_STACK=1 adds the emulator frames that asked for the read to each SLOW-WAIT line.
+    public static readonly bool WaitStack =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_STACK"), "1", StringComparison.Ordinal);
 
     public static readonly bool FoldClearsIntoPasses =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FOLD_CLEARS"), "0", StringComparison.Ordinal);

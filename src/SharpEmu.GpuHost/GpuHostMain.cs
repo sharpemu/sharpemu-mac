@@ -30,6 +30,7 @@ public static class GpuHostMain
     public static int Main(string[] args)
     {
         SharpEmu.Logging.GcPauseLog.StartFromEnvironment();
+        SharpEmu.CLI.AllocationProfiler.StartIfRequested();
         if (!OperatingSystem.IsMacOS())
         {
             Console.Error.WriteLine("[GPUHOST][ERROR] The GPU host runs only on macOS.");

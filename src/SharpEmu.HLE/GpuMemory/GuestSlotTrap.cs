@@ -30,8 +30,14 @@ public static class GuestSlotTrap
     // that the trap is armed again well inside one frame.
     private static readonly TimeSpan RearmDelay = TimeSpan.FromMilliseconds(2);
 
-    private static readonly ulong SlotOffset = Parse("SHARPEMU_TRAP_SLOT");
+    // SHARPEMU_TRAP_ADDRESS=<hex>: watch one known guest address instead of a slot of the
+    // pool blocks. Its block is adopted at the first submission boundary after the address
+    // is mapped, whatever the mapping's shape, and the slot is the address's offset in the
+    // block unless SHARPEMU_TRAP_SLOT names one.
+    private static readonly ulong FixedAddress = Parse("SHARPEMU_TRAP_ADDRESS");
     private static readonly ulong SlotMask = ParseOr("SHARPEMU_TRAP_SLOT_MASK", 0xFFFF);
+    private static readonly ulong SlotOffset =
+        ParseOr("SHARPEMU_TRAP_SLOT", FixedAddress & SlotMask);
     private static readonly ulong BlockBytes = ParseOr("SHARPEMU_TRAP_BLOCK_BYTES", 0x10000);
     private static readonly ulong Protection = ParseOr("SHARPEMU_TRAP_PROTECTION", 0xF2);
     private static readonly ulong SlotBytes = ParseOr("SHARPEMU_TRAP_SLOT_BYTES", 8);
@@ -56,6 +62,14 @@ public static class GuestSlotTrap
     private static readonly bool PageGuardEnabled =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_TRAP_PAGE_GUARD"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_TRAP_UNIQUE_RIP=1: report each storing instruction once. A slot that a loop
+    // rewrites every frame otherwise spends every report on the same store.
+    private static readonly bool UniqueRips =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_TRAP_UNIQUE_RIP"), "1", StringComparison.Ordinal);
+
+    private static readonly ulong[] ReportedRips = new ulong[MaxReports];
+    private static int _fixedAdopted;
+
     private const ulong PageBytes = 4096;
 
     private static readonly ulong[] BlockBases = new ulong[MaxBlocks];
@@ -69,7 +83,7 @@ public static class GuestSlotTrap
     private static int _rearmPending;
 
     /// <summary>True while the trap is watching a slot.</summary>
-    public static bool Armed => SlotOffset != 0 || SlotOffsetIsZeroButRequested;
+    public static bool Armed => SlotOffset != 0 || SlotOffsetIsZeroButRequested || FixedAddress != 0;
 
     private static readonly bool SlotOffsetIsZeroButRequested =
         !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SHARPEMU_TRAP_SLOT")) && SlotOffset == 0;
@@ -147,12 +161,17 @@ public static class GuestSlotTrap
     /// <summary>Adopts a mapping whose shape matches the one the watched structure lives in.</summary>
     public static void OnDirectMapping(ulong mappedAddress, ulong length, int protection)
     {
-        if (!Armed || !MatchesShape(length, (ulong)protection, BlockBytes, Protection) ||
+        if (!Armed || FixedAddress != 0 || !MatchesShape(length, (ulong)protection, BlockBytes, Protection) ||
             !MatchesBand(mappedAddress, BandHigh))
         {
             return;
         }
 
+        Adopt(mappedAddress);
+    }
+
+    private static void Adopt(ulong mappedAddress)
+    {
         lock (BlockArmed)
         {
             var existing = Volatile.Read(ref _blockCount);
@@ -210,14 +229,21 @@ public static class GuestSlotTrap
             Report(address);
         }
 
-
-        ReleaseBlock(index);
-        return true;
+        // A page the trap is not holding faulted for another watcher, which must resolve it:
+        // claiming it here would retry a store that can never land.
+        return ReleaseBlock(index);
     }
 
     /// <summary>Re-protects every page the trap released. Safe to call from any thread.</summary>
     public static void Rearm()
     {
+        if (FixedAddress != 0 && Volatile.Read(ref _fixedAdopted) == 0 &&
+            GuestGpuMemoryHook.Current?.Covers(FixedAddress, 1) == true &&
+            Interlocked.Exchange(ref _fixedAdopted, 1) == 0)
+        {
+            Adopt(FixedAddress - SlotOffset);
+        }
+
         if (!Armed || Interlocked.Exchange(ref _rearmPending, 0) == 0)
         {
             return;
@@ -242,7 +268,8 @@ public static class GuestSlotTrap
         // the faults that carry the watched value is what separates the corruption from
         // the allocator's own traffic through the same slot.
         var carries = TrapValue == 0 || context.CarriesValue(TrapValue);
-        if (!carries || Interlocked.Increment(ref _reports) > MaxReports)
+        if (!carries || (UniqueRips && !FirstReportOf(context.Rip)) ||
+            Interlocked.Increment(ref _reports) > MaxReports)
         {
             return;
         }
@@ -252,6 +279,25 @@ public static class GuestSlotTrap
             $"rip=0x{context.Rip:X16} code={context.DescribeCode()}");
         Console.Error.WriteLine($"[LOADER][WARN] slot_trap registers {context.DescribeRegisters()}");
         Console.Error.Flush();
+    }
+
+    private static bool FirstReportOf(ulong rip)
+    {
+        for (var index = 0; index < ReportedRips.Length; index++)
+        {
+            var seen = Interlocked.CompareExchange(ref ReportedRips[index], rip, 0);
+            if (seen == 0)
+            {
+                return true;
+            }
+
+            if (seen == rip)
+            {
+                return false;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>True when an access touches the watched slot rather than merely its page.</summary>
@@ -317,13 +363,13 @@ public static class GuestSlotTrap
         }
     }
 
-    private static void ReleaseBlock(int index)
+    private static bool ReleaseBlock(int index)
     {
         var pages = GuestGpuMemoryHook.Current?.Pages;
         var baseAddress = Volatile.Read(ref BlockBases[index]);
         if (pages is null || baseAddress == 0)
         {
-            return;
+            return false;
         }
 
         var page = PageOfSlot(baseAddress, SlotOffset);
@@ -331,7 +377,7 @@ public static class GuestSlotTrap
         {
             if (!BlockArmed[index])
             {
-                return;
+                return false;
             }
 
             BlockArmed[index] = false;
@@ -343,6 +389,7 @@ public static class GuestSlotTrap
         }
         Volatile.Write(ref _rearmPending, 1);
         Volatile.Write(ref _rearmTicks, Environment.TickCount64);
+        return true;
     }
 
     private static void EnsureRearmTimer()

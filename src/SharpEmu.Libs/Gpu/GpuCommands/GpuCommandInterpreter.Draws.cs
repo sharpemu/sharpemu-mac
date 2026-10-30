@@ -26,6 +26,14 @@ public sealed partial class GpuCommandInterpreter
 
     internal void DrawIndexed(ulong packetAddress, uint opcode, uint indexCount, ulong indexAddress, uint instanceCount = 0, int baseVertex = 0, uint firstInstance = 0, DrawOffsetSource offsetSource = DrawOffsetSource.Packet)
     {
+        if (TracedDrawIndexCounts.Count != 0 && TracedDrawIndexCounts.Contains(indexCount) &&
+            Interlocked.Increment(ref _tracedDrawPackets) <= 2000)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][DRAW-PACKET] submit={SubmitId} draw=0x{packetAddress:X} opcode=0x{opcode:X} indices={indexCount} " +
+                $"instances={(instanceCount != 0 ? instanceCount : InstanceCount)} num_instances_packet=0x{_instanceCountPacketAddress:X}");
+        }
+
         if (instanceCount == 0)
         {
             instanceCount = InstanceCount;
@@ -125,6 +133,11 @@ public sealed partial class GpuCommandInterpreter
         }
     }
 
+    // SHARPEMU_TRACE_CPU_INDIRECT=1: each indexed indirect draw whose arguments the interpreter reads itself, with
+    // whether GPU work still writes them.
+    private static readonly bool TraceCpuIndirect = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_CPU_INDIRECT") == "1";
+    private static int _tracedCpuIndirect;
+
     private void DrawIndirectArguments(ulong packetAddress, uint opcode, ulong argumentsAddress, bool indexed)
     {
         if (!indexed)
@@ -170,9 +183,16 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
+        var pendingGpuWrite = TraceCpuIndirect && _host.HasPendingGpuWrite(argumentsAddress, DrawIndexedIndirectArgumentsSize);
         _host.NoteIndirectArgumentsReadOnCpu(argumentsAddress, DrawIndexedIndirectArgumentsSize);
         var indexCountPerInstance = ReadDword(argumentsAddress);
         var indexedInstanceCount = ReadDword(argumentsAddress + 4);
+        if (TraceCpuIndirect && Interlocked.Increment(ref _tracedCpuIndirect) <= 4000)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][CPU-INDIRECT] submit={SubmitId} args=0x{argumentsAddress:X} indices={indexCountPerInstance} instances={indexedInstanceCount} " +
+                $"index_base=0x{IndexBaseAddress:X} index_size={IndexBufferSize} pending_gpu_write={pendingGpuWrite} gpu_path={_host.ResolvesIndirectDrawOnGpu}");
+        }
         var startIndex = ReadDword(argumentsAddress + 8);
         var baseVertex = ReadDword(argumentsAddress + 12);
         var indexedStartInstance = ReadDword(argumentsAddress + 16);
@@ -458,8 +478,19 @@ public sealed partial class GpuCommandInterpreter
     {
         RequireHeader(packet, PacketHeader.Make(2, PacketOpcode.NumInstances));
         SetInstanceCount(payload[0]);
+        _instanceCountPacketAddress = packet.PacketAddress;
         return 1;
     }
+
+    // SHARPEMU_TRACE_DRAW_PACKETS=<index count>[,...]: indexed draws of these index counts with the guest addresses of
+    // their packet and of the NUM_INSTANCES packet that set their instance count.
+    private static readonly HashSet<uint> TracedDrawIndexCounts = new(
+        (Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAW_PACKETS") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(text => uint.TryParse(text, out var count) ? count : 0u)
+            .Where(count => count != 0));
+    private ulong _instanceCountPacketAddress;
+    private static int _tracedDrawPackets;
 
     // Header bit 1 selects the draw (0) or dispatch (1) indirect arguments base.
     internal uint SetBasePacket(in PacketContext packet, ReadOnlySpan<uint> payload)

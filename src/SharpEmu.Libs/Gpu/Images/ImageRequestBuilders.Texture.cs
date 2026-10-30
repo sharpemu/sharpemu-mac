@@ -121,18 +121,26 @@ public static partial class ImageRequestBuilders
         TileGeometry.TryGetTextureSize(
             description.GuestFormat, description.Extent.Width, description.Extent.Height, description.Resources.Levels, description.TileMode,
             out _, spans, padded);
+        var hasBlock = TileGeometry.TryGetTextureBlockLayout(description.GuestFormat, description.TileMode, false, out var block);
         for (var level = 0; level < description.Resources.Levels; level++)
         {
             var span = spans[level];
             var offset = span.SourceSize != 0 ? span.SourceOffset : span.Offset;
             ulong size = span.SourceSize != 0 ? span.SourceSize : span.Size;
             size *= description.IsVolume ? Math.Max(description.Extent.Depth >> level, 1) : description.Resources.Layers;
+            var tailOffset = 0u;
+            if ((span.X | span.Y) != 0 && hasBlock && !TileGeometry.TryGetBlockOffset(block.Block, span.X, span.Y, 0, out tailOffset))
+            {
+                tailOffset = 0;
+            }
+
             layouts[level] = new MipLevelLayout
             {
                 Offset = offset,
                 Size = size,
                 Pitch = padded[level].Width != 0 ? padded[level].Width : Math.Max(description.Pitch >> level, 1),
                 Height = padded[level].Height != 0 ? padded[level].Height : Math.Max(description.Extent.Height >> level, 1),
+                TailOffset = tailOffset,
             };
         }
         description.MipLayout.SetPrefix(layouts[..(int)description.Resources.Levels]);

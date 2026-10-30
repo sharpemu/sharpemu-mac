@@ -164,9 +164,23 @@ public static class DepthTargetResolver
         return new DepthTargetState(target, ResolveState(context, target.HasStencil, fatal));
     }
 
+    // SHARPEMU_TRACE_DEPTH_CONTROL=1: each distinct DB_DEPTH_CONTROL that tests with ZFUNC NEVER or sets the colour-write
+    // bits 30/31 (ENABLE_COLOR_WRITES_ON_DEPTH_FAIL, DISABLE_COLOR_WRITES_ON_DEPTH_PASS), raw, once.
+    private static readonly bool TraceDepthControl = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DEPTH_CONTROL") == "1";
+    private static readonly HashSet<uint> TracedDepthControls = [];
+
     public static DepthStencilState ResolveState(ContextRegisters context, bool hasStencil, Func<string, Exception> fatal)
     {
         var depth = context.DepthTarget;
+        if (TraceDepthControl && ((depth.DepthTestEnabled && depth.DepthCompare == 0) || (depth.DepthControl & 0xC000_0000u) != 0))
+        {
+            lock (TracedDepthControls)
+            {
+                if (TracedDepthControls.Add(depth.DepthControl))
+                    Console.Error.WriteLine($"[GPU][DEPTH-CONTROL] raw=0x{depth.DepthControl:X8} test={depth.DepthTestEnabled} " +
+                        $"write={depth.DepthWriteEnabled} zfunc={depth.DepthCompare} stencil={depth.StencilTestEnabled}");
+            }
+        }
         var control = context.StencilControl;
         var masks = context.StencilMask;
         var stencilTest = hasStencil && depth.StencilTestEnabled;

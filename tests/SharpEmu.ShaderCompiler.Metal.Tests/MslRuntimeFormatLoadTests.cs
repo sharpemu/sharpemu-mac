@@ -27,7 +27,11 @@ public sealed partial class MslRuntimeFormatLoadTests(ITestOutputHelper output)
         ], 12, BufferBytes);
 
     private static (Gen5MslShader Shader, BindingLayout Layout) Compile(
-        Gen5ComputeFixture fixture, bool fast, uint threads = 1)
+        Gen5ComputeFixture fixture, bool fast, uint threads = 1) =>
+        Compile(fixture, new Gen5MslCodegenOptions(RuntimeDwordFormatLoads: fast, ForceRegisterInitialization: true), threads);
+
+    private static (Gen5MslShader Shader, BindingLayout Layout) Compile(
+        Gen5ComputeFixture fixture, Gen5MslCodegenOptions options, uint threads = 1)
     {
         var program = Gen5ComputeFixtures.DecodeOrThrow(fixture);
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 0x1234, 0, 16);
@@ -40,8 +44,7 @@ public sealed partial class MslRuntimeFormatLoadTests(ITestOutputHelper output)
             LocalSizeX = threads,
             ComputeSystemRegisters = new Gen5ComputeSystemRegisters(16, null, null, null),
         };
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error,
-            new Gen5MslCodegenOptions(RuntimeDwordFormatLoads: fast, ForceRegisterInitialization: true)), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options), error);
         return (shader, layout);
     }
 
@@ -111,6 +114,43 @@ public sealed partial class MslRuntimeFormatLoadTests(ITestOutputHelper output)
                             BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan((int)offset + c * 4)),
                         BinaryPrimitives.ReadUInt32LittleEndian(actual.AsSpan(c * 4)));
             }
+        }
+    }
+
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    [InlineData(3u)]
+    [InlineData(4u)]
+    public void TheCalledDecoderMatchesTheInlineOne(uint components)
+    {
+        // Without the whole-dword fast path every load takes the general decoder: inline below
+        // the threshold, sharpemu_format_load_decoded at or above it.
+        Gen5MslCodegenOptions Options(int threshold) =>
+            new(RuntimeDwordFormatLoads: false, ForceRegisterInitialization: true) { DecodedFormatLoadThreshold = threshold };
+        var (inline, layout) = Compile(Fixture(components), Options(0));
+        var (called, _) = Compile(Fixture(components), Options(1));
+        Assert.DoesNotContain("sharpemu_format_load_decoded", inline.Source);
+        Assert.Contains($"sharpemu_format_load_decoded(b", called.Source);
+        if (!RequireDevice()) return;
+        Assert.True(MetalNative.TryCompileLibrary(inline.Source, out var inlineLibrary, out var inlineError), inlineError);
+        Assert.True(MetalNative.TryCompileLibrary(called.Source, out var calledLibrary, out var calledError), calledError);
+        // Every unified format with the identity, reversed, constant and repeated selectors,
+        // at aligned, unaligned and end-straddling offsets.
+        var cases = from format in Enumerable.Range(0, 128).Select(format => (uint)format)
+                    from swizzle in new uint[] { 0xFAC, 0x977, 0x204, 0xFFF, 0x0D1 }
+                    from offset in new uint[] { 0, 33, 113, 122, 124, 127 }
+                    select (format, swizzle, offset);
+        var data = Enumerable.Range(0, BufferBytes).Select(i => (byte)(i * 37 + 11)).ToArray();
+        foreach (var (format, swizzle, offset) in cases)
+        {
+            var push = Push(layout, (format << 12) | swizzle, offset);
+            Assert.True(MetalNative.TryExecuteWithArgumentBuffer(inlineLibrary, inline.EntryPoint, data, push,
+                inline.ArgumentLayout!, 1, out var expected, out var inlineRunError), inlineRunError);
+            Assert.True(MetalNative.TryExecuteWithArgumentBuffer(calledLibrary, called.EntryPoint, data, push,
+                called.ArgumentLayout!, 1, out var actual, out var calledRunError), calledRunError);
+            Assert.True(expected.AsSpan().SequenceEqual(actual),
+                $"components={components} format={format} swizzle=0x{swizzle:X} offset={offset}");
         }
     }
 }

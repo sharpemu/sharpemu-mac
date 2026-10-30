@@ -341,6 +341,41 @@ public sealed unsafe partial class MetalImageAliasTests(ITestOutputHelper output
         Assert.False(MetalImageCache.SameTexelLayout(in blocks, in wider));
     }
 
+    // Ghost of Tsushima's reflection probes: a 256x256 BC6H cube array (17 cubes, six levels, 0x16000 a face) whose
+    // encoder writes each level through an R32G32B32A32Uint image of its blocks. Mip 1 is a 32x32 image at +0x2000 of
+    // a face; it shares the cube's texel layout there, though not the first level's rows.
+    [Theory]
+    [InlineData(0x2000ul, 32u, true)]
+    [InlineData(0x2000ul + 5 * 0x16000, 32u, true)]
+    [InlineData(0x1000ul, 16u, true)]
+    [InlineData(0x1000ul, 32u, false)]
+    [InlineData(0x3000ul, 32u, false)]
+    public void ALevelOfAMipChainSharesItsTexelLayoutWithAnImageOfThatLevel(ulong offset, uint side, bool shared)
+    {
+        const ulong probes = 0x85_2B52_0000;
+        uint[] words = [0x852B5200, 0xCB300000, 0x003FC03F, 0xB05503AC, 0x00000065, 0x00700050, 0, 0];
+        var cube = ImageRequestBuilders.Texture(
+            words, new ShaderImageShape(false, true, false, false, false, TextureNumericClass.Float)).Request.Description;
+        Assert.Equal(6u, cube.Resources.Levels);
+        Assert.Equal(0x2000ul, cube.MipLayout[1].Offset);
+
+        var level = ImageDescription.Create();
+        level.Data = new GuestSpan(probes + offset, (ulong)side * side * 16);
+        level.PixelFormat = GpuFormat.R32G32B32A32Uint;
+        level.GuestFormat = GuestPixelFormat.Bits32_32_32_32UInt;
+        level.Type = GuestImageType.Color2D;
+        level.Extent = new GpuExtent3D(side, side, 1);
+        level.Resources = new SubresourceCount(1, 1);
+        level.Pitch = side;
+        level.BytesPerBlock = 16;
+        level.Samples = 1;
+        level.TileMode = cube.TileMode;
+        level.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = level.Data.Size, Pitch = side, Height = side };
+
+        Assert.Equal(shared, MetalImageCache.SameTexelLayout(in cube, in level));
+        Assert.Equal(shared, MetalImageCache.SameTexelLayout(in level, in cube));
+    }
+
     // UE5's virtual texture pool: a compute shader writes BC3 blocks through an RGBA32Uint
     // view over the pool, and materials sample the pool as BC3. The sampled surface has to
     // get the blocks the GPU wrote; a skipped handover left it with stale tiles (Silent
