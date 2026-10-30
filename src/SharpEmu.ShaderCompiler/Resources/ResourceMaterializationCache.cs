@@ -2872,9 +2872,12 @@ public sealed partial class ResourceMaterializationCache
             };
         }
 
+        private readonly HashSet<(ulong Address, int Words, bool Clean, bool Table)> _residentRuns = new();
+
         public void Reset()
         {
             _reads.Clear();
+            _residentRuns.Clear();
             // Retain ordinary descriptor walks without keeping unusually large
             // tables alive for the lifetime of the renderer.
             if (_reads.Capacity > 16384)
@@ -2978,6 +2981,13 @@ public sealed partial class ResourceMaterializationCache
             var wordCount = destination.Length / sizeof(uint);
             if (wordCount >= 8)
             {
+                // A run read again whole with the same flags adds only words the entry keeps once
+                // (Build drops a repeated address): a bindless heap is read once per image that
+                // indexes it, and recording every copy multiplied the reads to sort and fold.
+                var block = (address, wordCount, clean, _inTable);
+                if (_residentRuns.Contains(block))
+                    return true;
+                _residentRuns.Add(block);
                 var first = _reads.Count;
                 System.Runtime.InteropServices.CollectionsMarshal.SetCount(_reads, checked(first + wordCount));
                 var recorded = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_reads).Slice(first, wordCount);
@@ -3005,40 +3015,62 @@ public sealed partial class ResourceMaterializationCache
 
         private (ulong Address, uint Word, bool Clean, bool Table)[] _sortScratch = [];
 
-        // Descriptor evaluation followed by table evaluation usually records two ordered runs.
-        // Merge those runs in linear time; irregular graphs still use the general sort.
+        private readonly List<int> _runStarts = new();
+
+        // Reads arrive as ordered runs: descriptor evaluation followed by table evaluation usually
+        // records two, and a bindless heap is recorded whole once for every image that indexes it.
+        // The runs are merged pairwise, in passes of linear time, keeping equal addresses in the
+        // order they were read. Grand Theft Auto V's bindless heap, read once by each of half a
+        // dozen images, made a general comparison sort of some 300 000 reads cost the GPU worker
+        // about 200 ms a frame.
         private void SortReads()
         {
-            var split = -1;
-            for (var index = 1; index < _reads.Count; index++)
+            var reads = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_reads);
+            _runStarts.Clear();
+            _runStarts.Add(0);
+            for (var index = 1; index < reads.Length; index++)
             {
-                if (_reads[index - 1].Address <= _reads[index].Address) continue;
-                if (split >= 0)
-                {
-                    ResourceMaterializationProfile.CountRead(ResourceMaterializationProfile.ReadCounter.SortedReadLists);
-                    _reads.Sort(static (left, right) => left.Address.CompareTo(right.Address));
-                    return;
-                }
-                split = index;
+                if (reads[index - 1].Address > reads[index].Address)
+                    _runStarts.Add(index);
             }
-            if (split < 0)
+            if (_runStarts.Count == 1)
             {
                 ResourceMaterializationProfile.CountRead(ResourceMaterializationProfile.ReadCounter.OrderedReadLists);
                 return;
             }
 
-            ResourceMaterializationProfile.CountRead(ResourceMaterializationProfile.ReadCounter.MergedReadLists);
-            var reads = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_reads);
+            ResourceMaterializationProfile.CountRead(_runStarts.Count == 2
+                ? ResourceMaterializationProfile.ReadCounter.MergedReadLists
+                : ResourceMaterializationProfile.ReadCounter.SortedReadLists);
             if (_sortScratch.Length < reads.Length)
                 _sortScratch = new (ulong, uint, bool, bool)[Math.Max(reads.Length, _sortScratch.Length * 2)];
-            reads.CopyTo(_sortScratch);
-            int left = 0, right = split, output = 0;
-            while (left < split && right < reads.Length)
-                reads[output++] = _sortScratch[left].Address <= _sortScratch[right].Address
-                    ? _sortScratch[left++] : _sortScratch[right++];
-            _sortScratch.AsSpan(left, split - left).CopyTo(reads[output..]);
-            output += split - left;
-            _sortScratch.AsSpan(right, reads.Length - right).CopyTo(reads[output..]);
+            var source = reads;
+            var target = _sortScratch.AsSpan(0, reads.Length);
+            while (_runStarts.Count > 1)
+            {
+                var runs = 0;
+                for (var run = 0; run < _runStarts.Count; run += 2)
+                {
+                    var start = _runStarts[run];
+                    var middle = run + 1 < _runStarts.Count ? _runStarts[run + 1] : source.Length;
+                    var end = run + 2 < _runStarts.Count ? _runStarts[run + 2] : source.Length;
+                    int left = start, right = middle, output = start;
+                    while (left < middle && right < end)
+                        target[output++] = source[left].Address <= source[right].Address ? source[left++] : source[right++];
+                    source[left..middle].CopyTo(target[output..]);
+                    output += middle - left;
+                    source[right..end].CopyTo(target[output..]);
+                    _runStarts[runs++] = start;
+                }
+
+                _runStarts.RemoveRange(runs, _runStarts.Count - runs);
+                var swap = source;
+                source = target;
+                target = swap;
+            }
+
+            if (source != reads)
+                source.CopyTo(reads);
         }
 
         public Entry Build(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot snapshot,
