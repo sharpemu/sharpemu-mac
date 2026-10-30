@@ -43,7 +43,14 @@ public sealed class PerGameSettings
     public string? OverlayCorner { get; set; }
     public string? OverlayMode { get; set; }
 
+    // Written by older launchers: the game's whole switch list, which replaces the global one
+    // (a switch missing from it is off). Still honoured; the launcher now writes
+    // EnvironmentChanges instead.
     public List<string>? EnvironmentToggles { get; set; }
+
+    // Per-variable overrides laid over the global list (or over EnvironmentToggles when an
+    // older file has one); every variable not named here follows the global setting.
+    public List<string>? EnvironmentChanges { get; set; }
 
     public List<string>? CustomEnvironmentVariables { get; set; }
 
@@ -65,6 +72,7 @@ public sealed class PerGameSettings
         OverlayCorner is null &&
         OverlayMode is null &&
         EnvironmentToggles is null &&
+        EnvironmentChanges is null &&
         CustomEnvironmentVariables is null;
 
     public static string DirectoryPath =>
@@ -102,6 +110,10 @@ public sealed class PerGameSettings
         if (settings?.EnvironmentToggles is { } toggles)
         {
             settings.EnvironmentToggles = toggles.Where(entry => !string.IsNullOrEmpty(entry)).ToList();
+        }
+        if (settings?.EnvironmentChanges is { } changes)
+        {
+            settings.EnvironmentChanges = changes.Where(entry => !string.IsNullOrEmpty(entry)).ToList();
         }
         if (settings?.CustomEnvironmentVariables is { } customEnvironmentVariables)
         {
@@ -198,6 +210,13 @@ public sealed class PerGameSettings
             EnvironmentEntriesEqual(environmentToggles, global.EnvironmentToggles))
         {
             EnvironmentToggles = null;
+        }
+
+        if (EnvironmentChanges is { } changes)
+        {
+            EnvironmentChanges = EnvironmentOverrides.WithoutInherited(
+                changes,
+                EnvironmentToggles ?? global.EnvironmentToggles);
         }
 
     }
@@ -320,5 +339,7 @@ public sealed record EffectiveLaunchSettings(
         perGame?.OverlayEnabled ?? global.OverlayEnabled,
         perGame?.OverlayCorner ?? global.OverlayCorner,
         perGame?.OverlayMode ?? global.OverlayMode,
-        perGame?.EnvironmentToggles ?? global.EnvironmentToggles);
+        EnvironmentOverrides.Merge(
+            perGame?.EnvironmentToggles ?? global.EnvironmentToggles,
+            perGame?.EnvironmentChanges));
 }

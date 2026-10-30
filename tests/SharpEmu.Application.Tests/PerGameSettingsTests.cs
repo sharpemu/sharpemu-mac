@@ -168,4 +168,85 @@ public sealed class PerGameSettingsTests
 
         Assert.Null(perGame.EnvironmentToggles);
     }
+
+    [Fact]
+    public void EnvironmentChanges_OverrideOneVariableAndFollowGlobalForTheRest()
+    {
+        var global = new GuiSettings();
+        var game = new PerGameSettings { EnvironmentChanges = ["SHARPEMU_CRASH_CAPTURE"] };
+
+        // A switch turned on globally after the game was configured still reaches it.
+        global.EnvironmentToggles.Add("SHARPEMU_LOG_IO");
+        var effective = EffectiveLaunchSettings.Resolve(global, game);
+
+        Assert.Contains("SHARPEMU_CRASH_CAPTURE", effective.EnvironmentToggles);
+        Assert.Contains("SHARPEMU_LOG_IO", effective.EnvironmentToggles);
+        Assert.Contains("SHARPEMU_WRITABLE_APP0", effective.EnvironmentToggles);
+    }
+
+    [Fact]
+    public void EnvironmentChanges_ExplicitOffBeatsGlobalOnAndNeverReachesTheEnvironment()
+    {
+        var global = new GuiSettings();
+        global.EnvironmentToggles.Add("SHARPEMU_CRASH_CAPTURE");
+        var game = new PerGameSettings { EnvironmentChanges = ["SHARPEMU_CRASH_CAPTURE=0"] };
+
+        var effective = EffectiveLaunchSettings.Resolve(global, game);
+
+        Assert.DoesNotContain(effective.EnvironmentToggles, entry => entry.StartsWith("SHARPEMU_CRASH_CAPTURE"));
+    }
+
+    [Fact]
+    public void EnvironmentChanges_ManagedChoiceOverridesGlobalChoice()
+    {
+        var global = new GuiSettings();
+        global.EnvironmentToggles.Add("SHARPEMU_AUDIO_LATENCY_MS=120");
+        var game = new PerGameSettings { EnvironmentChanges = ["SHARPEMU_AUDIO_LATENCY_MS=60"] };
+
+        var effective = EffectiveLaunchSettings.Resolve(global, game);
+
+        // 60 ms is the emulator default, so the variable is left unset.
+        Assert.DoesNotContain(effective.EnvironmentToggles, entry => entry.StartsWith("SHARPEMU_AUDIO_LATENCY_MS"));
+    }
+
+    [Fact]
+    public void RemoveInheritedValues_DropsChangesThatMatchGlobal()
+    {
+        var global = new GuiSettings();
+        global.EnvironmentToggles.Add("SHARPEMU_LOG_IO");
+        var game = new PerGameSettings { EnvironmentChanges = ["SHARPEMU_LOG_IO", "SHARPEMU_LOG_NP=0"] };
+
+        game.RemoveInheritedValues(global);
+
+        Assert.Null(game.EnvironmentChanges);
+        Assert.True(game.IsEmpty);
+    }
+
+    [Fact]
+    public void LegacyWholeListStillReplacesGlobal_AndConvertsToTheSameChanges()
+    {
+        var global = new GuiSettings();
+        global.EnvironmentToggles.Add("SHARPEMU_CRASH_CAPTURE");
+        List<string> legacy = ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_LOG_IO"];
+
+        var fromLegacy = EffectiveLaunchSettings.Resolve(global, new PerGameSettings { EnvironmentToggles = legacy });
+        var changes = EnvironmentOverrides.Between(global.EnvironmentToggles, legacy);
+        var fromChanges = EffectiveLaunchSettings.Resolve(global, new PerGameSettings { EnvironmentChanges = changes });
+
+        Assert.DoesNotContain("SHARPEMU_CRASH_CAPTURE", fromLegacy.EnvironmentToggles);
+        Assert.Equal(
+            fromLegacy.EnvironmentToggles.Select(EnvironmentOverrides.Name).Order(),
+            fromChanges.EnvironmentToggles.Select(EnvironmentOverrides.Name).Order());
+    }
+
+    [Fact]
+    public void PickChanged_KeepsStoredOverridesForUntouchedVariables()
+    {
+        List<string> baseline = ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_LOG_IO"];
+        List<string> current = ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_LOG_IO", "SHARPEMU_LOG_NP"];
+
+        var changes = EnvironmentOverrides.PickChanged(current, baseline, ["SHARPEMU_LOG_IO"]);
+
+        Assert.Equal(["SHARPEMU_LOG_IO", "SHARPEMU_LOG_NP"], changes);
+    }
 }

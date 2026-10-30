@@ -32,6 +32,13 @@ public partial class MainWindow
     ];
 
     private readonly List<string> _gameEnvironmentPassthrough = new();
+
+    // What the open game had stored, and what its controls showed once loaded. A save writes
+    // only the values the user changed since then, so a control showing a fallback for a
+    // global value (Exclusive shown as Borderless on macOS, a clamped trace limit) never
+    // turns into an override by itself.
+    private PerGameSettings? _gameSettingsStored;
+    private PerGameSettings? _gameSettingsBaseline;
     private IReadOnlyList<HostDisplayOption> _gameHostDisplays = [];
     private bool _isGameSettingsOpen;
     private bool _isLoadingGameSettings;
@@ -167,6 +174,8 @@ public partial class MainWindow
         SetGameOptionsPagesSpan(coversConsoleRow: false);
         SetGameOptionsNavigationIndicator(_gameOptionsIndicatorIndex, animate: false);
         _gameSettingsTitleId = null;
+        _gameSettingsStored = null;
+        _gameSettingsBaseline = null;
         _gameEnvironmentPassthrough.Clear();
         SetGameOptionsOpenClass(BackdropLayer, active: false);
         SetGameOptionsOpenClass(CarouselHost, active: false);
@@ -185,9 +194,8 @@ public partial class MainWindow
 
     private void LoadGameSettings(string titleId)
     {
-        var effective = EffectiveLaunchSettings.Resolve(
-            _settings,
-            PerGameSettings.Load(titleId));
+        var stored = PerGameSettings.Load(titleId);
+        var effective = EffectiveLaunchSettings.Resolve(_settings, stored);
 
         _isLoadingGameSettings = true;
         _updatingGameHostDisplayOptions = true;
@@ -251,6 +259,9 @@ public partial class MainWindow
             _updatingGameHostDisplayOptions = false;
             _isLoadingGameSettings = false;
         }
+
+        _gameSettingsStored = stored;
+        _gameSettingsBaseline = GameSettingsFromControls();
     }
 
     private void PersistOpenGameSettings()
@@ -263,7 +274,56 @@ public partial class MainWindow
             return;
         }
 
+        var current = GameSettingsFromControls();
+        var baseline = _gameSettingsBaseline ?? current;
+        var stored = _gameSettingsStored ?? new PerGameSettings();
+        T? Pick<T>(T? now, T? before, T? kept) => EqualityComparer<T?>.Default.Equals(now, before) ? kept : now;
         var settings = new PerGameSettings
+        {
+            LogLevel = Pick(current.LogLevel, baseline.LogLevel, stored.LogLevel),
+            ImportTraceLimit = Pick(current.ImportTraceLimit, baseline.ImportTraceLimit, stored.ImportTraceLimit),
+            StrictDynlibResolution = Pick(current.StrictDynlibResolution, baseline.StrictDynlibResolution, stored.StrictDynlibResolution),
+            LogToFile = Pick(current.LogToFile, baseline.LogToFile, stored.LogToFile),
+            WindowMode = Pick(current.WindowMode, baseline.WindowMode, stored.WindowMode),
+            Resolution = Pick(current.Resolution, baseline.Resolution, stored.Resolution),
+            DisplayIndex = Pick(current.DisplayIndex, baseline.DisplayIndex, stored.DisplayIndex),
+            RefreshRate = Pick(current.RefreshRate, baseline.RefreshRate, stored.RefreshRate),
+            ScalingMode = Pick(current.ScalingMode, baseline.ScalingMode, stored.ScalingMode),
+            VSync = Pick(current.VSync, baseline.VSync, stored.VSync),
+            HdrMode = Pick(current.HdrMode, baseline.HdrMode, stored.HdrMode),
+            GuestDisplayResolution = Pick(current.GuestDisplayResolution, baseline.GuestDisplayResolution, stored.GuestDisplayResolution),
+            OverlayEnabled = Pick(current.OverlayEnabled, baseline.OverlayEnabled, stored.OverlayEnabled),
+            OverlayMode = Pick(current.OverlayMode, baseline.OverlayMode, stored.OverlayMode),
+            OverlayCorner = Pick(current.OverlayCorner, baseline.OverlayCorner, stored.OverlayCorner),
+            // An older file's whole list becomes the overrides it amounts to, so the game
+            // keeps its switches and starts following global changes to every other one.
+            EnvironmentChanges = EnvironmentOverrides.PickChanged(
+                current.EnvironmentToggles ?? [],
+                baseline.EnvironmentToggles ?? [],
+                stored.EnvironmentToggles is { } legacy
+                    ? EnvironmentOverrides.Between(
+                        _settings.EnvironmentToggles,
+                        EnvironmentOverrides.Merge(legacy, stored.EnvironmentChanges))
+                    : stored.EnvironmentChanges),
+            CustomEnvironmentVariables = PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables,
+        };
+        settings.RemoveInheritedValues(_settings);
+        try
+        {
+            settings.SaveOrThrow(_gameSettingsTitleId);
+            _gameSettingsStored = settings;
+            _gameSettingsBaseline = current;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            AppendConsoleLine($"[SETTINGS][WARN] {exception.Message}", WarningLineBrush);
+        }
+    }
+
+    // Every game setting as the overlay's controls show it, with the environment switches as
+    // the full list the controls describe.
+    private PerGameSettings GameSettingsFromControls() =>
+        new()
         {
             LogLevel = SelectedComboText(GameLogLevelBox, "Info"),
             ImportTraceLimit = (int)(GameTraceImportsBox.Value ?? 0),
@@ -283,11 +343,7 @@ public partial class MainWindow
             OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),
             OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),
             EnvironmentToggles = BuildGameEnvironmentEntries(),
-            CustomEnvironmentVariables = PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables,
         };
-        settings.RemoveInheritedValues(_settings);
-        settings.Save(_gameSettingsTitleId);
-    }
 
     private void OnGameHostDisplayChanged()
     {
