@@ -94,3 +94,29 @@ static inline uint sharpemu_load_device_unaligned_coherent(device const Gen5Addr
     uint high = (alignment + count > 4u) ? sharpemu_load_device_dword_coherent(ranges, range_count, faults, fault_words, cache, aligned + 4ul) : 0u;
     return (low >> shift) | (shift == 0u ? 0u : (high << (32u - shift)));
 }
+
+// A GLC dword store (RDNA2 ISA 8.1.10: GLC on a store writes through the per-CU caches to
+// the device-coherent level). A plain Metal store can sit in the writing core's cache
+// until the kernel ends, so a workgroup polling the word with a GLC load (a decoupled
+// look-back scan waiting on the partition before it) reads the stale copy and spins on.
+// A relaxed device atomic store is the coherent write. Out of range is dropped, like
+// sharpemu_store_dword.
+static inline void sharpemu_store_dword_coherent(device uint* b, uint bytes, uint addr, uint value)
+{
+    uint index = addr >> 2;
+    if (index < (bytes >> 2))
+    {
+        atomic_store_explicit((device atomic_uint*)(b + index), value, memory_order_relaxed);
+    }
+}
+
+// The device-address form: sharpemu_store_device_dword with the resolved word written atomically.
+static inline void sharpemu_store_device_dword_coherent(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint value)
+{
+    bool valid = false;
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
+    if (valid)
+    {
+        atomic_store_explicit((device atomic_uint*)word, value, memory_order_relaxed);
+    }
+}

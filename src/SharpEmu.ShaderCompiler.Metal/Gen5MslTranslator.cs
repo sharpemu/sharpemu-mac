@@ -393,6 +393,7 @@ public static partial class Gen5MslTranslator
         private uint _scratchDwordCount;
         private bool _usesFormatLoads;
         private bool _usesBufferOffset;
+        // A GLC load or store: the program carries coherent_load_prelude.
         private bool _usesCoherentLoads;
         private bool _usesPairLocks;
         // An F64 atomic (FCMPSWAP_X2, FMIN/FMAX_X2, the DS F64 forms) compares on the
@@ -4234,12 +4235,14 @@ public static partial class Gen5MslTranslator
                 }
                 else
                 {
+                    // A GLC store writes through to where other workgroups' GLC loads read.
+                    _usesCoherentLoads |= glc;
                     for (uint index = 0; index < dwordCount; index++)
                     {
-                        Line(StoreDwordStatement(
-                            bindingIndex,
-                            byteAddress.Contiguous ? $"{byteAddress.Base} + {index * 4}u" : byteAddress.At(index * 4),
-                            $"v[{sourceVectorRegister + index}]"));
+                        var dwordAddress = byteAddress.Contiguous ? $"{byteAddress.Base} + {index * 4}u" : byteAddress.At(index * 4);
+                        Line(glc
+                            ? $"sharpemu_store_dword_coherent(b{bindingIndex}, {BufferBytes(bindingIndex)}, {dwordAddress}, v[{sourceVectorRegister + index}]);"
+                            : StoreDwordStatement(bindingIndex, dwordAddress, $"v[{sourceVectorRegister + index}]"));
                     }
                 }
 

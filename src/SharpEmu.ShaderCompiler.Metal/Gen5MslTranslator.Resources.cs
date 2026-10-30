@@ -1192,11 +1192,13 @@ public static partial class Gen5MslTranslator
                 Line($"if ({ExecCondition(inRange)})");
                 Line("{");
                 _indent++;
-                Line($"sharpemu_store_device_dword({DeviceArguments}, {address}, v[{control.VectorData + index}]);");
+                Line($"sharpemu_store_device_dword{(control.Glc ? "_coherent" : string.Empty)}({DeviceArguments}, {address}, v[{control.VectorData + index}]);");
                 _indent--;
                 Line("}");
             }
 
+            // A GLC store writes through to where other workgroups' GLC loads read.
+            _usesCoherentLoads |= control.Glc;
             return true;
         }
 
@@ -1615,6 +1617,15 @@ public static partial class Gen5MslTranslator
                         : $"(v[{control.SourceVectorRegister}] >> {sourceShift})";
                     Line($"sharpemu_store_device_bytes({DeviceArguments}, {address}, {source}, {byteCount}u);");
                 }
+                else if (control.Glc)
+                {
+                    // A GLC store writes through to where other workgroups' GLC loads read.
+                    _usesCoherentLoads = true;
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        Line($"sharpemu_store_device_dword_coherent({DeviceArguments}, {address} + {index * sizeof(uint)}ul, v[{control.SourceVectorRegister + index}]);");
+                    }
+                }
                 else if (_options.DeviceAddressSpans && control.DwordCount > 1)
                 {
                     // One page-table lookup for the whole record. A record inside one page is
@@ -1879,14 +1890,15 @@ public static partial class Gen5MslTranslator
                     return;
                 }
 
-                // A GLC load reads the device-coherent value (coherent_load_prelude).
-                _usesCoherentLoads |= !store && control.Glc;
+                // A GLC load reads the device-coherent value and a GLC store writes it
+                // (coherent_load_prelude).
+                _usesCoherentLoads |= control.Glc;
                 for (uint index = 0; index < control.DwordCount; index++)
                 {
                     var dwordAddress = index == 0 ? aligned : $"{aligned} + {index * sizeof(uint)}ul";
                     if (store)
                     {
-                        Line($"sharpemu_store_device_dword({DeviceArguments}, {dwordAddress}, v[{control.SourceVectorRegister + index}]);");
+                        Line($"sharpemu_store_device_dword{(control.Glc ? "_coherent" : string.Empty)}({DeviceArguments}, {dwordAddress}, v[{control.SourceVectorRegister + index}]);");
                     }
                     else
                     {
