@@ -36,7 +36,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <!-- Selected-game backdrop: key art behind the main content, dimmed by
          a scrim so tiles and text stay readable. Fades on selection. -->
     <Panel x:Name="BackdropLayer"
-           Grid.Row="1"
+           Grid.Row="0"
+           Grid.RowSpan="2"
            Classes="backdropLayer"
            ClipToBounds="True"
            RenderTransformOrigin="50%,50%">
@@ -45,6 +46,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <TransformOperationsTransition Property="RenderTransform"
                                          Duration="0:0:0.72"
                                          Easing="CubicEaseOut" />
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.2"
+                            Easing="CubicEaseOut" />
         </Transitions>
       </Panel.Transitions>
       <Image x:Name="BackdropImage" Stretch="UniformToFill" Opacity="0"
@@ -111,7 +115,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Grid>
 
     <!-- Main content -->
-    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20">
+    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,12,32,20">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
         <RowDefinition Height="*" MinHeight="160" />
@@ -122,69 +126,66 @@ SPDX-License-Identifier: GPL-2.0-or-later
            per-game settings, keeping both views in one visual system -->
       <Border x:Name="OptionsPageSurface"
               Grid.RowSpan="4"
-              Margin="-32,-24,-32,-20"
-              Background="{StaticResource GameOptionsMenuBrush}"
+              Margin="-32,-12,-32,-20"
+              Background="{StaticResource BgBrush}"
               IsVisible="False" />
       <local:TrophyBackdrop x:Name="TrophyBackdropHost"
                             Grid.RowSpan="4"
-                            Margin="-32,-24,-32,-20"
+                            Margin="-32,-12,-32,-20"
                             IsVisible="False" />
 
-      <!-- Library / Options page switcher, with the library toolbar sharing
-           the same row on the right. Plain buttons (not TabItem) so there is
-           no underline; LB/RB hint chips flank the pair and the gamepad's
-           shoulder buttons actually switch pages from anywhere. -->
-      <Grid x:Name="ContentToolbar" Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,20">
-        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-          <Border Classes="padHint" VerticalAlignment="Center">
+      <!-- Page switcher (segmented control) with the library toolbar on the same
+           row. Plain buttons (not TabItem) so there is no underline. The LB/RB hint
+           chips only show while a gamepad is connected, and the shoulder buttons
+           switch pages from anywhere. All controls here are 30pt tall, 8pt radius. -->
+      <Grid x:Name="ContentToolbar" Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,18">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+          <Border x:Name="PadHintLeft" Classes="padHint" VerticalAlignment="Center" IsVisible="False">
             <TextBlock Text="LB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
           </Border>
-          <Button x:Name="LibraryTabButton"
-                  Classes="segment active"
-                  Content="{Binding [Page.Library], Source={x:Static local:Localization.Instance}}" />
-          <Button x:Name="TrophiesTabButton"
-                  Classes="segment"
-                  Content="{Binding [Page.Trophies], Source={x:Static local:Localization.Instance}}" />
-          <Button x:Name="OptionsTabButton"
-                  Classes="segment"
-                  Content="{Binding [Page.Options], Source={x:Static local:Localization.Instance}}" />
-          <Border Classes="padHint" VerticalAlignment="Center">
+          <Border Classes="segmentTrack">
+            <StackPanel Orientation="Horizontal" Spacing="2">
+              <Button x:Name="LibraryTabButton" Classes="segment active">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <TextBlock Classes="materialSymbol compact" Text="sports_esports" />
+                  <TextBlock Text="{Binding [Page.Library], Source={x:Static local:Localization.Instance}}"
+                             VerticalAlignment="Center" />
+                </StackPanel>
+              </Button>
+              <Button x:Name="TrophiesTabButton" Classes="segment">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <TextBlock Classes="materialSymbol compact" Text="emoji_events" />
+                  <TextBlock Text="{Binding [Page.Trophies], Source={x:Static local:Localization.Instance}}"
+                             VerticalAlignment="Center" />
+                </StackPanel>
+              </Button>
+              <Button x:Name="OptionsTabButton" Classes="segment">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <TextBlock Classes="materialSymbol compact" Text="settings" />
+                  <TextBlock Text="{Binding [Page.Options], Source={x:Static local:Localization.Instance}}"
+                             VerticalAlignment="Center" />
+                </StackPanel>
+              </Button>
+            </StackPanel>
+          </Border>
+          <Border x:Name="PadHintRight" Classes="padHint" VerticalAlignment="Center" IsVisible="False">
             <TextBlock Text="RB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
           </Border>
         </StackPanel>
 
         <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="8"
                     VerticalAlignment="Center">
-          <Border Background="Transparent"
-                  BorderBrush="{StaticResource CardBorderBrush}"
-                  BorderThickness="1" CornerRadius="8"
-                  Height="32" Padding="2,0,6,0" VerticalAlignment="Center">
-            <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
-              <Button x:Name="TitleMusicMuteButton"
-                      Classes="iconGhost"
-                      Width="28" Height="28" BorderThickness="0"
-                      VerticalAlignment="Center">
-                <TextBlock x:Name="TitleMusicMuteGlyph"
-                           Classes="materialSymbol compact"
-                           Text="volume_up" />
-              </Button>
-              <Slider x:Name="TitleMusicVolumeSlider"
-                      Width="76" Height="28"
-                      Minimum="0" Maximum="100"
-                      SmallChange="1" LargeChange="10"
-                      VerticalAlignment="Center"
-                      ToolTip.Tip="{Binding [Library.Music.Volume], Source={x:Static local:Localization.Instance}}">
-                <Slider.Resources>
-                  <GridLength x:Key="SliderPreContentMargin">7</GridLength>
-                  <GridLength x:Key="SliderPostContentMargin">7</GridLength>
-                  <x:Double x:Key="SliderHorizontalHeight">24</x:Double>
-                  <x:Double x:Key="SliderHorizontalThumbWidth">14</x:Double>
-                  <x:Double x:Key="SliderHorizontalThumbHeight">14</x:Double>
-                  <CornerRadius x:Key="SliderThumbCornerRadius">7</CornerRadius>
-                </Slider.Resources>
-              </Slider>
-            </StackPanel>
-          </Border>
+          <TextBox x:Name="SearchBox"
+                   PlaceholderText="{Binding [Library.SearchWatermark], Source={x:Static local:Localization.Instance}}"
+                   Width="220"
+                   VerticalAlignment="Center">
+            <TextBox.InnerLeftContent>
+              <TextBlock Classes="materialSymbol compact"
+                         Text="search"
+                         Margin="9,0,0,0"
+                         Foreground="{StaticResource MutedBrush}" />
+            </TextBox.InnerLeftContent>
+          </TextBox>
           <Button x:Name="LibraryLayoutButton"
                   Classes="iconGhost"
                   VerticalAlignment="Center">
@@ -192,14 +193,52 @@ SPDX-License-Identifier: GPL-2.0-or-later
                        Classes="materialSymbol compact"
                        Text="grid_view" />
           </Button>
-          <TextBox x:Name="SearchBox"
-                   PlaceholderText="{Binding [Library.SearchWatermark], Source={x:Static local:Localization.Instance}}"
-                   Width="240"
-                   VerticalAlignment="Center" />
+          <!-- Volume: speaker button opening a compact mute + slider flyout -->
+          <Button x:Name="MusicVolumeButton"
+                  Classes="iconGhost"
+                  VerticalAlignment="Center"
+                  ToolTip.Tip="{Binding [Library.Music.Volume], Source={x:Static local:Localization.Instance}}"
+                  AutomationProperties.Name="{Binding [Library.Music.Volume], Source={x:Static local:Localization.Instance}}">
+            <TextBlock x:Name="MusicVolumeGlyph"
+                       Classes="materialSymbol compact"
+                       Text="volume_up" />
+            <Button.Flyout>
+              <Flyout Placement="BottomEdgeAlignedRight">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <Button x:Name="TitleMusicMuteButton"
+                          Classes="iconGhost"
+                          VerticalAlignment="Center">
+                    <TextBlock x:Name="TitleMusicMuteGlyph"
+                               Classes="materialSymbol compact"
+                               Text="volume_up" />
+                  </Button>
+                  <Slider x:Name="TitleMusicVolumeSlider"
+                          Width="140" Height="30"
+                          Minimum="0" Maximum="100"
+                          SmallChange="1" LargeChange="10"
+                          VerticalAlignment="Center">
+                    <Slider.Resources>
+                      <GridLength x:Key="SliderPreContentMargin">7</GridLength>
+                      <GridLength x:Key="SliderPostContentMargin">7</GridLength>
+                      <x:Double x:Key="SliderHorizontalHeight">24</x:Double>
+                      <x:Double x:Key="SliderHorizontalThumbWidth">14</x:Double>
+                      <x:Double x:Key="SliderHorizontalThumbHeight">14</x:Double>
+                      <CornerRadius x:Key="SliderThumbCornerRadius">7</CornerRadius>
+                    </Slider.Resources>
+                  </Slider>
+                </StackPanel>
+              </Flyout>
+            </Button.Flyout>
+          </Button>
           <Button x:Name="OpenFileButton"
                   Classes="ghost"
-                  Content="{Binding [Library.OpenFile], Source={x:Static local:Localization.Instance}}"
-                  VerticalAlignment="Center" />
+                  VerticalAlignment="Center">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <TextBlock Classes="materialSymbol compact" Text="folder_open" />
+              <TextBlock Text="{Binding [Library.OpenFile], Source={x:Static local:Localization.Instance}}"
+                         VerticalAlignment="Center" />
+            </StackPanel>
+          </Button>
         </StackPanel>
       </Grid>
 
@@ -230,58 +269,51 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           Header="{Binding [Library.Context.Launch], Source={x:Static local:Localization.Instance}}"
                           FontWeight="SemiBold">
                   <MenuItem.Icon>
-                    <TextBlock Text="▶" FontSize="11" Foreground="{StaticResource AccentHoverBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="play_arrow" Foreground="{StaticResource AccentHoverBrush}" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxOpenFolder"
                           Header="{Binding [Library.Context.OpenFolder], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="📂" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="folder_open" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <Separator />
                 <MenuItem x:Name="CtxCopyPath"
                           Header="{Binding [Library.Context.CopyPath], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="⧉" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="content_copy" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxCopyTitleId"
                           Header="{Binding [Library.Context.CopyTitleId], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="⧉" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="content_copy" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxPackZar"
                           Header="{Binding [Library.Context.PackZar], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="▣" FontSize="12" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="inventory_2" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxTrophies"
                           Header="{Binding [Library.Context.Trophies], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="🏆" FontSize="12" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="emoji_events" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <Separator />
                 <MenuItem x:Name="CtxGameSettings"
                           Header="{Binding [Library.Context.GameSettings], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <TextBlock Text="⚙" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="settings" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxPatches"
                           Header="{Binding [Library.Context.Patches], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
-                    <PathIcon Width="14" Height="14" Foreground="{StaticResource MutedBrush}"
-                              Data="M9,3 H3 V9 H5 A3,3 0 1 1 5,15 H3 V21 H9 V19 A3,3 0 1 1 15,19 V21 H21 V15 H19 A3,3 0 1 0 19,9 H21 V3 H15 V5 A3,3 0 1 1 9,5 Z" />
+                    <TextBlock Classes="materialSymbol compact" Text="extension" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <Separator />
@@ -289,8 +321,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           Header="{Binding [Library.Context.Remove], Source={x:Static local:Localization.Instance}}"
                           Foreground="{StaticResource DangerHoverBrush}">
                   <MenuItem.Icon>
-                    <TextBlock Text="✕" FontSize="12" Foreground="{StaticResource DangerHoverBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="delete" Foreground="{StaticResource DangerHoverBrush}" />
                   </MenuItem.Icon>
                 </MenuItem>
               </ContextMenu>
@@ -339,11 +370,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                               VerticalAlignment="Center"
                               Spacing="12">
                     <Border Classes="addFolderTileIcon">
-                      <TextBlock Classes="addFolderGlyph addFolderIconGlyph"
-                                 Text="+"
-                                 FontSize="34"
-                                 FontWeight="Light"
-                                 LineHeight="34"
+                      <TextBlock Classes="materialSymbol addFolderGlyph addFolderIconGlyph"
+                                 Text="add"
+                                 FontSize="28"
+                                 LineHeight="28"
                                  HorizontalAlignment="Center"
                                  VerticalAlignment="Center" />
                     </Border>
@@ -365,11 +395,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     VerticalAlignment="Top"
                     IsVisible="False"
                     AutomationProperties.Name="{Binding [Library.AddFolder], Source={x:Static local:Localization.Instance}}">
-              <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBlock Text="+"
-                           FontSize="16"
-                           FontWeight="Light"
-                           VerticalAlignment="Center" />
+              <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock Classes="materialSymbol compact" Text="add" />
                 <TextBlock Text="{Binding [Library.AddFolder], Source={x:Static local:Localization.Instance}}"
                            VerticalAlignment="Center" />
               </StackPanel>
@@ -422,24 +449,29 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </StackPanel>
             <StackPanel Grid.Column="1"
                         Orientation="Horizontal"
-                        Spacing="12"
+                        Spacing="8"
                         HorizontalAlignment="Right"
                         VerticalAlignment="Center">
               <Button x:Name="LaunchButton"
                       Classes="playButton"
                       Content="Launch"
-                      IsEnabled="False" />
-              <TextBlock Text="|"
-                         Foreground="{StaticResource MutedBrush}"
-                         FontSize="22"
-                         VerticalAlignment="Center"
-                         Margin="-4,0" />
+                      IsEnabled="False">
+                <Button.ContentTemplate>
+                  <DataTemplate x:DataType="x:String">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                      <TextBlock Classes="materialSymbol playGlyph" Text="play_arrow" />
+                      <TextBlock Text="{Binding}" VerticalAlignment="Center" />
+                    </StackPanel>
+                  </DataTemplate>
+                </Button.ContentTemplate>
+              </Button>
+              <Border Classes="selectedDivider" />
               <Button x:Name="LaunchCustomEnvButton"
                       Classes="optionsCircle"
                       ToolTip.Tip="{Binding [Launch.CustomEnv], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
                       AutomationProperties.Name="{Binding [Launch.CustomEnv], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
                 <TextBlock Classes="materialSymbol"
-                           Text="keyboard_arrow_down" />
+                           Text="tune" />
               </Button>
               <Button x:Name="GameSettingsButton"
                       Classes="optionsCircle"
@@ -450,7 +482,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                           Source={x:Static local:Localization.Instance},
                                                           x:CompileBindings=False}">
                 <TextBlock Classes="materialSymbol"
-                           Text="more_horiz" />
+                           Text="settings" />
               </Button>
               <ToggleButton x:Name="ConsoleToggle"
                             Classes="optionsCircle"
@@ -469,16 +501,43 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     Classes="selectedDetailsDivider" />
           </Grid>
 
-          <!-- Empty state -->
-          <StackPanel x:Name="EmptyState" Grid.RowSpan="2"
-                      Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
-                      IsVisible="False">
-            <TextBlock Text="🎮" FontSize="44" HorizontalAlignment="Center" Opacity="0.7" />
-            <TextBlock x:Name="EmptyStateTitle" Text="Your library is empty" FontSize="18" FontWeight="SemiBold"
-                       HorizontalAlignment="Center" />
-            <TextBlock x:Name="EmptyStateHint" Text="Add a folder containing your games to get started."
-                       FontSize="13" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
-          </StackPanel>
+          <!-- Empty state: a centred card (it also covers the default key art) -->
+          <Border x:Name="EmptyState" Grid.RowSpan="2"
+                  Classes="emptyStateCard"
+                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                  IsVisible="False">
+            <StackPanel Spacing="8" HorizontalAlignment="Center">
+              <Border Classes="emptyStateIcon" HorizontalAlignment="Center" Margin="0,0,0,8">
+                <TextBlock x:Name="EmptyStateIcon"
+                           Classes="materialSymbol"
+                           FontSize="32" LineHeight="32"
+                           Text="sports_esports"
+                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+              </Border>
+              <TextBlock x:Name="EmptyStateTitle" Text="No games yet" FontSize="20" FontWeight="SemiBold"
+                         HorizontalAlignment="Center" TextAlignment="Center" />
+              <TextBlock x:Name="EmptyStateHint" Text="Add a folder that contains your games to get started."
+                         FontSize="13" LineHeight="19" Foreground="{StaticResource SecondaryTextBrush}"
+                         TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Center" />
+              <StackPanel x:Name="EmptyStateActions"
+                          Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center" Margin="0,14,0,0">
+                <Button x:Name="EmptyStateAddFolderButton" Classes="accent">
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Classes="materialSymbol compact" Text="create_new_folder" />
+                    <TextBlock Text="{Binding [Library.Empty.AddFolderAction], Source={x:Static local:Localization.Instance}}"
+                               VerticalAlignment="Center" />
+                  </StackPanel>
+                </Button>
+                <Button x:Name="EmptyStateOpenFileButton" Classes="ghost">
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Classes="materialSymbol compact" Text="file_open" />
+                    <TextBlock Text="{Binding [Library.Empty.OpenFileAction], Source={x:Static local:Localization.Instance}}"
+                               VerticalAlignment="Center" />
+                  </StackPanel>
+                </Button>
+              </StackPanel>
+            </StackPanel>
+          </Border>
 
           <!-- Loading state: covers the grid while a scan (initial load,
                rescan, or a just-added folder) is in flight, so the screen
@@ -697,10 +756,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 AutomationProperties.Name="{Binding [Options.General],
                                                                     Source={x:Static local:Localization.Instance},
                                                                     x:CompileBindings=False}">
-                          <Grid ColumnDefinitions="36,*">
-                            <TextBlock Grid.Column="0"
-                                       Classes="materialSymbol optionsNavIcon"
-                                       Text="tune" />
+                          <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                            <Border Grid.Column="0" Classes="navIconTile graphite">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="tune" />
+                      </Border>
                             <TextBlock Grid.Column="1"
                                        Classes="optionsNavLabel"
                                        Text="{Binding [Options.General],
@@ -713,10 +772,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 AutomationProperties.Name="{Binding [Options.Logging],
                                                                     Source={x:Static local:Localization.Instance},
                                                                     x:CompileBindings=False}">
-                          <Grid ColumnDefinitions="36,*">
-                            <TextBlock Grid.Column="0"
-                                       Classes="materialSymbol optionsNavIcon"
-                                       Text="terminal" />
+                          <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                            <Border Grid.Column="0" Classes="navIconTile teal">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="terminal" />
+                      </Border>
                             <TextBlock Grid.Column="1"
                                        Classes="optionsNavLabel"
                                        Text="{Binding [Options.Logging],
@@ -729,10 +788,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 AutomationProperties.Name="{Binding [Options.Graphics],
                                                                     Source={x:Static local:Localization.Instance},
                                                                     x:CompileBindings=False}">
-                          <Grid ColumnDefinitions="36,*">
-                            <TextBlock Grid.Column="0"
-                                       Classes="materialSymbol optionsNavIcon"
-                                       Text="monitor" />
+                          <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                            <Border Grid.Column="0" Classes="navIconTile blue">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="desktop_windows" />
+                      </Border>
                             <TextBlock Grid.Column="1"
                                        Classes="optionsNavLabel"
                                        Text="{Binding [Options.Graphics],
@@ -745,10 +804,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 AutomationProperties.Name="{Binding [Options.Env.Tab],
                                                                     Source={x:Static local:Localization.Instance},
                                                                     x:CompileBindings=False}">
-                          <Grid ColumnDefinitions="36,*">
-                            <TextBlock Grid.Column="0"
-                                       Classes="materialSymbol optionsNavIcon"
-                                       Text="deployed_code" />
+                          <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                            <Border Grid.Column="0" Classes="navIconTile green">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="deployed_code" />
+                      </Border>
                             <TextBlock Grid.Column="1"
                                        Classes="optionsNavLabel"
                                        Text="{Binding [Options.Env.Tab],
@@ -761,10 +820,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 AutomationProperties.Name="{Binding [Common.Back],
                                                                     Source={x:Static local:Localization.Instance},
                                                                     x:CompileBindings=False}">
-                          <Grid ColumnDefinitions="36,*">
-                            <TextBlock Grid.Column="0"
-                                       Classes="materialSymbol optionsNavIcon"
-                                       Text="arrow_back" />
+                          <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                            <Border Grid.Column="0" Classes="navIconTile ">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="arrow_back" />
+                      </Border>
                             <TextBlock Grid.Column="1"
                                        Classes="optionsNavLabel"
                                        Text="{Binding [Common.Back],
@@ -783,7 +842,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                               Classes="optionsSectionPanel active">
                   <StackPanel Spacing="12">
                     <Border Classes="optionsGroup">
-                      <StackPanel Spacing="8">
+                      <StackPanel>
                         <local:SettingRow x:Name="GameStrictRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.Strict.Label],
@@ -862,7 +921,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                               Classes="optionsSectionPanel">
                   <StackPanel>
                     <Border Classes="optionsGroup">
-                      <StackPanel Spacing="8">
+                      <StackPanel>
                         <local:SettingRow x:Name="GameLogLevelRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.LogLevel.Label],
@@ -928,7 +987,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                               Classes="optionsSectionPanel">
                   <StackPanel>
                     <Border Classes="optionsGroup">
-                      <StackPanel Spacing="8">
+                      <StackPanel>
                         <local:SettingRow x:Name="GameWindowModeRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.WindowMode.Label],
@@ -1060,7 +1119,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                               Classes="optionsSectionPanel">
                   <StackPanel>
                     <Border Classes="optionsGroup">
-                      <StackPanel Spacing="8">
+                      <StackPanel>
                         <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Debug], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                         <local:SettingRow Classes="optionRow"
                                           Label="SHARPEMU_PROFILE_PERFORMANCE"
@@ -1189,25 +1248,24 @@ SPDX-License-Identifier: GPL-2.0-or-later
              focused while preserving every setting from the current launcher -->
         <Grid x:Name="OptionsPage"
               IsVisible="False"
-              ColumnDefinitions="244,*"
-              ColumnSpacing="42"
-              Margin="32,14,32,16">
+              ColumnDefinitions="216,*"
+              ColumnSpacing="40"
+              Margin="32,6,32,16">
           <Border Grid.Column="0" Classes="optionsNavSurface">
             <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                           VerticalScrollBarVisibility="Hidden">
               <Grid x:Name="OptionsNavHost">
                 <Border x:Name="OptionsNavIndicator"
                         Classes="optionsNavIndicator"
-                        Height="54"
                         VerticalAlignment="Top"
                         IsHitTestVisible="False" />
 
                 <StackPanel>
                   <Button x:Name="OptionsGeneralNav" Classes="optionsNav active">
-                    <Grid ColumnDefinitions="36,*">
-                      <TextBlock Grid.Column="0"
-                                 Classes="materialSymbol optionsNavIcon"
-                                 Text="tune" />
+                    <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                      <Border Grid.Column="0" Classes="navIconTile graphite">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="tune" />
+                      </Border>
                       <TextBlock x:Name="OptionsGeneralNavLabel"
                                  Grid.Column="1"
                                  Classes="optionsNavLabel"
@@ -1215,10 +1273,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </Grid>
                   </Button>
                   <Button x:Name="OptionsLoggingNav" Classes="optionsNav">
-                    <Grid ColumnDefinitions="36,*">
-                      <TextBlock Grid.Column="0"
-                                 Classes="materialSymbol optionsNavIcon"
-                                 Text="terminal" />
+                    <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                      <Border Grid.Column="0" Classes="navIconTile teal">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="terminal" />
+                      </Border>
                       <TextBlock x:Name="OptionsLoggingNavLabel"
                                  Grid.Column="1"
                                  Classes="optionsNavLabel"
@@ -1226,10 +1284,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </Grid>
                   </Button>
                   <Button x:Name="OptionsLauncherNav" Classes="optionsNav">
-                    <Grid ColumnDefinitions="36,*">
-                      <TextBlock Grid.Column="0"
-                                 Classes="materialSymbol optionsNavIcon"
-                                 Text="rocket_launch" />
+                    <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                      <Border Grid.Column="0" Classes="navIconTile orange">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="rocket_launch" />
+                      </Border>
                       <TextBlock x:Name="OptionsLauncherNavLabel"
                                  Grid.Column="1"
                                  Classes="optionsNavLabel"
@@ -1237,10 +1295,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </Grid>
                   </Button>
                   <Button x:Name="OptionsRenderingNav" Classes="optionsNav">
-                    <Grid ColumnDefinitions="36,*">
-                      <TextBlock Grid.Column="0"
-                                 Classes="materialSymbol optionsNavIcon"
-                                 Text="monitor" />
+                    <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                      <Border Grid.Column="0" Classes="navIconTile blue">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="desktop_windows" />
+                      </Border>
                       <TextBlock x:Name="OptionsRenderingNavLabel"
                                  Grid.Column="1"
                                  Classes="optionsNavLabel"
@@ -1248,10 +1306,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </Grid>
                   </Button>
                   <Button x:Name="OptionsEnvironmentNav" Classes="optionsNav">
-                    <Grid ColumnDefinitions="36,*">
-                      <TextBlock Grid.Column="0"
-                                 Classes="materialSymbol optionsNavIcon"
-                                 Text="deployed_code" />
+                    <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                      <Border Grid.Column="0" Classes="navIconTile green">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="deployed_code" />
+                      </Border>
                       <TextBlock x:Name="OptionsEnvironmentNavLabel"
                                  Grid.Column="1"
                                  Classes="optionsNavLabel"
@@ -1259,10 +1317,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </Grid>
                   </Button>
                   <Button x:Name="OptionsAboutNav" Classes="optionsNav">
-                    <Grid ColumnDefinitions="36,*">
-                      <TextBlock Grid.Column="0"
-                                 Classes="materialSymbol optionsNavIcon"
-                                 Text="info" />
+                    <Grid ColumnDefinitions="24,*" ColumnSpacing="10">
+                      <Border Grid.Column="0" Classes="navIconTile purple">
+                        <TextBlock Classes="materialSymbol navIconGlyph" Text="info" />
+                      </Border>
                       <TextBlock x:Name="OptionsAboutNavLabel"
                                  Grid.Column="1"
                                  Classes="optionsNavLabel"
@@ -1274,13 +1332,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </ScrollViewer>
           </Border>
 
-          <Border Grid.Column="1" Classes="optionsContentSurface">
+          <Border Grid.Column="1" Classes="optionsContentSurface" MaxWidth="780" HorizontalAlignment="Left">
             <Panel>
               <ScrollViewer x:Name="OptionsGeneralPanel"
                             Classes="optionsSectionPanel active">
                 <StackPanel>
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <local:SettingRow x:Name="CpuEngineRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.CpuEngine.Label], Source={x:Static local:Localization.Instance}}"
@@ -1330,7 +1388,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                             Classes="optionsSectionPanel">
                 <StackPanel>
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <local:SettingRow x:Name="LogLevelRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.LogLevel.Label], Source={x:Static local:Localization.Instance}}"
@@ -1407,7 +1465,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                             Classes="optionsSectionPanel">
                 <StackPanel>
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <local:SettingRow x:Name="LanguageRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Language.Label], Source={x:Static local:Localization.Instance}}"
@@ -1468,7 +1526,27 @@ SPDX-License-Identifier: GPL-2.0-or-later
                             Classes="optionsSectionPanel">
                 <StackPanel>
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
+                      <!--Version-->
+                      <Border Classes="optionsInfoRow">
+                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="18">
+                          <Image Grid.Column="0"
+                                 Source="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
+                                 Width="20" Height="20"
+                                 Margin="0,0,12,0"
+                                 RenderOptions.BitmapInterpolationMode="HighQuality" />
+                          <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                            <TextBlock Text="SharpEmu"
+                                       FontSize="13"
+                                       FontWeight="Medium" />
+                            <TextBlock x:Name="AboutVersionText"
+                                       FontSize="11"
+                                       Foreground="{StaticResource SettingsDescriptionBrush}"
+                                       TextWrapping="Wrap" />
+                          </StackPanel>
+                        </Grid>
+                      </Border>
+
                       <!--Latest commit info-->
                       <Border Classes="optionsInfoRow">
                         <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="18">
@@ -1480,7 +1558,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="LatestCommitLabel"
                                        Text="{Binding [About.Github.LatestCommitLabel], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="14"
+                                       FontSize="13"
                                        FontWeight="Medium" />
                             <TextBlock x:Name="LatestCommitDescription"
                                        Text="{Binding [About.Github.LatestCommitDescription], Source={x:Static local:Localization.Instance}}"
@@ -1510,7 +1588,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="UpdateLabel"
                                        Text="{Binding [Updater.Label], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="14"
+                                       FontSize="13"
                                        FontWeight="Medium" />
                             <TextBlock x:Name="UpdateStatusText"
                                        Text="Current build: dev"
@@ -1537,7 +1615,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="GithubLabel"
                                        Text="{Binding [About.Github.Label], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="14"
+                                       FontSize="13"
                                        FontWeight="Medium" />
                             <TextBlock x:Name="GithubDesc"
                                        Text="{Binding [About.Github.Desc], Source={x:Static local:Localization.Instance}}"
@@ -1564,7 +1642,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="DiscordServerLabel"
                                       Text="{Binding [About.Discord.Label], Source={x:Static local:Localization.Instance}}"
-                                      FontSize="14"
+                                      FontSize="13"
                                       FontWeight="Medium" />
                             <TextBlock x:Name="DiscordServerDesc"
                                       Text="{Binding [About.Discord.Desc], Source={x:Static local:Localization.Instance}}"
@@ -1588,7 +1666,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                             Classes="optionsSectionPanel">
                 <StackPanel Spacing="16">
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <local:SettingRow x:Name="WindowModeRow"
                                         Classes="optionRow"
                         Label="{Binding [Options.WindowMode.Label], Source={x:Static local:Localization.Instance}}"
@@ -1695,7 +1773,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                             Classes="optionsSectionPanel">
                 <StackPanel>
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Trophies], Source={x:Static local:Localization.Instance}}" />
                       <local:SettingRow Classes="optionRow"
                                         Label="{Binding [Options.Env.TrophyTest.Label], Source={x:Static local:Localization.Instance}}"
@@ -1719,7 +1797,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   </Border>
 
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <Border Classes="optionsGroupDivider" />
 
                       <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Debug], Source={x:Static local:Localization.Instance}}" />
@@ -1830,40 +1908,43 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Border Grid.Row="3" x:Name="ConsolePanel" Classes="card" Padding="0"
               IsVisible="False">
         <Grid RowDefinitions="Auto,*">
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto" Margin="16,10,12,10">
             <TextBlock x:Name="ConsoleSectionTitle" Classes="sectionTitle"
                        Text="{Binding [Console.Title], Source={x:Static local:Localization.Instance}}"
                        VerticalAlignment="Center" />
-            <TextBox Grid.Column="1" FontSize="12" Margin="0,0,12,0" x:Name="ConsoleSearchBox"
+            <TextBox Grid.Column="1" Margin="0,0,12,0" x:Name="ConsoleSearchBox"
                     PlaceholderText="{Binding [Console.SearchWatermark], Source={x:Static local:Localization.Instance}}"
-                    Width="320" />
+                    Width="280">
+              <TextBox.InnerLeftContent>
+                <TextBlock Classes="materialSymbol compact"
+                           Text="search"
+                           Margin="9,0,0,0"
+                           Foreground="{StaticResource MutedBrush}" />
+              </TextBox.InnerLeftContent>
+            </TextBox>
             <CheckBox Grid.Column="2" x:Name="AutoScrollCheck"
                     Content="{Binding [Console.AutoScroll], Source={x:Static local:Localization.Instance}}"
                     IsChecked="True"
                     FontSize="12" Margin="0,0,12,0" />
             <Button Grid.Column="3" x:Name="DetachConsoleButton" Classes="ghost"
                     Content="{Binding [Console.Split], Source={x:Static local:Localization.Instance}}"
-                    FontSize="12"
-                    Padding="10,4" Margin="0,0,8,0" />
+                    Margin="0,0,8,0" />
             <Button Grid.Column="4" x:Name="CopyLogButton" Classes="ghost"
                     Content="{Binding [Console.Copy], Source={x:Static local:Localization.Instance}}"
-                    FontSize="12"
-                    Padding="10,4" Margin="0,0,8,0" />
+                    Margin="0,0,8,0" />
             <Button Grid.Column="5" x:Name="ClearLogButton" Classes="ghost"
                     Content="{Binding [Console.Clear], Source={x:Static local:Localization.Instance}}"
-                    FontSize="12"
-                    Padding="10,4" Margin="0,0,8,0" />
+                    Margin="0,0,8,0" />
             <Button Grid.Column="6"
                     x:Name="CloseConsoleButton"
-                    Classes="ghost"
-                    Content="×"
+                    Classes="iconGhost"
                     AutomationProperties.Name="{Binding [Launch.Console],
-                                                        Source={x:Static local:Localization.Instance}}"
-                    FontSize="16"
-                    Padding="10,2" />
+                                                        Source={x:Static local:Localization.Instance}}">
+              <TextBlock Classes="materialSymbol compact" Text="close" />
+            </Button>
           </Grid>
           <ListBox Grid.Row="1" x:Name="ConsoleList" Classes="console" BorderThickness="0,1,0,0"
-                   BorderBrush="{StaticResource CardBorderBrush}" CornerRadius="0,0,12,12">
+                   BorderBrush="{StaticResource CardBorderBrush}" CornerRadius="0,0,11,11">
             <ListBox.ItemTemplate>
               <DataTemplate x:DataType="local:LogLine" x:CompileBindings="True">
                 <TextBlock Text="{Binding Text}" Foreground="{Binding Brush}" TextWrapping="NoWrap" />

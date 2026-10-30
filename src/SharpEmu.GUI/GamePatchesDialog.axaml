@@ -18,7 +18,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <Image x:Name="GameCover" Stretch="Uniform" HorizontalAlignment="Left" />
       </Grid>
       <StackPanel Grid.Row="1" Margin="0,14,0,18" Spacing="6">
-        <TextBlock x:Name="GameNameText" FontSize="20" FontWeight="Bold" TextWrapping="Wrap" />
+        <TextBlock x:Name="GameNameText" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" />
         <TextBlock x:Name="GameInfoText" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
       </StackPanel>
       <Border Grid.Row="2" Padding="14" CornerRadius="8" Background="{StaticResource CardBrush}">

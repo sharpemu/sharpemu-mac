@@ -319,6 +319,8 @@ public partial class MainWindow : Window
         SearchBox.TextChanged += (_, _) => RefreshVisibleGames();
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
         OpenFileButton.Click += async (_, _) => await OpenFileAsync();
+        EmptyStateAddFolderButton.Click += (_, _) => StartAddFolderFromTile();
+        EmptyStateOpenFileButton.Click += async (_, _) => await OpenFileAsync();
         LaunchButton.Click += (_, _) =>
         {
             if (_isRunning)
@@ -546,6 +548,7 @@ public partial class MainWindow : Window
         LibraryPage.IsVisible = index == 0;
         LibraryToolbar.IsVisible = index == 0;
         OptionsPageSurface.IsVisible = index is 1 or 2;
+        BackdropLayer.Opacity = index == 0 ? 1 : 0;
         TrophyBackdropHost.IsVisible = index == 2;
         OptionsPage.IsVisible = index == 1;
         AnimatePageChange(previousPage, index);
@@ -567,13 +570,12 @@ public partial class MainWindow : Window
     {
         _isLibraryGridLayout = grid;
         var selectedTile = GameList.SelectedItem;
-        _libraryTiles.IncludeAddFolderTile = grid;
+        UpdateAddFolderAffordances();
         if (selectedTile is GameEntry && !ReferenceEquals(GameList.SelectedItem, selectedTile))
         {
             GameList.SelectedItem = selectedTile;
         }
 
-        CarouselAddFolderButton.IsVisible = !grid;
         SetClass(GameList, "gridLayout", grid);
         UpdateCarouselPadding();
         SetClass(LibrarySelectedDetails, "gridLayout", grid);
@@ -591,6 +593,15 @@ public partial class MainWindow : Window
                 },
                 DispatcherPriority.Loaded);
         }
+    }
+
+    // The add-folder tile / button sit next to the games; an empty library offers the
+    // empty-state actions instead.
+    private void UpdateAddFolderAffordances()
+    {
+        var hasGames = _visibleGames.Count > 0;
+        _libraryTiles.IncludeAddFolderTile = _isLibraryGridLayout && hasGames;
+        CarouselAddFolderButton.IsVisible = !_isLibraryGridLayout && hasGames;
     }
 
     private void UpdateLibraryLayoutMetrics()
@@ -902,13 +913,31 @@ public partial class MainWindow : Window
 
     // ---- Controller navigation ----
 
+    private bool _gamepadConnected;
+
+    // The LB/RB page hints only make sense while a controller is connected.
+    private void SetGamepadConnected(bool connected)
+    {
+        if (_gamepadConnected == connected)
+        {
+            return;
+        }
+
+        _gamepadConnected = connected;
+        PadHintLeft.IsVisible = connected;
+        PadHintRight.IsVisible = connected;
+    }
+
     private void PollGamepad()
     {
         if (!LauncherGamepad.TryGetState(out var pad))
         {
+            SetGamepadConnected(false);
             _previousPadButtons = HostGamepadButtons.None;
             return;
         }
+
+        SetGamepadConnected(true);
 
         if (!IsActive)
         {
@@ -997,7 +1026,7 @@ public partial class MainWindow : Window
         var pressed = pad.Buttons & ~_previousPadButtons;
         if ((pressed & HostGamepadButtons.Cross) != 0)
         {
-            if (!_isLibraryGridLayout && CarouselAddFolderButton.IsFocused)
+            if (!_isLibraryGridLayout && CarouselAddFolderButton.IsFocused || EmptyState.IsVisible)
             {
                 StartAddFolderFromTile();
             }
@@ -1086,6 +1115,7 @@ public partial class MainWindow : Window
                 ? $" · {BuildInfo.CommitSha}"
                 : $" · UNOFFICIAL {BuildInfo.CommitSha}";
         VersionText.Text = display;
+        AboutVersionText.Text = display;
         Title = $"SharpEmu {display}";
         ReportGuiRenderer();
         ToolTip.SetTip(VersionText, BuildInfo.Banner);
@@ -1361,9 +1391,7 @@ public partial class MainWindow : Window
         }
     }
 
-    // Left inset that keeps the brand clear of the macOS traffic lights, and the AppKit
-    // title bar height they are centred in.
-    private const double TrafficLightInset = 78;
+    // The AppKit title bar height the traffic lights are centred in.
     private const double NativeTitleBarHeight = 30;
 
     private bool _nativeWindowChrome;
@@ -1371,7 +1399,9 @@ public partial class MainWindow : Window
     /// <summary>
     /// macOS keeps its system window frame: the content extends under a transparent title bar
     /// and AppKit draws the traffic lights over <see cref="TitleBar"/>, so the drawn caption
-    /// buttons and resize grips are hidden. Other platforms keep the frameless custom chrome.
+    /// buttons and resize grips are hidden. The band holds nothing but the traffic lights, so it
+    /// takes the window background and only serves as a drag region. Other platforms keep the
+    /// frameless custom chrome.
     /// </summary>
     private void UseNativeWindowChrome()
     {
@@ -1386,7 +1416,8 @@ public partial class MainWindow : Window
         TitleBar.Height = NativeTitleBarHeight;
         ExtendClientAreaTitleBarHeightHint = NativeTitleBarHeight;
         WindowChromeButtons.IsVisible = false;
-        TitleBarBrand.Margin = new Thickness(TrafficLightInset, 0, 16, 0);
+        TitleBarBrand.IsVisible = false;
+        TitleBar.Background = Brushes.Transparent;
     }
 
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -2723,6 +2754,7 @@ public partial class MainWindow : Window
         }
 
         EmptyState.IsVisible = _visibleGames.Count == 0;
+        UpdateAddFolderAffordances();
         UpdateEmptyStateTexts();
 
         if (!ReferenceEquals(selectedBefore, selectedAfter))
@@ -2763,6 +2795,8 @@ public partial class MainWindow : Window
 
         var query = SearchBox.Text?.Trim() ?? string.Empty;
         var hasFilter = query.Length > 0;
+        EmptyStateIcon.Text = hasFilter ? "search_off" : "sports_esports";
+        EmptyStateActions.IsVisible = !hasFilter;
         EmptyStateTitle.Text = hasFilter
             ? Localization.Instance.Get("Library.Empty.SearchTitle")
             : Localization.Instance.Get("Library.Empty.Title");
@@ -2839,6 +2873,7 @@ public partial class MainWindow : Window
             : _settings.TitleMusicVolume < 0.5 ? "volume_down" : "volume_up";
         var label = Localization.Instance.Get(
             _settings.PlayTitleMusic ? "Library.Music.Mute" : "Library.Music.Unmute");
+        MusicVolumeGlyph.Text = TitleMusicMuteGlyph.Text;
         ToolTip.SetTip(TitleMusicMuteButton, label);
         AutomationProperties.SetName(TitleMusicMuteButton, label);
     }
@@ -3390,6 +3425,10 @@ public partial class MainWindow : Window
         return string.IsNullOrEmpty(directory) ? timestampedName : Path.Combine(directory, timestampedName);
     }
 
+    // The language files prefix these labels with a ▶ / ■ character; the button draws its own
+    // play / stop symbol.
+    private static string WithoutLeadingSymbol(string label) => label.TrimStart('▶', '■', ' ');
+
     private void UpdateRunButtons()
     {
         LaunchButton.Classes.Remove("accent");
@@ -3398,14 +3437,14 @@ public partial class MainWindow : Window
         if (_isRunning)
         {
             LaunchButton.Classes.Add("danger");
-            LaunchButton.Content = Localization.Instance.Get(
-                _isStopping ? "Launch.Stopping" : "Launch.Stop");
+            LaunchButton.Content = WithoutLeadingSymbol(Localization.Instance.Get(
+                _isStopping ? "Launch.Stopping" : "Launch.Stop"));
             LaunchButton.IsEnabled = !_isStopping;
         }
         else
         {
             LaunchButton.Classes.Add("accent");
-            LaunchButton.Content = Localization.Instance.Get("Launch.Launch");
+            LaunchButton.Content = WithoutLeadingSymbol(Localization.Instance.Get("Launch.Launch"));
             LaunchButton.IsEnabled = GameList.SelectedItem is GameEntry;
         }
 

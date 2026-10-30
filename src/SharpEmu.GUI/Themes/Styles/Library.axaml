@@ -101,7 +101,7 @@ Cover-art library item states and motion.
     </Setter>
   </Style>
   <Style Selector="ListBox.tileGrid ListBoxItem:selected Border.libraryGameCard">
-    <Setter Property="BorderBrush" Value="#E6FFFFFF" />
+    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
   </Style>
   <Style Selector="Border.libraryGameCard Border.coverClip">
     <Setter Property="CornerRadius" Value="5" />
@@ -148,7 +148,7 @@ Cover-art library item states and motion.
     </Setter>
   </Style>
   <Style Selector="TextBlock.addFolderIconGlyph">
-    <Setter Property="RenderTransform" Value="translateY(-7px)" />
+    <Setter Property="RenderTransform" Value="none" />
   </Style>
   <Style Selector="ListBox.tileGrid ListBoxItem:pointerover TextBlock.addFolderGlyph,
                    ListBox.tileGrid ListBoxItem:selected TextBlock.addFolderGlyph">
@@ -162,5 +162,31 @@ Cover-art library item states and motion.
   <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTileIcon,
                    ListBox.tileGrid ListBoxItem:selected Border.addFolderTileIcon">
     <Setter Property="Background" Value="#2EFFFFFF" />
+  </Style>
+
+  <!-- Empty library: a centred card that also masks the default key art behind it. -->
+  <Style Selector="Border.emptyStateCard">
+    <Setter Property="Background" Value="#F5141416" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="16" />
+    <Setter Property="Padding" Value="36,32" />
+    <Setter Property="Width" Value="420" />
+    <Setter Property="BoxShadow" Value="0 18 48 0 #66000000" />
+  </Style>
+  <Style Selector="Border.emptyStateIcon">
+    <Setter Property="Width" Value="64" />
+    <Setter Property="Height" Value="64" />
+    <Setter Property="CornerRadius" Value="16" />
+    <Setter Property="Background" Value="{StaticResource AccentSoftBrush}" />
+  </Style>
+  <Style Selector="Border.emptyStateIcon TextBlock">
+    <Setter Property="Foreground" Value="{StaticResource AccentHoverBrush}" />
+  </Style>
+  <Style Selector="Border.selectedDivider">
+    <Setter Property="Width" Value="1" />
+    <Setter Property="Height" Value="20" />
+    <Setter Property="Margin" Value="2,0" />
+    <Setter Property="Background" Value="{StaticResource GroupHairlineBrush}" />
   </Style>
 </Styles>

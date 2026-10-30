@@ -16,7 +16,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <StackPanel Margin="24" Spacing="12">
     <TextBlock x:Name="HeadingText"
                FontSize="20"
-               FontWeight="Bold"
+               FontWeight="SemiBold"
                TextWrapping="Wrap" />
 
     <TextBlock TextWrapping="Wrap"
