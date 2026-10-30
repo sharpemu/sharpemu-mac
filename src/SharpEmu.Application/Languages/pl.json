@@ -71,8 +71,6 @@
   "Options.Env.Group.General": "Ogólne",
   "Options.Env.RenderDoc.Desc": "Załaduj API RenderDoc w aplikacji, aby można było przechwytywać klatki z wnętrza emulatora.\nNaciśnij F12 podczas działania gry, aby przechwycić jedną klatkę; przechwycone klatki trafiają do user/logs/capture_logs/<TITLE_ID>.\nWymaga zainstalowanego RenderDoc. Spowalnia GPU i zawiesza niektóre tytuły, więc zostaw wyłączone, chyba że debugujesz.",
   "Options.Env.DisableVkImplicitLayers.Desc": "Gdy RenderDoc jest włączony, inne konfliktujące nakładki mogą powodować utratę urządzenia. Włączenie tej opcji może rozwiązać problem.",
-  "Options.DefaultProfile.Label": "Domyślna nazwa profilu",
-  "Options.DefaultProfile.Desc": "Nazwa używana, gdy gra prosi o wprowadzenie tekstu. Domyślnie Sharp.",
   "Options.Section.Emulation": "EMULACJA",
   "Options.Section.Logging": "DZIENNIK ZDARZEŃ",
   "Options.Section.Launcher": "LAUNCHER",
@@ -80,8 +78,6 @@
   "Options.Section.Display": "WYŚWIETLANIE",
   "Options.Graphics": "Grafika",
 
-  "Options.Console.Type.Label": "Konsola",
-  "Options.Console.Type.Desc": "Model konsoli zgłaszany grom.",
   "Options.Console.Language.Label": "Język konsoli",
   "Options.Console.Language.Desc": "Język systemu zgłaszany grom.",
 
@@ -120,9 +116,6 @@
   "Options.Env.TrophySound.Label": "Dźwięk trofeów",
   "Options.Env.TrophySound.Desc": "Odtwarza krótki sygnał po odblokowaniu trofeum.",
 
-  "Options.CpuEngine.Label": "Silnik CPU",
-  "Options.CpuEngine.Desc": "Silnik wykonawczy używany do uruchamiania kodu gry.",
-  "Options.CpuEngine.Native": "Natywny",
 
   "Options.Strict.Label": "Ścisłe rozwiązywanie dynlib",
   "Options.Strict.Desc": "Przerwij uruchomienie, gdy importowany symbol nie może zostać rozwiązany.",

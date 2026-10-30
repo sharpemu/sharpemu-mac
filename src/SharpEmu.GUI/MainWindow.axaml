@@ -1281,28 +1281,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 <StackPanel>
                   <Border Classes="optionsGroup">
                     <StackPanel Spacing="8">
-                      <local:SettingRow x:Name="CpuEngineRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.CpuEngine.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.CpuEngine.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="CpuEngineBox"
-                                  Classes="optionValue"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
-                                  HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="ConsoleTypeRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.Console.Type.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Console.Type.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="ConsoleTypeBox"
-                                  Classes="optionValue"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
-                                  HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-
                       <local:SettingRow x:Name="ConsoleLanguageRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Console.Language.Label], Source={x:Static local:Localization.Instance}}"
@@ -1422,16 +1400,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                             </DataTemplate>
                           </ComboBox.ItemTemplate>
                         </ComboBox>
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="DefaultProfileRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.DefaultProfile.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.DefaultProfile.Desc], Source={x:Static local:Localization.Instance}}">
-                        <TextBox x:Name="DefaultProfileBox"
-                                 Classes="optionValue"
-                                 MaxLength="16"
-                                 VerticalAlignment="Center" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="TitleMusicRow"

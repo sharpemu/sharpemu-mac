@@ -57,9 +57,6 @@
   "Options.Section.Logging": "PROTOKOLLIERUNG",
   "Options.Section.Launcher": "LAUNCHER",
 
-  "Options.CpuEngine.Label": "CPU-Engine",
-  "Options.CpuEngine.Desc": "Ausführungs-Engine, die zum Ausführen des Spiel-Codes verwendet wird.",
-  "Options.CpuEngine.Native": "Nativ",
 
   "Options.Strict.Label": "Strikte dynlib-Auflösung",
   "Options.Strict.Desc": "Starten abbrechen, wenn ein importiertes Symbol nicht aufgelöst werden kann.",
@@ -99,8 +96,6 @@
 
   "Options.Language.Label": "Emulator-Sprache",
   "Options.Language.Desc": "Sprache der Benutzeroberfläche. Wird sofort angewendet.",
-  "Options.DefaultProfile.Label": "Standardprofilname",
-  "Options.DefaultProfile.Desc": "Name für Texteingaben in Spielen. Der Standardwert ist Sharp.",
 
   "Common.On": "An",
   "Common.Off": "Aus",
@@ -216,8 +211,6 @@
   "Updater.Status.Unsupported": "Automatische Updates erfordern einen x64-Build für Windows, Linux oder macOS.",
   "Options.Graphics": "Grafik",
 
-  "Options.Console.Type.Label": "Konsole",
-  "Options.Console.Type.Desc": "Konsolenmodell, das Spielen gemeldet wird.",
   "Options.Console.Language.Label": "Konsolensprache",
   "Options.Console.Language.Desc": "Systemsprache, die Spielen gemeldet wird.",
   "Options.Section.Rendering": "DARSTELLUNG",

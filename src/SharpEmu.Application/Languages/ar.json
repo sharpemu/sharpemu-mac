@@ -57,9 +57,6 @@
   "Options.Section.Logging": "التسجيل",
   "Options.Section.Launcher": "المُشغِّل",
 
-  "Options.CpuEngine.Label": "محرك المعالج",
-  "Options.CpuEngine.Desc": "محرك التنفيذ المستخدم لتشغيل كود اللعبة.", 
-  "Options.CpuEngine.Native": "أصلي",
 
   "Options.Strict.Label": "ربط صارم للمكتبات الديناميكية (dynlib)",
   "Options.Strict.Desc": "إفشال التشغيل عندما يتعذر التعرف على رمز مستورد.",
@@ -99,8 +96,6 @@
 
   "Options.Language.Label": "لغة المحاكي",
   "Options.Language.Desc": "اللغة المستخدمة في جميع أنحاء المشغل. تُطبق فوراً.",
-  "Options.DefaultProfile.Label": "اسم الملف الشخصي الافتراضي",
-  "Options.DefaultProfile.Desc": "الاسم المستخدم عندما تطلب لعبة إدخال نص. القيمة الافتراضية هي Sharp.",
 
   "Common.On": "تشغيل",
   "Common.Off": "إيقاف",
@@ -216,8 +211,6 @@
   "Updater.Status.Unsupported": "يتطلب التحديث التلقائي إصدار x64 لنظام Windows أو Linux أو macOS.",
   "Options.Graphics": "الرسومات",
 
-  "Options.Console.Type.Label": "وحدة التحكم",
-  "Options.Console.Type.Desc": "طراز وحدة التحكم الذي يتم إبلاغ الألعاب به.",
   "Options.Console.Language.Label": "لغة وحدة التحكم",
   "Options.Console.Language.Desc": "لغة النظام التي يتم إبلاغ الألعاب بها.",
   "Options.Section.Rendering": "التصيير",

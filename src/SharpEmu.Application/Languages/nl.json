@@ -57,9 +57,6 @@
   "Options.Section.Logging": "LOGGING",
   "Options.Section.Launcher": "LAUNCHER",
 
-  "Options.CpuEngine.Label": "CPU-engine",
-  "Options.CpuEngine.Desc": "Engine die wordt gebruikt om gamecode uit te voeren.",
-  "Options.CpuEngine.Native": "Native",
 
   "Options.Strict.Label": "Strikte dynlib-resolutie",
   "Options.Strict.Desc": "Laat het opstarten mislukken wanneer een geïmporteerd symbool niet kan worden opgelost.",
@@ -99,8 +96,6 @@
 
   "Options.Language.Label": "Taal van de emulator",
   "Options.Language.Desc": "Taal die in de hele launcher wordt gebruikt. Wordt direct toegepast.",
-  "Options.DefaultProfile.Label": "Standaardprofielnaam",
-  "Options.DefaultProfile.Desc": "Naam die wordt gebruikt wanneer een game om tekstinvoer vraagt. De standaardwaarde is Sharp.",
 
   "Common.On": "Aan",
   "Common.Off": "Uit",
@@ -216,8 +211,6 @@
   "Updater.Status.Unsupported": "Automatisch updaten vereist een x64-build voor Windows, Linux of macOS.",
   "Options.Graphics": "Grafisch",
 
-  "Options.Console.Type.Label": "Console",
-  "Options.Console.Type.Desc": "Consolemodel dat aan games wordt gemeld.",
   "Options.Console.Language.Label": "Consoletaal",
   "Options.Console.Language.Desc": "Systeemtaal die aan games wordt gemeld.",
   "Options.Section.Rendering": "RENDERING",

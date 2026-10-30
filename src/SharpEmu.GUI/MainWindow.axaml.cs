@@ -45,14 +45,6 @@ public partial class MainWindow : Window
     private static readonly IBrush WarningLineBrush = new SolidColorBrush(Color.Parse("#E8B341"));
     private static readonly IBrush ErrorLineBrush = new SolidColorBrush(Color.Parse("#F2777C"));
     private static readonly IBrush SuccessLineBrush = new SolidColorBrush(Color.Parse("#63D489"));
-    private readonly LocalizedChoice[] _cpuEngineChoices =
-    [
-        LocalizedChoice.FromKey("Native", "Options.CpuEngine.Native"),
-    ];
-    private readonly LocalizedChoice[] _consoleTypeChoices =
-    [
-        LocalizedChoice.Literal("PS5", "PlayStation 5"),
-    ];
     private readonly LocalizedChoice[] _consoleLanguageChoices =
     [
         LocalizedChoice.Literal("Japanese", "日本語"),
@@ -218,7 +210,6 @@ public partial class MainWindow : Window
         string EbootPath,
         string DisplayName,
         string? TitleId,
-        string ConsoleType,
         string ConsoleLanguage,
         EffectiveLaunchSettings Settings,
         SharpEmuRuntimeOptions RuntimeOptions);
@@ -376,8 +367,6 @@ public partial class MainWindow : Window
         };
         AutoUpdateToggle.IsCheckedChanged += (_, _) =>
             _settings.CheckForUpdatesOnStartup = AutoUpdateToggle.IsChecked == true;
-        ConsoleTypeBox.SelectionChanged += (_, _) =>
-            _settings.ConsoleType = SelectedComboText(ConsoleTypeBox, "PS5");
         ConsoleLanguageBox.SelectionChanged += (_, _) =>
             _settings.ConsoleLanguage = SelectedComboText(ConsoleLanguageBox, "EnglishUS");
         WindowModeBox.SelectionChanged += (_, _) => _settings.WindowMode = SelectedComboText(WindowModeBox, "Windowed");
@@ -431,8 +420,6 @@ public partial class MainWindow : Window
             SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
         CrashDumpToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_CRASH_CAPTURE", CrashDumpToggle.IsChecked == true);
-        DefaultProfileBox.TextChanged += (_, _) =>
-            _settings.DefaultProfile = GuiSettings.NormalizeDefaultProfile(DefaultProfileBox.Text);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
@@ -1468,8 +1455,6 @@ public partial class MainWindow : Window
 
     private void InitializeLocalizedChoiceBoxes()
     {
-        CpuEngineBox.ItemsSource = _cpuEngineChoices;
-        ConsoleTypeBox.ItemsSource = _consoleTypeChoices;
         ConsoleLanguageBox.ItemsSource = _consoleLanguageChoices;
         LogLevelBox.ItemsSource = _logLevelChoices;
         WindowModeBox.ItemsSource = _windowModeChoices;
@@ -1482,8 +1467,6 @@ public partial class MainWindow : Window
 
     private void RefreshLocalizedChoices()
     {
-        RefreshChoices(_cpuEngineChoices);
-        RefreshChoices(_consoleTypeChoices);
         RefreshChoices(_consoleLanguageChoices);
         RefreshChoices(_logLevelChoices);
         RefreshChoices(_windowModeChoices);
@@ -1504,8 +1487,6 @@ public partial class MainWindow : Window
 
     private void ApplySettingsToControls()
     {
-        CpuEngineBox.SelectedIndex = 0;
-        ConsoleTypeBox.SelectedIndex = 0;
         ConsoleLanguageBox.SelectedIndex = ChoiceIndex(
             _settings.ConsoleLanguage,
             _consoleLanguageChoices.Select(choice => choice.Value).ToArray());
@@ -1551,7 +1532,6 @@ public partial class MainWindow : Window
             _settings.EnvironmentToggles.Contains("SHARPEMU_RENDERDOC");
         EnvDisableVkImplicitLayersToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("SHARPEMU_VK_DISABLE_IMPLICITS");
-        DefaultProfileBox.Text = _settings.DefaultProfile;
         WindowModeBox.SelectedIndex = ChoiceIndex(_settings.WindowMode, "Windowed", "Borderless", "Exclusive");
         LoadHostDisplayOptions();
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
@@ -1797,7 +1777,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private const string DefaultProfileEnvironmentName = "SHARPEMU_DEFAULT_PROFILE";
     private const string BinkModeEnvironmentName = "SHARPEMU_BINK_MODE";
 
     private string SelectedLogLevel()
@@ -3049,11 +3028,6 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            if (string.Equals(name, DefaultProfileEnvironmentName, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
             Environment.SetEnvironmentVariable(name, value);
             _appliedEnvironmentVariables.Add(name);
         }
@@ -3065,14 +3039,10 @@ public partial class MainWindow : Window
             _appliedEnvironmentVariables.Add(name);
         }
 
-        Environment.SetEnvironmentVariable(
-            DefaultProfileEnvironmentName,
-            GuiSettings.NormalizeDefaultProfile(_settings.DefaultProfile));
         // Apply both values so an inherited skip setting cannot override the GUI choice.
         Environment.SetEnvironmentVariable(StrictComputeSettings.VariableName,
             StrictComputeSettings.GetLaunchValue(effective.EnvironmentToggles));
         _appliedEnvironmentVariables.Add(StrictComputeSettings.VariableName);
-        _appliedEnvironmentVariables.Add(DefaultProfileEnvironmentName);
 
         // An absent switch now enables the guard opt-out by default; send 0 for a disabled GUI toggle.
         Environment.SetEnvironmentVariable("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
@@ -3092,13 +3062,6 @@ public partial class MainWindow : Window
                 _ => "native",
             });
         _appliedEnvironmentVariables.Add(BinkModeEnvironmentName);
-
-        Environment.SetEnvironmentVariable(
-            "SHARPEMU_RENDER_SCALE",
-            _settings.RenderResolutionScale.ToString(
-                "0.###",
-                System.Globalization.CultureInfo.InvariantCulture));
-        _appliedEnvironmentVariables.Add("SHARPEMU_RENDER_SCALE");
 
         foreach (var entry in customEnvironment)
         {
@@ -3135,7 +3098,6 @@ public partial class MainWindow : Window
             Path.GetFullPath(ebootPath),
             displayName,
             _runningGameTitleId,
-            _settings.ConsoleType,
             _settings.ConsoleLanguage,
             effective,
             runtimeOptions);
@@ -3301,7 +3263,7 @@ public partial class MainWindow : Window
         {
             "--cpu-engine=native",
             $"--log-level={launch.Settings.LogLevel}",
-            $"--console={launch.ConsoleType.ToLowerInvariant()}",
+            "--console=ps5",
             $"--console-language={launch.ConsoleLanguage}",
         };
         if (launch.RuntimeOptions.StrictDynlibResolution)

@@ -72,9 +72,6 @@
   "Options.Section.Logging": "JOURNALISATION",
   "Options.Section.Launcher": "LANCEUR",
 
-  "Options.CpuEngine.Label": "Moteur CPU",
-  "Options.CpuEngine.Desc": "Moteur d’exécution utilisé pour exécuter le code du jeu.",
-  "Options.CpuEngine.Native": "Natif",
 
   "Options.Strict.Label": "Résolution stricte des bibliothèques dynamiques",
   "Options.Strict.Desc": "Interrompre le lancement lorsqu’un symbole importé ne peut pas être résolu.",
@@ -114,8 +111,6 @@
 
   "Options.Language.Label": "Langue de l’émulateur",
   "Options.Language.Desc": "Langue utilisée dans l’ensemble du lanceur. Le changement est immédiat.",
-  "Options.DefaultProfile.Label": "Nom de profil par défaut",
-  "Options.DefaultProfile.Desc": "Nom utilisé lorsqu’un jeu demande une saisie de texte. La valeur par défaut est Sharp.",
 
   "Common.On": "Activé",
   "Common.Off": "Désactivé",
@@ -219,8 +214,6 @@
   "Updater.Status.Unsupported": "La mise à jour automatique nécessite un build x64 pour Windows, Linux ou macOS.",
   "Options.Graphics": "Graphismes",
 
-  "Options.Console.Type.Label": "Console",
-  "Options.Console.Type.Desc": "Modèle de console signalé aux jeux.",
   "Options.Console.Language.Label": "Langue de la console",
   "Options.Console.Language.Desc": "Langue système signalée aux jeux.",
   "Options.Section.Rendering": "RENDU",

@@ -70,9 +70,6 @@
   "Options.Section.Logging": "REGISTOS",
   "Options.Section.Launcher": "LANÇADOR",
 
-  "Options.CpuEngine.Label": "Motor de CPU",
-  "Options.CpuEngine.Desc": "Motor de execução utilizado para correr o código do jogo.",
-  "Options.CpuEngine.Native": "Nativo",
 
   "Options.Strict.Label": "Resolução estrita de dynlib",
   "Options.Strict.Desc": "Falha o arranque quando um símbolo importado não pode ser resolvido.",
@@ -112,8 +109,6 @@
 
   "Options.Language.Label": "Idioma do emulador",
   "Options.Language.Desc": "Idioma utilizado em todo o lançador. Aplica-se de imediato.",
-  "Options.DefaultProfile.Label": "Nome de perfil predefinido",
-  "Options.DefaultProfile.Desc": "Nome utilizado quando um jogo solicita a introdução de texto. O valor predefinido é Sharp.",
 
   "Common.On": "Ativado",
   "Common.Off": "Desativado",
@@ -217,8 +212,6 @@
   "Updater.Status.Unsupported": "A atualização automática requer um build x64 para Windows, Linux ou macOS.",
   "Options.Graphics": "Gráficos",
 
-  "Options.Console.Type.Label": "Consola",
-  "Options.Console.Type.Desc": "Modelo de consola comunicado aos jogos.",
   "Options.Console.Language.Label": "Idioma da consola",
   "Options.Console.Language.Desc": "Idioma do sistema comunicado aos jogos.",
   "Options.Section.Rendering": "RENDERIZAÇÃO",

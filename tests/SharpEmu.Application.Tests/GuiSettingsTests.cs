@@ -105,7 +105,6 @@ public sealed class GuiSettingsTests
 
         Assert.Equal("Info", settings.LogLevel);
         Assert.Equal("en", settings.Language);
-        Assert.Equal("PS5", settings.ConsoleType);
         Assert.Equal("EnglishUS", settings.ConsoleLanguage);
         Assert.Equal("1525606762248540221", settings.DiscordClientId);
         Assert.Empty(settings.GameFolders);
@@ -150,9 +149,7 @@ public sealed class GuiSettingsTests
         var turkish = GuiSettings.NormalizeFromJson(
             """{ "ConsoleType": "ps5", "ConsoleLanguage": "turkish" }""");
 
-        Assert.Equal("PS5", invalid.ConsoleType);
         Assert.Equal("EnglishUS", invalid.ConsoleLanguage);
-        Assert.Equal("PS5", turkish.ConsoleType);
         Assert.Equal("Turkish", turkish.ConsoleLanguage);
     }
 
@@ -246,7 +243,6 @@ public sealed class GuiSettingsTests
         Assert.False(settings.PlayTitleMusic);
         Assert.Equal("C:\\SharpEmu\\SharpEmu.exe", settings.EmulatorPath);
         Assert.Equal("ru", settings.Language);
-        Assert.Equal("Player", settings.DefaultProfile);
         Assert.False(settings.DiscordRichPresence);
         Assert.False(settings.CheckForUpdatesOnStartup);
         Assert.Equal("Borderless", settings.WindowMode);
