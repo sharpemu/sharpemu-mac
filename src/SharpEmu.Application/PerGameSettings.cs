@@ -251,9 +251,20 @@ public sealed class PerGameSettings
     {
         var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (StrictComputeSettings.IsEnabled(entries)) normalized.Add(StrictComputeSettings.VariableName);
-        foreach (var entry in entries)
+        var materialized = entries as IReadOnlyCollection<string> ?? entries.ToList();
+        // A launcher setting counts only when it differs from the emulator's default, in either direction.
+        foreach (var setting in EnvironmentSettings.All)
+        {
+            if (EnvironmentSettings.Canonical(materialized, setting) is { } canonical)
+            {
+                normalized.Add(canonical);
+            }
+        }
+
+        foreach (var entry in materialized)
         {
             var parts = entry.Split('=', 2, StringSplitOptions.TrimEntries);
+            if (EnvironmentSettings.Find(parts[0]) is not null) continue;
             // An explicit zero differs from the enabled default for this switch.
             if (string.Equals(parts[0], StrictComputeSettings.VariableName, StringComparison.OrdinalIgnoreCase)) continue;
             if (parts.Length == 0 || string.IsNullOrWhiteSpace(parts[0]))

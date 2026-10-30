@@ -957,6 +957,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                     VerticalAlignment="Center" />
                         </local:SettingRow>
 
+                        <local:SettingRow x:Name="GameGuestResolutionRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Setting.GuestResolution.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                          Description="{Binding [Setting.GuestResolution.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                          <ComboBox x:Name="GameGuestResolutionBox"
+                                    Classes="optionValue"
+                                    ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                    HorizontalContentAlignment="Left"
+                                    VerticalAlignment="Center" />
+                        </local:SettingRow>
                         <local:SettingRow x:Name="GameDisplayRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.Display.Label],
@@ -1051,6 +1061,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                     ToolTip.Tip="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
                                     ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
                         </local:SettingRow>
+
+                        <Border Classes="optionsGroupDivider" />
+
+                        <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Performance], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                        <StackPanel x:Name="GamePerformanceHost" Spacing="8" />
                       </StackPanel>
                     </Border>
                   </StackPanel>
@@ -1146,6 +1161,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
 
+                        <StackPanel x:Name="GameDebugExtraHost" Spacing="8" />
+
                         <Border Classes="optionsGroupDivider" />
 
                         <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.General], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
@@ -1173,6 +1190,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <ToggleSwitch x:Name="GameEnvWritableApp0Toggle"
                                         Classes="optionToggle" />
                         </local:SettingRow>
+
+                        <Border Classes="optionsGroupDivider" />
+
+                        <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Compatibility], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                        <StackPanel x:Name="GameCompatibilityHost" Spacing="8" />
+
+                        <Border Classes="optionsGroupDivider" />
+
+                        <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Audio], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                        <StackPanel x:Name="GameAudioHost" Spacing="8" />
                       </StackPanel>
                     </Border>
                   </StackPanel>
@@ -1281,28 +1308,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 <StackPanel>
                   <Border Classes="optionsGroup">
                     <StackPanel Spacing="8">
-                      <local:SettingRow x:Name="CpuEngineRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.CpuEngine.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.CpuEngine.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="CpuEngineBox"
-                                  Classes="optionValue"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
-                                  HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="ConsoleTypeRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.Console.Type.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Console.Type.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="ConsoleTypeBox"
-                                  Classes="optionValue"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
-                                  HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-
                       <local:SettingRow x:Name="ConsoleLanguageRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Console.Language.Label], Source={x:Static local:Localization.Instance}}"
@@ -1422,16 +1427,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                             </DataTemplate>
                           </ComboBox.ItemTemplate>
                         </ComboBox>
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="DefaultProfileRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.DefaultProfile.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.DefaultProfile.Desc], Source={x:Static local:Localization.Instance}}">
-                        <TextBox x:Name="DefaultProfileBox"
-                                 Classes="optionValue"
-                                 MaxLength="16"
-                                 VerticalAlignment="Center" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="TitleMusicRow"
@@ -1607,6 +1602,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   Classes="optionValue"
                                   VerticalAlignment="Center" />
                       </local:SettingRow>
+                      <local:SettingRow x:Name="GuestResolutionRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Setting.GuestResolution.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Setting.GuestResolution.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <ComboBox x:Name="GuestResolutionBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
                       <local:SettingRow x:Name="DisplayRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Display.Label], Source={x:Static local:Localization.Instance}}"
@@ -1685,6 +1690,30 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   Classes="optionValue"
                                   ToolTip.Tip="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
+                      </local:SettingRow>
+
+                      <Border Classes="optionsGroupDivider" />
+
+                      <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Performance], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                      <StackPanel x:Name="OptionsPerformanceHost" Spacing="8" />
+
+                      <local:SettingRow x:Name="ShaderCacheFolderRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Setting.ShaderCacheFolder.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Setting.ShaderCacheFolder.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                          <Button x:Name="OpenShaderCacheButton"
+                                  Classes="optionAction">
+                            <TextBlock Text="{Binding [Setting.ShaderCacheFolder.Open], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                          <Button x:Name="ClearShaderCacheButton"
+                                  Classes="optionAction">
+                            <TextBlock x:Name="ClearShaderCacheButtonLabel"
+                                       Text="{Binding [Setting.ShaderCacheFolder.Clear], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                        </StackPanel>
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
@@ -1779,6 +1808,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         <ToggleSwitch x:Name="EnvLogNpToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
+                      <StackPanel x:Name="OptionsDebugExtraHost" Spacing="8" />
+
                       <Border Classes="optionsGroupDivider" />
 
                       <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.General], Source={x:Static local:Localization.Instance}}" />
@@ -1806,6 +1837,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Description="{Binding [Options.Env.WritableApp0.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvWritableApp0Toggle" Classes="optionToggle" />
                       </local:SettingRow>
+
+                      <Border Classes="optionsGroupDivider" />
+
+                      <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Compatibility], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                      <StackPanel x:Name="OptionsCompatibilityHost" Spacing="8" />
+
+                      <Border Classes="optionsGroupDivider" />
+
+                      <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Audio], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                      <StackPanel x:Name="OptionsAudioHost" Spacing="8" />
 
                     </StackPanel>
                   </Border>

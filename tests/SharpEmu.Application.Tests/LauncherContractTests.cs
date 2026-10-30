@@ -18,28 +18,6 @@ public sealed class LauncherContractTests
     }
 
     [Fact]
-    public void LaunchSnapshotPreservesArgumentOrderAndCustomEnvironmentPrecedence()
-    {
-        var global = new ApplicationSettings { StrictDynlibResolution = true, ImportTraceLimit = 17,
-            WindowMode = "Borderless", BinkPlaybackMode = "Host", RenderResolutionScale = .75 };
-        var game = new PerGameSettings { Resolution = "1280x720", VSync = false,
-            EnvironmentToggles = ["SHARPEMU_STRICT_COMPUTE=0"], CustomEnvironmentVariables = ["TEST=game"] };
-        var plan = LauncherLaunchPlan.Create("game folder/eboot.bin", global, game, ["TEST=global"], ["TEST=once"]);
-        Assert.Equal(new[] { "--cpu-engine=native", "--log-level=Info", "--console=ps5", "--console-language=EnglishUS",
-            "--strict", "--trace-imports=17", "--window-mode=borderless", "--resolution=1280x720", "--display=0",
-            "--refresh-rate=0", "--scaling=fit", "--vsync=off", "--hdr=auto", "--overlay=on",
-            "--overlay-mode=titlebar", "--overlay-corner=topright", Path.GetFullPath("game folder/eboot.bin") }, plan.Arguments);
-        Assert.Equal("once", plan.Environment["TEST"]);
-        Assert.Equal("0", plan.Environment["SHARPEMU_STRICT_COMPUTE"]);
-        Assert.Equal("0", plan.Environment["SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"]);
-        Assert.Equal("native", plan.Environment["SHARPEMU_BINK_HOST_PLAYBACK"]);
-        Assert.Equal("0.75", plan.Environment["SHARPEMU_RENDER_SCALE"]);
-        game.EnvironmentToggles.Clear(); game.Resolution = "1x1"; global.ConsoleLanguage = "Japanese";
-        Assert.Contains("--resolution=1280x720", plan.Arguments);
-        Assert.Equal("0", plan.Environment["SHARPEMU_STRICT_COMPUTE"]);
-    }
-
-    [Fact]
     public void SerializedSettingsKeepExistingFieldNamesAndNullVersusEmptyOverride()
     {
         var global = ApplicationSettings.NormalizeFromJson("{\"LibraryLayout\":\"Grid\",\"EnvironmentToggles\":[\"SHARPEMU_X\"],\"ConsoleWindowWidth\":1234}");

@@ -57,9 +57,6 @@
   "Options.Section.Logging": "ロギング",
   "Options.Section.Launcher": "ランチャー",
 
-  "Options.CpuEngine.Label": "CPUエンジン",
-  "Options.CpuEngine.Desc": "ゲームコードを実行するために使用される実行エンジン。",
-  "Options.CpuEngine.Native": "ネイティブ",
 
   "Options.Strict.Label": "厳格な動的ライブラリ解決",
   "Options.Strict.Desc": "インポートされたシンボルが解決できない場合、起動を中断します。",
@@ -99,8 +96,6 @@
 
   "Options.Language.Label": "エミュレータの言語",
   "Options.Language.Desc": "ランチャー全体で使用される言語。変更はすぐに適用されます。",
-  "Options.DefaultProfile.Label": "既定のプロフィール名",
-  "Options.DefaultProfile.Desc": "ゲームがテキスト入力を要求したときに使用する名前です。既定値は Sharp です。",
 
   "Common.On": "オン",
   "Common.Off": "オフ",
@@ -216,8 +211,6 @@
   "Updater.Status.Unsupported": "自動アップデートにはWindows、Linux、またはmacOSのx64ビルドが必要です。",
   "Options.Graphics": "グラフィックス",
 
-  "Options.Console.Type.Label": "コンソール",
-  "Options.Console.Type.Desc": "ゲームに通知するコンソールモデル。",
   "Options.Console.Language.Label": "コンソールの言語",
   "Options.Console.Language.Desc": "ゲームに通知するシステム言語。",
   "Options.Section.Rendering": "レンダリング",

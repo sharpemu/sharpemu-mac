@@ -57,8 +57,6 @@
   "Options.Env.DisableVkImplicitLayers.Desc": "RenderDoc aktiv olduqda digər ziddiyyətli overlay-lər device loss-a səbəb ola bilər. Bu seçimi aktivləşdirmək problemi həll edə bilər.",
   "Options.Env.GuestImageCpuSync.Desc": "Emulyasiya olunan sistemdə oyunun öz CPU kodunun yenidən yazdığı təsvir səthlərini təkrar yükləyin.\nAdətən söndürülmüş saxlayın. CPU ilə çəkilən səthləri ekranda görünməyən oyunlar üçün aktivləşdirin.\nPerformansı azaldır və GTA V kimi bəzi oyunların işini pisləşdirir.",
   "Options.Env.ForceSubmitOrphanPreambles.Desc": "GPU əmr buferlərinin giriş əmrlərini hədəf növbəsi onları qəbul etmədikdə belə ötürün.\nAdətən söndürülmüş saxlayın. Heç vaxt siqnal verməyən GPU sinxronlaşdırma səddini gözləyərkən donan oyunlar üçün aktivləşdirin.",
-  "Options.DefaultProfile.Label": "Standart profil adı",
-  "Options.DefaultProfile.Desc": "Oyun mətn daxil edilməsini istədikdə istifadə olunan ad. Standart ad Sharp-dır.",
   "Options.Section.Emulation": "Emulyasiya",
   "Options.Section.Logging": "Jurnala yazma",
   "Options.Section.Launcher": "Başladıcı",
@@ -66,8 +64,6 @@
   "Options.Section.Display": "Ekran",
   "Options.Graphics": "Qrafika",
 
-  "Options.Console.Type.Label": "Konsol",
-  "Options.Console.Type.Desc": "Oyunlara bildirilən konsol modeli.",
   "Options.Console.Language.Label": "Konsol dili",
   "Options.Console.Language.Desc": "Oyunlara bildirilən sistem dili.",
 
@@ -109,9 +105,6 @@
   "Options.Env.TrophySound.Label": "Kubok səsi",
   "Options.Env.TrophySound.Desc": "Kubok açılanda qısa bir səs çalınır.",
 
-  "Options.CpuEngine.Label": "CPU icra mühərriki",
-  "Options.CpuEngine.Desc": "Oyun kodunu işlətmək üçün istifadə olunan icra mühərriki.",
-  "Options.CpuEngine.Native": "Birbaşa icra",
 
   "Options.Strict.Label": "Dinamik kitabxana simvollarının ciddi yoxlanması",
   "Options.Strict.Desc": "İdxal olunan simvol tapılmadıqda işə salınmanı dayandırın.",

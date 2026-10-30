@@ -57,9 +57,6 @@
   "Options.Section.Logging": "LOGGING",
   "Options.Section.Launcher": "LAUNCHER",
 
-  "Options.CpuEngine.Label": "CPU-engine",
-  "Options.CpuEngine.Desc": "Den eksekveringsengine der bruges til at køre spilkode.",
-  "Options.CpuEngine.Native": "Native",
 
   "Options.Strict.Label": "Streng dynlib-opløsning",
   "Options.Strict.Desc": "Afbryd opstarten, når et importeret symbol ikke kan findes.",
@@ -99,8 +96,6 @@
 
   "Options.Language.Label": "Emulatorsprog",
   "Options.Language.Desc": "Sprog der bruges i hele launcheren. Anvendes med det samme.",
-  "Options.DefaultProfile.Label": "Standardprofilnavn",
-  "Options.DefaultProfile.Desc": "Navn der bruges, når et spil beder om tekstinput. Standardværdien er Sharp.",
 
   "Common.On": "Til",
   "Common.Off": "Fra",
@@ -216,8 +211,6 @@
   "Updater.Status.Unsupported": "Automatisk opdatering kræver et x64-build til Windows, Linux eller macOS.",
   "Options.Graphics": "Grafik",
 
-  "Options.Console.Type.Label": "Konsol",
-  "Options.Console.Type.Desc": "Konsolmodel der rapporteres til spil.",
   "Options.Console.Language.Label": "Konsolsprog",
   "Options.Console.Language.Desc": "Systemsprog der rapporteres til spil.",
   "Options.Section.Rendering": "GENGIVELSE",

@@ -59,12 +59,7 @@ public sealed class ApplicationSettings
     /// <summary>UI language, matching a file code under Languages/ (e.g. "en", "tr").</summary>
     public string Language { get; set; } = "en";
 
-    public string ConsoleType { get; set; } = "PS5";
-
     public string ConsoleLanguage { get; set; } = "EnglishUS";
-
-    /// <summary>Default text-entry profile exposed to games.</summary>
-    public string DefaultProfile { get; set; } = "Sharp";
 
     /// <summary>Publish launcher/game status to Discord Rich Presence.</summary>
     public bool DiscordRichPresence { get; set; } = true;
@@ -97,9 +92,6 @@ public sealed class ApplicationSettings
     public List<string> EnvironmentToggles { get; set; } = ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"];
 
     public string BinkPlaybackMode { get; set; } = "Guest";
-
-    /// <summary>Internal render resolution scale (1.0 = native, 0.5 = half).</summary>
-    public double RenderResolutionScale { get; set; } = 1.0;
 
     /// <summary>
     /// Discord application ID used for Rich Presence; the default is the
@@ -145,24 +137,17 @@ public sealed class ApplicationSettings
         settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles ?? ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"]);
         settings.LogLevel ??= "Info";
         settings.Language ??= "en";
-        var legacyProfile = settings.EnvironmentToggles
-            .Select(entry => entry.Split('=', 2, StringSplitOptions.TrimEntries))
-            .FirstOrDefault(parts =>
-                parts.Length == 2 &&
-                string.Equals(parts[0], "SHARPEMU_DEFAULT_PROFILE", StringComparison.OrdinalIgnoreCase));
+        // Nothing reads SHARPEMU_DEFAULT_PROFILE any more; older files may still carry it.
         settings.EnvironmentToggles.RemoveAll(entry =>
             string.Equals(
                 entry.Split('=', 2, StringSplitOptions.TrimEntries)[0],
                 "SHARPEMU_DEFAULT_PROFILE",
                 StringComparison.OrdinalIgnoreCase));
-        settings.DefaultProfile = NormalizeDefaultProfile(
-            legacyProfile is { Length: 2 } ? legacyProfile[1] : settings.DefaultProfile);
         settings.DiscordClientId ??= "1525606762248540221";
         settings.LibraryLayout = NormalizeChoice(settings.LibraryLayout, "Carousel", "Grid");
         settings.TitleMusicVolume = double.IsFinite(settings.TitleMusicVolume)
             ? Math.Clamp(settings.TitleMusicVolume, 0.0, 1.0)
             : 1.0;
-        settings.ConsoleType = NormalizeChoice(settings.ConsoleType, "PS5");
         settings.ConsoleLanguage = NormalizeChoice(
             settings.ConsoleLanguage,
             "EnglishUS",
@@ -245,12 +230,6 @@ public sealed class ApplicationSettings
         }
 
         return $"{width}x{height}";
-    }
-
-    public static string NormalizeDefaultProfile(string? value)
-    {
-        var trimmed = value?.Trim();
-        return string.IsNullOrEmpty(trimmed) ? "Sharp" : trimmed;
     }
 
     public void Save()

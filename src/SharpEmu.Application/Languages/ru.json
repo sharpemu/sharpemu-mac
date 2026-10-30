@@ -76,8 +76,6 @@
   "Options.Section.Display": "ЭКРАН",
   "Options.Graphics": "Графика",
 
-  "Options.Console.Type.Label": "Консоль",
-  "Options.Console.Type.Desc": "Модель консоли, сообщаемая играм.",
   "Options.Console.Language.Label": "Язык консоли",
   "Options.Console.Language.Desc": "Системный язык, сообщаемый играм.",
 
@@ -116,9 +114,6 @@
   "Options.Env.TrophySound.Label": "Звук трофеев",
   "Options.Env.TrophySound.Desc": "Воспроизводит короткий сигнал при получении трофея.",
 
-  "Options.CpuEngine.Label": "Движок ЦП",
-  "Options.CpuEngine.Desc": "Движок выполнения, используемый для запуска игрового кода.",
-  "Options.CpuEngine.Native": "Нативный",
 
   "Options.Strict.Label": "Строгое разрешение динамических библиотек",
   "Options.Strict.Desc": "Не запускать игру, если не удается найти или связать импортируемую функцию/переменную.",
@@ -158,8 +153,6 @@
 
   "Options.Language.Label": "Язык эмулятора",
   "Options.Language.Desc": "Язык интерфейса лаунчера. Изменение применяется сразу.",
-  "Options.DefaultProfile.Label": "Имя профиля по умолчанию",
-  "Options.DefaultProfile.Desc": "Имя, используемое, когда игра запрашивает ввод текста. Значение по умолчанию — Sharp.",
 
   "Common.On": "Включено",
   "Common.Off": "Выключено",
