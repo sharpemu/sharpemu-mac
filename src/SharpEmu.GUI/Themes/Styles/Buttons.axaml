@@ -123,28 +123,34 @@ at least 44 pt tall.
     <Setter Property="Background" Value="{StaticResource RaisedHoverBrush}" />
   </Style>
 
-  <!-- Top-level page titles (Library / Trophies / Options): plain buttons so
-       there is no Fluent tab chrome. The active page is full-white with a short
-       accent underline; the others are dimmed but stay above 4.5:1. -->
+  <!-- Top-level page switcher (Library / Trophies / Options): plain buttons in a
+       glass capsule, so there is no Fluent tab chrome. The active page sits on a
+       lighter pill in full white; the others are dimmed but stay above 4.5:1. -->
+  <Style Selector="Border.segmentGroup">
+    <Setter Property="CornerRadius" Value="26" />
+    <Setter Property="Padding" Value="4" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
   <Style Selector="Button.segment">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-    <Setter Property="FontSize" Value="{StaticResource FontSizeTitle}" />
+    <Setter Property="FontSize" Value="22" />
     <Setter Property="FontWeight" Value="Bold" />
-    <Setter Property="Padding" Value="14,6" />
-    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Padding" Value="22,0" />
+    <Setter Property="CornerRadius" Value="22" />
     <Setter Property="VerticalAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
   </Style>
   <Style Selector="Button.segment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#14FFFFFF" />
+    <Setter Property="Background" Value="#17FFFFFF" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
   <Style Selector="Button.segment.active /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    <Setter Property="BoxShadow" Value="{DynamicResource SegmentUnderlineShadow}" />
+    <Setter Property="Background" Value="{StaticResource SegmentActiveBrush}" />
   </Style>
 
   <!-- Pressed: one step lighter than hover, never the stock grey. -->

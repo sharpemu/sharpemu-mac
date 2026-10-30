@@ -138,16 +138,14 @@ internal static class LauncherThemes
         Tint(app, "HintBarFadeBrush", background);
         Tint(app, "TrophyBackdropFadeBrush", Color.Parse(palette.Menu));
 
+        // Glass is the theme's raised colour, mostly opaque: tinted like the theme and
+        // calm enough over bright key art that labels stay readable.
+        var raised = Color.Parse(palette.RaisedHover);
+        Paint(app, "GlassBrush", Color.FromArgb(0xBF, raised.R, raised.G, raised.B));
+        Paint(app, "GlassHoverBrush", Color.FromArgb(0xD9, fieldHover.R, fieldHover.G, fieldHover.B));
+        Paint(app, "GlassPressedBrush", Color.FromArgb(0xF2, fieldHover.R, fieldHover.G, fieldHover.B));
+
         app.Resources["SystemAccentColor"] = accent;
-        app.Resources["AccentGlowShadow"] = new BoxShadows(
-            new BoxShadow { OffsetY = 1, Color = Color.FromArgb(0x59, 0xFF, 0xFF, 0xFF), IsInset = true },
-            [new BoxShadow { OffsetY = 8, Blur = 28, Spread = -4, Color = Color.FromArgb(0x80, accent.R, accent.G, accent.B) }]);
-        app.Resources["SegmentUnderlineShadow"] = new BoxShadows(new BoxShadow
-        {
-            OffsetY = 6,
-            Spread = -3,
-            Color = accent,
-        });
     }
 
     private static void Paint(Avalonia.Application app, string key, Color color)

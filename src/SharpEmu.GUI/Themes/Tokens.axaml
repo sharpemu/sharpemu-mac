@@ -60,22 +60,22 @@ Shadows belong to floating layers (sheets, menus, toasts, dialogs) alone.
   <BoxShadows x:Key="FocusRingShadow">0 0 0 2 #FFFFFFFF, 0 0 22 4 #4DFFFFFF</BoxShadows>
   <BoxShadows x:Key="SelectedRingShadow">0 0 0 2 #B3FFFFFF</BoxShadows>
   <BoxShadows x:Key="SheetShadow">0 8 32 0 #66000000</BoxShadows>
-  <!-- Glass: controls that float over key art. A translucent white fill, a rim that
-       is brightest along the top edge and an inner top highlight, so the art shows
-       through and the control's edge reads as lit rather than cut out. -->
-  <SolidColorBrush x:Key="GlassBrush" Color="#17FFFFFF" />
-  <SolidColorBrush x:Key="GlassHoverBrush" Color="#26FFFFFF" />
-  <SolidColorBrush x:Key="GlassPressedBrush" Color="#33FFFFFF" />
+  <!-- Glass: controls that float over key art. The theme's raised colour, mostly
+       opaque, so the art tints through without hurting legibility; a rim lit from
+       the top edge; a faint inner highlight. LauncherThemes repaints the fills. -->
+  <SolidColorBrush x:Key="GlassBrush" Color="#BF353535" />
+  <SolidColorBrush x:Key="GlassHoverBrush" Color="#D93D3D3D" />
+  <SolidColorBrush x:Key="GlassPressedBrush" Color="#F23D3D3D" />
+  <!-- The selected page inside the page switcher capsule. -->
+  <SolidColorBrush x:Key="SegmentActiveBrush" Color="#2EFFFFFF" />
   <LinearGradientBrush x:Key="GlassRimBrush" StartPoint="0%,0%" EndPoint="0%,100%">
-    <GradientStop Offset="0" Color="#47FFFFFF" />
-    <GradientStop Offset="0.5" Color="#14FFFFFF" />
-    <GradientStop Offset="1" Color="#0AFFFFFF" />
+    <GradientStop Offset="0" Color="#3DFFFFFF" />
+    <GradientStop Offset="0.5" Color="#17FFFFFF" />
+    <GradientStop Offset="1" Color="#0FFFFFFF" />
   </LinearGradientBrush>
-  <BoxShadows x:Key="GlassShadow">inset 0 1 0 0 #1FFFFFFF, 0 6 18 0 #33000000</BoxShadows>
-  <!-- Soft glow under the accent pill; the theme sets its colour. -->
-  <BoxShadows x:Key="AccentGlowShadow">inset 0 1 0 0 #59FFFFFF, 0 8 28 -4 #80F2F2F2</BoxShadows>
-  <!-- Underline under the active page title; the theme sets its colour. -->
-  <BoxShadows x:Key="SegmentUnderlineShadow">0 6 0 -3 #F2F2F2</BoxShadows>
+  <BoxShadows x:Key="GlassShadow">inset 0 1 0 0 #14FFFFFF, 0 4 14 0 #2E000000</BoxShadows>
+  <!-- Lit top edge on the accent pill. -->
+  <BoxShadows x:Key="AccentEdgeShadow">inset 0 1 0 0 #40FFFFFF</BoxShadows>
 
   <!-- Scrim that keeps text legible on any key art. -->
   <LinearGradientBrush x:Key="ArtScrimBrush" StartPoint="0%,0%" EndPoint="0%,100%">
