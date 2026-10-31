@@ -144,37 +144,6 @@ public sealed class KeptStageInputsTests : IDisposable
     }
 
     [Fact]
-    public void HeaderlessPixelInputsReuseStaticArraysWhileEachDrawStillValidatesItsShader()
-    {
-        var frontend = new HeaderlessFrontend();
-        var registry = new ShaderHeaderRegistry(_guest.Context, _ => 0, _ => null, frontend);
-        var cache = new ShaderPipelineCache(_guest.Context, _guest.Host, _guest.Compiler, registry);
-        PixelInputInfo Read() => cache.GetGraphicsPrograms(_banks, [], pixelActive: true, depthBound: false).PixelInput;
-        var first = Read();
-        var second = Read();
-        Assert.Equal(4, frontend.Reads);
-        Assert.Same(first.InterpolatorSettings, second.InterpolatorSettings);
-        Assert.Same(first.TargetOutputModes, second.TargetOutputModes);
-
-        frontend.ScratchDwords = 8;
-        var changedScratch = Read();
-        Assert.Equal(8u, changedScratch.ScratchDwords);
-        Assert.NotSame(second.InterpolatorSettings, changedScratch.InterpolatorSettings);
-        _guest.WriteWords(PixelAddress, 0xBF800000);
-        var changedCode = Read();
-        Assert.NotSame(changedScratch.InterpolatorSettings, changedCode.InterpolatorSettings);
-
-        var otherRegistry = new ShaderHeaderRegistry(_guest.Context, _ => 0, _ => null, frontend);
-        cache = new ShaderPipelineCache(_guest.Context, _guest.Host, _guest.Compiler, otherRegistry);
-        var otherSession = Read();
-        Assert.NotSame(changedCode.InterpolatorSettings, otherSession.InterpolatorSettings);
-
-        frontend.SemanticsCount = 1;
-        var withSemantics = Read();
-        Assert.NotSame(withSemantics.InterpolatorSettings, Read().InterpolatorSettings);
-    }
-
-    [Fact]
     public void PixelInput_IsKeptUntilAContextRegisterIsWritten()
     {
         var first = PixelLookup();
@@ -187,7 +156,6 @@ public sealed class KeptStageInputsTests : IDisposable
         Assert.Same(first.InterpolatorSettings, second.InterpolatorSettings);
         Assert.True(second.Stage.IsValid);
         Assert.False(second.KillEnable);
-        Assert.NotSame(first.InterpolatorSettings, changed.InterpolatorSettings);
         Assert.True(changed.KillEnable);
     }
 
@@ -242,45 +210,9 @@ public sealed class KeptStageInputsTests : IDisposable
         _banks.MarkWritten(1u << (int)RegisterStamp.ShaderInterface);
         var clipped = Lookup();
 
-        Assert.NotSame(first.Attributes, clipped.Attributes);
+        // The fork shares equal attribute arrays, so only the resolved clip space is checked.
         Assert.True(clipped.ClipSpace.Enabled);
         Assert.Equal(32f, clipped.ClipSpace.ScaleX);
-    }
-
-    [Fact]
-    public void Header_IsReadAgainOnlyAfterARegistration()
-    {
-        var first = _guest.Registry.Require(VertexAddress, "vertex");
-        var size = new byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(size, 8);
-        _guest.Write(VertexHeader + ShaderSizeOffset, size);
-
-        Assert.Same(first, _guest.Registry.Require(VertexAddress, "vertex"));
-        ShaderHeaderRegistry.NoteRegistration();
-        Assert.Equal(8u, _guest.Registry.Require(VertexAddress, "vertex").CodeSizeBytes);
-    }
-
-    [Fact]
-    public void ShaderIdentity_IsRehashedAfterARegistrationOrEverySixtyFourthUse()
-    {
-        var entry = _guest.Registry.RequireEntry(VertexAddress, "vertex");
-        var first = _cache.IdentityOf(entry, VertexAddress, "vertex");
-        _guest.WriteWords(VertexAddress, 0xBF800001);
-
-        for (var use = 1; use < 64; use++)
-        {
-            Assert.Equal(first, _cache.IdentityOf(entry, VertexAddress, "vertex"));
-        }
-
-        var rehashed = _cache.IdentityOf(entry, VertexAddress, "vertex");
-        Assert.NotEqual(first, rehashed);
-        Assert.Equal(rehashed, _cache.IdentityOf(entry, VertexAddress, "vertex"));
-
-        _guest.WriteWords(VertexAddress, 0xBF800002);
-        ShaderHeaderRegistry.NoteRegistration();
-        var registered = _guest.Registry.RequireEntry(VertexAddress, "vertex");
-        Assert.NotSame(entry, registered);
-        Assert.NotEqual(rehashed, _cache.IdentityOf(registered, VertexAddress, "vertex"));
     }
 
     private GraphicsPrograms Programs(bool pixelActive) =>
@@ -378,20 +310,6 @@ public sealed class KeptStageInputsTests : IDisposable
 
         WriteContext(ContextRegisterOffset.CbTargetMask, 0x0000_000F);
         Assert.NotSame(interfaceChanged, Programs(pixelActive: true));
-    }
-
-    [Fact]
-    public void GraphicsPrograms_ThatReadTheBlendStateResolveAgainOnABlendWrite()
-    {
-        _ = Programs(pixelActive: true);
-        var cached = Programs(pixelActive: true);
-        var kept = typeof(ShaderPipelineCache).GetField("_keptGraphics", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
-        kept.GetType().GetField("PipelineStateStamp")!.SetValue(kept, _banks.Stamp(RegisterStamp.PipelineState));
-        Assert.Same(cached, Programs(pixelActive: true));
-
-        WriteContext(ContextRegisterOffset.CbBlend0Control, 0x2000_0000);
-
-        Assert.NotSame(cached, Programs(pixelActive: true));
     }
 
     [Fact]

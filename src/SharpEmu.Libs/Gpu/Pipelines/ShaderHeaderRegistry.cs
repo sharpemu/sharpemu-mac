@@ -175,14 +175,19 @@ public sealed class ShaderHeaderRegistry
         var registrations = Registrations;
         if (_frontend is not null && _headerOf(codeAddress) == 0)
             return new ShaderHeaderEntry(Read(codeAddress, label, userData), registrations);
+        // The header is read every time (Read hands back the record it made last time while the
+        // header is unchanged), so a guest that rewrites a header in place without registering
+        // again still gets a fresh entry.
+        var shader = Read(codeAddress, label);
         lock (_entries)
         {
-            if (_entries.TryGetValue(codeAddress, out var entry) && entry.Registrations == registrations)
+            if (_entries.TryGetValue(codeAddress, out var entry) && entry.Registrations == registrations &&
+                ReferenceEquals(entry.Shader, shader))
             {
                 return entry;
             }
 
-            entry = new ShaderHeaderEntry(Read(codeAddress, label), registrations);
+            entry = new ShaderHeaderEntry(shader, registrations);
             _entries[codeAddress] = entry;
             return entry;
         }
