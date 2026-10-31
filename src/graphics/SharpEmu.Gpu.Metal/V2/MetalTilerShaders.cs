@@ -112,6 +112,18 @@ internal static partial class MetalTilerShaders
         _ => [Y(4, 0x030), Y(6, 0x100), Y(7, 0x400), X(6, 0x0c0), X(7, 0x200), X(8, 0x800)],
     };
 
+    // The GCN 1D-thin 8x8 micro tile: x and y bits interleave from bit 0 upward, scaled
+    // by the element size. Keep in lockstep with TileGeometry's GcnThin1D offset.
+    private static Term[] GcnThin1DTerms(uint bytes)
+    {
+        var b = (int)Log2(bytes);
+        return
+        [
+            X(b, 1u << b), Y(b + 1, 1u << (b + 1)), X(b + 1, 1u << (b + 2)),
+            Y(b + 2, 1u << (b + 3)), X(b + 2, 1u << (b + 4)), Y(b + 3, 1u << (b + 5)),
+        ];
+    }
+
     private static Term[] Standard3DTerms(uint bytes) => bytes switch
     {
         1 => [X(0, 3), X(4, 0x40), X(6, 0x200), Y(3, 8), Y(4, 0x20), Y(6, 0x100), Y(8, 0x800), Z(2, 4), Z(3, 0x10), Z(5, 0x80), Z(7, 0x400)],
@@ -227,6 +239,8 @@ internal static partial class MetalTilerShaders
     {
         switch (kind)
         {
+            case TileBlockKind.GcnThin1D:
+                return XorTerms(GcnThin1DTerms(bytes));
             case TileBlockKind.Standard256B:
                 return $"({XorTerms(StandardTerms(bytes))} & 0xffu)";
             case TileBlockKind.Standard4KB:
