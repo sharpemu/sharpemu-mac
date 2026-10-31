@@ -37,6 +37,8 @@ public sealed class PendingGuestPublications
     private readonly Dictionary<int, long> _queueNewest = new();
     private long _nextOrdinal;
 
+    internal long Ordinal => Interlocked.Read(ref _nextOrdinal);
+
     private void Track(Entry entry)
     {
         entry.Ordinal = ++_nextOrdinal;
@@ -237,13 +239,13 @@ public sealed class PendingGuestPublications
         }
     }
 
-    public Entry? AddAfterPending(int queue, ulong address, ulong size, ulong value = 0)
+    public Entry? AddAfterPending(int queue, ulong address, ulong size, ulong value = 0, bool requireCompletion = false)
     {
         if (address > ulong.MaxValue - size) throw new ArgumentOutOfRangeException(nameof(size));
         lock (_gate)
         {
             ThrowIfFailed();
-            if (!_queueEntries.ContainsKey(queue)) return null;
+            if (!requireCompletion && !_queueEntries.ContainsKey(queue)) return null;
             var entry = new Entry(queue, address, size)
             {
                 DeferredLabel = size != 0,

@@ -10,6 +10,8 @@ public sealed class RegisterBanks
 {
     private ContextRegisters? _savedContext;
     private uint? _savedCompositeDepthSizeXy;
+    private static long _writeSerial;
+    private RegisterStampSet _stamps = InitialStamps();
 
     public RegisterBanks(Func<string, Exception> fatal)
         : this(fatal, new ContextRegisters(), new ShaderProgramRegisters(), new UserConfigRegisters())
@@ -29,7 +31,7 @@ public sealed class RegisterBanks
         UserConfig = userConfig;
     }
 
-    public Func<string, Exception> Fatal { get; }
+    public Func<string, Exception> Fatal { get; private set; }
 
     public ContextRegisters Context { get; private set; }
 
@@ -38,6 +40,40 @@ public sealed class RegisterBanks
     public UserConfigRegisters UserConfig { get; private set; }
 
     public bool ContextPushed => _savedContext is not null;
+
+    public ulong Stamp(RegisterStamp stamp) => _stamps[(int)stamp];
+
+    public ulong Stamp(RegisterStamp first, RegisterStamp second) => Math.Max(_stamps[(int)first], _stamps[(int)second]);
+
+    public ulong Stamp(RegisterStamp first, RegisterStamp second, RegisterStamp third) =>
+        Math.Max(Math.Max(_stamps[(int)first], _stamps[(int)second]), _stamps[(int)third]);
+
+    public ulong ContextStamp =>
+        Math.Max(
+            Math.Max(_stamps[(int)RegisterStamp.ColorTargets], _stamps[(int)RegisterStamp.DepthTargets]),
+            Math.Max(_stamps[(int)RegisterStamp.ShaderInterface], _stamps[(int)RegisterStamp.PipelineState]));
+
+    public void MarkWritten(uint stampBits)
+    {
+        while (stampBits != 0)
+        {
+            _stamps[System.Numerics.BitOperations.TrailingZeroCount(stampBits)] = NextSerial();
+            stampBits &= stampBits - 1;
+        }
+    }
+
+    private static ulong NextSerial() => (ulong)Interlocked.Increment(ref _writeSerial);
+
+    private static RegisterStampSet InitialStamps()
+    {
+        var stamps = new RegisterStampSet();
+        for (var index = 0; index < RegisterStamps.Count; index++)
+        {
+            stamps[index] = NextSerial();
+        }
+
+        return stamps;
+    }
 
     // A depth extent carried by a composite binding packet; a direct write clears it.
     public uint? CompositeDepthSizeXy { get; set; }
@@ -54,6 +90,7 @@ public sealed class RegisterBanks
             CompositeDepthSizeXy = CompositeDepthSizeXy,
             UserDataMarker = UserDataMarker,
             IndexTypeAndSize = IndexTypeAndSize,
+            _stamps = _stamps,
         };
         return clone;
     }
@@ -80,9 +117,19 @@ public sealed class RegisterBanks
 
     // A read-only copy that shares every part with the live banks until they next write it: a
     // deferred draw takes one per draw, and between draws only a few parts change.
-    public RegisterBanks Snapshot()
+    public RegisterBanks Snapshot() => SnapshotCore(null, reuse: true);
+
+    public RegisterBanks Snapshot(RegisterBanks? shell)
     {
-        if (!_writtenSinceSnapshot && _lastSnapshot is { } last &&
+        return SnapshotCore(shell, reuse: false);
+    }
+
+    // The parameterless form may hand out the last snapshot again (SnapshotReuseEnabled). One given
+    // a shell (or none) for a caller that recycles its snapshots as later shells never shares: a
+    // shared snapshot recycled by one holder would change under the others.
+    private RegisterBanks SnapshotCore(RegisterBanks? shell, bool reuse)
+    {
+        if (reuse && !_writtenSinceSnapshot && _lastSnapshot is { } last &&
             last.CompositeDepthSizeXy == CompositeDepthSizeXy &&
             last.UserDataMarker == UserDataMarker &&
             last.IndexTypeAndSize == IndexTypeAndSize)
@@ -90,17 +137,42 @@ public sealed class RegisterBanks
             return last;
         }
 
-        var snapshot = new RegisterBanks(Fatal, Context, Shader.ShareStages(), UserConfig)
+        RegisterBanks snapshot;
+        if (shell is null)
         {
-            CompositeDepthSizeXy = CompositeDepthSizeXy,
-            UserDataMarker = UserDataMarker,
-            IndexTypeAndSize = IndexTypeAndSize,
-        };
-        _lastSnapshot = SnapshotReuseEnabled ? snapshot : null;
+            snapshot = new RegisterBanks(Fatal, Context, Shader.ShareStages(), UserConfig);
+        }
+        else
+        {
+            snapshot = shell;
+            snapshot.Fatal = Fatal;
+            snapshot.Shader.ShareStagesOf(Shader);
+            snapshot.UserConfig = UserConfig;
+            snapshot._savedContext = null;
+            snapshot._savedCompositeDepthSizeXy = null;
+            snapshot._userConfigShared = snapshot._vertexShared = snapshot._pixelShared = snapshot._computeShared = false;
+            snapshot._pixelScalarsShared = snapshot._hullScalarsShared = snapshot._geometryScalarsShared = false;
+            snapshot._legacyVertexScalarsShared = snapshot._exportScalarsShared = snapshot._computeScalarsShared = false;
+            snapshot.OwnContext(Context);
+            snapshot._lastSnapshot = null;
+        }
+
+        snapshot.CompositeDepthSizeXy = CompositeDepthSizeXy;
+        snapshot.UserDataMarker = UserDataMarker;
+        snapshot.IndexTypeAndSize = IndexTypeAndSize;
+        snapshot._stamps = _stamps;
+        SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteSnapshot();
+        _lastSnapshot = reuse && SnapshotReuseEnabled ? snapshot : null;
         _writtenSinceSnapshot = false;
         _contextShared = _vertexShared = _pixelShared = _computeShared = _userConfigShared = true;
         _pixelScalarsShared = _hullScalarsShared = _geometryScalarsShared = _legacyVertexScalarsShared = _exportScalarsShared = _computeScalarsShared = true;
         return snapshot;
+    }
+
+    public ContextRegisters ShareContext()
+    {
+        _contextShared = true;
+        return Context;
     }
 
     // Called by the register writers before they store into a part.
@@ -110,6 +182,7 @@ public sealed class RegisterBanks
         if (_contextShared)
         {
             Context = Context.ShallowCopy();
+            SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContext();
             _contextShared = false;
             SetContextPartsShared(true);
         }
@@ -118,7 +191,7 @@ public sealed class RegisterBanks
     // The context is copied without its nested parts, and a part only when a writer asks for it
     // through these accessors: a draw usually rewrites a few plain fields.
     private bool _screenViewportShared;
-    private bool _viewportsShared;
+    private bool _secondaryViewportsShared;
     private bool _sampleLocationsShared;
     private bool _shaderInterfaceShared;
     private bool _blendControlsShared;
@@ -128,7 +201,7 @@ public sealed class RegisterBanks
     private bool _unmodeledShared;
 
     private void SetContextPartsShared(bool shared) =>
-        _screenViewportShared = _viewportsShared = _sampleLocationsShared = _shaderInterfaceShared =
+        _screenViewportShared = _secondaryViewportsShared = _sampleLocationsShared = _shaderInterfaceShared =
             _blendControlsShared = _colorTargetsShared = _colorClearWord1Shared = _userClipPlanesShared = _unmodeledShared = shared;
 
     private void OwnContext(ContextRegisters context)
@@ -146,27 +219,31 @@ public sealed class RegisterBanks
             PrepareContextWrite();
             if (_screenViewportShared)
             {
-                Context.ScreenViewport = Context.ScreenViewport.CopySharingViewports();
+                Context.ScreenViewport = Context.ScreenViewport.CopySharingSecondary();
                 _screenViewportShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.ScreenViewport;
         }
     }
 
-    public ViewportRegisters[] ViewportsForWrite
+    public ref ViewportRegisters ViewportForWrite(int slot)
     {
-        get
+        var screenViewport = ScreenViewportForWrite;
+        if (slot == 0)
         {
-            var screenViewport = ScreenViewportForWrite;
-            if (_viewportsShared)
-            {
-                screenViewport.Viewports = (ViewportRegisters[])screenViewport.Viewports.Clone();
-                _viewportsShared = false;
-            }
-
-            return screenViewport.Viewports;
+            return ref screenViewport.Primary;
         }
+
+        if (_secondaryViewportsShared)
+        {
+            screenViewport.Secondary = (ViewportRegisters[])screenViewport.Secondary.Clone();
+            _secondaryViewportsShared = false;
+            SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
+        }
+
+        return ref screenViewport.Secondary[slot - 1];
     }
 
     public SampleLocationRegisters SampleLocationsForWrite
@@ -178,6 +255,7 @@ public sealed class RegisterBanks
             {
                 Context.SampleLocations = Context.SampleLocations.Copy();
                 _sampleLocationsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.SampleLocations;
@@ -193,6 +271,7 @@ public sealed class RegisterBanks
             {
                 Context.ShaderInterface = Context.ShaderInterface.Copy();
                 _shaderInterfaceShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.ShaderInterface;
@@ -208,6 +287,7 @@ public sealed class RegisterBanks
             {
                 Context.BlendControls = (BlendRegisters[])Context.BlendControls.Clone();
                 _blendControlsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.BlendControls;
@@ -223,6 +303,7 @@ public sealed class RegisterBanks
             {
                 Context.ColorTargets = (ColorTargetWords[])Context.ColorTargets.Clone();
                 _colorTargetsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.ColorTargets;
@@ -238,6 +319,7 @@ public sealed class RegisterBanks
             {
                 Context.ColorClearWord1 = (uint[])Context.ColorClearWord1.Clone();
                 _colorClearWord1Shared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.ColorClearWord1;
@@ -268,6 +350,7 @@ public sealed class RegisterBanks
             {
                 Context.UnmodeledTableRegisters = new Dictionary<uint, uint>(Context.UnmodeledTableRegisters);
                 _unmodeledShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteUnmodeledTable();
             }
 
             return Context.UnmodeledTableRegisters;
@@ -281,6 +364,7 @@ public sealed class RegisterBanks
         {
             UserConfig = UserConfig.Copy();
             _userConfigShared = false;
+            SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteUserConfig();
         }
     }
 
@@ -312,12 +396,14 @@ public sealed class RegisterBanks
             {
                 Shader.Pixel = Shader.Pixel.ShallowCopy();
                 _pixelShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteStage();
             }
 
             if (_pixelScalarsShared && Overlaps(offset, last, ShaderRegisterOffset.SpiShaderUserDataPs0))
             {
                 Shader.Pixel.UserScalars = Shader.Pixel.UserScalars.Copy();
                 _pixelScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
         }
 
@@ -327,6 +413,7 @@ public sealed class RegisterBanks
             {
                 Shader.Vertex = Shader.Vertex.ShallowCopy();
                 _vertexShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteStage();
             }
 
             var vertex = Shader.Vertex;
@@ -334,24 +421,28 @@ public sealed class RegisterBanks
             {
                 vertex.HullUserScalars = vertex.HullUserScalars.Copy();
                 _hullScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
 
             if (_geometryScalarsShared && Overlaps(offset, last, ShaderRegisterOffset.SpiShaderUserDataGs0))
             {
                 vertex.GeometryUserScalars = vertex.GeometryUserScalars.Copy();
                 _geometryScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
 
             if (_legacyVertexScalarsShared && Overlaps(offset, last, ShaderRegisterOffset.SpiShaderUserDataVs0))
             {
                 vertex.LegacyVertexUserScalars = vertex.LegacyVertexUserScalars.Copy();
                 _legacyVertexScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
 
             if (_exportScalarsShared && Overlaps(offset, last, ShaderRegisterOffset.SpiShaderUserDataEs0))
             {
                 vertex.ExportUserScalars = vertex.ExportUserScalars.Copy();
                 _exportScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
         }
 
@@ -361,12 +452,14 @@ public sealed class RegisterBanks
             {
                 Shader.Compute = Shader.Compute.ShallowCopy();
                 _computeShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteStage();
             }
 
             if (_computeScalarsShared && Overlaps(offset, last, ShaderRegisterOffset.ComputeUserData0))
             {
                 Shader.Compute.UserScalars = Shader.Compute.UserScalars.Copy();
                 _computeScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
         }
     }
@@ -384,11 +477,12 @@ public sealed class RegisterBanks
         CompositeDepthSizeXy = null;
         UserDataMarker = UserScalarKind.Unknown;
         IndexTypeAndSize = 0;
+        MarkWritten(RegisterStamps.AllBits);
     }
 
     public void ApplyContextState(ContextStateOperation operation)
     {
-        var previousViewport = Context.ScreenViewport.Viewports[0];
+        var previousViewport = Context.ScreenViewport.Primary;
         switch (operation)
         {
             case ContextStateOperation.Clear:
@@ -417,9 +511,11 @@ public sealed class RegisterBanks
             default:
                 throw Fatal($"The context state operation is unknown: operation={(uint)operation}.");
         }
+
+        MarkWritten(RegisterStamps.ContextBits);
         if (Rendering.RenderTrace.Enabled)
         {
-            var currentViewport = Context.ScreenViewport.Viewports[0];
+            var currentViewport = Context.ScreenViewport.Primary;
             Rendering.RenderTrace.Write(
                 $"ContextState operation={operation} previousZScale={previousViewport.ZScale} previousZOffset={previousViewport.ZOffset} " +
                 $"zScale={currentViewport.ZScale} zOffset={currentViewport.ZOffset}");

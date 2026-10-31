@@ -33,7 +33,7 @@ public sealed partial class GuestImageCache
         }
 
         image.Registered = true;
-        InvalidateLookups();
+        InvalidateLookups(image.Description.Data.Address, image.Description.Data.End);
         image.RecencyEntryIndex = _recencyQueue.Insert(imageIdentifier, _collectionTick);
         _totalUsedMemory += image.AccountedSize;
     }
@@ -70,7 +70,6 @@ public sealed partial class GuestImageCache
 
         _totalUsedMemory -= accounted;
         image.Registered = false;
-        InvalidateLookups();
         image.HeapChanged?.Invoke(image);
     }
 
@@ -82,6 +81,12 @@ public sealed partial class GuestImageCache
         if (image == null || !image.Registered)
         {
             return;
+        }
+
+        if (image.Parked)
+        {
+            image.Parked = false;
+            _parked.Remove(imageIdentifier);
         }
 
         if (!image.DepthOwner.IsValid)
@@ -120,12 +125,19 @@ public sealed partial class GuestImageCache
             RecordMetadataEvent("remove-image-metadata", image.Description.Metadata.Range.Address,
                 image.Description.Metadata.Range.Size);
             _surfaceMetadata.Remove(image.Description.Metadata.Range.Address);
+            NoteMetadataChange(image.Description.Metadata.Range.Address);
         }
 
         RemoveFromIndex(imageIdentifier);
         if (_scheduler.Active)
         {
-            _scheduler.QueueCompletionAction(() => _slots.Erase(imageIdentifier));
+            var bytes = (long)image.Backing.AllocationSize;
+            Interlocked.Add(ref _pendingDestroyBytes, bytes);
+            _scheduler.QueueCompletionAction(() =>
+            {
+                _slots.Erase(imageIdentifier);
+                Interlocked.Add(ref _pendingDestroyBytes, -bytes);
+            });
         }
         else
         {
@@ -143,6 +155,79 @@ public sealed partial class GuestImageCache
         }
 
         DeleteImage(imageIdentifier);
+    }
+
+    private void ParkOrReleaseImage(ResourceSlotIdentifier imageIdentifier)
+    {
+        var image = _slots[imageIdentifier];
+        var park = !image.Parked && !image.DepthOwner.IsValid && image.Description.Samples <= 1;
+        if (!park)
+        {
+            Interlocked.Increment(ref _parkReleases);
+            ReleaseImage(imageIdentifier);
+            return;
+        }
+
+        Interlocked.Increment(ref _parks);
+        image.Parked = true;
+        image.ParkedTick = _collectionTick;
+        _parked.Add(imageIdentifier);
+    }
+
+    private bool TryUnparkImage(in ImageDescription requested, out ResourceSlotIdentifier result)
+    {
+        result = ResourceSlotIdentifier.Invalid;
+        for (var index = _parked.Count - 1; index >= 0; index--)
+        {
+            var imageIdentifier = _parked[index];
+            var image = _slots.TryGet(imageIdentifier);
+            if (image == null || !image.Registered || !image.Parked)
+            {
+                _parked.RemoveAt(index);
+                continue;
+            }
+
+            if (!HasSameBacking(image.Description, requested, exactFormat: true) || image.Description.Resources != requested.Resources ||
+                image.Description.Type != requested.Type)
+            {
+                continue;
+            }
+
+            _parked.RemoveAt(index);
+            Interlocked.Increment(ref _unparks);
+            image.Parked = false;
+            image.LastAccessTick = _scheduler.CurrentTick;
+            TouchImage(image);
+            InvalidateLookups(image.Description.Data.Address, image.Description.Data.End);
+            result = imageIdentifier;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ExpireParkedImages(ulong tick)
+    {
+        for (var index = _parked.Count - 1; index >= 0; index--)
+        {
+            var imageIdentifier = _parked[index];
+            var image = _slots.TryGet(imageIdentifier);
+            if (image == null || !image.Registered || !image.Parked)
+            {
+                _parked.RemoveAt(index);
+                continue;
+            }
+
+            if (tick - Math.Min(tick, image.ParkedTick) <= ParkedFramesBeforeRemoval && _parked.Count <= ParkedImageLimit)
+            {
+                continue;
+            }
+
+            _parked.RemoveAt(index);
+            Interlocked.Increment(ref _parkExpiries);
+            image.Parked = false;
+            ReleaseImage(imageIdentifier);
+        }
     }
 
     private void TouchImage(CachedImage image)
@@ -327,7 +412,7 @@ public sealed partial class GuestImageCache
     }
 
     // Caller holds the lock; the query epoch marks each image once per query.
-    private ImageQueryResults FindImagesInRange(ulong address, ulong size, bool pageOverlap)
+    private ImageQueryResults FindImagesInRange(ulong address, ulong size, bool pageOverlap, bool includeParked = false)
     {
         var result = new ImageQueryResults();
         if (!ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive))
@@ -354,7 +439,7 @@ public sealed partial class GuestImageCache
             {
                 var imageIdentifier = owners[ownerIndex];
                 var image = _slots.TryGet(imageIdentifier);
-                if (image == null || image.QueryEpoch == queryEpoch)
+                if (image == null || image.QueryEpoch == queryEpoch || (image.Parked && !includeParked))
                 {
                     continue;
                 }
@@ -445,7 +530,7 @@ public sealed partial class GuestImageCache
         var pageBegin = address & ~(TrackerLayout.PageBytes - 1);
         var pageEnd = (address + size + TrackerLayout.PageBytes - 1) & ~(TrackerLayout.PageBytes - 1);
         var covered = false;
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true, includeParked: true))
         {
             var owner = _slots.TryGet(imageIdentifier);
             if (owner == null)
@@ -488,6 +573,11 @@ public sealed partial class GuestImageCache
 
     private void InvalidateMemoryFromGpu(ulong address, ulong size, bool publish)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("image invalidate");
+        }
+
         if (!IsValidRange(address, size))
         {
             return;
@@ -502,10 +592,21 @@ public sealed partial class GuestImageCache
         if (ImageClearTrace.Enabled)
             _metadataHistory.RecordRange(CreateMetadataEvent("gpu-write-notification", address, size));
         RecordResourceHistory("gpu-buffer-write-notification", address, size);
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+        var found = new List<ResourceSlotIdentifier>();
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true, includeParked: true))
+        {
+            found.Add(imageIdentifier);
+        }
+
+        foreach (var imageIdentifier in found)
         {
             var image = _slots[imageIdentifier];
             if (!image.Overlaps(address, size))
+            {
+                continue;
+            }
+
+            if (image.IsGpuModified && IsNestedAliasWrite(image, found, address, size))
             {
                 continue;
             }
@@ -524,11 +625,12 @@ public sealed partial class GuestImageCache
     // bytes, starts from them instead of stale guest memory. Buffer bytes the GPU wrote under the image
     // before it are older than its contents: a buffer write after it over part of it published it then.
     // A raw binding over the whole image leaves it GPU-modified; its bytes may be newer than the image,
-    // so such an image is not published. A formatted write takes the ownership of the whole images under
-    // it too, which then publish as well. The buffer is obtained outside the lock; contents that cannot
-    // be copied are lost as before.
-    private void PublishPartlyWrittenImages(ulong address, ulong size, bool wholeImages = false)
+    // so such an image is not published, unless a raw binding about to be written is exactly the image's
+    // range. A formatted write takes the ownership of the whole images under it too, which then publish as
+    // well. The buffer is obtained outside the lock; contents that cannot be copied are lost as before.
+    private bool PublishPartlyWrittenImages(ulong address, ulong size, bool wholeImages = false, bool exactImages = false)
     {
+        var published = false;
         List<ResourceSlotIdentifier>? partlyWritten = null;
         using (var held = _lock.Hold())
         {
@@ -536,8 +638,9 @@ public sealed partial class GuestImageCache
             {
                 var image = _slots[imageIdentifier];
                 var range = image.Description.Data;
-                if (image.IsGpuModified && !image.DepthOwner.IsValid && image.Overlaps(address, size) &&
-                    (wholeImages || address > range.Address || address + size < range.Address + range.Size) &&
+                var exact = exactImages && address == range.Address && size == range.Size;
+                if (image.IsGpuModified && image.Overlaps(address, size) &&
+                    (wholeImages || exact || address > range.Address || address + size < range.Address + range.Size) &&
                     image.SafeToDownload && !image.RawWriteAfterGpuWrite && !HasNewerHandedOverImage(imageIdentifier, image))
                 {
                     (partlyWritten ??= []).Add(imageIdentifier);
@@ -576,9 +679,12 @@ public sealed partial class GuestImageCache
                 {
                     image.ClearGpuModified();
                     MarkOlderOverlappingImagesOverwritten(imageIdentifier, image);
+                    published = true;
                 }
             }
         }
+
+        return published;
     }
 
     // A newer GPU-written image over the same memory that has already handed its bytes to the buffer (or lost
@@ -617,12 +723,13 @@ public sealed partial class GuestImageCache
     // A raw binding that covers only part of a GPU-modified image names memory the guest gave to a buffer.
     // Before the shader writes it, the image's contents move into the buffer, so no later publish of the
     // image can put them over the shader's bytes. A binding that covers an image whole may be a window
-    // that never writes there; the image keeps its bytes.
+    // that never writes there; the image keeps its bytes. A binding of exactly the image's range names the
+    // image and publishes it as well.
     public void PublishImagesUnderRawWrite(ulong address, ulong size)
     {
         if (IsValidRange(address, size))
         {
-            PublishPartlyWrittenImages(address, size);
+            PublishPartlyWrittenImages(address, size, exactImages: true);
         }
     }
 
@@ -630,6 +737,14 @@ public sealed partial class GuestImageCache
     // shader may write only part of the window. The images it covers whole move their contents into the
     // buffer first as well, so the bytes the shader leaves keep them.
     public void PublishImagesUnderFormattedWrite(ulong address, ulong size)
+    {
+        if (IsValidRange(address, size))
+        {
+            PublishPartlyWrittenImages(address, size, wholeImages: true);
+        }
+    }
+
+    public void PublishImagesUnderRead(ulong address, ulong size)
     {
         if (IsValidRange(address, size))
         {
@@ -647,7 +762,7 @@ public sealed partial class GuestImageCache
 
         using var held = _lock.Hold();
         RecordResourceHistory("gpu-buffer-write-notification", address, size);
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true, includeParked: true))
         {
             var image = _slots[imageIdentifier];
             if (image.DepthOwner.IsValid || !image.Overlaps(address, size))
@@ -663,6 +778,28 @@ public sealed partial class GuestImageCache
 
             image.MarkBufferModified();
         }
+    }
+
+    private bool IsNestedAliasWrite(CachedImage image, List<ResourceSlotIdentifier> found, ulong address, ulong size)
+    {
+        var outer = image.Description.Data;
+        foreach (var otherIdentifier in found)
+        {
+            var other = _slots[otherIdentifier];
+            if (ReferenceEquals(other, image))
+            {
+                continue;
+            }
+
+            var inner = other.Description.Data;
+            if (inner.Size < outer.Size && inner.Address >= outer.Address && inner.Address + inner.Size <= outer.Address + outer.Size &&
+                address >= inner.Address && address + size <= inner.Address + inner.Size)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public ImageRegionInfo QueryRegion(ulong address, ulong size)
@@ -692,7 +829,7 @@ public sealed partial class GuestImageCache
     public bool HasGpuModifiedImageBytes(ulong address, ulong size)
     {
         GpuMemoryAccessProfile.CountImageQuery(gpuDirtyOnly: true);
-        if (!IsValidRange(address, size)) return false;
+        if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size) || !MayOwnPages(address, size)) return false;
 
         using var held = _lock.Hold();
         if (!ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive)) return false;
@@ -735,9 +872,10 @@ public sealed partial class GuestImageCache
         foreach (var metadataAddress in stale)
         {
             _surfaceMetadata.Remove(metadataAddress);
+            NoteMetadataChange(metadataAddress);
         }
 
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false, includeParked: true))
         {
             var owner = _slots.TryGet(imageIdentifier);
             if (owner == null)

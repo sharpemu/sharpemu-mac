@@ -83,6 +83,8 @@ public sealed class PacketCursorStack
     }
 }
 
+public sealed record CommandStreamCompletion(Action Consumed, PacketHandler?[]? PacketHandlers = null);
+
 public sealed class CommandSubmission
 {
     public CommandSubmission(CommandSubmissionKind kind, int queueId, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
@@ -92,7 +94,8 @@ public sealed class CommandSubmission
         Address = address;
         DwordCount = dwordCount;
         SubmissionId = submissionId;
-        GeometrySnapshots = geometrySnapshots;
+        GeometrySnapshots = geometrySnapshots is CommandStreamCompletion ? null : geometrySnapshots;
+        Completion = geometrySnapshots as CommandStreamCompletion;
     }
 
     public CommandSubmissionKind Kind { get; }
@@ -125,6 +128,8 @@ public sealed class CommandSubmission
 
     // Snapshots captured at submit time; the processor never reads them.
     public object? GeometrySnapshots { get; }
+
+    internal CommandStreamCompletion? Completion { get; }
 
     public int FlipHandle { get; init; }
 

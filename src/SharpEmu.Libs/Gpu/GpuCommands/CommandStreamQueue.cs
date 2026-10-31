@@ -1779,6 +1779,8 @@ public sealed class CommandStreamQueue
 
         var firstSlice = !submission.Started;
         var processor = GetInterpreter(submission.QueueId);
+        if (submission.Completion?.PacketHandlers is { } handlers)
+            processor.SetPacketHandlers(handlers);
         if (firstSlice && submission.ResetInterpreter)
         {
             processor.Reset();
@@ -1847,6 +1849,9 @@ public sealed class CommandStreamQueue
         {
             _host.RunGarbageCollector();
         }
+
+        if (complete)
+            submission.Completion?.Consumed();
 
         return complete;
     }

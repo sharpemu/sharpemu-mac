@@ -217,14 +217,17 @@ public sealed partial class ResourceMaterializationCache
 
                 using var comparisonProfile = MeasureDetail(CacheDetail.ValidateCompare);
                 var previous = entry.Bytes.AsSpan(entry.RangeOffsets[range], rangeLength);
-                if (!bytes.SequenceEqual(previous))
+                // Mip-statistics bits of an image descriptor alone do not change the materialization.
+                if (!bytes.SequenceEqual(previous) && !OnlyMipStatisticsDiffer(entry, range, bytes))
                 {
                     RecordChangedWords(entry, range, bytes);
                     CountDiagnostic(Diagnostic.BytesChanged);
                     for (var offset = 0; offset + sizeof(uint) <= rangeLength; offset += sizeof(uint))
                     {
-                        if (!entry.WordTableOnly[(entry.RangeOffsets[range] + offset) / sizeof(uint)] &&
-                            !bytes.Slice(offset, sizeof(uint)).SequenceEqual(previous.Slice(offset, sizeof(uint))))
+                        var word = (entry.RangeOffsets[range] + offset) / sizeof(uint);
+                        var now = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[offset..]);
+                        var was = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(previous[offset..]);
+                        if (!entry.WordTableOnly[word] && ((now ^ was) & ~MipStatisticsMask(entry, word, out _)) != 0)
                         {
                             descriptorChanged = true;
                             rejection = new RejectionSample(range, rangeStart, rangeLength, entry.RangeClean[range],

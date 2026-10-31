@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.VideoOut;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -214,12 +215,21 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         VulkanSynchronization.PipelineBarrier(vk,
             command, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.ComputeShaderBit, DependencyFlags.ByRegionBit,
             0, null, 1, &preBarrier, 0, null);
-        vk.CmdBindPipeline(command, PipelineBindPoint.Compute, _pipeline);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdBindPipeline(command, PipelineBindPoint.Compute, _pipeline);
+        }
         var set = _sets[_currentArea];
-        vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _pipelineLayout, 0, 1, &set, 0, null);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _pipelineLayout, 0, 1, &set, 0, null);
+        }
         NativeBindingEpoch.Advance();
         var threads = _pageCount / 32;
-        vk.CmdDispatch(command, (uint)((threads + 63) / 64), 1, 1);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdDispatch(command, (uint)((threads + 63) / 64), 1, 1);
+        }
         VulkanSynchronization.PipelineBarrier(vk,
             command, PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.AllCommandsBit, DependencyFlags.ByRegionBit,
             0, null, 1, &postBarrier, 0, null);

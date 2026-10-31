@@ -144,17 +144,14 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var count = packet.Length - 2;
-        for (var index = 0u; index < count; index++)
+        if (count > RegisterBankLayout.ShaderRegisterCount - offset)
         {
-            if (offset + index >= RegisterBankLayout.ShaderRegisterCount)
-            {
-                throw _host.Fatal($"The shader register range leaves the bank: offset=0x{offset:X8} count={count} address=0x{packet.PacketAddress:X16}.");
-            }
-
-            Registers.Shader[offset + index] = payload[1 + (int)index];
+            throw _host.Fatal($"The shader register range leaves the bank: offset=0x{offset:X8} count={count} address=0x{packet.PacketAddress:X16}.");
         }
 
-        var consumed = RegisterWriteTable.WriteShaderPacket(TypedRegisters, in packet, offset, payload.Slice(1, (int)count));
+        var values = payload.Slice(1, (int)count);
+        Registers.Shader.SetRange(offset, values);
+        var consumed = RegisterWriteTable.WriteShaderPacket(TypedRegisters, in packet, offset, values);
         if (GpuResourceOrigin.Enabled)
         {
             // The direct writer applied the whole packet before this historical state is sampled.

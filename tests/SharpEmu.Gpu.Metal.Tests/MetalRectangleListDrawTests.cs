@@ -392,7 +392,7 @@ public sealed unsafe class MetalRectangleListDrawTests(ITestOutputHelper output)
                 var pipeline = use ?? (_pipeline ??= CreatePipeline());
                 var rendering = new RenderingState { Width = Width, Height = Height, Layers = 1, ColorAttachmentCount = 1, Samples = 1 };
                 rendering.ColorAttachments[0] = new RenderingAttachment(
-                    attachment.View, GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
+                    attachment.View, GpuFormat.R8G8B8A8Unorm,
                     0, 0, 0, 0, false, false, false, false, false);
                 host.BeginRendering(in rendering);
                 host.BindPipeline(GpuBindPoint.Graphics, pipeline);

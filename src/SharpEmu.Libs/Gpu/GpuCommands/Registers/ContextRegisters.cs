@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands.Registers;
@@ -322,7 +323,8 @@ public sealed class ScreenViewportRegisters
     public const int ViewportCount = 16;
     public const int ClipRectangleCount = 4;
 
-    public ViewportRegisters[] Viewports = new ViewportRegisters[ViewportCount];
+    public ViewportRegisters Primary;
+    public ViewportRegisters[] Secondary = new ViewportRegisters[ViewportCount - 1];
     public uint TransformControl = 1087;
     public int ScreenScissorLeft;
     public int ScreenScissorTop;
@@ -347,30 +349,28 @@ public sealed class ScreenViewportRegisters
     public float GuardBandHorizontalDiscard;
     public float GuardBandVerticalDiscard;
     public ushort ClipRectangleRule = 0xFFFF;
-    public int[] ClipRectangleLeft = new int[ClipRectangleCount];
-    public int[] ClipRectangleTop = new int[ClipRectangleCount];
-    public int[] ClipRectangleRight = new int[ClipRectangleCount];
-    public int[] ClipRectangleBottom = new int[ClipRectangleCount];
-    public bool[] ClipRectangleWindowOffsetEnable = new bool[ClipRectangleCount];
+    public ClipRectangleValues<int> ClipRectangleLeft;
+    public ClipRectangleValues<int> ClipRectangleTop;
+    public ClipRectangleValues<int> ClipRectangleRight;
+    public ClipRectangleValues<int> ClipRectangleBottom;
+    public ClipRectangleValues<bool> ClipRectangleWindowOffsetEnable;
+
+    public ref ViewportRegisters Viewport(int slot) => ref slot == 0 ? ref Primary : ref Secondary[slot - 1];
 
     public ScreenViewportRegisters Copy()
     {
-        var copy = CopySharingViewports();
-        copy.Viewports = (ViewportRegisters[])Viewports.Clone();
+        var copy = CopySharingSecondary();
+        copy.Secondary = (ViewportRegisters[])Secondary.Clone();
         return copy;
     }
 
-    // A copy that shares the viewport array, the largest part, until RegisterBanks copies it.
-    public ScreenViewportRegisters CopySharingViewports()
-    {
-        var copy = (ScreenViewportRegisters)MemberwiseClone();
-        copy.ClipRectangleLeft = (int[])ClipRectangleLeft.Clone();
-        copy.ClipRectangleTop = (int[])ClipRectangleTop.Clone();
-        copy.ClipRectangleRight = (int[])ClipRectangleRight.Clone();
-        copy.ClipRectangleBottom = (int[])ClipRectangleBottom.Clone();
-        copy.ClipRectangleWindowOffsetEnable = (bool[])ClipRectangleWindowOffsetEnable.Clone();
-        return copy;
-    }
+    public ScreenViewportRegisters CopySharingSecondary() => (ScreenViewportRegisters)MemberwiseClone();
+}
+
+[InlineArray(ScreenViewportRegisters.ClipRectangleCount)]
+public struct ClipRectangleValues<T>
+{
+    private T _first;
 }
 
 // The context bank as the register writers decode it; the draw path reads it without lookups.

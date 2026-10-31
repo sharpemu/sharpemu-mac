@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
@@ -32,7 +33,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private static readonly bool OcclusionGpuDumps = !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_OCCLUSION_GPU_DUMPS"), "0", StringComparison.Ordinal);
 
-        private VulkanOcclusionQueries OcclusionQueries()
+        internal VulkanOcclusionQueries OcclusionQueries()
         {
             if (_occlusionQueries is { } existing) return existing;
             var queries = new VulkanOcclusionQueries(_vk, _device);
@@ -41,12 +42,15 @@ internal static unsafe partial class VulkanVideoPresenter
             return _occlusionQueries = queries;
         }
 
-        private void CompleteOverlappingPublications(ulong address, ulong size, bool includeLabels = true, bool skipGpuSlots = false)
+        internal bool HasOverlappingPublications(ulong address, ulong size, bool includeLabels) =>
+            _guestPublications.HasOverlap(address, size, includeLabels);
+
+        internal void CompleteOverlappingPublications(ulong address, ulong size, bool includeLabels = true, bool skipGpuSlots = false)
         {
             if (OnCommandThread)
             {
                 if (!_guestPublications.HasOverlap(address, size, includeLabels, skipGpuSlots)) return;
-                _commandThread!.Run(() => CompleteOverlappingPublications(address, size, includeLabels, skipGpuSlots));
+                CompletePublicationsOnRenderThread(address, size, includeLabels, skipGpuSlots);
                 return;
             }
             var tick = _guestPublications.OverlapTick(address, size, includeLabels, skipGpuSlots);
@@ -54,6 +58,10 @@ internal static unsafe partial class VulkanVideoPresenter
             _scheduler.Wait(tick);
             _scheduler.RunCompletedOperations();
         }
+
+        private void CompletePublicationsOnRenderThread(ulong address, ulong size, bool includeLabels, bool skipGpuSlots) =>
+            _commandThread!.Run(() => CompleteOverlappingPublications(address, size, includeLabels, skipGpuSlots), nameof(CompleteOverlappingPublications));
+
         public bool TryReadOcclusionCounter(int queueId, out ulong value)
         {
             if (OnCommandThread)
@@ -85,10 +93,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 return true;
             }
 
-            DrainDraws();
-            EndRendering();
+            _recording?.EndRendering();
             var queries = OcclusionQueries();
-            if (queries.HasGpuResults) _ = BeginBatchedGuestCommands();
+            if (queries.HasGpuResults) EnsureBatchedGuestCommands();
             queries.Reset(queueId);
             return true;
         }
@@ -124,13 +131,12 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             try
             {
-                DrainDraws();
-                EndRendering();
+                _recording?.EndRendering();
                 var queries = OcclusionQueries();
                 _ = CurrentRecording();
                 if (queries.HasGpuResults)
                 {
-                    _ = BeginBatchedGuestCommands();
+                    EnsureBatchedGuestCommands();
                     publication.DumpMask = instanceMask;
                     publication.DumpStride = strideBytes;
                     publication.GpuSlot = (long)queries.RecordGpuDump(publication.Queue);
@@ -141,7 +147,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var needsSubmit = !ready && queries.HasUnsubmitted;
                 if (needsSubmit)
                 {
-                    _ = BeginBatchedGuestCommands();
+                    EnsureBatchedGuestCommands();
                     queries.Submit(_scheduler);
                 }
                 // Ready results also enter the FIFO so a reset cannot overtake an older dump.
@@ -153,7 +159,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _guestPublications.Register(publication, tick);
                 // The slice and render-loop flushes submit the open batch, and a CPU wait submits its tick.
                 // A flush here would split the slice into two submissions.
-                if (needsSubmit || tick == _scheduler.CurrentTick) _ = BeginBatchedGuestCommands();
+                if (needsSubmit || tick == _scheduler.CurrentTick) EnsureBatchedGuestCommands();
                 if (_scheduler.IsTickKnownComplete(tick)) _scheduler.RunCompletedOperations();
             }
             catch (Exception exception)
@@ -221,16 +227,60 @@ internal static unsafe partial class VulkanVideoPresenter
                 PipelineStageFlags.AllCommandsBit, 0, 1, &barrier, 0, null, 0, null);
         }
 
+    }
+
+    private sealed partial class RecordingHost
+    {
+        private bool _occlusionCounting;
+        private VulkanOcclusionQueries.Block? _workerQueryBlock;
+        private bool _workerQueryActive;
+        private static readonly ThreadCounter _workerQueries = new();
+
+        internal static long TakeWorkerQueries() => _workerQueries.Take();
+
         private void SetOcclusionCounting(uint control)
         {
             const uint incrementDisabled = 1u;
             const uint counterZeroEnabled = 1u << 8;
             var enabled = (control & (incrementDisabled | counterZeroEnabled)) == counterZeroEnabled;
+            if (enabled && _worker && _presenter._supportsPreciseOcclusion && _presenter._occlusionQueries is null)
+                throw Serial("occlusion counting", resumable: true);
             if (enabled != _occlusionCounting)
                 EndRendering();
-            if (enabled && _supportsPreciseOcclusion)
-                _ = OcclusionQueries();
+            if (enabled && _presenter._supportsPreciseOcclusion)
+                _ = _presenter.OcclusionQueries();
             _occlusionCounting = enabled;
+        }
+
+        private void BeginWorkerQuery(CommandBuffer command)
+        {
+            if (_presenter._occlusionQueries is not { } queries)
+                return;
+            if (_workerQueryBlock is null || VulkanOcclusionQueries.IsFull(_workerQueryBlock))
+            {
+                _workerQueryBlock = queries.RentBlock(command);
+                (_segment!.QueryBlocks ??= []).Add(_workerQueryBlock);
+            }
+
+            queries.BeginInBlock(command, _workerQueryBlock);
+            _workerQueryActive = true;
+            _workerQueries.Increment();
+        }
+
+        private void EndWorkerQuery(CommandBuffer command)
+        {
+            if (!_workerQueryActive)
+                return;
+            _presenter._occlusionQueries!.EndInBlock(command, _workerQueryBlock!);
+            _workerQueryActive = false;
+        }
+
+        private void TraceOcclusionDraw(uint? indexCount = null)
+        {
+            if (!_worker)
+            {
+                _presenter._occlusionQueries?.TraceDraw(indexCount);
+            }
         }
     }
 }

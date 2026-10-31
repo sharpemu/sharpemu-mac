@@ -658,6 +658,53 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         }
     }
 
+    // A guest-to-guest copy inside single views, as TryWriteSingleView writes: one alias pin and one
+    // ordinary operation admission, the bytes bracketed by a per-chunk interval (and the single-copy
+    // bookkeeping for both ranges). False, with nothing copied, for anything that path would refuse.
+    public bool TryCopySingleView(ulong destination, ulong source, ulong size)
+    {
+        if (size == 0 || size > int.MaxValue || (!SingleViewWriteFastPath && _backing?.ManagedWrites is not null))
+        {
+            return false;
+        }
+
+        if (ulong.MaxValue - destination < size || ulong.MaxValue - source < size || !TryEnterAliasAccess())
+        {
+            return false;
+        }
+
+        try
+        {
+            var snapshot = Volatile.Read(ref _snapshot);
+            if (!TryFindAlias(snapshot, source, size, out var from) || !TryFindAlias(snapshot, destination, size, out var to))
+            {
+                return false;
+            }
+
+            var interval = _backing?.BeginManagedWriteOperation() ?? default;
+            if (!HostManagedWriteIntervals.AllowsBytes(interval))
+            {
+                return false;
+            }
+
+            var succeeded = false;
+            try
+            {
+                CopyCanonicalAliasChunk(from, to, (int)size);
+                succeeded = true;
+                return true;
+            }
+            finally
+            {
+                HostBackingObject.EndManagedWrite(interval, succeeded);
+            }
+        }
+        finally
+        {
+            ExitAliasAccess();
+        }
+    }
+
     // Two TryWriteSingleView writes (first, then second) under one alias pin and one operation
     // admission; each still brackets its own bytes with its own interval, so overlapping read watches
     // are invalidated per range before that range's bytes land, as for separate writes. False, with

@@ -19,7 +19,7 @@ public static partial class AjmExports
     private const int OrbisAjmErrorCodecAlreadyRegistered = unchecked((int)0x80930009);
     private const int OrbisAjmErrorCodecNotRegistered = unchecked((int)0x8093000A);
     private const int OrbisAjmErrorJobCreation = unchecked((int)0x80930012);
-    private const uint Atrac9CodecType = 1;
+    public const uint Atrac9CodecType = 1;
     private const uint OpusCodecType = 24;
     // instanceId packs codecType into the high bits and the instance slot
     // into the low InstanceIdSlotBits bits (see AjmInstanceCreate's
@@ -38,11 +38,11 @@ public static partial class AjmExports
 
     // AjmJobFlags: version:3, codec:8, run_flags:2, control_flags:3,
     // reserved:29, sideband_flags:3.
-    private const ulong AjmJobRunFlagGetCodecInfo = 1UL << 11;
-    private const ulong AjmJobRunFlagMultipleFrames = 1UL << 12;
-    private const ulong AjmJobSidebandFlagGaplessDecode = 1UL << 45;
-    private const ulong AjmJobSidebandFlagFormat = 1UL << 46;
-    private const ulong AjmJobSidebandFlagStream = 1UL << 47;
+    public const ulong AjmJobRunFlagGetCodecInfo = 1UL << 11;
+    public const ulong AjmJobRunFlagMultipleFrames = 1UL << 12;
+    public const ulong AjmJobSidebandFlagGaplessDecode = 1UL << 45;
+    public const ulong AjmJobSidebandFlagFormat = 1UL << 46;
+    public const ulong AjmJobSidebandFlagStream = 1UL << 47;
 
     // AjmBuffer { u8* p_address; u64 size; }
     private const int AjmBufferDescriptorBytes = 16;
@@ -1302,9 +1302,8 @@ public static partial class AjmExports
             return;
         }
 
-        // Layout is positional and driven purely by the job flags:
-        // Result, then Stream, Format, GaplessDecode, MFrame, CodecInfo — each
-        // only present when its flag is set and there is still room.
+        var at9CodecInfo = (flags & AjmJobRunFlagGetCodecInfo) != 0 && config is not null;
+        var layout = GetRunSidebandLayout(flags, size, at9CodecInfo);
         Span<byte> sideband = stackalloc byte[
             AjmSidebandResultBytes +
             AjmSidebandStreamBytes +
@@ -1315,75 +1314,105 @@ public static partial class AjmExports
         sideband.Clear();
 
         BinaryPrimitives.WriteInt32LittleEndian(sideband, result.Status);
-        var offset = AjmSidebandResultBytes;
 
-        if ((flags & AjmJobSidebandFlagStream) != 0 && (ulong)(offset + AjmSidebandStreamBytes) <= size)
+        if (layout.Stream >= 0)
         {
-            BinaryPrimitives.WriteInt32LittleEndian(sideband[offset..], result.InputConsumed);
-            BinaryPrimitives.WriteInt32LittleEndian(sideband[(offset + 4)..], result.OutputWritten);
-            BinaryPrimitives.WriteUInt64LittleEndian(sideband[(offset + 8)..], result.TotalDecodedSamples);
-            offset += AjmSidebandStreamBytes;
+            var stream = sideband[layout.Stream..];
+            BinaryPrimitives.WriteInt32LittleEndian(stream, result.InputConsumed);
+            BinaryPrimitives.WriteInt32LittleEndian(stream[4..], result.OutputWritten);
+            BinaryPrimitives.WriteUInt64LittleEndian(stream[8..], result.TotalDecodedSamples);
         }
 
-        if ((flags & AjmJobSidebandFlagFormat) != 0 && (ulong)(offset + AjmSidebandFormatBytes) <= size)
+        if (layout.Format >= 0)
         {
+            var format = sideband[layout.Format..];
             var channels = config?.ChannelCount ?? instance?.Opus?.Channels ?? instance?.MaxChannels ?? 0;
-            BinaryPrimitives.WriteUInt32LittleEndian(sideband[offset..], unchecked((uint)channels));
-            BinaryPrimitives.WriteUInt32LittleEndian(sideband[(offset + 4)..], ChannelMaskFor(channels));
-            BinaryPrimitives.WriteUInt32LittleEndian(sideband[(offset + 8)..], unchecked((uint)(config?.SampleRate ?? instance?.Opus?.SampleRate ?? 0)));
+            BinaryPrimitives.WriteUInt32LittleEndian(format, unchecked((uint)channels));
+            BinaryPrimitives.WriteUInt32LittleEndian(format[4..], ChannelMaskFor(channels));
+            BinaryPrimitives.WriteUInt32LittleEndian(format[8..], unchecked((uint)(config?.SampleRate ?? instance?.Opus?.SampleRate ?? 0)));
             BinaryPrimitives.WriteUInt32LittleEndian(
-                sideband[(offset + 12)..],
+                format[12..],
                 unchecked((uint)(instance?.Encoding ?? Atrac9PcmEncoding.Signed16)));
-            offset += AjmSidebandFormatBytes;
         }
 
-        if ((flags & AjmJobSidebandFlagGaplessDecode) != 0 && (ulong)(offset + AjmSidebandGaplessDecodeBytes) <= size)
+        if (layout.Gapless >= 0)
         {
+            var section = sideband[layout.Gapless..];
             var gapless = instance?.Atrac9?.Gapless ?? instance?.Opus?.Gapless ?? default;
-            BinaryPrimitives.WriteUInt32LittleEndian(sideband[offset..], gapless.TotalSamples);
-            BinaryPrimitives.WriteUInt16LittleEndian(sideband[(offset + 4)..], gapless.SkipSamples);
-            BinaryPrimitives.WriteUInt16LittleEndian(sideband[(offset + 6)..], gapless.SkippedSamples);
-            offset += AjmSidebandGaplessDecodeBytes;
+            BinaryPrimitives.WriteUInt32LittleEndian(section, gapless.TotalSamples);
+            BinaryPrimitives.WriteUInt16LittleEndian(section[4..], gapless.SkipSamples);
+            BinaryPrimitives.WriteUInt16LittleEndian(section[6..], gapless.SkippedSamples);
         }
 
         // SceAjmSidebandDecAt9CodecInfo { superFrameSize, framesInSuperFrame,
         // nextFrameSize, frameSamples } follows the gapless block and precedes
         // the multiple-frames block.
-        var at9CodecInfo = (flags & AjmJobRunFlagGetCodecInfo) != 0 && config is not null;
-        if (at9CodecInfo && (ulong)(offset + AjmSidebandAt9CodecInfoBytes) <= size)
+        if (layout.At9CodecInfo >= 0)
         {
-            BinaryPrimitives.WriteUInt32LittleEndian(sideband[offset..], unchecked((uint)config!.SuperframeBytes));
-            BinaryPrimitives.WriteUInt32LittleEndian(sideband[(offset + 4)..], unchecked((uint)config.FramesPerSuperframe));
+            var codecInfo = sideband[layout.At9CodecInfo..];
+            BinaryPrimitives.WriteUInt32LittleEndian(codecInfo, unchecked((uint)config!.SuperframeBytes));
+            BinaryPrimitives.WriteUInt32LittleEndian(codecInfo[4..], unchecked((uint)config.FramesPerSuperframe));
             BinaryPrimitives.WriteUInt32LittleEndian(
-                sideband[(offset + 8)..],
+                codecInfo[8..],
                 unchecked((uint)(instance?.Atrac9?.NextSuperframeBytes ?? config.SuperframeBytes)));
-            BinaryPrimitives.WriteUInt32LittleEndian(sideband[(offset + 12)..], unchecked((uint)config.FrameSamples));
-            offset += AjmSidebandAt9CodecInfoBytes;
+            BinaryPrimitives.WriteUInt32LittleEndian(codecInfo[12..], unchecked((uint)config.FrameSamples));
         }
 
-        if ((flags & AjmJobRunFlagMultipleFrames) != 0 && (ulong)(offset + AjmSidebandMFrameBytes) <= size)
+        if (layout.MultipleFrames >= 0)
         {
-            BinaryPrimitives.WriteUInt32LittleEndian(sideband[offset..], result.Frames);
-            offset += AjmSidebandMFrameBytes;
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[layout.MultipleFrames..], result.Frames);
         }
 
-        _ = ctx.Memory.TryWrite(address, sideband[..offset]);
+        _ = ctx.Memory.TryWrite(address, sideband[..layout.End]);
 
-        if ((flags & AjmJobRunFlagGetCodecInfo) != 0 && !at9CodecInfo && (ulong)offset < size)
+        if ((flags & AjmJobRunFlagGetCodecInfo) != 0 && !at9CodecInfo && (ulong)layout.End < size)
         {
             // No codec-info block is produced yet; zero it so the caller reads
             // defined values instead of whatever the buffer held before.
             ClearGuestMemory(
                 ctx,
-                address + (ulong)offset,
-                Math.Min(size - (ulong)offset, AjmSidebandCodecInfoBytes));
-            if (instance?.Opus is not null && size - (ulong)offset >= sizeof(uint))
+                address + (ulong)layout.End,
+                Math.Min(size - (ulong)layout.End, AjmSidebandCodecInfoBytes));
+            if (instance?.Opus is not null && size - (ulong)layout.End >= sizeof(uint))
             {
                 Span<byte> codecInfo = stackalloc byte[sizeof(uint)];
                 BinaryPrimitives.WriteUInt32LittleEndian(codecInfo, instance.Opus.FramesPerPacket);
-                _ = ctx.Memory.TryWrite(address + (ulong)offset, codecInfo);
+                _ = ctx.Memory.TryWrite(address + (ulong)layout.End, codecInfo);
             }
         }
+    }
+
+    // At9CodecInfo: the PS5 AT9 codec-info block between the gapless and multiple-frames blocks,
+    // present only when the caller asks for it (an AT9 instance with the get-codec-info flag).
+    public readonly record struct RunSidebandLayout(int Stream, int Format, int Gapless, int MultipleFrames, int End,
+        int At9CodecInfo = -1);
+
+    public static RunSidebandLayout GetRunSidebandLayout(ulong flags, ulong size, bool at9CodecInfo = false)
+    {
+        // Layout is positional and driven purely by the job flags:
+        // Result, then Stream, Format, GaplessDecode, MFrame, CodecInfo — each
+        // only present when its flag is set and there is still room.
+        var offset = AjmSidebandResultBytes;
+        var stream = TakeSidebandSection(flags, AjmJobSidebandFlagStream, AjmSidebandStreamBytes, size, ref offset);
+        var format = TakeSidebandSection(flags, AjmJobSidebandFlagFormat, AjmSidebandFormatBytes, size, ref offset);
+        var gapless = TakeSidebandSection(flags, AjmJobSidebandFlagGaplessDecode, AjmSidebandGaplessDecodeBytes, size, ref offset);
+        var codecInfo = at9CodecInfo
+            ? TakeSidebandSection(flags, AjmJobRunFlagGetCodecInfo, AjmSidebandAt9CodecInfoBytes, size, ref offset)
+            : -1;
+        var multipleFrames = TakeSidebandSection(flags, AjmJobRunFlagMultipleFrames, AjmSidebandMFrameBytes, size, ref offset);
+        return new RunSidebandLayout(stream, format, gapless, multipleFrames, offset, codecInfo);
+    }
+
+    private static int TakeSidebandSection(ulong flags, ulong flag, int bytes, ulong size, ref int offset)
+    {
+        if ((flags & flag) == 0 || (ulong)(offset + bytes) > size)
+        {
+            return -1;
+        }
+
+        var section = offset;
+        offset += bytes;
+        return section;
     }
 
     private static uint ChannelMaskFor(int channels) =>
@@ -1500,11 +1529,11 @@ public static partial class AjmExports
     private const ulong AjmJobRunSplitBaseSize = 32;
     private const ulong AjmJobGetStatisticsSize = 88;
     private const int AjmStatisticsResultBytes = 48;
-    private const int AjmSidebandResultBytes = 8;
-    private const int AjmSidebandStreamBytes = 16;
-    private const int AjmSidebandFormatBytes = 24;
-    private const int AjmSidebandGaplessDecodeBytes = 8;
-    private const int AjmSidebandMFrameBytes = 8;
+    public const int AjmSidebandResultBytes = 8;
+    public const int AjmSidebandStreamBytes = 16;
+    public const int AjmSidebandFormatBytes = 24;
+    public const int AjmSidebandGaplessDecodeBytes = 8;
+    public const int AjmSidebandMFrameBytes = 8;
     private const int AjmSidebandCodecInfoBytes = 64;
     private const int AjmSidebandAt9CodecInfoBytes = 16;
     // AjmSidebandResult (8) + AjmSidebandStream (16) + AjmSidebandMFrame (8).

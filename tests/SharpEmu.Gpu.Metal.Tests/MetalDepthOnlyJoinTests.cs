@@ -146,10 +146,10 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
         };
         var open = new RenderingState { Width = Width, Height = Height, Layers = 1, ColorAttachmentCount = 2, Samples = 1 };
         open.ColorAttachments[0] = new RenderingAttachment(
-            new GpuImageHandle(1), GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
+            new GpuImageHandle(1), GpuFormat.R8G8B8A8Unorm,
             0, 0, 0, 0, false, false, false, false, false);
         open.ColorAttachments[1] = new RenderingAttachment(
-            new GpuImageHandle(2), GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R16G16B16A16Sfloat,
+            new GpuImageHandle(2), GpuFormat.R16G16B16A16Sfloat,
             0, 0, 0, 0, false, false, false, false, false);
 
         var joined = MetalRenderHost.JoinedDescription(description, in open);
@@ -392,7 +392,7 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
             };
 
         private RenderingAttachment DepthAttachment(bool clear) => new(
-            new GpuImageHandle((ulong)_depth), GpuImageLayout.DepthStencilAttachmentOptimal, GpuFormat.D32Sfloat,
+            new GpuImageHandle((ulong)_depth), GpuFormat.D32Sfloat,
             BitConverter.SingleToUInt32Bits(1f), 0, 0, 0, false, true, clear, false, false);
 
         // The way an executor begins a draw: bindings reset, the target acquired, the pass
@@ -405,7 +405,7 @@ public sealed unsafe class MetalDepthOnlyJoinTests(ITestOutputHelper output)
             LastColour = attachment.View;
             var state = new RenderingState { Width = Width, Height = Height, Layers = 1, ColorAttachmentCount = 1, Samples = 1 };
             state.ColorAttachments[0] = new RenderingAttachment(
-                attachment.View, GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
+                attachment.View, GpuFormat.R8G8B8A8Unorm,
                 0, 0, 0, 0, false, false, false, false, false);
             state.DepthStencilAttachment = DepthAttachment(depthClear);
             host.NoteUpcomingDraw(in pipeline, 6, 0);

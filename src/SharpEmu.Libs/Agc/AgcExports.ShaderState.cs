@@ -131,6 +131,7 @@ public static partial class AgcExports
         }
         _shaderHeadersByCode[codeAddress] = headerAddress;
         ShaderHeaderObserver?.Invoke(codeAddress, headerAddress);
+        Gpu.Pipelines.ShaderHeaderRegistry.NoteRegistration();
 
         TryRegisterEmbeddedFusedProgram(ctx, codeAddress, headerAddress);
 
@@ -215,8 +216,15 @@ public static partial class AgcExports
                     descriptor[(int)ShaderCodeOffset..]);
                 var continuationSize = BinaryPrimitives.ReadUInt32LittleEndian(
                     descriptor[(int)ShaderSizeOffset..]);
-                if (continuationCodeAddress <= entryCodeAddress ||
-                    continuationCodeAddress - entryCodeAddress > uint.MaxValue ||
+                // A merged LS/HS object can place its HS continuation before the LS entry.
+                // Geometry pairs keep the continuation after the entry.
+                var continuationBefore = continuationCodeAddress < entryCodeAddress;
+                var separation = continuationBefore
+                    ? entryCodeAddress - continuationCodeAddress
+                    : continuationCodeAddress - entryCodeAddress;
+                if (continuationCodeAddress == entryCodeAddress ||
+                    (continuationBefore && entryType != HsFrontShaderType) ||
+                    separation > uint.MaxValue ||
                     !IsValidDeclaredShaderSize(continuationSize) ||
                     !CanReadShaderRange(ctx, continuationCodeAddress, continuationSize))
                 {
@@ -241,7 +249,7 @@ public static partial class AgcExports
                     }
                 }
 
-                var distance = continuationCodeAddress - entryCodeAddress;
+                var distance = separation;
                 if (distance >= bestDistance)
                 {
                     continue;
@@ -470,20 +478,26 @@ public static partial class AgcExports
             }
         }
 
+        var fusedEntryCode = frontCodeAddress;
+        var fusedEntryHeader = frontAddress;
+        if (!isGeometryPair &&
+            !TryGetFusedHullEntry(ctx, frontAddress, backAddress, backCodeAddress, ref fusedEntryCode, out fusedEntryHeader))
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+
         if (!PatchFusedProgramAddress(
                 ctx,
                 fusedRegistersAddress,
                 registerCount,
                 isGeometryPair ? SpiShaderPgmLoEs : SpiShaderPgmLoLs,
-                frontCodeAddress))
+                fusedEntryCode))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         Gen5ShaderTranslator.RegisterFusedProgram(
             ctx,
-            frontCodeAddress,
-            frontAddress,
+            fusedEntryCode,
+            fusedEntryHeader,
             backCodeAddress,
             backAddress);
 

@@ -82,6 +82,8 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public List<string> Calls { get; } = new();
 
+    public bool SupportsTessellation { get; set; }
+
     public List<(string Disposition, ulong Address, ulong PixelShader, ulong VertexShader)> DrawTargets { get; } = new();
 
     public void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) =>
@@ -122,8 +124,6 @@ internal sealed class RecordingRenderHost : IRenderHost
     public IImageFormatSupport FormatSupport { get; } = new AcceptingFormatSupport();
 
     public bool IsRecording => Recording;
-
-    public GpuImageLayout ColorLayout { get; set; } = GpuImageLayout.ColorAttachmentOptimal;
 
     public Dictionary<ulong, uint> ImageSamples { get; } = new();
 
@@ -244,6 +244,11 @@ internal sealed class RecordingRenderHost : IRenderHost
     }
 
     public void AwaitProgramsBeforePreparation(ShaderProgram first, ShaderProgram second) => Calls.Add("await_programs");
+    public DrawScopeToken Scope { get; set; }
+
+    public DrawScopeToken DrawScope => Scope;
+
+    public void KeepDepthAttachment(in DepthAttachmentState depth) => Calls.Add($"keep_depth {depth.Image.Index}");
 
     public ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target)
     {
@@ -254,7 +259,6 @@ internal sealed class RecordingRenderHost : IRenderHost
         return new ColorAttachmentAcquisition(
             target.Image,
             new GpuImageHandle(0x1000 + target.Image.Index),
-            ColorLayout,
             ImageSamples.TryGetValue(address, out var samples) ? samples : target.Resolution.Samples,
             metadataClear,
             clearValue);
@@ -270,8 +274,8 @@ internal sealed class RecordingRenderHost : IRenderHost
             DepthMetadataClear);
     }
 
-    public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects) =>
-        Calls.Add($"transition_depth {depth.Image.Index} {layout} {writeAspects} loadClear={depth.LoadClear}");
+    public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageAspect writeAspects) =>
+        Calls.Add($"transition_depth {depth.Image.Index} {writeAspects} loadClear={depth.LoadClear}");
 
     // Marks the pages the guest wrote so the next obtain re-uploads them.
     public void WriteGuest(ulong address, ReadOnlySpan<byte> data)
@@ -441,6 +445,40 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void ShaderAccessBarrier() => Calls.Add("access_barrier");
 
+    public bool DeferBarriers { get; set; }
+
+    public long Promotions { get; set; }
+
+    bool IRenderHost.TryDeferShaderAccessBarrier()
+    {
+        if (!DeferBarriers)
+        {
+            ShaderAccessBarrier();
+            return false;
+        }
+
+        Calls.Add("defer_access_barrier");
+        return true;
+    }
+
+    void IRenderHost.BeginCheckedDispatch()
+    {
+        if (DeferBarriers)
+        {
+            Calls.Add("checked_begin");
+        }
+    }
+
+    void IRenderHost.EndCheckedDispatch()
+    {
+        if (DeferBarriers)
+        {
+            Calls.Add("checked_end");
+        }
+    }
+
+    long IRenderHost.DeferredBarrierPromotions => Promotions;
+
     public bool RetainTargetlessDraws { get; set; }
 
     public bool OrdersVertexWritesInsidePass { get; set; }
@@ -538,32 +576,6 @@ internal sealed class RecordingRenderHost : IRenderHost
     public Exception Fatal(string message) => new RenderExecutorFatalException(message);
 }
 
-// Check register-derived inputs while preserving the draw mode supplied by the packet.
-internal sealed class InputsCheckingPrefetch(IRenderHost host) : IProgramPrefetch
-{
-    public List<string> Mismatches { get; } = new();
-
-    public int Checks { get; private set; }
-
-    public bool TryTakeGraphics(RegisterBanks banks, in GraphicsProgramInputs inputs, out GraphicsPrograms programs)
-    {
-        Checks++;
-        var expected = RenderExecutor.ProgramInputsOf(banks, host.FormatSupport, host.Fatal, inputs.Indexed);
-        if (!expected.Equals(inputs))
-        {
-            Mismatches.Add(
-                $"draw pixelActive={inputs.PixelActive}/{expected.PixelActive} depthBound={inputs.DepthBound}/{expected.DepthBound} " +
-                $"mapping=[{Describe(inputs.Mapping)}]/[{Describe(expected.Mapping)}]");
-        }
-
-        programs = null!;
-        return false;
-    }
-
-    private static string Describe(ReadOnlySpan<ColorComponentMap> mapping) =>
-        string.Join(",", mapping.ToArray().Select(map => map.Packed));
-}
-
 // Hands back the configured programs and records every pipeline request.
 internal sealed class FakePipelineProvider : IShaderPipelineProvider
 {
@@ -582,10 +594,7 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     public bool MeshDepthBound { get; private set; }
 
     public GraphicsPrograms GetMeshGraphicsPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         UserConfigRegisters userConfig,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
@@ -619,17 +628,16 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     public List<ColorComponentMap[]> ExportMappings { get; } = new();
 
     public GraphicsPrograms GetGraphicsPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
         bool depthAspectBound,
-        bool stencilAspectBound = false)
+        bool stencilAspectBound,
+        bool triangleList,
+        int startInstanceUserData)
     {
-        BeforeGraphicsResolve?.Invoke(vertex);
+        BeforeGraphicsResolve?.Invoke(banks.Shader.Vertex);
         Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
         ExportMappings.Add(targetExportMapping.ToArray());
         return Graphics;
@@ -781,7 +789,7 @@ internal static class RenderExecutorFixtures
         context.ColorTargets[0] = RegisterWords.Color(ColorBase, 64, 64);
         context.RenderTargetMask = 0xF;
         context.ShaderInterface.ColorShaderMask = 0xF;
-        context.ScreenViewport.Viewports[0] = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = -32, YOffset = 32, ZScale = 0.5f, ZOffset = 0.5f, MaxDepth = 1 };
+        context.ScreenViewport.Primary = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = -32, YOffset = 32, ZScale = 0.5f, ZOffset = 0.5f, MaxDepth = 1 };
         if (withDepth)
         {
             context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64);
@@ -863,4 +871,30 @@ internal static class RenderExecutorFixtures
 
     public static DrawAutoArguments Auto(uint count, uint instances = 1, uint firstVertex = 0, uint firstInstance = 0, DrawOffsetSource source = DrawOffsetSource.Packet) =>
         new(0, 0, count, instances, firstVertex, firstInstance, source);
+}
+
+// Check register-derived inputs while preserving the draw mode supplied by the packet.
+internal sealed class InputsCheckingPrefetch(IRenderHost host) : IProgramPrefetch
+{
+    public List<string> Mismatches { get; } = new();
+
+    public int Checks { get; private set; }
+
+    public bool TryTakeGraphics(RegisterBanks banks, in GraphicsProgramInputs inputs, out GraphicsPrograms programs)
+    {
+        Checks++;
+        var expected = RenderExecutor.ProgramInputsOf(banks, host.FormatSupport, host.Fatal, inputs.Indexed, inputs.StartInstanceUserData);
+        if (!expected.Equals(inputs))
+        {
+            Mismatches.Add(
+                $"draw pixelActive={inputs.PixelActive}/{expected.PixelActive} depthBound={inputs.DepthBound}/{expected.DepthBound} " +
+                $"mapping=[{Describe(inputs.Mapping)}]/[{Describe(expected.Mapping)}]");
+        }
+
+        programs = null!;
+        return false;
+    }
+
+    private static string Describe(ReadOnlySpan<ColorComponentMap> mapping) =>
+        string.Join(",", mapping.ToArray().Select(map => map.Packed));
 }

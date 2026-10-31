@@ -232,6 +232,12 @@ public sealed class ShaderCompileRequest
         return copy;
     }
     public ShaderStage Stage { get; }
+    // The native (Vulkan) tessellation stage configuration; Tessellation below is the Metal launch.
+    public Gen5TessellationInfo? TessellationInfo { get; init; }
+    // Merged LS/HS workgroups can contain several independently branching waves.
+    // The Vulkan lowering rendezvous all waves before an LDS phase transition.
+    public Gen5TessellationHullInfo? TessellationHull { get; init; }
+    public bool CooperativeWave64Workgroup { get; init; }
     public ulong Hash { get; }
     public MemoryAccessTable Memory { get; }
     public SpecializedResourceInfo Resources { get; }
@@ -483,6 +489,8 @@ public sealed class ShaderCompileRequest
     public IReadOnlyList<ShaderVertexInput> VertexInputs { get; init; } = [];
     public uint PositionExportControl { get; init; }
     public bool SupportsClipDistance { get; init; } = true;
+    public bool SupportsDrawParameters { get; init; }
+    public int StartInstanceUserData { get; init; } = -1;
     public ShaderClipSpaceTransform ClipSpace { get; init; }
     public MeshShaderConfiguration? Mesh { get; init; }
 

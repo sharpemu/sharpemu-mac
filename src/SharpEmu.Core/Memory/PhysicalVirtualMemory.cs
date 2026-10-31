@@ -2792,6 +2792,20 @@ public sealed unsafe partial class PhysicalVirtualMemory : IVirtualMemory, IGues
         // their owners dirtied before the copy; guest addresses are
         // host-identical, matching the tracker's fault addresses.
         GuestImageWriteTracker.NotifyManagedWrite(virtualAddress, (ulong)source.Length);
+        if (!source.IsEmpty && _backedSpace is { } backed && !_disposed)
+        {
+            GuestGpuMemoryHook.PrepareEmulatorWrite(virtualAddress, (ulong)source.Length);
+            if (backed.TryWriteSingleView(virtualAddress, source))
+            {
+                DsLock.Count(10, true);
+                GuestGpuMemoryHook.NoteEmulatorWrite(virtualAddress, (ulong)source.Length);
+                NotifyGuestWriteWatch(virtualAddress, source);
+                return true;
+            }
+
+            DsLock.Count(10, false);
+        }
+
         GuestGpuMemoryHook.MarkCpuWrite(virtualAddress, (ulong)source.Length);
         var written = TryWriteBytesCore(virtualAddress, source, out failure, out diagnosticSpace);
 
@@ -2805,18 +2819,6 @@ public sealed unsafe partial class PhysicalVirtualMemory : IVirtualMemory, IGues
         out OrdinaryWriteFailure failure, out GuestSpaceOwner? diagnosticSpace)
     {
         failure = default; diagnosticSpace = null;
-        if (!source.IsEmpty && _backedSpace is { } backed && !_disposed)
-        {
-            if (backed.TryWriteSingleView(virtualAddress, source))
-            {
-                DsLock.Count(10, true);
-                NotifyGuestWriteWatch(virtualAddress, source);
-                return true;
-            }
-
-            DsLock.Count(10, false);
-        }
-
         var requiresExclusiveAccess = false;
         OrdinaryBackingWriteReservation? publicationBusy = null;
         GuestSpaceOwner? originalSpace = null;
@@ -3019,6 +3021,17 @@ public sealed unsafe partial class PhysicalVirtualMemory : IVirtualMemory, IGues
         // Match TryWrite's managed-write notification before touching an
         // identity-mapped guest page protected by the image tracker.
         GuestImageWriteTracker.NotifyManagedWrite(destinationAddress, length);
+        if (_backedSpace is { } backed && !_disposed)
+        {
+            GuestGpuMemoryHook.PrepareEmulatorWrite(destinationAddress, length);
+            if (backed.TryCopySingleView(destinationAddress, sourceAddress, length))
+            {
+                GuestGpuMemoryHook.NoteEmulatorWrite(destinationAddress, length);
+                NotifyBackedWriteWatch(destinationAddress, length);
+                return true;
+            }
+        }
+
         GuestGpuMemoryHook.MarkCpuWrite(destinationAddress, length);
         var copied = TryCopyCore(destinationAddress, sourceAddress, length);
 

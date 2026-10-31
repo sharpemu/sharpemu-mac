@@ -174,6 +174,17 @@ public static partial class AgcExports
             $"addr=0x{commandAddress:X16} dwords={dwordCount} " +
             $"end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
+        return SubmitComputeCommands(ctx, ownerHandle, commandAddress, dwordCount);
+    }
+
+    public static int SubmitGraphicsCommands(CpuContext ctx, ulong commandAddress, uint dwordCount, PacketHandler?[] packetHandlers) =>
+        SubmitComputeCommands(ctx, 0, commandAddress, dwordCount, static () => { }, packetHandlers);
+
+    public static int SubmitComputeCommands(CpuContext ctx, uint ownerHandle, ulong commandAddress, uint dwordCount,
+        Action? consumed = null, PacketHandler?[]? packetHandlers = null)
+    {
+        if (HostSessionControl.IsShutdownRequested)
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
         SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.SubmitEntered,
             ownerHandle, 0, commandAddress, dwordCount);
         (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
@@ -188,7 +199,7 @@ public static partial class AgcExports
                 commandAddress,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                null, out preparation))
+                consumed is null ? null : new CommandStreamCompletion(consumed, packetHandlers), out preparation))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
             }
@@ -248,6 +259,9 @@ public static partial class AgcExports
     // SHARPEMU_SUBMIT_DONE_SPLIT=0 holds CommandSubmissionGate through the frame-boundary wait again,
     // so every other submitter blocks while the guest waits on the worker.
     internal static bool SplitSubmitDoneWait = Environment.GetEnvironmentVariable("SHARPEMU_SUBMIT_DONE_SPLIT") != "0";
+
+    public static void WaitForAcceptedCommandStreams() =>
+        GuestGpu.Current.RunAfterPendingCommandStreams(static () => { });
 
     // Synthetic label for an uncatalogued NID (the Unknown* convention); the NID is authoritative.
     #pragma warning disable SHEM006

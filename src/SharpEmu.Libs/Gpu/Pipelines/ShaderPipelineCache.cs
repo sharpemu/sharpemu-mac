@@ -1,7 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
@@ -16,6 +18,9 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 // The pipeline provider behind the executor: programs by identity, pipelines by their full static state.
 internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 {
+    internal bool SupportsParallelResolution => _registry.SupportsParallelResolution;
+    internal long FrontendImageVersion => _registry.FrontendImageVersion;
+
     private const uint VertexUserDataBase = 8;
     private const uint MaxPixelInputs = 32;
 
@@ -176,20 +181,36 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return previous = words.ToArray();
     }
 
+    // The same words as a span of the bank (the native tessellation hull, ShaderPipelineCache.Tessellation).
+    private static ReadOnlySpan<uint> UserData(UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, ulong shaderAddress, string label)
+    {
+        var count = declaredCount;
+        if (count == 0 && probeWrittenRegisters)
+        {
+            count = registers.Count;
+        }
+
+        if (count > UserScalarRegisters.Capacity)
+        {
+            throw GpuFatal.Fatal($"The shader declares more user registers than the bank holds: label={label} shader=0x{shaderAddress:X16} count={count}.");
+        }
+
+        return registers.ValueSpan((int)count);
+    }
+
     private ShaderSource PrepareSource(ulong codeAddress, ShaderStage stage, string label, UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, uint userDataBase, ref uint[]? userDataMemo,
         ulong geometryPointer = 0)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
-        var registered = _registry.Require(codeAddress, label);
-        Span<(ulong Address, uint SizeBytes)> ranges = stackalloc (ulong, uint)[RegisteredShader.MaxCodeRanges];
-        ranges = ranges[..registered.CopyCodeRanges(ranges)];
-        foreach (var (address, sizeBytes) in ranges)
+        // A frontend reads a headerless shader with the draw's user data, so they come first.
+        var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label, ref userDataMemo);
+        var registered = _registry.Require(codeAddress, label, userData);
+        var hash = HashOf(registered, codeAddress, label);
+        if (registered.Frontend is { } frontend && userDataBase == VertexUserDataBase)
         {
-            _host.SynchronizeShaderCode(address, sizeBytes);
+            userDataBase = frontend.VertexUserDataBase;
         }
 
-        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, ranges, label, _identities);
-        var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label, ref userDataMemo);
         if (stage == ShaderStage.Mesh && registered.IsFused)
         {
             // A fused program compiled as a mesh program takes the GS user-data pointer in
@@ -218,11 +239,117 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // The last source of each stage, kept under _resolveGate like the user data memos.
     private readonly ShaderSource?[] _lastSources = new ShaderSource?[Enum.GetValues<ShaderStage>().Length];
 
+    // The identity of a shader's code: its code is synchronized first, then the declared hash or the
+    // remembered content hash (ShaderIdentityMemo); a frontend's code is hashed by content in its domain.
+    private ulong HashOf(RegisteredShader registered, ulong codeAddress, string label)
+    {
+        Span<(ulong Address, uint SizeBytes)> scratch = stackalloc (ulong, uint)[RegisteredShader.MaxCodeRanges];
+        ReadOnlySpan<(ulong Address, uint SizeBytes)> ranges = registered.CodeRangeCount <= RegisteredShader.MaxCodeRanges
+            ? scratch[..registered.CopyCodeRanges(scratch)]
+            : registered.CodeRanges;
+        foreach (var (address, sizeBytes) in ranges)
+        {
+            _host.SynchronizeShaderCode(address, sizeBytes);
+        }
+
+        return registered.Frontend is { } frontend
+            ? ShaderIdentity.ComputeContent(_context.Memory, ranges, label) ^ frontend.CacheDomain
+            : ShaderIdentity.Compute(_context.Memory, codeAddress, ranges, label, _identities);
+    }
+
+    // The identity of a header entry's code (ShaderPipelineCache.Tessellation).
+    internal ulong IdentityOf(ShaderHeaderEntry header, ulong codeAddress, string label) => HashOf(header.Shader, codeAddress, label);
+
+    // A source from user data already read (the native tessellation hull).
+    private ShaderSource PrepareSource(ulong codeAddress, ShaderStage stage, string label, uint[] userData, uint userDataBase, out ShaderHeaderEntry header,
+        ulong geometryPointer = 0)
+    {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
+        header = _registry.RequireEntry(codeAddress, label, userData);
+        return SourceOf(header, IdentityOf(header, codeAddress, label), stage, userData, userDataBase, geometryPointer);
+    }
+
+    private static ShaderSource SourceOf(ShaderHeaderEntry header, ulong hash, ShaderStage stage, uint[] userData, uint userDataBase, ulong geometryPointer)
+    {
+        if (header.Shader.Frontend is { } frontend && userDataBase == VertexUserDataBase)
+            userDataBase = frontend.VertexUserDataBase;
+        if (stage == ShaderStage.Mesh && header.Shader.IsFused)
+        {
+            var withPointer = new uint[VertexUserDataBase + userData.Length];
+            userData.CopyTo(withPointer.AsSpan((int)VertexUserDataBase));
+            withPointer[0] = (uint)geometryPointer;
+            withPointer[1] = (uint)(geometryPointer >> 32);
+            return new ShaderSource(header.Shader, hash, withPointer, 0, stage);
+        }
+
+        return new ShaderSource(header.Shader, hash, userData, userDataBase, stage);
+    }
+
     // Program resolution runs on the render thread and on a thread resolving draws ahead of it;
     // the program, decode and materialization caches it updates are used under this lock only.
     // A pipeline lookup takes no lock, so it does not wait for a resolution.
     private readonly object _resolveGate = new();
 
+    // The draw's programs (IShaderPipelineProvider). A draw whose registers, user data, targets and resolved
+    // inputs are those of the last draw this thread resolved keeps its programs after their resources revalidate
+    // (TryKeepGraphicsPrograms); anything else resolves them again.
+    public GraphicsPrograms GetGraphicsPrograms(
+        RegisterBanks banks,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        bool triangleList,
+        int startInstanceUserData)
+    {
+        var vertex = banks.Shader.Vertex;
+        var pixel = banks.Shader.Pixel;
+        var context = banks.Context;
+        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
+        lock (_resolveGate)
+        {
+            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            var stamps = new KeptGraphicsStamps(
+                banks.Stamp(RegisterStamp.ShaderPrograms), banks.Stamp(RegisterStamp.VertexUserData), banks.Stamp(RegisterStamp.PixelUserData),
+                banks.Stamp(RegisterStamp.ColorTargets, RegisterStamp.ShaderInterface), ShaderHeaderRegistry.Registrations);
+            var flags = new KeptGraphicsFlags(pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, startInstanceUserData);
+            var kept = _keptGraphics ??= new KeptGraphicsPrograms();
+            if (TryKeepGraphicsPrograms(context, kept, stamps, flags, targetExportMapping, out var keptPrograms))
+            {
+                _graphicsKept.Increment();
+                return keptPrograms;
+            }
+
+            _graphicsResolved.Increment();
+            kept.Programs = null;
+            var programs = ResolveGraphicsProgramsCore(vertex, pixel, context.ShaderInterface, context, targetExportMapping, pixelActive, depthBound,
+                depthAspectBound, stencilAspectBound, triangleList, mesh: null, startInstanceUserData: startInstanceUserData,
+                nativeTessellation: true);
+            KeepGraphicsPrograms(kept, programs, context, stamps, flags, targetExportMapping);
+            return programs;
+        }
+    }
+
+    // The interface's earlier forms, for callers holding only the four inputs.
+    public GraphicsPrograms GetGraphicsPrograms(
+        RegisterBanks banks,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound) =>
+        GetGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound, depthAspectBound: depthBound, stencilAspectBound: false,
+            triangleList: false, startInstanceUserData: -1);
+
+    public GraphicsPrograms GetGraphicsPrograms(
+        RegisterBanks banks,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        int startInstanceUserData) =>
+        GetGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound, depthAspectBound: depthBound, stencilAspectBound: false,
+            triangleList: false, startInstanceUserData);
+
+    // The register-bank form without the bank: resolves every time, as before draw reuse.
     public GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
@@ -250,6 +377,157 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
             depthAspectBound, stencilAspectBound, triangleList, null);
 
+    [ThreadStatic]
+    private static KeptGraphicsPrograms? _keptGraphics;
+    [ThreadStatic]
+    private static Dictionary<ulong, List<KeptComputeProgram>>? _keptComputes;
+    private const int KeptComputesPerShader = 4;
+    // A rebound compute program reads its code's identity again every this many dispatches.
+    private const int IdentityRecheckPeriod = 64;
+    [ThreadStatic]
+    private static uint[]? _vertexTableScratch;
+
+    private static readonly ThreadCounter _graphicsKept = new();
+    private static readonly ThreadCounter _graphicsResolved = new();
+    private static readonly ThreadCounter _computeKept = new();
+    private static readonly ThreadCounter _computeRebound = new();
+    private static readonly ThreadCounter _computeResolved = new();
+
+    public static string TakeKeptProgramsReport() =>
+        FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] graphics_kept={_graphicsKept.Take()} graphics_resolved={_graphicsResolved.Take()} ") +
+        FormattableString.Invariant($"compute_kept={_computeKept.Take()} compute_rebound={_computeRebound.Take()} compute_resolved={_computeResolved.Take()}");
+
+    // Besides upstream's register stamps, the fork's resolution reads the host viewport transform (dynamic
+    // viewport registers, compared resolved), the depth aspects and triangle-list assembly (per-vertex pixel
+    // inputs), so those are part of the check too. Called under _resolveGate: revalidation uses the
+    // program cache's materializations.
+    private bool TryKeepGraphicsPrograms(ContextRegisters context, KeptGraphicsPrograms kept, in KeptGraphicsStamps stamps, in KeptGraphicsFlags flags,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping, out GraphicsPrograms programs)
+    {
+        programs = null!;
+        if (DrawReuseDisabled || _registry.HasFrontend)
+            return false;
+        if (kept.Programs is not { } previous || kept.Stamps != stamps || kept.Flags != flags ||
+            kept.ExportMappingCount != targetExportMapping.Length ||
+            !targetExportMapping.SequenceEqual(kept.ExportMapping.AsSpan(0, kept.ExportMappingCount)))
+        {
+            return false;
+        }
+
+        if ((flags.PixelActive && kept.OutputBlend != PixelOutputBlend(context)) ||
+            HostViewport(context).ClipSpace != previous.VertexInput.ClipSpace)
+        {
+            return false;
+        }
+
+        if (kept.TableWords is { } words && !SameVertexTables(kept, words))
+        {
+            return false;
+        }
+
+        if (!_programs.Revalidate(previous.VertexInput.Stage) || (flags.PixelActive && !_programs.Revalidate(previous.PixelInput.Stage)) ||
+            (previous.Tessellation is { } tessellation && !_programs.Revalidate(tessellation.Hull.Input.Stage)))
+        {
+            return false;
+        }
+
+        programs = previous;
+        return true;
+    }
+
+    private void KeepGraphicsPrograms(KeptGraphicsPrograms kept, GraphicsPrograms programs, ContextRegisters context, in KeptGraphicsStamps stamps,
+        in KeptGraphicsFlags flags, ReadOnlySpan<ColorComponentMap> targetExportMapping)
+    {
+        kept.Programs = null;
+        if (DrawReuseDisabled || _registry.HasFrontend || !programs.Available || programs.MeshInput is not null ||
+            programs.VertexInput.Stage.Program is null || !TryReadKeptTables(kept, programs))
+        {
+            return;
+        }
+
+        kept.Programs = programs;
+        kept.Stamps = stamps;
+        kept.Flags = flags;
+        kept.OutputBlend = flags.PixelActive ? PixelOutputBlend(context) : 0;
+        kept.ExportMappingCount = targetExportMapping.Length;
+        targetExportMapping.CopyTo(kept.ExportMapping);
+    }
+
+    // The vertex table words the kept vertex inputs were decoded from, read again on a keep so a later draw
+    // can compare them (VertexInputResolver.SameTableWords); false keeps nothing (static attributes, which
+    // ReadTableWords refuses, or more attributes than a table holds).
+    private bool TryReadKeptTables(KeptGraphicsPrograms kept, GraphicsPrograms programs)
+    {
+        kept.TableWords = null;
+        kept.AttributeTable = 0;
+        kept.BufferTable = 0;
+        var source = _lastSources[(int)ShaderStage.Vertex];
+        if (programs.Tessellation is not null || source is null)
+        {
+            // A native tessellation draw reads no vertex tables (its domain stage has none).
+            return programs.Tessellation is not null;
+        }
+
+        if (!_vertexTables.TryGet(source.Registered, source.Hash, out var tables) || tables is null)
+        {
+            tables = VertexInputResolver.RequireTables(_context, source.Registered);
+        }
+
+        if (!VertexInputResolver.ReadsTables(tables))
+        {
+            return true;
+        }
+
+        if (tables.InputSemantics.Length > VertexInputInfo.MaxBuffers)
+        {
+            return false;
+        }
+
+        foreach (var word in tables.InputSemantics)
+        {
+            var semantic = new ShaderInputSemantic(word);
+            if (semantic.StaticBufferIndex || semantic.StaticAttribute)
+            {
+                return false;
+            }
+        }
+
+        var attributeTable = VertexInputResolver.ReadTablePointer(source.UserData, tables.VertexAttributeRegister);
+        var bufferTable = VertexInputResolver.ReadTablePointer(source.UserData, tables.VertexBufferRegister);
+        if (attributeTable == 0 || bufferTable == 0)
+        {
+            return false;
+        }
+
+        kept.TableWords = VertexInputResolver.ReadTableWords(_context, tables.InputSemantics, attributeTable, bufferTable, source.Address);
+        kept.AttributeTable = attributeTable;
+        kept.BufferTable = bufferTable;
+        return kept.TableWords.WholeSpans;
+    }
+
+    private bool SameVertexTables(KeptGraphicsPrograms kept, VertexTableWords words) =>
+        VertexInputResolver.SameTableWords(_context, words, kept.AttributeTable, kept.BufferTable,
+            _vertexTableScratch ??= new uint[VertexTableWords.MaxWords]);
+
+    // The blend state the pixel outputs are resolved from: the second blend source of target zero and the
+    // targets that blend with the source alpha (NeedsDualSourceAlpha).
+    private static uint PixelOutputBlend(ContextRegisters context)
+    {
+        var bits = context.BlendControls[0].UsesSecondarySource ? 1u : 0u;
+        for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+        {
+            if (BlendsWithSourceAlpha(context, slot))
+            {
+                bits |= 2u << (int)slot;
+            }
+        }
+
+        return bits;
+    }
+
+    // SHARPEMU_DRAW_REUSE=0 resolves every draw's programs, as before draw reuse (A/B comparisons).
+    private static readonly bool DrawReuseDisabled = Environment.GetEnvironmentVariable("SHARPEMU_DRAW_REUSE") == "0";
+
     // A tessellated draw's hull threadgroup: one guest wave64, as many whole patches as fit.
     private const uint HullWaveLanes = 64;
 
@@ -274,7 +552,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     // The programs of a tessellated draw (Gen5TessellationLaunch): the domain program as the host
     // tessellator's post-tessellation vertex function with the pixel program as for any draw, and
-    // the merged local/hull program as a compute kernel the executor runs first.
+    // the merged local/hull program as a compute kernel the executor runs first. Never kept: the
+    // hull kernel's launch is part of the lookup.
+    public TessellationPrograms? GetTessellationPrograms(
+        RegisterBanks banks,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        uint controlPoints,
+        bool quad) =>
+        GetTessellationPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface, banks.Context, targetExportMapping,
+            pixelActive, depthBound, depthAspectBound, stencilAspectBound, controlPoints, quad);
+
     public TessellationPrograms? GetTessellationPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
@@ -373,6 +664,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // MeshShadersSupported). The depth target's aspects are not passed in, so a bound depth
     // target stands for its depth aspect.
     public GraphicsPrograms GetMeshGraphicsPrograms(
+        RegisterBanks banks,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound) =>
+        GetMeshGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface, banks.Context, userConfig,
+            targetExportMapping, pixelActive, depthBound);
+
+    public GraphicsPrograms GetMeshGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
         ShaderInterfaceRegisters shaderInterface,
@@ -446,14 +746,32 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool stencilAspectBound,
         bool triangleList,
         MeshDrawConfiguration? mesh,
-        Gen5TessellationLaunch? tessellation = null)
+        Gen5TessellationLaunch? tessellation = null,
+        int startInstanceUserData = -1,
+        bool nativeTessellation = false)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+        // A merged local/hull + domain draw on a host with tessellation stages (upstream's native path): the
+        // export program is the domain stage, which reads no vertex tables, and the hull runs as that host's
+        // hull stage (PrepareTessellationHull). Metal emulates tessellation instead (GetTessellationPrograms).
+        var tessellated = nativeTessellation && tessellation is null && mesh is null && _host.TessellationStagesSupported &&
+            IsMergedTessellationMask(context.ShaderStages);
+        Gen5TessellationInfo? tessellationInfo = null;
+        if (tessellated)
+        {
+            if (!Gen5TessellationInfo.TryDecode(shaderInterface.TessellationFactorParameter, out var configuration, out var tessellationError))
+                throw GpuFatal.Fatal(tessellationError);
+            tessellationInfo = configuration;
+        }
+
+        var vertexStageKind = tessellated ? ShaderStage.TessellationEvaluation : mesh is null ? ShaderStage.Vertex : ShaderStage.Mesh;
         var vertexSource = PrepareSource(
-            vertex.ExportAddress, mesh is null ? ShaderStage.Vertex : ShaderStage.Mesh,
-            mesh is null ? "vertex" : "mesh", vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount,
+            vertex.ExportAddress, vertexStageKind,
+            tessellated ? "domain" : mesh is null ? "vertex" : "mesh", vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount,
             probeWrittenRegisters: true, VertexUserDataBase, ref _vertexUserData, vertex.GeometryUserDataAddress);
-        var vertexInfo = mesh is null ? PrepareVertexInput(vertexSource, shaderInterface, context) : new VertexInputInfo();
+        var vertexInfo = tessellated ? new VertexInputInfo { PositionExportControl = shaderInterface.VertexOutputControl }
+            : mesh is null ? PrepareVertexInput(vertexSource, shaderInterface, context) : new VertexInputInfo();
+        vertexInfo.StartInstanceUserData = mesh is null && !tessellated ? startInstanceUserData : -1;
         vertexInfo.IeeeMode = vertex.GeometryResource1.IeeeMode;
         vertexInfo.FloatMode = vertex.GeometryResource1.FloatMode;
         vertexInfo.Dx10Clamp = vertex.GeometryResource1.Dx10Clamp;
@@ -502,7 +820,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelOutputs = ResolveBoundTargets(context, targetExportMapping, dropUnwritten ? pixelProgram.PixelColorExportMasks : null,
                 boundSlots, outputModes, outputMappings);
             pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount,
-                depthAspectBound, stencilAspectBound, _pixelInputArrays);
+                depthAspectBound, stencilAspectBound, _pixelInputArrays, semantics: InputSemantics(pixelSource.Registered));
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(attributes, pixelInfo));
@@ -514,7 +832,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         // A ShaderStage.Mesh draw replaces the vertex stage outright; the primitive-shader
         // workgroup path is for the vertex stage only.
-        var primitiveShader = mesh is null ? PrimitiveShaderStageInfo(vertex, shaderInterface, context.ShaderStages) : null;
+        var primitiveShader = mesh is null && !tessellated ? PrimitiveShaderStageInfo(vertex, shaderInterface, context.ShaderStages) : null;
         if (primitiveShader is { } ngg && vertexSource.Registered.IsFused)
         {
             // The GS half of a fused program assembles its input primitives from LDS, so the
@@ -543,6 +861,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderProgram pixelProgramHandle = default;
         ShaderStageResources vertexStage;
         ShaderStageResources pixelStage = default;
+        TessellationDrawPrograms? tessellationPrograms = null;
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
         lock (_gate)
         {
@@ -573,6 +892,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             vertexOptions.RequiredVertexOutputCount = (int)attributeCount;
             vertexOptions.PrimitiveShader = primitiveShader;
             vertexOptions.Tessellation = tessellation;
+            vertexOptions.TessellationInfo = tessellationInfo;
+            vertexOptions.TessellationHull = null;
             vertexOptions.MeshPerVertexParameterMask = perVertexParameters;
             vertexOptions.VertexInterpolants = manualInterpolation is null ? [] : EncodedInterpolantsOf(manualInterpolation);
             vertexOptions.MeshInfo = mesh;
@@ -584,9 +905,25 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 out vertexProgram,
                 out vertexStage))
                 return new GraphicsPrograms { Available = false };
+
+            vertexInfo.Stage = vertexStage;
+            if (tessellated)
+            {
+                tessellationPrograms = PrepareTessellationHull(vertex, shaderInterface, tessellationInfo!.Value);
+                var bridge = _programs.GetTessellationBridge(vertexStage.Program!.Bindings!, tessellationInfo.Value.Domain);
+                vertexInfo = new VertexInputInfo
+                {
+                    PositionExportControl = vertexInfo.PositionExportControl,
+                    IeeeMode = vertexInfo.IeeeMode,
+                    FloatMode = vertexInfo.FloatMode,
+                    Dx10Clamp = vertexInfo.Dx10Clamp,
+                    Stage = vertexStage,
+                    Tessellation = new(bridge.Control, vertexProgram, tessellationPrograms.HullConfiguration.InputControlPoints),
+                };
+                vertexProgram = bridge.Vertex;
+            }
         }
 
-        vertexInfo.Stage = vertexStage;
         if (pixelInfo is not null)
         {
             pixelInfo.Stage = pixelStage;
@@ -598,9 +935,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             Pixel = pixelProgramHandle,
             VertexInput = vertexInfo,
             MeshInput = mesh,
+            Tessellation = tessellationPrograms,
             PixelInput = pixelInfo ?? InactivePixelInput,
             DropUnwrittenColorTargets = dropUnwritten,
-            PositionStream = mesh is null ? FindPositionStream(vertexInfo) : null,
+            PositionStream = mesh is null && !tessellated ? FindPositionStream(vertexInfo) : null,
         };
     }
 
@@ -655,6 +993,19 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         var limits = _host.Limits;
         return HostViewportTransform.Resolve(context, limits.MaxViewportWidth, limits.MaxViewportHeight);
+    }
+
+    // A frontend's pixel shader carries its own input semantics (upstream's InputSemantics); an AGC
+    // shader's are read from its header by the resolver, as before.
+    private uint[]? InputSemantics(RegisteredShader shader)
+    {
+        if (shader.Frontend is null)
+        {
+            return null;
+        }
+
+        var words = new uint[Math.Min(shader.InputSemanticsCount, (uint)PixelInputInfo.InterpolatorCount)];
+        return words.Length == 0 || _context.Memory.TryRead(shader.InputSemanticsAddress, MemoryMarshal.AsBytes(words.AsSpan())) ? words : null;
     }
 
     // The interpolated attributes a pixel program reads, ascending. A program never changes, and this
@@ -1006,6 +1357,183 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return null;
     }
 
+    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect: false, retry: null);
+
+    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect, retry: null);
+
+    // A dispatch's program. With retry (a dispatch that may suspend on its pipeline) the program the retry kept is handed
+    // back while its reads still hold, as GetComputeProgram(…, ComputeProgramRetry) does, and nothing is predicted: the
+    // dispatch runs again. Without it, a dispatch whose registers and user data are those of a dispatch this thread
+    // resolved keeps that program after its resources revalidate, else rebinds that program's entry to its user data,
+    // else resolves; its writes are predicted on the CPU when the kernel is evaluable (ShaderPipelineCache.KernelEvaluation).
+    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect,
+        ComputeProgramRetry? retry)
+    {
+        var compute = banks.Shader.Compute;
+        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
+        lock (_resolveGate)
+        {
+            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            if (retry is not null)
+            {
+                return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry, out _, out _, out _);
+            }
+
+            var registrations = ShaderHeaderRegistry.Registrations;
+            var all = _keptComputes ??= new Dictionary<ulong, List<KeptComputeProgram>>();
+            if (!all.TryGetValue(compute.Address, out var keptList))
+            {
+                keptList = new List<KeptComputeProgram>(KeptComputesPerShader);
+                all.Add(compute.Address, keptList);
+            }
+
+            KeptComputeProgram? kept = null;
+            foreach (var candidate in keptList)
+            {
+                if (candidate.Registrations == registrations && candidate.DispatchInitiator == dispatchInitiator && SameComputeShape(candidate.Registers, compute))
+                {
+                    kept = candidate;
+                    break;
+                }
+            }
+
+            if (kept is not null && !DrawReuseDisabled && !_registry.HasFrontend)
+            {
+                if (kept.Program is { } previous && kept.Registers is { } previousRegisters && kept.DimensionX == dimensionX &&
+                    kept.DimensionY == dimensionY && kept.DimensionZ == dimensionZ &&
+                    SameUserScalars(previousRegisters.UserScalars, compute.UserScalars, compute.UserScalarCount) && _programs.Revalidate(previous.Input.Stage))
+                {
+                    _computeKept.Increment();
+                    return WithPrediction(previous, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+                }
+
+                if (kept.Entry is { } entry && ++kept.Rebinds % IdentityRecheckPeriod != 0)
+                {
+                    _computeRebound.Increment();
+                    var rebound = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+                    KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
+                    return WithPrediction(rebound, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+                }
+            }
+
+            _computeResolved.Increment();
+            var program = GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null,
+                out var source, out var systemRegisters, out var decoded);
+            if (program.ImageCopy is not null)
+                return program;
+            if (kept is null)
+            {
+                if (keptList.Count == KeptComputesPerShader)
+                {
+                    keptList.RemoveAt(0);
+                }
+
+                kept = new KeptComputeProgram { Registrations = registrations, DispatchInitiator = dispatchInitiator };
+                keptList.Add(kept);
+            }
+
+            var usable = program.Available && !program.Consumed && source is not null;
+            kept.Source = source;
+            kept.SystemRegisters = systemRegisters;
+            kept.Kernel = decoded is not null && usable ? KernelFor(decoded) : null;
+            kept.Entry = usable ? ShaderProgramCache.LastEntry : null;
+            KeepComputeProgram(kept, program, compute, dimensionX, dimensionY, dimensionZ);
+            return WithPrediction(program, kept.Kernel, source, systemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+        }
+    }
+
+    private static void KeepComputeProgram(KeptComputeProgram kept, ComputeProgram program, ComputeStageRegisters compute, uint dimensionX, uint dimensionY, uint dimensionZ)
+    {
+        kept.Program = program.Available && !program.Consumed ? program : null;
+        if (kept.Registers is { } registers && SameComputeShape(registers, compute))
+        {
+            registers.UserScalars.CopyFrom(compute.UserScalars, compute.UserScalarCount);
+        }
+        else
+        {
+            kept.Registers = compute.Copy();
+        }
+
+        kept.DimensionX = dimensionX;
+        kept.DimensionY = dimensionY;
+        kept.DimensionZ = dimensionZ;
+    }
+
+    // The kept program's entry with this dispatch's user data: its code is not read or hashed again.
+    private ComputeProgram RebindComputeProgram(KeptComputeProgram kept, ProgramSourceEntry entry, ComputeStageRegisters compute, uint dispatchInitiator,
+        uint dimensionX, uint dimensionY, uint dimensionZ)
+    {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+        var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute", ref _computeUserData);
+        var source = kept.Source! with { UserData = userData };
+        kept.Source = source;
+        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
+        ShaderProgram handle;
+        ShaderStageResources stage;
+        lock (_gate)
+        {
+            var pushDataCursor = 0u;
+            var options = _computeOptions;
+            options.ComputeInfo = input;
+            options.ComputeSystemRegisters = kept.SystemRegisters;
+            options.Tessellation = null;
+            if (!_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out handle, out stage, out var rejection))
+            {
+                ReportShaderSkip(source, rejection);
+                return new ComputeProgram { Available = false };
+            }
+        }
+
+        input.Stage = stage;
+        return new ComputeProgram { Program = handle, Input = input };
+    }
+
+    private static bool SameUserScalars(UserScalarRegisters kept, UserScalarRegisters current, int count) =>
+        kept.ValueSpan(count).SequenceEqual(current.ValueSpan(count)) &&
+        kept.KindSpan(count).SequenceEqual(current.KindSpan(count));
+
+    private static bool SameComputeShape(ComputeStageRegisters? kept, ComputeStageRegisters current) =>
+        kept is not null &&
+        kept.Address == current.Address && kept.ProgramChecksum == current.ProgramChecksum &&
+        kept.ThreadsX == current.ThreadsX && kept.ThreadsY == current.ThreadsY && kept.ThreadsZ == current.ThreadsZ &&
+        kept.VectorRegisterCount == current.VectorRegisterCount && kept.Priority == current.Priority && kept.FloatMode == current.FloatMode &&
+        kept.Dx10Clamp == current.Dx10Clamp && kept.DebugMode == current.DebugMode && kept.IeeeMode == current.IeeeMode &&
+        kept.RequireForwardProgress == current.RequireForwardProgress && kept.HalfPrecisionOverflow == current.HalfPrecisionOverflow &&
+        kept.ThreadgroupConfiguration == current.ThreadgroupConfiguration && kept.WaveSize == current.WaveSize && kept.ScratchEnable == current.ScratchEnable &&
+        kept.UserScalarCount == current.UserScalarCount && kept.ThreadGroupIdXEnable == current.ThreadGroupIdXEnable &&
+        kept.ThreadGroupIdYEnable == current.ThreadGroupIdYEnable && kept.ThreadGroupIdZEnable == current.ThreadGroupIdZEnable &&
+        kept.ThreadGroupSizeEnable == current.ThreadGroupSizeEnable && kept.ThreadIdComponentCount == current.ThreadIdComponentCount &&
+        kept.LocalDataShareSize == current.LocalDataShareSize && kept.SharedVectorRegisters == current.SharedVectorRegisters;
+
+    // A frontend image copy's fallback program, compiled when the executor cannot copy: outside any resolution.
+    private ComputeProgram CompileComputeProgram(ShaderSource source, ComputeInputInfo input, Gen5ComputeSystemRegisters systemRegisters)
+    {
+        lock (_resolveGate)
+        {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            ShaderProgram handle;
+            ShaderStageResources stage;
+            lock (_gate)
+            {
+                var pushDataCursor = 0u;
+                if (!TryPrepareProgram(
+                    source,
+                    new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = systemRegisters },
+                    ref pushDataCursor,
+                    out handle,
+                    out stage))
+                {
+                    return new ComputeProgram { Available = false };
+                }
+            }
+
+            input.Stage = stage;
+            return new ComputeProgram { Program = handle, Input = input };
+        }
+    }
+
     public ComputeProgram GetComputeProgram(
         ComputeStageRegisters compute,
         ShaderInterfaceRegisters shaderInterface,
@@ -1018,7 +1546,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null);
+            return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null, out _, out _, out _);
         }
     }
 
@@ -1035,7 +1563,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null, ahead: true);
+            return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null, out _, out _, out _, ahead: true);
         }
     }
 
@@ -1055,7 +1583,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry);
+            return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry, out _, out _, out _);
         }
     }
 
@@ -1066,9 +1594,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionY,
         uint dimensionZ,
         ComputeProgramRetry? retry,
+        out ShaderSource? resolvedSource,
+        out Gen5ComputeSystemRegisters resolvedSystemRegisters,
+        out Gen5ShaderProgram? decoded,
         bool ahead = false)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+        resolvedSource = null;
+        resolvedSystemRegisters = default;
+        decoded = null;
         var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0, ref _computeUserData);
         if (retry is not null)
         {
@@ -1084,6 +1618,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         var program = _programs.Decode(source);
+        resolvedSource = source;
+        decoded = program;
         if (_skipRayTracing)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
@@ -1105,6 +1641,18 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
         var systemRegisters = DecodeComputeSystemRegisters(compute);
+        resolvedSystemRegisters = systemRegisters;
+        if (!ahead && retry is null && source.Registered.Frontend is { } frontend &&
+            frontend.TryResolveImageCopy(_context, source.Registered, source.UserData, input, systemRegisters, dimensionX, dimensionY, dimensionZ,
+                out var copySource, out var copyDestination))
+        {
+            return new ComputeProgram
+            {
+                Input = input,
+                ImageCopy = new(copySource, copyDestination, () => CompileComputeProgram(source, input, systemRegisters)),
+            };
+        }
+
         if (ahead && IsMaskedDwordCopyKernel(program))
         {
             // Submitting it is running it; the dispatch does that itself when the stream gets there.
@@ -1132,6 +1680,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var computeOptions = _computeOptions;
             computeOptions.ComputeInfo = input;
             computeOptions.ComputeSystemRegisters = systemRegisters;
+            computeOptions.Tessellation = null;
             _programs.ReadLog = retry?.Reads;
             try
             {
@@ -1163,13 +1712,29 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         if (_programs.TryGetProgram(source, options, _strictShaders, ref pushDataCursor, out program, out stage, out var rejection))
             return true;
 
-        if (rejection.Length != 0 && _reportedShaderSkips.Add((source.Stage, source.Hash, source.CodeSize)))
+        ReportShaderSkip(source, rejection);
+        return false;
+    }
+
+    private void ReportShaderSkip(ShaderSource source, string rejection)
+    {
+        if (rejection.Length == 0)
+        {
+            return;
+        }
+
+        bool reported;
+        lock (_reportedShaderSkips)
+        {
+            reported = _reportedShaderSkips.Add((source.Stage, source.Hash, source.CodeSize));
+        }
+
+        if (reported)
         {
             var tag = source.Stage == ShaderStage.Compute ? "COMPUTE_SKIPPED" : "DRAW_SKIPPED";
             Console.Error.WriteLine($"[GPU][WARN][{tag}] {rejection} " +
                 "The operation was not executed. Images and FPS can be incorrect. Set SHARPEMU_STRICT_COMPUTE=1 to stop on this failure.");
         }
-        return false;
     }
 
     // The system registers that follow the user data, in the order the resource register enables them.
@@ -1274,6 +1839,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
         var lodStatistics = pixelInput is not null && _host.PixelPipelinesFollowLodStatistics && MipStatistics.TitleUsesCounters;
         lookup.LodStatistics = lodStatistics;
+        lookup.Tessellation = vertexInput.Tessellation;
         if (_graphicsPipelines.TryGetValue(lookup, out handle))
         {
             return true;
@@ -1312,6 +1878,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             _graphicsPipelines[key] = created;
 
+            // The upstream graphics records of a host without its own graphics prewarm (Metal keeps GraphicsPrewarmList).
+            if (_host.GraphicsPrewarm is null && _host.ShaderPrewarm is { } prewarm && description.Tessellation is null &&
+                description.VertexStage.Stage == ShaderStageKind.Vertex)
+            {
+                prewarm.RecordGraphics(description);
+            }
+
             ShaderCacheCounters.CountGraphicsPipeline();
             handle = created;
             return true;
@@ -1346,6 +1919,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             depthBoundsInPipelineState);
         return new GraphicsPipelineDescription
         {
+            Tessellation = vertexInput.Tessellation,
             Rendering = renderingState,
             VertexInput = vertexState,
             VertexInfo = vertexInput,
@@ -1453,7 +2027,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         var depthState = withDepth ? depth.Target.State : default;
-        var rectangleList = topology == GpuPrimitiveTopology.PatchList;
+        // A patch list without tessellation stages carries legacy rectangles, which are never
+        // culled. Tessellated patches rasterize as ordinary triangles and keep the guest's culling.
+        var rectangleList = topology == GpuPrimitiveTopology.PatchList && vertexInput.Tessellation is null;
         var mode = context.RasterMode;
         parameters.NegativeOneToOne = !context.Clip.DirectXClipSpace;
         parameters.DepthClipEnable = HostViewportTransform.DepthClipOf(context);
@@ -1565,6 +2141,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         VertexProgramId = description.VertexProgram.Id,
         PixelProgramId = description.PixelInfo is not null ? description.PixelProgram.Id : 0,
         LodStatistics = description.LodStatistics,
+        Tessellation = description.Tessellation,
         VertexInput = description.VertexInput,
         StaticParameters = description.StaticParameters,
     };
@@ -1682,4 +2259,42 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return _host.GetComputePipelineCompletion(program);
         }
     }
+}
+
+// The register stamps a kept draw was resolved under (RegisterBanks.Stamp) and the shader registrations then.
+internal readonly record struct KeptGraphicsStamps(ulong Programs, ulong VertexUserData, ulong PixelUserData, ulong Interface, long Registrations);
+
+// The executor's inputs a kept draw was resolved with.
+internal readonly record struct KeptGraphicsFlags(bool PixelActive, bool DepthBound, bool DepthAspectBound, bool StencilAspectBound,
+    bool TriangleList, int StartInstanceUserData);
+
+// The programs of the last draw a thread resolved, with what they were resolved from (ShaderPipelineCache.TryKeepGraphicsPrograms).
+internal sealed class KeptGraphicsPrograms
+{
+    public GraphicsPrograms? Programs;
+    public KeptGraphicsStamps Stamps;
+    public KeptGraphicsFlags Flags;
+    public uint OutputBlend;
+    public int ExportMappingCount;
+    public readonly ColorComponentMap[] ExportMapping = new ColorComponentMap[RenderingState.ColorAttachmentCapacity];
+    public VertexTableWords? TableWords;
+    public ulong AttributeTable;
+    public ulong BufferTable;
+}
+
+// The last dispatches of one compute shader a thread resolved (ShaderPipelineCache.GetComputeProgram).
+internal sealed class KeptComputeProgram
+{
+    public ComputeProgram? Program;
+    public ComputeStageRegisters? Registers;
+    public ShaderSource? Source;
+    public Gen5ComputeSystemRegisters SystemRegisters;
+    public ProgramSourceEntry? Entry;
+    public ShaderPipelineCache.KernelDemand? Kernel;
+    public long Rebinds;
+    public long Registrations;
+    public uint DispatchInitiator;
+    public uint DimensionX;
+    public uint DimensionY;
+    public uint DimensionZ;
 }

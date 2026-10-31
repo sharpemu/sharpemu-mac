@@ -76,7 +76,7 @@ public sealed partial class GuestImageCacheTests
     // A title submits dozens of command buffers per frame. An image it writes early in a frame and reads late in it
     // is past the removal window of submissions in between, and an unrelated image the frame requested inside its
     // memory deleted it with its contents: its next use uploaded stale guest memory. An image used this frame stays;
-    // after the frame ends, the overlapping request deletes it as before.
+    // after the frame ends, the overlapping request parks it with its contents.
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -97,12 +97,64 @@ public sealed partial class GuestImageCacheTests
             new GpuExtent3D(64, 64, 1), 1, 4, 1);
         harness.Acquire(ref inside);
 
-        Assert.Equal(!frameEnded, harness.Images.Contains(writtenId));
-        if (!frameEnded)
-        {
-            Assert.True(harness.Image(writtenId).IsGpuModified);
-            Assert.Equal(Bytes(Enumerable.Repeat(deviceValue, (int)(width * width)).ToArray()), harness.ReadImageBytes(harness.Image(writtenId)));
-        }
+        Assert.True(harness.Images.Contains(writtenId));
+        Assert.Equal(frameEnded, harness.Image(writtenId).Parked);
+        Assert.True(harness.Image(writtenId).IsGpuModified);
+        Assert.Equal(Bytes(Enumerable.Repeat(deviceValue, (int)(width * width)).ToArray()), harness.ReadImageBytes(harness.Image(writtenId)));
+
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void FindImage_AnImageFilledFromGuestMemoryIsParkedAndReusedWithTheNewerBytes()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 128;
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address, Bytes(Enumerable.Repeat(0x11111111u, (int)(width * width)).ToArray()));
+        var filled = LinearRequest(address, width * width * 4, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(width, width, 1), 1, 4, 1);
+        var filledId = harness.Acquire(ref filled);
+        Assert.False(harness.Image(filledId).IsGpuModified);
+        AgeBeyondTheRemovalWindow(harness, filledId, endFrame: true);
+
+        var inside = LinearRequest(address + 0x8000, 0x4000, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(64, 64, 1), 1, 4, 1);
+        harness.Acquire(ref inside);
+        Assert.True(harness.Image(filledId).Parked);
+
+        harness.Write(address, Bytes(Enumerable.Repeat(0x22222222u, (int)(width * width)).ToArray()));
+        harness.Images.InvalidateMemory(address, width * width * 4);
+        var again = LinearRequest(address, width * width * 4, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(width, width, 1), 1, 4, 1);
+        Assert.Equal(filledId, harness.Acquire(ref again));
+        Assert.False(harness.Image(filledId).Parked);
+        Assert.Equal(Bytes(Enumerable.Repeat(0x22222222u, (int)(width * width)).ToArray()), harness.ReadImageBytes(harness.Image(filledId)));
+
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void TryClearImageFromBuffer_AClearOfOneLayerClearsOnlyThatLayer()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 64;
+        const uint layers = 4;
+        const ulong layerSize = width * width * 4;
+        var address = harness.MapBacked(layerSize * layers, ReadWrite);
+        harness.Write(address, Bytes(Enumerable.Repeat(0x11111111u, (int)(width * width * layers)).ToArray()));
+        var request = LinearRequest(address, layerSize * layers, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(width, width, 1), layers, 4, 1);
+        var imageId = harness.Acquire(ref request);
+
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address + layerSize * 2, layerSize, 0x22222222u)));
+
+        var expected = Enumerable.Repeat(0x11111111u, (int)(width * width * layers)).ToArray();
+        Array.Fill(expected, 0x22222222u, (int)(width * width * 2), (int)(width * width));
+        Assert.True(harness.Image(imageId).IsGpuModified);
+        Assert.Equal(Bytes(expected), harness.ReadImageBytes(harness.Image(imageId)));
 
         harness.Shutdown();
     }

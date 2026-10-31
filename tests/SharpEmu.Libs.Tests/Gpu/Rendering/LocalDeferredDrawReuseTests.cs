@@ -29,7 +29,7 @@ public sealed partial class LocalDeferredDrawReuseTests
         public bool IsProducerThread => true;
         public long Gate => 0;
         public readonly List<AgcExports.DeferredWork> Work = new();
-        public void EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw) => Work.Add(work);
+        public long EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw) { Work.Add(work); return 0; }
     }
 
     private sealed class Fixture : IDisposable

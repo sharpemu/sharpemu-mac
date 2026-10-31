@@ -12,6 +12,32 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5VertexSystemRegisterTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void VertexSystemInputsFollowTheFrontendRegisterLayout(bool customLayout)
+    {
+        var program = ResourceTestProgram.Program(ResourceTestProgram.EndProgram(0));
+        if (customLayout)
+            program = program with { VertexIndexRegister = 0, InstanceIndexRegisters = [1, 2, 3] };
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Vertex);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(new ShaderCompileRequest(plan, resources, layout),
+            out var shader, out var error), error);
+        var instructions = Decode(shader.Spirv);
+        void AssertInput(uint builtIn, uint register)
+        {
+            var input = Assert.Single(instructions, item => item.Opcode == SpirvOp.Decorate &&
+                item.Operands.Length == 3 && item.Operands[1] == (uint)SpirvDecoration.BuiltIn && item.Operands[2] == builtIn).Operands[0];
+            var loads = instructions.Where(item => item.Opcode == SpirvOp.Load && item.Operands[2] == input)
+                .Select(item => item.Operands[1]).ToHashSet();
+            var target = Register(instructions, $"v{register}");
+            Assert.Contains(instructions, item => item.Opcode == SpirvOp.Store && item.Operands[0] == target && loads.Contains(item.Operands[1]));
+        }
+        AssertInput((uint)SpirvBuiltIn.VertexIndex, program.VertexIndexRegister);
+        foreach (var register in program.InstanceIndexRegisters)
+            AssertInput((uint)SpirvBuiltIn.InstanceIndex, register);
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public void VertexCapacityIsInitializedBeforeThePackedCountRead(bool subgroups)

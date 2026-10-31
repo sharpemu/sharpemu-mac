@@ -3,6 +3,8 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
@@ -29,7 +31,8 @@ public readonly record struct DrawIndexedArguments(
     ulong IndirectArgumentsAddress = 0,
     // The guest set no index buffer size: IndexCount is only the range seen so far and
     // must not clamp the count read from the arguments.
-    bool UnboundedIndexBuffer = false)
+    bool UnboundedIndexBuffer = false,
+    int StartInstanceUserData = -1)
 {
     // Predicated, or inside an occlusion query: never left out while its pipeline compiles.
     public bool MustExecute { get; init; }
@@ -44,6 +47,7 @@ public readonly record struct DrawAutoArguments(
     uint FirstVertex,
     uint FirstInstance,
     DrawOffsetSource OffsetSource,
+    int StartInstanceUserData = -1,
     // Nonzero when the counts are still in guest memory at this address, laid out as
     // (vertexCount, instanceCount, firstVertex, firstInstance). VertexCount is then a
     // placeholder and the other counts are unused.
@@ -95,7 +99,8 @@ public readonly record struct EndOfPipeWrite(
     int FlipMode = 0,
     long FlipArgument = 0,
     ulong FlipRequestId = 0,
-    bool ReferenceClock = false);
+    bool ReferenceClock = false,
+    bool WaitForGpu = false);
 
 // The host state a command block (or a refusal to give one) was read under: four counters the
 // host bumps whenever bytes a packet read could return, or whether that read would wait, change.
@@ -105,6 +110,8 @@ public readonly record struct CommandReadToken(long First, long Second, long Thi
 public interface ICommandStreamHost
 {
     ICpuMemory Memory { get; }
+
+    IRenderHost? RenderHost => this as IRenderHost;
 
     bool TryRecordLodStatistics(ulong destination, uint size) => false;
 
@@ -150,6 +157,34 @@ public interface ICommandStreamHost
     // write, unlike the packets themselves. A host that defers work completes it first.
     bool TryReadGuestOperand(ulong address, Span<byte> destination) => TryReadGuest(address, destination);
 
+    // Reads the label a wait polls. A stale value only suspends the wait until a retry, so a host
+    // that runs work behind the stream need not complete it first.
+    bool TryReadGuestWaitOperand(ulong address, Span<byte> destination) => TryReadGuestOperand(address, destination);
+    // The first look at a wait: a host that keeps a relaxed copy may answer from it and say so
+    // (stale), and the interpreter reads again with allowStale off when the copy does not satisfy
+    // the compare. A host without one takes it as the first look that commits nothing.
+    bool TryReadGuestWaitOperand(ulong address, Span<byte> destination, bool allowStale, out bool stale)
+    {
+        stale = false;
+        return TryReadGuestWaitOperand(address, destination, commitPendingWrite: false);
+    }
+
+    // Draws resolve ahead of the stream on this many worker threads; zero resolves them on the stream thread.
+    int ResolveWorkerCount => 0;
+
+    // Reads on this thread now serve a draw at this stream position: a range earlier work may still
+    // write refuses with SerialResolveRequiredException, every other read lands in the log.
+    void BeginWorkerResolve(long sequence, ResolveReadLog reads)
+    {
+    }
+
+    void EndWorkerResolve()
+    {
+    }
+
+    // At the stream position of the draw: whether the bytes a worker read are what it would read now.
+    bool ValidateWorkerReads(ResolveReadLog reads) => true;
+
     /// <summary>
     /// Reads the label a wait packet polls, as memory holds it now.
     /// </summary>
@@ -164,7 +199,7 @@ public interface ICommandStreamHost
     /// changing. Hosts whose operand reads do not wait need no override.
     /// </remarks>
     bool TryReadGuestWaitOperand(ulong address, Span<byte> destination, bool commitPendingWrite) =>
-        TryReadGuestOperand(address, destination);
+        TryReadGuestWaitOperand(address, destination);
 
     /// <summary>
     /// Whether recorded work still owes these bytes and will land them on its own, so that
@@ -196,6 +231,8 @@ public interface ICommandStreamHost
 
     // Runs commands other threads posted to this worker. Called before every packet.
     void RunPendingCommands();
+
+    PendingCommandSignal CommandSignal => PendingCommandSignal.AlwaysRaised;
 
     // Starts a slice of a submission; the geometry snapshots were captured when it was submitted.
     void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots);

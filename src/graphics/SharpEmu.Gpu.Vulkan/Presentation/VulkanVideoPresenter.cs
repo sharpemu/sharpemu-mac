@@ -232,6 +232,19 @@ internal static unsafe partial class VulkanVideoPresenter
                (Is10Bit(from) && to == Format.R8G8B8A8Unorm);
     }
 
+    // The host-owned resources of one recorded draw or dispatch, retired when its submission completes.
+    private sealed class SubmissionUploadResources
+    {
+        public string DebugName = "SharpEmu translated";
+        public TextureResource[] Textures = [];
+        public int TextureCount;
+        // Draw-local feedback copies stay alive until the GPU has consumed
+        // the descriptors that reference them.
+        public CachedImage[] FeedbackSnapshots = [];
+        // Host buffers that took uploads the stream ring could not hold; recycled with the draw.
+        public (VkBuffer Buffer, DeviceMemory Memory)[]? OverflowBuffers;
+    }
+
     private sealed partial class Presenter : IDisposable
     {
 
@@ -243,31 +256,19 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _firstFramePresented;
         private bool _firstGuestDrawPresented;
         private bool _splashPresented;
-        private bool _deviceLost;
+        internal bool _deviceLost;
         private bool _deviceLostLogged;
         private string _lastSubmitDebugName = string.Empty;
         private int _directPresentationCount;
         private readonly Dictionary<ulong, long> _presentedGuestImageTraceCounts = new();
         private readonly Dictionary<long, GuestImageResource> _guestImageVersions = new();
 
-        // The host-owned resources of one recorded draw or dispatch, retired when its submission completes.
-        private sealed class SubmissionUploadResources
-        {
-            public string DebugName = "SharpEmu translated";
-            public TextureResource[] Textures = [];
-            // Draw-local feedback copies stay alive until the GPU has consumed
-            // the descriptors that reference them.
-            public CachedImage[] FeedbackSnapshots = [];
-            // Host buffers that took uploads the stream ring could not hold; recycled with the draw.
-            public (VkBuffer Buffer, DeviceMemory Memory)[]? OverflowBuffers;
-        }
-
         private const ulong SwapchainAcquireTimeoutNs = 250_000_000;
 
         public Presenter(uint width, uint height)
         {
             _commandStream = new CommandStreamQueue(this);
-            _relay = new GpuWorkerRelay(WakeRenderThread, _commandStream.TryEnqueueControlBarrier);
+            _relay = new GpuWorkerRelay(WakeRenderThreadForRelay, _commandStream.TryEnqueueControlBarrier);
             _hostBufferPool = new VulkanHostBufferPool(
                 MaximumCachedHostBufferBytes,
                 DestroyHostBufferAllocation);
@@ -478,7 +479,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ => true,
             };
 
-        private static ImageSubresourceRange ColorSubresourceRange(
+        internal static ImageSubresourceRange ColorSubresourceRange(
             uint baseMipLevel = 0,
             uint levelCount = 1,
             uint layerCount = 1) =>
@@ -490,7 +491,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 LayerCount = layerCount,
             };
 
-        private static void TraceVulkanShader(string message)
+        internal static void TraceVulkanShader(string message)
         {
             if (!_traceVulkanShaderEnabled)
             {

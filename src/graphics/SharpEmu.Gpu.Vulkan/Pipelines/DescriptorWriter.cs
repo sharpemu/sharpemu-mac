@@ -43,6 +43,7 @@ public static class DescriptorWriter
         ShaderStage.Vertex => ShaderStageFlags.VertexBit,
         ShaderStage.Pixel => ShaderStageFlags.FragmentBit,
         ShaderStage.Compute => ShaderStageFlags.ComputeBit,
+        ShaderStage.TessellationEvaluation => ShaderStageFlags.TessellationEvaluationBit,
         ShaderStage.Mesh => ShaderStageFlags.MeshBitExt,
         _ => throw GpuFatal.Fatal($"The shader stage is unknown: stage={stage}."),
     };
@@ -50,6 +51,16 @@ public static class DescriptorWriter
     public static PipelineStageFlags PipelineStageFlag(ShaderStageFlags stages)
     {
         var result = PipelineStageFlags.None;
+        if ((stages & ShaderStageFlags.TessellationControlBit) != 0)
+        {
+            result |= PipelineStageFlags.TessellationControlShaderBit;
+        }
+
+        if ((stages & ShaderStageFlags.TessellationEvaluationBit) != 0)
+        {
+            result |= PipelineStageFlags.TessellationEvaluationShaderBit;
+        }
+
         if ((stages & ShaderStageFlags.VertexBit) != 0)
         {
             result |= PipelineStageFlags.VertexShaderBit;

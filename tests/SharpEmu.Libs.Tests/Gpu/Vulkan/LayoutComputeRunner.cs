@@ -218,12 +218,26 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         ulong[]? bufferRanges = null,
         uint[]? memoryOffsets = null,
         ulong[]? callArguments = null,
-        ulong[]? callTargets = null)
+        ulong[]? callTargets = null,
+        uint[]? tessellationData = null)
     {
         var vk = _harness.Vk;
         var device = _harness.Device.Device;
         var layout = _request.Bindings;
         var shaderData = new uint[layout.ShaderDataDwordCount];
+        if (layout.UsesBufferLengths && boundBuffers.TryGetValue(DescriptorBindingKind.Buffers, out var bounded))
+            for (var index = 0; index < bounded.Length; index++)
+                shaderData[layout.BufferLengthsDword + (uint)index] = checked((uint)(
+                    (bufferRanges is not null && index < bufferRanges.Length ? bufferRanges[index] : bounded[index].Size) / sizeof(uint)));
+        if (layout.UsesTessellationData)
+        {
+            if (tessellationData is not { Length: (int)Gen5TessellationData.DwordCount })
+            {
+                throw new InvalidOperationException("The tessellation kernel requires its runtime data.");
+            }
+
+            tessellationData.CopyTo(shaderData, (int)layout.TessellationDataDword);
+        }
         for (var index = 0; index < layout.UserDataRegisters.Count; index++)
         {
             var register = layout.UserDataRegisters[index];
@@ -269,6 +283,29 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
                 shaderData[layout.CallTargetsDword + index * 2] = (uint)callTargets[index];
                 shaderData[layout.CallTargetsDword + index * 2 + 1] = (uint)(callTargets[index] >> 32);
             }
+        }
+
+        if (layout.UsesTableBlock)
+        {
+            var bound = boundBuffers.TryGetValue(DescriptorBindingKind.Buffers, out var tableBuffers) ? tableBuffers : [];
+            var table = flattenedTable ?? [];
+            var block = new uint[layout.TableFlattenedDword + table.Length];
+            block[0] = (uint)table.Length;
+            for (var index = 0; index < layout.BufferCount; index++)
+            {
+                var buffer = index < bound.Length ? bound[index] : CreateBuffer(16);
+                var record = (int)(BindingLayout.TableBlockHeaderDwords + (uint)index * BindingLayout.TableBufferDwords);
+                var range = bufferRanges is not null && index < bufferRanges.Length ? bufferRanges[index] : buffer.Size;
+                block[record] = (uint)buffer.DeviceAddress;
+                block[record + 1] = (uint)(buffer.DeviceAddress >> 32);
+                block[record + 2] = (uint)(range >> 2);
+                block[record + 3] = memoryOffsets is not null && index < memoryOffsets.Length ? memoryOffsets[index] & 0xFF : 0;
+            }
+
+            table.CopyTo(block, (int)layout.TableFlattenedDword);
+            var blockAddress = CreateBuffer(MemoryMarshal.AsBytes<uint>(block)).DeviceAddress;
+            shaderData[layout.TableBlockDword] = (uint)blockAddress;
+            shaderData[layout.TableBlockDword + 1] = (uint)(blockAddress >> 32);
         }
 
         var setLayout = _setLayout;

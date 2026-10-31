@@ -13,7 +13,7 @@ namespace SharpEmu.Gpu.Vulkan;
 internal sealed unsafe partial class VulkanOcclusionQueries(Vk vulkan, Device device) : IDisposable
 {
     private const uint Capacity = 256;
-    private sealed class Group
+    internal sealed class Group
     {
         public ulong Sum;
         public long Recorded;
@@ -22,7 +22,7 @@ internal sealed unsafe partial class VulkanOcclusionQueries(Vk vulkan, Device de
         public readonly Queue<(long Needed, Action<ulong> Publish)> Dumps = new();
     }
 
-    private sealed class Block(QueryPool pool)
+    internal sealed class Block(QueryPool pool)
     {
         public readonly QueryPool Pool = pool;
         public readonly int[] Queues = new int[Capacity];
@@ -34,6 +34,7 @@ internal sealed unsafe partial class VulkanOcclusionQueries(Vk vulkan, Device de
 
     private readonly List<Block> _blocks = new();
     private readonly Stack<Block> _available = new();
+    private readonly Lock _blockGate = new();
     private readonly List<Block> _recorded = new();
     private readonly Dictionary<int, ulong> _samples = new();
     private readonly Dictionary<int, Group> _groups = new();
@@ -86,25 +87,8 @@ internal sealed unsafe partial class VulkanOcclusionQueries(Vk vulkan, Device de
 
         if (_current is null || _current.Count == Capacity)
         {
-            if (!_available.TryPop(out _current))
-            {
-                var info = new QueryPoolCreateInfo
-                {
-                    SType = StructureType.QueryPoolCreateInfo,
-                    QueryType = QueryType.Occlusion,
-                    QueryCount = Capacity,
-                };
-                var result = vulkan.CreateQueryPool(device, &info, null, out var pool);
-                if (result != Result.Success)
-                    throw SubmissionScheduler.Fatal($"Cannot create an occlusion query pool: {result}.");
-                _current = new Block(pool);
-                _blocks.Add(_current);
-            }
-
-            _current.Count = 0;
-            _current.ReducedCount = 0;
+            _current = RentBlock(command);
             _recorded.Add(_current);
-            vulkan.CmdResetQueryPool(command, _current.Pool, 0, Capacity);
         }
 
         _current.Queues[_current.Count] = queueId;
@@ -119,6 +103,75 @@ internal sealed unsafe partial class VulkanOcclusionQueries(Vk vulkan, Device de
             _traceDraws = 0;
             _traceSelectedDraws = 0;
             VisibilityResultTrace.Occlusion($"begin query={_traceId} queue={queueId} control=0x{depthCountControl:X8}");
+        }
+    }
+
+    // A render worker records its queries in blocks of its own and the render thread adopts them in stream order.
+    internal Block RentBlock(CommandBuffer command)
+    {
+        Block? block;
+        lock (_blockGate)
+        {
+            _available.TryPop(out block);
+        }
+
+        if (block is null)
+        {
+            var info = new QueryPoolCreateInfo
+            {
+                SType = StructureType.QueryPoolCreateInfo,
+                QueryType = QueryType.Occlusion,
+                QueryCount = Capacity,
+            };
+            var result = vulkan.CreateQueryPool(device, &info, null, out var pool);
+            if (result != Result.Success)
+                throw SubmissionScheduler.Fatal($"Cannot create an occlusion query pool: {result}.");
+            block = new Block(pool);
+            lock (_blockGate)
+            {
+                _blocks.Add(block);
+            }
+        }
+
+        block.Count = 0;
+        block.ReducedCount = 0;
+        vulkan.CmdResetQueryPool(command, block.Pool, 0, Capacity);
+        return block;
+    }
+
+    internal static bool IsFull(Block block) => block.Count == Capacity;
+
+    internal void BeginInBlock(CommandBuffer command, Block block) =>
+        vulkan.CmdBeginQuery(command, block.Pool, block.Count, QueryControlFlags.PreciseBit);
+
+    internal void EndInBlock(CommandBuffer command, Block block) => vulkan.CmdEndQuery(command, block.Pool, block.Count++);
+
+    internal void Adopt(Block block, int queueId)
+    {
+        if (block.Count == 0)
+        {
+            ReturnBlock(block);
+            return;
+        }
+
+        var group = GroupOf(queueId);
+        for (var index = 0; index < block.Count; index++)
+        {
+            block.Queues[index] = queueId;
+            block.Groups[index] = group;
+            group.Recorded++;
+            if (VisibilityResultTrace.Enabled)
+                block.TraceIds[index] = ++_traceId;
+        }
+
+        _recorded.Add(block);
+    }
+
+    internal void ReturnBlock(Block block)
+    {
+        lock (_blockGate)
+        {
+            _available.Push(block);
         }
     }
 
@@ -185,7 +238,7 @@ internal sealed unsafe partial class VulkanOcclusionQueries(Vk vulkan, Device de
                 VisibilityResultTrace.Occlusion($"complete query={block.TraceIds[index]} queue={queueId} samples={results[index]} cumulative={_samples[queueId]}");
         }
         // The timeline callback runs after all uses of this pool have completed.
-        _available.Push(block);
+        ReturnBlock(block);
     }
 
     public void Dispose()

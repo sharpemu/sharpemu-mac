@@ -480,6 +480,14 @@ public static class KernelPthreadCompatExports
         LibraryName = "libKernel")]
     public static int PthreadMutexLock(CpuContext ctx) => PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: false);
 
+    internal static int PthreadMutexRelativeTimedlock(CpuContext ctx)
+    {
+        var now = Stopwatch.GetTimestamp();
+        var ticks = (UInt128)ctx[CpuRegister.Rsi] * (ulong)Stopwatch.Frequency / 1_000_000;
+        var deadline = ticks >= (UInt128)(long.MaxValue - now) ? long.MaxValue : now + (long)ticks;
+        return PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: false, deadline: deadline);
+    }
+
     [SysAbiExport(
         Nid = "upoVrzMHFeE",
         ExportName = "scePthreadMutexTrylock",
@@ -2996,7 +3004,12 @@ public static class KernelPthreadCompatExports
         var granted = false;
         lock (state.SyncRoot)
         {
-            if (state.FifoHandoff)
+            if (waiter.Node is null && Volatile.Read(ref waiter.Granted) == 0)
+            {
+                // Abandoned (its timed lock expired): nothing holds it parked any more.
+                granted = true;
+            }
+            else if (state.FifoHandoff)
             {
                 granted = TryGrantMutexWaiterLocked(state, waiter);
             }

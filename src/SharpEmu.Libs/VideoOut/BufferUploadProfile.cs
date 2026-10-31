@@ -107,6 +107,93 @@ public static class BufferUploadProfile
     [ThreadStatic] private static Source _source;
     public static bool Enabled => RenderPhaseProfile.FrameTraceEnabled;
 
+    private static long _totalUploads;
+    private static long _totalCopies;
+    private static long _totalBytes;
+    private static long _totalRangeBytes;
+
+    public static void NoteUpload(int copies, ulong bytes, ulong rangeBytes)
+    {
+        if (!RenderPhaseProfile.Enabled) return;
+        Interlocked.Increment(ref _totalUploads);
+        Interlocked.Add(ref _totalCopies, copies);
+        Interlocked.Add(ref _totalBytes, (long)bytes);
+        Interlocked.Add(ref _totalRangeBytes, (long)rangeBytes);
+    }
+
+    private static readonly long[] _shapeUploads = new long[5];
+    private static readonly long[] _shapeBytes = new long[5];
+    private static readonly string[] ShapeNames = ["le4k", "le16k", "le64k", "le256k", "gt256k"];
+    private static readonly Dictionary<(ulong, ulong), long> _lastUploadAt = new();
+    private static long _repeatUploads;
+    private static long _trackingTicks;
+    private static long _recordTicks;
+
+    public static void NoteUploadShape(ulong address, ulong rangeSize, ulong bytes, long trackingTicks, long recordTicks)
+    {
+        if (!RenderPhaseProfile.Enabled) return;
+        var bucket = bytes <= 4096 ? 0 : bytes <= 16384 ? 1 : bytes <= 65536 ? 2 : bytes <= 262144 ? 3 : 4;
+        _shapeUploads[bucket]++;
+        _shapeBytes[bucket] += (long)bytes;
+        _trackingTicks += trackingTicks;
+        _recordTicks += recordTicks;
+        var now = Environment.TickCount64;
+        if (_lastUploadAt.TryGetValue((address, rangeSize), out var last) && now - last <= 100)
+        {
+            _repeatUploads++;
+        }
+
+        if (_lastUploadAt.Count >= 65536)
+        {
+            _lastUploadAt.Clear();
+        }
+
+        _lastUploadAt[(address, rangeSize)] = now;
+    }
+
+    private static string TakeShapeReport()
+    {
+        var parts = new List<string>();
+        for (var index = 0; index < ShapeNames.Length; index++)
+        {
+            parts.Add(ShapeNames[index] + "=" + FormattableString.Invariant($"{_shapeUploads[index]}/{_shapeBytes[index] / 1048576.0:F1}MB"));
+            _shapeUploads[index] = 0;
+            _shapeBytes[index] = 0;
+        }
+
+        var report = "shapes=" + string.Join(",", parts) + " " +
+            FormattableString.Invariant($"repeat_100ms={_repeatUploads} tracking_ms={_trackingTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} record_ms={_recordTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
+        _repeatUploads = 0;
+        _trackingTicks = 0;
+        _recordTicks = 0;
+        return report;
+    }
+
+    // The backend-neutral parts of upstream's buffer, dirty-tracking and sync-point reports. The
+    // guest buffer cache, its readbacks and the relay live in the graphics backend package, which
+    // appends its own counters through RenderPhaseProfile.RegisterReportProvider.
+    internal static string TakeDirtyTrackingReport() =>
+        "[PERF][DIRTY_TRACKING] " + SharpEmu.HLE.GpuMemory.ProtectionCauseCounts.TakeReport() + " " +
+        SharpEmu.ShaderCompiler.Resources.DeviceAddressRangePlanner.TakeUnboundedReport();
+
+    internal static string TakeSyncPointReport() =>
+        "[PERF][SYNC_POINTS] " + Gpu.GpuCommands.GpuCommandInterpreter.TakeAcquireMemoryReport();
+
+    internal static string TakeTotalsReport() =>
+        FormattableString.Invariant($"[PERF][BUFFER_SYNC_TOTAL] uploads={Interlocked.Exchange(ref _totalUploads, 0)} copies={Interlocked.Exchange(ref _totalCopies, 0)} bytes={Interlocked.Exchange(ref _totalBytes, 0)} range_bytes={Interlocked.Exchange(ref _totalRangeBytes, 0)} ") +
+        TakeShapeReport();
+
+    private static readonly SharpEmu.HLE.Diagnostics.ThreadCounter[] _guestFrameLead = [new(), new(), new(), new(), new()];
+
+    public static void NoteGuestFrameLead(long lead) => _guestFrameLead[(int)Math.Clamp(lead, 0, _guestFrameLead.Length - 1)].Increment();
+
+    // How many frames the guest ran ahead of the GPU when it ended one, for the backend's guest-read report.
+    public static string TakeGuestFrameLeadReport()
+    {
+        var lead = _guestFrameLead;
+        return FormattableString.Invariant($"guest_lead=0:{lead[0].Take()},1:{lead[1].Take()},2:{lead[2].Take()},3:{lead[3].Take()},4+:{lead[4].Take()}");
+    }
+
     public readonly struct Scope : IDisposable
     {
         private readonly Source _previousSource;

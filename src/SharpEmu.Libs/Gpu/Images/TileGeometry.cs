@@ -51,6 +51,7 @@ public enum TileBlockKind : uint
     RenderTarget64KB,
     Depth64KB,
     RenderTarget64KBGen5,
+    GcnThin1D,
 }
 
 public readonly record struct TileBlockLayout(TileBlockKind Kind, uint BytesPerElement, uint BlockSize, uint BlockWidth, uint BlockHeight, uint BlockDepth)
@@ -116,6 +117,9 @@ public static partial class TileGeometry
     private static readonly Log2BlockDimensions[] Thick64KB = [new(6, 5, 5), new(5, 5, 5), new(5, 5, 4), new(5, 4, 4), new(4, 4, 4)];
 
     private readonly record struct BlockKindFacts(uint BlockSize, Log2BlockDimensions[] Dimensions, uint MaxBytesPerElement);
+
+    private const uint GcnMicroTileSide = 8;
+    private const uint GcnMicroTileMaxBytes = 16;
 
     private static readonly BlockKindFacts[] BlockKinds =
     [
@@ -501,6 +505,18 @@ public static partial class TileGeometry
     public static bool TryGetBlockLayout(TileBlockKind kind, uint bytesPerElement, out TileBlockLayout layout)
     {
         layout = default;
+        if (kind == TileBlockKind.GcnThin1D)
+        {
+            if (!BitOperations.IsPow2(bytesPerElement) || bytesPerElement > GcnMicroTileMaxBytes)
+            {
+                return false;
+            }
+
+            layout = new TileBlockLayout(kind, bytesPerElement, GcnMicroTileSide * GcnMicroTileSide * bytesPerElement,
+                GcnMicroTileSide, GcnMicroTileSide, 1);
+            return true;
+        }
+
         if ((uint)kind >= BlockKinds.Length || !BitOperations.IsPow2(bytesPerElement))
         {
             return false;

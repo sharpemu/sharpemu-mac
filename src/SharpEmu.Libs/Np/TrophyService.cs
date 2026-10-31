@@ -33,6 +33,7 @@ internal static class TrophyService
         public int Id { get; init; }
         public int Grade { get; init; }
         public int GroupId { get; init; }
+        public int PlatinumId { get; init; } = -1;
         public bool Hidden { get; init; }
         public bool HasReward { get; init; }
         public string Name { get; init; } = string.Empty;
@@ -275,6 +276,35 @@ internal static class TrophyService
         unlockedNow.Add(trophy);
     }
 
+    internal static int UnlockDirect(int id, out int platinumId)
+    {
+        platinumId = -1;
+        List<Trophy> unlockedNow = [];
+        lock (Gate)
+        {
+            EnsureLoaded();
+            var trophies = _trophies!;
+            var trophy = trophies.FirstOrDefault(t => t.Id == id);
+            if (trophy is null)
+                return unchecked((int)0x8055160A);
+            if (trophy.Unlocked)
+                return unchecked((int)0x8055160C);
+            if (trophy.IsPlatinum)
+                return unchecked((int)0x8055160D);
+            Unlock(trophy, unlockedNow);
+            var platinum = trophies.FirstOrDefault(t => t.IsPlatinum && t.Id == trophy.PlatinumId && !t.Unlocked);
+            if (platinum is not null && trophies.Where(t => t.PlatinumId == platinum.Id && !t.IsPlatinum).All(t => t.Unlocked))
+            {
+                Unlock(platinum, unlockedNow);
+                platinumId = platinum.Id;
+            }
+            SaveUnlocks();
+        }
+        foreach (var trophy in unlockedNow)
+            Console.Error.WriteLine($"{UnlockMarker}{KernelMemoryCompatExports.ApplicationTitleId}|{trophy.Id}|{trophy.Grade}|{trophy.Name}");
+        return 0;
+    }
+
     private static bool TryReadNumber(UdsObjectNode root, StatRule rule, out ulong value)
     {
         value = 0;
@@ -311,17 +341,15 @@ internal static class TrophyService
 
         try
         {
-            var trophyPath = KernelMemoryCompatExports.ResolveGuestPath("/app0/sce_sys/trophy2/trophy00.ucp");
-            if (File.Exists(trophyPath))
+            // A PS5 trophy2 package or, through the compatibility reader, a PS4 trophy package.
+            var app0 = KernelMemoryCompatExports.ResolveGuestPath("/app0");
+            _trophies = TrophyCatalog.ReadDefinitions(app0, false,
+                TrophyLanguage.FromSystemLanguage(SystemServiceExports.SystemLanguage));
+            var trophyPath = TrophyCatalog.PackagePath(app0);
+            if (_trophies.Length != 0 && trophyPath.EndsWith(".ucp", StringComparison.OrdinalIgnoreCase))
             {
-                var package = File.ReadAllBytes(trophyPath);
-                _trophies = ReadTrophies(package, language: TrophyLanguage.FromSystemLanguage(SystemServiceExports.SystemLanguage));
                 _packagePath = trophyPath;
-                (_gameTitle, _groupNames) = ReadPackageNames(package);
-            }
-            else
-            {
-                _trophies = [];
+                (_gameTitle, _groupNames) = ReadPackageNames(File.ReadAllBytes(trophyPath));
             }
 
             var udsPath = KernelMemoryCompatExports.ResolveGuestPath("/app0/sce_sys/uds/uds00.ucp");

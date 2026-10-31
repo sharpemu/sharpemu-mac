@@ -292,6 +292,9 @@ internal sealed partial class MetalRenderHost :
     // one on culling primitives with a zero position like the guest does.
     public bool ClipDistanceEnabled => true;
 
+    // Tessellated draws are emulated (hull kernel + post-tessellation vertex function), never native stages.
+    public bool TessellationStagesSupported => false;
+
     public GpuSampleCount NoAttachmentSampleCounts => GpuSampleCount.Count1Bit;
 
     // Per-vertex pixel inputs are MSL 4.0's metal::vertex_value (macOS 26). The feature set

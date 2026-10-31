@@ -22,6 +22,7 @@ public sealed class PresenterSubmissionTests
 {
     private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
+    private static readonly Type RecordingHostType = typeof(VulkanVideoPresenter).GetNestedType("RecordingHost", BindingFlags.NonPublic)!;
 
     [Theory]
     [InlineData(0x000u, false)]
@@ -43,20 +44,22 @@ public sealed class PresenterSubmissionTests
     public void OcclusionCounting_UsesCounterZeroEnableAndIncrementDisable(uint control, bool expected)
     {
         var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
+        var host = RuntimeHelpers.GetUninitializedObject(RecordingHostType);
+        Set(host, "_presenter", presenter);
         var commands = new CommandStreamQueue((ICommandStreamHost)presenter);
         Set(presenter, "_commandStream", commands);
 
         foreach (var queueId in new[] { 0, 2 })
         {
             Set(presenter, "_occlusionQueueId", queueId);
-            Set(presenter, "_occlusionCounting", !expected);
+            Set(host, "_occlusionCounting", !expected);
             commands.GetInterpreter(queueId).TypedRegisters.Context.DepthCountControl = control;
             commands.GetInterpreter(queueId == 0 ? 2 : 0).TypedRegisters.Context.DepthCountControl = expected ? 0u : 0x100u;
 
-            Invoke(presenter, "SetOcclusionCounting", control);
+            Invoke(host, "SetOcclusionCounting", control);
 
-            Assert.Equal(expected, (bool)Get(presenter, "_occlusionCounting"));
-            Assert.False((bool)Get(presenter, "_renderingActive"));
+            Assert.Equal(expected, (bool)Get(host, "_occlusionCounting"));
+            Assert.False((bool)Get(host, "_renderingActive"));
         }
     }
 
@@ -66,25 +69,27 @@ public sealed class PresenterSubmissionTests
     public void OcclusionCounting_CreatesQueriesBeforeFirstReadAndReusesThem(bool supported)
     {
         var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
+        var host = RuntimeHelpers.GetUninitializedObject(RecordingHostType);
+        Set(host, "_presenter", presenter);
         var commands = new CommandStreamQueue((ICommandStreamHost)presenter);
         Set(presenter, "_commandStream", commands);
         Set(presenter, "_supportsPreciseOcclusion", supported);
         var context = commands.GetInterpreter(0).TypedRegisters.Context;
 
         context.DepthCountControl = 0;
-        Invoke(presenter, "SetOcclusionCounting", context.DepthCountControl);
+        Invoke(host, "SetOcclusionCounting", context.DepthCountControl);
         Assert.Null(Get(presenter, "_occlusionQueries"));
         context.DepthCountControl = 0x100;
-        Invoke(presenter, "SetOcclusionCounting", context.DepthCountControl);
+        Invoke(host, "SetOcclusionCounting", context.DepthCountControl);
         var queries = Get(presenter, "_occlusionQueries");
         if (supported) Assert.NotNull(queries);
         else Assert.Null(queries);
 
         context.DepthCountControl = 0;
-        Invoke(presenter, "SetOcclusionCounting", context.DepthCountControl);
+        Invoke(host, "SetOcclusionCounting", context.DepthCountControl);
         Assert.Same(queries, Get(presenter, "_occlusionQueries"));
         context.DepthCountControl = 0x100;
-        Invoke(presenter, "SetOcclusionCounting", context.DepthCountControl);
+        Invoke(host, "SetOcclusionCounting", context.DepthCountControl);
         Assert.Same(queries, Get(presenter, "_occlusionQueries"));
     }
 
@@ -599,7 +604,7 @@ public sealed class PresenterSubmissionTests
     }
 
     private static object NewNested(string name) =>
-        Activator.CreateInstance(PresenterType.GetNestedType(name, BindingFlags.NonPublic)!, nonPublic: true)!;
+        Activator.CreateInstance(typeof(VulkanVideoPresenter).GetNestedType(name, BindingFlags.NonPublic)!, nonPublic: true)!;
 
     private static object Get(object target, string name) => target.GetType().GetField(name, InstanceMembers)!.GetValue(target)!;
 

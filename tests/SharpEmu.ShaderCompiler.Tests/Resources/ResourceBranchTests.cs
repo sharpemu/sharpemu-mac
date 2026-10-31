@@ -122,7 +122,11 @@ public sealed class ResourceBranchTests
         bool GeneralRead(ulong address, out uint word) { generalReads++; word = 1; return true; }
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
-        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, GeneralRead, CleanRead), ref snapshot, ref specialization));
+        using (MaterializationProgramCheck.Suspend())
+        {
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, GeneralRead, CleanRead), ref snapshot, ref specialization));
+        }
+
         Assert.Equal(0x1000u, snapshot.Buffers[0][0]);
         Assert.Equal(0x2000u, snapshot.Buffers[1][0]);
         // Flattened reads still use their original reader after the predicate check declines.

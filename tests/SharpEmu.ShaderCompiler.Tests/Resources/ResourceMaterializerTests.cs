@@ -221,6 +221,38 @@ public sealed class ResourceMaterializerTests
     }
 
     [Fact]
+    public void MaterialKeysTheCleanReaderRefusesAreReadThroughTheSynchronizedReader()
+    {
+        var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false));
+        uint[] userData = [0x1000, 224 << 16, 2, 0, 0x10000, 16 << 16, 4, 0, 7];
+        var memory = new TestWordMemory { Words = new uint[0x11000 / 4] };
+        for (var index = 0; index < 2; index++)
+        {
+            memory.At(0x1000 + (ulong)index * 224 + 4) = (uint)index;
+            var descriptor = ResourceTrackerTests.ImageDescriptor();
+            descriptor[0] += (uint)index;
+            ResourceTrackerTests.WriteImage(memory, 0x10000 + (ulong)index * 32, descriptor);
+        }
+
+        var synchronizedReads = 0;
+        var inputs = Inputs(
+            userData,
+            readMemory: (ulong address, out uint word) => { synchronizedReads++; return memory.Read(address, out word); },
+            readCleanMemory: (ulong address, out uint word) =>
+            {
+                word = 0;
+                return address >= 0x1000 + 224 && address < 0x1000 + 2 * 224 ? false : memory.Read(address, out word);
+            });
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failure));
+        Assert.Equal(ResourceMaterializationFailure.None, failure);
+        Assert.Equal(2, snapshot.Images.Length);
+        Assert.NotEqual(0, synchronizedReads);
+    }
+
+    [Fact]
     public void MappedTable_UsesTheDirectReaderByDefault()
     {
         var plan = Extract(Program(

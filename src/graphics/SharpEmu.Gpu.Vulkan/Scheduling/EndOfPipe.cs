@@ -186,7 +186,7 @@ public sealed class EndOfPipe
 
     public void QueueInterruptOnCompletion(RecordingBuffer buffer, int eventId, uint contextId)
     {
-        _ = buffer.Handle;
+        RequireRecording(buffer);
         var scheduler = buffer.Owner;
         if (!scheduler.Active || buffer != scheduler.Current)
         {
@@ -203,7 +203,15 @@ public sealed class EndOfPipe
             throw GpuFatal.Fatal("Cannot record an end-of-pipe write to address zero.");
         }
 
-        _ = signal.Buffer.Handle;
+        RequireRecording(signal.Buffer);
+    }
+
+    private static void RequireRecording(RecordingBuffer buffer)
+    {
+        if (buffer.IsInvalid)
+        {
+            throw SubmissionScheduler.Fatal("An end-of-pipe signal requires a recording command buffer.");
+        }
     }
 
     private static RecordedOperation GetDebugOperation(WriteAction action) => action switch

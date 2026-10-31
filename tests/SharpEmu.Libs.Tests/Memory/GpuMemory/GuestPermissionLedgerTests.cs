@@ -226,4 +226,69 @@ public sealed class GuestPermissionLedgerTests
         Assert.Equal(expected, tree.ToArray());
         Assert.Equal(new PermissionRange(0x10, 0x8, GuestPageProtection.Read), snapshot.FindAtOrBelow(0x17));
     }
+
+    [Fact]
+    public void Lookup_ReportsWhereTheAnswerStopsHolding()
+    {
+        var ledger = new GuestPermissionLedger();
+        Assert.Equal(ReadWrite, ledger.Lookup(0x5000, out var emptyUntil));
+        Assert.Equal(ulong.MaxValue, emptyUntil);
+
+        ledger.Set(0x2000, 0x2000, GuestPageProtection.Read);
+        ledger.Set(0x6000, 0x1000, GuestPageProtection.None);
+
+        Assert.Equal(ReadWrite, ledger.Lookup(0x1000, out var beforeFirst));
+        Assert.Equal(0x2000UL, beforeFirst);
+        Assert.Equal(GuestPageProtection.Read, ledger.Lookup(0x2000, out var firstStart));
+        Assert.Equal(0x4000UL, firstStart);
+        Assert.Equal(GuestPageProtection.Read, ledger.Lookup(0x3FFF, out var firstLast));
+        Assert.Equal(0x4000UL, firstLast);
+        Assert.Equal(ReadWrite, ledger.Lookup(0x4000, out var hole));
+        Assert.Equal(0x6000UL, hole);
+        Assert.Equal(GuestPageProtection.None, ledger.Lookup(0x6000, out var second));
+        Assert.Equal(0x7000UL, second);
+        Assert.Equal(ReadWrite, ledger.Lookup(0x7000, out var afterLast));
+        Assert.Equal(ulong.MaxValue, afterLast);
+
+        ledger.Clear(0x2000, 0x2000);
+        Assert.Equal(ReadWrite, ledger.Lookup(0x2000, out var cleared));
+        Assert.Equal(0x6000UL, cleared);
+    }
+
+    [Fact]
+    public void Lookup_ConcurrentWithSetSeesEitherTheOldOrTheNewProtection()
+    {
+        var ledger = new GuestPermissionLedger();
+        ledger.Set(0x10000, 0x10000, GuestPageProtection.Read);
+        using var stop = new CancellationTokenSource();
+        var writer = Task.Run(() =>
+        {
+            for (var round = 0; !stop.IsCancellationRequested; round++)
+            {
+                ledger.Set(0x10000 + (ulong)(round % 16) * 0x1000, 0x1000, round % 2 == 0 ? GuestPageProtection.None : GuestPageProtection.Read);
+                ledger.Set(0x40000 + (ulong)(round % 8) * 0x1000, 0x1000, GuestPageProtection.Execute);
+                ledger.Clear(0x40000 + (ulong)(round % 8) * 0x1000, 0x1000);
+            }
+        });
+
+        var unexpected = 0;
+        for (var index = 0; index < 200_000; index++)
+        {
+            var address = 0x10000 + (ulong)(index % 16) * 0x1000 + 0x800;
+            var protection = ledger.Lookup(address, out var validUntil);
+            if ((protection != GuestPageProtection.None && protection != GuestPageProtection.Read) || validUntil <= address)
+            {
+                unexpected++;
+            }
+
+            if (ledger.Lookup(0x30000) != ReadWrite)
+            {
+                unexpected++;
+            }
+        }
+
+        stop.Cancel();
+        writer.Wait();
+        Assert.Equal(0, unexpected);
+    }
 }

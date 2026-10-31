@@ -19,7 +19,6 @@ public readonly record struct RenderHostLimits(uint MaxFramebufferWidth, uint Ma
 public readonly record struct ColorAttachmentAcquisition(
     ResourceSlotIdentifier Image,
     GpuImageHandle View,
-    GpuImageLayout Layout,
     uint Samples,
     bool MetadataClear,
     GpuClearColor MetadataClearValue);
@@ -89,9 +88,15 @@ public interface IResourcePreparation : IDisposable
 {
 }
 
+public readonly record struct DrawScopeToken(long Scope, ulong Lookups, long Metadata)
+{
+    public bool IsActive => Scope != 0;
+}
+
 // Everything the executor needs from the renderer, the caches and the pipeline objects.
 public interface IRenderHost
 {
+    bool TryCopyImage(in ImageRequest source, in ImageRequest destination) => false;
     int BeginImageSnapshot(IPreparedBindings? pixelBindings) => 0;
 
     int BeginComputeImageSnapshot(IPreparedBindings bindings) => 0;
@@ -103,9 +108,17 @@ public interface IRenderHost
     // Records a draw's color-target base for the image-clear trace; see docs/image-clear-tracing.md.
     void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) { }
 
+    DrawScopeToken DrawScope => default;
+
+    void KeepDepthAttachment(in DepthAttachmentState depth)
+    {
+    }
+
     RenderHostLimits Limits { get; }
 
     bool SupportsNativeRectangles => false;
+
+    bool SupportsTessellation => false;
 
     IImageFormatSupport FormatSupport { get; }
 
@@ -127,17 +140,24 @@ public interface IRenderHost
 
     void ResetBindings();
 
-    // Finds the image again when it changed, makes the view, sets the layout and resolves a metadata clear.
+    // Finds the image again when it changed, makes the view and resolves a metadata clear.
     ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target);
 
-    // Makes the view and consumes the metadata clear state; the layout follows in a second call.
+    // Makes the view and consumes the metadata clear state; the transition follows in a second call.
     DepthAttachmentAcquisition AcquireDepthAttachment(in DepthAttachmentState depth);
 
-    void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects);
+    void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageAspect writeAspects);
 
     BufferBinding NullBuffer { get; }
 
     BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten);
+
+    void PrepareBufferAllocations(ReadOnlySpan<SharpEmu.HLE.GpuMemory.GuestSpan> ranges) =>
+        throw new NotSupportedException("The render host does not support tessellation buffer preparation.");
+
+    // The device address of a guest range's cached buffer, for shaders that read it through a physical pointer.
+    ulong ObtainBufferDeviceAddress(ulong address, ulong size, bool isWritten) =>
+        throw new NotSupportedException("The render host does not expose buffer addresses for tessellation.");
 
     void TraceVertexBuffer(ulong shaderHash, VertexAttributeResource attribute, VertexInputBuffer input,
         BufferBinding binding, ulong requestedBytes, ulong acquiredBytes) { }
@@ -212,6 +232,9 @@ public interface IRenderHost
 
     IPreparedBindings PrepareBindings(ShaderStageResources stage);
 
+    void UpdateTessellationData(IPreparedBindings prepared, uint[] data) =>
+        throw new NotSupportedException("The render host does not support tessellation runtime data.");
+
     void PrepareDeviceAddresses();
 
     // True when a draw or dispatch whose pipeline is still compiling may be left for
@@ -260,6 +283,9 @@ public interface IRenderHost
     // Ends the pass for a stated reason ("release", "barrier" or "dispatch"), for a host that
     // reports why passes ended; the others just end it.
     void EndRendering(string why) => EndRendering();
+
+    // Ends the pass for a counted reason; a host that does not count them treats it as any other end.
+    void EndRendering(ScopeBreak reason) => EndRendering(reason.ToString());
 
     // Whether a texture bound for the draw being prepared reads the depth attachment's subresources.
     bool SamplesDepthAttachment(in DepthAttachmentState depth) => true;
@@ -367,6 +393,28 @@ public interface IRenderHost
     void ShaderWriteHazardBarrier();
 
     void ShaderAccessBarrier();
+
+    // False when the host recorded the barrier at once; true when it waits for the next native
+    // command outside a checked dispatch or the next barrier request.
+    bool TryDeferShaderAccessBarrier()
+    {
+        ShaderAccessBarrier();
+        return false;
+    }
+
+    void BeginCheckedDispatch()
+    {
+    }
+
+    void EndCheckedDispatch()
+    {
+    }
+
+    long DeferredBarrierPromotions => 0;
+
+    void NoteKnownGpuContents(ulong address, ReadOnlySpan<uint> words)
+    {
+    }
 
     // Clears the bound color targets to one colour in place of the draw.
     void ClearColorTargets(ReadOnlySpan<ColorTargetState> targets, SolidColorClear clear);

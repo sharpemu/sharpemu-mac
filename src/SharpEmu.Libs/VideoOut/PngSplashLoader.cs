@@ -26,7 +26,8 @@ public static class PngSplashLoader
 
     /// <summary>Decodes the title's splash image, if the mounted image has one.</summary>
     public static bool TryLoad(out byte[] pixels, out uint width, out uint height)
-        => TryLoad("pic0.png", requestRgba: false, out pixels, out width, out height);
+        => TryLoad("pic0.png", requestRgba: false, out pixels, out width, out height) ||
+           TryLoad("pic1.png", requestRgba: false, out pixels, out width, out height);
 
     /// <summary>Decodes the title's icon as RGBA, if the mounted image has one.</summary>
     public static bool TryLoadIcon(out byte[] pixels, out uint width, out uint height)

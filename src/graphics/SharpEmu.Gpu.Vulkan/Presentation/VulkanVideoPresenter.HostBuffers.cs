@@ -15,7 +15,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private sealed partial class Presenter
     {
         private readonly VulkanHostBufferPool _hostBufferPool;
-        private VkBuffer CreateHostBuffer(
+        internal VkBuffer CreateHostBuffer(
             ReadOnlySpan<byte> data,
             BufferUsageFlags usage,
             out DeviceMemory memory,
@@ -66,7 +66,7 @@ internal static unsafe partial class VulkanVideoPresenter
             return allocation.Buffer;
         }
 
-        private void RecycleHostBuffer(VkBuffer buffer, DeviceMemory memory)
+        internal void RecycleHostBuffer(VkBuffer buffer, DeviceMemory memory)
         {
             if (buffer.Handle == 0)
             {

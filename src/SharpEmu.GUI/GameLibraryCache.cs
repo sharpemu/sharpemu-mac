@@ -8,8 +8,8 @@ internal static class GameLibraryCache
     internal static string CachePath => GameCatalogCache.CachePath;
     internal static List<GameEntry> Load(IReadOnlyList<string> folders) => GameCatalogCache.Load(folders)
         .Select(game => new GameEntry(game.Name, game.TitleId, game.Version, game.Path,
-            game.SizeBytes, game.CoverPath, game.BackgroundPath)).ToList();
+            game.SizeBytes, game.CoverPath, game.BackgroundPath, game.CompatibilityMode)).ToList();
     internal static void Save(IReadOnlyList<string> folders, IReadOnlyList<GameEntry> games) =>
         GameCatalogCache.Save(folders, games.Select(game => new CatalogGame(game.Name, game.TitleId,
-            game.Version, game.Path, game.SizeBytes, game.CoverPath, game.BackgroundPath)).ToArray());
+            game.Version, game.Path, game.SizeBytes, game.CoverPath, game.BackgroundPath, game.CompatibilityMode)).ToArray());
 }

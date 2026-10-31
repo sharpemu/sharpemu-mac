@@ -63,50 +63,6 @@ public readonly record struct DepthStencilState(
 
     public bool IsReadOnly(GpuFormat format) => AttachmentWriteAspects(format) == GpuImageAspect.None;
 
-    // The layout for an attachment the draw does not also sample: writable in every aspect the
-    // format has, so draws that toggle depth or stencil writes keep one layout (and one rendering
-    // scope). Only a sampled attachment needs the read-only layouts of AttachmentLayout.
-    public static GpuImageLayout WritableAttachmentLayout(GpuFormat format)
-    {
-        var available = ViewFormatRules.DepthAspects(format);
-        var hasDepth = (available & GpuImageAspect.DepthBit) != 0;
-        var hasStencil = (available & GpuImageAspect.StencilBit) != 0;
-        return hasDepth && hasStencil ? GpuImageLayout.DepthStencilAttachmentOptimal
-            : hasStencil ? GpuImageLayout.StencilAttachmentOptimal
-            : GpuImageLayout.DepthAttachmentOptimal;
-    }
-
-    public GpuImageLayout AttachmentLayout(GpuFormat format)
-    {
-        var available = ViewFormatRules.DepthAspects(format);
-        var writes = AttachmentWriteAspects(format);
-        var hasDepth = (available & GpuImageAspect.DepthBit) != 0;
-        var hasStencil = (available & GpuImageAspect.StencilBit) != 0;
-        var depthWrite = (writes & GpuImageAspect.DepthBit) != 0;
-        var stencilWrite = (writes & GpuImageAspect.StencilBit) != 0;
-        if (!hasStencil)
-        {
-            return depthWrite ? GpuImageLayout.DepthAttachmentOptimal : GpuImageLayout.DepthReadOnlyOptimal;
-        }
-
-        if (!hasDepth)
-        {
-            return stencilWrite ? GpuImageLayout.StencilAttachmentOptimal : GpuImageLayout.StencilReadOnlyOptimal;
-        }
-
-        if (depthWrite && stencilWrite)
-        {
-            return GpuImageLayout.DepthStencilAttachmentOptimal;
-        }
-
-        if (depthWrite)
-        {
-            return GpuImageLayout.DepthAttachmentStencilReadOnlyOptimal;
-        }
-
-        return stencilWrite ? GpuImageLayout.DepthReadOnlyStencilAttachmentOptimal : GpuImageLayout.DepthStencilReadOnlyOptimal;
-    }
-
     private bool FaceWrites(in StencilOperations operations, in StencilMasks masks)
     {
         if (masks.WriteMask == 0)

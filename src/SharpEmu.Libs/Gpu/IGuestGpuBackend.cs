@@ -43,6 +43,11 @@ public interface IGuestGpuBackend
     /// submit skips the walk of the command buffer that builds them.</summary>
     bool ConsumesSubmittedGeometrySnapshots => false;
 
+    // The vertex stage a tessellated pipeline requires and the control stage that feeds the guest's hull factors to the tessellator.
+    (IGuestCompiledShader Vertex, IGuestCompiledShader Control) CompileTessellationBridge(
+        SharpEmu.ShaderCompiler.Resources.BindingLayout layout, Gen5TessellationDomain domain) =>
+        throw new NotSupportedException($"The {BackendName} backend does not support merged tessellation.");
+
     /// <summary>Returns the backend's no-color-output fragment shader.</summary>
     IGuestCompiledShader GetDepthOnlyFragmentShader();
 

@@ -301,7 +301,7 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
         {
             var state = new RenderingState { Width = Width, Height = Height, Layers = 1, ColorAttachmentCount = 1, Samples = 1 };
             state.ColorAttachments[0] = new RenderingAttachment(
-                view, GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
+                view, GpuFormat.R8G8B8A8Unorm,
                 0, 0, 0, 0, false, false, false, false, false);
             return state;
         }

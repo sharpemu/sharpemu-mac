@@ -38,44 +38,59 @@ public sealed class GamePatchDownloaderTests : IDisposable
         });
 
     [Theory]
-    [InlineData("PPSA00001", "01.004.000")]
-    [InlineData("ppsa00001", "1.4.0")]
-    public async Task DownloadsOnlyTheMatchingGameAndVersionWithoutEnablingIt(string titleId, string version)
+    [InlineData("PPSA00001", "01.004.000", false)]
+    [InlineData("ppsa00001", "1.4.0", false)]
+    [InlineData("CUSA00001", "01.09", true)]
+    [InlineData("cusa00001", "1.9", true)]
+    public async Task DownloadsOnlyTheMatchingGameAndVersionWithoutEnablingIt(string titleId, string version, bool compatibilityMode)
     {
-        var handler = new RepositoryHandler(Index(), Xml());
+        var expectedVersion = compatibilityMode ? "01.09" : "01.004.000";
+        var expectedTitle = compatibilityMode ? "CUSA00001" : "PPSA00001";
+        var xml = Xml(expectedVersion, expectedTitle);
+        var handler = new RepositoryHandler(Index(expectedVersion, titleId: expectedTitle), xml, compatibilityMode: compatibilityMode);
         using var client = new HttpClient(handler);
-        var count = await GamePatchDownloader.DownloadAsync(titleId, version, Destination, client: client);
+        var count = await GamePatchDownloader.DownloadAsync(titleId, version, Destination, client: client, compatibilityMode: compatibilityMode);
         Assert.Equal(1, count);
-        Assert.Equal(new[] { "/sharpemu/ps5patches/main/patches.json", "/sharpemu/ps5patches/main/prospero_patches/Match.xml" }, handler.Requests);
-        Assert.Equal(Xml(), await File.ReadAllTextAsync(Path.Combine(Destination, "Match.xml")));
-        var repository = new GamePatchRepository(Destination);
-        Assert.Single(repository.Load(titleId));
-        Assert.Empty(repository.LoadEnabled(titleId));
+        var repository = compatibilityMode ? "ps4patches" : "ps5patches";
+        var patches = compatibilityMode ? "orbis_patches" : "prospero_patches";
+        Assert.Equal(new[] { $"/sharpemu/{repository}/main/patches.json", $"/sharpemu/{repository}/main/{patches}/Match.xml" }, handler.Requests);
+        Assert.Equal(xml, await File.ReadAllTextAsync(Path.Combine(Destination, "Match.xml")));
+        var installed = new GamePatchRepository(Destination);
+        Assert.Single(installed.Load(titleId));
+        Assert.Empty(installed.LoadEnabled(titleId));
         Assert.Single(Directory.GetFiles(Destination));
     }
 
     [Theory]
-    [InlineData("PPSA00002", "01.004.000")]
-    [InlineData("PPSA00001", "01.007.000")]
-    [InlineData("PPSA00001", null)]
-    public async Task MissingTitleOrVersionDoesNotRequestAnyXml(string titleId, string? version)
+    [InlineData("PPSA00002", "01.004.000", false)]
+    [InlineData("PPSA00001", "01.007.000", false)]
+    [InlineData("PPSA00001", null, false)]
+    [InlineData("CUSA00002", "01.09", true)]
+    [InlineData("CUSA00001", "01.08", true)]
+    [InlineData("CUSA00001", null, true)]
+    public async Task MissingTitleOrVersionDoesNotRequestAnyXml(string titleId, string? version, bool compatibilityMode)
     {
-        var handler = new RepositoryHandler(Index(), Xml());
+        var handler = new RepositoryHandler(compatibilityMode ? Index("01.09", titleId: "CUSA00001") : Index(), Xml(),
+            compatibilityMode: compatibilityMode);
         using var client = new HttpClient(handler);
-        Assert.Equal(0, await GamePatchDownloader.DownloadAsync(titleId, version, Destination, client: client));
+        Assert.Equal(0, await GamePatchDownloader.DownloadAsync(titleId, version, Destination, client: client, compatibilityMode: compatibilityMode));
         Assert.Single(handler.Requests);
+        Assert.Equal($"/sharpemu/{(compatibilityMode ? "ps4patches" : "ps5patches")}/main/patches.json", handler.Requests[0]);
         Assert.False(Directory.Exists(Destination));
     }
 
     [Theory]
-    [InlineData("01.007.000")]
-    [InlineData(null)]
-    public async Task PatternBasedPatchesCanMatchAnyInstalledVersion(string? version)
+    [InlineData("01.007.000", false)]
+    [InlineData(null, false)]
+    [InlineData("01.09", true)]
+    [InlineData(null, true)]
+    public async Task PatternBasedPatchesCanMatchAnyInstalledVersion(string? version, bool compatibilityMode)
     {
-        var handler = new RepositoryHandler(Index("mask"), Xml("mask"));
+        var titleId = compatibilityMode ? "CUSA00001" : "PPSA00001";
+        var handler = new RepositoryHandler(Index("mask", titleId: titleId), Xml("mask", titleId), compatibilityMode: compatibilityMode);
         using var client = new HttpClient(handler);
-        Assert.Equal(1, await GamePatchDownloader.DownloadAsync("PPSA00001", version, Destination, client: client));
-        Assert.True(Assert.Single(new GamePatchRepository(Destination).Load("PPSA00001")).IsPatternVersion);
+        Assert.Equal(1, await GamePatchDownloader.DownloadAsync(titleId, version, Destination, client: client, compatibilityMode: compatibilityMode));
+        Assert.True(Assert.Single(new GamePatchRepository(Destination).Load(titleId)).IsPatternVersion);
     }
 
     [Theory]
@@ -165,7 +180,8 @@ public sealed class GamePatchDownloaderTests : IDisposable
         Assert.False(Directory.Exists(Destination));
     }
 
-    private sealed class RepositoryHandler(string index, string xml, HttpStatusCode xmlStatus = HttpStatusCode.OK) : HttpMessageHandler
+    private sealed class RepositoryHandler(string index, string xml, HttpStatusCode xmlStatus = HttpStatusCode.OK,
+        bool compatibilityMode = false) : HttpMessageHandler
     {
         public List<string> Requests { get; } = [];
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -174,7 +190,7 @@ public sealed class GamePatchDownloaderTests : IDisposable
             Assert.Equal("raw.githubusercontent.com", request.RequestUri!.Host);
             Requests.Add(request.RequestUri.AbsolutePath);
             var isIndex = request.RequestUri.AbsolutePath.EndsWith("patches.json", StringComparison.Ordinal);
-            if (!isIndex) Assert.EndsWith("/prospero_patches/Match.xml", request.RequestUri.AbsolutePath);
+            if (!isIndex) Assert.EndsWith(compatibilityMode ? "/orbis_patches/Match.xml" : "/prospero_patches/Match.xml", request.RequestUri.AbsolutePath);
             return Task.FromResult(new HttpResponseMessage(isIndex ? HttpStatusCode.OK : xmlStatus)
             {
                 Content = new StringContent(isIndex ? index : xml, Encoding.UTF8),

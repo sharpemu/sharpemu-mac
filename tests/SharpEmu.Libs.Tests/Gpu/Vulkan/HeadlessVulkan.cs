@@ -38,12 +38,14 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         StorageImageExtendedFormats = features.ShaderStorageImageExtendedFormats;
         ShaderInt64 = features.ShaderInt64;
         SupportsClipDistance = features.ShaderClipDistance;
+        SupportsTessellation = features.TessellationShader;
         SupportsDynamicRendering = dynamicRendering;
     }
 
     // Dynamic rendering support required by the presenter's render host.
     public bool SupportsDynamicRendering { get; }
     public bool SupportsClipDistance { get; }
+    public bool SupportsTessellation { get; }
     public bool SupportsFragmentShaderBarycentric { get; private init; }
     public bool SupportsFillRectangle { get; private init; }
     public bool SupportsMeshShaders { get; private init; }
@@ -381,6 +383,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             sizeControlProperties.MinSubgroupSize <= 32 && sizeControlProperties.MaxSubgroupSize >= 32;
         var enabledFeatures = new PhysicalDeviceFeatures
         {
+            TessellationShader = baseFeatures.TessellationShader,
             GeometryShader = baseFeatures.GeometryShader,
             OcclusionQueryPrecise = baseFeatures.OcclusionQueryPrecise,
             SampleRateShading = baseFeatures.SampleRateShading,
@@ -564,9 +567,11 @@ internal sealed class LoggingTickDevice : IGpuTickDevice
 
     public void BeginBuffer(nint buffer) => _inner.BeginBuffer(buffer);
 
-    public void EndBuffer(nint buffer) => _inner.EndBuffer(buffer);
+    public void EndBuffer(nint buffer, bool hostRead) => _inner.EndBuffer(buffer, hostRead);
 
-    public bool TrySubmit(nint buffer, SubmitBundle bundle, out string failure)
+    public IGpuCommandBufferSource CreateBufferSource() => _inner.CreateBufferSource();
+
+    public bool TrySubmit(ReadOnlySpan<nint> buffers, SubmitBundle bundle, out string failure)
     {
         for (var i = 0; i < bundle.SignalCount; i++)
         {
@@ -576,7 +581,7 @@ internal sealed class LoggingTickDevice : IGpuTickDevice
             }
         }
 
-        return _inner.TrySubmit(buffer, bundle, out failure);
+        return _inner.TrySubmit(buffers, bundle, out failure);
     }
 
     public void Dispose() => _inner.Dispose();

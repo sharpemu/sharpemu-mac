@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Gpu.Vulkan;
+using SharpEmu.Gpu.Vulkan.Buffers;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
@@ -76,6 +78,33 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
         });
         Assert.Equal(0UL, buffer.Handle.Handle);
         Assert.Equal(0x0BADF00Du, BitConverter.ToUInt32(harness.Read(dirty + 0xFC, 4)));
+        Detach(harness);
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void AGuestReadCountsItsWaitAndTheFrameAgeOfItsWriter()
+    {
+        if (_vulkan is null || !GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        using var fatal = new FatalScope();
+        Attach(harness, _vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        GpuWrite(harness, address, 0x55667788);
+        var lastTick = harness.Scheduler.CurrentTick;
+        for (var frame = 0; frame < 3; frame++)
+        {
+            harness.Cache.FrameTicks.NoteFrameSubmitted(lastTick);
+        }
+
+        var reads = GuestBufferCache.GuestReadbacks.Total;
+        var oldWriters = GuestBufferCache.GuestReadbackFrameAge[3].Total;
+
+        Assert.True(harness.Cache.DownloadToCpu(address + 8, 4));
+
+        Assert.True(GuestBufferCache.GuestReadbacks.Total > reads);
+        Assert.True(GuestBufferCache.GuestReadbackFrameAge[3].Total > oldWriters);
+        Assert.Equal(0x55667788u, BitConverter.ToUInt32(harness.Read(address + 8, 4)));
         Detach(harness);
         harness.Shutdown();
     }

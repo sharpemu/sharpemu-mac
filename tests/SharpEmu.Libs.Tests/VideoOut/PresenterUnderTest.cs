@@ -44,6 +44,7 @@ internal sealed class PresenterUnderTest : IDisposable
 {
     public const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     public static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
+    public static readonly Type RecordingHostType = typeof(VulkanVideoPresenter).GetNestedType("RecordingHost", BindingFlags.NonPublic)!;
 
     public PresenterUnderTest(HeadlessVulkan vulkan, bool startScheduler = true)
     {
@@ -58,6 +59,7 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_supportsFragmentShaderBarycentric", vulkan.SupportsFragmentShaderBarycentric);
         SetField("_supportsFillRectangle", vulkan.SupportsFillRectangle);
         SetField("_supportsShaderClipDistance", vulkan.SupportsClipDistance);
+        SetField("_supportsTessellation", vulkan.SupportsTessellation);
         SetField("_deviceInfo", vulkan.DeviceInfo);
         SetField("_scheduler", Harness.Scheduler);
         SetField("_guestPublications", new PendingGuestPublications());
@@ -72,7 +74,6 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_guestBacking", Harness.Memory);
         SetField("_guestMemory", Harness.Memory);
         SetField("_samplerStore", Samplers);
-        SetField("_trackedImageBindings", new List<ResourceSlotIdentifier>());
         SetField("_submissionContext", new SubmissionContext { QueueName = "presenter.test", SubmissionId = 1 });
         SetField("_commandStream", new CommandStreamQueue((ICommandStreamHost)Instance));
         SetField("_descriptorHeap", new DescriptorHeap(vulkan.DeviceInfo, Harness.Scheduler));
@@ -89,7 +90,6 @@ internal sealed class PresenterUnderTest : IDisposable
             "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions",
             "_deferredGuestImageVersionDestroys",
             "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes", "_rectangleStageCode",
-            "_preparedTextures", "_barriersAfterRendering", "_feedbackSnapshotPool",
         })
         {
             var field = PresenterType.GetField(name, InstanceMembers)!;
@@ -110,22 +110,39 @@ internal sealed class PresenterUnderTest : IDisposable
 
     public object Instance { get; }
 
-    public IRenderHost RenderHost => (IRenderHost)Instance;
+    public object Recording => PresenterType.GetProperty("Recording", InstanceMembers)!.GetValue(Instance)!;
+
+    public IRenderHost RenderHost => (IRenderHost)Recording;
 
     public CommandBuffer Command => new(Harness.Scheduler.Current.Handle);
 
     // Loads the dynamic rendering commands the render host records with; the device must carry the extensions.
     public void LoadRenderingCommands() => InvokeMethod("LoadRenderingCommands", false, Harness.Vulkan.DeviceName);
 
-    public void SetField(string name, object value) => PresenterType.GetField(name, InstanceMembers)!.SetValue(Instance, value);
+    public void SetField(string name, object value)
+    {
+        var (field, target) = Field(name);
+        field.SetValue(target, value);
+    }
 
-    public T GetField<T>(string name) => (T)PresenterType.GetField(name, InstanceMembers)!.GetValue(Instance)!;
+    public T GetField<T>(string name)
+    {
+        var (field, target) = Field(name);
+        return (T)field.GetValue(target)!;
+    }
+
+    private (FieldInfo Field, object Target) Field(string name) =>
+        PresenterType.GetField(name, InstanceMembers) is { } field
+            ? (field, Instance)
+            : (RecordingHostType.GetField(name, InstanceMembers)!, Recording);
 
     public object? InvokeMethod(string name, params object?[] arguments)
     {
         try
         {
-            return PresenterType.GetMethod(name, InstanceMembers | BindingFlags.Static)!.Invoke(Instance, arguments);
+            return PresenterType.GetMethod(name, InstanceMembers | BindingFlags.Static) is { } method
+                ? method.Invoke(Instance, arguments)
+                : RecordingHostType.GetMethod(name, InstanceMembers | BindingFlags.Static)!.Invoke(Recording, arguments);
         }
         catch (TargetInvocationException exception) when (exception.InnerException is not null)
         {

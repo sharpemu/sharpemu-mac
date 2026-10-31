@@ -36,11 +36,11 @@ internal static class ScalarGraphDiskCache
     internal static int ListingsOf(string directory) => Listings.GetValueOrDefault(directory);
 
     internal static ScalarValueGraph Build(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, string? cachePath = null, ulong excludedUserDataRegisters = 0)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, string? cachePath = null, ulong excludedUserDataRegisters = 0, int dynamicUserData = -1)
     {
         var directory = cachePath ?? CachePath;
-        if (directory == "0") return ScalarValueGraph.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters);
-        var key = Key(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters);
+        if (directory == "0") return ScalarValueGraph.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters, dynamicUserData);
+        var key = Key(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters, dynamicUserData);
         var path = Path.Combine(directory, key + ".graph");
         try
         {
@@ -60,7 +60,7 @@ internal static class ScalarGraphDiskCache
                     {
                         using var reader = new BinaryReader(new MemoryStream(bytes, 0, length, false));
                         if (reader.ReadString() != key) throw new InvalidDataException("Graph cache key mismatch.");
-                        var cached = ScalarValueGraph.ReadSnapshot(reader, program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters);
+                        var cached = ScalarValueGraph.ReadSnapshot(reader, program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters, dynamicUserData);
                         if (Trace) Console.Error.WriteLine($"[SHADER_ANALYSIS_CACHE] hit key={key} bytes={length}");
                         return cached;
                     }
@@ -73,7 +73,7 @@ internal static class ScalarGraphDiskCache
         }
         catch (Exception error) when (IsCacheFailure(error)) { }
 
-        var graph = ScalarValueGraph.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters);
+        var graph = ScalarValueGraph.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, excludedUserDataRegisters, dynamicUserData);
         try
         {
             // One buffer per thread, kept between shaders, instead of one grown by doubling for each.
@@ -119,7 +119,7 @@ internal static class ScalarGraphDiskCache
     }
 
     internal static string Key(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, ulong excludedUserDataRegisters = 0)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, ulong excludedUserDataRegisters = 0, int dynamicUserData = -1)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         using var stream = new HashingStream(hash);
@@ -130,6 +130,7 @@ internal static class ScalarGraphDiskCache
             writer.Write(AssemblyCodeIdentity.Of(typeof(ScalarValueGraph).Assembly));
             writer.Write(userDataBase); writer.Write(userDataCount); writer.Write(waveSize);
             writer.Write(excludedUserDataRegisters);
+            if (dynamicUserData >= 0) writer.Write(dynamicUserData);
             var loads = fixedFunctionVertexLoads?.Order().ToArray() ?? [];
             writer.Write(loads.Length);
             foreach (var load in loads) writer.Write(load);

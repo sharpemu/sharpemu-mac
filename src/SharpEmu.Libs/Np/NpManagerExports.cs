@@ -7,7 +7,7 @@ using System.Collections.Concurrent;
 
 namespace SharpEmu.Libs.Np;
 
-public static class NpManagerExports
+public static partial class NpManagerExports
 {
     private const int NpTitleIdSize = 16;
     private const int NpTitleSecretSize = 128;
