@@ -111,6 +111,12 @@ public sealed class SheetHost : Panel
         var layer = _layers[index];
         _layers.RemoveAt(index);
         Children.Remove(layer.Root);
+        // Free the sheet from its card so a kept instance (the library menu) can open again.
+        if (sheet.Parent is Border card)
+        {
+            card.Child = null;
+        }
+
         sheet.IsOpen = false;
         sheet.Host = null;
         SetBelowEnabled(true);

@@ -100,11 +100,18 @@ public partial class MainWindow
             return;
         }
 
-        // Hang the menu from the button's bottom-right corner.
+        // Hang the menu from the button's bottom-right corner. The sheet host is hidden (so
+        // never laid out) until a sheet opens; MainContent shares its row and is, so measure
+        // from that and add back its margin.
         var size = LibraryMenuButton.Bounds.Size;
-        if (LibraryMenuButton.TranslatePoint(new Point(size.Width, size.Height), Sheets) is { } corner)
+        if (LibraryMenuButton.TranslatePoint(new Point(size.Width, size.Height), MainContent) is { } corner)
         {
-            _libraryMenu.PopoverMargin = new Thickness(0, corner.Y + 10, Math.Max(0, Sheets.Bounds.Width - corner.X), 0);
+            var margin = MainContent.Margin;
+            _libraryMenu.PopoverMargin = new Thickness(
+                0,
+                margin.Top + corner.Y + 10,
+                Math.Max(0, MainContent.Bounds.Width + margin.Right - corner.X),
+                0);
         }
 
         _ = Sheets.ShowAsync(_libraryMenu);
