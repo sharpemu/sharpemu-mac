@@ -205,7 +205,7 @@ public partial class MainWindow
         if (restoreLibrary && returnToOptions)
         {
             SetActivePage(1);
-            AllGamesSettingsButton.Focus();
+            OptionsGeneralNav.Focus();
         }
         else if (restoreLibrary && _activePageIndex == 0)
         {
@@ -326,7 +326,7 @@ public partial class MainWindow
 
         var settings = PerGameSettings.Load(titleId) ?? new PerGameSettings();
         settings.CustomEnvironmentVariables = entries.Count == 0 ? null : entries.ToList();
-        settings.RemoveDefaultValues();
+        settings.RemoveInheritedValues(PerGameSettings.GlobalEffective());
         try
         {
             settings.SaveOrThrow(titleId);
@@ -354,7 +354,7 @@ public partial class MainWindow
 
     private void PersistOpenGameSettings()
     {
-        if (!_isGameSettingsOpen ||
+        if ((!_isGameSettingsOpen && !_globalGameSettingsAttached) ||
             _isLoadingGameSettings ||
             _updatingGameHostDisplayOptions ||
             (!_editingAllGames && string.IsNullOrWhiteSpace(_gameSettingsTitleId)))
