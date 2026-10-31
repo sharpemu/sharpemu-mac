@@ -27,7 +27,9 @@
 # footprint.log ("seconds footprint_mb rss_mb" per second), frame-times.txt (one line per guest
 # flip, SHARPEMU_FRAME_TIMES), markers.tsv (epoch<TAB>name per plan marker), screenshots (every
 # SHARPEMU_SHOT_EVERY seconds and one shot-mark-<name>.png per marker, when a window-id
-# helper is available; SHARPEMU_HUD_WATCH=1 adds the `hud` marker, see hud-detect.py) and run.env (launch_epoch is the wall clock at launch). SHARPEMU_MEM_LIMIT_MB bounds the physical footprint.
+# helper is available; SHARPEMU_HUD_WATCH=1 adds the `hud` marker, see hud-detect.py), run.env (launch_epoch is the wall clock at launch),
+# guest.pid (the game's process id, written at launch) and window-id (its window, written by the first screenshot, for
+# `screencapture -l<id> -V <seconds>` recordings). SHARPEMU_MEM_LIMIT_MB bounds the physical footprint.
 #
 # Memory evidence (memstat.py has the formats):
 #   system-mem.log  always: every SHARPEMU_SYSMEM_EVERY (5) s the vm_stat deltas (pageins, pageouts,
@@ -248,7 +250,9 @@ fi
 shot() {
   [[ -x "$WINID" ]] || return 0
   local id
-  id="$("$WINID" "$GPID" 2>/dev/null)" && [[ -n "$id" ]] && screencapture -x -o -l"$id" "$1" 2>/dev/null
+  id="$("$WINID" "$GPID" 2>/dev/null)" && [[ -n "$id" ]] || return 0
+  [[ -s "$OUT/window-id" ]] || echo "$id" > "$OUT/window-id"
+  screencapture -x -o -l"$id" "$1" 2>/dev/null
 }
 
 (
@@ -263,6 +267,7 @@ shot() {
   exec ./SharpEmu ${SHARPEMU_ARGS:-} "$EBOOT"
 ) > "$OUT/game.log" 2>&1 &
 GPID=$!
+echo "$GPID" > "$OUT/guest.pid"
 start=$(date +%s)
 echo "launch_epoch=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> "$OUT/run.env"
 # game.tlog: game.log with seconds since launch on each line, for load timelines.
