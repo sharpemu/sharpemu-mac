@@ -37,7 +37,9 @@ internal static class TrophyUi
         Opacity = 0,
         CornerRadius = CardRadius,
         BorderThickness = new Thickness(2),
-        BorderBrush = Token("AccentBrush"),
+        // The same light ring as a selected library cover; an accent ring matched the gold
+        // edge of a completed game on warm themes.
+        BorderBrush = Token("TextBrush"),
         Transitions = [new Avalonia.Animation.DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(140) }],
     };
 

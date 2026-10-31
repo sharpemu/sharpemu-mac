@@ -16,6 +16,11 @@ much weaker fill change defined next to each control.
   <Style Selector="Button, ToggleButton, ComboBox, ComboBoxItem, ListBoxItem">
     <Setter Property="FocusAdorner" Value="{x:Null}" />
   </Style>
+  <!-- A slider in a settings row is shown focused by the row's ring; Fluent's square
+       adorner drew a second box inside it. -->
+  <Style Selector="local|SettingRow Slider">
+    <Setter Property="FocusAdorner" Value="{x:Null}" />
+  </Style>
 
   <Style Selector="Button, ToggleButton, ComboBox">
     <Setter Property="RenderTransformOrigin" Value="50%,50%" />

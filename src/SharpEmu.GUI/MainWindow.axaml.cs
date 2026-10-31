@@ -375,6 +375,7 @@ public partial class MainWindow : Window
         WireGameOptions();
         BuildEnvironmentSettingRows();
         HideUnsupportedPlatformOptions();
+        InitializeOptionGroupDividers();
 
         // The settings page edits _settings live, so a launch started while
         // it is open already uses the new values.

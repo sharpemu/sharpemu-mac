@@ -85,10 +85,10 @@ glow outside a group are never clipped.
     <Setter Property="Spacing" Value="0" />
   </Style>
 
-  <!-- The first row of a group has nothing above it to separate from. Rows added to a
-       host panel at run time (environment settings) only count when the host leads. -->
-  <Style Selector="Border.optionsGroup > StackPanel > local|SettingRow:nth-child(1) /template/ Border#PART_Divider,
-                   Border.optionsGroup > StackPanel > StackPanel:nth-child(1) > local|SettingRow:nth-child(1) /template/ Border#PART_Divider">
+  <!-- The first visible line of a group has nothing above it to separate from.
+       MainWindow.OptionGroups.cs marks it, since rows are hidden per platform and added
+       at run time (:nth-child would count hidden rows). -->
+  <Style Selector="local|SettingRow.groupFirst /template/ Border#PART_Divider">
     <Setter Property="IsVisible" Value="False" />
   </Style>
 
@@ -108,7 +108,7 @@ glow outside a group are never clipped.
     <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
     <Setter Property="BorderThickness" Value="0,1,0,0" />
   </Style>
-  <Style Selector="Border.optionsGroup > StackPanel > Border.optionsInfoRow:nth-child(1)">
+  <Style Selector="Border.optionsInfoRow.groupFirst">
     <Setter Property="BorderThickness" Value="0" />
   </Style>
   <!-- The group clips, so a focused button inside it draws its ring inside. -->
