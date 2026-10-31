@@ -37,6 +37,7 @@ public partial class MainWindow
             _settings.LauncherTheme = SelectedComboText(ThemeBox, LauncherThemes.DefaultId);
             ApplyLauncherTheme();
             SyncThemeControls();
+            ScheduleSettingsSave();
         };
 
         HookHexField(CustomBackgroundHex, accent: false);
@@ -49,6 +50,7 @@ public partial class MainWindow
                 _settings.GlassOpacity = (int)Math.Round(GlassOpacitySlider.Value);
                 ApplyLauncherTheme();
                 ShowAppearanceValues();
+                ScheduleSettingsSave();
             }
         };
         ThemeContrastSlider.ValueChanged += (_, _) =>
@@ -58,6 +60,7 @@ public partial class MainWindow
                 _settings.ThemeContrast = (int)Math.Round(ThemeContrastSlider.Value);
                 ApplyLauncherTheme();
                 ShowAppearanceValues();
+                ScheduleSettingsSave();
             }
         };
     }
@@ -120,6 +123,7 @@ public partial class MainWindow
 
         ApplyLauncherTheme();
         SyncThemeControls();
+        ScheduleSettingsSave();
     }
 
     private void HookHexField(TextBox field, bool accent)

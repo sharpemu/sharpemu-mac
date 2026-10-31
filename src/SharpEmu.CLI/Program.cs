@@ -46,6 +46,7 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        ConfigureManagedPluginResolution();
         // Apply the game file before composition or static backend settings read the environment.
         // Keep the result for RunEmulator so settings and relative paths are resolved once.
         if (args.Length > 0 && args[0] != SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
@@ -75,8 +76,6 @@ internal static partial class Program
 
         // Must precede any guest execution; registration itself is lazy.
         CpuComposition.Register();
-
-        ConfigureManagedPluginResolution();
 
         if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
             return SharpEmu.Core.Diagnostics.WindowsCrashCapture.RunHelper(args);
@@ -134,7 +133,7 @@ internal static partial class Program
         // itself to a console before the first write.
         EnsureCliConsole();
         UseUtf8ConsoleOutput();
-        if (isMitigatedChild && TryGetLogFileArgument(args, out var earlyLogFilePath))
+        if (isMitigatedChild && _preparedLaunch?.LogFile is { Length: > 0 } earlyLogFilePath)
         {
             TryEnableConsoleFileMirror(earlyLogFilePath);
         }
@@ -686,39 +685,6 @@ internal static partial class Program
         }
     }
 
-    private static bool TryGetLogFileArgument(IReadOnlyList<string> args, out string path)
-    {
-        for (var i = 0; i < args.Count; i++)
-        {
-            var argument = args[i];
-            if (string.Equals(argument, "--log-file", StringComparison.OrdinalIgnoreCase))
-            {
-                if (i + 1 < args.Count &&
-                    !string.IsNullOrWhiteSpace(args[i + 1]) &&
-                    !args[i + 1].StartsWith("--", StringComparison.Ordinal) &&
-                    ShouldConsumeLogFilePath(args, i + 1))
-                {
-                    path = args[i + 1];
-                    return true;
-                }
-
-                path = BuildDefaultLogFilePath(TryFindEbootPathToken(args));
-                return true;
-            }
-
-            const string logFilePrefix = "--log-file=";
-            if (argument.StartsWith(logFilePrefix, StringComparison.OrdinalIgnoreCase) &&
-                !string.IsNullOrWhiteSpace(argument[logFilePrefix.Length..]))
-            {
-                path = argument[logFilePrefix.Length..];
-                return true;
-            }
-        }
-
-        path = string.Empty;
-        return false;
-    }
-
     private static string BuildDefaultLogFilePath(string? ebootPath)
     {
         var key = string.IsNullOrWhiteSpace(ebootPath) ? "UNKNOWN"
@@ -769,23 +735,6 @@ internal static partial class Program
         catch
         {
             // Logging should never block launch; unknown title ids use a stable fallback.
-        }
-
-        return null;
-    }
-
-    private static string? TryFindEbootPathToken(IReadOnlyList<string> args)
-    {
-        for (var i = args.Count - 1; i >= 0; i--)
-        {
-            var argument = args[i];
-            if (string.IsNullOrWhiteSpace(argument) ||
-                argument.StartsWith("--", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            return argument;
         }
 
         return null;
@@ -1366,7 +1315,7 @@ internal static partial class Program
                 }
                 else
                 {
-                    logFilePath = BuildDefaultLogFilePath(TryFindEbootPathToken(args));
+                    logFilePath = string.Empty; // resolve the default after the executable path is known
                 }
 
                 continue;
@@ -1455,7 +1404,17 @@ internal static partial class Program
         }
 
         ebootPath = string.Join(' ', pathTokens);
-        var configured = LaunchConfiguration.Load(ebootPath, TryReadTitleId(ebootPath));
+        LaunchConfiguration configured;
+        try
+        {
+            configured = LaunchConfiguration.Load(ebootPath, TryReadTitleId(ebootPath));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            runtimeOptions = default;
+            logFilePath = null;
+            return false;
+        }
         foreach (var (name, value) in configured.BuildCliEnvironment(OperatingSystem.IsMacOS(), Environment.GetEnvironmentVariable))
         {
             Environment.SetEnvironmentVariable(name, value);
@@ -1470,6 +1429,7 @@ internal static partial class Program
         {
             logFilePath = BuildDefaultLogFilePath(ebootPath);
         }
+        if (logFilePath == string.Empty) logFilePath = BuildDefaultLogFilePath(ebootPath);
         runtimeOptions = new SharpEmuRuntimeOptions
         {
             CpuEngine = cpuEngine,

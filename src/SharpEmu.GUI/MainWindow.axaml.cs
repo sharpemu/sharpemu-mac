@@ -9,7 +9,6 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
-using Avalonia.LogicalTree;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
@@ -285,7 +284,7 @@ public partial class MainWindow : Window
             _libraryLayoutTimer.Stop();
             UpdateLibraryLayoutMetrics();
         };
-        _settingsSaveTimer = new DispatcherTimer
+        _settingsSaveTimer = new DispatcherTimer(DispatcherPriority.Normal)
         {
             Interval = TimeSpan.FromMilliseconds(180),
         };
@@ -388,7 +387,10 @@ public partial class MainWindow : Window
         // The settings page edits _settings live, so a launch started while
         // it is open already uses the new values.
         OverrideLogFileToggle.IsCheckedChanged += (_, _) =>
+        {
             _settings.OverrideLogFile = OverrideLogFileToggle.IsChecked == true;
+            ScheduleSettingsSave();
+        };
         TitleMusicToggle.IsCheckedChanged += (_, _) =>
         {
             _settings.PlayTitleMusic = TitleMusicToggle.IsChecked == true;
@@ -399,12 +401,19 @@ public partial class MainWindow : Window
         {
             _settings.DiscordRichPresence = DiscordToggle.IsChecked == true;
             UpdateDiscordPresence();
+            ScheduleSettingsSave();
         };
         AutoUpdateToggle.IsCheckedChanged += (_, _) =>
+        {
             _settings.CheckForUpdatesOnStartup = AutoUpdateToggle.IsChecked == true;
+            ScheduleSettingsSave();
+        };
         InitializeThemeControls();
         ConsoleLanguageBox.SelectionChanged += (_, _) =>
+        {
             _settings.ConsoleLanguage = SelectedComboText(ConsoleLanguageBox, "EnglishUS");
+            ScheduleSettingsSave();
+        };
         PortableDataToggle.IsCheckedChanged += (_, _) =>
         {
             var enabled = PortableDataToggle.IsChecked == true;
@@ -450,16 +459,6 @@ public partial class MainWindow : Window
         PopulateLanguageBox();
         ApplyLocalization();
         ApplySettingsToControls();
-        // Schedule after the existing control handlers update _settings, including changes
-        // made while the user stays on the Options page.
-        foreach (var control in OptionsPage.GetLogicalDescendants().OfType<Control>())
-        {
-            control.PropertyChanged += (_, change) =>
-            {
-                if (change.Property.Name is "IsChecked" or "SelectedItem" or "Value" or "Text")
-                    ScheduleSettingsSave();
-            };
-        }
         SeedLibraryFromCache();
         FillScreenBeforeShowing();
         InitializeController();
@@ -1225,6 +1224,7 @@ public partial class MainWindow : Window
         _settings.Language = language.Code;
         Localization.Instance.Load(language.Code);
         ApplyLocalization();
+        ScheduleSettingsSave();
     }
 
     /// <summary>
@@ -1572,6 +1572,7 @@ public partial class MainWindow : Window
             SharpEmu.Logging.SharpEmuPaths.CanWriteExecutableDirectory();
         PortableDataToggle.IsChecked = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent();
         UpdateLogFilePathText();
+        _settingsSaveTimer.Stop();
     }
 
     private static string SelectedComboText(ComboBox comboBox, string fallback) =>
