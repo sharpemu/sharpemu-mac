@@ -71,7 +71,7 @@ internal static class LauncherThemes
             ["#111111", "#191919", "#222222", "#2A2A2A", "#313131", "#3A3A3A",
              "#484848", "#606060", "#6E6E6E", "#7B7B7B", "#B4B4B4", "#EEEEEE"],
             accent: "#F2F2F2", accentHover: "#FFFFFF", accentForeground: "#111111", tintAlpha: 0x24),
-        // True black surfaces for OLED panels.
+        // Onyx: true black surfaces under the glass. The id keeps its old name so saved settings still match.
         new(
             Id: "Oled",
             Background: "#000000", Chrome: "#000000", Menu: "#0A0A0A",

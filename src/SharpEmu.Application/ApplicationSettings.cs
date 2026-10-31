@@ -62,7 +62,7 @@ public sealed class ApplicationSettings
     /// <summary>UI language, matching a file code under Languages/ (e.g. "en", "tr").</summary>
     public string Language { get; set; } = "en";
 
-    /// <summary>Launcher colour theme: Graphite, Oled, Midnight, Violet or Custom.</summary>
+    /// <summary>Launcher colour theme: a LauncherThemes palette id (Graphite, Oled for Onyx, Midnight, ...) or Custom.</summary>
     public string LauncherTheme { get; set; } = "Graphite";
 
     /// <summary>Custom theme background, #RRGGBB.</summary>
