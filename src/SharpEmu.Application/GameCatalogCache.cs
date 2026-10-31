@@ -102,6 +102,34 @@ public static class GameCatalogCache
         return games;
     }
 
+    /// <summary>
+    /// Every title id in the cache, whatever folders it was written for and whether or not
+    /// the games are still reachable: a library on an unmounted drive still names its games.
+    /// </summary>
+    public static IReadOnlyList<string> CachedTitleIds()
+    {
+        try
+        {
+            if (!File.Exists(CachePath))
+            {
+                return [];
+            }
+
+            var document = JsonSerializer.Deserialize<CacheDocument>(
+                File.ReadAllText(CachePath),
+                SerializerOptions);
+            return document?.Games
+                .Select(game => game.TitleId)
+                .Where(titleId => !string.IsNullOrWhiteSpace(titleId))
+                .Select(titleId => titleId!)
+                .ToList() ?? [];
+        }
+        catch (Exception)
+        {
+            return [];
+        }
+    }
+
     public static void Save(IReadOnlyList<string> folders, IReadOnlyList<CatalogGame> games)
     {
         try

@@ -100,33 +100,29 @@ public sealed class EnvironmentSettingsTests
     }
 
     [Fact]
-    public void PerGameOverrideOfADefaultOnSettingSurvivesInheritanceCleanup()
+    public void PerGameOverrideOfADefaultOnSettingSurvivesDefaultCleanup()
     {
-        var global = new ApplicationSettings();
         var perGame = new PerGameSettings
         {
-            EnvironmentToggles = [.. global.EnvironmentToggles, "SHARPEMU_TESSELLATION=0"],
+            EnvironmentToggles = [.. EffectiveLaunchSettings.Defaults.EnvironmentToggles, "SHARPEMU_TESSELLATION=0"],
         };
 
-        perGame.RemoveInheritedValues(global);
+        perGame.RemoveDefaultValues();
 
         Assert.NotNull(perGame.EnvironmentToggles);
         Assert.False(EnvironmentSettings.IsEnabled(
-            EffectiveLaunchSettings.Resolve(global, perGame).EnvironmentToggles, Setting("Tessellation")));
+            EffectiveLaunchSettings.Resolve(perGame).EnvironmentToggles, Setting("Tessellation")));
     }
 
     [Fact]
-    public void PerGameListMatchingGlobalOnlyInSpellingIsDropped()
+    public void PerGameListMatchingDefaultsOnlyInSpellingIsDropped()
     {
-        var global = new ApplicationSettings();
-        EnvironmentSettings.SetEnabled(global.EnvironmentToggles, Setting("NoFlipPacing"), enabled: true);
         var perGame = new PerGameSettings
         {
-            EnvironmentToggles = [.. global.EnvironmentToggles.Where(entry => !entry.StartsWith("SHARPEMU_NO_FLIP")),
-                "SHARPEMU_NO_FLIP_PACING=1"],
+            EnvironmentToggles = ["SHARPEMU_WRITABLE_APP0=1", "sharpemu_disable_import_loop_guard"],
         };
 
-        perGame.RemoveInheritedValues(global);
+        perGame.RemoveDefaultValues();
 
         Assert.Null(perGame.EnvironmentToggles);
     }
@@ -134,9 +130,11 @@ public sealed class EnvironmentSettingsTests
     [Fact]
     public void LegacyDefaultProfileAndConsoleFieldsAreTolerated()
     {
-        var settings = ApplicationSettings.NormalizeFromJson(
-            """{ "DefaultProfile": "Player", "ConsoleType": "PS5", "RenderResolutionScale": 0.5, "EnvironmentToggles": ["SHARPEMU_DEFAULT_PROFILE=Player", "SHARPEMU_WRITABLE_APP0"] }""");
+        const string json =
+            """{ "DefaultProfile": "Player", "ConsoleType": "PS5", "RenderResolutionScale": 0.5, "EnvironmentToggles": ["SHARPEMU_DEFAULT_PROFILE=Player", "SHARPEMU_WRITABLE_APP0"] }""";
 
-        Assert.Equal(["SHARPEMU_WRITABLE_APP0"], settings.EnvironmentToggles);
+        ApplicationSettings.NormalizeFromJson(json);
+
+        Assert.Equal(["SHARPEMU_WRITABLE_APP0"], SettingsSplitMigration.CarriedValues(json).EnvironmentToggles);
     }
 }

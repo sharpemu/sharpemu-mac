@@ -264,7 +264,6 @@
 
   "Options.Console.Language.Label": "Konsolsprog",
   "Options.Console.Language.Desc": "Systemsprog der rapporteres til spil.",
-  "Options.Section.Rendering": "GENGIVELSE",
   "Options.Section.General.Desc": "Grundlæggende emuleringsadfærd.",
   "Options.Section.Logging.Desc": "Hvor meget emulatoren logger, og hvor logfilerne gemmes.",
   "Options.Section.Launcher.Desc": "Udseende, sprog, musik og opdateringer til launcheren.",

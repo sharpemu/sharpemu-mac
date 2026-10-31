@@ -264,7 +264,6 @@
 
   "Options.Console.Language.Label": "لغة وحدة التحكم",
   "Options.Console.Language.Desc": "لغة النظام التي يتم إبلاغ الألعاب بها.",
-  "Options.Section.Rendering": "التصيير",
   "Options.Section.General.Desc": "السلوك الأساسي للمحاكاة.",
   "Options.Section.Logging.Desc": "مقدار ما يسجله المحاكي وأين يحفظ السجلات.",
   "Options.Section.Launcher.Desc": "مظهر المشغّل ولغته وموسيقاه وتحديثاته.",

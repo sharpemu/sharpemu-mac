@@ -284,7 +284,6 @@
   "About.Discord.Desc": "Topluluğa katılın, destek alın ve geliştirmeyi takip edin.",
   "About.GithubButton": "GitHub'da katkıda bulun!",
   "About.DiscordButton": "Discord'a katıl!",
-  "Options.Section.Rendering": "GÖRÜNTÜ İŞLEME",
   "Options.Section.General.Desc": "Emülasyonun temel davranışı.",
   "Options.Section.Logging.Desc": "Emülatörün ne kadar günlük tuttuğu ve günlükleri nereye kaydettiği.",
   "Options.Section.Launcher.Desc": "Başlatıcının görünümü, dili, müziği ve güncellemeleri.",

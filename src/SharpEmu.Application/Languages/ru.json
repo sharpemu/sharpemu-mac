@@ -101,7 +101,6 @@
   "Options.Section.Emulation": "ЭМУЛЯЦИЯ",
   "Options.Section.Logging": "ЛОГГИРОВАНИЕ",
   "Options.Section.Launcher": "ЛАУНЧЕР",
-  "Options.Section.Rendering": "РЕНДЕРИНГ",
   "Options.Section.General.Desc": "Базовое поведение эмуляции.",
   "Options.Section.Logging.Desc": "Сколько эмулятор записывает в журнал и куда сохраняет журналы.",
   "Options.Section.Launcher.Desc": "Оформление, язык, музыка и обновления лаунчера.",

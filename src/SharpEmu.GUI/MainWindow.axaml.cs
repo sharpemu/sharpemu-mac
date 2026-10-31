@@ -162,8 +162,6 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _settingsSaveTimer;
 
     private GuiSettings _settings = new();
-    private IReadOnlyList<HostDisplayOption> _hostDisplays = [];
-    private bool _updatingHostDisplayOptions;
     private EmulatorProcess? _emulator;
     private ConsoleWindow? _consoleWindow;
     private GuiConsoleMirror? _consoleMirror;
@@ -241,6 +239,8 @@ public partial class MainWindow : Window
     {
         // Settings, theme and strings load before the controls are built, so the first frame
         // already shows the user's theme and language instead of raw keys.
+        // Game settings an older launcher kept globally move to each game's file first.
+        SettingsSplitMigration.MigrateIfNeeded();
         _settings = GuiSettings.Load();
         ApplyLauncherTheme();
         Localization.Instance.Load(_settings.Language);
@@ -386,10 +386,6 @@ public partial class MainWindow : Window
 
         // The settings page edits _settings live, so a launch started while
         // it is open already uses the new values.
-        LogLevelBox.SelectionChanged += (_, _) => _settings.LogLevel = SelectedLogLevel();
-        TraceImportsBox.ValueChanged += (_, _) => _settings.ImportTraceLimit = (int)(TraceImportsBox.Value ?? 0);
-        StrictToggle.IsCheckedChanged += (_, _) => _settings.StrictDynlibResolution = StrictToggle.IsChecked == true;
-        LogToFileToggle.IsCheckedChanged += (_, _) => _settings.LogToFile = LogToFileToggle.IsChecked == true;
         OverrideLogFileToggle.IsCheckedChanged += (_, _) =>
             _settings.OverrideLogFile = OverrideLogFileToggle.IsChecked == true;
         TitleMusicToggle.IsCheckedChanged += (_, _) =>
@@ -408,12 +404,6 @@ public partial class MainWindow : Window
         InitializeThemeControls();
         ConsoleLanguageBox.SelectionChanged += (_, _) =>
             _settings.ConsoleLanguage = SelectedComboText(ConsoleLanguageBox, "EnglishUS");
-        WindowModeBox.SelectionChanged += (_, _) => _settings.WindowMode = SelectedComboText(WindowModeBox, "Windowed");
-        DisplayBox.SelectionChanged += (_, _) => OnHostDisplayChanged();
-        ResolutionBox.SelectionChanged += (_, _) => OnHostResolutionChanged();
-        RefreshRateBox.SelectionChanged += (_, _) => OnHostRefreshRateChanged();
-        ScalingModeBox.SelectionChanged += (_, _) => _settings.ScalingMode = SelectedComboText(ScalingModeBox, "Fit");
-        VSyncToggle.IsCheckedChanged += (_, _) => _settings.VSync = VSyncToggle.IsChecked == true;
         PortableDataToggle.IsCheckedChanged += (_, _) =>
         {
             var enabled = PortableDataToggle.IsChecked == true;
@@ -424,49 +414,9 @@ public partial class MainWindow : Window
                 PortableDataToggle.IsChecked = !enabled;
             }
         };
-        HdrModeBox.SelectionChanged += (_, _) => _settings.HdrMode = SelectedComboText(HdrModeBox, "Auto");
-        OverlayEnabledToggle.IsCheckedChanged += (_, _) =>
-        {
-            _settings.OverlayEnabled = OverlayEnabledToggle.IsChecked == true;
-            UpdateOverlayRows();
-        };
-        OverlayModeBox.SelectionChanged += (_, _) =>
-        {
-            _settings.OverlayMode = SelectedComboText(OverlayModeBox, "TitleBar");
-            UpdateOverlayRows();
-        };
-        OverlayCornerBox.SelectionChanged += (_, _) => _settings.OverlayCorner = SelectedComboText(OverlayCornerBox, "TopRight");
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
         OpenLogsFolderButton.Click += (_, _) => OpenLogsFolder();
-        PerformanceProfileToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_PROFILE_PERFORMANCE", PerformanceProfileToggle.IsChecked == true);
-        PerformanceFrameTraceToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE", PerformanceFrameTraceToggle.IsChecked == true);
-        StrictComputeToggle.IsCheckedChanged += (_, _) =>
-            StrictComputeSettings.SetEnabled(_settings.EnvironmentToggles, StrictComputeToggle.IsChecked == true);
-        EnvBthidToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_BTHID_UNAVAILABLE", EnvBthidToggle.IsChecked == true);
-        EnvLoopGuardToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", EnvLoopGuardToggle.IsChecked == true);
-        EnvWritableApp0Toggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_WRITABLE_APP0", EnvWritableApp0Toggle.IsChecked == true);
-        BinkPlaybackBox.SelectionChanged += (_, _) =>
-            _settings.BinkPlaybackMode = SelectedComboText(BinkPlaybackBox, "Guest");
-        EnvVkValidationToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_VK_VALIDATION", EnvVkValidationToggle.IsChecked == true);
-        EnvDumpSpirvToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_DUMP_SPIRV", EnvDumpSpirvToggle.IsChecked == true);
-        EnvSkipRtToggle.IsCheckedChanged += (_, _) =>
-            RayTracingSkipSettings.SetEnabled(_settings.EnvironmentToggles, EnvSkipRtToggle.IsChecked == true);
-        EnvLogDirectMemoryToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_LOG_DIRECT_MEMORY", EnvLogDirectMemoryToggle.IsChecked == true);
-        EnvLogIoToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_LOG_IO", EnvLogIoToggle.IsChecked == true);
-        EnvLogNpToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
-        CrashDumpToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_CRASH_CAPTURE", CrashDumpToggle.IsChecked == true);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
@@ -493,14 +443,6 @@ public partial class MainWindow : Window
         {
             Interval = TimeSpan.FromMilliseconds(50),
         };
-        EnvRenderDocToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle(
-                "SHARPEMU_RENDERDOC",
-                EnvRenderDocToggle.IsChecked == true);
-        EnvDisableVkImplicitLayersToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle(
-                "SHARPEMU_VK_DISABLE_IMPLICITS",
-                EnvDisableVkImplicitLayersToggle.IsChecked == true);
 
         LauncherGamepad.EnsureStarted();
         ShowVersion();
@@ -755,8 +697,6 @@ public partial class MainWindow : Window
         OptionsGeneralNav,
         OptionsLoggingNav,
         OptionsLauncherNav,
-        OptionsRenderingNav,
-        OptionsEnvironmentNav,
         OptionsAboutNav,
     ];
 
@@ -765,8 +705,6 @@ public partial class MainWindow : Window
         OptionsGeneralPanel,
         OptionsLoggingPanel,
         OptionsLauncherPanel,
-        OptionsRenderingPanel,
-        OptionsEnvironmentPanel,
         OptionsAboutPanel,
     ];
 
@@ -785,7 +723,7 @@ public partial class MainWindow : Window
             SetOptionsPanelInteraction(panels[index], active);
         }
 
-        if (panels[section] == OptionsEnvironmentPanel)
+        if (panels[section] == OptionsLauncherPanel)
         {
             RefreshTrophyTestGames();
         }
@@ -1281,7 +1219,6 @@ public partial class MainWindow : Window
         RefreshOptionsNavigationLabels();
         RefreshLocalizedChoices();
         UpdateLogFilePathText();
-        RefreshHostRefreshRates(_settings.RefreshRate);
         RefreshUpdateText();
         UpdateEmptyStateTexts();
         UpdateLibraryLayoutButton();
@@ -1305,14 +1242,6 @@ public partial class MainWindow : Window
             OptionsLauncherNav,
             OptionsLauncherNavLabel,
             localization.Get("Options.Section.Launcher"));
-        SetOptionsNavigationLabel(
-            OptionsRenderingNav,
-            OptionsRenderingNavLabel,
-            localization.Get("Options.Section.Rendering"));
-        SetOptionsNavigationLabel(
-            OptionsEnvironmentNav,
-            OptionsEnvironmentNavLabel,
-            localization.Get("Options.Env.Tab"));
         SetOptionsNavigationLabel(
             OptionsAboutNav,
             OptionsAboutNavLabel,
@@ -1580,13 +1509,6 @@ public partial class MainWindow : Window
     {
         ConsoleLanguageBox.ItemsSource = _consoleLanguageChoices;
         ThemeBox.ItemsSource = _themeChoices;
-        LogLevelBox.ItemsSource = _logLevelChoices;
-        WindowModeBox.ItemsSource = _windowModeChoices;
-        ScalingModeBox.ItemsSource = _scalingModeChoices;
-        HdrModeBox.ItemsSource = _hdrModeChoices;
-        BinkPlaybackBox.ItemsSource = _binkPlaybackChoices;
-        OverlayModeBox.ItemsSource = _overlayModeChoices;
-        OverlayCornerBox.ItemsSource = _overlayCornerChoices;
     }
 
     private void RefreshLocalizedChoices()
@@ -1616,20 +1538,6 @@ public partial class MainWindow : Window
         ConsoleLanguageBox.SelectedIndex = ChoiceIndex(
             _settings.ConsoleLanguage,
             _consoleLanguageChoices.Select(choice => choice.Value).ToArray());
-        LogLevelBox.SelectedIndex = _settings.LogLevel.ToLowerInvariant() switch
-        {
-            "trace" => 0,
-            "debug" => 1,
-            "info" => 2,
-            "warning" or "warn" => 3,
-            "error" => 4,
-            "critical" or "fatal" => 5,
-            _ => 2,
-        };
-        TraceImportsBox.Value = Math.Clamp(_settings.ImportTraceLimit, 0, 4096);
-        StrictToggle.IsChecked = _settings.StrictDynlibResolution;
-        LogToFileToggle.IsChecked = _settings.LogToFile;
-        CrashDumpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_CRASH_CAPTURE");
         OverrideLogFileToggle.IsChecked = _settings.OverrideLogFile;
         TitleMusicToggle.IsChecked = _settings.PlayTitleMusic;
         TitleMusicVolumeSlider.Value = _settings.TitleMusicVolume * 100.0;
@@ -1642,39 +1550,11 @@ public partial class MainWindow : Window
         SetLibraryLayout(string.Equals(_settings.LibraryLayout, "Grid", StringComparison.OrdinalIgnoreCase));
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
         AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
-        PerformanceProfileToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_PROFILE_PERFORMANCE");
-        PerformanceFrameTraceToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE");
-        StrictComputeToggle.IsChecked = StrictComputeSettings.IsEnabled(_settings.EnvironmentToggles);
-        EnvBthidToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_BTHID_UNAVAILABLE");
-        EnvLoopGuardToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
-        EnvWritableApp0Toggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_WRITABLE_APP0");
-        BinkPlaybackBox.SelectedIndex = ChoiceIndex(_settings.BinkPlaybackMode, "Host", "Guest", "Skip");
-        EnvVkValidationToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_VK_VALIDATION");
-        EnvDumpSpirvToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DUMP_SPIRV");
-        EnvSkipRtToggle.IsChecked = RayTracingSkipSettings.IsEnabled(_settings.EnvironmentToggles);
-        EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
-        EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
-        EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
-        EnvRenderDocToggle.IsChecked =
-            _settings.EnvironmentToggles.Contains("SHARPEMU_RENDERDOC");
-        EnvDisableVkImplicitLayersToggle.IsChecked =
-            _settings.EnvironmentToggles.Contains("SHARPEMU_VK_DISABLE_IMPLICITS");
-        WindowModeBox.SelectedIndex = ChoiceIndex(
-            PlatformWindowMode(_settings.WindowMode), "Windowed", "Borderless", "Exclusive");
-        LoadHostDisplayOptions();
-        ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         SyncThemeControls();
-        VSyncToggle.IsChecked = _settings.VSync;
         PortableDataToggle.IsEnabled = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent() ||
             SharpEmu.Logging.SharpEmuPaths.CanWriteExecutableDirectory();
         PortableDataToggle.IsChecked = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent();
-        HdrModeBox.SelectedIndex = ChoiceIndex(_settings.HdrMode, "Auto", "On", "Off");
-        OverlayEnabledToggle.IsChecked = _settings.OverlayEnabled;
-        OverlayModeBox.SelectedIndex = ChoiceIndex(_settings.OverlayMode, "Full", "Minimal", "TitleBar");
-        UpdateOverlayRows();
-        OverlayCornerBox.SelectedIndex = ChoiceIndex(_settings.OverlayCorner, "TopLeft", "TopRight", "BottomRight", "BottomLeft");
         UpdateLogFilePathText();
-        ApplyEnvironmentSettingsToControls();
     }
 
     private static string SelectedComboText(ComboBox comboBox, string fallback) =>
@@ -1684,117 +1564,6 @@ public partial class MainWindow : Window
             string value => value,
             _ => fallback,
         };
-
-    private void LoadHostDisplayOptions()
-    {
-        _updatingHostDisplayOptions = true;
-        try
-        {
-            _hostDisplays = HostDisplayOptions.BuildDisplays(
-                HostDisplayCatalog.Query(),
-                _settings.DisplayIndex);
-            DisplayBox.ItemsSource = _hostDisplays;
-            var display = HostDisplayOptions.SelectDisplay(_hostDisplays, _settings.DisplayIndex);
-            DisplayBox.SelectedItem = display;
-            PopulateHostModes(display, _settings.Resolution, _settings.RefreshRate);
-        }
-        finally
-        {
-            _updatingHostDisplayOptions = false;
-        }
-
-        SyncHostVideoSettings();
-    }
-
-    private void OnHostDisplayChanged()
-    {
-        if (_updatingHostDisplayOptions || DisplayBox.SelectedItem is not HostDisplayOption display)
-        {
-            return;
-        }
-
-        _updatingHostDisplayOptions = true;
-        try
-        {
-            PopulateHostModes(display, _settings.Resolution, _settings.RefreshRate);
-        }
-        finally
-        {
-            _updatingHostDisplayOptions = false;
-        }
-
-        SyncHostVideoSettings();
-    }
-
-    private void OnHostResolutionChanged()
-    {
-        if (_updatingHostDisplayOptions || DisplayBox.SelectedItem is not HostDisplayOption)
-        {
-            return;
-        }
-
-        _settings.Resolution = SelectedComboText(ResolutionBox, "1920x1080");
-        RefreshHostRefreshRates(_settings.RefreshRate);
-        OnHostRefreshRateChanged();
-    }
-
-    private void OnHostRefreshRateChanged()
-    {
-        if (!_updatingHostDisplayOptions && RefreshRateBox.SelectedItem is HostRefreshRateOption refreshRate)
-        {
-            _settings.RefreshRate = refreshRate.Value;
-        }
-    }
-
-    private void PopulateHostModes(
-        HostDisplayOption display,
-        string selectedResolution,
-        int selectedRefreshRate)
-    {
-        var resolutions = HostDisplayOptions.BuildResolutions(display, selectedResolution);
-        ResolutionBox.ItemsSource = resolutions;
-        ResolutionBox.SelectedItem = resolutions.FirstOrDefault(resolution =>
-            string.Equals(resolution, selectedResolution, StringComparison.OrdinalIgnoreCase)) ?? resolutions[0];
-        RefreshHostRefreshRates(selectedRefreshRate);
-    }
-
-    private void RefreshHostRefreshRates(int selectedRefreshRate)
-    {
-        if (DisplayBox.SelectedItem is not HostDisplayOption display)
-        {
-            return;
-        }
-
-        var wasUpdating = _updatingHostDisplayOptions;
-        _updatingHostDisplayOptions = true;
-        try
-        {
-            var rates = HostDisplayOptions.BuildRefreshRates(
-                display,
-                SelectedComboText(ResolutionBox, _settings.Resolution),
-                selectedRefreshRate,
-                Localization.Instance.Get("Options.RefreshRate.Automatic"));
-            RefreshRateBox.ItemsSource = rates;
-            RefreshRateBox.SelectedItem = rates.FirstOrDefault(rate => rate.Value == selectedRefreshRate) ?? rates[0];
-        }
-        finally
-        {
-            _updatingHostDisplayOptions = wasUpdating;
-        }
-    }
-
-    private void SyncHostVideoSettings()
-    {
-        if (DisplayBox.SelectedItem is HostDisplayOption display)
-        {
-            _settings.DisplayIndex = display.Index;
-        }
-
-        _settings.Resolution = SelectedComboText(ResolutionBox, "1920x1080");
-        _settings.RefreshRate = RefreshRateBox.SelectedItem is HostRefreshRateOption refreshRate
-            ? refreshRate.Value
-            : 0;
-    }
 
     private static int ChoiceIndex(string value, params string[] choices)
     {
@@ -1893,36 +1662,7 @@ public partial class MainWindow : Window
     // inherit the process environment, so stale names must be cleared explicitly.
     private readonly HashSet<string> _appliedEnvironmentVariables = new(StringComparer.OrdinalIgnoreCase);
 
-    private void SetEnvironmentToggle(string name, bool enabled)
-    {
-        if (enabled)
-        {
-            if (!_settings.EnvironmentToggles.Contains(name))
-            {
-                _settings.EnvironmentToggles.Add(name);
-            }
-        }
-        else
-        {
-            _settings.EnvironmentToggles.Remove(name);
-        }
-    }
-
     private const string BinkModeEnvironmentName = "SHARPEMU_BINK_MODE";
-
-    private string SelectedLogLevel()
-    {
-        return LogLevelBox.SelectedIndex switch
-        {
-            0 => "Trace",
-            1 => "Debug",
-            2 => "Info",
-            3 => "Warning",
-            4 => "Error",
-            5 => "Critical",
-            _ => "Info",
-        };
-    }
 
     private void UpdateLogFilePathText()
     {
@@ -2932,14 +2672,6 @@ public partial class MainWindow : Window
         }
     }
 
-    // As in a game's settings: the mode needs the overlay on, the corner an in-game panel.
-    private void UpdateOverlayRows()
-    {
-        OverlayModeRow.IsVisible = _settings.OverlayEnabled;
-        OverlayCornerRow.IsVisible = _settings.OverlayEnabled &&
-            !string.Equals(_settings.OverlayMode, "TitleBar", StringComparison.OrdinalIgnoreCase);
-    }
-
     // The Options page and the library menu show the same two title-music settings.
     private void UpdateTitleMusicControls()
     {
@@ -3102,7 +2834,7 @@ public partial class MainWindow : Window
                 game.Path.Equals(ebootPath, GameLibraryPath.Comparison))?.TitleId
             : titleId;
         var perGame = PerGameSettings.Load(resolvedTitleId);
-        var effective = EffectiveLaunchSettings.Resolve(_settings, perGame);
+        var effective = EffectiveLaunchSettings.Resolve(perGame);
         var customEnvironment = CustomEnvironmentVariables.Merge(
             GlobalCustomEnvironmentSettings.Load(),
             perGame?.CustomEnvironmentVariables,
@@ -3170,10 +2902,10 @@ public partial class MainWindow : Window
 
         Environment.SetEnvironmentVariable(
             BinkModeEnvironmentName,
-            _settings.BinkPlaybackMode switch
+            effective.BinkPlaybackMode.ToLowerInvariant() switch
             {
-                "Guest" => "guest",
-                "Skip" => "skip",
+                "guest" => "guest",
+                "skip" => "skip",
                 _ => "native",
             });
         _appliedEnvironmentVariables.Add(BinkModeEnvironmentName);

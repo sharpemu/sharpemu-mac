@@ -13,7 +13,7 @@ namespace SharpEmu.GUI;
 /// <summary>
 /// Options that only some platforms have, and the emulator switches the launcher exposes from
 /// <see cref="EnvironmentSettings"/>: one row per switch, built in code with the same row, toggle
-/// and combo styles as the hand-written rows, on the Options page and in per-game options.
+/// and combo styles as the hand-written rows, in per-game options.
 /// </summary>
 public partial class MainWindow
 {
@@ -25,9 +25,7 @@ public partial class MainWindow
         LocalizedChoice.Literal("2160p", "3840 x 2160 (4K)"),
     ];
 
-    private readonly List<EnvironmentSettingControl> _globalEnvironmentSettings = new();
     private readonly List<EnvironmentSettingControl> _gameEnvironmentSettings = new();
-    private bool _loadingEnvironmentSettings;
     private DispatcherTimer? _clearShaderCacheTimer;
 
     /// <summary>One emulator switch and the control that edits it.</summary>
@@ -91,11 +89,6 @@ public partial class MainWindow
 
         Control[] unsupported =
         [
-            CrashDumpRow,
-            RefreshRateRow,
-            EnvRenderDocRow,
-            EnvVkValidationRow,
-            EnvDisableVkImplicitLayersToggle,
             GameCrashDumpRow,
             GameRefreshRateRow,
             GameEnvRenderDocToggle,
@@ -110,13 +103,6 @@ public partial class MainWindow
 
     private void BuildEnvironmentSettingRows()
     {
-        var globalHosts = new Dictionary<EnvironmentSettingGroup, Panel>
-        {
-            [EnvironmentSettingGroup.Performance] = OptionsPerformanceHost,
-            [EnvironmentSettingGroup.Compatibility] = OptionsCompatibilityHost,
-            [EnvironmentSettingGroup.Audio] = OptionsAudioHost,
-            [EnvironmentSettingGroup.Debug] = OptionsDebugExtraHost,
-        };
         var gameHosts = new Dictionary<EnvironmentSettingGroup, Panel>
         {
             [EnvironmentSettingGroup.Performance] = GamePerformanceHost,
@@ -132,26 +118,12 @@ public partial class MainWindow
                 continue;
             }
 
-            var global = CreateEnvironmentSettingRow(setting, "", () =>
-            {
-                if (!_loadingEnvironmentSettings)
-                {
-                    var control = _globalEnvironmentSettings.First(c => c.Setting == setting);
-                    control.Store(_settings.EnvironmentToggles);
-                }
-            }, out var globalControl);
-            globalHosts[setting.Group].Children.Add(global);
-            _globalEnvironmentSettings.Add(globalControl);
-
             var perGame = CreateEnvironmentSettingRow(setting, "Game", PersistOpenGameSettings, out var gameControl);
             gameHosts[setting.Group].Children.Add(perGame);
             _gameEnvironmentSettings.Add(gameControl);
         }
 
-        GuestResolutionBox.ItemsSource = _guestResolutionChoices;
         GameGuestResolutionBox.ItemsSource = _guestResolutionChoices;
-        GuestResolutionBox.SelectionChanged += (_, _) =>
-            _settings.GuestDisplayResolution = SelectedComboText(GuestResolutionBox, "1080p");
         GameGuestResolutionBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         OpenShaderCacheButton.Click += (_, _) => OpenFolder(EmulatorShaderCacheRoot());
         ClearShaderCacheButton.Click += (_, _) => OnClearShaderCacheClicked();
@@ -209,31 +181,12 @@ public partial class MainWindow
     private void RefreshEnvironmentSettingChoices()
     {
         RefreshChoices(_guestResolutionChoices);
-        foreach (var control in _globalEnvironmentSettings.Concat(_gameEnvironmentSettings))
+        foreach (var control in _gameEnvironmentSettings)
         {
             if (control.Choices is { } choices)
             {
                 RefreshChoices(choices);
             }
-        }
-    }
-
-    private void ApplyEnvironmentSettingsToControls()
-    {
-        _loadingEnvironmentSettings = true;
-        try
-        {
-            foreach (var control in _globalEnvironmentSettings)
-            {
-                control.Load(_settings.EnvironmentToggles);
-            }
-
-            GuestResolutionBox.SelectedItem = FindChoice(
-                _guestResolutionChoices, _settings.GuestDisplayResolution, "1080p");
-        }
-        finally
-        {
-            _loadingEnvironmentSettings = false;
         }
     }
 

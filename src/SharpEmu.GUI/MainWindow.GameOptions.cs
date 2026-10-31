@@ -35,8 +35,8 @@ public partial class MainWindow
 
     // What the open game had stored, and what its controls showed once loaded. A save writes
     // only the values the user changed since then, so a control showing a fallback for a
-    // global value (Exclusive shown as Borderless on macOS, a clamped trace limit) never
-    // turns into an override by itself.
+    // default (Exclusive shown as Borderless on macOS, a clamped trace limit) never turns
+    // into a setting by itself.
     private PerGameSettings? _gameSettingsStored;
     private PerGameSettings? _gameSettingsBaseline;
     private IReadOnlyList<HostDisplayOption> _gameHostDisplays = [];
@@ -58,6 +58,7 @@ public partial class MainWindow
         GameHdrModeBox.ItemsSource = _hdrModeChoices;
         GameOverlayModeBox.ItemsSource = _overlayModeChoices;
         GameOverlayCornerBox.ItemsSource = _overlayCornerChoices;
+        GameBinkPlaybackBox.ItemsSource = _binkPlaybackChoices;
 
         var navigationButtons = GameOptionsNavigationButtons();
         for (var index = 0; index < navigationButtons.Length; index++)
@@ -127,6 +128,7 @@ public partial class MainWindow
             PersistOpenGameSettings();
         };
         GameOverlayCornerBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameBinkPlaybackBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         foreach (var (_, toggle) in GameEnvironmentToggles())
         {
             toggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
@@ -206,7 +208,7 @@ public partial class MainWindow
     {
         var stored = PerGameSettings.Load(titleId);
         UpdateGameCustomEnvironmentSummary(titleId);
-        var effective = EffectiveLaunchSettings.Resolve(_settings, stored);
+        var effective = EffectiveLaunchSettings.Resolve(stored);
 
         _isLoadingGameSettings = true;
         _updatingGameHostDisplayOptions = true;
@@ -236,6 +238,7 @@ public partial class MainWindow
                 _hdrModeChoices,
                 effective.HdrMode,
                 "Auto");
+            GameBinkPlaybackBox.SelectedItem = FindChoice(_binkPlaybackChoices, effective.BinkPlaybackMode, "Guest");
 
             _gameHostDisplays = HostDisplayOptions.BuildDisplays(
                 HostDisplayCatalog.Query(),
@@ -302,7 +305,7 @@ public partial class MainWindow
 
         var settings = PerGameSettings.Load(titleId) ?? new PerGameSettings();
         settings.CustomEnvironmentVariables = entries.Count == 0 ? null : entries.ToList();
-        settings.RemoveInheritedValues(_settings);
+        settings.RemoveDefaultValues();
         settings.Save(titleId);
         UpdateGameCustomEnvironmentSummary(titleId);
     }
@@ -346,19 +349,19 @@ public partial class MainWindow
             OverlayEnabled = Pick(current.OverlayEnabled, baseline.OverlayEnabled, stored.OverlayEnabled),
             OverlayMode = Pick(current.OverlayMode, baseline.OverlayMode, stored.OverlayMode),
             OverlayCorner = Pick(current.OverlayCorner, baseline.OverlayCorner, stored.OverlayCorner),
-            // An older file's whole list becomes the overrides it amounts to, so the game
-            // keeps its switches and starts following global changes to every other one.
+            BinkPlaybackMode = Pick(current.BinkPlaybackMode, baseline.BinkPlaybackMode, stored.BinkPlaybackMode),
+            // An older file's whole list becomes the changes from the defaults it amounts to.
             EnvironmentChanges = EnvironmentOverrides.PickChanged(
                 current.EnvironmentToggles ?? [],
                 baseline.EnvironmentToggles ?? [],
                 stored.EnvironmentToggles is { } legacy
                     ? EnvironmentOverrides.Between(
-                        _settings.EnvironmentToggles,
+                        EffectiveLaunchSettings.Defaults.EnvironmentToggles,
                         EnvironmentOverrides.Merge(legacy, stored.EnvironmentChanges))
                     : stored.EnvironmentChanges),
             CustomEnvironmentVariables = PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables,
         };
-        settings.RemoveInheritedValues(_settings);
+        settings.RemoveDefaultValues();
         try
         {
             settings.SaveOrThrow(_gameSettingsTitleId);
@@ -393,6 +396,7 @@ public partial class MainWindow
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
             OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),
             OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),
+            BinkPlaybackMode = SelectedComboText(GameBinkPlaybackBox, "Guest"),
             EnvironmentToggles = BuildGameEnvironmentEntries(),
         };
 

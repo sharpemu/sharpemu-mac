@@ -265,7 +265,6 @@
 
   "Options.Console.Language.Label": "Konzol nyelve",
   "Options.Console.Language.Desc": "A játékoknak jelentett rendszer nyelve.",
-  "Options.Section.Rendering": "RENDERELÉS",
   "Options.Section.General.Desc": "Az emuláció alapvető viselkedése.",
   "Options.Section.Logging.Desc": "Mennyit naplóz az emulátor, és hová menti a naplókat.",
   "Options.Section.Launcher.Desc": "Az indító megjelenése, nyelve, zenéje és frissítései.",

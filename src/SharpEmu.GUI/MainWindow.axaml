@@ -1186,6 +1186,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.General], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                     <Border Classes="optionsGroup">
                       <StackPanel>
+                        <local:SettingRow x:Name="GameBinkPlaybackRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.Env.BinkPlayback.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                          Description="{Binding [Options.Env.BinkPlayback.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                          <ComboBox x:Name="GameBinkPlaybackBox"
+                                    Classes="optionValue"
+                                    ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                    HorizontalContentAlignment="Left"
+                                    VerticalAlignment="Center" />
+                        </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
                                           Label="{Binding [Setting.Env.BthidUnavailable.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_BTHID_UNAVAILABLE"
                                           Description="{Binding [Options.Env.Bthid.Desc],
@@ -1304,28 +1314,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Text="Launcher" />
                     </Grid>
                   </Button>
-                  <Button x:Name="OptionsRenderingNav" Classes="optionsNav">
-                    <Grid ColumnDefinitions="36,*">
-                      <TextBlock Grid.Column="0"
-                                 Classes="materialSymbol optionsNavIcon"
-                                 Text="monitor" />
-                      <TextBlock x:Name="OptionsRenderingNavLabel"
-                                 Grid.Column="1"
-                                 Classes="optionsNavLabel"
-                                 Text="Rendering" />
-                    </Grid>
-                  </Button>
-                  <Button x:Name="OptionsEnvironmentNav" Classes="optionsNav">
-                    <Grid ColumnDefinitions="36,*">
-                      <TextBlock Grid.Column="0"
-                                 Classes="materialSymbol optionsNavIcon"
-                                 Text="deployed_code" />
-                      <TextBlock x:Name="OptionsEnvironmentNavLabel"
-                                 Grid.Column="1"
-                                 Classes="optionsNavLabel"
-                                 Text="Environment" />
-                    </Grid>
-                  </Button>
                   <Button x:Name="OptionsAboutNav" Classes="optionsNav">
                     <Grid ColumnDefinitions="36,*">
                       <TextBlock Grid.Column="0"
@@ -1366,12 +1354,32 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   VerticalAlignment="Center" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="StrictRow"
+                      <local:SettingRow x:Name="PortableDataRow"
                                         Classes="optionRow"
-                                        Label="{Binding [Options.Strict.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Strict.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="StrictToggle"
-                                      Classes="optionToggle" />
+                                        Label="{Binding [Options.PortableData.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.PortableData.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="PortableDataToggle"
+                                      Classes="optionToggle"
+                                      IsChecked="False" />
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="ShaderCacheFolderRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Setting.ShaderCacheFolder.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Setting.ShaderCacheFolder.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                          <Button x:Name="OpenShaderCacheButton"
+                                  Classes="optionAction">
+                            <TextBlock Text="{Binding [Setting.ShaderCacheFolder.Open], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                          <Button x:Name="ClearShaderCacheButton"
+                                  Classes="optionAction">
+                            <TextBlock x:Name="ClearShaderCacheButtonLabel"
+                                       Text="{Binding [Setting.ShaderCacheFolder.Clear], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                        </StackPanel>
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
@@ -1389,44 +1397,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   </StackPanel>
                   <Border Classes="optionsGroup">
                     <StackPanel>
-                      <local:SettingRow x:Name="LogLevelRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.LogLevel.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.LogLevel.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="LogLevelBox"
-                                  Classes="optionValue"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
-                                  HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="TraceImportsRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.TraceImports.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.TraceImports.Desc], Source={x:Static local:Localization.Instance}}">
-                        <settingsControls:SplitNumericUpDown x:Name="TraceImportsBox"
-                                                             Classes="optionValue"
-                                                             Minimum="0"
-                                                             Maximum="4096" Increment="16" Value="0" FormatString="0"
-                                                             VerticalAlignment="Center" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="LogToFileRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.LogToFile.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.LogToFile.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="LogToFileToggle"
-                                      Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="CrashDumpRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.CrashDump.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.CrashDump.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="CrashDumpToggle"
-                                      Classes="optionToggle" />
-                      </local:SettingRow>
-
                       <local:SettingRow x:Name="LogsFolderRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.LogsFolder.Label], Source={x:Static local:Localization.Instance}}">
@@ -1591,6 +1561,30 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
+
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Trophies], Source={x:Static local:Localization.Instance}}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow Classes="optionRow"
+                                        Label="{Binding [Options.Env.TrophyTest.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Env.TrophyTest.Desc], Source={x:Static local:Localization.Instance}}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                          <ComboBox x:Name="TrophyTestGameBox" Width="190" PlaceholderText="Game" />
+                          <ComboBox x:Name="TrophyTestTrophyBox" Width="170" PlaceholderText="Trophy" />
+                          <Button x:Name="TrophyTestButton"
+                                  Classes="accent"
+                                  Content="{Binding [Options.Env.TrophyTest.Show], Source={x:Static local:Localization.Instance}}" />
+                        </StackPanel>
+                      </local:SettingRow>
+                      <local:SettingRow Classes="optionRow"
+                                        Label="{Binding [Options.Env.TrophySound.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Env.TrophySound.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="TrophySoundToggle"
+                                      Classes="optionToggle"
+                                      IsChecked="True" />
+                      </local:SettingRow>
+                    </StackPanel>
+                  </Border>
                 </StackPanel>
               </ScrollViewer>
 
@@ -1717,298 +1711,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </Border>
                     </StackPanel>
                   </Border>
-                </StackPanel>
-              </ScrollViewer>
-
-              <ScrollViewer x:Name="OptionsRenderingPanel"
-                            Classes="optionsSectionPanel">
-                <StackPanel>
-                  <StackPanel Classes="optionsSectionHeader">
-                    <TextBlock Classes="optionsSectionTitle"
-                               Text="{Binding Text, ElementName=OptionsRenderingNavLabel}" />
-                    <TextBlock Classes="optionsSectionDesc"
-                               Text="{Binding [Options.Section.Rendering.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                  </StackPanel>
-                  <Border Classes="optionsGroup">
-                    <StackPanel>
-                      <local:SettingRow x:Name="WindowModeRow"
-                                        Classes="optionRow"
-                        Label="{Binding [Options.WindowMode.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.WindowMode.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="WindowModeBox"
-                                  Classes="optionValue"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
-                                  HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="ResolutionRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.Resolution.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Resolution.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="ResolutionBox"
-                                  Classes="optionValue"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="GuestResolutionRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Setting.GuestResolution.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                        Description="{Binding [Setting.GuestResolution.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
-                        <ComboBox x:Name="GuestResolutionBox"
-                                  Classes="optionValue"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
-                                  HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="DisplayRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.Display.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Display.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="DisplayBox"
-                                  Classes="optionValue"
-                                  Width="260"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="RefreshRateRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.RefreshRate.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.RefreshRate.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="RefreshRateBox"
-                                  Classes="optionValue"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="ScalingRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.Scaling.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Scaling.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="ScalingModeBox"
-                                  Classes="optionValue"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
-                                  HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="VSyncRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.VSync.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.VSync.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="VSyncToggle"
-                                      Classes="optionToggle"
-                                      IsChecked="True" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="PortableDataRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.PortableData.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.PortableData.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="PortableDataToggle"
-                                      Classes="optionToggle"
-                                      IsChecked="False" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="HdrRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.Hdr.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Hdr.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="HdrModeBox"
-                                  Classes="optionValue"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
-                                  HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="OverlayEnabledRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.OverlayEnabled.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                        Description="{Binding [Options.OverlayEnabled.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
-                        <ToggleSwitch x:Name="OverlayEnabledToggle"
-                                  Classes="optionToggle"
-                                  ToolTip.Tip="{Binding [Options.OverlayEnabled.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="OverlayModeRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.OverlayMode.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                        Description="{Binding [Options.OverlayMode.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
-                        <ComboBox x:Name="OverlayModeBox"
-                                  Classes="optionValue"
-                                  ToolTip.Tip="{Binding [Options.OverlayMode.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
-                      </local:SettingRow>
-                      <local:SettingRow x:Name="OverlayCornerRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.OverlayCorner.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                        Description="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
-                        <ComboBox x:Name="OverlayCornerBox"
-                                  Classes="optionValue"
-                                  ToolTip.Tip="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
-                      </local:SettingRow>
-                    </StackPanel>
-                  </Border>
-
-                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Performance], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                  <Border Classes="optionsGroup">
-                    <StackPanel>
-                      <StackPanel x:Name="OptionsPerformanceHost" />
-
-                      <local:SettingRow x:Name="ShaderCacheFolderRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Setting.ShaderCacheFolder.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                        Description="{Binding [Setting.ShaderCacheFolder.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                          <Button x:Name="OpenShaderCacheButton"
-                                  Classes="optionAction">
-                            <TextBlock Text="{Binding [Setting.ShaderCacheFolder.Open], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                       VerticalAlignment="Center" />
-                          </Button>
-                          <Button x:Name="ClearShaderCacheButton"
-                                  Classes="optionAction">
-                            <TextBlock x:Name="ClearShaderCacheButtonLabel"
-                                       Text="{Binding [Setting.ShaderCacheFolder.Clear], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                       VerticalAlignment="Center" />
-                          </Button>
-                        </StackPanel>
-                      </local:SettingRow>
-                    </StackPanel>
-                  </Border>
-                </StackPanel>
-              </ScrollViewer>
-
-              <ScrollViewer x:Name="OptionsEnvironmentPanel"
-                            Classes="optionsSectionPanel">
-                <StackPanel>
-                  <StackPanel Classes="optionsSectionHeader">
-                    <TextBlock Classes="optionsSectionTitle"
-                               Text="{Binding Text, ElementName=OptionsEnvironmentNavLabel}" />
-                    <TextBlock Classes="optionsSectionDesc"
-                               Text="{Binding [Options.Section.Environment.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                  </StackPanel>
-                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Trophies], Source={x:Static local:Localization.Instance}}" />
-                  <Border Classes="optionsGroup">
-                    <StackPanel>
-                      <local:SettingRow Classes="optionRow"
-                                        Label="{Binding [Options.Env.TrophyTest.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Env.TrophyTest.Desc], Source={x:Static local:Localization.Instance}}">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                          <ComboBox x:Name="TrophyTestGameBox" Width="190" PlaceholderText="Game" />
-                          <ComboBox x:Name="TrophyTestTrophyBox" Width="170" PlaceholderText="Trophy" />
-                          <Button x:Name="TrophyTestButton"
-                                  Classes="accent"
-                                  Content="{Binding [Options.Env.TrophyTest.Show], Source={x:Static local:Localization.Instance}}" />
-                        </StackPanel>
-                      </local:SettingRow>
-                      <local:SettingRow Classes="optionRow"
-                                        Label="{Binding [Options.Env.TrophySound.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Env.TrophySound.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="TrophySoundToggle"
-                                      Classes="optionToggle"
-                                      IsChecked="True" />
-                      </local:SettingRow>
-                    </StackPanel>
-                  </Border>
-
-                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Debug], Source={x:Static local:Localization.Instance}}" />
-                  <Border Classes="optionsGroup">
-                    <StackPanel>
-                      <local:SettingRow x:Name="PerformanceProfileRow" Classes="optionRow" Label="{Binding [Setting.Env.ProfilePerformance.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_PROFILE_PERFORMANCE"
-                                        Description="{Binding [Options.Env.PerformanceProfile.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="PerformanceProfileToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="PerformanceFrameTraceRow" Classes="optionRow" Label="{Binding [Setting.Env.ProfilePerformanceFrameTrace.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"
-                                        Description="{Binding [Options.Env.PerformanceFrameTrace.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="PerformanceFrameTraceToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow Classes="optionRow" Label="{Binding [Setting.Env.StrictCompute.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_STRICT_COMPUTE"
-                                        Description="{Binding [Options.Env.StrictCompute.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="StrictComputeToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvRenderDocRow" Classes="optionRow" Label="{Binding [Setting.Env.Renderdoc.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_RENDERDOC"
-                                        Description="{Binding [Options.Env.RenderDoc.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvRenderDocToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow Classes="optionRow"
-                                       
-                                        Label="{Binding [Setting.Env.VkDisableImplicits.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_VK_DISABLE_IMPLICITS"
-                                        Description="{Binding [Options.Env.DisableVkImplicitLayers.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvDisableVkImplicitLayersToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvVkValidationRow" Classes="optionRow" Label="{Binding [Setting.Env.VkValidation.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_VK_VALIDATION"
-                                        Description="{Binding [Options.Env.VkValidation.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvVkValidationToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvDumpSpirvRow" Classes="optionRow" Label="{Binding [Setting.Env.DumpSpirv.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_DUMP_SPIRV"
-                                        Description="{Binding [Options.Env.DumpSpirv.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvDumpSpirvToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-                      <local:SettingRow Classes="optionRow" Label="{Binding [Setting.Env.SkipRt.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_SKIP_RT"
-                                        Description="{Binding [Options.Env.SkipRt.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvSkipRtToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvLogDirectMemoryRow" Classes="optionRow" Label="{Binding [Setting.Env.LogDirectMemory.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_LOG_DIRECT_MEMORY"
-                                        Description="{Binding [Options.Env.LogDirectMemory.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvLogIoRow" Classes="optionRow" Label="{Binding [Setting.Env.LogIo.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_LOG_IO"
-                                        Description="{Binding [Options.Env.LogIo.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvLogIoToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvLogNpRow" Classes="optionRow" Label="{Binding [Setting.Env.LogNp.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_LOG_NP"
-                                        Description="{Binding [Options.Env.LogNp.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvLogNpToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <StackPanel x:Name="OptionsDebugExtraHost" />
-                    </StackPanel>
-                  </Border>
-
-                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.General], Source={x:Static local:Localization.Instance}}" />
-                  <Border Classes="optionsGroup">
-                    <StackPanel>
-                      <local:SettingRow x:Name="BinkPlaybackRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.Env.BinkPlayback.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Env.BinkPlayback.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="BinkPlaybackBox"
-                                  Classes="optionValue"
-                                  ToolTip.Tip="{Binding [Options.Env.BinkPlayback.Desc], Source={x:Static local:Localization.Instance}}"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvBthidRow" Classes="optionRow" Label="{Binding [Setting.Env.BthidUnavailable.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_BTHID_UNAVAILABLE"
-                                        Description="{Binding [Options.Env.Bthid.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvBthidToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvLoopGuardRow" Classes="optionRow" Label="{Binding [Setting.Env.DisableImportLoopGuard.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
-                                        Description="{Binding [Options.Env.LoopGuard.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvLoopGuardToggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvWritableApp0Row" Classes="optionRow" Label="{Binding [Setting.Env.WritableApp0.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_WRITABLE_APP0"
-                                        Description="{Binding [Options.Env.WritableApp0.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvWritableApp0Toggle" Classes="optionToggle" />
-                      </local:SettingRow>
-                    </StackPanel>
-                  </Border>
-
-                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Compatibility], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                  <Border Classes="optionsGroup">
-                    <StackPanel>
-                      <StackPanel x:Name="OptionsCompatibilityHost" />
-                    </StackPanel>
-                  </Border>
-
-                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Audio], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                  <Border Classes="optionsGroup">
-                    <StackPanel>
-                      <StackPanel x:Name="OptionsAudioHost" />
-                    </StackPanel>
-                  </Border>
-
                 </StackPanel>
               </ScrollViewer>
             </Panel>

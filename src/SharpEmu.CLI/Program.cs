@@ -1457,9 +1457,10 @@ internal static partial class Program
         var defaults = HostVideoOptions.Default;
         try
         {
-            var effective = EffectiveLaunchSettings.Resolve(
-                ApplicationSettings.Load(),
-                PerGameSettings.Load(TryReadTitleId(ebootPath)));
+            // Game settings live in the game's own file; an older launcher kept them globally,
+            // so a run started before the launcher has moved them does that first.
+            SettingsSplitMigration.MigrateIfNeeded();
+            var effective = EffectiveLaunchSettings.Resolve(PerGameSettings.Load(TryReadTitleId(ebootPath)));
 
             var windowMode = TryParseWindowMode(effective.WindowMode, out var parsedWindowMode)
                 ? parsedWindowMode

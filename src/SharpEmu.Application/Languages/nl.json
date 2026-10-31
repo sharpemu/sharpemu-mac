@@ -264,7 +264,6 @@
 
   "Options.Console.Language.Label": "Consoletaal",
   "Options.Console.Language.Desc": "Systeemtaal die aan games wordt gemeld.",
-  "Options.Section.Rendering": "RENDERING",
   "Options.Section.General.Desc": "Basisgedrag van de emulatie.",
   "Options.Section.Logging.Desc": "Hoeveel de emulator logt en waar de logs worden opgeslagen.",
   "Options.Section.Launcher.Desc": "Uiterlijk, taal, muziek en updates van de launcher.",

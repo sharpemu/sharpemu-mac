@@ -2,10 +2,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Application;
 
+/// <summary>
+/// Launcher and machine-wide settings. Anything that changes how a game runs or is shown lives
+/// in <see cref="PerGameSettings"/>; <see cref="SettingsSplitMigration"/> moves it out of
+/// files written before the split.
+/// </summary>
 public sealed class ApplicationSettings
 {
     private static readonly JsonSerializerOptions SerializerOptions = new()
@@ -18,21 +24,13 @@ public sealed class ApplicationSettings
     /// <summary>Eboot paths hidden from the library via "Remove from library".</summary>
     public List<string> ExcludedGames { get; set; } = new();
 
-    public string LogLevel { get; set; } = "Info";
-
-    public int ImportTraceLimit { get; set; }
-
-    public bool StrictDynlibResolution { get; set; }
-
     /// <summary>
-    /// Mirror emulator output to user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log, if <see cref="LogFilePath"/> is null.
+    /// Where a game that logs to file (<see cref="PerGameSettings.LogToFile"/>) writes; null
+    /// mirrors output to user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log.
     /// </summary>
-    public bool LogToFile { get; set; }
-
-    /// <summary>If <see cref="LogToFile"/> is true it logs to this file path.</summary>
     public string? LogFilePath { get; set; }
 
-    /// <summary> 
+    /// <summary>
     /// If <see cref="OverrideLogFile"/> is false it appends &lt;titleId&gt;-&lt;timestamp&gt; to the filename specified by 
     /// <see cref="LogFilePath"/>. Otherwise it uses the exact filename from <see cref="LogFilePath"/>
     /// </summary>
@@ -77,6 +75,8 @@ public sealed class ApplicationSettings
     /// <summary>Theme contrast from -50 (softer) to +50 (stronger); 0 is the theme as designed.</summary>
     public int ThemeContrast { get; set; }
 
+    // The console's system language, machine-wide as on the console itself; trophy lists
+    // shown outside any game follow it too.
     public string ConsoleLanguage { get; set; } = "EnglishUS";
 
     /// <summary>Publish launcher/game status to Discord Rich Presence.</summary>
@@ -84,39 +84,17 @@ public sealed class ApplicationSettings
 
     public bool CheckForUpdatesOnStartup { get; set; } = true;
 
-    public string WindowMode { get; set; } = "Windowed";
-
-    public string Resolution { get; set; } = "1920x1080";
-
-    public int DisplayIndex { get; set; }
-
-    public int RefreshRate { get; set; }
-
-    public string ScalingMode { get; set; } = "Fit";
-
-    public bool VSync { get; set; } = true;
-
-    public string HdrMode { get; set; } = "Auto";
-
-    // What the guest is told the display is, which is what decides how much pixel work a
-    // title does. Not the window size: see GuestDisplayResolution.
-    public string GuestDisplayResolution { get; set; } = "1080p";
-
-    public bool OverlayEnabled { get; set; } = true;
-    public string OverlayCorner { get; set; } = "TopRight";
-    public string OverlayMode { get; set; } = "TitleBar";
-
-    /// <summary>Names of SHARPEMU_* switches set to "1" in the emulator's environment at launch.</summary>
-    public List<string> EnvironmentToggles { get; set; } = ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"];
-
-    public string BinkPlaybackMode { get; set; } = "Guest";
-
     /// <summary>
     /// Discord application ID used for Rich Presence; the default is the
     /// SharpEmu application. Override to rebrand what Discord shows as
     /// "Playing …" (register at discord.com/developers/applications).
     /// </summary>
     public string DiscordClientId { get; set; } = "1525606762248540221";
+
+    // Keys this build does not know survive a save: a newer build's settings, and the game
+    // settings of a pre-split file whose migration has not completed yet.
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? AdditionalProperties { get; set; }
 
     // The emulator is portable and keeps its data next to the executable;
     // the GUI follows the same convention. Inside a macOS .app bundle that
@@ -152,15 +130,7 @@ public sealed class ApplicationSettings
 
         settings.GameFolders = FilterNullOrEmpty(settings.GameFolders);
         settings.ExcludedGames = FilterNullOrEmpty(settings.ExcludedGames);
-        settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles ?? ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"]);
-        settings.LogLevel ??= "Info";
         settings.Language ??= "en";
-        // Nothing reads SHARPEMU_DEFAULT_PROFILE any more; older files may still carry it.
-        settings.EnvironmentToggles.RemoveAll(entry =>
-            string.Equals(
-                entry.Split('=', 2, StringSplitOptions.TrimEntries)[0],
-                "SHARPEMU_DEFAULT_PROFILE",
-                StringComparison.OrdinalIgnoreCase));
         settings.DiscordClientId ??= "1525606762248540221";
         settings.LibraryLayout = NormalizeChoice(settings.LibraryLayout, "Carousel", "Grid");
         settings.TitleMusicVolume = double.IsFinite(settings.TitleMusicVolume)
@@ -202,17 +172,6 @@ public sealed class ApplicationSettings
             "Vietnamese",
             "Indonesian",
             "Ukrainian");
-        settings.WindowMode = NormalizeChoice(settings.WindowMode, "Windowed", "Borderless", "Exclusive");
-        settings.Resolution = NormalizeResolution(settings.Resolution);
-        settings.ScalingMode = NormalizeChoice(settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
-        settings.HdrMode = NormalizeChoice(settings.HdrMode, "Auto", "On", "Off");
-        settings.GuestDisplayResolution = NormalizeChoice(
-            settings.GuestDisplayResolution, "1080p", "720p", "1440p", "2160p");
-        settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Guest", "Host", "Skip");
-        settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
-        settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "TitleBar", "Full", "Minimal");
-        settings.DisplayIndex = Math.Max(0, settings.DisplayIndex);
-        settings.RefreshRate = Math.Clamp(settings.RefreshRate, 0, 1000);
         settings.EmbeddedConsoleHeight = NormalizeConsoleSize(settings.EmbeddedConsoleHeight, 240, 120);
         settings.ConsoleWindowWidth = NormalizeConsoleSize(settings.ConsoleWindowWidth, 980, 520);
         settings.ConsoleWindowHeight = NormalizeConsoleSize(settings.ConsoleWindowHeight, 620, 320);
@@ -236,22 +195,12 @@ public sealed class ApplicationSettings
         return source.Where(entry => !string.IsNullOrEmpty(entry)).ToList();
     }
 
-    private static string NormalizeChoice(string? value, string fallback, params string[] choices) =>
+    internal static string NormalizeChoice(string? value, string fallback, params string[] choices) =>
         choices.Prepend(fallback).FirstOrDefault(
             choice => string.Equals(choice, value, StringComparison.OrdinalIgnoreCase)) ?? fallback;
 
     private static double NormalizeConsoleSize(double value, double fallback, double minimum) =>
         double.IsFinite(value) && value >= minimum ? Math.Min(value, 16384) : fallback;
-
-    private static string NormalizeResolution(string? value)
-    {
-        if (!DisplayResolution.TryParse(value, out var width, out var height))
-        {
-            return "1920x1080";
-        }
-
-        return $"{width}x{height}";
-    }
 
     public void Save()
     {

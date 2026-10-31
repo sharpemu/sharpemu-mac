@@ -264,7 +264,6 @@
 
   "Options.Console.Language.Label": "콘솔 언어",
   "Options.Console.Language.Desc": "게임에 보고할 시스템 언어입니다.",
-  "Options.Section.Rendering": "렌더링",
   "Options.Section.General.Desc": "에뮬레이션의 기본 동작입니다.",
   "Options.Section.Logging.Desc": "에뮬레이터가 기록하는 로그의 양과 저장 위치입니다.",
   "Options.Section.Launcher.Desc": "런처의 모양, 언어, 음악, 업데이트 설정입니다.",

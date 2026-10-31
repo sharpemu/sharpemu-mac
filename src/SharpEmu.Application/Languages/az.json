@@ -89,7 +89,6 @@
   "Options.Section.Emulation": "Emulyasiya",
   "Options.Section.Logging": "Jurnala yazma",
   "Options.Section.Launcher": "Başladıcı",
-  "Options.Section.Rendering": "Təsvirin yaradılması",
   "Options.Section.General.Desc": "Emulyasiyanın əsas davranışı.",
   "Options.Section.Logging.Desc": "Emulyatorun nə qədər jurnal yazdığı və jurnalları harada saxladığı.",
   "Options.Section.Launcher.Desc": "Launcher-in görünüşü, dili, musiqisi və yenilənmələri.",

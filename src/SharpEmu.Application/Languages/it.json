@@ -269,7 +269,6 @@
 
   "Options.Console.Language.Label": "Lingua della console",
   "Options.Console.Language.Desc": "Lingua di sistema comunicata ai giochi.",
-  "Options.Section.Rendering": "RENDERING",
   "Options.Section.General.Desc": "Comportamento di base dell'emulazione.",
   "Options.Section.Logging.Desc": "Quanto registra l'emulatore e dove salva i log.",
   "Options.Section.Launcher.Desc": "Aspetto, lingua, musica e aggiornamenti del launcher.",

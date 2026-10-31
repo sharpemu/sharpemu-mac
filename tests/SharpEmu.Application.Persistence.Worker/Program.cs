@@ -12,16 +12,16 @@ switch (args[0])
 {
     case "global":
     {
-        var settings = new ApplicationSettings { LogLevel = "Debug", LibraryLayout = "Grid", VSync = false };
+        var settings = new ApplicationSettings { Language = "tr", LibraryLayout = "Grid", PlayTitleMusic = false };
         Directory.CreateDirectory(ApplicationSettings.SettingsPath);
         MustFail(() => settings.SaveOrThrow()); settings.Save(); // legacy best-effort stays nonthrowing
         if (!Directory.Exists(ApplicationSettings.SettingsPath)) throw new Exception("Failure changed obstacle.");
         Directory.Delete(ApplicationSettings.SettingsPath);
-        settings.SaveOrThrow(); settings.LogLevel = "Critical";
+        settings.SaveOrThrow(); settings.Language = "de";
         PreservePriorFileOnFailure(ApplicationSettings.SettingsPath, settings.SaveOrThrow);
         settings.SaveOrThrow();
         var restored = ApplicationSettings.Load();
-        if (restored.LogLevel != "Critical" || restored.LibraryLayout != "Grid" || restored.VSync) throw new Exception("Global retry did not retain fields.");
+        if (restored.Language != "de" || restored.LibraryLayout != "Grid" || restored.PlayTitleMusic) throw new Exception("Global retry did not retain fields.");
         break;
     }
     case "game":

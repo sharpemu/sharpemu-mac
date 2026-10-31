@@ -264,7 +264,6 @@
 
   "Options.Console.Language.Label": "Konsolensprache",
   "Options.Console.Language.Desc": "Systemsprache, die Spielen gemeldet wird.",
-  "Options.Section.Rendering": "DARSTELLUNG",
   "Options.Section.General.Desc": "Grundlegendes Emulationsverhalten.",
   "Options.Section.Logging.Desc": "Wie viel der Emulator protokolliert und wo die Protokolle gespeichert werden.",
   "Options.Section.Launcher.Desc": "Design, Sprache, Musik und Updates des Launchers.",

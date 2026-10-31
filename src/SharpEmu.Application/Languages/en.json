@@ -122,7 +122,6 @@
   "Options.Section.Emulation": "EMULATION",
   "Options.Section.Logging": "LOGGING",
   "Options.Section.Launcher": "LAUNCHER",
-  "Options.Section.Rendering": "RENDERING",
   "Options.Section.General.Desc": "Core emulation behaviour.",
   "Options.Section.Logging.Desc": "How much the emulator logs, and where it saves the logs.",
   "Options.Section.Launcher.Desc": "Appearance, language, music and updates for the launcher.",

@@ -264,7 +264,6 @@
 
   "Options.Console.Language.Label": "コンソールの言語",
   "Options.Console.Language.Desc": "ゲームに通知するシステム言語。",
-  "Options.Section.Rendering": "レンダリング",
   "Options.Section.General.Desc": "エミュレーションの基本的な動作。",
   "Options.Section.Logging.Desc": "エミュレーターがどれだけログを記録し、どこに保存するか。",
   "Options.Section.Launcher.Desc": "ランチャーの外観、言語、音楽、アップデート。",

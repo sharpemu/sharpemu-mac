@@ -20,12 +20,13 @@ public sealed class LauncherContractTests
     [Fact]
     public void SerializedSettingsKeepExistingFieldNamesAndNullVersusEmptyOverride()
     {
-        var global = ApplicationSettings.NormalizeFromJson("{\"LibraryLayout\":\"Grid\",\"EnvironmentToggles\":[\"SHARPEMU_X\"],\"ConsoleWindowWidth\":1234}");
+        var global = ApplicationSettings.NormalizeFromJson("{\"LibraryLayout\":\"Grid\",\"ConsoleWindowWidth\":1234}");
         using var json = JsonDocument.Parse(JsonSerializer.Serialize(global));
         Assert.Equal(1234, json.RootElement.GetProperty("ConsoleWindowWidth").GetDouble());
         Assert.Equal("Grid", json.RootElement.GetProperty("LibraryLayout").GetString());
-        Assert.Equal(["SHARPEMU_X"], EffectiveLaunchSettings.Resolve(global, PerGameSettings.NormalizeFromJson("{}" )).EnvironmentToggles);
-        Assert.Empty(EffectiveLaunchSettings.Resolve(global, PerGameSettings.NormalizeFromJson("{\"EnvironmentToggles\":[]}")).EnvironmentToggles);
+        Assert.Equal(EffectiveLaunchSettings.Defaults.EnvironmentToggles,
+            EffectiveLaunchSettings.Resolve(PerGameSettings.NormalizeFromJson("{}")).EnvironmentToggles);
+        Assert.Empty(EffectiveLaunchSettings.Resolve(PerGameSettings.NormalizeFromJson("{\"EnvironmentToggles\":[]}")).EnvironmentToggles);
     }
 
     [Fact]

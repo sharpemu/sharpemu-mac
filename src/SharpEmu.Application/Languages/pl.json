@@ -103,7 +103,6 @@
   "Options.Section.Emulation": "EMULACJA",
   "Options.Section.Logging": "DZIENNIK ZDARZEŃ",
   "Options.Section.Launcher": "LAUNCHER",
-  "Options.Section.Rendering": "RENDEROWANIE",
   "Options.Section.General.Desc": "Podstawowe zachowanie emulacji.",
   "Options.Section.Logging.Desc": "Ile emulator zapisuje w dziennikach i gdzie je przechowuje.",
   "Options.Section.Launcher.Desc": "Wygląd, język, muzyka i aktualizacje launchera.",
