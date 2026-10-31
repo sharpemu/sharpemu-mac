@@ -146,6 +146,8 @@ public sealed partial class GpuCommandInterpreter
         var count = packet.Length - 2;
         if (count > RegisterBankLayout.ShaderRegisterCount - offset)
         {
+            // The raw bank keeps the in-bank prefix, as the per-register writes did.
+            Registers.Shader.SetRange(offset, payload.Slice(1, (int)(RegisterBankLayout.ShaderRegisterCount - offset)));
             throw _host.Fatal($"The shader register range leaves the bank: offset=0x{offset:X8} count={count} address=0x{packet.PacketAddress:X16}.");
         }
 
