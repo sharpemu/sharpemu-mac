@@ -278,7 +278,7 @@ internal sealed partial class RenderRecorder
             {
                 // SHARPEMU_SKIP_CS: what the program contributes, by its absence.
             }
-            else if (record.IndirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(record.IndirectArgumentsAddress))
+            else if (record.IndirectArgumentsAddress == 0 || !TryDispatchIndirect(input, record.IndirectArgumentsAddress))
             {
                 _host.Dispatch(groupsX, groupsY, groupsZ);
                 dispatched = true;
@@ -644,13 +644,35 @@ internal sealed partial class RenderRecorder
         }
     }
 
-    // The shader's local workgroup axes may have been remapped at compile time (see
-    // Gen5WorkgroupAxisOrder.Compute) so the largest NUM_THREAD axis lands on a physical axis the
-    // host allows it on. The dispatch group counts are permuted the same way.
-    private static (uint X, uint Y, uint Z) PhysicalGroups(ComputeInputInfo input, ResolvedDispatch record)
+    // The indirect form hands the host the group axis order so it can permute the counts it reads.
+    private bool TryDispatchIndirect(ComputeInputInfo input, ulong argumentsAddress)
     {
         Span<int> axisOrder = stackalloc int[3];
-        Gen5WorkgroupAxisOrder.ComputeInto(input.ThreadsX, input.ThreadsY, input.ThreadsZ, axisOrder);
+        GroupAxisOrder(input, axisOrder);
+        return _host.TryDispatchIndirect(argumentsAddress, axisOrder);
+    }
+
+    // The shader's local workgroup axes may have been remapped at compile time (see
+    // Gen5WorkgroupAxisOrder.Compute) so the largest NUM_THREAD axis lands on a physical axis the
+    // host allows it on, and a host whose programs run a Y-only one-dimensional program's groups
+    // on X (IRenderHost.RunsYOnlyGroupsOnX) swaps those two. Group counts follow the same order.
+    private void GroupAxisOrder(ComputeInputInfo input, Span<int> axisOrder)
+    {
+        if (_host.RunsYOnlyGroupsOnX)
+        {
+            Gen5WorkgroupAxisOrder.ComputeGroupsInto(input.ThreadsX, input.ThreadsY, input.ThreadsZ,
+                input.GroupIdX, input.GroupIdY, input.GroupIdZ, axisOrder);
+        }
+        else
+        {
+            Gen5WorkgroupAxisOrder.ComputeInto(input.ThreadsX, input.ThreadsY, input.ThreadsZ, axisOrder);
+        }
+    }
+
+    private (uint X, uint Y, uint Z) PhysicalGroups(ComputeInputInfo input, ResolvedDispatch record)
+    {
+        Span<int> axisOrder = stackalloc int[3];
+        GroupAxisOrder(input, axisOrder);
         Span<uint> logical = [record.GroupsX, record.GroupsY, record.GroupsZ];
         Span<uint> physical = stackalloc uint[3];
         for (var axis = 0; axis < 3; axis++)

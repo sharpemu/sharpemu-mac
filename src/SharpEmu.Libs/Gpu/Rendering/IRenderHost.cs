@@ -370,7 +370,13 @@ public interface IRenderHost
 
     // Executes a dispatch from three uint32 group counts in guest memory when the backend can
     // consume the guest buffer directly. Backends without native indirect dispatch return false.
-    bool TryDispatchIndirect(ulong argumentsAddress);
+    // physicalAxisOfLogical is the group axis order the program was compiled for.
+    bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical);
+
+    // True when the host's compute programs run the groups of a one-dimensional program that reads
+    // only its Y group ID on the X axis (Gen5WorkgroupAxisOrder.ComputeGroups), so the executor
+    // permutes that dispatch's group counts to match.
+    bool RunsYOnlyGroupsOnX => false;
 
     // Orders the buffer writes of the given shader stages before every later access.
     void ShaderWriteBarrier(GpuPipelineStage sourceStages);

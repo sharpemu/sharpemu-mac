@@ -1817,7 +1817,8 @@ public sealed class CommandStreamQueue
 
         try
         {
-            complete = processor.Process(submission.Commands, submission.Address, submission.DwordCount) == SubmissionProgress.Complete;
+            complete = processor.Process(submission.Commands, submission.Address, submission.DwordCount,
+                submission.CommandBytes, submission.RegisterTables) == SubmissionProgress.Complete;
         }
         finally
         {
@@ -1851,7 +1852,10 @@ public sealed class CommandStreamQueue
         }
 
         if (complete)
+        {
             submission.Completion?.Consumed();
+            submission.ReleaseCommandBytes();
+        }
 
         return complete;
     }

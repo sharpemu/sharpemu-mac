@@ -437,7 +437,7 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ) => Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
 
-    public bool TryDispatchIndirect(ulong argumentsAddress) => false;
+    public bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical) => false;
 
     public void ShaderWriteBarrier(GpuPipelineStage sourceStages) => Calls.Add($"write_barrier {sourceStages}");
 
