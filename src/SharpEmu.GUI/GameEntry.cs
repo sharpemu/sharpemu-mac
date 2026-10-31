@@ -5,6 +5,7 @@ using System.ComponentModel;
 using Avalonia;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Avalonia.Threading;
 
 namespace SharpEmu.GUI;
 
@@ -187,7 +188,7 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
             _coverStamp = scanned._coverStamp;
             var previousCover = Cover;
             Cover = null;
-            previousCover?.Dispose();
+            DisposeAfterRender(previousCover);
             changes |= GameEntryChanges.Cover;
         }
 
@@ -198,7 +199,7 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
             _backgroundStamp = scanned._backgroundStamp;
             var previousBackground = Background;
             Background = null;
-            previousBackground?.Dispose();
+            DisposeAfterRender(previousBackground);
             changes |= GameEntryChanges.Background;
         }
 
@@ -274,6 +275,16 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
             {
                 return default;
             }
+        }
+    }
+
+    // The renderer can still draw a replaced image in the frame it is composing; freeing it
+    // at once threw ObjectDisposedException there. Free it once that frame is long gone.
+    private static void DisposeAfterRender(Bitmap? image)
+    {
+        if (image is not null)
+        {
+            DispatcherTimer.RunOnce(image.Dispose, TimeSpan.FromSeconds(1));
         }
     }
 }
