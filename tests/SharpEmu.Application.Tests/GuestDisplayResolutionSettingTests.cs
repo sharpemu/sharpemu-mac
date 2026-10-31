@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using GuiSettings = SharpEmu.Application.ApplicationSettings;
 using Xunit;
 
 namespace SharpEmu.Application.Tests;
@@ -11,8 +10,9 @@ public sealed class GuestDisplayResolutionSettingTests
     [Fact]
     public void MissingAndUnknownValuesAre1080p()
     {
-        Assert.Equal("1080p", GuiSettings.NormalizeFromJson("{}").GuestDisplayResolution);
-        Assert.Equal("1080p", GuiSettings.NormalizeFromJson("""{"GuestDisplayResolution":"banana"}""").GuestDisplayResolution);
+        Assert.Equal("1080p", EffectiveLaunchSettings.Resolve(new PerGameSettings()).GuestDisplayResolution);
+        Assert.Null(SettingsSplitMigration.CarriedValues("{}").GuestDisplayResolution);
+        Assert.Null(SettingsSplitMigration.CarriedValues("""{"GuestDisplayResolution":"banana"}""").GuestDisplayResolution);
     }
 
     [Theory]
@@ -22,6 +22,6 @@ public sealed class GuestDisplayResolutionSettingTests
     public void OtherResolutionsStaySelectable(string saved, string expected)
     {
         var json = "{\"GuestDisplayResolution\":\"" + saved + "\"}";
-        Assert.Equal(expected, GuiSettings.NormalizeFromJson(json).GuestDisplayResolution);
+        Assert.Equal(expected, SettingsSplitMigration.CarriedValues(json).GuestDisplayResolution);
     }
 }

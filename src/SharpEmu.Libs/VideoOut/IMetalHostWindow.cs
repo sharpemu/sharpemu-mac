@@ -16,6 +16,10 @@ public interface IMetalHostWindow : IDisposable
     /// (Retina aware). Never smaller than 1x1.</summary>
     (int Width, int Height) PixelSize { get; }
 
+    /// <summary>Drawable pixels per logical point, used to size the on-screen
+    /// performance display. 1 for a window with no scale factor.</summary>
+    double ContentsScale => 1.0;
+
     /// <summary>True while the window is miniaturized; the presenter skips
     /// acquiring drawables and throttles instead.</summary>
     bool IsMinimized { get; }

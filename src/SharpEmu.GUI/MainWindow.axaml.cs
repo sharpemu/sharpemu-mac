@@ -39,20 +39,13 @@ public partial class MainWindow : Window
     private static readonly TimeSpan NavigationIndicatorAnimationDuration =
         TimeSpan.FromMilliseconds(180);
 
-    private static readonly IBrush DefaultLineBrush = new SolidColorBrush(Color.Parse("#C7CFDE"));
-    private static readonly IBrush DimLineBrush = new SolidColorBrush(Color.Parse("#6B7488"));
-    private static readonly IBrush InfoLineBrush = new SolidColorBrush(Color.Parse("#6FA8FF"));
-    private static readonly IBrush WarningLineBrush = new SolidColorBrush(Color.Parse("#E8B341"));
-    private static readonly IBrush ErrorLineBrush = new SolidColorBrush(Color.Parse("#F2777C"));
-    private static readonly IBrush SuccessLineBrush = new SolidColorBrush(Color.Parse("#63D489"));
-    private readonly LocalizedChoice[] _cpuEngineChoices =
-    [
-        LocalizedChoice.FromKey("Native", "Options.CpuEngine.Native"),
-    ];
-    private readonly LocalizedChoice[] _consoleTypeChoices =
-    [
-        LocalizedChoice.Literal("PS5", "PlayStation 5"),
-    ];
+    // Console lines use the theme's text and status colours.
+    private static IBrush DefaultLineBrush => LauncherThemes.Brush("SecondaryTextBrush");
+    private static IBrush DimLineBrush => LauncherThemes.Brush("MutedBrush");
+    private static IBrush InfoLineBrush => LauncherThemes.Brush("InfoBrush");
+    private static IBrush WarningLineBrush => LauncherThemes.Brush("WarningBrush");
+    private static IBrush ErrorLineBrush => LauncherThemes.Brush("DangerBrush");
+    private static IBrush SuccessLineBrush => LauncherThemes.Brush("SuccessBrush");
     private readonly LocalizedChoice[] _consoleLanguageChoices =
     [
         LocalizedChoice.Literal("Japanese", "日本語"),
@@ -96,11 +89,13 @@ public partial class MainWindow : Window
         LocalizedChoice.FromKey("Error", "Options.LogLevel.Error"),
         LocalizedChoice.FromKey("Critical", "Options.LogLevel.Critical"),
     ];
-    private readonly LocalizedChoice[] _windowModeChoices =
+    private readonly LocalizedChoice[] _windowModeChoices = CreateWindowModeChoices();
+    private readonly LocalizedChoice[] _themeChoices =
     [
-        LocalizedChoice.FromKey("Windowed", "Options.WindowMode.Windowed"),
-        LocalizedChoice.FromKey("Borderless", "Options.WindowMode.Borderless"),
-        LocalizedChoice.FromKey("Exclusive", "Options.WindowMode.Exclusive"),
+        .. Array.ConvertAll(
+            LauncherThemes.All,
+            palette => LocalizedChoice.FromKey(palette.Id, $"Options.Theme.{palette.Id}")),
+        LocalizedChoice.FromKey(LauncherThemes.CustomId, "Options.Theme.Custom"),
     ];
     private readonly LocalizedChoice[] _scalingModeChoices =
     [
@@ -134,6 +129,27 @@ public partial class MainWindow : Window
         LocalizedChoice.FromKey("Guest", "Options.Env.BinkPlayback.Guest"),
         LocalizedChoice.FromKey("Skip", "Options.Env.BinkPlayback.Skip"),
     ];
+    // macOS has one native fullscreen, so Exclusive would just be a second name for Borderless.
+    private static LocalizedChoice[] CreateWindowModeChoices()
+    {
+        var choices = new List<LocalizedChoice>
+        {
+            LocalizedChoice.FromKey("Windowed", "Options.WindowMode.Windowed"),
+            LocalizedChoice.FromKey("Borderless", "Options.WindowMode.Borderless"),
+        };
+        if (!OperatingSystem.IsMacOS())
+        {
+            choices.Add(LocalizedChoice.FromKey("Exclusive", "Options.WindowMode.Exclusive"));
+        }
+
+        return choices.ToArray();
+    }
+
+    private static string PlatformWindowMode(string windowMode) =>
+        OperatingSystem.IsMacOS() && string.Equals(windowMode, "Exclusive", StringComparison.OrdinalIgnoreCase)
+            ? "Borderless"
+            : windowMode;
+
     private readonly List<GameEntry> _allGames = new();
     private readonly ObservableCollection<GameEntry> _visibleGames = new();
     private readonly LibraryTileCollection _libraryTiles;
@@ -143,11 +159,9 @@ public partial class MainWindow : Window
     private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
     private readonly DispatcherTimer _libraryLayoutTimer;
-    private readonly DispatcherTimer _titleMusicVolumeTimer;
+    private readonly DispatcherTimer _settingsSaveTimer;
 
     private GuiSettings _settings = new();
-    private IReadOnlyList<HostDisplayOption> _hostDisplays = [];
-    private bool _updatingHostDisplayOptions;
     private EmulatorProcess? _emulator;
     private ConsoleWindow? _consoleWindow;
     private GuiConsoleMirror? _consoleMirror;
@@ -175,13 +189,12 @@ public partial class MainWindow : Window
     private int _detailLoadGeneration;
     private int _backdropGeneration;
     private bool _isClosing;
-    private bool _restoringGameSelection;
     private bool _addFolderInProgress;
     private bool _isLibraryGridLayout;
     private GameEntry? _lastSelectedGame;
     private double _libraryRailRowHeight = 188;
     private double _libraryGridRowHeight = 216;
-    private const double CarouselLeadingPadding = 20;
+    private const double CarouselLeadingPadding = 24;
     private const double CarouselItemMargin = 12;
     private bool _carouselAnimating;
     private readonly TranslateTransform _carouselTransform = new();
@@ -218,13 +231,19 @@ public partial class MainWindow : Window
         string EbootPath,
         string DisplayName,
         string? TitleId,
-        string ConsoleType,
         string ConsoleLanguage,
         EffectiveLaunchSettings Settings,
-        SharpEmuRuntimeOptions RuntimeOptions);
+        IReadOnlyDictionary<string, string?> Environment);
 
     public MainWindow()
     {
+        // Settings, theme and strings load before the controls are built, so the first frame
+        // already shows the user's theme and language instead of raw keys.
+        // Game settings an older launcher kept globally move to each game's file first.
+        SettingsSplitMigration.MigrateIfNeeded();
+        _settings = GuiSettings.Load();
+        ApplyLauncherTheme();
+        Localization.Instance.Load(_settings.Language);
         InitializeComponent();
         InitializeLocalizedChoiceBoxes();
         _libraryTiles = new LibraryTileCollection(_visibleGames);
@@ -265,16 +284,17 @@ public partial class MainWindow : Window
             _libraryLayoutTimer.Stop();
             UpdateLibraryLayoutMetrics();
         };
-        _titleMusicVolumeTimer = new DispatcherTimer
+        _settingsSaveTimer = new DispatcherTimer(DispatcherPriority.Normal)
         {
             Interval = TimeSpan.FromMilliseconds(180),
         };
-        _titleMusicVolumeTimer.Tick += (_, _) =>
+        _settingsSaveTimer.Tick += (_, _) =>
         {
-            _titleMusicVolumeTimer.Stop();
+            _settingsSaveTimer.Stop();
             _settings.Save();
         };
         CarouselAddFolderButton.Click += (_, _) => StartAddFolderFromTile();
+        EmptyStateAddFolderButton.Click += (_, _) => StartAddFolderFromTile();
         GameList.AddHandler(PointerPressedEvent, OnCarouselPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
         GameList.AddHandler(PointerMovedEvent, OnCarouselPointerMoved, RoutingStrategies.Tunnel, handledEventsToo: true);
         GameList.AddHandler(PointerReleasedEvent, OnCarouselPointerReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
@@ -296,6 +316,7 @@ public partial class MainWindow : Window
             Dispatcher.UIThread.Post(() => AnchorCarouselSelection(animate: false), DispatcherPriority.Loaded);
         };
 
+        UseNativeWindowChrome();
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
         TitleBar.DoubleTapped += OnTitleBarDoubleTapped;
         MinimizeButton.Click += (_, _) => WindowState = WindowState.Minimized;
@@ -315,9 +336,18 @@ public partial class MainWindow : Window
         UpdateWindowChromeState();
         GameList.SelectionChanged += (_, _) => OnGameListSelectionChanged();
         GameList.DoubleTapped += OnGameListDoubleTapped;
+        GameList.Tapped += OnGameListTapped;
+        GameList.KeyDown += (_, args) =>
+        {
+            if (args.Key == Key.Enter && !args.Handled)
+            {
+                args.Handled = true;
+                LaunchSelected();
+            }
+        };
         SearchBox.TextChanged += (_, _) => RefreshVisibleGames();
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
-        OpenFileButton.Click += async (_, _) => await OpenFileAsync();
+        InitializeLibraryToolbar();
         LaunchButton.Click += (_, _) =>
         {
             if (_isRunning)
@@ -329,7 +359,6 @@ public partial class MainWindow : Window
                 LaunchSelected();
             }
         };
-        LaunchCustomEnvButton.Click += async (_, _) => await OpenCustomEnvironmentDialogAsync();
         ClearLogButton.Click += (_, _) => { _consoleLines.Clear(); _allConsoleLines.Clear(); };
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
         DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
@@ -337,15 +366,13 @@ public partial class MainWindow : Window
         LibraryTabButton.Click += (_, _) => SetActivePage(0);
         OptionsTabButton.Click += (_, _) => SetActivePage(1);
         TrophiesTabButton.Click += (_, _) => OpenTrophyHub();
-        LibraryLayoutButton.Click += (_, _) => ToggleLibraryLayout();
-        TitleMusicMuteButton.Click += (_, _) => TitleMusicToggle.IsChecked = !_settings.PlayTitleMusic;
         TitleMusicVolumeSlider.ValueChanged += (_, _) =>
         {
             _settings.TitleMusicVolume = TitleMusicVolumeSlider.Value / 100.0;
             _sndPreview.Volume = _settings.TitleMusicVolume;
-            UpdateTitleMusicMuteButton();
-            _titleMusicVolumeTimer.Stop();
-            _titleMusicVolumeTimer.Start();
+            UpdateTitleMusicControls();
+            _settingsSaveTimer.Stop();
+            _settingsSaveTimer.Start();
         };
         LibraryPage.SizeChanged += (_, _) => ScheduleLibraryLayoutMetricsUpdate();
         LibrarySelectedDetails.SizeChanged += (_, _) => UpdateLibraryMinimumHeight();
@@ -353,15 +380,17 @@ public partial class MainWindow : Window
         ConsoleToggle.IsCheckedChanged += (_, _) => UpdateEmbeddedConsoleVisibility();
         WireOptionsNavigation();
         WireGameOptions();
+        BuildEnvironmentSettingRows();
+        HideUnsupportedPlatformOptions();
+        InitializeOptionGroupDividers();
 
         // The settings page edits _settings live, so a launch started while
         // it is open already uses the new values.
-        LogLevelBox.SelectionChanged += (_, _) => _settings.LogLevel = SelectedLogLevel();
-        TraceImportsBox.ValueChanged += (_, _) => _settings.ImportTraceLimit = (int)(TraceImportsBox.Value ?? 0);
-        StrictToggle.IsCheckedChanged += (_, _) => _settings.StrictDynlibResolution = StrictToggle.IsChecked == true;
-        LogToFileToggle.IsCheckedChanged += (_, _) => _settings.LogToFile = LogToFileToggle.IsChecked == true;
         OverrideLogFileToggle.IsCheckedChanged += (_, _) =>
+        {
             _settings.OverrideLogFile = OverrideLogFileToggle.IsChecked == true;
+            ScheduleSettingsSave();
+        };
         TitleMusicToggle.IsCheckedChanged += (_, _) =>
         {
             _settings.PlayTitleMusic = TitleMusicToggle.IsChecked == true;
@@ -372,19 +401,19 @@ public partial class MainWindow : Window
         {
             _settings.DiscordRichPresence = DiscordToggle.IsChecked == true;
             UpdateDiscordPresence();
+            ScheduleSettingsSave();
         };
         AutoUpdateToggle.IsCheckedChanged += (_, _) =>
+        {
             _settings.CheckForUpdatesOnStartup = AutoUpdateToggle.IsChecked == true;
-        ConsoleTypeBox.SelectionChanged += (_, _) =>
-            _settings.ConsoleType = SelectedComboText(ConsoleTypeBox, "PS5");
+            ScheduleSettingsSave();
+        };
+        InitializeThemeControls();
         ConsoleLanguageBox.SelectionChanged += (_, _) =>
+        {
             _settings.ConsoleLanguage = SelectedComboText(ConsoleLanguageBox, "EnglishUS");
-        WindowModeBox.SelectionChanged += (_, _) => _settings.WindowMode = SelectedComboText(WindowModeBox, "Windowed");
-        DisplayBox.SelectionChanged += (_, _) => OnHostDisplayChanged();
-        ResolutionBox.SelectionChanged += (_, _) => OnHostResolutionChanged();
-        RefreshRateBox.SelectionChanged += (_, _) => OnHostRefreshRateChanged();
-        ScalingModeBox.SelectionChanged += (_, _) => _settings.ScalingMode = SelectedComboText(ScalingModeBox, "Fit");
-        VSyncToggle.IsCheckedChanged += (_, _) => _settings.VSync = VSyncToggle.IsChecked == true;
+            ScheduleSettingsSave();
+        };
         PortableDataToggle.IsCheckedChanged += (_, _) =>
         {
             var enabled = PortableDataToggle.IsChecked == true;
@@ -395,43 +424,9 @@ public partial class MainWindow : Window
                 PortableDataToggle.IsChecked = !enabled;
             }
         };
-        HdrModeBox.SelectionChanged += (_, _) => _settings.HdrMode = SelectedComboText(HdrModeBox, "Auto");
-        OverlayEnabledToggle.IsCheckedChanged += (_, _) => _settings.OverlayEnabled = OverlayEnabledToggle.IsChecked == true;
-        OverlayModeBox.SelectionChanged += (_, _) => _settings.OverlayMode = SelectedComboText(OverlayModeBox, "TitleBar");
-        OverlayCornerBox.SelectionChanged += (_, _) => _settings.OverlayCorner = SelectedComboText(OverlayCornerBox, "TopRight");
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
         OpenLogsFolderButton.Click += (_, _) => OpenLogsFolder();
-        PerformanceProfileToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_PROFILE_PERFORMANCE", PerformanceProfileToggle.IsChecked == true);
-        PerformanceFrameTraceToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE", PerformanceFrameTraceToggle.IsChecked == true);
-        StrictComputeToggle.IsCheckedChanged += (_, _) =>
-            StrictComputeSettings.SetEnabled(_settings.EnvironmentToggles, StrictComputeToggle.IsChecked == true);
-        EnvBthidToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_BTHID_UNAVAILABLE", EnvBthidToggle.IsChecked == true);
-        EnvLoopGuardToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", EnvLoopGuardToggle.IsChecked == true);
-        EnvWritableApp0Toggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_WRITABLE_APP0", EnvWritableApp0Toggle.IsChecked == true);
-        BinkPlaybackBox.SelectionChanged += (_, _) =>
-            _settings.BinkPlaybackMode = SelectedComboText(BinkPlaybackBox, "Guest");
-        EnvVkValidationToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_VK_VALIDATION", EnvVkValidationToggle.IsChecked == true);
-        EnvDumpSpirvToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_DUMP_SPIRV", EnvDumpSpirvToggle.IsChecked == true);
-        EnvSkipRtToggle.IsCheckedChanged += (_, _) =>
-            RayTracingSkipSettings.SetEnabled(_settings.EnvironmentToggles, EnvSkipRtToggle.IsChecked == true);
-        EnvLogDirectMemoryToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_LOG_DIRECT_MEMORY", EnvLogDirectMemoryToggle.IsChecked == true);
-        EnvLogIoToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_LOG_IO", EnvLogIoToggle.IsChecked == true);
-        EnvLogNpToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
-        CrashDumpToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_CRASH_CAPTURE", CrashDumpToggle.IsChecked == true);
-        DefaultProfileBox.TextChanged += (_, _) =>
-            _settings.DefaultProfile = GuiSettings.NormalizeDefaultProfile(DefaultProfileBox.Text);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
@@ -458,17 +453,22 @@ public partial class MainWindow : Window
         {
             Interval = TimeSpan.FromMilliseconds(50),
         };
-        EnvRenderDocToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle(
-                "SHARPEMU_RENDERDOC",
-                EnvRenderDocToggle.IsChecked == true);
-        EnvDisableVkImplicitLayersToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle(
-                "SHARPEMU_VK_DISABLE_IMPLICITS",
-                EnvDisableVkImplicitLayersToggle.IsChecked == true);
 
         LauncherGamepad.EnsureStarted();
+        ShowVersion();
+        PopulateLanguageBox();
+        ApplyLocalization();
+        ApplySettingsToControls();
+        SeedLibraryFromCache();
+        FillScreenBeforeShowing();
         InitializeController();
+        InitializeLaunchCard();
+        Sheets.Covered = MainContent;
+        foreach (var viewer in OptionsSectionPanels().Concat(GameOptionsSectionPanels()).OfType<ScrollViewer>()
+                     .Append(OptionsNavScroll).Append(GameOptionsNavScroll))
+        {
+            EdgeFade.Attach(viewer);
+        }
         _gamepadTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(16),
@@ -510,6 +510,12 @@ public partial class MainWindow : Window
         };
     }
 
+    private void ScheduleSettingsSave()
+    {
+        _settingsSaveTimer.Stop();
+        if (!_isClosing) _settingsSaveTimer.Start();
+    }
+
     /// <summary>
     /// Switches between the Library and Options pages. Also reachable via
     /// the gamepad's shoulder buttons (LB/RB, L1/R1) from <see cref="PollGamepad"/>.
@@ -541,11 +547,17 @@ public partial class MainWindow : Window
         SetActiveClass(LibraryTabButton, index == 0);
         SetActiveClass(OptionsTabButton, index == 1);
         SetActiveClass(TrophiesTabButton, index == 2);
+        MovePageTabThumb(animate: true);
         TrophyPageHost.IsVisible = index == 2;
         LibraryPage.IsVisible = index == 0;
         LibraryToolbar.IsVisible = index == 0;
         OptionsPageSurface.IsVisible = index is 1 or 2;
         TrophyBackdropHost.IsVisible = index == 2;
+        OptionsBackdrop.IsVisible = index == 1;
+        if (index == 1)
+        {
+            OptionsBackdrop.Show(null);
+        }
         OptionsPage.IsVisible = index == 1;
         AnimatePageChange(previousPage, index);
         UpdateEmbeddedConsoleVisibility();
@@ -566,13 +578,13 @@ public partial class MainWindow : Window
     {
         _isLibraryGridLayout = grid;
         var selectedTile = GameList.SelectedItem;
-        _libraryTiles.IncludeAddFolderTile = grid;
+        _libraryTiles.IncludeAddFolderTile = true;
         if (selectedTile is GameEntry && !ReferenceEquals(GameList.SelectedItem, selectedTile))
         {
             GameList.SelectedItem = selectedTile;
         }
 
-        CarouselAddFolderButton.IsVisible = !grid;
+        CarouselAddFolderButton.IsVisible = false;
         SetClass(GameList, "gridLayout", grid);
         UpdateCarouselPadding();
         SetClass(LibrarySelectedDetails, "gridLayout", grid);
@@ -594,13 +606,18 @@ public partial class MainWindow : Window
 
     private void UpdateLibraryLayoutMetrics()
     {
-        var metrics = LibraryLayoutMetrics.Calculate(LibraryPage.Bounds.Width);
+        var metrics = LibraryLayoutMetrics.Calculate(
+            LibraryPage.Bounds.Width,
+            _settings.LibraryTileScale,
+            rail: !_isLibraryGridLayout);
         Resources["LibraryCoverSize"] = metrics.CoverSize;
         Resources["LibraryTileWidth"] = metrics.ItemWidth;
         Resources["LibraryRailItemHeight"] = metrics.RailItemHeight;
         Resources["LibraryGridItemHeight"] = metrics.GridItemHeight;
-        _libraryRailRowHeight = metrics.RailItemHeight + 16 + 48;
-        CarouselAddFolderButton.Margin = new Thickness(0, metrics.RailItemHeight + 24, 0, 0);
+        Resources["LibraryCoverSizeSelected"] = metrics.SelectedCoverSize;
+        Resources["LibraryTileWidthSelected"] = metrics.SelectedItemWidth;
+        Resources["LibraryRailItemHeightSelected"] = metrics.SelectedRailItemHeight;
+        _libraryRailRowHeight = metrics.SelectedRailItemHeight + 16 + 48;
         _libraryGridRowHeight = metrics.GridItemHeight + 16;
         UpdateCarouselPadding();
         Dispatcher.UIThread.Post(
@@ -634,20 +651,22 @@ public partial class MainWindow : Window
         ClampEmbeddedConsoleHeight();
     }
 
-    private void ToggleLibraryLayout()
+    private void ChooseLibraryLayout(bool grid)
     {
-        SetLibraryLayout(!_isLibraryGridLayout);
+        if (grid == _isLibraryGridLayout)
+        {
+            return;
+        }
+
+        SetLibraryLayout(grid);
         _settings.LibraryLayout = _isLibraryGridLayout ? "Grid" : "Carousel";
         _settings.Save();
     }
 
     private void UpdateLibraryLayoutButton()
     {
-        LibraryLayoutGlyph.Text = _isLibraryGridLayout ? "view_carousel" : "grid_view";
-        var label = Localization.Instance.Get(
-            _isLibraryGridLayout ? "Library.View.Carousel" : "Library.View.Grid");
-        ToolTip.SetTip(LibraryLayoutButton, label);
-        AutomationProperties.SetName(LibraryLayoutButton, label);
+        SetActiveClass(_libraryMenu.CarouselViewButton, !_isLibraryGridLayout);
+        SetActiveClass(_libraryMenu.GridViewButton, _isLibraryGridLayout);
     }
 
     private static void SetActiveClass(Button button, bool active) =>
@@ -675,12 +694,17 @@ public partial class MainWindow : Window
         {
             var section = index;
             buttons[index].Click += (_, _) => SetOptionsSection(section);
-            buttons[index].PointerEntered += (_, _) => SetOptionsNavigationIndicator(section);
-            buttons[index].GotFocus += (_, _) => SetOptionsNavigationIndicator(section);
+            // Moving focus onto a section selects it (console settings behaviour); the
+            // selected fill follows the section, never the pointer or the focus ring.
+            buttons[index].GotFocus += (_, e) =>
+            {
+                if (e.NavigationMethod != NavigationMethod.Pointer && section != _optionsSectionIndex)
+                {
+                    SetOptionsSection(section);
+                }
+            };
         }
 
-        OptionsNavHost.PointerExited += (_, _) =>
-            SetOptionsNavigationIndicator(_optionsSectionIndex);
         SetOptionsSection(0);
     }
 
@@ -689,8 +713,6 @@ public partial class MainWindow : Window
         OptionsGeneralNav,
         OptionsLoggingNav,
         OptionsLauncherNav,
-        OptionsRenderingNav,
-        OptionsEnvironmentNav,
         OptionsAboutNav,
     ];
 
@@ -699,8 +721,6 @@ public partial class MainWindow : Window
         OptionsGeneralPanel,
         OptionsLoggingPanel,
         OptionsLauncherPanel,
-        OptionsRenderingPanel,
-        OptionsEnvironmentPanel,
         OptionsAboutPanel,
     ];
 
@@ -719,7 +739,7 @@ public partial class MainWindow : Window
             SetOptionsPanelInteraction(panels[index], active);
         }
 
-        if (panels[section] == OptionsEnvironmentPanel)
+        if (panels[section] == OptionsLauncherPanel)
         {
             RefreshTrophyTestGames();
         }
@@ -906,7 +926,15 @@ public partial class MainWindow : Window
         if (!LauncherGamepad.TryGetState(out var pad))
         {
             _previousPadButtons = HostGamepadButtons.None;
+            SetGamepadConnected(false);
             return;
+        }
+
+        SetGamepadConnected(true);
+        RefreshControllerHints();
+        if ((pad.Buttons & ~_previousPadButtons) != HostGamepadButtons.None)
+        {
+            SetPadNavigation(true);
         }
 
         if (!IsActive)
@@ -921,6 +949,14 @@ public partial class MainWindow : Window
         {
             // The controller belongs to the separate game window while a
             // session is active; Circle/B must never stop the session.
+            _previousPadButtons = pad.Buttons;
+            return;
+        }
+
+        if (Sheets.Top is not null)
+        {
+            // A sheet is modal: the shoulder buttons stay put and the pad drives the sheet.
+            PollControllerPage(pad, pad.Buttons & ~_previousPadButtons);
             _previousPadButtons = pad.Buttons;
             return;
         }
@@ -951,29 +987,12 @@ public partial class MainWindow : Window
 
         if (ShouldNavigate(left, ref _navLeftNextAt, now))
         {
-            MoveSelection(-1);
-            ReturnFocusFromCarouselAddFolder();
+            MoveSelection(-1, fromPad: true);
         }
 
         if (ShouldNavigate(right, ref _navRightNextAt, now))
         {
-            MoveSelection(1);
-            ReturnFocusFromCarouselAddFolder();
-        }
-
-        if (!_isLibraryGridLayout)
-        {
-            var up = (pad.Buttons & HostGamepadButtons.Up) != 0 || pad.LeftY < 64;
-            var down = (pad.Buttons & HostGamepadButtons.Down) != 0 || pad.LeftY > 192;
-            if (ShouldNavigate(down, ref _navDownNextAt, now))
-            {
-                CarouselAddFolderButton.Focus(NavigationMethod.Directional);
-            }
-
-            if (ShouldNavigate(up, ref _navUpNextAt, now))
-            {
-                ReturnFocusFromCarouselAddFolder();
-            }
+            MoveSelection(1, fromPad: true);
         }
 
         if (_isLibraryGridLayout)
@@ -984,19 +1003,19 @@ public partial class MainWindow : Window
 
             if (ShouldNavigate(up, ref _navUpNextAt, now))
             {
-                MoveSelection(-rowStep);
+                MoveSelection(-rowStep, fromPad: true);
             }
 
             if (ShouldNavigate(down, ref _navDownNextAt, now))
             {
-                MoveSelection(rowStep);
+                MoveSelection(rowStep, fromPad: true);
             }
         }
 
         var pressed = pad.Buttons & ~_previousPadButtons;
         if ((pressed & HostGamepadButtons.Cross) != 0)
         {
-            if (!_isLibraryGridLayout && CarouselAddFolderButton.IsFocused)
+            if (_visibleGames.Count == 0)
             {
                 StartAddFolderFromTile();
             }
@@ -1004,6 +1023,16 @@ public partial class MainWindow : Window
             {
                 LaunchSelected();
             }
+        }
+
+        if ((pressed & HostGamepadButtons.Triangle) != 0 && _visibleGames.Count > 0)
+        {
+            OpenSelectedGameSettings();
+        }
+
+        if ((pressed & HostGamepadButtons.Square) != 0)
+        {
+            OpenLibraryMenu();
         }
 
         _previousPadButtons = pad.Buttons;
@@ -1062,7 +1091,7 @@ public partial class MainWindow : Window
         return columns;
     }
 
-    private void MoveSelection(int delta)
+    private void MoveSelection(int delta, bool fromPad = false)
     {
         var index = GameList.SelectedIndex < 0
             ? 0
@@ -1071,11 +1100,28 @@ public partial class MainWindow : Window
         GameList.ScrollIntoView(index);
         if (GameList.IsKeyboardFocusWithin && GameList.ContainerFromIndex(index) is { } container)
         {
-            container.Focus(NavigationMethod.Unspecified);
+            container.Focus(fromPad ? NavigationMethod.Directional : NavigationMethod.Unspecified);
         }
     }
 
     private async Task OnOpenedAsync()
+    {
+        ReportGuiRenderer();
+        LocateEmulator();
+        UpdateDiscordPresence();
+        _ = LoadLatestCommitAsync();
+
+        if (_settings.CheckForUpdatesOnStartup)
+        {
+            _ = CheckForUpdatesAsync();
+        }
+
+        FocusLibrarySelection();
+        await RescanLibraryAsync();
+        FocusLibrarySelection();
+    }
+
+    private void ShowVersion()
     {
         var version = Assembly.GetExecutingAssembly().GetName().Version;
         var display = version is not null ? $"v{version.ToString(3)}" : "v0.0.1";
@@ -1086,35 +1132,23 @@ public partial class MainWindow : Window
                 : $" · UNOFFICIAL {BuildInfo.CommitSha}";
         VersionText.Text = display;
         Title = $"SharpEmu {display}";
-        ReportGuiRenderer();
         ToolTip.SetTip(VersionText, BuildInfo.Banner);
-
-        _settings = GuiSettings.Load();
-        Localization.Instance.Load(_settings.Language);
-        PopulateLanguageBox();
-        ApplyLocalization();
-        ApplySettingsToControls();
-        LocateEmulator();
-        UpdateDiscordPresence();
-        _ = LoadLatestCommitAsync();
-
-        if (_settings.CheckForUpdatesOnStartup)
-        {
-            _ = CheckForUpdatesAsync();
-        }
-
-        SeedLibraryFromCache();
-        FocusLibrarySelection();
-        await RescanLibraryAsync();
-        FocusLibrarySelection();
     }
 
-    private void ReturnFocusFromCarouselAddFolder()
+    // The window opens maximized; giving it the screen's size up front keeps it from first
+    // appearing at its 1280x820 design size and then growing.
+    private void FillScreenBeforeShowing()
     {
-        if (CarouselAddFolderButton.IsFocused)
+        if (Screens.Primary is not { } screen)
         {
-            FocusLibrarySelection();
+            return;
         }
+
+        var area = screen.WorkingArea;
+        WindowStartupLocation = WindowStartupLocation.Manual;
+        Position = area.Position;
+        Width = area.Width / screen.Scaling;
+        Height = area.Height / screen.Scaling;
     }
 
     private void ReportGuiRenderer()
@@ -1154,13 +1188,18 @@ public partial class MainWindow : Window
                 }
 
                 AnchorCarouselSelection(animate: false);
-                if (GameList.SelectedIndex >= 0 && GameList.ContainerFromIndex(GameList.SelectedIndex) is { } container)
+                var method = _gamepadConnected ? NavigationMethod.Directional : NavigationMethod.Unspecified;
+                if (_visibleGames.Count == 0)
                 {
-                    container.Focus(NavigationMethod.Unspecified);
+                    EmptyStateAddFolderButton.Focus(method);
+                }
+                else if (GameList.SelectedIndex >= 0 && GameList.ContainerFromIndex(GameList.SelectedIndex) is { } container)
+                {
+                    container.Focus(method);
                 }
                 else
                 {
-                    GameList.Focus(NavigationMethod.Unspecified);
+                    GameList.Focus(method);
                 }
             },
             DispatcherPriority.Loaded);
@@ -1185,6 +1224,7 @@ public partial class MainWindow : Window
         _settings.Language = language.Code;
         Localization.Instance.Load(language.Code);
         ApplyLocalization();
+        ScheduleSettingsSave();
     }
 
     /// <summary>
@@ -1196,11 +1236,10 @@ public partial class MainWindow : Window
         RefreshOptionsNavigationLabels();
         RefreshLocalizedChoices();
         UpdateLogFilePathText();
-        RefreshHostRefreshRates(_settings.RefreshRate);
         RefreshUpdateText();
         UpdateEmptyStateTexts();
         UpdateLibraryLayoutButton();
-        UpdateTitleMusicMuteButton();
+        UpdateTitleMusicControls();
         AutomationProperties.SetName(TitleMusicVolumeSlider, Localization.Instance.Get("Library.Music.Volume"));
         UpdateRunButtons();
     }
@@ -1220,14 +1259,6 @@ public partial class MainWindow : Window
             OptionsLauncherNav,
             OptionsLauncherNavLabel,
             localization.Get("Options.Section.Launcher"));
-        SetOptionsNavigationLabel(
-            OptionsRenderingNav,
-            OptionsRenderingNavLabel,
-            localization.Get("Options.Section.Rendering"));
-        SetOptionsNavigationLabel(
-            OptionsEnvironmentNav,
-            OptionsEnvironmentNavLabel,
-            localization.Get("Options.Env.Tab"));
         SetOptionsNavigationLabel(
             OptionsAboutNav,
             OptionsAboutNavLabel,
@@ -1310,10 +1341,35 @@ public partial class MainWindow : Window
 
     private void OnPreviewKeyDown(object? sender, KeyEventArgs args)
     {
-        // The session runs in its own SDL window and takes keyboard focus with
+        // The session runs in its own window and takes keyboard focus with
         // it, so launcher buttons no longer see game input and nothing has to
         // be swallowed here. Kept as the wired handler because the launcher
         // still needs a preview hook for its own shortcuts.
+        if (args.KeyDeviceType == KeyDeviceType.Gamepad || args.Handled || Sheets.Top is not null ||
+            args.Key is not (Key.Up or Key.Down or Key.Left or Key.Right or Key.Enter or Key.Escape) ||
+            ControllerSettings() is not { } layout ||
+            FocusManager?.GetFocusedElement() is TextBox or ComboBoxItem or ComboBox { IsDropDownOpen: true })
+        {
+            return;
+        }
+
+        // The arrow keys drive the settings screens exactly like the D-pad. The first
+        // key press only brings focus into the page (onto Launch or the current section).
+        var focusedBefore = FocusManager?.GetFocusedElement();
+        EnsureControllerFocus(layout.Root);
+        if (!ReferenceEquals(focusedBefore, FocusManager?.GetFocusedElement()) && args.Key != Key.Escape)
+        {
+            args.Handled = true;
+        }
+        else if (SettingsControllerKey(layout, args.Key))
+        {
+            args.Handled = true;
+        }
+        else if (args.Key == Key.Escape && _isGameSettingsOpen)
+        {
+            CloseGameSettings();
+            args.Handled = true;
+        }
     }
 
     private void BeginWindowClosing()
@@ -1324,11 +1380,12 @@ public partial class MainWindow : Window
         }
 
         _isClosing = true;
+        Sheets.CloseAll();
         Interlocked.Increment(ref _libraryScanGeneration);
         Interlocked.Increment(ref _detailLoadGeneration);
         _consoleFlushTimer.Stop();
         _libraryLayoutTimer.Stop();
-        _titleMusicVolumeTimer.Stop();
+        _settingsSaveTimer.Stop();
         _gamepadTimer.Stop();
     }
 
@@ -1358,6 +1415,34 @@ public partial class MainWindow : Window
             Console.Error.WriteLine(
                 $"[GUI][WARN] Failed to clean up {component}: {exception}");
         }
+    }
+
+    // Left inset that keeps the brand clear of the macOS traffic lights, and the AppKit
+    // title bar height they are centred in.
+    private const double TrafficLightInset = 78;
+    private const double NativeTitleBarHeight = 30;
+
+    private bool _nativeWindowChrome;
+
+    /// <summary>
+    /// macOS keeps its system window frame: the content extends under a transparent title bar
+    /// and AppKit draws the traffic lights over <see cref="TitleBar"/>, so the drawn caption
+    /// buttons and resize grips are hidden. Other platforms keep the frameless custom chrome.
+    /// </summary>
+    private void UseNativeWindowChrome()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        _nativeWindowChrome = true;
+        WindowDecorations = WindowDecorations.Full;
+        ExtendClientAreaToDecorationsHint = true;
+        TitleBar.Height = NativeTitleBarHeight;
+        ExtendClientAreaTitleBarHeightHint = NativeTitleBarHeight;
+        WindowChromeButtons.IsVisible = false;
+        TitleBarBrand.Margin = new Thickness(TrafficLightInset, 0, 16, 0);
     }
 
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -1417,7 +1502,7 @@ public partial class MainWindow : Window
 
         if (ResizeHandles is { } handles)
         {
-            handles.IsVisible = CanResize && WindowState == WindowState.Normal;
+            handles.IsVisible = !_nativeWindowChrome && CanResize && WindowState == WindowState.Normal;
         }
     }
 
@@ -1439,23 +1524,14 @@ public partial class MainWindow : Window
 
     private void InitializeLocalizedChoiceBoxes()
     {
-        CpuEngineBox.ItemsSource = _cpuEngineChoices;
-        ConsoleTypeBox.ItemsSource = _consoleTypeChoices;
         ConsoleLanguageBox.ItemsSource = _consoleLanguageChoices;
-        LogLevelBox.ItemsSource = _logLevelChoices;
-        WindowModeBox.ItemsSource = _windowModeChoices;
-        ScalingModeBox.ItemsSource = _scalingModeChoices;
-        HdrModeBox.ItemsSource = _hdrModeChoices;
-        BinkPlaybackBox.ItemsSource = _binkPlaybackChoices;
-        OverlayModeBox.ItemsSource = _overlayModeChoices;
-        OverlayCornerBox.ItemsSource = _overlayCornerChoices;
+        ThemeBox.ItemsSource = _themeChoices;
     }
 
     private void RefreshLocalizedChoices()
     {
-        RefreshChoices(_cpuEngineChoices);
-        RefreshChoices(_consoleTypeChoices);
         RefreshChoices(_consoleLanguageChoices);
+        RefreshChoices(_themeChoices);
         RefreshChoices(_logLevelChoices);
         RefreshChoices(_windowModeChoices);
         RefreshChoices(_scalingModeChoices);
@@ -1463,6 +1539,7 @@ public partial class MainWindow : Window
         RefreshChoices(_binkPlaybackChoices);
         RefreshChoices(_overlayModeChoices);
         RefreshChoices(_overlayCornerChoices);
+        RefreshEnvironmentSettingChoices();
     }
 
     private static void RefreshChoices(IEnumerable<LocalizedChoice> choices)
@@ -1475,66 +1552,27 @@ public partial class MainWindow : Window
 
     private void ApplySettingsToControls()
     {
-        CpuEngineBox.SelectedIndex = 0;
-        ConsoleTypeBox.SelectedIndex = 0;
         ConsoleLanguageBox.SelectedIndex = ChoiceIndex(
             _settings.ConsoleLanguage,
             _consoleLanguageChoices.Select(choice => choice.Value).ToArray());
-        LogLevelBox.SelectedIndex = _settings.LogLevel.ToLowerInvariant() switch
-        {
-            "trace" => 0,
-            "debug" => 1,
-            "info" => 2,
-            "warning" or "warn" => 3,
-            "error" => 4,
-            "critical" or "fatal" => 5,
-            _ => 2,
-        };
-        TraceImportsBox.Value = Math.Clamp(_settings.ImportTraceLimit, 0, 4096);
-        StrictToggle.IsChecked = _settings.StrictDynlibResolution;
-        LogToFileToggle.IsChecked = _settings.LogToFile;
-        CrashDumpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_CRASH_CAPTURE");
         OverrideLogFileToggle.IsChecked = _settings.OverrideLogFile;
         TitleMusicToggle.IsChecked = _settings.PlayTitleMusic;
         TitleMusicVolumeSlider.Value = _settings.TitleMusicVolume * 100.0;
-        _titleMusicVolumeTimer.Stop();
+        _libraryMenu.TileSizeSlider.Value = _settings.LibraryTileScale * 100.0;
+        _settingsSaveTimer.Stop();
         _sndPreview.Volume = _settings.TitleMusicVolume;
-        UpdateTitleMusicMuteButton();
+        UpdateTitleMusicControls();
         TrophySoundToggle.IsChecked = _settings.TrophySound;
         TrophySound.Enabled = _settings.TrophySound;
         SetLibraryLayout(string.Equals(_settings.LibraryLayout, "Grid", StringComparison.OrdinalIgnoreCase));
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
         AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
-        PerformanceProfileToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_PROFILE_PERFORMANCE");
-        PerformanceFrameTraceToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE");
-        StrictComputeToggle.IsChecked = StrictComputeSettings.IsEnabled(_settings.EnvironmentToggles);
-        EnvBthidToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_BTHID_UNAVAILABLE");
-        EnvLoopGuardToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
-        EnvWritableApp0Toggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_WRITABLE_APP0");
-        BinkPlaybackBox.SelectedIndex = ChoiceIndex(_settings.BinkPlaybackMode, "Host", "Guest", "Skip");
-        EnvVkValidationToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_VK_VALIDATION");
-        EnvDumpSpirvToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DUMP_SPIRV");
-        EnvSkipRtToggle.IsChecked = RayTracingSkipSettings.IsEnabled(_settings.EnvironmentToggles);
-        EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
-        EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
-        EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
-        EnvRenderDocToggle.IsChecked =
-            _settings.EnvironmentToggles.Contains("SHARPEMU_RENDERDOC");
-        EnvDisableVkImplicitLayersToggle.IsChecked =
-            _settings.EnvironmentToggles.Contains("SHARPEMU_VK_DISABLE_IMPLICITS");
-        DefaultProfileBox.Text = _settings.DefaultProfile;
-        WindowModeBox.SelectedIndex = ChoiceIndex(_settings.WindowMode, "Windowed", "Borderless", "Exclusive");
-        LoadHostDisplayOptions();
-        ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
-        VSyncToggle.IsChecked = _settings.VSync;
+        SyncThemeControls();
         PortableDataToggle.IsEnabled = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent() ||
             SharpEmu.Logging.SharpEmuPaths.CanWriteExecutableDirectory();
         PortableDataToggle.IsChecked = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent();
-        HdrModeBox.SelectedIndex = ChoiceIndex(_settings.HdrMode, "Auto", "On", "Off");
-        OverlayEnabledToggle.IsChecked = _settings.OverlayEnabled;
-        OverlayModeBox.SelectedIndex = ChoiceIndex(_settings.OverlayMode, "Full", "Minimal", "TitleBar");
-        OverlayCornerBox.SelectedIndex = ChoiceIndex(_settings.OverlayCorner, "TopLeft", "TopRight", "BottomRight", "BottomLeft");
         UpdateLogFilePathText();
+        _settingsSaveTimer.Stop();
     }
 
     private static string SelectedComboText(ComboBox comboBox, string fallback) =>
@@ -1544,117 +1582,6 @@ public partial class MainWindow : Window
             string value => value,
             _ => fallback,
         };
-
-    private void LoadHostDisplayOptions()
-    {
-        _updatingHostDisplayOptions = true;
-        try
-        {
-            _hostDisplays = HostDisplayOptions.BuildDisplays(
-                HostDisplayCatalog.Query(),
-                _settings.DisplayIndex);
-            DisplayBox.ItemsSource = _hostDisplays;
-            var display = HostDisplayOptions.SelectDisplay(_hostDisplays, _settings.DisplayIndex);
-            DisplayBox.SelectedItem = display;
-            PopulateHostModes(display, _settings.Resolution, _settings.RefreshRate);
-        }
-        finally
-        {
-            _updatingHostDisplayOptions = false;
-        }
-
-        SyncHostVideoSettings();
-    }
-
-    private void OnHostDisplayChanged()
-    {
-        if (_updatingHostDisplayOptions || DisplayBox.SelectedItem is not HostDisplayOption display)
-        {
-            return;
-        }
-
-        _updatingHostDisplayOptions = true;
-        try
-        {
-            PopulateHostModes(display, _settings.Resolution, _settings.RefreshRate);
-        }
-        finally
-        {
-            _updatingHostDisplayOptions = false;
-        }
-
-        SyncHostVideoSettings();
-    }
-
-    private void OnHostResolutionChanged()
-    {
-        if (_updatingHostDisplayOptions || DisplayBox.SelectedItem is not HostDisplayOption)
-        {
-            return;
-        }
-
-        _settings.Resolution = SelectedComboText(ResolutionBox, "1920x1080");
-        RefreshHostRefreshRates(_settings.RefreshRate);
-        OnHostRefreshRateChanged();
-    }
-
-    private void OnHostRefreshRateChanged()
-    {
-        if (!_updatingHostDisplayOptions && RefreshRateBox.SelectedItem is HostRefreshRateOption refreshRate)
-        {
-            _settings.RefreshRate = refreshRate.Value;
-        }
-    }
-
-    private void PopulateHostModes(
-        HostDisplayOption display,
-        string selectedResolution,
-        int selectedRefreshRate)
-    {
-        var resolutions = HostDisplayOptions.BuildResolutions(display, selectedResolution);
-        ResolutionBox.ItemsSource = resolutions;
-        ResolutionBox.SelectedItem = resolutions.FirstOrDefault(resolution =>
-            string.Equals(resolution, selectedResolution, StringComparison.OrdinalIgnoreCase)) ?? resolutions[0];
-        RefreshHostRefreshRates(selectedRefreshRate);
-    }
-
-    private void RefreshHostRefreshRates(int selectedRefreshRate)
-    {
-        if (DisplayBox.SelectedItem is not HostDisplayOption display)
-        {
-            return;
-        }
-
-        var wasUpdating = _updatingHostDisplayOptions;
-        _updatingHostDisplayOptions = true;
-        try
-        {
-            var rates = HostDisplayOptions.BuildRefreshRates(
-                display,
-                SelectedComboText(ResolutionBox, _settings.Resolution),
-                selectedRefreshRate,
-                Localization.Instance.Get("Options.RefreshRate.Automatic"));
-            RefreshRateBox.ItemsSource = rates;
-            RefreshRateBox.SelectedItem = rates.FirstOrDefault(rate => rate.Value == selectedRefreshRate) ?? rates[0];
-        }
-        finally
-        {
-            _updatingHostDisplayOptions = wasUpdating;
-        }
-    }
-
-    private void SyncHostVideoSettings()
-    {
-        if (DisplayBox.SelectedItem is HostDisplayOption display)
-        {
-            _settings.DisplayIndex = display.Index;
-        }
-
-        _settings.Resolution = SelectedComboText(ResolutionBox, "1920x1080");
-        _settings.RefreshRate = RefreshRateBox.SelectedItem is HostRefreshRateOption refreshRate
-            ? refreshRate.Value
-            : 0;
-    }
 
     private static int ChoiceIndex(string value, params string[] choices)
     {
@@ -1749,42 +1676,6 @@ public partial class MainWindow : Window
             _availableUpdate is null ? "Updater.Check" : "Updater.DownloadRestart");
     }
 
-    // Environment variables set on this process at the previous launch; children
-    // inherit the process environment, so stale names must be cleared explicitly.
-    private readonly HashSet<string> _appliedEnvironmentVariables = new(StringComparer.OrdinalIgnoreCase);
-
-    private void SetEnvironmentToggle(string name, bool enabled)
-    {
-        if (enabled)
-        {
-            if (!_settings.EnvironmentToggles.Contains(name))
-            {
-                _settings.EnvironmentToggles.Add(name);
-            }
-        }
-        else
-        {
-            _settings.EnvironmentToggles.Remove(name);
-        }
-    }
-
-    private const string DefaultProfileEnvironmentName = "SHARPEMU_DEFAULT_PROFILE";
-    private const string BinkModeEnvironmentName = "SHARPEMU_BINK_MODE";
-
-    private string SelectedLogLevel()
-    {
-        return LogLevelBox.SelectedIndex switch
-        {
-            0 => "Trace",
-            1 => "Debug",
-            2 => "Info",
-            3 => "Warning",
-            4 => "Error",
-            5 => "Critical",
-            _ => "Info",
-        };
-    }
-
     private void UpdateLogFilePathText()
     {
         LogFilePathRow.Description = string.IsNullOrWhiteSpace(_settings.LogFilePath)
@@ -1845,23 +1736,7 @@ public partial class MainWindow : Window
 
     private void OpenLogsFolder()
     {
-        try
-        {
-            var root = EmulatorLogsRoot();
-            Directory.CreateDirectory(root);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = OperatingSystem.IsWindows() ? "explorer.exe" : OperatingSystem.IsMacOS() ? "open" : "xdg-open",
-                Arguments = $"\"{root}\"",
-                UseShellExecute = false,
-            });
-        }
-        catch (Exception ex)
-        {
-            AppendConsoleLine(
-                Localization.Instance.Format("Status.CouldNotOpenFolder", ex.Message),
-                WarningLineBrush);
-        }
+        OpenFolder(EmulatorLogsRoot());
     }
 
     private async Task SelectLogFilePathAsync()
@@ -1883,6 +1758,7 @@ public partial class MainWindow : Window
         {
             _settings.LogFilePath = result.File.Path.LocalPath;
             UpdateLogFilePathText();
+            ScheduleSettingsSave();
         }
     }
 
@@ -1909,6 +1785,9 @@ public partial class MainWindow : Window
         candidates.Add(Path.Combine(baseDirectory, exeName));
         candidates.Add(Path.Combine(baseDirectory, "win-x64", exeName));
         candidates.Add(Path.Combine(baseDirectory, "..", exeName));
+        // The native arm64 GUI host (SharpEmu.GuiHost): in a build tree the x64 emulator sits
+        // in the sibling RID folder; in the bundle it is "..", above.
+        candidates.Add(Path.Combine(baseDirectory, "..", "osx-x64", exeName));
 
         _emulatorExePath = candidates.FirstOrDefault(File.Exists) is { } found
             ? Path.GetFullPath(found)
@@ -2016,6 +1895,7 @@ public partial class MainWindow : Window
         if (showLoadingState)
         {
             EmptyState.IsVisible = false;
+            GameList.IsVisible = false;
             LoadingState.IsVisible = true;
         }
         else if (addingFolder)
@@ -2224,32 +2104,22 @@ public partial class MainWindow : Window
 
     private void OnGameListSelectionChanged()
     {
-        if (_restoringGameSelection)
-        {
-            return;
-        }
-
+        // The add-folder tile is selected like a game and opens the picker only when it
+        // is activated (Cross, Enter or a click); the backdrop keeps the last game's art.
         if (GameList.SelectedItem is AddFolderTile)
         {
-            _restoringGameSelection = true;
-            try
-            {
-                GameList.SelectedItem = _lastSelectedGame;
-            }
-            finally
-            {
-                _restoringGameSelection = false;
-            }
-
-            // A held direction must not reopen the picker after it closes.
-            _navLeftNextAt = new NavigationRepeat(long.MaxValue, 0);
-            _navRightNextAt = new NavigationRepeat(long.MaxValue, 0);
-            StartAddFolderFromTile();
-            return;
+            LibrarySelectedDetails.DataContext = null;
+            LibrarySelectedDetails.IsVisible = false;
+            _sndPreview.Stop();
+            UpdateLibraryMinimumHeight();
+            UpdateRunButtons();
+        }
+        else
+        {
+            _lastSelectedGame = GameList.SelectedItem as GameEntry;
+            UpdateSelectedGame();
         }
 
-        _lastSelectedGame = GameList.SelectedItem as GameEntry;
-        UpdateSelectedGame();
         Dispatcher.UIThread.Post(() => AnchorCarouselSelection(animate: true), DispatcherPriority.Loaded);
     }
 
@@ -2441,6 +2311,17 @@ public partial class MainWindow : Window
         RequestAnimationFrame(OnCarouselAnimationFrame);
     }
 
+    // One click on the add-folder tile opens the picker; a game needs a double click.
+    private void OnGameListTapped(object? sender, TappedEventArgs e)
+    {
+        var item = (e.Source as Visual)?.FindAncestorOfType<ListBoxItem>(includeSelf: true);
+        if (item?.DataContext is AddFolderTile)
+        {
+            e.Handled = true;
+            StartAddFolderFromTile();
+        }
+    }
+
     private void OnGameListDoubleTapped(object? sender, TappedEventArgs e)
     {
         var item = (e.Source as Visual)?.FindAncestorOfType<ListBoxItem>(includeSelf: true);
@@ -2492,7 +2373,7 @@ public partial class MainWindow : Window
         GameList.SelectedItem = game;
         CtxLaunch.IsEnabled = !_isRunning;
         CtxCopyTitleId.IsEnabled = game.TitleId is not null;
-        CtxGameSettings.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
+        CtxGameSettings.IsEnabled = true;
         CtxPackZar.IsEnabled = !ZArchive.IsArchivePath(game.Path);
         CtxTrophies.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
         CtxPatches.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
@@ -2511,7 +2392,10 @@ public partial class MainWindow : Window
         var options = new FilePickerSaveOptions
         {
             Title = loc.Get("Dialog.SaveZar"),
-            SuggestedFileName = SuggestedArchiveName(Path.GetFileName(gameFolder), game.TitleId, game.Version) + ".zar",
+            // The macOS save panel always appends the selected type's extension, so a suggested
+            // name that already ends in .zar would show as name.zar.zar there.
+            SuggestedFileName = SuggestedArchiveName(Path.GetFileName(gameFolder), game.TitleId, game.Version) +
+                (OperatingSystem.IsMacOS() ? "" : ".zar"),
             DefaultExtension = "zar",
             FileTypeChoices = [new FilePickerFileType(loc.Get("Dialog.ZarFiles")) { Patterns = ["*.zar"] }],
         };
@@ -2535,7 +2419,7 @@ public partial class MainWindow : Window
         dialog.MuteMusicChanged += SetTitleMusicMuted;
         try
         {
-            if (await dialog.ShowDialog<bool>(this))
+            if (await Sheets.ShowAsync(dialog) is true)
             {
                 AppendConsoleLine(loc.Format("Status.PackedZar", destination), SuccessLineBrush);
             }
@@ -2691,6 +2575,7 @@ public partial class MainWindow : Window
         }
 
         EmptyState.IsVisible = _visibleGames.Count == 0;
+        GameList.IsVisible = _visibleGames.Count != 0;
         UpdateEmptyStateTexts();
 
         if (!ReferenceEquals(selectedBefore, selectedAfter))
@@ -2789,7 +2674,7 @@ public partial class MainWindow : Window
 
     private void OnTitleMusicSettingChanged()
     {
-        UpdateTitleMusicMuteButton();
+        UpdateTitleMusicControls();
         if (!_settings.PlayTitleMusic)
         {
             _sndPreview.Stop();
@@ -2800,15 +2685,20 @@ public partial class MainWindow : Window
         }
     }
 
-    private void UpdateTitleMusicMuteButton()
+    // The Options page and the library menu show the same two title-music settings.
+    private void UpdateTitleMusicControls()
     {
-        TitleMusicMuteGlyph.Text = !_settings.PlayTitleMusic || _settings.TitleMusicVolume == 0
+        var volume = $"{Math.Round(_settings.TitleMusicVolume * 100)}%";
+        TitleMusicVolumeValue.Text = volume;
+        _libraryMenu.VolumeValue.Text = volume;
+        _libraryMenu.VolumeSlider.Value = _settings.TitleMusicVolume * 100.0;
+        _libraryMenu.TitleMusicSwitch.IsChecked = _settings.PlayTitleMusic;
+        // Volume only matters while title music plays.
+        _libraryMenu.VolumeRow.IsVisible = _settings.PlayTitleMusic;
+        TitleMusicVolumeRow.IsVisible = _settings.PlayTitleMusic;
+        _libraryMenu.VolumeGlyph.Text = _settings.TitleMusicVolume == 0
             ? "volume_off"
             : _settings.TitleMusicVolume < 0.5 ? "volume_down" : "volume_up";
-        var label = Localization.Instance.Get(
-            _settings.PlayTitleMusic ? "Library.Music.Mute" : "Library.Music.Unmute");
-        ToolTip.SetTip(TitleMusicMuteButton, label);
-        AutomationProperties.SetName(TitleMusicMuteButton, label);
     }
 
     /// <summary>Pauses the preview music while the window is minimized.</summary>
@@ -2929,37 +2819,13 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task OpenCustomEnvironmentDialogAsync()
-    {
-        if (_isRunning || GameList.SelectedItem is not GameEntry game)
-        {
-            return;
-        }
-
-        var perGame = PerGameSettings.Load(game.TitleId);
-        var initialEntries = CustomEnvironmentVariables.Merge(
-            GlobalCustomEnvironmentSettings.Load(),
-            perGame?.CustomEnvironmentVariables);
-        var dialog = new CustomEnvironmentDialog(game.TitleId, initialEntries);
-        dialog.SaveGlobalRequested += entries => GlobalCustomEnvironmentSettings.Save(entries);
-        dialog.SaveGameRequested += (titleId, entries) =>
-        {
-            var settings = PerGameSettings.Load(titleId) ?? new PerGameSettings();
-            settings.CustomEnvironmentVariables = entries.Count == 0 ? null : entries.ToList();
-            settings.RemoveInheritedValues(_settings);
-            settings.Save(titleId);
-        };
-
-        var customEntries = await dialog.ShowDialog<IReadOnlyList<string>?>(this);
-        if (customEntries is not null && !_isRunning)
-        {
-            Launch(game.Path, game.Name, game.TitleId, customEntries);
-        }
-    }
-
     private void LaunchSelected()
     {
-        if (GameList.SelectedItem is GameEntry game)
+        if (GameList.SelectedItem is AddFolderTile)
+        {
+            StartAddFolderFromTile();
+        }
+        else if (GameList.SelectedItem is GameEntry game)
         {
             Launch(game.Path, game.Name, game.TitleId);
         }
@@ -2968,8 +2834,7 @@ public partial class MainWindow : Window
     private void Launch(
         string ebootPath,
         string displayName,
-        string? titleId = null,
-        IReadOnlyList<string>? oneShotCustomEnvironment = null)
+        string? titleId = null)
     {
         if (_isRunning)
         {
@@ -2980,12 +2845,8 @@ public partial class MainWindow : Window
             ? _allGames.FirstOrDefault(game =>
                 game.Path.Equals(ebootPath, GameLibraryPath.Comparison))?.TitleId
             : titleId;
-        var perGame = PerGameSettings.Load(resolvedTitleId);
-        var effective = EffectiveLaunchSettings.Resolve(_settings, perGame);
-        var customEnvironment = CustomEnvironmentVariables.Merge(
-            GlobalCustomEnvironmentSettings.Load(),
-            perGame?.CustomEnvironmentVariables,
-            oneShotCustomEnvironment);
+        var configuration = LaunchConfiguration.Load(ebootPath, resolvedTitleId);
+        var effective = configuration.Settings;
 
         _sndPreview.Stop();
         _consoleLines.Clear();
@@ -2994,102 +2855,13 @@ public partial class MainWindow : Window
         DropFileLog();
         if (effective.LogToFile)
         {
-            OpenFileLog(resolvedTitleId);
-        }
-
-        // The isolated game child inherits these diagnostics. Keep them on the
-        // launcher process so every platform receives the same launch options.
-        foreach (var staleName in _appliedEnvironmentVariables)
-        {
-            if (!effective.EnvironmentToggles.Any(entry =>
-                    TryParseEnvironmentEntry(entry, out var name, out _) &&
-                    string.Equals(name, staleName, StringComparison.OrdinalIgnoreCase)))
-            {
-                Environment.SetEnvironmentVariable(staleName, null);
-            }
-        }
-
-        _appliedEnvironmentVariables.Clear();
-        foreach (var entry in effective.EnvironmentToggles)
-        {
-            if (!TryParseEnvironmentEntry(entry, out var name, out var value))
-            {
-                continue;
-            }
-
-            if (string.Equals(name, DefaultProfileEnvironmentName, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            Environment.SetEnvironmentVariable(name, value);
-            _appliedEnvironmentVariables.Add(name);
-        }
-
-        // Whether a graphics loader needs configuring at all, and which variables that takes,
-        // is the composed backend's business; the GUI only has to undo what was set.
-        foreach (var name in RenderDocCapture.ApplyGraphicsLoaderEnvironment())
-        {
-            _appliedEnvironmentVariables.Add(name);
-        }
-
-        Environment.SetEnvironmentVariable(
-            DefaultProfileEnvironmentName,
-            GuiSettings.NormalizeDefaultProfile(_settings.DefaultProfile));
-        // Apply both values so an inherited skip setting cannot override the GUI choice.
-        Environment.SetEnvironmentVariable(StrictComputeSettings.VariableName,
-            StrictComputeSettings.GetLaunchValue(effective.EnvironmentToggles));
-        _appliedEnvironmentVariables.Add(StrictComputeSettings.VariableName);
-        _appliedEnvironmentVariables.Add(DefaultProfileEnvironmentName);
-
-        // An absent switch now enables the guard opt-out by default; send 0 for a disabled GUI toggle.
-        Environment.SetEnvironmentVariable("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
-            effective.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD") ? "1" : "0");
-        _appliedEnvironmentVariables.Add("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
-
-        Environment.SetEnvironmentVariable("SHARPEMU_SKIP_RT",
-            RayTracingSkipSettings.GetLaunchValue(effective.EnvironmentToggles));
-        _appliedEnvironmentVariables.Add("SHARPEMU_SKIP_RT");
-
-        Environment.SetEnvironmentVariable(
-            BinkModeEnvironmentName,
-            _settings.BinkPlaybackMode switch
-            {
-                "Guest" => "guest",
-                "Skip" => "skip",
-                _ => "native",
-            });
-        _appliedEnvironmentVariables.Add(BinkModeEnvironmentName);
-
-        Environment.SetEnvironmentVariable(
-            "SHARPEMU_RENDER_SCALE",
-            _settings.RenderResolutionScale.ToString(
-                "0.###",
-                System.Globalization.CultureInfo.InvariantCulture));
-        _appliedEnvironmentVariables.Add("SHARPEMU_RENDER_SCALE");
-
-        foreach (var entry in customEnvironment)
-        {
-            if (!CustomEnvironmentVariables.TryParseEntry(entry, out var name, out var value))
-            {
-                continue;
-            }
-
-            Environment.SetEnvironmentVariable(name, value);
-            _appliedEnvironmentVariables.Add(name);
+            OpenFileLog(PerGameSettings.KeyFor(resolvedTitleId, ebootPath));
         }
 
         if (SharpEmuLog.TryParseLevel(effective.LogLevel, out var logLevel))
         {
             SharpEmuLog.MinimumLevel = logLevel;
         }
-
-        var runtimeOptions = new SharpEmuRuntimeOptions
-        {
-            CpuEngine = CpuExecutionEngine.NativeOnly,
-            StrictDynlibResolution = effective.StrictDynlibResolution,
-            ImportTraceLimit = Math.Max(0, effective.ImportTraceLimit),
-        };
 
         _isRunning = true;
         _isStopping = false;
@@ -3098,36 +2870,20 @@ public partial class MainWindow : Window
         _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         UpdateRunButtons();
         UpdateDiscordPresence();
+        ShowLaunchStarting(displayName);
 
         _pendingLaunch = new PendingLaunch(
             Path.GetFullPath(ebootPath),
             displayName,
             _runningGameTitleId,
-            _settings.ConsoleType,
             _settings.ConsoleLanguage,
             effective,
-            runtimeOptions);
+            configuration.BuildEnvironment(OperatingSystem.IsMacOS()));
 
         StartPendingSession();
     }
 
-    private static bool TryParseEnvironmentEntry(string entry, out string name, out string value)
-    {
-        var separator = entry.IndexOf('=');
-        name = separator >= 0 ? entry[..separator] : entry;
-        value = separator >= 0 ? entry[(separator + 1)..] : "1";
-        return name.StartsWith("SHARPEMU_", StringComparison.OrdinalIgnoreCase) &&
-               name.Length > "SHARPEMU_".Length &&
-               value.Length != 0;
-    }
 
-    /// <summary>
-    /// Stops the running game and updates status/presence immediately. The
-    /// process-exit path still runs when the corpse is collected, but a game
-    /// wedged in a GPU driver call can keep its process alive for a long
-    /// time after termination — the launcher should not look (or tell
-    /// Discord it is) "playing" during that window.
-    /// </summary>
     private void StopEmulator()
     {
         if (!_isRunning || _isStopping)
@@ -3135,6 +2891,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        HideLaunchCard();
         if (_emulator is null)
         {
             // The native host can be created a moment after Launch. Do not
@@ -3152,34 +2909,7 @@ public partial class MainWindow : Window
         _runningGameTitleId = null;
         UpdateDiscordPresence();
         UpdateEmbeddedConsoleVisibility();
-        Console.Error.WriteLine("[GUI][INFO] Waiting for the SDL game process to exit.");
-    }
-
-    /// <summary>
-    /// Builds "user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log" under the user data root,
-    /// following the same convention as savedata.
-    /// </summary>
-    private string? BuildLogFilePath(string? titleId)
-    {
-        try
-        {
-            // The child process resolves its own data root the same way, so
-            // both agree even when the bundle redirects writes out of itself.
-            var logsDirectory = EmulatorLogsRoot();
-            Directory.CreateDirectory(logsDirectory);
-
-            var id = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId;
-            foreach (var invalid in Path.GetInvalidFileNameChars())
-            {
-                id = id.Replace(invalid, '_');
-            }
-
-            return Path.Combine(logsDirectory, $"{id}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
-        }
-        catch (Exception)
-        {
-            return null; // unwritable location: launch continues without a log file
-        }
+        Console.Error.WriteLine("[GUI][INFO] Waiting for the game process to exit.");
     }
 
     private void OnEmulatorExited(int exitCode)
@@ -3212,6 +2942,16 @@ public partial class MainWindow : Window
                 : Localization.Instance.Format("Launch.ProcessExited", exitCode, meaning),
             brush);
         CloseFileLogSoon();
+
+        // With the console out of sight, a failure would otherwise pass without a word.
+        if (exitCode != 0 && !stoppedByUser && !ConsolePanel.IsVisible && _consoleWindow is null)
+        {
+            ShowLaunchFailed(_runningGameName ?? string.Empty, exitCode, meaning);
+        }
+        else
+        {
+            HideLaunchCard();
+        }
 
         _runningGameName = null;
         _runningGameTitleId = null;
@@ -3246,11 +2986,11 @@ public partial class MainWindow : Window
             process.Start(
                 _emulatorExePath,
                 arguments,
-                Path.GetDirectoryName(_emulatorExePath));
+                Path.GetDirectoryName(_emulatorExePath),
+                launch.Environment);
             AppendConsoleLine(
                 Localization.Instance.Format("Launch.Command", launch.EbootPath),
                 DimLineBrush);
-            DispatcherTimer.RunOnce(GuiMemory.Release, TimeSpan.FromSeconds(3));
         }
         catch (Exception exception)
         {
@@ -3263,42 +3003,19 @@ public partial class MainWindow : Window
         }
     }
 
-    private List<string> BuildEmulatorArguments(PendingLaunch launch)
-    {
-        var arguments = new List<string>
-        {
-            "--cpu-engine=native",
-            $"--log-level={launch.Settings.LogLevel}",
-            $"--console={launch.ConsoleType.ToLowerInvariant()}",
-            $"--console-language={launch.ConsoleLanguage}",
-        };
-        if (launch.RuntimeOptions.StrictDynlibResolution)
-        {
-            arguments.Add("--strict");
-        }
-        if (launch.RuntimeOptions.ImportTraceLimit > 0)
-        {
-            arguments.Add($"--trace-imports={launch.RuntimeOptions.ImportTraceLimit}");
-        }
-
-        arguments.Add($"--window-mode={launch.Settings.WindowMode.ToLowerInvariant()}");
-        arguments.Add($"--resolution={launch.Settings.Resolution}");
-        arguments.Add($"--display={launch.Settings.DisplayIndex}");
-        arguments.Add($"--refresh-rate={launch.Settings.RefreshRate}");
-        arguments.Add($"--scaling={launch.Settings.ScalingMode.ToLowerInvariant()}");
-        arguments.Add($"--vsync={(launch.Settings.VSync ? "on" : "off")}");
-        arguments.Add($"--hdr={launch.Settings.HdrMode.ToLowerInvariant()}");
-        arguments.Add($"--overlay={(launch.Settings.OverlayEnabled ? "on" : "off")}");
-        arguments.Add($"--overlay-mode={launch.Settings.OverlayMode.ToLowerInvariant()}");
-        arguments.Add($"--overlay-corner={launch.Settings.OverlayCorner.ToLowerInvariant()}");
-
-        arguments.Add(launch.EbootPath);
-        return arguments;
-    }
+    private List<string> BuildEmulatorArguments(PendingLaunch launch) =>
+        new LaunchConfiguration(launch.Settings, []).BuildArguments(
+            launch.EbootPath, launch.ConsoleLanguage, OperatingSystem.IsMacOS());
 
     private void OnEmulatorOutput(string line, bool isError)
     {
         _pendingLines.Enqueue((line, isError));
+        if (line.Contains("[LOADER][INFO]", StringComparison.Ordinal) &&
+            line.Contains(" window ready:", StringComparison.Ordinal))
+        {
+            Dispatcher.UIThread.Post(OnGameWindowShown);
+        }
+
         if (SharpEmu.Libs.Np.TrophyCatalog.TryParseUnlockLine(line, out var notice))
         {
             var ebootPath = _runningEbootPath;
@@ -3332,31 +3049,28 @@ public partial class MainWindow : Window
         }
     }
 
-    private string? ResolveLogFilePath(string? titleId)
+    private string ResolveLogFilePath(string? gameKey) =>
+        LaunchConfiguration.ResolveLogFilePath(_settings, gameKey, EmulatorLogsRoot());
+
+    // A solid play or stop shape beside the label. The strings carry a ▶ or ■ text glyph for
+    // places that show plain text; on the button it sat high, and the symbol font has only
+    // outlined icons, so the shape is drawn and takes the button's text colour.
+    private static StackPanel IconLabel(bool stop, string label) => new()
     {
-        if (string.IsNullOrWhiteSpace(_settings.LogFilePath))
+        Orientation = Avalonia.Layout.Orientation.Horizontal,
+        Spacing = 10,
+        Children =
         {
-            return BuildLogFilePath(titleId);
-        }
-
-        if (_settings.OverrideLogFile)
-        {
-            return _settings.LogFilePath;
-        }
-
-        var path = _settings.LogFilePath;
-        var id = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId;
-        foreach (var invalid in Path.GetInvalidFileNameChars())
-        {
-            id = id.Replace(invalid.ToString(), string.Empty, StringComparison.Ordinal);
-        }
-
-        var directory = Path.GetDirectoryName(path);
-        var filename = Path.GetFileNameWithoutExtension(path);
-        var extension = Path.GetExtension(path);
-        var timestampedName = $"{filename}-{id}-{DateTime.Now:yyyyMMdd-HHmmss}{extension}";
-        return string.IsNullOrEmpty(directory) ? timestampedName : Path.Combine(directory, timestampedName);
-    }
+            new PathIcon
+            {
+                Data = StreamGeometry.Parse(stop ? "M1,1 H11 V11 H1 Z" : "M1,0 L12,7 L1,14 Z"),
+                Width = stop ? 12 : 13,
+                Height = stop ? 12 : 14,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+            },
+            new TextBlock { Text = label.TrimStart('▶', '■', ' ', '\u00A0') },
+        },
+    };
 
     private void UpdateRunButtons()
     {
@@ -3366,23 +3080,22 @@ public partial class MainWindow : Window
         if (_isRunning)
         {
             LaunchButton.Classes.Add("danger");
-            LaunchButton.Content = Localization.Instance.Get(
-                _isStopping ? "Launch.Stopping" : "Launch.Stop");
+            LaunchButton.Content = _isStopping
+                ? Localization.Instance.Get("Launch.Stopping")
+                : IconLabel(stop: true, Localization.Instance.Get("Launch.Stop"));
             LaunchButton.IsEnabled = !_isStopping;
         }
         else
         {
             LaunchButton.Classes.Add("accent");
-            LaunchButton.Content = Localization.Instance.Get("Launch.Launch");
+            LaunchButton.Content = IconLabel(stop: false, Localization.Instance.Get("Launch.Launch"));
             LaunchButton.IsEnabled = GameList.SelectedItem is GameEntry;
         }
 
-        LaunchCustomEnvButton.IsEnabled = !_isRunning && GameList.SelectedItem is GameEntry;
 
         GameSettingsButton.IsEnabled =
-            GameList.SelectedItem is GameEntry game &&
-            !string.IsNullOrWhiteSpace(game.TitleId);
-        OpenFileButton.IsEnabled = !_isRunning;
+            GameList.SelectedItem is GameEntry;
+        _libraryMenu.OpenFileButton.IsEnabled = !_isRunning;
     }
 
     // ---- Console ----

@@ -1,0 +1,31 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!--
+  The native arm64 frontend of the macOS bundle. SharpEmu.CLI must stay osx-x64 (guest code
+  runs natively under Rosetta), but nothing in the launcher needs x86-64, so the bundle's
+  main executable is this host: it opens SharpEmu.GUI natively and starts the bundled osx-x64
+  SharpEmu for each game, as the CLI-hosted GUI does.
+
+  osx-arm64 always (Directory.Build.props pins the RID). Self-contained, and published into
+  the same Contents/MacOS/arm64/ directory as SharpEmu.GpuHost so the two share one arm64
+  runtime. scripts/macos/build-app.sh points the bundle's main apphost at it.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <SelfContained>true</SelfContained>
+    <TieredPGO>true</TieredPGO>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.GUI\SharpEmu.GUI.csproj" />
+    <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -75,7 +75,7 @@ public sealed class PerformanceOverlayTests
         Assert.False(state.Enabled);
         state.Toggle();
         Assert.True(state.Enabled);
-        Assert.Equal(PerformanceOverlayMode.TitleBar, state.Mode);
+        Assert.Equal(PerformanceOverlayMode.Full, state.Mode);
     }
 
     [Theory]
@@ -151,7 +151,7 @@ public sealed class PerformanceOverlayTests
             OverlayEnabled = false,
         }.Normalize();
         Assert.Equal(PerformanceOverlayCorner.TopRight, options.OverlayCorner);
-        Assert.Equal(PerformanceOverlayMode.TitleBar, options.OverlayMode);
+        Assert.Equal(PerformanceOverlayMode.Full, options.OverlayMode);
         Assert.False(options.OverlayEnabled);
     }
 

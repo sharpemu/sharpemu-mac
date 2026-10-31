@@ -3,7 +3,6 @@
 
 using System.Text.Json;
 using SharpEmu.Application;
-using GuiSettings = SharpEmu.Application.ApplicationSettings;
 using Xunit;
 
 namespace SharpEmu.Application.Tests;
@@ -11,63 +10,62 @@ namespace SharpEmu.Application.Tests;
 public sealed class OverlaySettingsTests
 {
     [Fact]
-    public void MissingSettingsUseTitleBarOverlay()
+    public void MissingSettingsUseFullOverlay()
     {
-        var settings = GuiSettings.NormalizeFromJson("{}");
+        var settings = EffectiveLaunchSettings.Resolve(PerGameSettings.NormalizeFromJson("{}"));
         Assert.True(settings.OverlayEnabled);
-        Assert.Equal("TitleBar", settings.OverlayMode);
+        Assert.Equal("Full", settings.OverlayMode);
         Assert.Equal("TopRight", settings.OverlayCorner);
     }
 
     [Fact]
-    public void GlobalSettingsRoundTripAndNormalizeChoices()
+    public void LegacyGlobalSettingsNormalizeChoicesAndRoundTrip()
     {
-        var settings = GuiSettings.NormalizeFromJson("""
-            {"OverlayEnabled":false,"OverlayMode":"titlebar","OverlayCorner":"bottomleft"}
+        var settings = SettingsSplitMigration.CarriedValues("""
+            {"OverlayEnabled":false,"OverlayMode":"minimal","OverlayCorner":"bottomleft"}
             """);
-        settings = GuiSettings.NormalizeFromJson(JsonSerializer.Serialize(settings));
+        settings = PerGameSettings.NormalizeFromJson(JsonSerializer.Serialize(settings))!;
         Assert.False(settings.OverlayEnabled);
-        Assert.Equal("TitleBar", settings.OverlayMode);
+        Assert.Equal("Minimal", settings.OverlayMode);
         Assert.Equal("BottomLeft", settings.OverlayCorner);
     }
 
     [Fact]
     public void InvalidChoicesUseDefaults()
     {
-        var settings = GuiSettings.NormalizeFromJson("""
+        var settings = SettingsSplitMigration.CarriedValues("""
             {"OverlayMode":null,"OverlayCorner":"somewhere"}
             """);
-        Assert.Equal("TitleBar", settings.OverlayMode);
-        Assert.Equal("TopRight", settings.OverlayCorner);
+        Assert.Null(settings.OverlayMode);
+        Assert.Null(settings.OverlayCorner);
     }
 
     [Fact]
-    public void GameOptionsInheritUnlessOverridden()
+    public void GameOptionsUseDefaultsUnlessSet()
     {
-        var global = new GuiSettings { OverlayEnabled = false, OverlayMode = "Minimal", OverlayCorner = "BottomRight" };
-        var inherited = EffectiveLaunchSettings.Resolve(global, new PerGameSettings());
-        Assert.False(inherited.OverlayEnabled);
-        Assert.Equal("Minimal", inherited.OverlayMode);
-        Assert.Equal("BottomRight", inherited.OverlayCorner);
+        var defaults = EffectiveLaunchSettings.Resolve(new PerGameSettings());
+        Assert.True(defaults.OverlayEnabled);
+        Assert.Equal("Full", defaults.OverlayMode);
+        Assert.Equal("TopRight", defaults.OverlayCorner);
 
         var overrides = PerGameSettings.NormalizeFromJson("""
-            {"OverlayEnabled":true,"OverlayMode":"TitleBar","OverlayCorner":"TopLeft"}
+            {"OverlayEnabled":false,"OverlayMode":"Full","OverlayCorner":"TopLeft"}
             """);
         Assert.NotNull(overrides);
-        overrides.RemoveInheritedValues(global);
-        var effective = EffectiveLaunchSettings.Resolve(global, overrides);
-        Assert.True(effective.OverlayEnabled);
-        Assert.Equal("TitleBar", effective.OverlayMode);
+        overrides.RemoveDefaultValues();
+        var effective = EffectiveLaunchSettings.Resolve(overrides);
+        Assert.False(effective.OverlayEnabled);
+        Assert.Equal("Full", effective.OverlayMode);
         Assert.Equal("TopLeft", effective.OverlayCorner);
+        Assert.Null(overrides.OverlayMode);
         Assert.False(overrides.IsEmpty);
     }
 
     [Fact]
-    public void MatchingGameOptionsDoNotLeaveAnOverride()
+    public void GameOptionsMatchingDefaultsDoNotLeaveASetting()
     {
-        var global = new GuiSettings { OverlayEnabled = false, OverlayMode = "Minimal", OverlayCorner = "BottomLeft" };
-        var settings = new PerGameSettings { OverlayEnabled = false, OverlayMode = "Minimal", OverlayCorner = "BottomLeft" };
-        settings.RemoveInheritedValues(global);
+        var settings = new PerGameSettings { OverlayEnabled = true, OverlayMode = "full", OverlayCorner = "TopRight" };
+        settings.RemoveDefaultValues();
         Assert.True(settings.IsEmpty);
     }
 }

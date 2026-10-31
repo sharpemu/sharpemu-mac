@@ -3,6 +3,7 @@
 
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.VisualTree;
 using SharpEmu.Libs.VideoOut;
 
@@ -11,26 +12,16 @@ namespace SharpEmu.GUI;
 /// <summary>Inline per-game settings navigation, loading and persistence.</summary>
 public partial class MainWindow
 {
-    private static readonly string[] GameEnvironmentToggleNames =
-    [
-        "SHARPEMU_PROFILE_PERFORMANCE",
-        "SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE",
-        StrictComputeSettings.VariableName,
-        "SHARPEMU_BTHID_UNAVAILABLE",
-        "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
-        "SHARPEMU_WRITABLE_APP0",
-        "SHARPEMU_VK_VALIDATION",
-        "SHARPEMU_DUMP_SPIRV",
-        "SHARPEMU_SKIP_RT",
-        "SHARPEMU_LOG_DIRECT_MEMORY",
-        "SHARPEMU_LOG_IO",
-        "SHARPEMU_LOG_NP",
-        "SHARPEMU_RENDERDOC",
-        "SHARPEMU_VK_DISABLE_IMPLICITS",
-        "SHARPEMU_CRASH_CAPTURE",
-    ];
+    private static readonly IReadOnlyList<string> GameEnvironmentToggleNames = LaunchConfiguration.SwitchVariables;
 
     private readonly List<string> _gameEnvironmentPassthrough = new();
+
+    // What the open game had stored, and what its controls showed once loaded. A save writes
+    // only the values the user changed since then, so a control showing a fallback for a
+    // default (Exclusive shown as Borderless on macOS, a clamped trace limit) never turns
+    // into a setting by itself.
+    private PerGameSettings? _gameSettingsStored;
+    private PerGameSettings? _gameSettingsBaseline;
     private IReadOnlyList<HostDisplayOption> _gameHostDisplays = [];
     private bool _isGameSettingsOpen;
     private bool _isLoadingGameSettings;
@@ -42,6 +33,7 @@ public partial class MainWindow
     private void WireGameOptions()
     {
         GameSettingsButton.Click += (_, _) => OpenSelectedGameSettings();
+        GameCustomEnvButton.Click += async (_, _) => await EditGameCustomEnvironmentAsync();
 
         GameLogLevelBox.ItemsSource = _logLevelChoices;
         GameWindowModeBox.ItemsSource = _windowModeChoices;
@@ -49,6 +41,7 @@ public partial class MainWindow
         GameHdrModeBox.ItemsSource = _hdrModeChoices;
         GameOverlayModeBox.ItemsSource = _overlayModeChoices;
         GameOverlayCornerBox.ItemsSource = _overlayCornerChoices;
+        GameBinkPlaybackBox.ItemsSource = _binkPlaybackChoices;
 
         var navigationButtons = GameOptionsNavigationButtons();
         for (var index = 0; index < navigationButtons.Length; index++)
@@ -65,29 +58,19 @@ public partial class MainWindow
                     CloseGameSettings();
                 }
             };
-            navigationButtons[index].PointerEntered += (_, _) =>
+            // Moving focus onto a section selects it (console settings behaviour); the
+            // selected fill follows the section, never the pointer or the focus ring.
+            navigationButtons[index].GotFocus += (_, e) =>
             {
-                if (_isGameSettingsOpen)
+                if (_isGameSettingsOpen &&
+                    e.NavigationMethod != NavigationMethod.Pointer &&
+                    section < GameOptionsSectionPanels().Length &&
+                    section != _gameOptionsSectionIndex)
                 {
-                    SetGameOptionsNavigationIndicator(section);
-                }
-            };
-            navigationButtons[index].GotFocus += (_, _) =>
-            {
-                if (_isGameSettingsOpen)
-                {
-                    SetGameOptionsNavigationIndicator(section);
+                    SetGameOptionsSection(section);
                 }
             };
         }
-
-        GameOptionsNavHost.PointerExited += (_, _) =>
-        {
-            if (_isGameSettingsOpen)
-            {
-                SetGameOptionsNavigationIndicator(_gameOptionsSectionIndex);
-            }
-        };
 
         GameOptionsLaunchButton.Click += (_, _) =>
         {
@@ -117,9 +100,18 @@ public partial class MainWindow
         GameScalingModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameVSyncToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameHdrModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
-        GameOverlayEnabledToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
-        GameOverlayModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameOverlayEnabledToggle.IsCheckedChanged += (_, _) =>
+        {
+            UpdateGameOverlayRows();
+            PersistOpenGameSettings();
+        };
+        GameOverlayModeBox.SelectionChanged += (_, _) =>
+        {
+            UpdateGameOverlayRows();
+            PersistOpenGameSettings();
+        };
         GameOverlayCornerBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameBinkPlaybackBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         foreach (var (_, toggle) in GameEnvironmentToggles())
         {
             toggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
@@ -135,17 +127,10 @@ public partial class MainWindow
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(game.TitleId))
-        {
-            AppendConsoleLine(
-                "[GUI][WARN] Per-game settings require a title ID, which this game does not have.",
-                WarningLineBrush);
-            return;
-        }
-
-        _gameSettingsTitleId = game.TitleId;
+        _gameSettingsTitleId = PerGameSettings.KeyFor(game.TitleId, game.Path);
         GameOptionsOverlay.DataContext = game;
-        LoadGameSettings(game.TitleId);
+        GameOptionsBackdrop.Show(game);
+        LoadGameSettings(_gameSettingsTitleId);
         SetGameOptionsSection(0, animateIndicator: false);
         GameOptionsLaunchButton.IsEnabled = !_isRunning;
         GameOptionsCopyTitleIdButton.IsEnabled =
@@ -161,7 +146,7 @@ public partial class MainWindow
         GameList.IsHitTestVisible = false;
         LibraryToolbar.IsHitTestVisible = false;
         GameOptionsOverlay.IsHitTestVisible = true;
-        GameOptionsGeneralNav.Focus();
+        GameOptionsLaunchButton.Focus(_gamepadConnected ? NavigationMethod.Directional : NavigationMethod.Unspecified);
     }
 
     private void CloseGameSettings(bool restoreLibrary = true)
@@ -176,6 +161,8 @@ public partial class MainWindow
         SetGameOptionsPagesSpan(coversConsoleRow: false);
         SetGameOptionsNavigationIndicator(_gameOptionsIndicatorIndex, animate: false);
         _gameSettingsTitleId = null;
+        _gameSettingsStored = null;
+        _gameSettingsBaseline = null;
         _gameEnvironmentPassthrough.Clear();
         SetGameOptionsOpenClass(BackdropLayer, active: false);
         SetGameOptionsOpenClass(CarouselHost, active: false);
@@ -194,9 +181,9 @@ public partial class MainWindow
 
     private void LoadGameSettings(string titleId)
     {
-        var effective = EffectiveLaunchSettings.Resolve(
-            _settings,
-            PerGameSettings.Load(titleId));
+        var stored = PerGameSettings.Load(titleId);
+        UpdateGameCustomEnvironmentSummary(titleId);
+        var effective = EffectiveLaunchSettings.Resolve(stored);
 
         _isLoadingGameSettings = true;
         _updatingGameHostDisplayOptions = true;
@@ -211,7 +198,7 @@ public partial class MainWindow
             GameLogToFileToggle.IsChecked = effective.LogToFile;
             GameWindowModeBox.SelectedItem = FindChoice(
                 _windowModeChoices,
-                effective.WindowMode,
+                PlatformWindowMode(effective.WindowMode),
                 "Windowed");
             GameScalingModeBox.SelectedItem = FindChoice(
                 _scalingModeChoices,
@@ -219,12 +206,14 @@ public partial class MainWindow
                 "Fit");
             GameVSyncToggle.IsChecked = effective.VSync;
             GameOverlayEnabledToggle.IsChecked = effective.OverlayEnabled;
-            GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "TitleBar");
+            GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "Full");
+            UpdateGameOverlayRows();
             GameOverlayCornerBox.SelectedItem = FindChoice(_overlayCornerChoices, effective.OverlayCorner, "TopRight");
             GameHdrModeBox.SelectedItem = FindChoice(
                 _hdrModeChoices,
                 effective.HdrMode,
                 "Auto");
+            GameBinkPlaybackBox.SelectedItem = FindChoice(_binkPlaybackChoices, effective.BinkPlaybackMode, "Guest");
 
             _gameHostDisplays = HostDisplayOptions.BuildDisplays(
                 HostDisplayCatalog.Query(),
@@ -252,12 +241,63 @@ public partial class MainWindow
             {
                 toggle.IsChecked = IsEnvironmentEnabled(effective.EnvironmentToggles, name);
             }
+
+            LoadGameEnvironmentSettings(effective.EnvironmentToggles, effective.GuestDisplayResolution);
         }
         finally
         {
             _updatingGameHostDisplayOptions = false;
             _isLoadingGameSettings = false;
         }
+
+        _gameSettingsStored = stored;
+        _gameSettingsBaseline = GameSettingsFromControls();
+    }
+
+    // The mode only matters while the overlay is on, and the corner only for a panel drawn
+    // in the game (not the title bar).
+    private void UpdateGameOverlayRows()
+    {
+        var on = GameOverlayEnabledToggle.IsChecked == true;
+        GameOverlayModeRow.IsVisible = on;
+        GameOverlayCornerRow.IsVisible = on && SelectedComboText(GameOverlayModeBox, "Full") != "TitleBar";
+    }
+
+    // The game's own variables, edited in a sheet over the game settings and saved on Save.
+    private async Task EditGameCustomEnvironmentAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_gameSettingsTitleId))
+        {
+            return;
+        }
+
+        var titleId = _gameSettingsTitleId;
+        var dialog = new CustomEnvironmentDialog(PerGameSettings.Load(titleId)?.CustomEnvironmentVariables ?? []);
+        if (await Sheets.ShowAsync(dialog) is not IReadOnlyList<string> entries)
+        {
+            return;
+        }
+
+        var settings = PerGameSettings.Load(titleId) ?? new PerGameSettings();
+        settings.CustomEnvironmentVariables = entries.Count == 0 ? null : entries.ToList();
+        settings.RemoveDefaultValues();
+        try
+        {
+            settings.SaveOrThrow(titleId);
+            UpdateGameCustomEnvironmentSummary(titleId);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            AppendConsoleLine($"[SETTINGS][WARN] {exception.Message}", WarningLineBrush);
+        }
+    }
+
+    private void UpdateGameCustomEnvironmentSummary(string? titleId)
+    {
+        var count = PerGameSettings.Load(titleId)?.CustomEnvironmentVariables?.Count ?? 0;
+        GameCustomEnvSummary.Text = count == 0
+            ? Localization.Instance.Get("Common.Edit")
+            : string.Format(Localization.Instance.Get("Setting.CustomEnv.Count"), count);
     }
 
     private void PersistOpenGameSettings()
@@ -270,7 +310,56 @@ public partial class MainWindow
             return;
         }
 
+        var current = GameSettingsFromControls();
+        var baseline = _gameSettingsBaseline ?? current;
+        var stored = _gameSettingsStored ?? new PerGameSettings();
+        T? Pick<T>(T? now, T? before, T? kept) => EqualityComparer<T?>.Default.Equals(now, before) ? kept : now;
         var settings = new PerGameSettings
+        {
+            LogLevel = Pick(current.LogLevel, baseline.LogLevel, stored.LogLevel),
+            ImportTraceLimit = Pick(current.ImportTraceLimit, baseline.ImportTraceLimit, stored.ImportTraceLimit),
+            StrictDynlibResolution = Pick(current.StrictDynlibResolution, baseline.StrictDynlibResolution, stored.StrictDynlibResolution),
+            LogToFile = Pick(current.LogToFile, baseline.LogToFile, stored.LogToFile),
+            WindowMode = Pick(current.WindowMode, baseline.WindowMode, stored.WindowMode),
+            Resolution = Pick(current.Resolution, baseline.Resolution, stored.Resolution),
+            DisplayIndex = Pick(current.DisplayIndex, baseline.DisplayIndex, stored.DisplayIndex),
+            RefreshRate = Pick(current.RefreshRate, baseline.RefreshRate, stored.RefreshRate),
+            ScalingMode = Pick(current.ScalingMode, baseline.ScalingMode, stored.ScalingMode),
+            VSync = Pick(current.VSync, baseline.VSync, stored.VSync),
+            HdrMode = Pick(current.HdrMode, baseline.HdrMode, stored.HdrMode),
+            GuestDisplayResolution = Pick(current.GuestDisplayResolution, baseline.GuestDisplayResolution, stored.GuestDisplayResolution),
+            OverlayEnabled = Pick(current.OverlayEnabled, baseline.OverlayEnabled, stored.OverlayEnabled),
+            OverlayMode = Pick(current.OverlayMode, baseline.OverlayMode, stored.OverlayMode),
+            OverlayCorner = Pick(current.OverlayCorner, baseline.OverlayCorner, stored.OverlayCorner),
+            BinkPlaybackMode = Pick(current.BinkPlaybackMode, baseline.BinkPlaybackMode, stored.BinkPlaybackMode),
+            // An older file's whole list becomes the changes from the defaults it amounts to.
+            EnvironmentChanges = EnvironmentOverrides.PickChanged(
+                current.EnvironmentToggles ?? [],
+                baseline.EnvironmentToggles ?? [],
+                stored.EnvironmentToggles is { } legacy
+                    ? EnvironmentOverrides.Between(
+                        EffectiveLaunchSettings.Defaults.EnvironmentToggles,
+                        EnvironmentOverrides.Merge(legacy, stored.EnvironmentChanges))
+                    : stored.EnvironmentChanges),
+            CustomEnvironmentVariables = PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables,
+        };
+        settings.RemoveDefaultValues();
+        try
+        {
+            settings.SaveOrThrow(_gameSettingsTitleId);
+            _gameSettingsStored = settings;
+            _gameSettingsBaseline = current;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            AppendConsoleLine($"[SETTINGS][WARN] {exception.Message}", WarningLineBrush);
+        }
+    }
+
+    // Every game setting as the overlay's controls show it, with the environment switches as
+    // the full list the controls describe.
+    private PerGameSettings GameSettingsFromControls() =>
+        new()
         {
             LogLevel = SelectedComboText(GameLogLevelBox, "Info"),
             ImportTraceLimit = (int)(GameTraceImportsBox.Value ?? 0),
@@ -285,15 +374,13 @@ public partial class MainWindow
             ScalingMode = SelectedComboText(GameScalingModeBox, "Fit"),
             VSync = GameVSyncToggle.IsChecked == true,
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
+            GuestDisplayResolution = SelectedComboText(GameGuestResolutionBox, "1080p"),
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
-            OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),
+            OverlayMode = SelectedComboText(GameOverlayModeBox, "Full"),
             OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),
+            BinkPlaybackMode = SelectedComboText(GameBinkPlaybackBox, "Guest"),
             EnvironmentToggles = BuildGameEnvironmentEntries(),
-            CustomEnvironmentVariables = PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables,
         };
-        settings.RemoveInheritedValues(_settings);
-        settings.Save(_gameSettingsTitleId);
-    }
 
     private void OnGameHostDisplayChanged()
     {
@@ -396,6 +483,7 @@ public partial class MainWindow
             }
         }
 
+        StoreGameEnvironmentSettings(entries);
         return entries;
     }
 
@@ -429,7 +517,8 @@ public partial class MainWindow
     private static bool IsKnownGameEnvironmentEntry(string entry)
     {
         var name = entry.Split('=', 2, StringSplitOptions.TrimEntries)[0];
-        return GameEnvironmentToggleNames.Contains(name, StringComparer.OrdinalIgnoreCase);
+        return GameEnvironmentToggleNames.Contains(name, StringComparer.OrdinalIgnoreCase) ||
+            EnvironmentSettings.IsManagedEntry(entry);
     }
 
     private void SetGameOptionsSection(int section, bool animateIndicator = true)
