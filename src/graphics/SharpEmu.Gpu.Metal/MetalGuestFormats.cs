@@ -219,7 +219,7 @@ internal static class MetalGuestFormats
         _ => 0,
     };
 
-    /// <summary>True for the sRGB formats, which Metal refuses to bind writable.</summary>
+    /// <summary>True for the sRGB formats, which only Apple GPUs bind writable.</summary>
     public static bool IsSrgb(MtlPixelFormat format) => format is
         MtlPixelFormat.R8UnormSrgb or MtlPixelFormat.Rg8UnormSrgb or MtlPixelFormat.Rgba8UnormSrgb or
         MtlPixelFormat.Bgra8UnormSrgb or MtlPixelFormat.Bc1RgbaSrgb or MtlPixelFormat.Bc2RgbaSrgb or

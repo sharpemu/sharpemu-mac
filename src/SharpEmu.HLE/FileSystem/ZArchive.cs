@@ -43,6 +43,11 @@ public sealed class ZArchive : IDisposable
     // Decompressed blocks, least recently used first.
     private readonly LinkedList<(ulong Block, byte[] Data)> _cache = new();
     private readonly Dictionary<ulong, LinkedListNode<(ulong Block, byte[] Data)>> _cached = new();
+    // Per directory node, its children by name without case, built the first time a lookup passes
+    // through it. Scanning the children instead decodes every sibling's name on every lookup, which
+    // is tens of microseconds in a directory of thousands of files, and titles resolve their whole
+    // asset list one path at a time.
+    private readonly Dictionary<string, int>?[] _children;
 
     private readonly record struct OffsetRecord(ulong BaseOffset, ushort[] Sizes);
 
@@ -74,6 +79,7 @@ public sealed class ZArchive : IDisposable
         _nodes = nodes;
         _dataOffset = dataOffset;
         _dataSize = dataSize;
+        _children = new Dictionary<string, int>?[nodes.Length];
     }
 
     public static bool IsArchivePath(string? path) =>
@@ -192,33 +198,44 @@ public sealed class ZArchive : IDisposable
     public int LookUp(string path)
     {
         var current = 0;
-        foreach (var part in path.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries))
+        var rest = path.AsSpan();
+        while (!rest.IsEmpty)
         {
-            var directory = _nodes[current];
-            if (directory.IsFile)
+            var separator = rest.IndexOfAny('/', '\\');
+            var part = separator < 0 ? rest : rest[..separator];
+            rest = separator < 0 ? [] : rest[(separator + 1)..];
+            if (part.IsEmpty)
+            {
+                continue;
+            }
+
+            if (_nodes[current].IsFile ||
+                !ChildrenOf(current).GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(part, out current))
             {
                 return InvalidNode;
             }
-
-            var match = InvalidNode;
-            for (var child = directory.FirstChild; child < directory.FirstChild + directory.ChildCount; child++)
-            {
-                if (string.Equals(NameOf(_names, _nodes[child].NameOffset), part, StringComparison.OrdinalIgnoreCase))
-                {
-                    match = (int)child;
-                    break;
-                }
-            }
-
-            if (match == InvalidNode)
-            {
-                return InvalidNode;
-            }
-
-            current = match;
         }
 
         return current;
+    }
+
+    // The first child of each name wins, as a scan in node order would find it.
+    private Dictionary<string, int> ChildrenOf(int directory)
+    {
+        if (Volatile.Read(ref _children[directory]) is { } children)
+        {
+            return children;
+        }
+
+        var node = _nodes[directory];
+        children = new Dictionary<string, int>((int)node.ChildCount, StringComparer.OrdinalIgnoreCase);
+        for (var child = node.FirstChild; child < node.FirstChild + node.ChildCount; child++)
+        {
+            children.TryAdd(NameOf(_names, _nodes[child].NameOffset), (int)child);
+        }
+
+        // A racing lookup that built the same index loses its copy; both are equal.
+        return Interlocked.CompareExchange(ref _children[directory], children, null) ?? children;
     }
 
     public bool IsFile(int node) => (uint)node < (uint)_nodes.Length && _nodes[node].IsFile;
@@ -266,17 +283,20 @@ public sealed class ZArchive : IDisposable
         var count = (int)Math.Min((ulong)destination.Length, node.FileSize - offset);
         var position = node.FileOffset + offset;
         var written = 0;
-        lock (_gate)
+        while (written < count)
         {
-            while (written < count)
+            var block = position / BlockSize;
+            var within = (int)(position % BlockSize);
+            var step = Math.Min(count - written, BlockSize - within);
+            // One block at a time: a read of hundreds of megabytes would otherwise hold every other
+            // reader of the archive, a small streaming read included, until all of it was loaded.
+            lock (_gate)
             {
-                var block = position / BlockSize;
-                var within = (int)(position % BlockSize);
-                var step = Math.Min(count - written, BlockSize - within);
                 LoadBlock(block).AsSpan(within, step).CopyTo(destination[written..]);
-                written += step;
-                position += (ulong)step;
             }
+
+            written += step;
+            position += (ulong)step;
         }
 
         return written;

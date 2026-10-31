@@ -346,6 +346,18 @@ public interface IRenderHost
     // consume the guest buffer directly. Backends without native indirect dispatch return false.
     bool TryDispatchIndirect(ulong argumentsAddress);
 
+    // True when a dispatch in thread units may reach the host with its thread counts still in
+    // guest memory (TryDispatchThreadsIndirect): its group counts zero and its thread limits
+    // (DispatchThreadLimits.FromIndirectArguments) for the GPU to write.
+    bool DispatchesThreadsIndirectOnGpu => false;
+
+    // Executes a dispatch from three uint32 thread counts in guest memory: the GPU turns them
+    // into the group counts of the bound pipeline, rounding up per axis (localX..Z, the
+    // shader's group size, as RenderExecutor.GroupsFromThreads; a zero axis dispatches
+    // nothing), placed on the physical axes (axisOrder[logical] = physical), and writes them
+    // as the bound program's thread limits. False when the backend cannot.
+    bool TryDispatchThreadsIndirect(ulong argumentsAddress, uint localX, uint localY, uint localZ, ReadOnlySpan<int> axisOrder) => false;
+
     // Orders the buffer writes of the given shader stages before every later access.
     void ShaderWriteBarrier(GpuPipelineStage sourceStages);
 

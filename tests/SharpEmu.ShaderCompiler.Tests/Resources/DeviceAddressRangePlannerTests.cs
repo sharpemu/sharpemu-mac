@@ -44,6 +44,29 @@ public sealed class DeviceAddressRangePlannerTests
         Assert.Equal(FlatAddressSpace.SharedOrPrivate, plan.Memory[index].AddressSpace);
     }
 
+    // GTA V's ray-traversal stack (compute 0x8395E43F382309DF) builds the shared tag with
+    // s_brev_b32 s101, 1 before its loop and clamps into it inside the loop, where s101 is
+    // a loop-carried phi. The store is still local; read as global it owned no range and
+    // was dropped, so every pop of the stack read LDS and scratch nothing had written.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FlatAddressClampedByAConstantRegisterInALoop_IsLocal(bool loop)
+    {
+        var plan = Extract(Program(
+            Sop1(0, "SBrevB32", 101, Operand(1)),
+            Vop3(4, "VMed3U32", 1, Gen5Operand.Scalar(101), Operand(0x7000_0000), Gen5Operand.Vector(7)),
+            Vop1(12, "VMovB32", 0, Operand(16)),
+            GlobalAccess(16, "FlatStoreDword", 0, vectorAddress: 0),
+            Vop2(24, "VAddU32", 7, Operand(4), Gen5Operand.Vector(7)),
+            loop ? Branch(28, "SCbranchScc1", -7) : Nop(28),
+            EndProgram(32)));
+
+        Assert.Empty(plan.DeviceAddressRanges);
+        Assert.True(plan.Memory.TryGetIndex(16, 0, out var index));
+        Assert.Equal(FlatAddressSpace.SharedOrPrivate, plan.Memory[index].AddressSpace);
+    }
+
     // After v_cmpx the clamp is a lane-masked write whose inactive lanes keep an
     // unknown value; those lanes do not store, so the address is still local.
     [Fact]

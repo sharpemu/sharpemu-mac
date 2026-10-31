@@ -318,7 +318,7 @@ internal sealed partial class MetalRenderHost
 
     // The pixel function with every [[color(n)]] moved where the remap sends output n, with its LOD
     // statistics counters in or out as PixelFunctionOf would choose them.
-    private nint RequireRemappedPixelFunction(MetalShaderModule module, uint remap, bool lodStatistics)
+    private (nint Function, UInt128 ArchiveKey) RequireRemappedPixelFunction(MetalShaderModule module, uint remap, bool lodStatistics)
     {
         lock (module)
         {
@@ -326,7 +326,7 @@ internal sealed partial class MetalRenderHost
             var counters = lodStatistics && module.Shader.UsesMipStatisticsConstant;
             if (module.RemappedFunctions.TryGetValue((remap, counters), out var known))
             {
-                return known.Function;
+                return (known.Function, known.ArchiveKey);
             }
 
             var shader = module.Compiled.AcquireShader();
@@ -336,7 +336,7 @@ internal sealed partial class MetalRenderHost
                 var slot = output < 8 ? (int)((remap >> (output * 4)) & 0xF) - 1 : -1;
                 return slot < 0 ? match.Value : $"[[color({slot})";
             });
-            var library = CompileLibrary(source, module.Hash, shader.UsesPerVertexInputs, prewarmable: true, out _, out _);
+            var library = CompileLibrary(source, module.Hash, shader.UsesPerVertexInputs, prewarmable: true, out var archiveKey, out _);
             nint error = 0;
             var function = shader.UsesMipStatisticsConstant
                 ? NewMipStatisticsFunction(library, shader.EntryPoint, enabled: counters, out error)
@@ -355,8 +355,8 @@ internal sealed partial class MetalRenderHost
                 Volatile.Write(ref _lodStatsCompiledOut, true);
             }
 
-            module.RemappedFunctions[(remap, counters)] = (library, function);
-            return function;
+            module.RemappedFunctions[(remap, counters)] = (library, function, archiveKey);
+            return (function, archiveKey);
         }
     }
 
@@ -367,7 +367,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        foreach (var (library, function) in remapped.Values)
+        foreach (var (library, function, _) in remapped.Values)
         {
             MetalNative.SendVoid(function, SelRelease);
             ReleaseLibrary(library);

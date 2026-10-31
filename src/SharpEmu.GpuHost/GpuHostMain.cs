@@ -30,6 +30,10 @@ public static class GpuHostMain
     public static int Main(string[] args)
     {
         SharpEmu.Logging.GcPauseLog.StartFromEnvironment();
+        // The guest process records the flip times (VideoOut's FrameTimeLog). This process inherits
+        // the variable and would open the same file: its own header, written later, truncated the
+        // guest's and moved every flip of the log by the GPU host's start time.
+        Environment.SetEnvironmentVariable("SHARPEMU_FRAME_TIMES", null);
         SharpEmu.CLI.AllocationProfiler.StartIfRequested();
         if (!OperatingSystem.IsMacOS())
         {
@@ -66,6 +70,9 @@ public static class GpuHostMain
         }
 
         MirrorConsoleToLogFile();
+
+        // The window title's CPU and memory cover the guest process as well as this one.
+        PerfOverlay.SetGuestProcessId(parent);
 
         // Before anything can post the window: the presenter runs it on this thread.
         HostMainThread.Enable();

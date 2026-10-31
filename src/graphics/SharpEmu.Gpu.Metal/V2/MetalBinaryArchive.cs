@@ -46,9 +46,13 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// Every file ends in a trailer (magic, format, payload length, XxHash64 of the payload);
 /// Metal ignores bytes past the slices, and a file whose trailer does not match is deleted
 /// unread: a truncated archive still opens as a library, and a flipped byte goes unnoticed
-/// by Metal. A directory written for another device, OS or format is removed at start. The
-/// files are bounded to <see cref="DiskBudgetBytes"/>, least recently used first (a segment
-/// is used when it is opened).
+/// by Metal. A directory written for another device, OS or format is removed at start. A
+/// file no start used for <see cref="MaxUnusedAge"/> is removed at start too (a library is
+/// used when it is loaded, a segment when it is opened or written): what another
+/// translator build wrote and this one never asks for, and static precompile guesses no
+/// draw took (a guess is written as last used <see cref="GuessGrace"/> before that age).
+/// The rest is bounded to <see cref="DiskBudgetBytes"/>: files never used since they were
+/// written go first, then the least recently used.
 /// SHARPEMU_METAL_V2_BINARY_ARCHIVE=0 turns it off.
 ///
 /// The archiver packs a whole archive or none: one pipeline it refuses fails the
@@ -65,12 +69,23 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     // A title's working set: Black Myth: Wukong's opening alone builds over a thousand render
     // pipelines (about a gigabyte of GPU binaries) and three thousand libraries, so a 1 GiB
     // bound evicted every run's pipelines before the next run could open them, and each boot
-    // compiled them all again (minutes of loading, seconds-long stalls in play).
+    // compiled them all again (minutes of loading, seconds-long stalls in play). 8 GiB was
+    // a bound nothing reached but the static precompile's guesses: Demon's Souls' archive
+    // grew to 3 GB, 16453 library files of which 11810 (1.6 GB) were never loaded after
+    // they were written, and the other titles' were 63-85% such files.
     // SHARPEMU_METAL_V2_BINARY_ARCHIVE_BUDGET_MB=<n> sets it.
     internal static readonly long DiskBudgetBytes =
         long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINARY_ARCHIVE_BUDGET_MB"), out var budgetMb) && budgetMb > 0
             ? budgetMb << 20
-            : 8L << 30;
+            : 2L << 30;
+
+    // How long a file may go unused before a start removes it. A library is used when it is
+    // loaded and a segment when it is opened, so this is what stopped being asked for, not
+    // what is old. SHARPEMU_METAL_V2_BINARY_ARCHIVE_MAX_UNUSED_DAYS=<n> sets it.
+    internal static readonly TimeSpan MaxUnusedAge =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINARY_ARCHIVE_MAX_UNUSED_DAYS"), out var unusedDays) && unusedDays > 0
+            ? TimeSpan.FromDays(unusedDays)
+            : TimeSpan.FromDays(30);
     internal const long SegmentBytes = 8L << 20;
     internal const long ResidentSegmentBytes = 32L << 20;
     internal const int TrailerBytes = 24;
@@ -135,6 +150,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private readonly string _libraries;
     private readonly string _translatorStamp;
     private readonly long _budget;
+    private readonly TimeSpan _maxUnused;
     private readonly ConcurrentDictionary<UInt128, byte> _known = new();
     private readonly ConcurrentDictionary<UInt128, byte> _pending = new();
     private readonly BlockingCollection<Job> _jobs = new(MaxQueuedJobs);
@@ -177,6 +193,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     private int _pipelinesAdded;
     private int _loadedSegments;
     private int _segmentsOpened;
+    private long _segmentOpenTicks;
     private int _capturesDropped;
     private long _acquireTicks;
     private int _acquires;
@@ -196,12 +213,13 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
     }
 
-    private MetalBinaryArchive(nint device, string root, string translatorStamp, long budget)
+    private MetalBinaryArchive(nint device, string root, string translatorStamp, long budget, TimeSpan maxUnused)
     {
         _device = device;
         _root = root;
         _translatorStamp = Hex64(XxHash3.HashToUInt64(MemoryMarshal.AsBytes(translatorStamp.AsSpan())));
         _budget = budget;
+        _maxUnused = maxUnused;
         _directory = Path.Combine(root, Hex64(XxHash3.HashToUInt64(MemoryMarshal.AsBytes(DeviceStamp(device).AsSpan()))));
         _libraries = Path.Combine(_directory, "libraries");
         _lastFlushTicks = Stopwatch.GetTimestamp();
@@ -281,7 +299,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
                 MetalShaderPrewarm.SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()),
                 "metal-v2",
                 "binary-archive");
-            var archive = Open(root, device, TranslatorStamp(), DiskBudgetBytes);
+            var archive = Open(root, device, TranslatorStamp(), DiskBudgetBytes, MaxUnusedAge);
             if (Interlocked.CompareExchange(ref _current, archive, null) is not null)
             {
                 archive.Dispose();
@@ -307,12 +325,13 @@ internal sealed partial class MetalBinaryArchive : IDisposable
 
     /// <summary>
     /// Opens (creating) the archive under <paramref name="root"/>: removes directories of
-    /// other devices, OSes and formats, lists the library files and starts the writer, which
-    /// loads the segments of <paramref name="translatorStamp"/>.
+    /// other devices, OSes and formats and the files unused for <paramref name="maxUnused"/>
+    /// (by default <see cref="MaxUnusedAge"/>), lists the library files and starts the
+    /// writer, which loads the segments of <paramref name="translatorStamp"/>.
     /// </summary>
-    internal static MetalBinaryArchive Open(string root, nint device, string translatorStamp, long budget)
+    internal static MetalBinaryArchive Open(string root, nint device, string translatorStamp, long budget, TimeSpan? maxUnused = null)
     {
-        var archive = new MetalBinaryArchive(device, root, translatorStamp, budget);
+        var archive = new MetalBinaryArchive(device, root, translatorStamp, budget, maxUnused ?? MaxUnusedAge);
         archive.Prepare();
         archive._writer.Start();
         return archive;
@@ -526,6 +545,8 @@ internal sealed partial class MetalBinaryArchive : IDisposable
                 return -1;
             }
 
+            // A guess no draw has loaded yet: least recently used first (GuessGrace).
+            BackdateGuess(LibraryPath(key));
             _known.TryAdd(key, 0);
             Interlocked.Increment(ref _librariesWritten);
             Interlocked.Increment(ref _librariesStored);
@@ -555,9 +576,15 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// added to the current segment when no loaded archive had it, and written as the
     /// library file of either stage key that has none. The descriptor is retained until
     /// the writer is done with it. The two stages' entry points must differ, so each file's
-    /// library has one function of the name its module asks for.
+    /// library has one function of the name its module asks for. The pair is listed under
+    /// <paramref name="pixelPairKey"/> when given (<see cref="LodStatisticsKey"/>: the same
+    /// pixel library makes another pipeline with its counters), while the library file keeps
+    /// the key a library load asks for: written under the counters' key, the pixel library
+    /// of every pipeline made only with counters missed at each start and compiled again
+    /// from its MSL, and its file was never read.
     /// </summary>
-    public void NoteRenderPipeline(nint descriptor, PipelineKind kind, UInt128 vertexKey, UInt128 pixelKey, bool missed)
+    public void NoteRenderPipeline(
+        nint descriptor, PipelineKind kind, UInt128 vertexKey, UInt128 pixelKey, bool missed, UInt128? pixelPairKey = null)
     {
         if (descriptor == 0 || Volatile.Read(ref _disposed) != 0)
         {
@@ -575,7 +602,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
 
         MetalNative.Send(descriptor, SelRetain);
-        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, PairKey(vertexKey, pixelKey))))
+        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, PairKey(vertexKey, pixelPairKey ?? pixelKey))))
         {
             Interlocked.Increment(ref _capturesDropped);
             MetalNative.SendVoid(descriptor, SelRelease);
@@ -633,6 +660,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             $"libraries_written={written} pipeline_hits={pipelineHits} pipeline_misses={pipelineMisses} " +
             $"pipelines_added={added} pipelines_refused={Volatile.Read(ref _pipelinesRefused)} " +
             $"segments_listed={segments} segments_opened={Volatile.Read(ref _segmentsOpened)} " +
+            $"segment_open_ms={Stopwatch.GetElapsedTime(0, Interlocked.Read(ref _segmentOpenTicks)).TotalMilliseconds:F0} " +
             $"captures_dropped={Volatile.Read(ref _capturesDropped)} acquires={Volatile.Read(ref _acquires)} " +
             $"acquire_ms={Volatile.Read(ref _acquireTicks) * 1000.0 / Stopwatch.Frequency:F0} max_segments_per_pair={_maxSegmentsPerPair}");
     }
@@ -680,8 +708,11 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         TryDelete(path);
     }
 
-    // Removes what other devices, OSes and formats wrote and what an interrupted write
-    // left, then lists the libraries on disk.
+    /// <summary>What this archive removed at open (unused) and in its trims (over the budget), for tests.</summary>
+    internal (int UnusedFiles, long UnusedBytes, int BudgetFiles, long BudgetBytes) Removed { get; private set; }
+
+    // Removes what other devices, OSes and formats wrote, what an interrupted write left and
+    // what no start used for _maxUnused, then lists the libraries on disk.
     private void Prepare()
     {
         System.IO.Directory.CreateDirectory(_libraries);
@@ -693,12 +724,28 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             }
         }
 
-        foreach (var path in System.IO.Directory.EnumerateFiles(_directory, "*", SearchOption.AllDirectories))
+        var unusedBefore = DateTime.UtcNow - _maxUnused;
+        var unusedFiles = 0;
+        var unusedBytes = 0L;
+        foreach (var file in new DirectoryInfo(_directory).EnumerateFiles("*", SearchOption.AllDirectories))
         {
-            if (!path.EndsWith(Extension, StringComparison.Ordinal))
+            if (!file.Name.EndsWith(Extension, StringComparison.Ordinal))
             {
-                TryDelete(path);
+                TryDelete(file.FullName);
             }
+            else if (file.LastWriteTimeUtc < unusedBefore)
+            {
+                unusedFiles++;
+                unusedBytes += file.Length;
+                TryDelete(file.FullName);
+            }
+        }
+
+        Removed = (unusedFiles, unusedBytes, 0, 0);
+        if (unusedFiles > 0)
+        {
+            Console.Error.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[METAL-V2][ARCHIVE] removed {unusedFiles} files ({unusedBytes / 1048576.0:F1} MB) unused for {_maxUnused.TotalDays:F0} days"));
         }
 
         foreach (var path in System.IO.Directory.EnumerateFiles(_libraries, "*" + Extension))
@@ -1310,6 +1357,20 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             return open.Archive;
         }
 
+        var started = Stopwatch.GetTimestamp();
+        try
+        {
+            return OpenSegmentFile(sequence, wanted);
+        }
+        finally
+        {
+            Interlocked.Add(ref _segmentOpenTicks, Stopwatch.GetTimestamp() - started);
+        }
+    }
+
+    // Under _archivesLock: reads and checks the whole file, then has Metal read it again.
+    private nint OpenSegmentFile(int sequence, List<int> wanted)
+    {
         var path = SegmentFile(sequence);
         if (!TryVerify(path, out var length))
         {
@@ -1387,8 +1448,19 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
     }
 
-    // Least recently used first: a library's file is touched when it is loaded, a segment
-    // when it is written.
+    // A guess (StoreLibrary) is written as if last used this long before MaxUnusedAge runs
+    // out, so one no draw loads goes within a week instead of a month.
+    internal static readonly TimeSpan GuessGrace = TimeSpan.FromDays(7);
+
+    // Whether a file was used after it was written: a load or an open touches it.
+    internal static bool UsedSinceWritten(FileInfo file) =>
+        file.LastWriteTimeUtc - file.CreationTimeUtc > TimeSpan.FromMinutes(1);
+
+    // Least recently used first, and the files never used since they were written before
+    // every used one: a library's file is touched when it is loaded, a segment when it is
+    // opened or written. Most of an archive that outgrew the budget was such files (the
+    // static precompile's guesses), written recently, which least recently used alone kept
+    // ahead of files the title loads.
     private void Trim()
     {
         var files = new DirectoryInfo(_directory).GetFiles("*" + Extension, SearchOption.AllDirectories);
@@ -1403,9 +1475,14 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             return;
         }
 
+        var startTotal = total;
+        var removed = 0;
         var current = Path.GetFullPath(SegmentPath(_segmentSequence));
-        Array.Sort(files, static (left, right) => left.LastWriteTimeUtc.CompareTo(right.LastWriteTimeUtc));
-        foreach (var file in files)
+        var order = files
+            .OrderBy(static file => UsedSinceWritten(file))
+            .ThenBy(static file => file.LastWriteTimeUtc)
+            .ToArray();
+        foreach (var file in order)
         {
             if (total <= _budget - _budget / 10)
             {
@@ -1423,8 +1500,14 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             }
 
             total -= file.Length;
+            removed++;
             TryDelete(file.FullName);
         }
+
+        Removed = Removed with { BudgetFiles = Removed.BudgetFiles + removed, BudgetBytes = Removed.BudgetBytes + startTotal - total };
+        Console.Error.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[METAL-V2][ARCHIVE] removed {removed} files ({(startTotal - total) / 1048576.0:F1} MB) over the " +
+            $"{_budget / 1048576.0:F0} MB budget, unused since written first, then least recently used"));
     }
 
     private nint NewArchive(string? path)
@@ -1655,6 +1738,18 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     // Autoreleased.
     private static nint FileUrl(string path) =>
         MetalNative.Send(MetalNative.Class("NSURL"), MetalNative.Selector("fileURLWithPath:"), MetalNative.NsString(path));
+
+    private void BackdateGuess(string path)
+    {
+        try
+        {
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow - (_maxUnused > GuessGrace ? _maxUnused - GuessGrace : TimeSpan.Zero));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Only the eviction order depends on it.
+        }
+    }
 
     private static void Touch(string path)
     {

@@ -265,6 +265,56 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Wave64ReadLaneReadsItsOwnWaveInAGroupOfSeveralWaves()
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        // A 256-thread group is four guest waves of 64 lanes, not eight simdgroups of 32:
+        // lane 63 is the wave's last thread. Each wave also leaves its loop after its own
+        // number of exchanges (wave + 1), which only a per-wave rendezvous survives.
+        var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64GroupReadLane, new byte[2048],
+            waveLaneCount: 64, localSizeX: 256, threadsPerThreadgroup: 256);
+
+        for (var thread = 0; thread < 256; thread++)
+        {
+            var wave = (uint)thread >> 6;
+            Assert.Equal((wave + 1u) * (3u * (64u * wave + 63u) + 7u), ReadDword(result, thread * 8));
+            Assert.Equal(3u * (64u * wave + 5u) + 7u, ReadDword(result, thread * 8 + 4));
+        }
+    }
+
+    [Theory]
+    [InlineData(64u)]
+    [InlineData(256u)]
+    public void Wave64LdsAtomicReturnsCountInLaneOrderAcrossBothHalves(uint threads)
+    {
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        // The wave's upper simdgroup used to race its lower one to the shared word, so lane 32
+        // could read a count below lane 31's (a few rounds in fifty). Within each wave the counts
+        // go up lane by lane; another wave of the group may add between the two halves.
+        for (var round = 0; round < 50; round++)
+        {
+            var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.Wave64LdsAddRank, new byte[1024],
+                waveLaneCount: 64, localSizeX: threads, threadsPerThreadgroup: threads, localDataShareDwords: 64);
+            for (var wave = 0; wave < threads / 64; wave++)
+            {
+                var first = ReadDword(result, wave * 256);
+                for (var lane = 1; lane < 64; lane++)
+                {
+                    var count = ReadDword(result, (wave * 64 + lane) * 4);
+                    var previous = ReadDword(result, (wave * 64 + lane - 1) * 4);
+                    Assert.True(count > previous, $"round {round} wave {wave} lane {lane}: {count} after {previous}");
+                    if (threads == 64)
+                    {
+                        Assert.Equal((uint)lane, count - first);
+                    }
+                }
+            }
+        }
+    }
+
+    [Fact]
     public void Wave64FusedConstantLaneReadsReturnEachLanesValue()
     {
         if (SkipWithoutMetalDevice("the execution test")) return;
@@ -540,25 +590,41 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void Wave64InALargerWorkgroupBridgesOnlyAProgramThatReadsAnUpperLane()
+    public void Wave64InALargerWorkgroupBridgesEachWaveAtItsOwnPairBarrier()
     {
-        // The SPIR-V translator bridges only a 64-thread (one-wave) workgroup; a 256-thread
-        // group would share the half-indexed scratch between its four waves.
+        // A 64-thread (one-wave) group meets at threadgroup barriers; a 256-thread group's four
+        // waves each get their own scratch sets and pair-barrier counter.
         var bridged = Gen5ComputeFixtures.CompileRequestOrThrow(
             Gen5ComputeFixtures.Wave64Broadcast, waveLaneCount: 64, localSizeX: 64);
-        Assert.Contains("sharpemu_wave_scratch", bridged.Source);
+        Assert.Contains("sharpemu_wave_scratch[8]", bridged.Source);
+        Assert.DoesNotContain("sharpemu_wave_pair", bridged.Source);
 
-        var broadcast = Gen5ComputeFixtures.CompileRequestOrThrow(
-            Gen5ComputeFixtures.Wave64Broadcast, waveLaneCount: 64, localSizeX: 256);
-        Assert.DoesNotContain("sharpemu_wave_scratch", broadcast.Source);
-        Assert.DoesNotContain("threadgroup_barrier", broadcast.Source);
+        foreach (var fixture in new[] { Gen5ComputeFixtures.Wave64Broadcast, Gen5ComputeFixtures.Wave64ReadLane })
+        {
+            var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount: 64, localSizeX: 256);
+            Assert.Contains("sharpemu_wave_scratch[32]", shader.Source);
+            Assert.Contains("sharpemu_wave_pair[4]", shader.Source);
+            Assert.Contains("sharpemu_wave_set = (sharpemu_tg_index >> 6u) * 8u", shader.Source);
+        }
 
-        // V_READLANE of lane 63 combines the halves itself: each of the four waves gets slots
-        // of its own and meets its partner half at a pair barrier.
-        var readLane = Gen5ComputeFixtures.CompileRequestOrThrow(
-            Gen5ComputeFixtures.Wave64ReadLane, waveLaneCount: 64, localSizeX: 256);
-        Assert.Contains("sharpemu_wave_scratch[32]", readLane.Source);
-        Assert.Contains("sharpemu_wave_pair[sharpemu_tg_index >> 6u]", readLane.Source);
+        // SHARPEMU_MSL_MULTIWAVE64=0 bridges only a program that combines the halves itself
+        // (V_READLANE of lane 63); SHARPEMU_BRIDGE_COMPUTE_WAVES=0 bridges none.
+        static string Source(Gen5ComputeFixture fixture, Gen5MslCodegenOptions options)
+        {
+            var request = Gen5ComputeFixtures.CreateComputeRequest(fixture, waveLaneCount: 64, localSizeX: 256);
+            Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options), error);
+            return shader.Source;
+        }
+
+        var upperLaneOnly = Gen5MslCodegenOptions.FromEnvironment with { MultiWaveCompute64 = false };
+        var broadcast = Source(Gen5ComputeFixtures.Wave64Broadcast, upperLaneOnly);
+        Assert.DoesNotContain("sharpemu_wave_scratch", broadcast);
+        Assert.DoesNotContain("threadgroup_barrier", broadcast);
+        var readLane = Source(Gen5ComputeFixtures.Wave64ReadLane, upperLaneOnly);
+        Assert.Contains("sharpemu_wave_scratch[32]", readLane);
+        Assert.Contains("sharpemu_wave_pair[4]", readLane);
+        Assert.DoesNotContain("sharpemu_wave_pair",
+            Source(Gen5ComputeFixtures.Wave64ReadLane, Gen5MslCodegenOptions.FromEnvironment with { BridgeComputeWaves = false }));
     }
 
     [Fact]
@@ -740,9 +806,9 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     private static byte[] ExecuteRequestOrThrow(Gen5ComputeFixture fixture, byte[] buffer,
-        uint waveLaneCount = 32, uint localSizeX = 32, uint threadsPerThreadgroup = 1)
+        uint waveLaneCount = 32, uint localSizeX = 32, uint threadsPerThreadgroup = 1, uint localDataShareDwords = 0)
     {
-        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount, localSizeX);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount, localSizeX, localDataShareDwords);
         if (!MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError))
         {
             throw new InvalidOperationException($"[{fixture.Name}] {compileError}\n{shader.Source}");

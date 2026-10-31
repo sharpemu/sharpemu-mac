@@ -119,6 +119,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         public readonly List<MetalTileTransfer> StencilTiles = [];
     }
 
+    private const nint GpuFamilyApple2 = 1002;
     private readonly nint _device;
     private readonly MetalTiler _tiler;
     private const int MaxPlans = 2048;
@@ -139,6 +140,18 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         _device = device;
         _tiler = new MetalTiler(device);
     }
+
+    // Apple GPUs store to the 8-bit sRGB formats; the Mac2 family does not. Every Mac with
+    // an Apple GPU has only that one, so the system device answers for the transfer's own,
+    // which a planning-only transfer does not have.
+    private static readonly Lazy<bool> SrgbWritable = new(() =>
+    {
+        var device = MetalNative.MTLCreateSystemDefaultDevice();
+        var supportsFamily = MetalNative.Selector("supportsFamily:");
+        return device != 0 &&
+            MetalNative.SendBool(device, MetalNative.Selector("respondsToSelector:"), supportsFamily) &&
+            MetalNative.SendBool(device, supportsFamily, GpuFamilyApple2);
+    });
 
     public MetalTiler Tiler => _tiler;
 
@@ -601,7 +614,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             description.Resources.Levels - firstLevel,
             description.IsVolume ? 1 : description.Resources.Layers,
             description.Samples,
-            (ulong)UsageOf(description, format));
+            (ulong)UsageOf(description, format, SrgbWritable.Value));
     }
 
     public (ulong Start, ulong End) LevelBytes(in ImageDescription description, uint firstLevel)
@@ -672,7 +685,15 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         return arrayed ? MtlTextureType.Type2DArray : MtlTextureType.Type2D;
     }
 
-    internal static MtlTextureUsage UsageOf(in ImageDescription description, MtlPixelFormat format)
+    /// <summary>
+    /// The usage a texture of this format is created with. An sRGB colour image gets the
+    /// shader-write usage when the device stores to sRGB: a guest writes such an image
+    /// through a linear storage view (Demon's Souls generates the mips of the face it bakes
+    /// in character creation that way), and Metal leaves a store to a texture created
+    /// without the usage undefined; on an M4 it scrambled the face.
+    /// </summary>
+    internal static MtlTextureUsage UsageOf(in ImageDescription description, MtlPixelFormat format,
+        bool srgbWritable = false)
     {
         if (MetalGuestFormats.IsDepthStencil(format))
         {
@@ -698,7 +719,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
         }
 
         var usage = MtlTextureUsage.ShaderRead | MtlTextureUsage.RenderTarget | MtlTextureUsage.PixelFormatView;
-        if (description.Samples == 1 && !MetalGuestFormats.IsSrgb(format))
+        if (description.Samples == 1 && (srgbWritable || !MetalGuestFormats.IsSrgb(format)))
         {
             usage |= MtlTextureUsage.ShaderWrite;
 

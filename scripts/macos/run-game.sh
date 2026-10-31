@@ -27,7 +27,9 @@
 # footprint.log ("seconds footprint_mb rss_mb" per second), frame-times.txt (one line per guest
 # flip, SHARPEMU_FRAME_TIMES), markers.tsv (epoch<TAB>name per plan marker), screenshots (every
 # SHARPEMU_SHOT_EVERY seconds and one shot-mark-<name>.png per marker, when a window-id
-# helper is available; SHARPEMU_HUD_WATCH=1 adds the `hud` marker, see hud-detect.py) and run.env (launch_epoch is the wall clock at launch). SHARPEMU_MEM_LIMIT_MB bounds the physical footprint.
+# helper is available; SHARPEMU_HUD_WATCH=1 adds the `hud` marker, see hud-detect.py), run.env (launch_epoch is the wall clock at launch),
+# guest.pid (the game's process id, written at launch) and window-id (its window, written by the first screenshot, for
+# `screencapture -l<id> -V <seconds>` recordings). SHARPEMU_MEM_LIMIT_MB bounds the physical footprint.
 #
 # Memory evidence (memstat.py has the formats):
 #   system-mem.log  always: every SHARPEMU_SYSMEM_EVERY (5) s the vm_stat deltas (pageins, pageouts,
@@ -117,6 +119,34 @@ KEYS="$OUT/keys.state"
   echo "seconds_limit=$SECONDS_LIMIT"
   for e in "$@"; do echo "$e"; done
 } > "$OUT/run.env"
+
+# Each checkout (main and every worktree) runs games on its own data root, artifacts/data-root
+# as games/ds.sh does, so harness runs of many branches never write the user's real pipeline
+# caches (every translator a branch builds adds its own stamp's files there) or saves. A title's
+# pipeline cache and saves are cloned from the user's data root the first time a checkout runs it
+# (cp -c: APFS clones, which take no space until written), so the first run starts warm.
+# SHARPEMU_DATA_ROOT overrides the root.
+USER_ROOT="$HOME/Library/Application Support/SharpEmu"
+DATA_ROOT="${SHARPEMU_DATA_ROOT:-$REPO_ROOT/artifacts/data-root}"
+case "$GAME" in
+  ds) TITLE_ID=PPSA01342 ;; sarah) TITLE_ID=PPSA02929 ;; gta) TITLE_ID=PPSA04264 ;;
+  poppy) TITLE_ID=PPSA18454 ;; quake) TITLE_ID=PPSA01880 ;; sh) TITLE_ID=PPSA10112 ;;
+  superl) TITLE_ID=PPSA06084 ;; oregon) TITLE_ID=PPSA19244 ;; void) TITLE_ID=PPSA03061 ;;
+  *) TITLE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("titleId", ""))' \
+       "$(dirname "$EBOOT")/sce_sys/param.json" 2>/dev/null || true)" ;;
+esac
+if [[ "$TITLE_ID" =~ ^[A-Z0-9_-]+$ ]]; then
+  for part in "user/pipeline_cache/$TITLE_ID" "user/savedata/$TITLE_ID"; do
+    if [[ ! -e "$DATA_ROOT/$part" && -d "$USER_ROOT/$part" ]]; then
+      mkdir -p "$(dirname "$DATA_ROOT/$part")"
+      cp -cR "$USER_ROOT/$part" "$DATA_ROOT/$part" 2>/dev/null \
+        || cp -R "$USER_ROOT/$part" "$DATA_ROOT/$part" 2>/dev/null || true
+    fi
+  done
+fi
+mkdir -p "$DATA_ROOT"
+export SHARPEMU_DATA_ROOT="$DATA_ROOT"
+echo "data_root=$DATA_ROOT title_id=$TITLE_ID" >> "$OUT/run.env"
 # A preexisting bundle may predate provenance metadata. Never equate the current
 # checkout with that binary: retain the exact payload hashes and label it unknown.
 python3 - "$APP_DIR" "$OUT" <<'PY'
@@ -220,7 +250,9 @@ fi
 shot() {
   [[ -x "$WINID" ]] || return 0
   local id
-  id="$("$WINID" "$GPID" 2>/dev/null)" && [[ -n "$id" ]] && screencapture -x -o -l"$id" "$1" 2>/dev/null
+  id="$("$WINID" "$GPID" 2>/dev/null)" && [[ -n "$id" ]] || return 0
+  [[ -s "$OUT/window-id" ]] || echo "$id" > "$OUT/window-id"
+  screencapture -x -o -l"$id" "$1" 2>/dev/null
 }
 
 (
@@ -235,6 +267,7 @@ shot() {
   exec ./SharpEmu ${SHARPEMU_ARGS:-} "$EBOOT"
 ) > "$OUT/game.log" 2>&1 &
 GPID=$!
+echo "$GPID" > "$OUT/guest.pid"
 start=$(date +%s)
 echo "launch_epoch=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> "$OUT/run.env"
 # game.tlog: game.log with seconds since launch on each line, for load timelines.

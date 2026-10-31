@@ -127,6 +127,7 @@ public sealed class TitleDisplayPatchesTests
             Assert.True(memory.TryWrite(imageBase + site.Offset, Encode(site, site.OldWidth, site.OldHeight)));
         }
 
+        WriteImageScaleSites(memory, imageBase);
         var previous = Environment.GetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable);
         try
         {
@@ -314,6 +315,75 @@ public sealed class TitleDisplayPatchesTests
             Assert.True(memory.TryRead(imageBase + site.Offset, actual));
             Assert.Equal(expected, actual);
         }
+    }
+
+    [Fact]
+    public void TheImageScaleStandInDividesTheTexturesCanvasAndEveryCallerReachesIt()
+    {
+        var sites = TitleDisplayPatches.ImageScaleSitesFor("PPSA01342")!;
+        Assert.Null(TitleDisplayPatches.ImageScaleSitesFor("PPSA00000"));
+
+        // mov eax, 2160.0f; vmovd xmm0, eax; jmp back into the ratio after its canvas load.
+        var standIn = sites[0];
+        Assert.All(standIn.Old, value => Assert.Equal(0xCC, value));
+        Assert.Equal(0xB8, standIn.New[0]);
+        Assert.Equal(2160f, BinaryPrimitives.ReadSingleLittleEndian(standIn.New.AsSpan(1)));
+        Assert.Equal(0xEB, standIn.New[^2]);
+        Assert.Equal(0xEA5FD5UL, standIn.Offset + (ulong)standIn.New.Length + unchecked((ulong)(sbyte)standIn.New[^1]));
+
+        foreach (var call in sites.Skip(1))
+        {
+            Assert.Equal(0xEA5FD0UL, CallTarget(call.Offset, call.Old));
+            Assert.Equal(standIn.Offset, CallTarget(call.Offset, call.New));
+        }
+    }
+
+    [Theory]
+    [InlineData(1920u, 1080u, true)]
+    [InlineData(3840u, 2160u, false)]
+    public void TheAllSitesRewriteRedirectsTheImageScaleOnlyWhenTheCanvasShrinks(uint width, uint height, bool redirected)
+    {
+        var sites = TitleDisplayPatches.SitesFor("PPSA01342")!;
+        var imageSize = (sites.Max(site => site.Offset) + 0x10000) & ~0xFFFFUL;
+        using var memory = new SharpEmu.Core.Memory.PhysicalVirtualMemory();
+        Assert.True(memory.TryAllocateAtOrAbove(0x200000000UL, imageSize, executable: false, 0x4000, out var imageBase));
+        ProgramHeader[] headers = [CreateLoad(0, imageSize)];
+        foreach (var site in sites)
+        {
+            Assert.True(memory.TryWrite(imageBase + site.Offset, Encode(site, site.OldWidth, site.OldHeight)));
+        }
+
+        WriteImageScaleSites(memory, imageBase);
+        var previous = Environment.GetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, null);
+            Assert.Equal(redirected, TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", width, height));
+            foreach (var site in TitleDisplayPatches.ImageScaleSitesFor("PPSA01342")!)
+            {
+                var actual = new byte[site.New.Length];
+                Assert.True(memory.TryRead(imageBase + site.Offset, actual));
+                Assert.Equal(redirected ? site.New : site.Old, actual);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, previous);
+        }
+    }
+
+    private static void WriteImageScaleSites(SharpEmu.Core.Memory.PhysicalVirtualMemory memory, ulong imageBase)
+    {
+        foreach (var site in TitleDisplayPatches.ImageScaleSitesFor("PPSA01342")!)
+        {
+            Assert.True(memory.TryWrite(imageBase + site.Offset, site.Old));
+        }
+    }
+
+    private static ulong CallTarget(ulong offset, byte[] call)
+    {
+        Assert.Equal(0xE8, call[0]);
+        return (ulong)((long)offset + 5 + BinaryPrimitives.ReadInt32LittleEndian(call.AsSpan(1)));
     }
 
     // Demon's Souls' HD output size (output table index 1) and the 1920x1080 views of its

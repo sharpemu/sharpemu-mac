@@ -1064,6 +1064,7 @@ public sealed partial class ResourceTracker
         if (memory.Access is MemoryAccess.Write or MemoryAccess.Atomic)
         {
             _info.WritesDeviceAddresses = true;
+            memory.DeviceWrite = true;
         }
     }
 

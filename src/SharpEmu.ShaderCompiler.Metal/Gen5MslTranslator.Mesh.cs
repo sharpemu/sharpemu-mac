@@ -269,8 +269,13 @@ public static partial class Gen5MslTranslator
         /// Only a dispatch that asked for the whole 32 KB leaves no room for its own
         /// slots.</summary>
         private bool AliasesWaveScratchIntoLds =>
-            _stage == Gen5MslStage.Compute && _usesLds && !IsBridgedComputeWaves &&
-            _computeLdsDwords + WaveScratchDwords > LdsDwordCount;
+            _stage == Gen5MslStage.Compute && _usesLds &&
+            _computeLdsDwords + ComputeWaveScratchDwords > LdsDwordCount;
+
+        /// <summary>The wave64 bridge's slots of a compute group: both sets for each wave.</summary>
+        private uint ComputeWaveScratchDwords => IsBridgedComputeWaves
+            ? WaveScratchDwords * BridgedWavesPerThreadgroup
+            : WaveScratchDwords;
 
 
         /// <summary>A wave64 primitive shader with no GS half, run as one 32-lane simdgroup.

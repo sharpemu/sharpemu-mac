@@ -50,4 +50,20 @@ internal static class GpuComposition
 #error No GPU backend was composed. SharpEmu.CLI.csproj must define SHARPEMU_GPU_METAL or SHARPEMU_GPU_VULKAN for the target RID.
 #endif
     }
+
+    /// <summary>
+    /// Stops what the backend runs outside this process once the guest has stopped, before the
+    /// runtime unmaps guest memory. Only the GPU-process split has anything to stop.
+    /// </summary>
+    public static void Shutdown()
+    {
+#if SHARPEMU_GPU_METAL
+#pragma warning disable CA1416
+        if (SharpEmu.GpuSplit.SplitGpuComposition.IsRequested)
+        {
+            SharpEmu.GpuSplit.SplitGpuComposition.Shutdown();
+        }
+#pragma warning restore CA1416
+#endif
+    }
 }

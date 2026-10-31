@@ -37,9 +37,9 @@ public sealed class PerfOverlayCadenceTests
         // timing. Assertions observe the user-visible summary, not counters.
         Field("_statsWindowStart").SetValue(null, Stopwatch.GetTimestamp() - Stopwatch.Frequency);
         var summary = PerfOverlay.GetTitleBarSummary();
-        var match = Regex.Match(summary, @"^FPS ([0-9]+(?:[.,][0-9]+)?)");
+        var match = Regex.Match(summary, @"^([0-9]+(?:[.,][0-9]+)?) FPS");
         Assert.True(match.Success, summary);
-        return double.Parse(match.Groups[1].Value, CultureInfo.CurrentCulture);
+        return double.Parse(match.Groups[1].Value.Replace(',', '.'), CultureInfo.InvariantCulture);
     }
 
     private static FieldInfo Field(string name) => typeof(PerfOverlay)
