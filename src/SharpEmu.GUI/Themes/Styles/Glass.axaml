@@ -49,6 +49,18 @@ replaces the glass shadow.
     <Setter Property="Background" Value="{StaticResource GlassPressedBrush}" />
     <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
   </Style>
+  <!-- Disabled (also everything under an open sheet): the same glass with a muted label,
+       not the theme's light grey block. -->
+  <Style Selector="Button.glass:disabled /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.glass:disabled /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource GlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+  </Style>
+  <Style Selector="TextBox.glass:disabled /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{StaticResource GlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+  </Style>
   <!-- Inside a glass group the button is only a hit target; the group is the glass. -->
   <Style Selector="Border.glass Button.iconGhost">
     <Setter Property="Background" Value="Transparent" />

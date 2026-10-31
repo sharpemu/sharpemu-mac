@@ -44,10 +44,13 @@ much weaker fill change defined next to each control.
     <Setter Property="BoxShadow" Value="{StaticResource FocusRingShadow}" />
     <Setter Property="ClipToBounds" Value="False" />
   </Style>
-  <Style Selector="ComboBox:focus-visible /template/ Border#Background,
-                   TextBox:focus /template/ Border#PART_BorderElement">
+  <Style Selector="ComboBox:focus-visible /template/ Border#Background">
     <Setter Property="BoxShadow" Value="{StaticResource FocusRingShadow}" />
     <Setter Property="ClipToBounds" Value="False" />
+  </Style>
+  <!-- A field draws its ring inside: the toolbar clipped an outer glow to square corners. -->
+  <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
+    <Setter Property="BoxShadow" Value="{StaticResource FocusRingInsetShadow}" />
   </Style>
   <!-- The theme tints a focused combo with the accent; keep the field colour instead. -->
   <Style Selector="ComboBox:focus-visible /template/ Border#Background, ComboBox:focus /template/ Border#Background">
@@ -64,12 +67,6 @@ much weaker fill change defined next to each control.
     <Setter Property="BoxShadow" Value="{StaticResource FocusRingInsetShadow}" />
     <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
   </Style>
-  <!-- The ring is drawn outside the field; a clipping TextBox left only its corners. -->
-  <Style Selector="TextBox:focus">
-    <Setter Property="ZIndex" Value="3" />
-    <Setter Property="ClipToBounds" Value="False" />
-  </Style>
-
   <!-- Inside a settings row the whole row is the focus target, so the control
        itself stays quiet. -->
   <Style Selector="local|SettingRow ComboBox:focus-visible, local|SettingRow Button:focus-visible, local|SettingRow ToggleButton:focus-visible">

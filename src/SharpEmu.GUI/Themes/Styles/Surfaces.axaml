@@ -90,9 +90,6 @@ Shared card, badge, hint and cover surfaces.
   <Style Selector="Border.sheetScrim.popover">
     <Setter Property="Background" Value="#33000000" />
   </Style>
-  <Style Selector="Border.sheetCard.popover">
-    <Setter Property="Background" Value="{StaticResource ToastBrush}" />
-  </Style>
   <Style Selector="TextBlock.sheetTitle">
     <Setter Property="FontSize" Value="22" />
     <Setter Property="FontWeight" Value="SemiBold" />

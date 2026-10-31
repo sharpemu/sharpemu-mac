@@ -199,6 +199,12 @@ at least 44 pt tall.
     </Setter>
   </Style>
 
+  <!-- An icon and a label side by side: the icon's taller line box left the label riding high. -->
+  <Style Selector="Button StackPanel[Orientation=Horizontal] > TextBlock,
+                   ToggleButton StackPanel[Orientation=Horizontal] > TextBlock">
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+
   <!-- Selected-game actions: the same height as the Launch pill, an icon and a word each. -->
   <Style Selector="Button.heroAction, ToggleButton.heroAction">
     <Setter Property="Height" Value="52" />
