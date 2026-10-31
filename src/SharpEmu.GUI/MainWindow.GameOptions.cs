@@ -12,24 +12,7 @@ namespace SharpEmu.GUI;
 /// <summary>Inline per-game settings navigation, loading and persistence.</summary>
 public partial class MainWindow
 {
-    private static readonly string[] GameEnvironmentToggleNames =
-    [
-        "SHARPEMU_PROFILE_PERFORMANCE",
-        "SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE",
-        StrictComputeSettings.VariableName,
-        "SHARPEMU_BTHID_UNAVAILABLE",
-        "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
-        "SHARPEMU_WRITABLE_APP0",
-        "SHARPEMU_VK_VALIDATION",
-        "SHARPEMU_DUMP_SPIRV",
-        "SHARPEMU_SKIP_RT",
-        "SHARPEMU_LOG_DIRECT_MEMORY",
-        "SHARPEMU_LOG_IO",
-        "SHARPEMU_LOG_NP",
-        "SHARPEMU_RENDERDOC",
-        "SHARPEMU_VK_DISABLE_IMPLICITS",
-        "SHARPEMU_CRASH_CAPTURE",
-    ];
+    private static readonly IReadOnlyList<string> GameEnvironmentToggleNames = LaunchConfiguration.SwitchVariables;
 
     private readonly List<string> _gameEnvironmentPassthrough = new();
 
@@ -144,18 +127,10 @@ public partial class MainWindow
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(game.TitleId))
-        {
-            AppendConsoleLine(
-                "[GUI][WARN] Per-game settings require a title ID, which this game does not have.",
-                WarningLineBrush);
-            return;
-        }
-
-        _gameSettingsTitleId = game.TitleId;
+        _gameSettingsTitleId = PerGameSettings.KeyFor(game.TitleId, game.Path);
         GameOptionsOverlay.DataContext = game;
         GameOptionsBackdrop.Show(game);
-        LoadGameSettings(game.TitleId);
+        LoadGameSettings(_gameSettingsTitleId);
         SetGameOptionsSection(0, animateIndicator: false);
         GameOptionsLaunchButton.IsEnabled = !_isRunning;
         GameOptionsCopyTitleIdButton.IsEnabled =
@@ -306,8 +281,15 @@ public partial class MainWindow
         var settings = PerGameSettings.Load(titleId) ?? new PerGameSettings();
         settings.CustomEnvironmentVariables = entries.Count == 0 ? null : entries.ToList();
         settings.RemoveDefaultValues();
-        settings.Save(titleId);
-        UpdateGameCustomEnvironmentSummary(titleId);
+        try
+        {
+            settings.SaveOrThrow(titleId);
+            UpdateGameCustomEnvironmentSummary(titleId);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            AppendConsoleLine($"[SETTINGS][WARN] {exception.Message}", WarningLineBrush);
+        }
     }
 
     private void UpdateGameCustomEnvironmentSummary(string? titleId)

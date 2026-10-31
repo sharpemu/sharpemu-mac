@@ -254,10 +254,9 @@ public static class SettingsSplitMigration
     // is not mounted still has its games in the cache, and a game added since the last scan is
     // only on disk. Games removed from the library are included, in case they come back.
     private static IEnumerable<string> LibraryTitleIds(IReadOnlyList<string> folders) =>
-        GameCatalogCache.CachedTitleIds()
+        GameCatalogCache.CachedSettingsKeys()
             .Concat(GameCatalog.ScanFolders(folders, new HashSet<string>())
-                .Select(game => game.TitleId)
-                .OfType<string>());
+                .Select(game => PerGameSettings.KeyFor(game.TitleId, game.Path)));
 
     private static string NormalizeResolution(string? value) =>
         DisplayResolution.TryParse(value, out var width, out var height)

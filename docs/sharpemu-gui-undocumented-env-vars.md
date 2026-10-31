@@ -15,8 +15,8 @@ pixel shader hash for input/output image snapshots. It is off by default. See
 [selected draw snapshots](image-clear-tracing.md#selected-draw-snapshots) for limits and output paths.
 
 This list contains each `SHARPEMU_*` environment variable in the repository that the GUI does not show.
-The GUI exposes these variables on its **Options** and **Game options** pages:
-`SHARPEMU_BTHID_UNAVAILABLE`, `SHARPEMU_CRASH_CAPTURE`, `SHARPEMU_DEFAULT_PROFILE`,
+The GUI exposes these variables on its **Game options** page:
+`SHARPEMU_BTHID_UNAVAILABLE`, `SHARPEMU_CRASH_CAPTURE`,
 `SHARPEMU_DISABLE_IMPORT_LOOP_GUARD`, `SHARPEMU_DUMP_SPIRV`, `SHARPEMU_LOG_DIRECT_MEMORY`, `SHARPEMU_LOG_IO`,
 `SHARPEMU_LOG_NP`, `SHARPEMU_PROFILE_PERFORMANCE`, `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE`,
 `SHARPEMU_RENDERDOC`, `SHARPEMU_SKIP_RT`, `SHARPEMU_VK_DISABLE_IMPLICITS`, `SHARPEMU_STRICT_COMPUTE`, `SHARPEMU_VK_VALIDATION`, `SHARPEMU_WRITABLE_APP0`.
@@ -28,11 +28,34 @@ On macOS the Vulkan, RenderDoc and Windows-only entries in this list do not
 apply, because that build has no Vulkan presenter. The variables that the Metal
 backend reads are in [macOS configuration](macos/configuration.md).
 
+## Launch settings and overrides
+
+The GUI and CLI resolve the same per-game settings file in `user/custom_configs`.
+The file name is the title ID when metadata provides one. Otherwise it is `PATH-`
+followed by the first 32 hexadecimal characters of SHA-256 of the full executable
+or archive path. Relative paths are normalized; only Windows paths are folded to
+uppercase, so distinct files on case-sensitive Unix volumes remain distinct.
+Moving a game without a title ID changes its settings key.
+
+A file stores only changes from built-in defaults. The GUI sends each exposed
+switch's resolved state to the child process, including off values, so a switch
+in the launcher's parent shell cannot override the game settings. Custom variables
+in the game's Environment section apply last. The launcher's own environment is
+restored after creating the child, including when process creation fails.
+
+A terminal launch applies logging, strict loading, import tracing, video options,
+Bink playback, environment switches and custom variables from the same file.
+Variables already supplied by a script override file settings; explicit command
+line arguments override both. `--strict=off`, `--trace-imports=0` and
+`--no-log-file` can disable corresponding file settings. Log file naming follows
+the launcher's shared log-path preference. macOS GUI launches omit refresh-rate
+arguments because the host does not change display modes.
+
 ## Ray-tracing compute skip (GUI Debug option)
 
 `SHARPEMU_SKIP_RT` is off by default. Set it to `1` to skip ray-tracing compute.
 Unset it or set it to `0` to run those shaders. The Debug section exposes this
-switch in Options and Game options. Restart the game after a change.
+switch in Game options. Restart the game after a change.
 Compute shaders with `ImageBvhIntersectRay` or `ImageBvh64IntersectRay` are
 skipped before resource planning and compilation. The entire dispatch is skipped.
 This compatibility workaround applies with either strict-compute setting.

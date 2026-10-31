@@ -9,6 +9,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
+using Avalonia.LogicalTree;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
@@ -233,7 +234,7 @@ public partial class MainWindow : Window
         string? TitleId,
         string ConsoleLanguage,
         EffectiveLaunchSettings Settings,
-        SharpEmuRuntimeOptions RuntimeOptions);
+        IReadOnlyDictionary<string, string?> Environment);
 
     public MainWindow()
     {
@@ -449,6 +450,16 @@ public partial class MainWindow : Window
         PopulateLanguageBox();
         ApplyLocalization();
         ApplySettingsToControls();
+        // Schedule after the existing control handlers update _settings, including changes
+        // made while the user stays on the Options page.
+        foreach (var control in OptionsPage.GetLogicalDescendants().OfType<Control>())
+        {
+            control.PropertyChanged += (_, change) =>
+            {
+                if (change.Property.Name is "IsChecked" or "SelectedItem" or "Value" or "Text")
+                    ScheduleSettingsSave();
+            };
+        }
         SeedLibraryFromCache();
         FillScreenBeforeShowing();
         InitializeController();
@@ -498,6 +509,12 @@ public partial class MainWindow : Window
                 UseShellExecute = true
             });
         };
+    }
+
+    private void ScheduleSettingsSave()
+    {
+        _settingsSaveTimer.Stop();
+        if (!_isClosing) _settingsSaveTimer.Start();
     }
 
     /// <summary>
@@ -1658,12 +1675,6 @@ public partial class MainWindow : Window
             _availableUpdate is null ? "Updater.Check" : "Updater.DownloadRestart");
     }
 
-    // Environment variables set on this process at the previous launch; children
-    // inherit the process environment, so stale names must be cleared explicitly.
-    private readonly HashSet<string> _appliedEnvironmentVariables = new(StringComparer.OrdinalIgnoreCase);
-
-    private const string BinkModeEnvironmentName = "SHARPEMU_BINK_MODE";
-
     private void UpdateLogFilePathText()
     {
         LogFilePathRow.Description = string.IsNullOrWhiteSpace(_settings.LogFilePath)
@@ -1746,6 +1757,7 @@ public partial class MainWindow : Window
         {
             _settings.LogFilePath = result.File.Path.LocalPath;
             UpdateLogFilePathText();
+            ScheduleSettingsSave();
         }
     }
 
@@ -2360,7 +2372,7 @@ public partial class MainWindow : Window
         GameList.SelectedItem = game;
         CtxLaunch.IsEnabled = !_isRunning;
         CtxCopyTitleId.IsEnabled = game.TitleId is not null;
-        CtxGameSettings.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
+        CtxGameSettings.IsEnabled = true;
         CtxPackZar.IsEnabled = !ZArchive.IsArchivePath(game.Path);
         CtxTrophies.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
         CtxPatches.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
@@ -2821,8 +2833,7 @@ public partial class MainWindow : Window
     private void Launch(
         string ebootPath,
         string displayName,
-        string? titleId = null,
-        IReadOnlyList<string>? oneShotCustomEnvironment = null)
+        string? titleId = null)
     {
         if (_isRunning)
         {
@@ -2833,12 +2844,8 @@ public partial class MainWindow : Window
             ? _allGames.FirstOrDefault(game =>
                 game.Path.Equals(ebootPath, GameLibraryPath.Comparison))?.TitleId
             : titleId;
-        var perGame = PerGameSettings.Load(resolvedTitleId);
-        var effective = EffectiveLaunchSettings.Resolve(perGame);
-        var customEnvironment = CustomEnvironmentVariables.Merge(
-            GlobalCustomEnvironmentSettings.Load(),
-            perGame?.CustomEnvironmentVariables,
-            oneShotCustomEnvironment);
+        var configuration = LaunchConfiguration.Load(ebootPath, resolvedTitleId);
+        var effective = configuration.Settings;
 
         _sndPreview.Stop();
         _consoleLines.Clear();
@@ -2847,91 +2854,13 @@ public partial class MainWindow : Window
         DropFileLog();
         if (effective.LogToFile)
         {
-            OpenFileLog(resolvedTitleId);
-        }
-
-        // The isolated game child inherits these diagnostics. Keep them on the
-        // launcher process so every platform receives the same launch options.
-        foreach (var staleName in _appliedEnvironmentVariables)
-        {
-            if (!effective.EnvironmentToggles.Any(entry =>
-                    TryParseEnvironmentEntry(entry, out var name, out _) &&
-                    string.Equals(name, staleName, StringComparison.OrdinalIgnoreCase)))
-            {
-                Environment.SetEnvironmentVariable(staleName, null);
-            }
-        }
-
-        _appliedEnvironmentVariables.Clear();
-        foreach (var entry in effective.EnvironmentToggles)
-        {
-            if (!TryParseEnvironmentEntry(entry, out var name, out var value))
-            {
-                continue;
-            }
-
-            Environment.SetEnvironmentVariable(name, value);
-            _appliedEnvironmentVariables.Add(name);
-        }
-
-        // The child also reads this from the settings files; passing the resolved value keeps the
-        // game's override authoritative even when its title id cannot be read back from disk.
-        Environment.SetEnvironmentVariable("SHARPEMU_DISPLAY_RESOLUTION", effective.GuestDisplayResolution);
-        _appliedEnvironmentVariables.Add("SHARPEMU_DISPLAY_RESOLUTION");
-
-        // Whether a graphics loader needs configuring at all, and which variables that takes,
-        // is the composed backend's business; the GUI only has to undo what was set.
-        foreach (var name in RenderDocCapture.ApplyGraphicsLoaderEnvironment())
-        {
-            _appliedEnvironmentVariables.Add(name);
-        }
-
-        // Apply both values so an inherited skip setting cannot override the GUI choice.
-        Environment.SetEnvironmentVariable(StrictComputeSettings.VariableName,
-            StrictComputeSettings.GetLaunchValue(effective.EnvironmentToggles));
-        _appliedEnvironmentVariables.Add(StrictComputeSettings.VariableName);
-
-        // An absent switch now enables the guard opt-out by default; send 0 for a disabled GUI toggle.
-        Environment.SetEnvironmentVariable("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
-            EnvironmentOverrides.IsSet(effective.EnvironmentToggles, "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD") ? "1" : "0");
-        _appliedEnvironmentVariables.Add("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
-
-        Environment.SetEnvironmentVariable("SHARPEMU_SKIP_RT",
-            RayTracingSkipSettings.GetLaunchValue(effective.EnvironmentToggles));
-        _appliedEnvironmentVariables.Add("SHARPEMU_SKIP_RT");
-
-        Environment.SetEnvironmentVariable(
-            BinkModeEnvironmentName,
-            effective.BinkPlaybackMode.ToLowerInvariant() switch
-            {
-                "guest" => "guest",
-                "skip" => "skip",
-                _ => "native",
-            });
-        _appliedEnvironmentVariables.Add(BinkModeEnvironmentName);
-
-        foreach (var entry in customEnvironment)
-        {
-            if (!CustomEnvironmentVariables.TryParseEntry(entry, out var name, out var value))
-            {
-                continue;
-            }
-
-            Environment.SetEnvironmentVariable(name, value);
-            _appliedEnvironmentVariables.Add(name);
+            OpenFileLog(PerGameSettings.KeyFor(resolvedTitleId, ebootPath));
         }
 
         if (SharpEmuLog.TryParseLevel(effective.LogLevel, out var logLevel))
         {
             SharpEmuLog.MinimumLevel = logLevel;
         }
-
-        var runtimeOptions = new SharpEmuRuntimeOptions
-        {
-            CpuEngine = CpuExecutionEngine.NativeOnly,
-            StrictDynlibResolution = effective.StrictDynlibResolution,
-            ImportTraceLimit = Math.Max(0, effective.ImportTraceLimit),
-        };
 
         _isRunning = true;
         _isStopping = false;
@@ -2948,28 +2877,12 @@ public partial class MainWindow : Window
             _runningGameTitleId,
             _settings.ConsoleLanguage,
             effective,
-            runtimeOptions);
+            configuration.BuildEnvironment(OperatingSystem.IsMacOS()));
 
         StartPendingSession();
     }
 
-    private static bool TryParseEnvironmentEntry(string entry, out string name, out string value)
-    {
-        var separator = entry.IndexOf('=');
-        name = separator >= 0 ? entry[..separator] : entry;
-        value = separator >= 0 ? entry[(separator + 1)..] : "1";
-        return name.StartsWith("SHARPEMU_", StringComparison.OrdinalIgnoreCase) &&
-               name.Length > "SHARPEMU_".Length &&
-               value.Length != 0;
-    }
 
-    /// <summary>
-    /// Stops the running game and updates status/presence immediately. The
-    /// process-exit path still runs when the corpse is collected, but a game
-    /// wedged in a GPU driver call can keep its process alive for a long
-    /// time after termination — the launcher should not look (or tell
-    /// Discord it is) "playing" during that window.
-    /// </summary>
     private void StopEmulator()
     {
         if (!_isRunning || _isStopping)
@@ -2996,33 +2909,6 @@ public partial class MainWindow : Window
         UpdateDiscordPresence();
         UpdateEmbeddedConsoleVisibility();
         Console.Error.WriteLine("[GUI][INFO] Waiting for the game process to exit.");
-    }
-
-    /// <summary>
-    /// Builds "user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log" under the user data root,
-    /// following the same convention as savedata.
-    /// </summary>
-    private string? BuildLogFilePath(string? titleId)
-    {
-        try
-        {
-            // The child process resolves its own data root the same way, so
-            // both agree even when the bundle redirects writes out of itself.
-            var logsDirectory = EmulatorLogsRoot();
-            Directory.CreateDirectory(logsDirectory);
-
-            var id = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId;
-            foreach (var invalid in Path.GetInvalidFileNameChars())
-            {
-                id = id.Replace(invalid, '_');
-            }
-
-            return Path.Combine(logsDirectory, $"{id}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
-        }
-        catch (Exception)
-        {
-            return null; // unwritable location: launch continues without a log file
-        }
     }
 
     private void OnEmulatorExited(int exitCode)
@@ -3099,7 +2985,8 @@ public partial class MainWindow : Window
             process.Start(
                 _emulatorExePath,
                 arguments,
-                Path.GetDirectoryName(_emulatorExePath));
+                Path.GetDirectoryName(_emulatorExePath),
+                launch.Environment);
             AppendConsoleLine(
                 Localization.Instance.Format("Launch.Command", launch.EbootPath),
                 DimLineBrush);
@@ -3115,38 +3002,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private List<string> BuildEmulatorArguments(PendingLaunch launch)
-    {
-        var arguments = new List<string>
-        {
-            "--cpu-engine=native",
-            $"--log-level={launch.Settings.LogLevel}",
-            "--console=ps5",
-            $"--console-language={launch.ConsoleLanguage}",
-        };
-        if (launch.RuntimeOptions.StrictDynlibResolution)
-        {
-            arguments.Add("--strict");
-        }
-        if (launch.RuntimeOptions.ImportTraceLimit > 0)
-        {
-            arguments.Add($"--trace-imports={launch.RuntimeOptions.ImportTraceLimit}");
-        }
-
-        arguments.Add($"--window-mode={launch.Settings.WindowMode.ToLowerInvariant()}");
-        arguments.Add($"--resolution={launch.Settings.Resolution}");
-        arguments.Add($"--display={launch.Settings.DisplayIndex}");
-        arguments.Add($"--refresh-rate={launch.Settings.RefreshRate}");
-        arguments.Add($"--scaling={launch.Settings.ScalingMode.ToLowerInvariant()}");
-        arguments.Add($"--vsync={(launch.Settings.VSync ? "on" : "off")}");
-        arguments.Add($"--hdr={launch.Settings.HdrMode.ToLowerInvariant()}");
-        arguments.Add($"--overlay={(launch.Settings.OverlayEnabled ? "on" : "off")}");
-        arguments.Add($"--overlay-mode={launch.Settings.OverlayMode.ToLowerInvariant()}");
-        arguments.Add($"--overlay-corner={launch.Settings.OverlayCorner.ToLowerInvariant()}");
-
-        arguments.Add(launch.EbootPath);
-        return arguments;
-    }
+    private List<string> BuildEmulatorArguments(PendingLaunch launch) =>
+        new LaunchConfiguration(launch.Settings, []).BuildArguments(
+            launch.EbootPath, launch.ConsoleLanguage, OperatingSystem.IsMacOS());
 
     private void OnEmulatorOutput(string line, bool isError)
     {
@@ -3190,31 +3048,8 @@ public partial class MainWindow : Window
         }
     }
 
-    private string? ResolveLogFilePath(string? titleId)
-    {
-        if (string.IsNullOrWhiteSpace(_settings.LogFilePath))
-        {
-            return BuildLogFilePath(titleId);
-        }
-
-        if (_settings.OverrideLogFile)
-        {
-            return _settings.LogFilePath;
-        }
-
-        var path = _settings.LogFilePath;
-        var id = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId;
-        foreach (var invalid in Path.GetInvalidFileNameChars())
-        {
-            id = id.Replace(invalid.ToString(), string.Empty, StringComparison.Ordinal);
-        }
-
-        var directory = Path.GetDirectoryName(path);
-        var filename = Path.GetFileNameWithoutExtension(path);
-        var extension = Path.GetExtension(path);
-        var timestampedName = $"{filename}-{id}-{DateTime.Now:yyyyMMdd-HHmmss}{extension}";
-        return string.IsNullOrEmpty(directory) ? timestampedName : Path.Combine(directory, timestampedName);
-    }
+    private string ResolveLogFilePath(string? gameKey) =>
+        LaunchConfiguration.ResolveLogFilePath(_settings, gameKey, EmulatorLogsRoot());
 
     // A solid play or stop shape beside the label. The strings carry a ▶ or ■ text glyph for
     // places that show plain text; on the button it sat high, and the symbol font has only
@@ -3258,8 +3093,7 @@ public partial class MainWindow : Window
 
 
         GameSettingsButton.IsEnabled =
-            GameList.SelectedItem is GameEntry game &&
-            !string.IsNullOrWhiteSpace(game.TitleId);
+            GameList.SelectedItem is GameEntry;
         _libraryMenu.OpenFileButton.IsEnabled = !_isRunning;
     }
 

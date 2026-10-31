@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SharpEmu.Logging;
@@ -86,6 +88,16 @@ public sealed class PerGameSettings
 
     public static string DirectoryPath =>
         SharpEmuPaths.UserPath("custom_configs");
+
+    // Windows paths are case-insensitive. Keep case on Unix, where a case-sensitive volume
+    // can hold two different games whose paths differ only by case.
+    public static string KeyFor(string? titleId, string gamePath)
+    {
+        if (!string.IsNullOrWhiteSpace(titleId)) return titleId.Trim();
+        var path = Path.GetFullPath(gamePath);
+        if (OperatingSystem.IsWindows()) path = path.ToUpperInvariant();
+        return "PATH-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(path)))[..32];
+    }
 
     public static string PathFor(string titleId) => PathFor(DirectoryPath, titleId);
 

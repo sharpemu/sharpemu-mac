@@ -103,10 +103,10 @@ public static class GameCatalogCache
     }
 
     /// <summary>
-    /// Every title id in the cache, whatever folders it was written for and whether or not
+    /// Every settings key in the cache, whatever folders it was written for and whether or not
     /// the games are still reachable: a library on an unmounted drive still names its games.
     /// </summary>
-    public static IReadOnlyList<string> CachedTitleIds()
+    public static IReadOnlyList<string> CachedSettingsKeys()
     {
         try
         {
@@ -119,9 +119,8 @@ public static class GameCatalogCache
                 File.ReadAllText(CachePath),
                 SerializerOptions);
             return document?.Games
-                .Select(game => game.TitleId)
-                .Where(titleId => !string.IsNullOrWhiteSpace(titleId))
-                .Select(titleId => titleId!)
+                .Where(game => !string.IsNullOrWhiteSpace(game.TitleId) || !string.IsNullOrWhiteSpace(game.Path))
+                .Select(game => PerGameSettings.KeyFor(game.TitleId, game.Path))
                 .ToList() ?? [];
         }
         catch (Exception)

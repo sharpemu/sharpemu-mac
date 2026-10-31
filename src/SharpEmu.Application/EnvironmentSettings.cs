@@ -5,7 +5,7 @@ namespace SharpEmu.Application;
 
 public enum EnvironmentSettingKind
 {
-    /// <summary>On or off; the emulator's own default decides which state sends nothing.</summary>
+    /// <summary>On or off; values matching the emulator's default are omitted from storage.</summary>
     Toggle,
 
     /// <summary>One of <see cref="EnvironmentSetting.Choices"/>.</summary>
@@ -20,14 +20,14 @@ public enum EnvironmentSettingGroup
     Debug,
 }
 
-/// <param name="Value">What the variable is set to. The default one is never sent.</param>
+/// <param name="Value">What the variable is set to. The default one is omitted from storage.</param>
 /// <param name="Label">Language-neutral label ("4 GB"), or null to look the label up per language.</param>
 public sealed record EnvironmentSettingChoice(string Value, string? Label = null);
 
 /// <summary>
 /// One emulator switch the launcher exposes. The emulator's default is authoritative: a value
-/// equal to it is stored as no entry at all, so the launcher never pins a default the emulator
-/// later changes.
+/// equal to it is stored as no entry at all. The launch configuration resolves the current
+/// defaults explicitly, so inherited shell variables cannot override GUI choices.
 /// </summary>
 /// <param name="Id">Names the setting's strings ("Setting.&lt;Id&gt;.Label") and its controls.</param>
 /// <param name="Variable">The environment variable the emulator reads.</param>
