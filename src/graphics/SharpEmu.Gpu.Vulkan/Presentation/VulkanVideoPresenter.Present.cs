@@ -42,6 +42,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private static bool _hdrOutputSupported;
 
     private static bool _splashHidden;
+    private static (byte[] Pixels, uint Width, uint Height)? _splashFrame;
 
     private static bool ShouldSamplePresentedGuestImageForDiagnostics(long frame)
     {
@@ -86,6 +87,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _windowWidth = width;
             _windowHeight = height;
+            _splashFrame = hasSplash ? (splashPixels, splashWidth, splashHeight) : null;
             _latestPresentation ??= _splashHidden
                 ? new Presentation(
                     CreateBlackFrame(width, height),
@@ -458,6 +460,26 @@ internal static unsafe partial class VulkanVideoPresenter
     /// visible.  In that case the AvPlayer HLE keeps a host-decoded BGRA frame
     /// available; substitute it for the guest image the title is flipping.
     /// </summary>
+    private static void TryReplaceWithHeldSplash(ref Presentation presentation)
+    {
+        if (!VideoOutExports.SplashHoldsGuestFrames || _splashHidden || presentation.IsSplash ||
+            _splashFrame is not { } splash)
+        {
+            return;
+        }
+
+        presentation = new Presentation(
+            splash.Pixels,
+            splash.Width,
+            splash.Height,
+            presentation.Sequence,
+            GuestDrawKind.None,
+            IsSplash: false,
+            RequiredTick: presentation.RequiredTick,
+            FlipRequestId: presentation.FlipRequestId,
+            Publication: presentation.Publication);
+    }
+
     private static void TryReplaceWithHostMovieFrame(ref Presentation presentation)
     {
         if (!TryTakeHostMovieFrame(out var pixels, out var width, out var height))

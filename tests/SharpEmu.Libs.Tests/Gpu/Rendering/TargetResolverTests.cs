@@ -243,15 +243,12 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         var state = DepthTargetResolver.ResolveState(context, true, Fatal);
 
         Assert.Equal(GpuImageAspect.DepthBit | GpuImageAspect.StencilBit, state.AttachmentWriteAspects(GpuFormat.D32SfloatS8Uint));
-        Assert.Equal(GpuImageLayout.DepthStencilAttachmentOptimal, state.AttachmentLayout(GpuFormat.D32SfloatS8Uint));
         Assert.Equal(GpuImageAspect.DepthBit, state.AttachmentWriteAspects(GpuFormat.D32Sfloat));
-        Assert.Equal(GpuImageLayout.DepthAttachmentOptimal, state.AttachmentLayout(GpuFormat.D32Sfloat));
         Assert.Equal(GpuImageAspect.None, state.AttachmentWriteAspects(GpuFormat.Undefined));
 
         var testOnly = state with { DepthWriteEnabled = false, StencilTestEnabled = false };
         Assert.Equal(GpuImageAspect.None, testOnly.AttachmentWriteAspects(GpuFormat.D32SfloatS8Uint));
         Assert.True(testOnly.IsReadOnly(GpuFormat.D32SfloatS8Uint));
-        Assert.Equal(GpuImageLayout.DepthStencilReadOnlyOptimal, testOnly.AttachmentLayout(GpuFormat.D32SfloatS8Uint));
 
         // A compare that can never pass with an all-keep fail path writes nothing; a fail operation does.
         var neverPasses = state with
@@ -265,9 +262,7 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(GpuImageAspect.None, neverPasses.AttachmentWriteAspects(GpuFormat.D32SfloatS8Uint));
         var failWrites = neverPasses with { FrontOperations = neverPasses.FrontOperations with { FailOperation = GpuStencilOp.Zero } };
         Assert.Equal(GpuImageAspect.StencilBit, failWrites.AttachmentWriteAspects(GpuFormat.D32SfloatS8Uint));
-        Assert.Equal(GpuImageLayout.DepthReadOnlyStencilAttachmentOptimal, failWrites.AttachmentLayout(GpuFormat.D32SfloatS8Uint));
         var depthOnlyWrite = state with { StencilTestEnabled = false };
-        Assert.Equal(GpuImageLayout.DepthAttachmentStencilReadOnlyOptimal, depthOnlyWrite.AttachmentLayout(GpuFormat.D32SfloatS8Uint));
     }
 
     [Fact]

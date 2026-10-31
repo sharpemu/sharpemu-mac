@@ -2002,6 +2002,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 				0x48, 0x83, 0xC7, 0x02,
 				0x48, 0x83, 0xC6, 0x02,
 				0xEB, 0xE7,
+				// Match HLE's -1/0/1 ordering; some guests test for exactly 1.
+				0x85, 0xC0,                   // test eax,eax
+				0x0F, 0x9F, 0xC1,             // setg cl
+				0xC1, 0xF8, 0x1F,             // sar eax,31
+				0x08, 0xC8,                   // or al,cl
 				0xC3,
 			],
 			"E8wCoUEbfzk" =>
@@ -2019,6 +2024,10 @@ public sealed unsafe partial class DirectExecutionBackend :
 				0x48, 0x83, 0xC6, 0x02,
 				0x48, 0xFF, 0xCA,
 				0x75, 0xE4,
+				0x85, 0xC0,                   // test eax,eax
+				0x0F, 0x9F, 0xC1,             // setg cl
+				0xC1, 0xF8, 0x1F,             // sar eax,31
+				0x08, 0xC8,                   // or al,cl
 				0xC3,
 			],
 			"kiZSXIWd9vg" =>

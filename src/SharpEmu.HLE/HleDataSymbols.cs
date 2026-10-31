@@ -48,6 +48,8 @@ public static class HleDataSymbols
     private static readonly nint _environPointerAddress = Allocate(nint.Size);
     private static readonly nint _stdioObjectsAddress = Allocate(StdioObjectSize * 3);
     private static readonly nint _stdioPointersAddress = Allocate(nint.Size * 3);
+    private static int _processArgumentCount;
+    private static ulong _processArgumentVector;
 
     static HleDataSymbols()
     {
@@ -113,55 +115,23 @@ public static class HleDataSymbols
         yield return StderrObjectNid;
     }
 
-    // The full argv getargv reports once the process arguments are known; until then the
-    // one-entry vector of the program name.
-    private static nint _extendedArgumentVector;
-    private static int _extendedArgumentCount;
-
     public static int ProcessArgumentCount =>
-        Volatile.Read(ref _extendedArgumentVector) != 0
-            ? Volatile.Read(ref _extendedArgumentCount)
-            : _progNameBufferAddress != 0 && _argumentVectorAddress != 0 ? 1 : 0;
+        Volatile.Read(ref _processArgumentVector) != 0 ? Volatile.Read(ref _processArgumentCount) :
+        _progNameBufferAddress != 0 && _argumentVectorAddress != 0 ? 1 : 0;
 
-    public static ulong ProcessArgumentVectorAddress =>
-        unchecked((ulong)(Volatile.Read(ref _extendedArgumentVector) is var extended and not 0
-            ? extended
-            : _argumentVectorAddress));
-
-    /// <summary>Publishes the process's whole argv (argv[0] first) for getargc/getargv, the same
-    /// list the entry parameters carry. Process lifetime: the memory is never freed.</summary>
-    public static void ConfigureProcessArguments(IReadOnlyList<string> arguments)
+    public static ulong ProcessArgumentVectorAddress
     {
-        ArgumentNullException.ThrowIfNull(arguments);
-        if (arguments.Count <= 1)
+        get
         {
-            return;
+            var address = Volatile.Read(ref _processArgumentVector);
+            return address != 0 ? address : unchecked((ulong)_argumentVectorAddress);
         }
+    }
 
-        var vector = Allocate(nint.Size * (arguments.Count + 1));
-        if (vector == 0)
-        {
-            return;
-        }
-
-        for (var index = 0; index < arguments.Count; index++)
-        {
-            var encoded = Encoding.UTF8.GetBytes(arguments[index] + '\0');
-            var text = Allocate(encoded.Length);
-            if (text == 0)
-            {
-                return;
-            }
-
-            Marshal.Copy(encoded, 0, text, encoded.Length);
-            WritePointer(IntPtr.Add(vector, index * nint.Size), text);
-        }
-
-        lock (_gate)
-        {
-            Volatile.Write(ref _extendedArgumentCount, arguments.Count);
-            Volatile.Write(ref _extendedArgumentVector, vector);
-        }
+    public static void ConfigureProcessArguments(int count, ulong vector)
+    {
+        Volatile.Write(ref _processArgumentCount, count);
+        Volatile.Write(ref _processArgumentVector, vector);
     }
 
     public static void ConfigureProcessImageName(string? processImageName)
@@ -174,6 +144,7 @@ public static class HleDataSymbols
 
         lock (_gate)
         {
+            ConfigureProcessArguments(0, 0);
             if (_progNameBufferAddress == 0 ||
                 _progNamePointerAddress == 0 ||
                 _argumentVectorAddress == 0)

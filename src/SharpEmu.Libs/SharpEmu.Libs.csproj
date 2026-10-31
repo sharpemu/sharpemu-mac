@@ -27,6 +27,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+    <InternalsVisibleTo Include="SharpEmu.GnmMode" />
+    <InternalsVisibleTo Include="SharpEmu.Gpu.Vulkan" />
     <!-- The runtime reads internal load-progress diagnostics. -->
     <InternalsVisibleTo Include="SharpEmu.Core" />
   </ItemGroup>

@@ -241,6 +241,7 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
 
     public bool TryFillSingleView<TState>(ulong address, int length, TState state, GuestSpanFill<TState> fill, out int filled) =>
         _views.TryFillSingleView(address, length, state, fill, out filled);
+    public bool TryCopySingleView(ulong destination, ulong source, ulong size) => _views.TryCopySingleView(destination, source, size);
 
     public object AliasSnapshot => _views.AliasSnapshot;
 

@@ -62,7 +62,7 @@ internal static unsafe partial class VulkanVideoPresenter
             return ulong.TryParse(text, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var hash) ? hash : 0;
         }
 
-        private void TraceBufferParameter(ulong shaderHash, int slot, ulong address, ulong size,
+        internal void TraceBufferParameter(ulong shaderHash, int slot, ulong address, ulong size,
             ulong bufferHandle, ulong bufferOffset, bool written)
         {
             if (_bufferParameterShader == 0 || shaderHash != _bufferParameterShader ||

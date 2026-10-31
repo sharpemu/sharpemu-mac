@@ -8,6 +8,50 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed class RenderPhaseProfileTests
 {
+    [Fact]
+    public void ResolveWorkers_ReportEveryScopeOnceAcrossThreads()
+    {
+        if (!RenderPhaseProfile.Enabled) return;
+
+        var originalError = Console.Error;
+        using var output = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+        using var start = new ManualResetEventSlim();
+        try
+        {
+            Console.SetError(output);
+            RenderPhaseProfile.ReportResolveWorker(1, 1);
+            output.GetStringBuilder().Clear();
+            var threads = Enumerable.Range(0, 4).Select(_ => new Thread(() =>
+            {
+                RenderPhaseProfile.AttachResolveWorker();
+                start.Wait();
+                for (var index = 0; index < 1000; index++)
+                {
+                    using var scope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.ProgramPreparation);
+                    using var detail = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization);
+                }
+            }) { IsBackground = true }).ToArray();
+
+            foreach (var thread in threads) thread.Start();
+            start.Set();
+            foreach (var thread in threads) Assert.True(thread.Join(TimeSpan.FromSeconds(30)));
+
+            RenderPhaseProfile.ReportResolveWorker(1, 1);
+            var report = output.ToString();
+            Assert.Matches(@"ProgramPreparation=[0-9.]+ms/n4000\b", report);
+            Assert.Matches(@"ResourceMaterialization=[0-9.]+ms/n4000\b", report);
+
+            output.GetStringBuilder().Clear();
+            RenderPhaseProfile.ReportResolveWorker(1, 1);
+            Assert.DoesNotContain("ms/n", output.ToString());
+        }
+        finally
+        {
+            start.Set();
+            Console.SetError(originalError);
+        }
+    }
+
     [Theory]
     [InlineData((int)RenderPhaseProfile.Phase.ProgramTranslation)]
     [InlineData((int)RenderPhaseProfile.Phase.ProgramLayoutRequest)]

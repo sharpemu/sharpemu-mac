@@ -49,6 +49,7 @@ public sealed class ShaderPrewarmPresenterTests(HeadlessVulkanFixture fixture) :
         {
             var guest = new PipelineTestGuest(Compile);
             guest.Host.ShaderPrewarm = list;
+            guest.Host.TableBlocks = true;
             guest.RegisterProgram(CodeAddress, HeaderAddress, PipelineTestGuest.FormatLoadProgram);
             var cursor = 0u;
             guest.Programs.GetOrCompile(

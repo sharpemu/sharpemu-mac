@@ -30,16 +30,21 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
     public bool TriangleList;
     public bool Indexed;
 
+    // The vertex user data register that carries the draw's first instance, or -1 (the draw packet's).
+    public int StartInstanceUserData;
+
     public static GraphicsProgramInputs Create()
     {
         var inputs = new GraphicsProgramInputs();
         ((Span<ColorComponentMap>)inputs.Mapping).Fill(ColorComponentMap.Identity);
+        inputs.StartInstanceUserData = -1;
         return inputs;
     }
 
     public readonly bool Equals(GraphicsProgramInputs other) =>
         PixelActive == other.PixelActive && DepthBound == other.DepthBound && DepthAspectBound == other.DepthAspectBound &&
         StencilAspectBound == other.StencilAspectBound && TriangleList == other.TriangleList && Indexed == other.Indexed &&
+        StartInstanceUserData == other.StartInstanceUserData &&
         ((ReadOnlySpan<ColorComponentMap>)Mapping).SequenceEqual(other.Mapping);
 
     public override readonly bool Equals(object? obj) => obj is GraphicsProgramInputs other && Equals(other);
@@ -58,6 +63,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
         hash.Add(StencilAspectBound);
         hash.Add(TriangleList);
         hash.Add(Indexed);
+        hash.Add(StartInstanceUserData);
         return hash.ToHashCode();
     }
 }
@@ -103,7 +109,8 @@ public sealed partial class RenderExecutor
 
     // The inputs ResolveShaderPrograms derives from the targets TryResolveDrawTargets binds, from the
     // registers alone: the target requests and the pixel and depth activity, without the images.
-    public static GraphicsProgramInputs ProgramInputsOf(RegisterBanks banks, IImageFormatSupport formats, Func<string, Exception> fatal, bool indexed = false)
+    public static GraphicsProgramInputs ProgramInputsOf(RegisterBanks banks, IImageFormatSupport formats, Func<string, Exception> fatal, bool indexed = false,
+        int startInstanceUserData = -1)
     {
         var inputs = GraphicsProgramInputs.Create();
         var context = banks.Context;
@@ -131,6 +138,7 @@ public sealed partial class RenderExecutor
         inputs.PixelActive = HasActivePixelShader(banks);
         inputs.TriangleList = AssemblesTriangleList(banks);
         inputs.Indexed = indexed;
+        inputs.StartInstanceUserData = startInstanceUserData;
         return inputs;
     }
 
@@ -150,21 +158,18 @@ public sealed partial class RenderExecutor
             }
 
             return _pipelines.GetMeshGraphicsPrograms(
-                banks.Shader.Vertex, banks.Shader.Pixel, context.ShaderInterface, context,
-                userConfig, inputs.Mapping, inputs.PixelActive, inputs.DepthBound);
+                banks, userConfig, inputs.Mapping, inputs.PixelActive, inputs.DepthBound);
         }
 
         return _pipelines.GetGraphicsPrograms(
-            banks.Shader.Vertex,
-            banks.Shader.Pixel,
-            context.ShaderInterface,
-            context,
+            banks,
             inputs.Mapping,
             inputs.PixelActive,
             inputs.DepthBound,
             inputs.DepthAspectBound,
             inputs.StencilAspectBound,
-            inputs.TriangleList);
+            inputs.TriangleList,
+            inputs.StartInstanceUserData);
     }
 
     private static bool AssemblesTriangleList(RegisterBanks banks) =>

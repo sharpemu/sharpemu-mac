@@ -1,0 +1,28 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.Core\SharpEmu.Core.csproj" />
+  </ItemGroup>
+
+  <!-- The GPU-written memory queries and the GPU detile of GCN thin-1D textures go through the
+       Vulkan backend's buffer cache. A macOS build carries no Vulkan backend (see SharpEmu.CLI):
+       there GnmMode sees no GPU-written memory, as it does under any backend whose buffer store
+       is not that cache, and detiles on the CPU. -->
+  <PropertyGroup>
+    <_SharpEmuTargetsMac Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx')) Or ('$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('OSX')))">true</_SharpEmuTargetsMac>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(_SharpEmuTargetsMac)' != 'true'">
+    <DefineConstants>$(DefineConstants);SHARPEMU_GPU_VULKAN</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(_SharpEmuTargetsMac)' != 'true'">
+    <ProjectReference Include="..\graphics\SharpEmu.Gpu.Vulkan\SharpEmu.Gpu.Vulkan.csproj" />
+  </ItemGroup>
+</Project>

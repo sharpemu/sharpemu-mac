@@ -384,8 +384,13 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     // bindings among them, and a new property there would orphan every recorded list
     // though no record keeps a layout.
     public uint BufferWordCount;
+    public bool UsesBufferLengths { get; init; }
     public bool UsesDispatchThreadLimits { get; init; }
+    public bool UsesTessellationData { get; init; }
     public bool UsesMeshDrawParameters { get; init; }
+    public bool UsesTableBlock { get; init; }
+    public bool UsesFlattenedTable { get; init; }
+    public uint BufferCount { get; init; }
 
     // The distinct nonzero arguments of the module's call records (Gen5ShaderCallLinker.CallEntryArguments), two dwords each.
     public uint CallArgumentCount { get; init; }
@@ -397,7 +402,17 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];
 
-    public uint DispatchThreadLimitsDword => MemoryOffsetDword + (MemoryOffsetCount + 3) / 4 + BufferWordCount;
+    public const uint TableBlockHeaderDwords = 1;
+    public const uint TableBufferDwords = 4;
+
+    public uint TableBlockDword => MemoryOffsetDword;
+
+    public uint TableFlattenedDword => TableBlockHeaderDwords + BufferCount * TableBufferDwords;
+
+    // Portable buffer words (BufferWordCount) follow the packed offsets, then the buffer lengths.
+    public uint BufferLengthsDword => FirstBufferWordDword() + BufferWordCount;
+
+    public uint DispatchThreadLimitsDword => BufferLengthsDword + (UsesBufferLengths ? MemoryOffsetCount : 0);
 
     public uint MipStatisticsCount { get; init; }
 
@@ -407,7 +422,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     /// </summary>
     public uint BindlessImageTableCount { get; init; }
 
-    public uint MipStatisticsDword => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
+    public uint TessellationDataDword => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
+
+    public uint MipStatisticsDword => TessellationDataDword + (UsesTessellationData ? Gen5TessellationData.DwordCount : 0u);
 
     public uint MeshDrawParametersDword => MipStatisticsDword + MipStatisticsCount;
 
@@ -419,7 +436,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
-    public uint FirstBufferWordDword() => MemoryOffsetDword + (MemoryOffsetCount + 3) / 4;
+    public uint FirstBufferWordDword() => MemoryOffsetDword + (UsesTableBlock ? 2u : (MemoryOffsetCount + 3) / 4);
 
     public bool UsesShaderBase => ShaderBaseDword != NoShaderBase;
 
@@ -668,11 +685,16 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool usesMeshDrawParameters = false,
         uint callArgumentCount = 0,
         uint callTargetCount = 0,
-        bool? portableBuffers = null)
+        bool? portableBuffers = null,
+        bool tableBlock = false,
+        bool usesBufferLengths = false,
+        bool usesTessellationData = false)
     {
+        var flattened = usesFlattenedTable || info.Images.Any(image => image.IndirectSearchIterations != 0);
+        var usesTableBlock = tableBlock && (info.Buffers.Count != 0 || flattened);
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
         var memoryOffsetDword = (uint)userDataRegisters.Count + (usesShaderBase ? ShaderBaseDwordCount : 0);
-        var memoryOffsetCount = (uint)info.Buffers.Count;
+        var memoryOffsetCount = usesTableBlock ? 0u : (uint)info.Buffers.Count;
         var bufferWordCount = (portableBuffers ?? PortableBufferWord.Enabled) ? memoryOffsetCount * PortableBufferWord.DwordCount : 0u;
         var mipStatisticsCount = info.Images.Any(static image => image.MipStatistics) ? (uint)info.Images.Count : 0u;
         var bindlessImageTableCount = info.Images
@@ -680,12 +702,14 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             .Select(static image => image.BindlessSlot + 1)
             .DefaultIfEmpty(0u)
             .Max();
-        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + bufferWordCount +
+        usesBufferLengths &= memoryOffsetCount != 0 && !usesTableBlock;
+        var shaderDataDwords = memoryOffsetDword + (usesTableBlock ? 2u : (memoryOffsetCount + 3) / 4) + bufferWordCount +
+            (usesBufferLengths ? memoryOffsetCount : 0) +
             (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u) +
-            callArgumentCount * 2 + callTargetCount * 2;
-        var pushStart = PushData.StartFor(pushDataStartDword, shaderDataDwords);
+            (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + callArgumentCount * 2 + callTargetCount * 2;
+        var pushStart = usesTessellationData ? PushData.NoStart : PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
-        if (info.Buffers.Count != 0)
+        if (info.Buffers.Count != 0 && !usesTableBlock)
         {
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.Buffers, Enumerable.Range(0, info.Buffers.Count).Select(index => (uint)index).ToArray()));
         }
@@ -743,8 +767,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.FaultBuffer, []));
         }
 
-        var flattened = usesFlattenedTable || info.Images.Any(image => image.IndirectSearchIterations != 0);
-        if (flattened)
+        if (flattened && !usesTableBlock)
         {
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.FlattenedResourceTable, []));
         }
@@ -782,7 +805,12 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             MemoryOffsetDword = memoryOffsetDword,
             MemoryOffsetCount = memoryOffsetCount,
             BufferWordCount = bufferWordCount,
+            UsesBufferLengths = usesBufferLengths,
             UsesDispatchThreadLimits = usesDispatchThreadLimits,
+            UsesTessellationData = usesTessellationData,
+            UsesTableBlock = usesTableBlock,
+            UsesFlattenedTable = flattened,
+            BufferCount = (uint)info.Buffers.Count,
             MipStatisticsCount = mipStatisticsCount,
             BindlessImageTableCount = bindlessImageTableCount,
             UsesMeshDrawParameters = usesMeshDrawParameters,
@@ -808,7 +836,12 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             MemoryOffsetDword != other.MemoryOffsetDword ||
             MemoryOffsetCount != other.MemoryOffsetCount ||
             BufferWordCount != other.BufferWordCount ||
+            UsesBufferLengths != other.UsesBufferLengths ||
             UsesDispatchThreadLimits != other.UsesDispatchThreadLimits ||
+            UsesTessellationData != other.UsesTessellationData ||
+            UsesTableBlock != other.UsesTableBlock ||
+            UsesFlattenedTable != other.UsesFlattenedTable ||
+            BufferCount != other.BufferCount ||
             MipStatisticsCount != other.MipStatisticsCount ||
             BindlessImageTableCount != other.BindlessImageTableCount ||
             UsesMeshDrawParameters != other.UsesMeshDrawParameters ||
@@ -865,7 +898,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public override bool Equals(object? obj) => Equals(obj as BindingLayout);
 
     public override int GetHashCode() => HashCode.Combine(PushDataStartDword, MemoryOffsetDword, MemoryOffsetCount,
-        BufferWordCount, Descriptors.Count, UsesDispatchThreadLimits, UsesMeshDrawParameters);
+        BufferWordCount, Descriptors.Count, UsesDispatchThreadLimits, UsesMeshDrawParameters,
+        HashCode.Combine(UsesBufferLengths, UsesTessellationData, UsesTableBlock));
 }
 
 // Recomputes the layout an emitter was given from the same inputs and the same push
@@ -895,7 +929,8 @@ public static class BindingLayoutValidator
         var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare,
             usesFlattenedTable, usesShaderBase, layout.AllocationCursor,
             layout.UsesDispatchThreadLimits, layout.UsesMeshDrawParameters, layout.CallArgumentCount, layout.CallTargetCount,
-            portableBuffers: layout.BufferWordCount != 0);
+            portableBuffers: layout.BufferWordCount != 0,
+            tableBlock: layout.UsesTableBlock, usesBufferLengths: layout.UsesBufferLengths, usesTessellationData: layout.UsesTessellationData);
         if (!expected.Equals(layout))
         {
             throw new ResourcePlanException(
@@ -905,7 +940,7 @@ public static class BindingLayoutValidator
     }
 
     private static string Describe(BindingLayout layout) =>
-        $"push={layout.PushDataStartDword} base={layout.ShaderBaseDword} offsets={layout.MemoryOffsetDword}+{layout.MemoryOffsetCount} " +
+        $"push={layout.PushDataStartDword} base={layout.ShaderBaseDword} offsets={layout.MemoryOffsetDword}+{layout.MemoryOffsetCount} table={layout.UsesTableBlock} " +
         $"words={layout.BufferWordCount} " +
         $"user=[{string.Join(",", layout.UserDataRegisters)}] " +
         string.Join(" ", layout.Descriptors.Select(binding => $"{binding.Kind}:{string.Join(",", binding.Resources)}"));

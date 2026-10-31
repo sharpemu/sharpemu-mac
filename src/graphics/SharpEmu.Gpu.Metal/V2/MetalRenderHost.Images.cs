@@ -55,7 +55,6 @@ internal sealed partial class MetalRenderHost
         return new ColorAttachmentAcquisition(
             imageIdentifier,
             new GpuImageHandle((ulong)texture),
-            GpuImageLayout.ColorAttachmentOptimal,
             image.Shape.SampleCount,
             metadataClear,
             clearValue);
@@ -206,12 +205,11 @@ internal sealed partial class MetalRenderHost
         _depthAttachmentRealLayer = view.BaseLayer;
     }
 
-    public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects)
+    public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageAspect writeAspects)
     {
         // Metal has no image layouts; the pass descriptor's load and store actions
         // carry everything the transition would have expressed.
         _ = depth;
-        _ = layout;
         _ = writeAspects;
     }
 

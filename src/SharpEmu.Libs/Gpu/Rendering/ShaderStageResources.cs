@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -15,6 +16,7 @@ public enum ShaderStageKind
     Pixel,
     Compute,
     Mesh,
+    TessellationEvaluation,
 }
 
 public enum ImageResourceClass : byte
@@ -43,7 +45,10 @@ public class ShaderProgramInfo
     public const int NoScalarRegister = -1;
 
     public ShaderStageKind Stage { get; init; }
+    public int TessellationFactorBuffer { get; init; } = -1;
+    public bool UsesTessellationLocalDataRing { get; init; }
     public ulong Hash { get; init; }
+    public Pipelines.IShaderFrontend? Frontend { get; init; }
     public uint UserDataBase { get; init; }
     public uint UserDataCount { get; init; }
     public uint ParameterExportMask { get; init; }
@@ -65,6 +70,7 @@ public class ShaderProgramInfo
     public Pipelines.ConstantFill? ConstantFill { get; init; }
     public Pipelines.BoundedFill? BoundedFill { get; init; }
     public Pipelines.BoundedCopy? BoundedCopy { get; init; }
+    public bool StoresUniformValues { get; init; }
     public BufferResourceInfo[] Buffers { get; init; } = [];
     public ImageResourceInfo[] Images { get; init; } = [];
     public int SamplerCount { get; init; }
@@ -94,6 +100,20 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
     public DispatchThreadLimits? ThreadLimits { get; init; }
 
     public MeshDrawParameters? MeshDraw { get; init; }
+
+    public uint[]? TessellationData { get; init; }
+
+    public void WriteTessellationData(Span<uint> shaderData)
+    {
+        if (Program?.Bindings is not { UsesTessellationData: true } layout) return;
+        if (TessellationData is not { Length: (int)Gen5TessellationData.DwordCount } data ||
+            shaderData.Length != layout.ShaderDataDwordCount)
+        {
+            throw GpuFatal.Fatal("The tessellation stage has missing runtime data or invalid shader data.");
+        }
+
+        data.CopyTo(shaderData[(int)layout.TessellationDataDword..]);
+    }
 
     // The distinct nonzero arguments of this dispatch's call records (ShaderCallLibrary.Arguments): the module compares a
     // site's argument relative to them, so one module serves every position of the tables.
@@ -235,6 +255,7 @@ public readonly record struct ClipSpaceTransform(
 
 public sealed class VertexInputInfo
 {
+    public Pipelines.TessellationPipelineStages? Tessellation { get; init; }
     public const int MaxBuffers = 32;
 
     public VertexInputBuffer[] Buffers { get; init; } = [];
@@ -248,7 +269,15 @@ public sealed class VertexInputInfo
     public uint ScratchDwords { get; init; }
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
+    public int StartInstanceUserData { get; set; } = -1;
     public ShaderStageResources Stage { get; set; }
+
+    public VertexInputInfo WithoutStage()
+    {
+        var copy = (VertexInputInfo)MemberwiseClone();
+        copy.Stage = default;
+        return copy;
+    }
 }
 
 public sealed record MeshDrawConfiguration
@@ -331,6 +360,13 @@ public sealed class PixelInputInfo
     public ShaderStageResources Stage { get; set; }
 
     public bool PositionXY => PositionX && PositionY;
+
+    public PixelInputInfo WithoutStage()
+    {
+        var copy = (PixelInputInfo)MemberwiseClone();
+        copy.Stage = default;
+        return copy;
+    }
 }
 
 public sealed class ComputeInputInfo

@@ -133,6 +133,127 @@ public sealed class PageGuardTests : IDisposable
     }
 
     [Fact]
+    public void WatchMask_SparsePagesProtectOnePageEachWay()
+    {
+        using var guard = new PageGuard(_space);
+        var mask = new PageMask();
+        mask.Set(2);
+        mask.Set(900);
+
+        guard.AddWatchMask(Block, mask, blockReads: false);
+        guard.RemoveWatchMask(Block, mask, blockReads: false);
+
+        Assert.Equal(
+            new[]
+            {
+                (Block + 0x2000, 0x1000UL, GuestPageProtection.Read),
+                (Block + 0x384000, 0x1000UL, GuestPageProtection.Read),
+                (Block + 0x2000, 0x1000UL, ReadWrite),
+                (Block + 0x384000, 0x1000UL, ReadWrite),
+            },
+            _space.Protects);
+        Assert.Empty(_fatals);
+    }
+
+    [Fact]
+    public void RemoveWatchMask_MergesAcrossAShortGapWithTheSameAccess()
+    {
+        using var guard = new PageGuard(_space);
+        var mask = new PageMask();
+        mask.Set(1);
+        mask.Set(10);
+        guard.AddWatchMask(Block, mask, blockReads: false);
+        Assert.Equal(2, _space.Protects.Count);
+
+        guard.RemoveWatchMask(Block, mask, blockReads: false);
+
+        Assert.Equal(3, _space.Protects.Count);
+        Assert.Equal((Block + 0x1000, 0xA000UL, ReadWrite), _space.Protects[2]);
+    }
+
+    [Fact]
+    public void RemoveWatchMask_DoesNotMergeAcrossAGapWithOtherAccess()
+    {
+        using var guard = new PageGuard(_space);
+        var mask = new PageMask();
+        mask.Set(1);
+        mask.Set(10);
+        guard.AddWatchMask(Block, mask, blockReads: false);
+        guard.AddWatch(Block + 0x5000, 0x1000, blockReads: false);
+        _space.Protects.Clear();
+
+        guard.RemoveWatchMask(Block, mask, blockReads: false);
+
+        Assert.Equal(
+            new[] { (Block + 0x1000, 0x1000UL, ReadWrite), (Block + 0xA000, 0x1000UL, ReadWrite) },
+            _space.Protects);
+        guard.RemoveWatch(Block + 0x5000, 0x1000, blockReads: false);
+    }
+
+    [Fact]
+    public void AddWatch_LedgerSpanEndingInsideTheRunSplitsTheProtection()
+    {
+        using var guard = new PageGuard(_space);
+        guard.Permissions.Set(0x10000, 0x2000, ReadWrite);
+        guard.Permissions.Set(0x12000, 0x1000, GuestPageProtection.Read | GuestPageProtection.Execute);
+        guard.Permissions.Set(0x13000, 0x1000, ReadWrite);
+
+        guard.AddWatch(0x10000, 0x5000, blockReads: false);
+
+        Assert.Equal(
+            new[] { (0x10000UL, 0x2000UL, GuestPageProtection.Read), (0x13000UL, 0x2000UL, GuestPageProtection.Read) },
+            _space.Protects);
+        guard.RemoveWatch(0x10000, 0x5000, blockReads: false);
+        Assert.Equal(
+            new[] { (0x10000UL, 0x2000UL, ReadWrite), (0x13000UL, 0x2000UL, ReadWrite) },
+            _space.Protects.Skip(2));
+    }
+
+    [Fact]
+    public void WatchMask_ReadAndWriteWatchesOnTheSamePagesKeepTheStrongest()
+    {
+        using var guard = new PageGuard(_space);
+        var mask = new PageMask();
+        mask.SetRange(0, 2);
+        mask.SetRange(4, 6);
+        guard.AddWatch(Block + 0x1000, 0x4000, blockReads: true);
+        _space.Protects.Clear();
+
+        guard.AddWatchMask(Block, mask, blockReads: false);
+        Assert.Equal(new[] { (Block, 0x1000UL, GuestPageProtection.Read), (Block + 0x5000, 0x1000UL, GuestPageProtection.Read) }, _space.Protects);
+
+        guard.RemoveWatch(Block + 0x1000, 0x4000, blockReads: true);
+        Assert.Equal(
+            new[] { (Block + 0x1000, 0x1000UL, GuestPageProtection.Read), (Block + 0x2000, 0x2000UL, ReadWrite), (Block + 0x4000, 0x1000UL, GuestPageProtection.Read) },
+            _space.Protects.Skip(2));
+
+        guard.RemoveWatchMask(Block, mask, blockReads: false);
+        Assert.Equal(new[] { (Block, 0x6000UL, ReadWrite) }, _space.Protects.Skip(5));
+        Assert.Empty(_fatals);
+    }
+
+    [Fact]
+    public void ProtectionCalls_AreCountedByCause()
+    {
+        using var guard = new PageGuard(_space);
+        var sweepCalls = ProtectionCauseCounts.CallsOf(ProtectionCause.SweepReprotect);
+        var sweepPages = ProtectionCauseCounts.PagesOf(ProtectionCause.SweepReprotect);
+        var releases = ProtectionCauseCounts.CallsOf(ProtectionCause.CpuWriteRelease);
+        var reapplies = ProtectionCauseCounts.CallsOf(ProtectionCause.MappingReapply);
+
+        guard.AddWatch(0x60000, 0x3000, blockReads: false, ProtectionCause.SweepReprotect);
+        guard.Permissions.Set(0x60000, 0x1000, GuestPageProtection.Read);
+        guard.Reapply(0x60000, 0x1000);
+        guard.RemoveWatch(0x60000, 0x3000, blockReads: false);
+
+        Assert.Equal(1, ProtectionCauseCounts.CallsOf(ProtectionCause.SweepReprotect) - sweepCalls);
+        Assert.Equal(3, ProtectionCauseCounts.PagesOf(ProtectionCause.SweepReprotect) - sweepPages);
+        Assert.Equal(1, ProtectionCauseCounts.CallsOf(ProtectionCause.MappingReapply) - reapplies);
+        Assert.Equal(1, ProtectionCauseCounts.CallsOf(ProtectionCause.CpuWriteRelease) - releases);
+        Assert.Contains("protect_sweep_reprotect=", ProtectionCauseCounts.TakeReport(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RemoveWatch_OnUnknownPageIsFatal()
     {
         using var guard = new PageGuard(_space);

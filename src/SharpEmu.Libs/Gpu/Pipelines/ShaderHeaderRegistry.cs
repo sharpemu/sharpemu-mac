@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 
 using System.Buffers.Binary;
 
@@ -21,33 +22,85 @@ public sealed record RegisteredShader(
     uint ContinuationSizeBytes)
 {
     public uint ContinuationScratchDwords { get; init; }
+    public IShaderFrontend? Frontend { get; init; }
+    public ReadOnlyMemory<uint> FrontendUserData { get; init; }
+    public (ulong Address, uint SizeBytes)[] AdditionalRanges { get; init; } = [];
 
     public bool IsFused => ContinuationAddress != 0;
 
     // The code ranges the identity covers, in program order.
-    public (ulong Address, uint SizeBytes)[] CodeRanges =>
-        IsFused ? [(CodeAddress, CodeSizeBytes), (ContinuationAddress, ContinuationSizeBytes)] : [(CodeAddress, CodeSizeBytes)];
+    public (ulong Address, uint SizeBytes)[] CodeRanges => IsFused
+        ? [(CodeAddress, CodeSizeBytes), (ContinuationAddress, ContinuationSizeBytes), .. AdditionalRanges]
+        : [(CodeAddress, CodeSizeBytes), .. AdditionalRanges];
 
-    public const int MaxCodeRanges = 2;
+    // The ranges the per-draw path copies on the stack; a shader with more (a frontend's
+    // additional ranges) takes CodeRanges instead.
+    public const int MaxCodeRanges = 3;
+
+    public int CodeRangeCount => (IsFused ? 2 : 1) + AdditionalRanges.Length;
 
     // CodeRanges without the array, for the per-draw path: the number of ranges written.
+    // The destination holds at least CodeRangeCount entries.
     public int CopyCodeRanges(Span<(ulong Address, uint SizeBytes)> destination)
     {
-        destination[0] = (CodeAddress, CodeSizeBytes);
-        if (!IsFused)
+        var count = 0;
+        destination[count++] = (CodeAddress, CodeSizeBytes);
+        if (IsFused)
         {
-            return 1;
+            destination[count++] = (ContinuationAddress, ContinuationSizeBytes);
         }
 
-        destination[1] = (ContinuationAddress, ContinuationSizeBytes);
-        return 2;
+        foreach (var range in AdditionalRanges)
+        {
+            destination[count++] = range;
+        }
+
+        return count;
     }
 
-    public uint TotalCodeSizeBytes => CodeSizeBytes + ContinuationSizeBytes;
+    public uint TotalCodeSizeBytes
+    {
+        get
+        {
+            var total = CodeSizeBytes + ContinuationSizeBytes;
+            foreach (var range in AdditionalRanges)
+            {
+                total += range.SizeBytes;
+            }
+
+            return total;
+        }
+    }
 }
 
 // The two code objects the guest joined into one program; the entry ends in a jump to the continuation.
 public readonly record struct FusedProgramParts(ulong ContinuationAddress, ulong ContinuationHeaderAddress);
+
+internal sealed class ShaderHeaderEntry
+{
+    public ShaderHeaderEntry(RegisteredShader shader, long registrations)
+    {
+        Shader = shader;
+        Registrations = registrations;
+        CodeRanges = shader.CodeRanges;
+    }
+
+    public RegisteredShader Shader { get; }
+
+    public long Registrations { get; }
+
+    public (ulong Address, uint SizeBytes)[] CodeRanges { get; }
+
+    public VertexTableMetadata? VertexTables { get; set; }
+
+    public bool InputSemanticsRead { get; set; }
+
+    public uint[]? InputSemantics { get; set; }
+
+    public ulong IdentityHash;
+
+    public int IdentityUses;
+}
 
 // Resolves the header the guest registered for a code address; a missing header stops the draw.
 public sealed class ShaderHeaderRegistry
@@ -64,16 +117,33 @@ public sealed class ShaderHeaderRegistry
     private readonly CpuContext _context;
     private readonly Func<ulong, ulong> _headerOf;
     private readonly Func<ulong, FusedProgramParts?> _fusedPartsOf;
+    private readonly IShaderFrontend? _frontend;
+    private readonly Dictionary<ulong, ShaderHeaderEntry> _entries = new();
+    private static long _registrations;
 
-    public ShaderHeaderRegistry(CpuContext context, Func<ulong, ulong> headerOf, Func<ulong, FusedProgramParts?> fusedPartsOf)
+    public bool HasFrontend => _frontend is not null;
+    internal bool SupportsParallelResolution => _frontend?.SupportsParallelResolution ?? true;
+    internal long FrontendImageVersion => _frontend?.ImageNormalizationVersion?.Invoke() ?? 0;
+
+    public ShaderHeaderRegistry(CpuContext context, Func<ulong, ulong> headerOf, Func<ulong, FusedProgramParts?> fusedPartsOf,
+        IShaderFrontend? frontend = null)
     {
         _context = context;
         _headerOf = headerOf;
         _fusedPartsOf = fusedPartsOf;
+        _frontend = frontend;
     }
 
     internal (ulong Address, byte[] Code)[] ReadDiagnosticCode(ulong codeAddress)
     {
+        if (_frontend is not null && _headerOf(codeAddress) == 0)
+        {
+            var shader = _frontend.ReadShader(_context, codeAddress, "diagnostic");
+            var bytes = new byte[shader.CodeSizeBytes];
+            if (!_context.Memory.TryRead(codeAddress, bytes))
+                throw new InvalidDataException("The shader code is not readable.");
+            return [(codeAddress, bytes)];
+        }
         var ranges = new List<(ulong Address, byte[] Code)>();
         void ReadRange(ulong address, ulong header)
         {
@@ -94,10 +164,50 @@ public sealed class ShaderHeaderRegistry
         return ranges.ToArray();
     }
 
-    public RegisteredShader Require(ulong codeAddress, string label)
+    public static void NoteRegistration() => Interlocked.Increment(ref _registrations);
+
+    public static long Registrations => Interlocked.Read(ref _registrations) + Gen5ShaderTranslator.FusedProgramRegistrations;
+
+    public RegisteredShader Require(ulong codeAddress, string label, ReadOnlySpan<uint> userData = default) => RequireEntry(codeAddress, label, userData).Shader;
+
+    internal ShaderHeaderEntry RequireEntry(ulong codeAddress, string label, ReadOnlySpan<uint> userData = default)
+    {
+        var registrations = Registrations;
+        if (_frontend is not null && _headerOf(codeAddress) == 0)
+            return new ShaderHeaderEntry(Read(codeAddress, label, userData), registrations);
+        // The header is read every time (Read hands back the record it made last time while the
+        // header is unchanged), so a guest that rewrites a header in place without registering
+        // again still gets a fresh entry.
+        var shader = Read(codeAddress, label);
+        lock (_entries)
+        {
+            if (_entries.TryGetValue(codeAddress, out var entry) && entry.Registrations == registrations &&
+                ReferenceEquals(entry.Shader, shader))
+            {
+                return entry;
+            }
+
+            entry = new ShaderHeaderEntry(shader, registrations);
+            _entries[codeAddress] = entry;
+            return entry;
+        }
+    }
+
+    private RegisteredShader Read(ulong codeAddress, string label, ReadOnlySpan<uint> userData = default)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ShaderHeaderLookup);
         var headerAddress = _headerOf(codeAddress);
+        if (_frontend is not null && headerAddress == 0)
+        {
+            try
+            {
+                return _frontend.ReadShader(_context, codeAddress, label, userData) with { Frontend = _frontend };
+            }
+            catch (InvalidDataException exception)
+            {
+                throw GpuFatal.Fatal($"The shader binary is invalid: label={label} shader=0x{codeAddress:X16} error={exception.Message}");
+            }
+        }
         if (headerAddress == 0)
         {
             throw GpuFatal.Fatal($"The shader has no registered header: label={label} shader=0x{codeAddress:X16}.");
@@ -227,6 +337,22 @@ public sealed class ShaderHeaderRegistry
         }
         else ranges = [(address, size)];
         return true;
+    }
+
+    public RegisteredShader? RequireMergedHull(ulong localAddress, ulong hullAddress, ReadOnlySpan<uint> userData)
+    {
+        if (_frontend is null || _headerOf(localAddress) != 0)
+            return null;
+        try
+        {
+            return _frontend.ReadMergedHull(_context, localAddress, hullAddress, userData) is { } shader
+                ? shader with { Frontend = _frontend }
+                : null;
+        }
+        catch (InvalidDataException exception)
+        {
+            throw GpuFatal.Fatal($"The shader binary is invalid: label=merged-hull shader=0x{localAddress:X16} hull=0x{hullAddress:X16} error={exception.Message}");
+        }
     }
 
     private uint RequireCodeSize(ulong headerAddress, ulong codeAddress, string label)

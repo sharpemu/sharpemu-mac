@@ -4,8 +4,18 @@
 
 namespace SharpEmu.Gpu.Vulkan.Scheduling;
 
-// Provide the scheduler with one timeline semaphore, one command pool, and one queue.
-public interface IGpuTickDevice : IDisposable
+public interface IGpuCommandBufferSource
+{
+    nint[] AllocateBuffers(int count);
+
+    void BeginBuffer(nint buffer);
+
+    void EndBuffer(nint buffer, bool hostRead);
+}
+
+// Provide the scheduler with one timeline semaphore, one queue, its own command pool and further
+// command pools for other recording threads.
+public interface IGpuTickDevice : IGpuCommandBufferSource, IDisposable
 {
     object QueueGate { get; }
 
@@ -15,11 +25,7 @@ public interface IGpuTickDevice : IDisposable
 
     bool TryWaitTimeline(ulong tick, out string failure);
 
-    nint[] AllocateBuffers(int count);
+    IGpuCommandBufferSource CreateBufferSource();
 
-    void BeginBuffer(nint buffer);
-
-    void EndBuffer(nint buffer);
-
-    bool TrySubmit(nint buffer, SubmitBundle bundle, out string failure);
+    bool TrySubmit(ReadOnlySpan<nint> buffers, SubmitBundle bundle, out string failure);
 }

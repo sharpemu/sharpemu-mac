@@ -238,7 +238,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
                 return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
-            if (!InitializeProcessEntryFrame(context, processImageName, programExitHandlerStubAddress))
+            if (!InitializeProcessEntryFrame(context, processImageName, programExitHandlerStubAddress, executionOptions.ProcessArguments))
             {
                 return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
@@ -464,11 +464,20 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
     private static bool InitializeProcessEntryFrame(
         CpuContext context,
         string processImageName,
-        ulong programExitHandlerAddress)
+        ulong programExitHandlerAddress,
+        IReadOnlyList<string>? processArguments = null)
     {
         var imageName = string.IsNullOrWhiteSpace(processImageName) ? "eboot.bin" : processImageName;
-        var arguments = new List<string> { imageName };
-        arguments.AddRange(SharpEmu.HLE.GuestArguments.Effective);
+        // A relaunch (loadExec) passes its own argv (an empty one is argv[0] alone); otherwise argv[0]
+        // is the image name and the rest come from --guest-args / SHARPEMU_GUEST_ARGS and engine
+        // adapter defaults.
+        var arguments = processArguments is { Count: > 0 }
+            ? new List<string>(processArguments)
+            : new List<string> { imageName };
+        if (processArguments is null)
+        {
+            arguments.AddRange(SharpEmu.HLE.GuestArguments.Effective);
+        }
 
         var cursor = context[CpuRegister.Rsp];
         var argumentAddresses = new ulong[arguments.Count];
@@ -504,7 +513,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             }
         }
 
-        SharpEmu.HLE.HleDataSymbols.ConfigureProcessArguments(arguments);
+        // getargc/getargv report the argv the entry parameters carry.
+        SharpEmu.HLE.HleDataSymbols.ConfigureProcessArguments(arguments.Count, entryParamsAddress + 8);
         if (arguments.Count > 1)
         {
             Log.Info($"Guest arguments: {string.Join(' ', arguments.Skip(1))}");

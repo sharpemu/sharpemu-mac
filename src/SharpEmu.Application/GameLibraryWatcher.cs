@@ -86,6 +86,8 @@ public sealed class GameLibraryWatcher : IDisposable
         "pic1.png",
         "snd0.at9",
         "trophy00.ucp",
+        "trophy00.trp",
+        "npbind.dat",
     };
 
     private void OnFileSystemChanged(object sender, FileSystemEventArgs args)

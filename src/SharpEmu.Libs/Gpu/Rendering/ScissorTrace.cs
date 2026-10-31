@@ -114,7 +114,7 @@ internal sealed class ScissorTrace
     private static string Describe(ContextRegisters context)
     {
         var s = context.ScreenViewport;
-        var v = s.Viewports[0];
+        var v = s.Primary;
         var transform = FormattableString.Invariant($"({v.XScale},{v.YScale},{v.XOffset},{v.YOffset})");
         var clips = string.Join(";", Enumerable.Range(0, ScreenViewportRegisters.ClipRectangleCount).Select(i =>
             $"{s.ClipRectangleLeft[i]},{s.ClipRectangleTop[i]},{s.ClipRectangleRight[i]},{s.ClipRectangleBottom[i]},{s.ClipRectangleWindowOffsetEnable[i]}"));

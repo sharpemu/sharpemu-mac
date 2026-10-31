@@ -15,7 +15,7 @@ internal sealed partial class ShaderPipelineCache
     {
         var address = banks.Shader.Vertex.ExportAddress;
         if (!CompiledShaderDump.ShouldWrite(address, null)) return;
-        lock (_gate)
+        lock (_rejectedDumpKeys)
         {
             if (_rejectedDumpKeys.Count >= 64 ||
                 !_rejectedDumpKeys.Add((address, banks.Context.ShaderStages, autoDraw))) return;

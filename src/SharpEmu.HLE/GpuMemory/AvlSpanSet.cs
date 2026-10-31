@@ -13,11 +13,17 @@ public sealed class AvlSpanSet
         public Node? Left;
         public Node? Right;
         public int Height = 1;
+        public int Count = 1;
     }
 
     private Node? _root;
+    private SpanSnapshot? _snapshot = SpanSnapshot.Empty;
     public bool IsEmpty => _root is null;
-    public void Clear() => _root = null;
+    public void Clear()
+    {
+        _root = null;
+        _snapshot = SpanSnapshot.Empty;
+    }
 
     public void Add(ulong address, ulong size)
     {
@@ -31,6 +37,7 @@ public sealed class AvlSpanSet
             start = previous.Start;
             _root = Delete(_root, start);
         }
+        _snapshot = null;
         for (var next = FindAtOrAbove(start); next is not null && next.Start <= end; next = FindAtOrAbove(start))
         {
             end = Math.Max(end, next.End);
@@ -45,6 +52,8 @@ public sealed class AvlSpanSet
         var end = address + size;
         var current = FindAtOrBelow(address);
         if (current is null || current.End <= address) current = FindAtOrAbove(address);
+        if (current is null || current.Start >= end) return;
+        _snapshot = null;
         while (current is not null && current.Start < end)
         {
             var spanStart = current.Start;
@@ -81,6 +90,17 @@ public sealed class AvlSpanSet
         return false;
     }
 
+    public SpanSnapshot Snapshot()
+    {
+        if (_snapshot is { } snapshot) return snapshot;
+        if (_root is null) return _snapshot = SpanSnapshot.Empty;
+        var starts = new ulong[_root.Count];
+        var ends = new ulong[starts.Length];
+        var index = 0;
+        Collect(_root, starts, ends, ref index);
+        return _snapshot = new SpanSnapshot(starts, ends);
+    }
+
     public List<GuestSpan> GetOverlappingRanges(ulong address, ulong size)
     {
         ValidateRange(address, size);
@@ -109,6 +129,15 @@ public sealed class AvlSpanSet
         VisitOverlaps(node.Right, start, end, result);
     }
 
+    private static void Collect(Node? node, ulong[] starts, ulong[] ends, ref int index)
+    {
+        if (node is null) return;
+        Collect(node.Left, starts, ends, ref index);
+        starts[index] = node.Start;
+        ends[index++] = node.End;
+        Collect(node.Right, starts, ends, ref index);
+    }
+
     private Node? FindAtOrBelow(ulong address)
     {
         Node? result = null;
@@ -132,7 +161,11 @@ public sealed class AvlSpanSet
     }
 
     private static int Height(Node? node) => node?.Height ?? 0;
-    private static void UpdateHeight(Node node) => node.Height = Math.Max(Height(node.Left), Height(node.Right)) + 1;
+    private static void UpdateHeight(Node node)
+    {
+        node.Height = Math.Max(Height(node.Left), Height(node.Right)) + 1;
+        node.Count = (node.Left?.Count ?? 0) + (node.Right?.Count ?? 0) + 1;
+    }
 
     private static Node RotateRight(Node node)
     {

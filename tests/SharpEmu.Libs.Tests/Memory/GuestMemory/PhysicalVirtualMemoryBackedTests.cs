@@ -225,6 +225,42 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
     }
 
     [Fact]
+    public void ProtectFindsItsRegionsAmongManyLowerRegions()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var memory = new PhysicalVirtualMemory(hostMemory: PlatformMemory);
+        const ulong size = 0x10000;
+        var regions = new List<ulong>();
+        for (var index = 0; index < 32; index++)
+        {
+            Assert.True(memory.TryAllocateAtOrAbove(0x2_0000_0000 + (ulong)index * size * 2, size, executable: false, size, out var address));
+            regions.Add(address);
+        }
+
+        var target = regions[20];
+        Assert.True(memory.TryProtect(target + 0x1000, 0x1000, GuestPageProtection.Read));
+        Assert.Equal(HostPageProtection.ReadOnly, ProtectionOf(target + 0x1000));
+        Assert.Equal(HostPageProtection.ReadWrite, ProtectionOf(target));
+        Assert.Equal(HostPageProtection.ReadWrite, ProtectionOf(target + 0x2000));
+        Assert.Equal(HostPageProtection.ReadWrite, ProtectionOf(regions[19] + size - 0x1000));
+
+        var last = regions[^1];
+        var start = regions[^2] + size - 0x1000;
+        Assert.True(memory.TryProtect(start, last + 0x2000 - start, GuestPageProtection.Read));
+        Assert.Equal(HostPageProtection.ReadOnly, ProtectionOf(start));
+        Assert.Equal(HostPageProtection.ReadOnly, ProtectionOf(last));
+        Assert.Equal(HostPageProtection.ReadOnly, ProtectionOf(last + 0x1000));
+        Assert.Equal(HostPageProtection.ReadWrite, ProtectionOf(last + 0x2000));
+        Assert.Equal(HostPageProtection.ReadWrite, ProtectionOf(regions[^2]));
+
+        static HostPageProtection ProtectionOf(ulong address)
+        {
+            Assert.True(PlatformMemory.Query(address, out var info));
+            return info.Protection;
+        }
+    }
+
+    [Fact]
     public void ClearKeepsTheSameMemoryObjectUsable()
     {
         if (!Supported) return;

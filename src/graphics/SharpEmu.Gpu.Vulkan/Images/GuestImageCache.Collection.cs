@@ -22,6 +22,7 @@ public sealed partial class GuestImageCache
         var tick = endsFrame ? _collectionTick++ : _collectionTick;
         if (endsFrame && SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled && tick % 300 == 0)
             ReportImageMemory("collection", true, tick);
+        ExpireParkedImages(tick);
         if (_totalUsedMemory < _collectionStartBytes)
         {
             return;
@@ -140,6 +141,14 @@ public sealed partial class GuestImageCache
         _scheduledReadbacks.Clear();
     }
 
+    private long _pendingDestroyBytes;
+
+    private long _destroyedImageReclaims;
+
+    public void NoteDestroyedImageReclaim() => Interlocked.Increment(ref _destroyedImageReclaims);
+
+    public bool HoldsManyDestroyedImages => (ulong)Math.Max(0, Volatile.Read(ref _pendingDestroyBytes)) >= _memoryPressureBytes;
+
     // Test seams: thresholds, the recency order and the private state the tests inspect.
     internal void SetCollectionThresholds(ulong trigger, ulong pressure, ulong critical, ulong tick)
     {
@@ -227,15 +236,17 @@ public sealed partial class GuestImageCache
     internal void AddPageOwner(ulong address, ResourceSlotIdentifier imageIdentifier)
     {
         using var held = _lock.Hold();
-        InvalidateLookups();
-        _pageOwners.GetOrCreate(address >> ImagePageOwnerTable.PageBits).Add(imageIdentifier);
+        var page = address >> ImagePageOwnerTable.PageBits;
+        InvalidateLookups(page << ImagePageOwnerTable.PageBits, (page + 1) << ImagePageOwnerTable.PageBits);
+        _pageOwners.GetOrCreate(page).Add(imageIdentifier);
     }
 
     internal bool RemovePageOwner(ulong address, ResourceSlotIdentifier imageIdentifier)
     {
         using var held = _lock.Hold();
-        InvalidateLookups();
-        return _pageOwners.Find(address >> ImagePageOwnerTable.PageBits)?.Remove(imageIdentifier) == true;
+        var page = address >> ImagePageOwnerTable.PageBits;
+        InvalidateLookups(page << ImagePageOwnerTable.PageBits, (page + 1) << ImagePageOwnerTable.PageBits);
+        return _pageOwners.Find(page)?.Remove(imageIdentifier) == true;
     }
 
     internal uint QueryEpoch
@@ -305,14 +316,14 @@ public sealed partial class GuestImageCache
 
     internal readonly struct RegionLockScope : IDisposable
     {
-        private readonly HLE.GpuMemory.RegionLock _lock;
+        private readonly HLE.GpuMemory.SpinReadWriteLock _lock;
 
-        public RegionLockScope(HLE.GpuMemory.RegionLock regionLock)
+        public RegionLockScope(HLE.GpuMemory.SpinReadWriteLock cacheLock)
         {
-            _lock = regionLock;
-            regionLock.Enter();
+            _lock = cacheLock;
+            cacheLock.EnterWrite();
         }
 
-        public void Dispose() => _lock.Exit();
+        public void Dispose() => _lock.ExitWrite();
     }
 }

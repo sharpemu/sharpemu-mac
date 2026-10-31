@@ -47,6 +47,7 @@ public partial class MainWindow
         GameWindowModeBox.ItemsSource = _windowModeChoices;
         GameScalingModeBox.ItemsSource = _scalingModeChoices;
         GameHdrModeBox.ItemsSource = _hdrModeChoices;
+        GameGpuReadbacksBox.ItemsSource = _gpuReadbackChoices;
         GameOverlayModeBox.ItemsSource = _overlayModeChoices;
         GameOverlayCornerBox.ItemsSource = _overlayCornerChoices;
 
@@ -117,6 +118,7 @@ public partial class MainWindow
         GameScalingModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameVSyncToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameHdrModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameGpuReadbacksBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameOverlayEnabledToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameOverlayModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameOverlayCornerBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
@@ -225,6 +227,10 @@ public partial class MainWindow
                 _hdrModeChoices,
                 effective.HdrMode,
                 "Auto");
+            GameGpuReadbacksBox.SelectedItem = FindChoice(
+                _gpuReadbackChoices,
+                effective.GpuReadbacks,
+                "Full");
 
             _gameHostDisplays = HostDisplayOptions.BuildDisplays(
                 HostDisplayCatalog.Query(),
@@ -285,6 +291,7 @@ public partial class MainWindow
             ScalingMode = SelectedComboText(GameScalingModeBox, "Fit"),
             VSync = GameVSyncToggle.IsChecked == true,
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
+            GpuReadbacks = SelectedComboText(GameGpuReadbacksBox, "Full"),
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
             OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),
             OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),

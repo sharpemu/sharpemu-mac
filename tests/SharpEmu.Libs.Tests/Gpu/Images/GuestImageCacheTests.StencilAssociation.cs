@@ -129,10 +129,10 @@ public sealed partial class GuestImageCacheTests
         {
             var owner = harness.Image(depthId);
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            owner.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            owner.Transition(AccessFlags.TransferWriteBit, null, command);
             var value = new ClearDepthStencilValue(0.75f, 0x6d);
             var range = new ImageSubresourceRange(ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit, 0, 1, 0, 1);
-            _vulkan.Vk.CmdClearDepthStencilImage(command, owner.Backing.Handle, ImageLayout.TransferDstOptimal, &value, 1, &range);
+            _vulkan.Vk.CmdClearDepthStencilImage(command, owner.Backing.Handle, ImageLayout.General, &value, 1, &range);
             harness.Images.MarkGpuWritten(depthId);
         });
         Assert.Equal(depthId, harness.Acquire(ref depth));
@@ -168,10 +168,10 @@ public sealed partial class GuestImageCacheTests
         {
             var source = harness.Image(aId);
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            source.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            source.Transition(AccessFlags.TransferWriteBit, null, command);
             var value = normalized ? new ClearColorValue(1f, 0f, 0f, 0f) : new ClearColorValue { Uint32_0 = 255 };
             var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1);
-            _vulkan.Vk.CmdClearColorImage(command, source.Backing.Handle, ImageLayout.TransferDstOptimal, &value, 1, &range);
+            _vulkan.Vk.CmdClearColorImage(command, source.Backing.Handle, ImageLayout.General, &value, 1, &range);
             harness.Images.MarkGpuWritten(aId);
         });
         byte[] a = [255, 255, 255, 255];
@@ -213,10 +213,10 @@ public sealed partial class GuestImageCacheTests
         {
             var owner = harness.Image(depthId);
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            owner.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            owner.Transition(AccessFlags.TransferWriteBit, null, command);
             var value = new ClearDepthStencilValue(0f, 0x6d);
             var range = new ImageSubresourceRange(ImageAspectFlags.StencilBit, 0, 1, 0, 1);
-            _vulkan.Vk.CmdClearDepthStencilImage(command, owner.Backing.Handle, ImageLayout.TransferDstOptimal, &value, 1, &range);
+            _vulkan.Vk.CmdClearDepthStencilImage(command, owner.Backing.Handle, ImageLayout.General, &value, 1, &range);
             harness.Images.MarkGpuWritten(depthId);
         });
         Assert.Equal(depthId, harness.Acquire(ref depth));

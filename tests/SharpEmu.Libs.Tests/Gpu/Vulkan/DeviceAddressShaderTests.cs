@@ -440,6 +440,57 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
     }
 
     [Theory]
+    [InlineData(false, 77u, false)]
+    [InlineData(true, 119u, false)]
+    [InlineData(true, 111u, false)]
+    [InlineData(false, 77u, true)]
+    [InlineData(true, 119u, true)]
+    [InlineData(true, 111u, true)]
+    public void RuntimeFormattedDescriptorsRespectTheirFormatEncoding(bool split, uint format, bool linked)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var load = BufferAccess(24, "BufferLoadFormatXyzw", 16, 0, 4, vectorData: 5);
+        load = load with { Control = ((Gen5BufferMemoryControl)load.Control!) with { SplitDescriptorFormat = split } };
+        var program = Program(
+            Vop2(0, "VAddU32", 2, Operand((uint)GuestBase), Gen5Operand.Vector(0)),
+            ReadFirstLane(8, 12, 2),
+            MoveScalar(12, 13, (uint)(GuestBase >> 32)),
+            ScalarLoad(16, 12, 16, count: 4),
+            load,
+            BufferAccess(32, "BufferStoreDwordx4", ResultRegister, 0, 4, vectorData: 5),
+            EndProgram(40));
+        if (linked)
+        {
+            var caller = Program(MoveScalar(0, 14, 0x2000), MoveScalar(4, 15, 0),
+                MoveScalar(8, 20, 0), MoveScalar(12, 21, 0),
+                Sop1(16, "SSwappcB64", 14, Gen5Operand.Scalar(14)),
+                BufferAccess(20, "BufferStoreDwordx4", ResultRegister, 0, 4, vectorData: 5), EndProgram(28));
+            var callee = Program([.. program.Instructions.Take(program.Instructions.Count - 2),
+                Sop1(32, "SSetpcB64", 0, Gen5Operand.Scalar(14))]);
+            program = Gen5ShaderCallLinker.Link(caller,
+                [new(16, 14, 20, 14, caller.Address + 20, [new(0x2000, 0, callee)])]);
+        }
+        var run = new Run(vulkan, program);
+        Assert.Contains(run.Plan.Memory.Entries, access => access.DeviceDescriptor);
+        var data = new byte[64];
+        WriteWord(data, 0, (uint)(GuestBase + 32));
+        WriteWord(data, 4, (uint)(GuestBase >> 32) | (16u << 16));
+        WriteWord(data, 8, 1);
+        WriteWord(data, 12, (format << 12) | 0xFAC);
+        float[] expected = [0.25f, -2.5f, 123.75f, 1f];
+        for (var i = 0; i < expected.Length; i++)
+            WriteWord(data, 32 + i * 4, BitConverter.SingleToUInt32Bits(expected[i]));
+        run.MapPage(GuestBase, data);
+        run.Dispatch(GuestBase);
+        var actual = Enumerable.Range(0, 4).Select(i => BitConverter.UInt32BitsToSingle(run.ResultWord((uint)i * 4))).ToArray();
+        var faults = run.FaultWords();
+        run.Finish(output, nameof(RuntimeFormattedDescriptorsRespectTheirFormatEncoding));
+        Assert.All(faults, word => Assert.Equal(0u, word));
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
     [InlineData(8u, 1u)]
     [InlineData(4u, 1u)]
     [InlineData(8u, 2u)]

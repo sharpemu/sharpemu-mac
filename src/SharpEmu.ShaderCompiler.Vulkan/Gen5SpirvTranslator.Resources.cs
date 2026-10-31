@@ -26,6 +26,30 @@ public static partial class Gen5SpirvTranslator
         out string error, ref ShaderTranslationProfile.Scope profile)
     {
         shader = default!;
+        if (request.CooperativeWave64Workgroup && (request.Stage != ShaderStage.Compute || request.WaveSize != 64 ||
+            (ulong)request.LocalSizeX * request.LocalSizeY * request.LocalSizeZ is 0 or > 256 ||
+            (request.LocalSizeX * request.LocalSizeY * request.LocalSizeZ) % 64 != 0))
+        {
+            error = "Cooperative wave64 requires a compute workgroup containing one to four complete waves.";
+            return false;
+        }
+
+        if (request.TessellationHull is not null &&
+            (request.Stage != ShaderStage.Compute || !request.CooperativeWave64Workgroup || !request.Bindings.UsesTessellationData))
+        {
+            error = "A merged hull program requires cooperative compute execution and tessellation runtime data.";
+            return false;
+        }
+
+        if (request.Stage == ShaderStage.TessellationEvaluation &&
+            (request.TessellationInfo is not { } tessellation ||
+             !Enum.IsDefined(tessellation.Domain) || !Enum.IsDefined(tessellation.Spacing) ||
+             tessellation.Spacing == Gen5TessellationSpacing.PowerOfTwo))
+        {
+            error = "Tessellation evaluation requires a supported tessellation configuration; power-of-two partitioning needs factor conversion.";
+            return false;
+        }
+
         try
         {
             BindingLayoutValidator.Validate(
@@ -137,6 +161,12 @@ public static partial class Gen5SpirvTranslator
         private uint _samplerPointer;
         private uint _storageUlongPointer;
         private uint _physicalUintPointer;
+        private uint _privateUlongPointer;
+        private uint _tableBlock;
+        private uint _tableBufferBases;
+        private uint _tableBufferLengths;
+        private uint _tableFlattenedLength;
+        private readonly HashSet<uint> _physicalPointers = [];
         private uint _deviceEntryScratch;
         private uint _deviceWordScratch;
         private uint _deviceBufferWordScratch;
@@ -178,6 +208,7 @@ public static partial class Gen5SpirvTranslator
                 ShaderStage.Vertex => Gen5SpirvStage.Vertex,
                 ShaderStage.Pixel => Gen5SpirvStage.Pixel,
                 ShaderStage.Mesh => Gen5SpirvStage.Mesh,
+                ShaderStage.TessellationEvaluation => Gen5SpirvStage.TessellationEvaluation,
                 _ => Gen5SpirvStage.Compute,
             };
             _pixelOutputBindings = request.PixelOutputs;
@@ -195,12 +226,24 @@ public static partial class Gen5SpirvTranslator
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);
             _physicalAxisOfLogical = Gen5WorkgroupAxisOrder.Compute(_localSizeX, _localSizeY, _localSizeZ);
+            var systemRegisters = request.ComputeSystemRegisters;
+            _physicalGroupAxisOfLogical = _stage == Gen5SpirvStage.Compute
+                ? Gen5WorkgroupAxisOrder.ComputeGroups(_localSizeX, _localSizeY, _localSizeZ,
+                    systemRegisters?.WorkGroupXRegister is not null, systemRegisters?.WorkGroupYRegister is not null,
+                    systemRegisters?.WorkGroupZRegister is not null)
+                : _physicalAxisOfLogical;
             // A wave64 runs as one 64-lane host subgroup when the host pins it to one
             // (HostWave64Supported). Hosts without 64-lane subgroups bridge the two 32-lane
             // halves through workgroup memory.
             if (_waveLaneCount == 32)
             {
                 _waveLowering = new NativeWave32Lowering(this);
+            }
+            else if (request.CooperativeWave64Workgroup)
+            {
+                // The waves of a cooperative workgroup run one block at a time through a workgroup
+                // dispatcher and meet at workgroup barriers, which only the emulated lowering models.
+                _waveLowering = new EmulatedWave64Lowering(this);
             }
             else if (request.HostWave64Supported ||
                      (_stage == Gen5SpirvStage.Mesh && request.Mesh?.DeviceSubgroupLaneCount == 64))
@@ -325,12 +368,40 @@ public static partial class Gen5SpirvTranslator
                 _interfaces.Add(_runtimeBufferBiases);
             }
 
-            if (info.UsesDeviceAddresses || _stage == Gen5SpirvStage.Mesh)
+            if (info.UsesDeviceAddresses || _stage == Gen5SpirvStage.Mesh || layout.UsesTessellationData || layout.UsesTableBlock)
             {
                 _module.AddCapability(SpirvCapability.PhysicalStorageBufferAddresses);
                 _module.SetPhysicalStorageBuffer64MemoryModel();
                 _physicalUintPointer = _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _uintType);
             }
+            if (request.TessellationHull is not null)
+            {
+                _tessellationVertexIndexScratch = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
+                _interfaces.Add(_tessellationVertexIndexScratch);
+            }
+
+            if (layout.UsesTableBlock)
+            {
+                _privateUlongPointer = _module.TypePointer(SpirvStorageClass.Private, _ulongType);
+                _tableBlock = _module.AddGlobalVariable(_privateUlongPointer, SpirvStorageClass.Private, ULong(0));
+                _module.AddName(_tableBlock, "tableBlock");
+                _interfaces.Add(_tableBlock);
+                _tableFlattenedLength = DeclareFunctionUint(UInt(0));
+                _module.AddName(_tableFlattenedLength, "tableFlattenedLength");
+                if (info.Buffers.Count != 0)
+                {
+                    var count = (uint)info.Buffers.Count;
+                    var baseArray = _module.TypeArray(_ulongType, count);
+                    _tableBufferBases = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.Private, baseArray), SpirvStorageClass.Private, _module.ConstantNull(baseArray));
+                    _module.AddName(_tableBufferBases, "tableBufferBases");
+                    _interfaces.Add(_tableBufferBases);
+                    var lengthArray = _module.TypeArray(_uintType, count);
+                    _tableBufferLengths = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.Private, lengthArray), SpirvStorageClass.Private, _module.ConstantNull(lengthArray));
+                    _module.AddName(_tableBufferLengths, "tableBufferLengths");
+                    _interfaces.Add(_tableBufferLengths);
+                }
+            }
+
             if (info.UsesDeviceAddresses)
             {
                 var privateUlongPointer = _module.TypePointer(SpirvStorageClass.Private, _ulongType);
@@ -579,7 +650,45 @@ public static partial class Gen5SpirvTranslator
                 var bias = BitwiseAnd(ShiftRightLogical(packed, UInt((buffer % 4) * 8)), UInt(0xFF));
                 Store(RuntimeBufferBiasPointer((int)buffer), bias);
             }
+
+            if (layout.UsesTableBlock)
+            {
+                Store(_tableBlock, Pair64(LoadShaderDataDword(UInt(layout.TableBlockDword)), LoadShaderDataDword(UInt(layout.TableBlockDword + 1))));
+                if (layout.UsesFlattenedTable)
+                {
+                    Store(_tableFlattenedLength, LoadTableWord(UInt(0)));
+                }
+
+                for (uint buffer = 0; buffer < layout.BufferCount; buffer++)
+                {
+                    var record = BindingLayout.TableBlockHeaderDwords + buffer * BindingLayout.TableBufferDwords;
+                    Store(TableBufferBasePointer((int)buffer), Pair64(LoadTableWord(UInt(record)), LoadTableWord(UInt(record + 1))));
+                    Store(TableBufferLengthPointer((int)buffer), LoadTableWord(UInt(record + 2)));
+                    Store(RuntimeBufferBiasPointer((int)buffer), LoadTableWord(UInt(record + 3)));
+                }
+            }
         }
+
+        private uint PhysicalWordPointer(uint baseAddress, uint dwordIndex)
+        {
+            var pointer = _module.AddInstruction(SpirvOp.ConvertUToPtr, _physicalUintPointer,
+                IAdd64(baseAddress, Widen(ShiftLeftLogical(dwordIndex, UInt(2)))));
+            _physicalPointers.Add(pointer);
+            return pointer;
+        }
+
+        private uint LoadTableWord(uint dwordIndex) => Load(_uintType, PhysicalWordPointer(Load(_ulongType, _tableBlock), dwordIndex));
+
+        private uint TableBufferBasePointer(int binding) =>
+            _module.AddInstruction(SpirvOp.AccessChain, _privateUlongPointer, _tableBufferBases, UInt((uint)binding));
+
+        private uint TableBufferLengthPointer(int binding) =>
+            _module.AddInstruction(SpirvOp.AccessChain, _privateUintPointer, _tableBufferLengths, UInt((uint)binding));
+
+        private uint TableBufferWordPointer(int binding, uint dwordAddress) =>
+            PhysicalWordPointer(Load(_ulongType, TableBufferBasePointer(binding)), dwordAddress);
+
+        private uint TableBufferLength(int binding) => Load(_uintType, TableBufferLengthPointer(binding));
 
         private uint LoadShaderDataDword(uint dwordIndex)
         {
@@ -652,7 +761,18 @@ public static partial class Gen5SpirvTranslator
             return _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0);
         }
 
-        private uint LoadFlattenedWord(uint slot) => LoadBlockWord(_flattenedTable, slot);
+        private uint LoadFlattenedWord(uint slot)
+        {
+            if (!_request.Bindings.UsesTableBlock)
+            {
+                return LoadBlockWord(_flattenedTable, slot);
+            }
+
+            var inRange = _module.AddInstruction(SpirvOp.ULessThan, _boolType, slot, Load(_uintType, _tableFlattenedLength));
+            var safeSlot = _module.AddInstruction(SpirvOp.Select, _uintType, inRange, slot, UInt(0));
+            var value = LoadTableWord(IAdd(UInt(_request.Bindings.TableFlattenedDword), safeSlot));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, inRange, value, UInt(0));
+        }
 
         // A planned slot is inside the table the host binds, so its load skips the runtime bounds
         // check. Large shaders make hundreds of these reads, and every check costs the Metal
@@ -663,15 +783,23 @@ public static partial class Gen5SpirvTranslator
             if (_flatSlotShift != 0 && _shiftedFlatSlots is { } shifted && shifted.Contains(slot))
             {
                 var index = IAdd(UInt(slot), _flatSlotShift);
-                return _shiftedFlatSlotsReserved
-                    ? Load(_uintType, BlockWordPointer(_flattenedTable, index))
-                    : LoadFlattenedWord(index);
+                return _shiftedFlatSlotsReserved ? LoadReservedFlattenedWord(index) : LoadFlattenedWord(index);
             }
 
-            return slot < _request.FlattenedTableReservedWords
-                ? Load(_uintType, BlockWordPointer(_flattenedTable, UInt(slot)))
-                : LoadFlattenedWord(UInt(slot));
+            if (slot >= _request.FlattenedTableReservedWords)
+            {
+                return LoadFlattenedWord(UInt(slot));
+            }
+
+            return _request.Bindings.UsesTableBlock
+                ? LoadTableWord(UInt(_request.Bindings.TableFlattenedDword + slot))
+                : Load(_uintType, BlockWordPointer(_flattenedTable, UInt(slot)));
         }
+
+        private uint LoadReservedFlattenedWord(uint index) =>
+            _request.Bindings.UsesTableBlock
+                ? LoadTableWord(IAdd(UInt(_request.Bindings.TableFlattenedDword), index))
+                : Load(_uintType, BlockWordPointer(_flattenedTable, index));
 
         // A linked program's address relative to the shader base the host pushes, which is the program's own address.
         private uint ProgramAddress(ulong address)
@@ -2081,7 +2209,7 @@ public static partial class Gen5SpirvTranslator
             return false;
         }
 
-        private bool HasFlattenedTable => _flattenedTable != 0;
+        private bool HasFlattenedTable => _flattenedTable != 0 || _request.Bindings is { UsesTableBlock: true, UsesFlattenedTable: true };
 
         // Resolves the image an instruction reads through its class array, joined with
         // its sampler for sampling operations.

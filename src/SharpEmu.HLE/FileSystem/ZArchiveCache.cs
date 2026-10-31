@@ -19,11 +19,14 @@ public static class ZArchiveCache
     private static readonly string[] MetadataFiles =
     [
         "sce_sys/param.json",
+        "sce_sys/param.sfo",
         "sce_sys/icon0.png",
         "sce_sys/pic0.png",
         "sce_sys/pic1.png",
         "sce_sys/snd0.at9",
         "sce_sys/trophy2/trophy00.ucp",
+        "sce_sys/trophy/trophy00.trp",
+        "sce_sys/npbind.dat",
     ];
 
     // The data root, where the library already looks for the metadata (trophies, title music). Beside

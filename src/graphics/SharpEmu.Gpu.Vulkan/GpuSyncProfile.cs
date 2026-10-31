@@ -15,8 +15,33 @@ internal enum NativeStateKind
     Count,
 }
 
+internal enum DeferredBarrierPromotion
+{
+    Handle,
+    Request,
+    Count,
+}
+
 internal static class GpuSyncProfile
 {
+    private static long _deferredBarriers;
+    private static long _skippedBarriers;
+    private static long _transferKeptDeferred;
+
+    public static void CountTransferKeptDeferred() => Interlocked.Increment(ref _transferKeptDeferred);
+    private static readonly long[] _deferredPromotions = new long[(int)DeferredBarrierPromotion.Count];
+
+    public static void CountDeferredBarrier() => Interlocked.Increment(ref _deferredBarriers);
+
+    public static void CountSkippedBarrier() => Interlocked.Increment(ref _skippedBarriers);
+
+    public static void CountDeferredPromotion(DeferredBarrierPromotion cause) => Interlocked.Increment(ref _deferredPromotions[(int)cause]);
+
+    private static string TakeChainReport() =>
+        FormattableString.Invariant($"deferred={Interlocked.Exchange(ref _deferredBarriers, 0)} skipped={Interlocked.Exchange(ref _skippedBarriers, 0)} transfer_kept={Interlocked.Exchange(ref _transferKeptDeferred, 0)} ") +
+        FormattableString.Invariant($"promoted_handle={Interlocked.Exchange(ref _deferredPromotions[(int)DeferredBarrierPromotion.Handle], 0)} promoted_request={Interlocked.Exchange(ref _deferredPromotions[(int)DeferredBarrierPromotion.Request], 0)} ") +
+        SharpEmu.Libs.Gpu.Rendering.DispatchChainTally.TakeReport();
+
     private static readonly long[] _nativeStateRecorded = new long[(int)NativeStateKind.Count];
     private static readonly long[] _nativeStateReused = new long[(int)NativeStateKind.Count];
     private static long _barriers;
@@ -75,5 +100,5 @@ internal static class GpuSyncProfile
     }
 
     public static string TakeReport() => FormattableString.Invariant(
-        $"[PERF][GPU_SYNC] barriers={Interlocked.Exchange(ref _barriers, 0)} draining={Interlocked.Exchange(ref _drainingBarriers, 0)} memory={Interlocked.Exchange(ref _memoryBarriers, 0)} buffer={Interlocked.Exchange(ref _bufferBarriers, 0)} image={Interlocked.Exchange(ref _imageBarriers, 0)} merged_requests={Interlocked.Exchange(ref _mergedRequests, 0)} rendering_scopes={Interlocked.Exchange(ref _renderingScopes, 0)} draw_count_flushes={Interlocked.Exchange(ref _batchFlushes, 0)} reused {TakeNativeStateReport()}");
+        $"[PERF][GPU_SYNC] barriers={Interlocked.Exchange(ref _barriers, 0)} draining={Interlocked.Exchange(ref _drainingBarriers, 0)} memory={Interlocked.Exchange(ref _memoryBarriers, 0)} buffer={Interlocked.Exchange(ref _bufferBarriers, 0)} image={Interlocked.Exchange(ref _imageBarriers, 0)} merged_requests={Interlocked.Exchange(ref _mergedRequests, 0)} rendering_scopes={Interlocked.Exchange(ref _renderingScopes, 0)} draw_count_flushes={Interlocked.Exchange(ref _batchFlushes, 0)} {TakeChainReport()} reused {TakeNativeStateReport()}");
 }

@@ -23,7 +23,7 @@ namespace SharpEmu.Gpu.Vulkan.Presentation;
 
 internal static unsafe partial class VulkanVideoPresenter
 {
-    private sealed partial class Presenter
+    private sealed partial class RecordingHost
     {
         private static readonly ulong _snapshotPixelHash = ulong.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_SNAPSHOT_PIXEL_HASH")?.Replace("0x", "", StringComparison.OrdinalIgnoreCase),
@@ -39,6 +39,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (_snapshotComputeHash == 0 || _computeSnapshotCount >= 2 ||
                 bindings is not PreparedStageBindings prepared || prepared.Program.Hash != _snapshotComputeHash) return 0;
+            if (_worker) throw Serial("image snapshot", resumable: true);
             var sequence = ++_computeSnapshotCount;
             SaveComputeImages(sequence, prepared, after: false);
             return sequence;
@@ -69,6 +70,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (_snapshotPixelHash == 0 || _imageSnapshotCount >= 2 ||
                 bindings is not PreparedStageBindings prepared || prepared.Program.Hash != _snapshotPixelHash) return 0;
+            if (_worker) throw Serial("image snapshot", resumable: true);
             var sequence = ++_imageSnapshotCount;
             for (var index = 0; index < prepared.Textures.Length; index++)
             {

@@ -8,13 +8,93 @@ using SharpEmu.Gpu.Vulkan.Scheduling;
 
 namespace SharpEmu.Gpu.Vulkan;
 
+internal sealed unsafe class VulkanCommandPool : IGpuCommandBufferSource, IDisposable
+{
+    private readonly Vk _vk;
+    private readonly Device _device;
+    private readonly CommandPool _pool;
+    private readonly VulkanCommandProfile? _profile;
+
+    public VulkanCommandPool(Vk vk, Device device, uint queueFamilyIndex, VulkanCommandProfile? profile)
+    {
+        _vk = vk;
+        _device = device;
+        _profile = profile;
+        var poolInfo = new CommandPoolCreateInfo
+        {
+            SType = StructureType.CommandPoolCreateInfo,
+            QueueFamilyIndex = queueFamilyIndex,
+            Flags = CommandPoolCreateFlags.TransientBit | CommandPoolCreateFlags.ResetCommandBufferBit,
+        };
+        VulkanTickDevice.RequireSuccess(_vk.CreateCommandPool(_device, &poolInfo, null, out _pool), "vkCreateCommandPool(scheduler)");
+    }
+
+    public nint[] AllocateBuffers(int count)
+    {
+        var allocateInfo = new CommandBufferAllocateInfo
+        {
+            SType = StructureType.CommandBufferAllocateInfo,
+            CommandPool = _pool,
+            Level = CommandBufferLevel.Primary,
+            CommandBufferCount = (uint)count,
+        };
+        var buffers = new CommandBuffer[count];
+        fixed (CommandBuffer* pointer = buffers)
+        {
+            VulkanTickDevice.RequireSuccess(_vk.AllocateCommandBuffers(_device, &allocateInfo, pointer), "vkAllocateCommandBuffers(scheduler)");
+        }
+
+        var handles = new nint[count];
+        for (var i = 0; i < count; i++)
+        {
+            handles[i] = buffers[i].Handle;
+        }
+
+        return handles;
+    }
+
+    public void BeginBuffer(nint buffer)
+    {
+        var beginInfo = new CommandBufferBeginInfo
+        {
+            SType = StructureType.CommandBufferBeginInfo,
+            Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
+        };
+        VulkanTickDevice.RequireSuccess(_vk.BeginCommandBuffer(new CommandBuffer(buffer), &beginInfo), "vkBeginCommandBuffer(scheduler)");
+        _profile?.BeginBuffer(new CommandBuffer(buffer));
+    }
+
+    public void EndBuffer(nint buffer, bool hostRead)
+    {
+        var command = new CommandBuffer(buffer);
+        _profile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Tail);
+        if (hostRead)
+        {
+            var barrier = new MemoryBarrier2
+            {
+                SType = StructureType.MemoryBarrier2,
+                SrcAccessMask = AccessFlags2.MemoryWriteBit,
+                DstAccessMask = AccessFlags2.HostReadBit,
+            };
+            VulkanSynchronization.PipelineBarrier(_vk, command, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.HostBit, 0,
+                1, &barrier, 0, null, 0, null, BarrierSource.HostRead);
+        }
+
+        VulkanTickDevice.RequireSuccess(_vk.EndCommandBuffer(command), "vkEndCommandBuffer(scheduler)");
+    }
+
+    public void Dispose() => _vk.DestroyCommandPool(_device, _pool, null);
+}
+
 // One transient command pool and one timeline semaphore on the presenter's queue.
 internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
 {
     private readonly Vk _vk;
     private readonly Device _device;
     private readonly Queue _queue;
-    private readonly CommandPool _pool;
+    private readonly uint _queueFamilyIndex;
+    private readonly VulkanCommandPool _pool;
+    private readonly List<VulkanCommandPool> _pools = new();
     private readonly VkSemaphore _timeline;
 
     public VulkanTickDevice(Vk vk, Device device, Queue queue, uint queueFamilyIndex, object queueGate, PhysicalDevice profilePhysicalDevice = default)
@@ -22,14 +102,8 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
         _vk = vk;
         _device = device;
         _queue = queue;
+        _queueFamilyIndex = queueFamilyIndex;
         QueueGate = queueGate;
-        var poolInfo = new CommandPoolCreateInfo
-        {
-            SType = StructureType.CommandPoolCreateInfo,
-            QueueFamilyIndex = queueFamilyIndex,
-            Flags = CommandPoolCreateFlags.TransientBit | CommandPoolCreateFlags.ResetCommandBufferBit,
-        };
-        RequireSuccess(_vk.CreateCommandPool(_device, &poolInfo, null, out _pool), "vkCreateCommandPool(scheduler)");
         var typeInfo = new SemaphoreTypeCreateInfo
         {
             SType = StructureType.SemaphoreTypeCreateInfo,
@@ -44,6 +118,7 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
         RequireSuccess(_vk.CreateSemaphore(_device, &createInfo, null, out _timeline), "vkCreateSemaphore(scheduler timeline)");
         if (profilePhysicalDevice.Handle != 0)
             CommandProfile = new VulkanCommandProfile(vk, profilePhysicalDevice, device, queueFamilyIndex);
+        _pool = new VulkanCommandPool(vk, device, queueFamilyIndex, CommandProfile);
     }
 
     public VulkanCommandProfile? CommandProfile { get; }
@@ -231,50 +306,25 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
         return result == Result.Success && WaitRetired(tick);
     }
 
-    public nint[] AllocateBuffers(int count)
+    public nint[] AllocateBuffers(int count) => _pool.AllocateBuffers(count);
+
+    public void BeginBuffer(nint buffer) => _pool.BeginBuffer(buffer);
+
+    public void EndBuffer(nint buffer, bool hostRead) => _pool.EndBuffer(buffer, hostRead);
+
+    public IGpuCommandBufferSource CreateBufferSource()
     {
-        var allocateInfo = new CommandBufferAllocateInfo
+        var pool = new VulkanCommandPool(_vk, _device, _queueFamilyIndex, null);
+        lock (_pools)
         {
-            SType = StructureType.CommandBufferAllocateInfo,
-            CommandPool = _pool,
-            Level = CommandBufferLevel.Primary,
-            CommandBufferCount = (uint)count,
-        };
-        var buffers = new CommandBuffer[count];
-        fixed (CommandBuffer* pointer = buffers)
-        {
-            RequireSuccess(_vk.AllocateCommandBuffers(_device, &allocateInfo, pointer), "vkAllocateCommandBuffers(scheduler)");
+            _pools.Add(pool);
         }
 
-        var handles = new nint[count];
-        for (var i = 0; i < count; i++)
-        {
-            handles[i] = buffers[i].Handle;
-        }
-
-        return handles;
+        return pool;
     }
 
-    public void BeginBuffer(nint buffer)
+    public bool TrySubmit(ReadOnlySpan<nint> buffers, SubmitBundle bundle, out string failure)
     {
-        var beginInfo = new CommandBufferBeginInfo
-        {
-            SType = StructureType.CommandBufferBeginInfo,
-            Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
-        };
-        RequireSuccess(_vk.BeginCommandBuffer(new CommandBuffer(buffer), &beginInfo), "vkBeginCommandBuffer(scheduler)");
-        CommandProfile?.BeginBuffer(new CommandBuffer(buffer));
-    }
-
-    public void EndBuffer(nint buffer)
-    {
-        CommandProfile?.WriteMarker(new CommandBuffer(buffer), VulkanCommandProfile.IntervalKind.Tail);
-        RequireSuccess(_vk.EndCommandBuffer(new CommandBuffer(buffer)), "vkEndCommandBuffer(scheduler)");
-    }
-
-    public bool TrySubmit(nint buffer, SubmitBundle bundle, out string failure)
-    {
-        var commandBuffer = new CommandBuffer(buffer);
         fixed (ulong* waitSemaphores = bundle.WaitSemaphores)
         fixed (ulong* waitTicks = bundle.WaitTicks)
         fixed (uint* waitStages = bundle.WaitStages)
@@ -305,22 +355,32 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
                 };
             }
 
-            var commandInfo = new CommandBufferSubmitInfo
+            var commandInfos = stackalloc CommandBufferSubmitInfo[buffers.Length];
+            for (var index = 0; index < buffers.Length; index++)
             {
-                SType = StructureType.CommandBufferSubmitInfo,
-                CommandBuffer = commandBuffer,
-                DeviceMask = 1,
-            };
+                commandInfos[index] = new CommandBufferSubmitInfo
+                {
+                    SType = StructureType.CommandBufferSubmitInfo,
+                    CommandBuffer = new CommandBuffer(buffers[index]),
+                    DeviceMask = 1,
+                };
+            }
+
             var submitInfo = new SubmitInfo2
             {
                 SType = StructureType.SubmitInfo2,
                 WaitSemaphoreInfoCount = (uint)bundle.WaitCount,
                 PWaitSemaphoreInfos = waitInfos,
-                CommandBufferInfoCount = 1,
-                PCommandBufferInfos = &commandInfo,
+                CommandBufferInfoCount = (uint)buffers.Length,
+                PCommandBufferInfos = commandInfos,
                 SignalSemaphoreInfoCount = (uint)bundle.SignalCount,
                 PSignalSemaphoreInfos = signalInfos,
             };
+            if (SharpEmu.Libs.Diagnostics.SubmitSiteTally.Enabled)
+            {
+                SharpEmu.Libs.Diagnostics.SubmitSiteTally.Note();
+            }
+
             Fence fence = default;
             ulong fenceTick = 0;
             if (FenceRetirement && bundle.SignalCount != 0)
@@ -361,8 +421,14 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
                 }
             }
 
-            if (result == Result.Success)
-                CommandProfile?.MarkSubmitted(buffer);
+            if (result == Result.Success && CommandProfile is { } profile)
+            {
+                foreach (var buffer in buffers)
+                {
+                    profile.MarkSubmitted(buffer);
+                }
+            }
+
             failure = result.ToString();
             return result == Result.Success;
         }
@@ -389,10 +455,19 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
         }
 
         _vk.DestroySemaphore(_device, _timeline, null);
-        _vk.DestroyCommandPool(_device, _pool, null);
+        _pool.Dispose();
+        lock (_pools)
+        {
+            foreach (var pool in _pools)
+            {
+                pool.Dispose();
+            }
+
+            _pools.Clear();
+        }
     }
 
-    private static void RequireSuccess(Result result, string operation)
+    internal static void RequireSuccess(Result result, string operation)
     {
         if (result != Result.Success)
         {

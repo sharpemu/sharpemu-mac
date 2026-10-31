@@ -16,9 +16,18 @@ using Xunit.Abstractions;
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 [Collection(SchedulingStateCollection.Name)]
-public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITestOutputHelper output)
+public sealed class GlobalMemoryShaderTableBlockTests(HeadlessVulkanFixture fixture, ITestOutputHelper output)
+    : GlobalMemoryShaderTests(fixture, output)
+{
+    protected override bool TableBlocks => true;
+}
+
+[Collection(SchedulingStateCollection.Name)]
+public class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITestOutputHelper output)
     : IClassFixture<HeadlessVulkanFixture>
 {
+    protected virtual bool TableBlocks => false;
+
     private const ulong ShaderAddress = 0x1_0000_0000;
     private const ulong BufferAddress = 0x2_0000_0000;
     private const int BufferBytes = 192;
@@ -407,7 +416,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
 
     private sealed record ShaderFixture(ShaderResourcePlan Plan, uint[] UserData, uint LocalSizeX);
 
-    private static byte[] RunOnce(HeadlessVulkan vulkan, ShaderFixture fixture, byte[] initial, uint threadCount = 1, bool traceMissingPage = false, bool expectFault = true)
+    private byte[] RunOnce(HeadlessVulkan vulkan, ShaderFixture fixture, byte[] initial, uint threadCount = 1, bool traceMissingPage = false, bool expectFault = true)
     {
         bool ReadWordFromFixture(ulong address, out uint value)
         {
@@ -425,7 +434,8 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
         var layout = BindingLayout.Allocate(resources.Info,
             BindingLayout.CollectUserDataRegisters(plan.Graph.Program, 0, 20), false,
-            ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false, tableBlock: TableBlocks);
+        Assert.Equal(TableBlocks && (resources.Info.Buffers.Count != 0 || layout.UsesFlattenedTable), layout.UsesTableBlock);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
             TraceDeviceAddressFaults = traceMissingPage,

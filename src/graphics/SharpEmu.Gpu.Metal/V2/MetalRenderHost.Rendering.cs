@@ -2121,7 +2121,9 @@ internal sealed partial class MetalRenderHost
         Console.Error.WriteLine($"[METAL-V2][INDIRECT-DISPATCH] ran hash=0x{entry.VertexHash:X16} gds[0x928..]={TracedGdsWindow()}");
     }
 
-    public bool TryDispatchIndirect(ulong argumentsAddress)
+    // Metal's programs keep the thread axis order for their groups (no Y-only swap), and the
+    // indirect counts are dispatched as the guest wrote them, as before; the order is not used.
+    public bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical)
     {
         var range = _guestMemory.Resolve(argumentsAddress, 3 * sizeof(uint));
         if (!range.IsValid)

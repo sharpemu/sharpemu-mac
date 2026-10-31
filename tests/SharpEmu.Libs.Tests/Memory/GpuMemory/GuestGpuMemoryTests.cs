@@ -54,7 +54,13 @@ public sealed class GuestGpuMemoryTests
 
         public bool Accepting { get; set; } = true;
 
-        public void Post(Action work) => work();
+        public int Posts { get; private set; }
+
+        public void Post(Action work)
+        {
+            Posts++;
+            work();
+        }
 
         public void RunOnGpuQueue(Action work)
         {
@@ -109,6 +115,12 @@ public sealed class GuestGpuMemoryTests
         _memory.AttachStores(_stores, _stores);
     }
 
+    private void RegisterQuietly(ulong address, ulong size, GuestPageProtection protection)
+    {
+        _memory.Register(address, size, protection);
+        _stores.Calls.Clear();
+    }
+
     [Fact]
     public void Register_ThenCoversSubSpansOnly()
     {
@@ -118,8 +130,9 @@ public sealed class GuestGpuMemoryTests
         Assert.True(_memory.Covers(0x11000, 0x8));
         Assert.False(_memory.Covers(0x13FF8, 0x10));
         Assert.False(_memory.Covers(1UL << 40, 0x8));
-        Assert.Empty(_stores.Calls);
+        Assert.Equal(new[] { "buffer.write 10000+4000", "image.write 10000+4000" }, _stores.Calls);
 
+        _stores.Calls.Clear();
         _memory.Unregister(0x10000, 0x4000);
         Assert.False(_memory.Covers(0x11000, 0x8));
         Assert.Equal(new[] { "buffer.write 10000+4000", "image.unregister 10000+4000" }, _stores.Calls);
@@ -224,6 +237,45 @@ public sealed class GuestGpuMemoryTests
         memory.Unregister(0x10000, 0x1000);
     }
 
+    [Fact]
+    public void RegisterLazyRange_CoversWritesAndFaultsWithoutRegisteringSpans()
+    {
+        _memory.RegisterLazyRange(0x100000, 0x10000);
+
+        Assert.False(_memory.Covers(0x104000, 0x2000));
+        Assert.False(_memory.OverlapsRegistered(0x104000, 0x2000));
+        Assert.True(_memory.MarkCpuWrite(0x104000, 0x2000));
+        Assert.Equal(new[] { "buffer.write 104000+2000", "image.write 104000+2000" }, _stores.Calls);
+
+        _stores.Calls.Clear();
+        _stores.ImageHandles = true;
+        Assert.True(_memory.TryResolveFault(FaultKind.Write, 0x104010));
+        Assert.Equal(new[] { "buffer.write 104000+4000", "image.write 104010+8" }, _stores.Calls);
+
+        _stores.Calls.Clear();
+        _memory.UnregisterLazyRange(0x100000, 0x10000);
+        Assert.False(_memory.MarkCpuWrite(0x104000, 0x2000));
+        Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x104010));
+        Assert.Empty(_stores.Calls);
+        _memory.Dispose();
+    }
+
+    [Fact]
+    public void Register_MarksTheMappedContentWrittenOnTheGpuQueue()
+    {
+        var queue = new InlineQueue { IsGpuQueueThread = false };
+        var scheduler = new RecordingScheduler();
+        _memory.AttachGpuQueue(queue, scheduler);
+
+        _memory.Register(0x20000, 0x2000, ReadWrite);
+
+        Assert.Equal(1, queue.Posts);
+        Assert.Equal(new[] { "buffer.write 20000+2000", "image.write 20000+2000" }, _stores.Calls);
+        Assert.Empty(scheduler.Calls);
+        _memory.AttachGpuQueue(null, null);
+        _memory.Dispose();
+    }
+
     [Theory]
     [InlineData(FaultKind.Write, "buffer.write 10010+8", "image.write 10010+8")]
     [InlineData(FaultKind.Read, "buffer.pull 10010+8")]
@@ -231,7 +283,7 @@ public sealed class GuestGpuMemoryTests
     [InlineData(FaultKind.Unknown, "buffer.pull 10010+8")]
     public void TryResolveFault_NotifiesStoresButDeclinesWhenNoneRecovers(FaultKind kind, params string[] expected)
     {
-        _memory.Register(0x10000, 0x1000, ReadWrite);
+        RegisterQuietly(0x10000, 0x1000, ReadWrite);
 
         Assert.False(_memory.TryResolveFault(kind, 0x10010));
         Assert.Equal(expected, _stores.Calls);
@@ -248,7 +300,7 @@ public sealed class GuestGpuMemoryTests
     {
         _stores.BufferHandles = buffer;
         _stores.ImageHandles = image;
-        _memory.Register(0x10000, 0x1000, ReadWrite);
+        RegisterQuietly(0x10000, 0x1000, ReadWrite);
 
         Assert.True(_memory.TryResolveFault(kind, 0x10010));
 
@@ -260,7 +312,7 @@ public sealed class GuestGpuMemoryTests
     public void TryResolveFault_WriteNotifiesBothStoresEvenWhenTheFirstRecovers()
     {
         _stores.BufferHandles = true;
-        _memory.Register(0x10000, 0x1000, ReadWrite);
+        RegisterQuietly(0x10000, 0x1000, ReadWrite);
 
         Assert.True(_memory.TryResolveFault(FaultKind.Write, 0x10010));
         Assert.Equal(new[] { "buffer.write 10010+8", "image.write 10010+8" }, _stores.Calls);
@@ -275,7 +327,7 @@ public sealed class GuestGpuMemoryTests
     public void TryResolveFault_RetriesAfterRecoveryWhenAWatchIsRearmed(FaultKind kind, bool blockReads)
     {
         _stores.BufferHandles = true;
-        _memory.Register(0x10000, 0x1000, ReadWrite);
+        RegisterQuietly(0x10000, 0x1000, ReadWrite);
         _memory.Pages.AddWatch(0x10000, 0x1000, blockReads);
         var rearm = true;
         _stores.Recover = () =>
@@ -301,7 +353,7 @@ public sealed class GuestGpuMemoryTests
     public void TryResolveFault_OutsideMappedSpansIsDeclined()
     {
         _stores.BufferHandles = true;
-        _memory.Register(0x10000, 0x1000, ReadWrite);
+        RegisterQuietly(0x10000, 0x1000, ReadWrite);
 
         Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x20000));
         Assert.False(_memory.MarkCpuWrite(0x20000, 0x10));
@@ -320,7 +372,7 @@ public sealed class GuestGpuMemoryTests
     public void TryResolveFault_ResolvesAccessesToTheLastBytesOfASpan()
     {
         _stores.BufferHandles = true;
-        _memory.Register(0x10000, 0x1000, ReadWrite);
+        RegisterQuietly(0x10000, 0x1000, ReadWrite);
 
         Assert.True(_memory.TryResolveFault(FaultKind.Write, 0x10FFC));
         Assert.True(_memory.TryResolveFault(FaultKind.Read, 0x10FFC));
@@ -335,8 +387,8 @@ public sealed class GuestGpuMemoryTests
     {
         _stores.BufferHandles = true;
         _stores.ImageHandles = true;
-        _memory.Register(0x10000, 0x1000, GuestPageProtection.Read);
-        _memory.Register(0x11000, 0x1000, GuestPageProtection.None);
+        RegisterQuietly(0x10000, 0x1000, GuestPageProtection.Read);
+        RegisterQuietly(0x11000, 0x1000, GuestPageProtection.None);
 
         Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x10010));
         Assert.False(_memory.TryResolveFault(FaultKind.Execute, 0x10010));
@@ -374,7 +426,7 @@ public sealed class GuestGpuMemoryTests
     public void AttachStores_NullStoresDeclineEveryFault()
     {
         _memory.AttachStores(null, null);
-        _memory.Register(0x10000, 0x1000, ReadWrite);
+        RegisterQuietly(0x10000, 0x1000, ReadWrite);
 
         Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x10010));
         Assert.False(_memory.TryResolveFault(FaultKind.Read, 0x10010));
@@ -389,7 +441,7 @@ public sealed class GuestGpuMemoryTests
     public void Unregister_RunsOnTheGpuQueueWhenAttached()
     {
         var queue = new InlineQueue { IsGpuQueueThread = false };
-        _memory.Register(0x10000, 0x1000, ReadWrite);
+        RegisterQuietly(0x10000, 0x1000, ReadWrite);
         _memory.AttachGpuQueue(queue, null);
 
         _memory.Unregister(0x10000, 0x1000);
@@ -461,7 +513,7 @@ public sealed class GuestGpuMemoryTests
     public void Unregister_DrainsTheSchedulerThroughTheTickItCaptured()
     {
         var scheduler = new RecordingScheduler { Active = true };
-        _memory.Register(0x10000, 0x1000, ReadWrite);
+        RegisterQuietly(0x10000, 0x1000, ReadWrite);
         _memory.AttachGpuQueue(new InlineQueue(), scheduler);
 
         _memory.Unregister(0x10000, 0x1000);
@@ -471,7 +523,7 @@ public sealed class GuestGpuMemoryTests
         Assert.False(_memory.Covers(0x10000, 0x1000));
 
         scheduler.Active = false;
-        _memory.Register(0x20000, 0x1000, ReadWrite);
+        RegisterQuietly(0x20000, 0x1000, ReadWrite);
         _memory.Unregister(0x20000, 0x1000);
         Assert.Equal(2, scheduler.Calls.Count);
         _memory.Dispose();
@@ -482,7 +534,7 @@ public sealed class GuestGpuMemoryTests
     {
         var scheduler = new RecordingScheduler { Active = true };
         var queue = new InlineQueue { IsGpuQueueThread = false, Accepting = false };
-        _memory.Register(0x10000, 0x1000, ReadWrite);
+        RegisterQuietly(0x10000, 0x1000, ReadWrite);
         _memory.AttachGpuQueue(queue, scheduler);
 
         var unregister = Task.Run(() => _memory.Unregister(0x10000, 0x1000));
@@ -508,7 +560,7 @@ public sealed class GuestGpuMemoryTests
         try
         {
             var queue = new InlineQueue();
-            _memory.Register(0x10000, 0x1000, ReadWrite);
+            RegisterQuietly(0x10000, 0x1000, ReadWrite);
             _memory.AttachGpuQueue(queue, new RecordingScheduler { Active = true, InsideTickCallback = true });
 
             _memory.Unregister(0x10000, 0x1000);

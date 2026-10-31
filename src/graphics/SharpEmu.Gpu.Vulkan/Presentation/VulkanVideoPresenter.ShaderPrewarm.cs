@@ -9,6 +9,8 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Pipelines;
+using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -35,6 +37,12 @@ internal static unsafe partial class VulkanVideoPresenter
         private int _shaderPrewarmFailed;
         private int _shaderPrewarmRuntimeHits;
         private readonly ConcurrentQueue<ulong> _shaderPrewarmCompleted = new();
+        private readonly ConcurrentDictionary<ulong, Lazy<PrewarmedStage?>> _prewarmStages = new();
+        private readonly ConcurrentBag<ShaderModule> _prewarmStageModules = [];
+
+        private sealed record PrewarmedStage(ShaderProgram Handle, ShaderProgramInfo Program);
+
+        private readonly record struct PrewarmWork(ComputePrewarmRecord? Compute, ShaderCodeCapture? Code, GraphicsPrewarmItem? Graphics);
 
         ShaderPrewarmList? IShaderPipelineHost.ShaderPrewarm => Volatile.Read(ref _shaderPrewarmList);
 
@@ -71,7 +79,7 @@ internal static unsafe partial class VulkanVideoPresenter
             Volatile.Write(ref _shaderPrewarmList, list);
             var compiler = GuestGpu.Current;
             var stamp = list.CoverageStamp(ShaderPrewarmStamp(compiler));
-            if (list.LoadedComputeCount == 0)
+            if (list.LoadedComputeCount == 0 && list.LoadedGraphicsCount == 0)
             {
                 _loadedPrewarmCache = [];
                 _shaderPrewarmFinished = true;
@@ -84,44 +92,60 @@ internal static unsafe partial class VulkanVideoPresenter
                 _loadedPrewarmCache = [];
                 _shaderPrewarmFinished = true;
                 Console.Error.WriteLine(
-                    $"[LOADER][INFO] Shader prewarm skipped: compute={list.LoadedComputeCount} reason=cache-and-recording-match");
+                    $"[LOADER][INFO] Shader prewarm skipped: compute={list.LoadedComputeCount} graphics={list.LoadedGraphicsCount} " +
+                    "reason=cache-and-recording-match");
                 return false;
             }
 
             _loadedPrewarmCache = [];
             // Progress alone does not prove that the saved cache contains those pipelines.
             list.ClearProgress();
-            var pending = list.LoadedComputes();
-            Interlocked.Add(ref _shaderPrewarmFailed, list.LoadedComputeCount - pending.Count);
+            var computes = list.LoadedComputes();
+            var graphics = list.LoadedGraphics();
+            Interlocked.Add(ref _shaderPrewarmFailed,
+                list.LoadedComputeCount - computes.Count + list.LoadedGraphicsCount - graphics.Count);
             var started = Stopwatch.GetTimestamp();
-            if (pending.Count == 0)
+            var pendingCount = computes.Count + graphics.Count;
+            if (pendingCount == 0)
             {
                 FinishShaderPrewarm(list, stamp, started);
                 return false;
             }
 
-            var work = new ConcurrentQueue<(ComputePrewarmRecord Record, ShaderCodeCapture Code)>(pending);
-            var workerCount = Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
+            var work = new ConcurrentQueue<PrewarmWork>(
+                graphics.Select(static item => new PrewarmWork(null, null, item))
+                    .Concat(computes.Select(static item => new PrewarmWork(item.Record, item.Code, null))));
+            var workerCount = Math.Clamp(Environment.ProcessorCount / 2, 1, 8);
             var remaining = workerCount;
             var host = (IShaderPipelineHost)this;
             var sharedInt64Atomics = host.SharedInt64AtomicsEnabled;
             var execGuardElision = host.ExecGuardElisionEnabled;
-            Volatile.Write(ref _shaderPrewarmTotal, pending.Count);
+            Volatile.Write(ref _shaderPrewarmTotal, pendingCount);
             Volatile.Write(ref _shaderPrewarmProgress, 0);
             Console.Error.WriteLine(
-                $"[LOADER][INFO] Shader prewarm started: compute={pending.Count} resumed=0 workers={workerCount}");
+                $"[LOADER][INFO] Shader prewarm started: compute={computes.Count} graphics={graphics.Count} resumed=0 workers={workerCount}");
             SetShaderPrewarmState(true);
             _shaderPrewarmThreads = new Thread[workerCount];
             for (var index = 0; index < workerCount; index++)
             {
-                _shaderPrewarmThreads[index] = new Thread(() =>
+                // A fatal condition on a prewarm thread abandons that pipeline (GpuFatal.Speculatively);
+                // the render thread compiles it itself when a draw needs it.
+                _shaderPrewarmThreads[index] = new Thread(() => GpuFatal.Speculatively(() =>
                 {
                     while (!_shaderPrewarmStopping && work.TryDequeue(out var item))
                     {
-                        if (PrewarmComputePipeline(item.Record, item.Code, compiler, sharedInt64Atomics, execGuardElision))
+                        if (item.Graphics is { } pipeline)
                         {
-                            _shaderPrewarmCompleted.Enqueue(ShaderPrewarmList.Identity(item.Record));
+                            if (PrewarmGraphicsPipeline(pipeline, compiler))
+                            {
+                                _shaderPrewarmCompleted.Enqueue(pipeline.Identity);
+                            }
                         }
+                        else if (PrewarmComputePipeline(item.Compute!, item.Code!, compiler, sharedInt64Atomics, execGuardElision))
+                        {
+                            _shaderPrewarmCompleted.Enqueue(ShaderPrewarmList.Identity(item.Compute!));
+                        }
+
                         if (Interlocked.Increment(ref _shaderPrewarmProgress) % PrewarmProgressBatch == 0)
                         {
                             FlushShaderPrewarmProgress(list, stamp);
@@ -131,9 +155,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     FlushShaderPrewarmProgress(list, stamp);
                     if (Interlocked.Decrement(ref remaining) == 0)
                     {
+                        ReleasePrewarmStages();
                         FinishShaderPrewarm(list, stamp, started);
                     }
-                })
+
+                    return 0;
+                }))
                 {
                     IsBackground = true,
                     Priority = ThreadPriority.BelowNormal,
@@ -162,8 +189,12 @@ internal static unsafe partial class VulkanVideoPresenter
         private static string ShaderPrewarmStampPart(Type type) =>
             type.Assembly.ManifestModule.ModuleVersionId.ToString("N");
 
-        private string ShaderPrewarmStamp(IGuestGpuBackend compiler) =>
-            BuildShaderPrewarmStamp(compiler.GetType(), DriverCacheSignature());
+        private string ShaderPrewarmStamp(IGuestGpuBackend compiler)
+        {
+            var stamp = BuildShaderPrewarmStamp(compiler.GetType(), DriverCacheSignature());
+            var frontends = SharpEmu.Libs.Agc.AgcExports.ShaderFrontendStamp();
+            return frontends.Length == 0 ? stamp : $"{stamp}|frontends-v1|{frontends}";
+        }
 
         private string BuildShaderPrewarmStamp(Type compilerType, string driverSignature) =>
             string.Join(
@@ -204,9 +235,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     _supportsShaderSignedZeroInfNanPreserveFloat32, out var compiled, out var layout, out var error,
                     ((IShaderPipelineHost)this).ComputeWave64SubgroupNative,
                     ((IShaderPipelineHost)this).ComputeRunsOn32LaneSubgroups(record.Info),
-                    ImageInt64AtomicsEnabled))
+                    ImageInt64AtomicsEnabled, tableBlocks: ((IShaderPipelineHost)this).TableBlocks,
+                    frontendOf: SharpEmu.Libs.Agc.AgcExports.ShaderFrontendForDomain))
             {
-                NoteShaderPrewarmFailure(record, error);
+                NoteShaderPrewarmFailure("cs", record.Hash, record.Address, error);
                 return false;
             }
 
@@ -229,7 +261,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             catch (Exception exception)
             {
-                NoteShaderPrewarmFailure(record, exception.Message);
+                NoteShaderPrewarmFailure("cs", record.Hash, record.Address, exception.Message);
                 return false;
             }
             finally
@@ -251,13 +283,180 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private void NoteShaderPrewarmFailure(ComputePrewarmRecord record, string error)
+        private bool PrewarmGraphicsPipeline(GraphicsPrewarmItem item, IGuestGpuBackend compiler)
+        {
+            var vertex = PrewarmStageProgram(item.Vertex, compiler);
+            var pixel = item.Pixel is { } pixelSource ? PrewarmStageProgram(pixelSource, compiler) : null;
+            if (vertex is null || (item.Pixel is not null && pixel is null))
+            {
+                Interlocked.Increment(ref _shaderPrewarmFailed);
+                return false;
+            }
+
+            var record = item.Record;
+            var rectangleList = record.StaticParameters.Topology == SharpEmu.Libs.Gpu.Abstractions.GpuPrimitiveTopology.PatchList;
+            if (rectangleList && !_supportsFillRectangle)
+            {
+                return true;
+            }
+
+            var description = new GraphicsPipelineDescription
+            {
+                Rendering = record.Rendering,
+                VertexInput = record.VertexInput,
+                VertexInfo = record.VertexInfo,
+                VertexProgram = vertex.Handle,
+                VertexStage = vertex.Program,
+                PixelInfo = item.Pixel?.Record.Options.PixelInfo,
+                PixelProgram = pixel?.Handle ?? default,
+                PixelStage = pixel?.Program,
+                StaticParameters = record.StaticParameters,
+            };
+            var bindings = new List<DescriptorSetLayoutBinding>();
+            DescriptorSetLayout setLayout = default;
+            PipelineLayout pipelineLayout = default;
+            try
+            {
+                CollectLayoutBindings(bindings, description.VertexStage, ShaderStage.Vertex);
+                if (description.PixelStage is { } pixelStage)
+                {
+                    CollectLayoutBindings(bindings, pixelStage, ShaderStage.Pixel);
+                }
+
+                setLayout = CreateDescriptorSetLayout(bindings, out _, out _);
+                var bindlessHeap = UsesBindlessHeap(description.VertexStage) ||
+                    (description.PixelStage is { } heapPixelStage && UsesBindlessHeap(heapPixelStage));
+                pipelineLayout = CreatePipelineLayout(setLayout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, bindlessHeap);
+                var pipeline = rectangleList
+                    ? CreateRenderPipeline(description, PrimitiveTopology.TriangleList, pipelineLayout, PolygonMode.FillRectangleNV, prewarm: true)
+                    : CreateRenderPipeline(description, record.StaticParameters.Topology.ToVk(), pipelineLayout, prewarm: true);
+                _vk.DestroyPipeline(_device, pipeline, null);
+                Interlocked.Increment(ref _shaderPrewarmCompiled);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                NoteShaderPrewarmFailure("vs", item.Vertex.Record.Hash, item.Vertex.Record.Registered.CodeAddress, exception.Message);
+                return false;
+            }
+            finally
+            {
+                if (pipelineLayout.Handle != 0)
+                {
+                    _vk.DestroyPipelineLayout(_device, pipelineLayout, null);
+                }
+
+                if (setLayout.Handle != 0)
+                {
+                    _vk.DestroyDescriptorSetLayout(_device, setLayout, null);
+                }
+            }
+        }
+
+        private PrewarmedStage? PrewarmStageProgram(PrewarmStage stage, IGuestGpuBackend compiler) =>
+            _prewarmStages.GetOrAdd(stage.Identity, _ => new Lazy<PrewarmedStage?>(() => CompilePrewarmStage(stage, compiler))).Value;
+
+        private PrewarmedStage? CompilePrewarmStage(PrewarmStage stage, IGuestGpuBackend compiler)
+        {
+            var record = stage.Record;
+            var code = stage.Code;
+            var label = record.Stage == ShaderStage.Vertex ? "vs" : "ps";
+            try
+            {
+                IShaderFrontend? frontend = null;
+                if (code.FrontendDomain != 0 && (frontend = SharpEmu.Libs.Agc.AgcExports.ShaderFrontendForDomain(code.FrontendDomain)) is null)
+                {
+                    NoteShaderPrewarmFailure(label, record.Hash, record.Registered.CodeAddress,
+                        $"The shader frontend 0x{code.FrontendDomain:X16} is not registered.");
+                    return null;
+                }
+
+                var registered = record.Registered with { Frontend = frontend, FrontendUserData = code.FrontendUserData };
+                var source = new ShaderSource(registered, record.Hash, new uint[record.UserDataCount], record.UserDataBase, record.Stage);
+                var programs = new ShaderProgramCache(code.CreateContext(), compiler, new PrewarmShaderHost(this));
+                var (handle, program) = programs.CompilePrewarmStage(source, record.Options, record.Specialization, record.PushDataCursor);
+                return new PrewarmedStage(handle, program);
+            }
+            catch (Exception exception)
+            {
+                NoteShaderPrewarmFailure(label, record.Hash, record.Registered.CodeAddress, exception.Message);
+                return null;
+            }
+        }
+
+        private void ReleasePrewarmStages()
+        {
+            _prewarmStages.Clear();
+            while (_prewarmStageModules.TryTake(out var module))
+            {
+                _vk.DestroyShaderModule(_device, module, null);
+            }
+        }
+
+        private void NoteShaderPrewarmFailure(string kind, ulong hash, ulong address, string error)
         {
             if (Interlocked.Increment(ref _shaderPrewarmFailed) <= MaxLoggedPrewarmFailures)
             {
                 Console.Error.WriteLine(
-                    $"[LOADER][WARN] Shader prewarm failed: cs=0x{record.Hash:X16} shader=0x{record.Address:X16} error={error}");
+                    $"[LOADER][WARN] Shader prewarm failed: {kind}=0x{hash:X16} shader=0x{address:X16} error={error}");
             }
+        }
+
+        private sealed class PrewarmShaderHost(Presenter presenter) : IShaderPipelineHost
+        {
+            private readonly IShaderPipelineHost _inner = presenter;
+
+            public uint MaxPushDescriptors => _inner.MaxPushDescriptors;
+            public bool ComputeWave64Supported => _inner.ComputeWave64Supported;
+            public bool ComputeWave64SubgroupNative => _inner.ComputeWave64SubgroupNative;
+            public bool ComputeRunsOn32LaneSubgroups(ComputeInputInfo input) => _inner.ComputeRunsOn32LaneSubgroups(input);
+            public bool MipStatisticsSubgroupReduction => _inner.MipStatisticsSubgroupReduction;
+            public bool RuntimeCallRecordsSupported => _inner.RuntimeCallRecordsSupported;
+            public bool CallMarksSupported => _inner.CallMarksSupported;
+            public bool TableBlocks => _inner.TableBlocks;
+            public bool GraphicsSubgroupOperationsEnabled => _inner.GraphicsSubgroupOperationsEnabled;
+            public bool SharedInt64AtomicsEnabled => _inner.SharedInt64AtomicsEnabled;
+            public bool ImageInt64AtomicsEnabled => _inner.ImageInt64AtomicsEnabled;
+            public bool ShaderSignedZeroInfNanPreserveFloat32Supported => _inner.ShaderSignedZeroInfNanPreserveFloat32Supported;
+            public bool ExecGuardElisionEnabled => _inner.ExecGuardElisionEnabled;
+            public bool PerVertexPixelInputsSupported => _inner.PerVertexPixelInputsSupported;
+            public bool ClipDistanceEnabled => _inner.ClipDistanceEnabled;
+            public bool ShaderDrawParametersSupported => _inner.ShaderDrawParametersSupported;
+            public bool MeshShadersSupported => _inner.MeshShadersSupported;
+            public MeshShaderLimits MeshLimits => _inner.MeshLimits;
+            public uint MeshSubgroupSize => _inner.MeshSubgroupSize;
+            public RenderHostLimits Limits => _inner.Limits;
+            public bool SupportsDualSourceBlend => _inner.SupportsDualSourceBlend;
+            public SharpEmu.Libs.Gpu.Abstractions.GpuSampleCount NoAttachmentSampleCounts => _inner.NoAttachmentSampleCounts;
+
+            public bool TryResolveColorOutput(uint dataFormat, uint numberType, uint componentSwap, out Gen5PixelOutputKind outputKind,
+                out Gen5ColorComponentMapping componentMapping) =>
+                _inner.TryResolveColorOutput(dataFormat, numberType, componentSwap, out outputKind, out componentMapping);
+
+            public bool TryReadGuestWord(ulong address, out uint word)
+            {
+                word = 0;
+                return false;
+            }
+
+            public bool TryReadCleanGuestWord(ulong address, out uint word)
+            {
+                word = 0;
+                return false;
+            }
+
+            public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
+            {
+                var module = presenter.CreateShaderModule(shader.Payload);
+                presenter._prewarmStageModules.Add(module);
+                return module.Handle;
+            }
+
+            public PipelineHandle CreateGraphicsPipeline(GraphicsPipelineDescription description) =>
+                throw new NotSupportedException("The prewarm host does not create pipelines.");
+
+            public PipelineHandle CreateComputePipeline(ComputePipelineDescription description) =>
+                throw new NotSupportedException("The prewarm host does not create pipelines.");
         }
 
         private void FinishShaderPrewarm(ShaderPrewarmList list, string stamp, long started)

@@ -4,8 +4,9 @@ using System.Text.Json;
 namespace SharpEmu.Application;
 
 /// <summary>Owned metadata only; image files are loaded by the selected frontend.</summary>
+/// <param name="CompatibilityMode">The executable runs in the PS4 compatibility mode (GnmMode).</param>
 public sealed record CatalogGame(string Name, string? TitleId, string? Version, string Path,
-    long SizeBytes, string? CoverPath, string? BackgroundPath);
+    long SizeBytes, string? CoverPath, string? BackgroundPath, bool CompatibilityMode = false);
 
 public static class GameCatalog
 {
@@ -13,8 +14,13 @@ public static class GameCatalog
     /// When given, game archives (<c>*.zar</c>) are listed too; it maps an archive to the eboot path
     /// whose sce_sys folder holds that archive's metadata, or null when none could be read.
     /// </param>
+    /// <param name="compatibilityInfo">
+    /// When given, asked about an executable without param.json metadata: it returns the title, title
+    /// id and version of a PS4 (compatibility mode) executable, or null when it is not one.
+    /// </param>
     public static List<CatalogGame> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths,
-        Func<string, string?>? archiveMetadataPath = null)
+        Func<string, string?>? archiveMetadataPath = null,
+        Func<string, (string? Title, string? TitleId, string? Version)?>? compatibilityInfo = null)
     {
         var games = new List<CatalogGame>();
         var seen = new HashSet<string>(GameLibraryPath.Comparer);
@@ -70,9 +76,16 @@ public static class GameCatalog
                     }
 
                     var (title, titleId, version) = TryReadParamJson(metadataPath);
+                    var compatibilityMode = false;
+                    if (title is null && titleId is null && compatibilityInfo?.Invoke(fullPath) is { } compatibility)
+                    {
+                        compatibilityMode = true;
+                        (title, titleId, version) = compatibility;
+                    }
+
                     games.Add(new CatalogGame(
                         title ?? GameNameFor(metadataPath), titleId, version, fullPath, size,
-                        FindCoverFor(metadataPath), FindBackgroundFor(metadataPath)));
+                        FindCoverFor(metadataPath), FindBackgroundFor(metadataPath), compatibilityMode));
                 }
             }
             catch (Exception exception)

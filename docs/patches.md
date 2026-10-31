@@ -13,7 +13,10 @@ filter by XML file, and select a patch to see its author, notes, version and tar
 executable. Selections are saved automatically.
 
 Use **Download patches** in this window to fetch compatible XML files from
-[PS5 Game Patches](https://github.com/sharpemu/ps5patches). The download index
+[PS4 Game Patches](https://github.com/sharpemu/ps4patches) for PS4 games in GnmMode,
+or [PS5 Game Patches](https://github.com/sharpemu/ps5patches) for PS5 games. The
+repository is selected automatically from the game's compatibility mode; both
+use the same window, installation directory, and patch settings. The download index
 matches both title ID and game version; unrelated games and incompatible
 versions are not downloaded. A dialog confirms completion or reports that no
 compatible patch was found. Downloads are not enabled automatically.
@@ -23,6 +26,8 @@ launch, including CLI launches. Selections are saved separately per title ID.
 
 The loader matches `TitleID`, `AppVer` and `AppElf`, relocates addresses using
 `ImageBase`, and modifies loaded memory, not game files or `.zar` archives.
+Imported PS4 patches explicitly use `ImageBase="0x00400000"` to preserve their
+original virtual-address convention when the executable is relocated.
 Supported types are `byte`, `bytes16`, `bytes32`, `bytes64`, `bytes`, `float32`,
 `float64`, `utf8`, `utf16`, `mask` and `mask_jump32`. Numbers are written in
 little-endian order; text is null-terminated automatically. Pattern searches are
@@ -32,5 +37,6 @@ require executable segments and valid signed 32-bit displacements.
 Invalid lines, unresolved patterns and out-of-range writes reject the whole
 patch. `AppVer="mask"` requires every line to use `mask` or `mask_jump32`.
 Updating a patch's contents requires enabling it again. Only use patches from
-sources you trust. See [PS5 Game Patches](https://github.com/sharpemu/ps5patches)
+sources you trust. See [PS4 Game Patches](https://github.com/sharpemu/ps4patches)
+and [PS5 Game Patches](https://github.com/sharpemu/ps5patches)
 for the format reference, examples and available patches.

@@ -48,7 +48,7 @@ public readonly record struct HostViewportTransform(
     {
         var clip = context.Clip;
         var control = context.ScreenViewport.TransformControl;
-        ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
+        ref readonly var viewport = ref context.ScreenViewport.Primary;
         float x;
         float y;
         float width;
@@ -153,7 +153,7 @@ public readonly record struct HostViewportTransform(
     {
         var clip = context.Clip;
         var control = context.ScreenViewport.TransformControl;
-        ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
+        ref readonly var viewport = ref context.ScreenViewport.Primary;
         var near = !clip.NearZClipDisable;
         var far = !clip.FarZClipDisable;
         var planes = (near ? clip.DirectXClipSpace ? ShaderDepthPlanes.NearAtZero : ShaderDepthPlanes.NearAtNegativeW : 0) |
@@ -208,7 +208,7 @@ public readonly record struct HostViewportTransform(
             return false;
         }
 
-        ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
+        ref readonly var viewport = ref context.ScreenViewport.Primary;
         if (context.DepthRenderOverride.DisableViewportClamp)
         {
             return (near && far) ||
@@ -224,7 +224,7 @@ public readonly record struct HostViewportTransform(
     // DB_RENDER_OVERRIDE.DISABLE_VIEWPORT_CLAMP only the depth format's own range.
     private static (float Min, float Max) DepthClampRange(ContextRegisters context)
     {
-        ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
+        ref readonly var viewport = ref context.ScreenViewport.Primary;
         if (context.DepthRenderOverride.DisableViewportClamp)
         {
             // A unorm depth holds [0, 1] whatever the clamp; a float one keeps any value,

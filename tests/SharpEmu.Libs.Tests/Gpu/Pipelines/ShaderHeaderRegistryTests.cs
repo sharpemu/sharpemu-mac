@@ -5,6 +5,8 @@ using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Tests.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
+using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 
@@ -16,6 +18,34 @@ public sealed class ShaderHeaderRegistryTests : IDisposable
     private const ulong Header = PipelineTestGuest.MemoryBase + 0x8000;
 
     public void Dispose() => _fatal.Dispose();
+
+    [Fact]
+    public void FrontendHeadersReflectTheCurrentDrawUserDataAtTheSameCodeAddress()
+    {
+        var guest = new PipelineTestGuest();
+        var frontend = new UserDataFrontend();
+        var registry = new ShaderHeaderRegistry(guest.Context, _ => 0, _ => null, frontend);
+        var first = registry.RequireEntry(Code, "fetch", [1u]);
+        var second = registry.RequireEntry(Code, "fetch", [2u]);
+        Assert.Equal(4u, first.Shader.CodeSizeBytes);
+        Assert.Equal(8u, second.Shader.CodeSizeBytes);
+        Assert.Same(frontend, first.Shader.Frontend);
+        Assert.Equal(first.Registrations, second.Registrations);
+    }
+
+    private sealed class UserDataFrontend : IShaderFrontend
+    {
+        public ulong CacheDomain => 1;
+        public RegisteredShader ReadShader(CpuContext context, ulong codeAddress, string label, ReadOnlySpan<uint> userData = default) =>
+            new(codeAddress, 0, userData[0] * 4, 0, 0, 0, 0, 0, 0);
+
+        public bool TryDecode(CpuContext context, RegisteredShader shader, out Gen5ShaderProgram program, out string error)
+        {
+            program = null!;
+            error = string.Empty;
+            return false;
+        }
+    }
 
     [Theory]
     [InlineData(3, 19)]

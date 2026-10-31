@@ -27,6 +27,37 @@ public sealed class RenderExecutorComputeTests : IDisposable
     public void Dispose() => _fatal.Dispose();
 
     [Fact]
+    public void FrontendImageCopyFallbackRunsOnlyWhenTheCommandIsRecorded()
+    {
+        var fallbackCalls = 0;
+        _pipelines.Compute = new ComputeProgram
+        {
+            ImageCopy = new(default, default, () =>
+            {
+                fallbackCalls++;
+                return new ComputeProgram { Consumed = true };
+            }),
+        };
+        var sink = new CapturedDispatch();
+        var resolver = new RenderExecutor(_host, _pipelines, sink);
+        resolver.Dispatch(5, Banks(), 1, 1, 1, 0x41);
+        Assert.Equal(0, fallbackCalls);
+        Assert.NotNull(sink.Command);
+        Assert.False(sink.Command.Skipped);
+        var recorder = new RenderRecorder(_host, _pipelines, true, returnsRecords: false);
+        recorder.Record(sink.Command);
+        Assert.Equal(1, fallbackCalls);
+    }
+
+    private sealed class CapturedDispatch : IResolvedCommandSink
+    {
+        public ResolvedDispatch? Command;
+        public long NextSequence() => 1;
+        public void Record(ResolvedDraw record) => throw new InvalidOperationException();
+        public void Record(ResolvedDispatch record) => Command = record;
+    }
+
+    [Fact]
     public void CompletedPipeline_RetriesPublicationBeforeDispatch()
     {
         _pipelines.PendingComputeCompletion = Task.CompletedTask;
@@ -83,7 +114,8 @@ public sealed class RenderExecutorComputeTests : IDisposable
         AssertNotDispatched();
         Assert.Equal(1, _pipelines.ComputePipelineAttempts);
         Assert.DoesNotContain("preparation_begin", _host.Calls);
-        Assert.Equal("reset_bindings", _host.Calls[^1]);
+        Assert.DoesNotContain("reset_bindings", _host.Calls);
+        Assert.StartsWith("debug DispatchDirect", _host.Calls[^1]);
 
         completion.SetResult();
         _executor.Dispatch(6, Banks(), 4, 2, 1, 0x41);
@@ -194,6 +226,18 @@ public sealed class RenderExecutorComputeTests : IDisposable
         _executor.Dispatch(1, Banks(), 0, 0, 0, 0x41, 0x1000);
 
         Assert.Contains("create_compute_pipeline", _pipelines.Calls);
+    }
+
+    [Fact]
+    public void ThreadDimensionInitiator_WithNoThreads_IsSkippedBeforeTheProgramLookup()
+    {
+        var banks = Banks();
+        banks.Shader.Compute.ThreadsX = 8;
+        _executor.Dispatch(1, banks, 0, 17, 1, 0x41 | (1u << 5));
+
+        AssertNotDispatched();
+        Assert.Empty(_pipelines.Calls);
+        Assert.Equal(0, _host.PreparationsOpened);
     }
 
     [Fact]

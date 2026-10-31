@@ -46,10 +46,10 @@ public sealed partial class GuestImageCacheTests
         harness.Worker.Run(() =>
         {
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            source.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            source.Transition(AccessFlags.TransferWriteBit, null, command);
             var clear = new ClearColorValue { Uint32_0 = 0x77777777 };
             var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 2);
-            harness.Vulkan.Vk.CmdClearColorImage(command, source.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+            harness.Vulkan.Vk.CmdClearColorImage(command, source.Backing.Handle, ImageLayout.General, &clear, 1, &range);
         });
         harness.MarkGpuWritten(sourceId);
         if (cpuWrite)

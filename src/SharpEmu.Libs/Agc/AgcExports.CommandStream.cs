@@ -24,7 +24,20 @@ public static partial class AgcExports
     internal sealed record RetainedTargetlessDraw(RegisterBanks Banks, TargetlessDrawArguments Arguments);
 
     // A draw or dispatch the translation deferred, with the banks it was issued under.
-    public abstract record DeferredWork;
+    public abstract record DeferredWork
+    {
+        public virtual bool IsDispatch => false;
+
+        public virtual int CostKind => IsDispatch ? Diagnostics.ItemCostTally.Dispatch : Diagnostics.ItemCostTally.ResolvedDraw;
+    }
+
+    // A guest cache flush in stream order, recorded by whichever thread records its neighbours.
+    internal sealed record GlobalBarrierWork : DeferredWork
+    {
+        public static readonly GlobalBarrierWork Instance = new();
+
+        public override int CostKind => Diagnostics.ItemCostTally.Barrier;
+    }
 
     // Takes the deferred work of a command stream interpreted on its own thread.
     public interface IDeferredWorkSink
@@ -32,10 +45,21 @@ public static partial class AgcExports
         // True on the thread that interprets the stream; elsewhere the translation runs work itself.
         bool IsProducerThread { get; }
 
-        // The non-draw items handed over so far; a draw's resolution waits until they ran.
-        long Gate { get; }
+        // The non-draw items handed over so far; a prefetched draw's resolution waits until they ran.
+        long Gate => 0;
 
-        void EnqueueDeferred(DeferredWork work, bool isDraw);
+        // The sequence the next item takes; a sink that does not number its items keeps it at zero.
+        long NextSequence => 0;
+
+        long EnqueueDeferred(DeferredWork work, bool isDraw);
+
+        void WaitPending(long sequence)
+        {
+        }
+
+        void NoteKnownWrite(KnownGpuWrite known, long sequence)
+        {
+        }
     }
 
     // The snapshots the submit-time prepass captured for one submission.
@@ -60,7 +84,7 @@ public static partial class AgcExports
     internal static IReadOnlyDictionary<uint, uint> GetGeometryCaptureRegistersForTests(ICpuMemory memory) =>
         new Dictionary<uint, uint>(_submittedGpuStates.GetValue(CanonicalMemory(memory), static _ => new SubmittedGpuState()).GeometryCapture.ShRegisters);
 
-    internal static DenseShaderRegisterMap GetExecutedShaderRegistersForTests(ICpuMemory memory) =>
+    internal static ShaderRegisterMirror GetExecutedShaderRegistersForTests(ICpuMemory memory) =>
         _submittedGpuStates.GetValue(CanonicalMemory(memory), static _ => new SubmittedGpuState()).Graphics.ShRegisters;
 
     // Builds the snapshots of one draw as the prepass would, for tests of the execution-time check.
@@ -166,7 +190,7 @@ public static partial class AgcExports
         new(memory, host);
 
     // Translates the draws, dispatches, resets and flips of one interpreter host thread.
-    public sealed class CommandStreamTranslation
+    public sealed partial class CommandStreamTranslation
     {
         private readonly ICommandStreamHost _host;
         private readonly CpuContext _context;
@@ -175,28 +199,39 @@ public static partial class AgcExports
         private int _currentQueueId;
         private readonly ShaderPipelineCache? _pipelines;
         private readonly RenderExecutor? _executor;
+        private readonly RenderRecorder? _recorder;
+        private readonly RecordPool? _pool;
+        private readonly bool _retainsTargetlessDraws;
 
         internal CommandStreamTranslation(ICpuMemory memory, ICommandStreamHost host, bool? recycleLocalDraws = null)
         {
             _host = host;
             _recycleLocalDraws = recycleLocalDraws ?? LocalDrawReuseEnabled;
+            _retainsTargetlessDraws = ShaderFrontendOf(memory)?.RetainsTargetlessDraws ?? true;
             _context = new CpuContext(memory, Generation.Gen5);
             _gpuState = _submittedGpuStates.GetValue(CanonicalMemory(memory), static _ => new SubmittedGpuState());
-            if (host is IRenderHost renderHost && host is IShaderPipelineHost pipelineHost)
+            if (host.RenderHost is { } renderHost && host is IShaderPipelineHost pipelineHost)
             {
                 _pipelines = new ShaderPipelineCache(_context, pipelineHost, GuestGpu.Current, CreateShaderHeaderRegistry(_context));
-                _executor = new RenderExecutor(renderHost, _pipelines);
-                if (host is IConcurrentResolveHost { ResolvesConcurrently: true } concurrentHost)
+                var pool = new RecordPool();
+                _pool = pool;
+                _executor = new RenderExecutor(renderHost, _pipelines, new ExecutorSink(this), pool: pool);
+                _recorder = new RenderRecorder(renderHost, _pipelines, RenderExecutor.DefaultStrictDrawResources, _executor.PendingWrites, pool);
+                // A host that answers reads from another thread (Metal) takes whole draws and dispatches
+                // through the sink and resolves them where they run, with their programs prefetched.
+                if (host is IConcurrentResolveHost concurrentHost)
                 {
-                    _parallel = new ParallelProgramPrefetch(_executor, renderHost, concurrentHost);
-                    _executor.Prefetch = _parallel;
+                    _defersWholeWork = true;
+                    if (concurrentHost.ResolvesConcurrently)
+                    {
+                        _parallel = new ParallelProgramPrefetch(_executor, renderHost, concurrentHost);
+                        _executor.Prefetch = _parallel;
+                    }
                 }
             }
         }
 
-        // Resolves the programs of deferred draws ahead of them, for a host that answers reads from
-        // another thread; draws are deferred whenever it exists.
-        private readonly ParallelProgramPrefetch? _parallel;
+        internal PendingGpuWrites? PendingWrites => _executor?.PendingWrites;
 
         // The context bank of the queue whose slice runs now; the Metal host rebuilds its records from it.
         public ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
@@ -298,20 +333,87 @@ public static partial class AgcExports
             uint DispatchInitiator,
             ulong IndirectArgumentsAddress) : DeferredWork;
 
-        // With the command stream on its own thread, its draws and dispatches reach the render
-        // thread through the sink, which runs them with RunDeferred in stream order.
-        public IDeferredWorkSink? Sink { get; set; }
+        private sealed record ResolvedDrawWork(ResolvedDraw Record) : DeferredWork;
+        // Resolves the programs of deferred draws ahead of them, for a host that answers reads from
+        // another thread; draws are deferred whenever it exists.
+        private readonly ParallelProgramPrefetch? _parallel;
 
-        private bool Producing => Sink is { IsProducerThread: true };
+        // The host resolves draws and dispatches where they run (PendingDraw/PendingDispatch), not on
+        // the interpreting thread into resolved records (ResolvedDrawWork/ResolvedDispatchWork).
+        private readonly bool _defersWholeWork;
 
         // The queue state of the work the render thread runs now; _current belongs to the thread
         // interpreting the stream.
         private SubmittedDcbState? _executing;
 
+        private sealed record ResolvedDispatchWork(ResolvedDispatch Record) : DeferredWork
+        {
+            public override bool IsDispatch => true;
+        }
+
+        // With the command stream on its own thread, its draws and dispatches reach the render thread
+        // through the sink, which runs or records them with RunDeferred in stream order.
+        private IDeferredWorkSink? _sink;
+
+        public IDeferredWorkSink? Sink
+        {
+            get => _sink;
+            set
+            {
+                _sink = value;
+                _resolvePool?.Dispose();
+                _resolvePool = value is not null && _executor is not null && !_defersWholeWork && _pipelines!.SupportsParallelResolution &&
+                    _host.RenderHost is { } renderHost && _host.ResolveWorkerCount > 0
+                    ? new ResolvePool(this, renderHost, _host.ResolveWorkerCount)
+                    : null;
+            }
+        }
+
+        private bool Producing => Sink is { IsProducerThread: true };
+
+        private sealed class ExecutorSink(CommandStreamTranslation owner) : IResolvedCommandSink
+        {
+            public long NextSequence() => owner.Producing ? owner.Sink!.NextSequence : 0;
+
+            public void Record(ResolvedDraw record)
+            {
+                owner.LearnDrawWrites(record);
+                if (owner.Producing)
+                {
+                    owner.Sink!.EnqueueDeferred(new ResolvedDrawWork(record), isDraw: true);
+                }
+                else
+                {
+                    owner._recorder!.Record(record);
+                }
+            }
+
+            public void Record(ResolvedDispatch record)
+            {
+                if (!owner.Producing)
+                {
+                    owner._recorder!.Record(record);
+                    return;
+                }
+
+                var sink = owner.Sink!;
+                if (!record.Skipped && record.IndirectArgumentsAddress == 0 && record.GroupsX != 0 && record.GroupsY != 0 && record.GroupsZ != 0 &&
+                    record.Program.KnownWrite is { } known)
+                {
+                    sink.NoteKnownWrite(known, record.Sequence);
+                }
+
+                sink.EnqueueDeferred(new ResolvedDispatchWork(record), isDraw: false);
+            }
+        }
+
         public void RunDeferred(DeferredWork work)
         {
             switch (work)
             {
+                case DeferredDraw deferred:
+                    JoinDeferredDraw(deferred);
+                    return;
                 case PendingDraw draw:
                 {
                     using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DeferredDrawTranslation);
@@ -337,7 +439,7 @@ public static partial class AgcExports
                         }
                     }
 
-                    break;
+                    return;
                 }
                 case PendingDispatch dispatch:
                 {
@@ -354,8 +456,26 @@ public static partial class AgcExports
                         _executing = executing;
                     }
 
-                    break;
+                    return;
                 }
+            }
+
+            RunDeferred(work, _recorder!);
+        }
+
+        internal void RunDeferred(DeferredWork work, RenderRecorder recorder)
+        {
+            switch (work)
+            {
+                case ResolvedDrawWork draw:
+                    recorder.Record(draw.Record);
+                    break;
+                case ResolvedDispatchWork dispatch:
+                    recorder.Record(dispatch.Record);
+                    break;
+                case DeferredDraw deferred:
+                    recorder.Record(TakeWorkerResolvedDraw(deferred));
+                    break;
                 default:
                     throw _host.Fatal($"The deferred work is unknown: {work.GetType().Name}.");
             }
@@ -495,8 +615,32 @@ public static partial class AgcExports
             _parallel?.WaitIdle();
         }
 
+        // A recorder for another recording thread: it neither releases pending writes nor returns the
+        // records; CompleteDeferred does both once the work is joined in stream order.
+        internal RenderRecorder CreateWorkerRecorder(IRenderHost host) =>
+            new(host, _pipelines ?? throw _host.Fatal("The translation has no pipelines."), RenderExecutor.DefaultStrictDrawResources, pendingWrites: null, _pool, returnsRecords: false);
+
+        internal void CompleteDeferred(DeferredWork work)
+        {
+            switch (work)
+            {
+                case ResolvedDrawWork draw:
+                    _executor!.PendingWrites.Release(draw.Record.Sequence);
+                    _pool!.Return(draw.Record);
+                    break;
+                case ResolvedDispatchWork dispatch:
+                    _executor!.PendingWrites.Release(dispatch.Record.Sequence);
+                    _pool!.Return(dispatch.Record);
+                    break;
+                case DeferredDraw deferred:
+                    CompleteDeferredDraw(deferred);
+                    break;
+            }
+        }
+
         private bool TryRunExecutorDraw(ulong submitId, SubmittedDcbState state, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
         {
+            Diagnostics.DispatchRunTally.NoteDraw();
             if (_executor is null)
             {
                 return false;
@@ -504,19 +648,20 @@ public static partial class AgcExports
 
             var banks = RequireTypedRegisters(state);
             var producing = Producing;
-            if (!producing)
+            if (!_defersWholeWork || !producing)
             {
-                // A draw run by the render thread records its targets there.
+                // A whole draw deferred to the render thread records its targets there (RunDeferred).
                 RecordKnownColorTargets(state, banks);
             }
 
             state.FrameDrawCount++;
             state.SawIndexedDraw |= indexed;
-            if (_parallel is not null || producing)
+            if (_defersWholeWork && (_parallel is not null || producing))
             {
                 var snapshot = banks.Snapshot();
                 var pending = TakePendingDraw(producing, submitId, state, snapshot, indexed, in indexedArguments, in autoArguments,
-                    _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0, indexed));
+                    _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0, indexed,
+                        indexed ? indexedArguments.StartInstanceUserData : autoArguments.StartInstanceUserData));
                 if (producing)
                 {
                     Sink!.EnqueueDeferred(pending, isDraw: true);
@@ -531,7 +676,17 @@ public static partial class AgcExports
                 return true;
             }
 
-            RunExecutorDraw(submitId, state, banks, indexed, indexedArguments, autoArguments);
+            if (_resolvePool is { } pool && producing && _executor.DrawHasTargets(banks) && DrawKnownNotToWrite(banks))
+            {
+                var deferStarted = DcbParseProfile.Begin();
+                DeferDraw(pool, submitId, banks, indexed, in indexedArguments, in autoArguments);
+                DcbParseProfile.RecordDraw(deferStarted);
+                state.CurrentIndexSnapshot = null;
+                state.CurrentVertexSnapshot = null;
+                return true;
+            }
+
+            RunExecutorDraw(submitId, state, banks, indexed, in indexedArguments, in autoArguments);
             return true;
         }
 
@@ -540,6 +695,7 @@ public static partial class AgcExports
         {
             var executor = _executor!;
             var drawStarted = DcbParseProfile.Begin();
+            _learningKey = (banks.Shader.Vertex.ExportAddress, banks.Shader.Pixel.Address);
             try
             {
                 if (indexed)
@@ -553,6 +709,7 @@ public static partial class AgcExports
             }
             finally
             {
+                _learningKey = default;
                 DcbParseProfile.RecordDraw(drawStarted);
                 // The snapshot fields belong to the interpreting thread when it is another one.
                 if (clearSnapshots)
@@ -564,14 +721,17 @@ public static partial class AgcExports
         }
 
         // Keeps the banks the draw was issued under; the flip replays it into the display buffer.
-        public void RetainTargetlessDraw(RegisterBanks banks, in TargetlessDrawArguments arguments)
+        internal bool TryRetainTargetlessDraw(RegisterBanks banks, in TargetlessDrawArguments arguments)
         {
+            if (!_retainsTargetlessDraws)
+                return false;
             var state = _executing ?? RequireCurrent();
             if (RenderTrace.Enabled)
             {
                 RenderTrace.Write($"TargetlessRetention submit={arguments.SubmitId} replaced={state.RetainedTargetlessDraw is not null} previousSubmit={state.RetainedTargetlessDraw?.Arguments.SubmitId} export=0x{banks.Shader.Vertex.ExportAddress:X16} pixel=0x{banks.Shader.Pixel.Address:X16}");
             }
             state.RetainedTargetlessDraw = new RetainedTargetlessDraw(banks.Clone(), arguments);
+            return true;
         }
 
         public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots, GpuCommandInterpreter interpreter)
@@ -706,9 +866,12 @@ public static partial class AgcExports
             var state = RequireCurrent();
             if (_executor is { } executor)
             {
-                var banks = RequireTypedRegisters(state);
                 state.FrameDispatchCount++;
-                if (Producing)
+                var banks = RequireTypedRegisters(state);
+                var compute = banks.Shader.Compute;
+                Diagnostics.DispatchRunTally.NoteDispatch(state, compute.Address, compute.ThreadsX, compute.ThreadsY, compute.ThreadsZ, compute.LocalDataShareSize,
+                    compute.UserScalars.ValueSpan((int)Math.Min(compute.UserScalarCount, (uint)UserScalarRegisters.Capacity)), endX, endY, endZ, indirectArgumentsAddress != 0);
+                if (_defersWholeWork && Producing)
                 {
                     var snapshot = banks.Snapshot();
                     Sink!.EnqueueDeferred(new PendingDispatch(submitId, state, snapshot, endX, endY, endZ, dispatchInitiator, indirectArgumentsAddress),
@@ -763,6 +926,7 @@ public static partial class AgcExports
             var banks = retained.Banks;
             banks.Context.ColorTargets[0] = words;
             banks.Context.RenderTargetMask = 0xF;
+            banks.MarkWritten(RegisterStamps.ContextBits);
             var arguments = retained.Arguments;
             if (RenderTrace.Enabled)
             {
