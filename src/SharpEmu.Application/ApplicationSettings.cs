@@ -47,6 +47,9 @@ public sealed class ApplicationSettings
 
     public string LibraryLayout { get; set; } = "Carousel";
 
+    /// <summary>Cover size in the grid view, as a multiple of the size that fits the window.</summary>
+    public double LibraryTileScale { get; set; } = 1.0;
+
     public double EmbeddedConsoleHeight { get; set; } = 240;
     public double ConsoleWindowWidth { get; set; } = 980;
     public double ConsoleWindowHeight { get; set; } = 620;
@@ -162,6 +165,9 @@ public sealed class ApplicationSettings
         settings.LibraryLayout = NormalizeChoice(settings.LibraryLayout, "Carousel", "Grid");
         settings.TitleMusicVolume = double.IsFinite(settings.TitleMusicVolume)
             ? Math.Clamp(settings.TitleMusicVolume, 0.0, 1.0)
+            : 1.0;
+        settings.LibraryTileScale = double.IsFinite(settings.LibraryTileScale)
+            ? Math.Clamp(settings.LibraryTileScale, 0.75, 1.6)
             : 1.0;
         settings.ConsoleLanguage = NormalizeChoice(
             settings.ConsoleLanguage,

@@ -25,6 +25,38 @@
   "Page.GameCount.Other": "{0} لعبة",
 
   "Library.SearchWatermark": "ابحث في المكتبة...",
+
+  "LibraryMenu.Library": "المكتبة",
+
+  "LibraryMenu.View": "العرض",
+
+  "LibraryMenu.Row": "صف",
+
+  "LibraryMenu.Grid": "شبكة",
+
+  "LibraryMenu.TileSizeGridOnly": "متاح في عرض الشبكة",
+
+  "LibraryMenu.Sound": "الصوت",
+
+  "LibraryMenu.Volume": "مستوى الصوت",
+
+  "LibraryMenu.AddGames": "إضافة ألعاب",
+
+  "LibraryMenu.AddFolder": "إضافة مجلد…",
+
+  "Hero.GameSettings": "إعدادات اللعبة",
+
+  "Hero.CustomLaunch": "تشغيل مخصص…",
+
+  "Hero.Console": "وحدة التحكم",
+
+  "Hint.LibraryMenu": "قائمة المكتبة",
+
+  "Library.SearchClear": "مسح البحث",
+
+  "Library.TileSize": "حجم المربعات",
+
+  "Options.TitleMusicVolume.Desc": "مدى ارتفاع موسيقى عنوان اللعبة في المكتبة.",
   "Library.AddFolder": "إضافة مجلد",
   "Library.OpenFile": "فتح ملف...",
 
@@ -147,6 +179,12 @@
   "Launch.Stop": "■  إيقاف",
   "Launch.Running": "قيد التشغيل — {0}",
   "Launch.Stopping": "جارٍ الإيقاف...",
+  "Launch.Card.Starting": "جارٍ تشغيل {0}",
+  "Launch.Card.Loading": "جارٍ تجهيز اللعبة · {0} ث",
+  "Launch.Card.Failed": "توقفت {0}",
+  "Launch.Card.FailedDetail": "{0} (الرمز {1})",
+  "Launch.Card.ShowConsole": "إظهار وحدة التحكم",
+  "Launch.Card.Dismiss": "إغلاق",
   "Launch.Exited": "انتهى برمز {0} ({1})",
   "Launch.ExeNotFound": "لم يُعثر على الملف التنفيذي SharpEmu. ابنِ مشروع SharpEmu.CLI أولاً (dotnet build).",
   "Launch.LogFile": "ملف السجل: {0}",

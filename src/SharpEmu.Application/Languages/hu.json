@@ -25,6 +25,38 @@
   "Page.GameCount.Other": "{0} játékok",
 
   "Library.SearchWatermark": "Keresés a könyvtárban",
+
+  "LibraryMenu.Library": "Könyvtár",
+
+  "LibraryMenu.View": "Nézet",
+
+  "LibraryMenu.Row": "Sor",
+
+  "LibraryMenu.Grid": "Rács",
+
+  "LibraryMenu.TileSizeGridOnly": "Rácsnézetben érhető el",
+
+  "LibraryMenu.Sound": "Hang",
+
+  "LibraryMenu.Volume": "Hangerő",
+
+  "LibraryMenu.AddGames": "Játékok hozzáadása",
+
+  "LibraryMenu.AddFolder": "Mappa hozzáadása…",
+
+  "Hero.GameSettings": "Játékbeállítások",
+
+  "Hero.CustomLaunch": "Egyéni indítás…",
+
+  "Hero.Console": "Konzol",
+
+  "Hint.LibraryMenu": "Könyvtár menü",
+
+  "Library.SearchClear": "Keresés törlése",
+
+  "Library.TileSize": "Csempeméret",
+
+  "Options.TitleMusicVolume.Desc": "Milyen hangosan szól egy játék címzenéje a könyvtárban.",
   "Library.AddFolder": "Mappa hozzáadása",
   "Library.OpenFile": "Fájl megnyitása…",
 
@@ -160,6 +192,12 @@
   "Launch.Stop": "■  Leállítás",
   "Launch.Running": "Fut — {0}",
   "Launch.Stopping": "Leállítás…",
+  "Launch.Card.Starting": "{0} indítása",
+  "Launch.Card.Loading": "A játék előkészítése · {0} mp",
+  "Launch.Card.Failed": "{0} leállt",
+  "Launch.Card.FailedDetail": "{0} ({1}. kód)",
+  "Launch.Card.ShowConsole": "Konzol megjelenítése",
+  "Launch.Card.Dismiss": "Bezárás",
   "Launch.Exited": "Kilépett a következő kóddal: {0} ({1})",
   "Launch.ExeNotFound": "A SharpEmu futtatható fájl nem található. Előbb építsd fel a SharpEmu.CLI projektet (dotnet build).",
   "Launch.LogFile": "Naplófájl: {0}",

@@ -118,6 +118,7 @@ public partial class MainWindow
             case HintContext.Library:
                 items.Add(HintItem(PadSymbol.Cross, Hint("Launch")));
                 items.Add(HintItem(PadSymbol.Triangle, Hint("GameOptions")));
+                items.Add(HintItem(PadSymbol.Square, Hint("LibraryMenu")));
                 break;
             case HintContext.LibraryEmpty:
                 items.Add(HintItem(PadSymbol.Cross, loc.Get("Library.AddFolder")));

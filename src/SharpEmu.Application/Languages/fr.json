@@ -25,6 +25,38 @@
   "Page.GameCount.Other": "{0} jeux",
 
   "Library.SearchWatermark": "Rechercher dans la bibliothèque…",
+
+  "LibraryMenu.Library": "Bibliothèque",
+
+  "LibraryMenu.View": "Affichage",
+
+  "LibraryMenu.Row": "Rangée",
+
+  "LibraryMenu.Grid": "Grille",
+
+  "LibraryMenu.TileSizeGridOnly": "Disponible en vue grille",
+
+  "LibraryMenu.Sound": "Son",
+
+  "LibraryMenu.Volume": "Volume",
+
+  "LibraryMenu.AddGames": "Ajouter des jeux",
+
+  "LibraryMenu.AddFolder": "Ajouter un dossier…",
+
+  "Hero.GameSettings": "Paramètres du jeu",
+
+  "Hero.CustomLaunch": "Lancement personnalisé…",
+
+  "Hero.Console": "Console",
+
+  "Hint.LibraryMenu": "Menu de la bibliothèque",
+
+  "Library.SearchClear": "Effacer la recherche",
+
+  "Library.TileSize": "Taille des vignettes",
+
+  "Options.TitleMusicVolume.Desc": "Volume de la musique de titre d'un jeu dans la bibliothèque.",
   "Library.AddFolder": "Ajouter un dossier",
   "Library.OpenFile": "Ouvrir un fichier…",
   "Library.View.Grid": "Vue empilée",
@@ -162,6 +194,12 @@
   "Launch.Stop": "■  Arrêter",
   "Launch.Running": "En cours d’exécution — {0}",
   "Launch.Stopping": "Arrêt en cours…",
+  "Launch.Card.Starting": "Lancement de {0}",
+  "Launch.Card.Loading": "Préparation du jeu · {0} s",
+  "Launch.Card.Failed": "{0} s'est arrêté",
+  "Launch.Card.FailedDetail": "{0} (code {1})",
+  "Launch.Card.ShowConsole": "Afficher la console",
+  "Launch.Card.Dismiss": "Fermer",
   "Launch.Exited": "Processus terminé avec le code {0} ({1})",
   "Launch.ExeNotFound": "L’exécutable SharpEmu est introuvable. Compilez d’abord le projet SharpEmu.CLI (dotnet build).",
   "Launch.LogFile": "Fichier journal : {0}",

@@ -20,13 +20,14 @@ internal static class LibraryLayoutMetrics
     private const double GridHeightExtra = 52;
     private const double TargetColumnCount = 9;
 
-    internal static LibraryTileMetrics Calculate(double availableWidth)
+    // scale is the user's tile size: it multiplies the cover that fits the width.
+    internal static LibraryTileMetrics Calculate(double availableWidth, double scale = 1.0)
     {
         var contentWidth = Math.Max(0, availableWidth - HorizontalPadding);
         var coverSize = Math.Clamp(
             (contentWidth / TargetColumnCount) - ItemWidthExtra - ItemMargin,
             MinimumCoverSize,
-            MaximumCoverSize);
+            MaximumCoverSize) * scale;
 
         return new LibraryTileMetrics(
             CoverSize: coverSize,

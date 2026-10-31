@@ -25,6 +25,38 @@
   "Page.GameCount.Other": "{0} spil",
 
   "Library.SearchWatermark": "Søg i biblioteket…",
+
+  "LibraryMenu.Library": "Bibliotek",
+
+  "LibraryMenu.View": "Visning",
+
+  "LibraryMenu.Row": "Række",
+
+  "LibraryMenu.Grid": "Gitter",
+
+  "LibraryMenu.TileSizeGridOnly": "Kun i gittervisning",
+
+  "LibraryMenu.Sound": "Lyd",
+
+  "LibraryMenu.Volume": "Lydstyrke",
+
+  "LibraryMenu.AddGames": "Tilføj spil",
+
+  "LibraryMenu.AddFolder": "Tilføj mappe…",
+
+  "Hero.GameSettings": "Spilindstillinger",
+
+  "Hero.CustomLaunch": "Tilpasset start…",
+
+  "Hero.Console": "Konsol",
+
+  "Hint.LibraryMenu": "Biblioteksmenu",
+
+  "Library.SearchClear": "Ryd søgning",
+
+  "Library.TileSize": "Flisestørrelse",
+
+  "Options.TitleMusicVolume.Desc": "Hvor højt et spils titelmusik spiller i biblioteket.",
   "Library.AddFolder": "Tilføj mappe",
   "Library.OpenFile": "Åbn fil…",
 
@@ -147,6 +179,12 @@
   "Launch.Stop": "■  Stop",
   "Launch.Running": "Kører — {0}",
   "Launch.Stopping": "Stopper…",
+  "Launch.Card.Starting": "Starter {0}",
+  "Launch.Card.Loading": "Gør spillet klar · {0} s",
+  "Launch.Card.Failed": "{0} stoppede",
+  "Launch.Card.FailedDetail": "{0} (kode {1})",
+  "Launch.Card.ShowConsole": "Vis konsol",
+  "Launch.Card.Dismiss": "Luk",
   "Launch.Exited": "Afsluttet med kode {0} ({1})",
   "Launch.ExeNotFound": "SharpEmu-programmet blev ikke fundet. Byg SharpEmu.CLI-projektet først (dotnet build).",
   "Launch.LogFile": "Logfil: {0}",

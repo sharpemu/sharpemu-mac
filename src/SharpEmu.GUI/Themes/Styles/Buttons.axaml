@@ -157,22 +157,60 @@ at least 44 pt tall.
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-    <Setter Property="FontSize" Value="22" />
-    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="FontWeight" Value="SemiBold" />
     <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
-    <Setter Property="Padding" Value="22,0" />
+    <Setter Property="Padding" Value="20,0" />
     <Setter Property="CornerRadius" Value="22" />
     <Setter Property="VerticalAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
   </Style>
-  <Style Selector="Button.segment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#17FFFFFF" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  <!-- The thumb behind the active tab is the only fill; tabs themselves only change text. -->
+  <Style Selector="Button.segment /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Foreground" Duration="0:0:0.2" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.segment:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.segment:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
   </Style>
   <Style Selector="Button.segment.active /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Border.segmentThumb">
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="VerticalAlignment" Value="Stretch" />
+    <Setter Property="CornerRadius" Value="22" />
     <Setter Property="Background" Value="{StaticResource SegmentActiveBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BoxShadow" Value="inset 0 1 0 0 #1FFFFFFF, 0 2 10 0 #40000000" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.32" Easing="CubicEaseOut" />
+        <DoubleTransition Property="Width" Duration="0:0:0.32" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- Selected-game actions: the same height as the Launch pill, an icon and a word each. -->
+  <Style Selector="Button.heroAction, ToggleButton.heroAction">
+    <Setter Property="Height" Value="52" />
+    <Setter Property="Padding" Value="20,0" />
+    <Setter Property="CornerRadius" Value="26" />
+    <Setter Property="FontSize" Value="15" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="ToggleButton.heroAction:checked /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource SegmentActiveBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
   <!-- Pressed: one step lighter than hover, never the stock grey. -->

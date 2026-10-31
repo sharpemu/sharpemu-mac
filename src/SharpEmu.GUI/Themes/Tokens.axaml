@@ -47,6 +47,15 @@ Shadows belong to floating layers (sheets, menus, toasts, dialogs) alone.
   <SolidColorBrush x:Key="AccentTintBrush" Color="#24FFFFFF" />
   <SolidColorBrush x:Key="AccentForegroundBrush" Color="#111111" />
 
+  <!-- Fluent draws a hovered or dragged slider in its own accent shades (blue); keep
+       sliders on the launcher accent in every state. -->
+  <StaticResource x:Key="SliderThumbBackground" ResourceKey="AccentBrush" />
+  <StaticResource x:Key="SliderThumbBackgroundPointerOver" ResourceKey="AccentHoverBrush" />
+  <StaticResource x:Key="SliderThumbBackgroundPressed" ResourceKey="AccentPressedBrush" />
+  <StaticResource x:Key="SliderTrackValueFill" ResourceKey="AccentBrush" />
+  <StaticResource x:Key="SliderTrackValueFillPointerOver" ResourceKey="AccentHoverBrush" />
+  <StaticResource x:Key="SliderTrackValueFillPressed" ResourceKey="AccentPressedBrush" />
+
   <!-- Semantic colours tuned for dark surfaces. -->
   <SolidColorBrush x:Key="DangerBrush" Color="#FF7A86" />
   <SolidColorBrush x:Key="DangerHoverBrush" Color="#FF98A1" />

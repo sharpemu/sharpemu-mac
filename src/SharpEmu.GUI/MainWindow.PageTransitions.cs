@@ -63,7 +63,7 @@ public partial class MainWindow
                     if (_activePageIndex != 2)
                     {
                         TrophyPageHost.Unload();
-                        GuiMemory.Release();
+                        GuiMemory.Trim();
                     }
                 },
                 PageTransitionTime + TimeSpan.FromMilliseconds(120));

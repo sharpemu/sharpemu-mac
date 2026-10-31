@@ -25,6 +25,38 @@
   "Page.GameCount.Other": "{0} games",
 
   "Library.SearchWatermark": "Zoeken in bibliotheek…",
+
+  "LibraryMenu.Library": "Bibliotheek",
+
+  "LibraryMenu.View": "Weergave",
+
+  "LibraryMenu.Row": "Rij",
+
+  "LibraryMenu.Grid": "Raster",
+
+  "LibraryMenu.TileSizeGridOnly": "Alleen in rasterweergave",
+
+  "LibraryMenu.Sound": "Geluid",
+
+  "LibraryMenu.Volume": "Volume",
+
+  "LibraryMenu.AddGames": "Games toevoegen",
+
+  "LibraryMenu.AddFolder": "Map toevoegen…",
+
+  "Hero.GameSettings": "Game-instellingen",
+
+  "Hero.CustomLaunch": "Aangepast starten…",
+
+  "Hero.Console": "Console",
+
+  "Hint.LibraryMenu": "Bibliotheekmenu",
+
+  "Library.SearchClear": "Zoekopdracht wissen",
+
+  "Library.TileSize": "Tegelgrootte",
+
+  "Options.TitleMusicVolume.Desc": "Hoe luid de titelmuziek van een game in de bibliotheek speelt.",
   "Library.AddFolder": "Map toevoegen",
   "Library.OpenFile": "Bestand openen…",
 
@@ -147,6 +179,12 @@
   "Launch.Stop": "■  Stoppen",
   "Launch.Running": "Actief — {0}",
   "Launch.Stopping": "Stoppen…",
+  "Launch.Card.Starting": "{0} wordt gestart",
+  "Launch.Card.Loading": "Game wordt voorbereid · {0} s",
+  "Launch.Card.Failed": "{0} is gestopt",
+  "Launch.Card.FailedDetail": "{0} (code {1})",
+  "Launch.Card.ShowConsole": "Console tonen",
+  "Launch.Card.Dismiss": "Sluiten",
   "Launch.Exited": "Afgesloten met code {0} ({1})",
   "Launch.ExeNotFound": "SharpEmu-uitvoerbaar bestand niet gevonden. Bouw eerst het SharpEmu.CLI-project (dotnet build).",
   "Launch.LogFile": "Logbestand: {0}",

@@ -158,7 +158,7 @@ public partial class MainWindow : Window
     private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
     private readonly DispatcherTimer _libraryLayoutTimer;
-    private readonly DispatcherTimer _titleMusicVolumeTimer;
+    private readonly DispatcherTimer _settingsSaveTimer;
 
     private GuiSettings _settings = new();
     private IReadOnlyList<HostDisplayOption> _hostDisplays = [];
@@ -239,6 +239,11 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
+        // Settings, theme and strings load before the controls are built, so the first frame
+        // already shows the user's theme and language instead of raw keys.
+        _settings = GuiSettings.Load();
+        ApplyLauncherTheme();
+        Localization.Instance.Load(_settings.Language);
         InitializeComponent();
         InitializeLocalizedChoiceBoxes();
         _libraryTiles = new LibraryTileCollection(_visibleGames);
@@ -279,13 +284,13 @@ public partial class MainWindow : Window
             _libraryLayoutTimer.Stop();
             UpdateLibraryLayoutMetrics();
         };
-        _titleMusicVolumeTimer = new DispatcherTimer
+        _settingsSaveTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(180),
         };
-        _titleMusicVolumeTimer.Tick += (_, _) =>
+        _settingsSaveTimer.Tick += (_, _) =>
         {
-            _titleMusicVolumeTimer.Stop();
+            _settingsSaveTimer.Stop();
             _settings.Save();
         };
         CarouselAddFolderButton.Click += (_, _) => StartAddFolderFromTile();
@@ -333,7 +338,7 @@ public partial class MainWindow : Window
         GameList.DoubleTapped += OnGameListDoubleTapped;
         SearchBox.TextChanged += (_, _) => RefreshVisibleGames();
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
-        OpenFileButton.Click += async (_, _) => await OpenFileAsync();
+        InitializeLibraryToolbar();
         LaunchButton.Click += (_, _) =>
         {
             if (_isRunning)
@@ -353,15 +358,13 @@ public partial class MainWindow : Window
         LibraryTabButton.Click += (_, _) => SetActivePage(0);
         OptionsTabButton.Click += (_, _) => SetActivePage(1);
         TrophiesTabButton.Click += (_, _) => OpenTrophyHub();
-        LibraryLayoutButton.Click += (_, _) => ToggleLibraryLayout();
-        TitleMusicMuteButton.Click += (_, _) => TitleMusicToggle.IsChecked = !_settings.PlayTitleMusic;
         TitleMusicVolumeSlider.ValueChanged += (_, _) =>
         {
             _settings.TitleMusicVolume = TitleMusicVolumeSlider.Value / 100.0;
             _sndPreview.Volume = _settings.TitleMusicVolume;
-            UpdateTitleMusicMuteButton();
-            _titleMusicVolumeTimer.Stop();
-            _titleMusicVolumeTimer.Start();
+            UpdateTitleMusicControls();
+            _settingsSaveTimer.Stop();
+            _settingsSaveTimer.Start();
         };
         LibraryPage.SizeChanged += (_, _) => ScheduleLibraryLayoutMetricsUpdate();
         LibrarySelectedDetails.SizeChanged += (_, _) => UpdateLibraryMinimumHeight();
@@ -483,7 +486,14 @@ public partial class MainWindow : Window
                 EnvDisableVkImplicitLayersToggle.IsChecked == true);
 
         LauncherGamepad.EnsureStarted();
+        ShowVersion();
+        PopulateLanguageBox();
+        ApplyLocalization();
+        ApplySettingsToControls();
+        SeedLibraryFromCache();
+        FillScreenBeforeShowing();
         InitializeController();
+        InitializeLaunchCard();
         Sheets.Covered = MainContent;
         foreach (var viewer in OptionsSectionPanels().Concat(GameOptionsSectionPanels()).OfType<ScrollViewer>()
                      .Append(OptionsNavScroll).Append(GameOptionsNavScroll))
@@ -562,6 +572,7 @@ public partial class MainWindow : Window
         SetActiveClass(LibraryTabButton, index == 0);
         SetActiveClass(OptionsTabButton, index == 1);
         SetActiveClass(TrophiesTabButton, index == 2);
+        MovePageTabThumb(animate: true);
         TrophyPageHost.IsVisible = index == 2;
         LibraryPage.IsVisible = index == 0;
         LibraryToolbar.IsVisible = index == 0;
@@ -615,7 +626,9 @@ public partial class MainWindow : Window
 
     private void UpdateLibraryLayoutMetrics()
     {
-        var metrics = LibraryLayoutMetrics.Calculate(LibraryPage.Bounds.Width);
+        var metrics = LibraryLayoutMetrics.Calculate(
+            LibraryPage.Bounds.Width,
+            _isLibraryGridLayout ? _settings.LibraryTileScale : 1.0);
         Resources["LibraryCoverSize"] = metrics.CoverSize;
         Resources["LibraryTileWidth"] = metrics.ItemWidth;
         Resources["LibraryRailItemHeight"] = metrics.RailItemHeight;
@@ -654,20 +667,24 @@ public partial class MainWindow : Window
         ClampEmbeddedConsoleHeight();
     }
 
-    private void ToggleLibraryLayout()
+    private void ChooseLibraryLayout(bool grid)
     {
-        SetLibraryLayout(!_isLibraryGridLayout);
+        if (grid == _isLibraryGridLayout)
+        {
+            return;
+        }
+
+        SetLibraryLayout(grid);
         _settings.LibraryLayout = _isLibraryGridLayout ? "Grid" : "Carousel";
         _settings.Save();
     }
 
     private void UpdateLibraryLayoutButton()
     {
-        LibraryLayoutGlyph.Text = _isLibraryGridLayout ? "view_carousel" : "grid_view";
-        var label = Localization.Instance.Get(
-            _isLibraryGridLayout ? "Library.View.Carousel" : "Library.View.Grid");
-        ToolTip.SetTip(LibraryLayoutButton, label);
-        AutomationProperties.SetName(LibraryLayoutButton, label);
+        SetActiveClass(_libraryMenu.CarouselViewButton, !_isLibraryGridLayout);
+        SetActiveClass(_libraryMenu.GridViewButton, _isLibraryGridLayout);
+        _libraryMenu.TileSizeSlider.IsEnabled = _isLibraryGridLayout;
+        _libraryMenu.TileSizeHint.IsVisible = !_isLibraryGridLayout;
     }
 
     private static void SetActiveClass(Button button, bool active) =>
@@ -1035,6 +1052,11 @@ public partial class MainWindow : Window
             OpenSelectedGameSettings();
         }
 
+        if ((pressed & HostGamepadButtons.Square) != 0)
+        {
+            OpenLibraryMenu();
+        }
+
         _previousPadButtons = pad.Buttons;
     }
 
@@ -1106,24 +1128,7 @@ public partial class MainWindow : Window
 
     private async Task OnOpenedAsync()
     {
-        var version = Assembly.GetExecutingAssembly().GetName().Version;
-        var display = version is not null ? $"v{version.ToString(3)}" : "v0.0.1";
-        display += BuildInfo.CommitSha is null
-            ? " · dev"
-            : BuildInfo.IsOfficialRelease
-                ? $" · {BuildInfo.CommitSha}"
-                : $" · UNOFFICIAL {BuildInfo.CommitSha}";
-        VersionText.Text = display;
-        Title = $"SharpEmu {display}";
         ReportGuiRenderer();
-        ToolTip.SetTip(VersionText, BuildInfo.Banner);
-
-        _settings = GuiSettings.Load();
-        ApplyLauncherTheme();
-        Localization.Instance.Load(_settings.Language);
-        PopulateLanguageBox();
-        ApplyLocalization();
-        ApplySettingsToControls();
         LocateEmulator();
         UpdateDiscordPresence();
         _ = LoadLatestCommitAsync();
@@ -1133,10 +1138,39 @@ public partial class MainWindow : Window
             _ = CheckForUpdatesAsync();
         }
 
-        SeedLibraryFromCache();
         FocusLibrarySelection();
         await RescanLibraryAsync();
         FocusLibrarySelection();
+    }
+
+    private void ShowVersion()
+    {
+        var version = Assembly.GetExecutingAssembly().GetName().Version;
+        var display = version is not null ? $"v{version.ToString(3)}" : "v0.0.1";
+        display += BuildInfo.CommitSha is null
+            ? " · dev"
+            : BuildInfo.IsOfficialRelease
+                ? $" · {BuildInfo.CommitSha}"
+                : $" · UNOFFICIAL {BuildInfo.CommitSha}";
+        VersionText.Text = display;
+        Title = $"SharpEmu {display}";
+        ToolTip.SetTip(VersionText, BuildInfo.Banner);
+    }
+
+    // The window opens maximized; giving it the screen's size up front keeps it from first
+    // appearing at its 1280x820 design size and then growing.
+    private void FillScreenBeforeShowing()
+    {
+        if (Screens.Primary is not { } screen)
+        {
+            return;
+        }
+
+        var area = screen.WorkingArea;
+        WindowStartupLocation = WindowStartupLocation.Manual;
+        Position = area.Position;
+        Width = area.Width / screen.Scaling;
+        Height = area.Height / screen.Scaling;
     }
 
     private void ReportGuiRenderer()
@@ -1227,7 +1261,7 @@ public partial class MainWindow : Window
         RefreshUpdateText();
         UpdateEmptyStateTexts();
         UpdateLibraryLayoutButton();
-        UpdateTitleMusicMuteButton();
+        UpdateTitleMusicControls();
         AutomationProperties.SetName(TitleMusicVolumeSlider, Localization.Instance.Get("Library.Music.Volume"));
         UpdateRunButtons();
     }
@@ -1381,7 +1415,7 @@ public partial class MainWindow : Window
         Interlocked.Increment(ref _detailLoadGeneration);
         _consoleFlushTimer.Stop();
         _libraryLayoutTimer.Stop();
-        _titleMusicVolumeTimer.Stop();
+        _settingsSaveTimer.Stop();
         _gamepadTimer.Stop();
     }
 
@@ -1575,9 +1609,10 @@ public partial class MainWindow : Window
         OverrideLogFileToggle.IsChecked = _settings.OverrideLogFile;
         TitleMusicToggle.IsChecked = _settings.PlayTitleMusic;
         TitleMusicVolumeSlider.Value = _settings.TitleMusicVolume * 100.0;
-        _titleMusicVolumeTimer.Stop();
+        _libraryMenu.TileSizeSlider.Value = _settings.LibraryTileScale * 100.0;
+        _settingsSaveTimer.Stop();
         _sndPreview.Volume = _settings.TitleMusicVolume;
-        UpdateTitleMusicMuteButton();
+        UpdateTitleMusicControls();
         TrophySoundToggle.IsChecked = _settings.TrophySound;
         TrophySound.Enabled = _settings.TrophySound;
         SetLibraryLayout(string.Equals(_settings.LibraryLayout, "Grid", StringComparison.OrdinalIgnoreCase));
@@ -2860,7 +2895,7 @@ public partial class MainWindow : Window
 
     private void OnTitleMusicSettingChanged()
     {
-        UpdateTitleMusicMuteButton();
+        UpdateTitleMusicControls();
         if (!_settings.PlayTitleMusic)
         {
             _sndPreview.Stop();
@@ -2871,15 +2906,17 @@ public partial class MainWindow : Window
         }
     }
 
-    private void UpdateTitleMusicMuteButton()
+    // The Options page and the library menu show the same two title-music settings.
+    private void UpdateTitleMusicControls()
     {
-        TitleMusicMuteGlyph.Text = !_settings.PlayTitleMusic || _settings.TitleMusicVolume == 0
+        var volume = $"{Math.Round(_settings.TitleMusicVolume * 100)}%";
+        TitleMusicVolumeValue.Text = volume;
+        _libraryMenu.VolumeValue.Text = volume;
+        _libraryMenu.VolumeSlider.Value = _settings.TitleMusicVolume * 100.0;
+        _libraryMenu.TitleMusicSwitch.IsChecked = _settings.PlayTitleMusic;
+        _libraryMenu.VolumeGlyph.Text = !_settings.PlayTitleMusic || _settings.TitleMusicVolume == 0
             ? "volume_off"
             : _settings.TitleMusicVolume < 0.5 ? "volume_down" : "volume_up";
-        var label = Localization.Instance.Get(
-            _settings.PlayTitleMusic ? "Library.Music.Mute" : "Library.Music.Unmute");
-        ToolTip.SetTip(TitleMusicMuteButton, label);
-        AutomationProperties.SetName(TitleMusicMuteButton, label);
     }
 
     /// <summary>Pauses the preview music while the window is minimized.</summary>
@@ -3158,6 +3195,7 @@ public partial class MainWindow : Window
         _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         UpdateRunButtons();
         UpdateDiscordPresence();
+        ShowLaunchStarting(displayName);
 
         _pendingLaunch = new PendingLaunch(
             Path.GetFullPath(ebootPath),
@@ -3194,6 +3232,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        HideLaunchCard();
         if (_emulator is null)
         {
             // The native host can be created a moment after Launch. Do not
@@ -3272,6 +3311,16 @@ public partial class MainWindow : Window
             brush);
         CloseFileLogSoon();
 
+        // With the console out of sight, a failure would otherwise pass without a word.
+        if (exitCode != 0 && !stoppedByUser && !ConsolePanel.IsVisible && _consoleWindow is null)
+        {
+            ShowLaunchFailed(_runningGameName ?? string.Empty, exitCode, meaning);
+        }
+        else
+        {
+            HideLaunchCard();
+        }
+
         _runningGameName = null;
         _runningGameTitleId = null;
         UpdateRunButtons();
@@ -3309,7 +3358,6 @@ public partial class MainWindow : Window
             AppendConsoleLine(
                 Localization.Instance.Format("Launch.Command", launch.EbootPath),
                 DimLineBrush);
-            DispatcherTimer.RunOnce(GuiMemory.Release, TimeSpan.FromSeconds(3));
         }
         catch (Exception exception)
         {
@@ -3358,6 +3406,12 @@ public partial class MainWindow : Window
     private void OnEmulatorOutput(string line, bool isError)
     {
         _pendingLines.Enqueue((line, isError));
+        if (line.Contains("[LOADER][INFO]", StringComparison.Ordinal) &&
+            line.Contains(" window ready:", StringComparison.Ordinal))
+        {
+            Dispatcher.UIThread.Post(OnGameWindowShown);
+        }
+
         if (SharpEmu.Libs.Np.TrophyCatalog.TryParseUnlockLine(line, out var notice))
         {
             var ebootPath = _runningEbootPath;
@@ -3441,7 +3495,7 @@ public partial class MainWindow : Window
         GameSettingsButton.IsEnabled =
             GameList.SelectedItem is GameEntry game &&
             !string.IsNullOrWhiteSpace(game.TitleId);
-        OpenFileButton.IsEnabled = !_isRunning;
+        _libraryMenu.OpenFileButton.IsEnabled = !_isRunning;
     }
 
     // ---- Console ----

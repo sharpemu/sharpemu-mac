@@ -25,6 +25,38 @@
   "Page.GameCount.Other": "{0} mängu",
 
   "Library.SearchWatermark": "Otsi teegist…",
+
+  "LibraryMenu.Library": "Teek",
+
+  "LibraryMenu.View": "Vaade",
+
+  "LibraryMenu.Row": "Rida",
+
+  "LibraryMenu.Grid": "Ruudustik",
+
+  "LibraryMenu.TileSizeGridOnly": "Saadaval ruudustikuvaates",
+
+  "LibraryMenu.Sound": "Heli",
+
+  "LibraryMenu.Volume": "Helitugevus",
+
+  "LibraryMenu.AddGames": "Lisa mänge",
+
+  "LibraryMenu.AddFolder": "Lisa kaust…",
+
+  "Hero.GameSettings": "Mängu seaded",
+
+  "Hero.CustomLaunch": "Kohandatud käivitus…",
+
+  "Hero.Console": "Konsool",
+
+  "Hint.LibraryMenu": "Teegi menüü",
+
+  "Library.SearchClear": "Tühjenda otsing",
+
+  "Library.TileSize": "Paani suurus",
+
+  "Options.TitleMusicVolume.Desc": "Kui valjult mängu tiitlimuusika teegis mängib.",
   "Library.AddFolder": "Lisa kaust",
   "Library.OpenFile": "Ava fail…",
   "Library.View.Grid": "Ruudustikvaade",
@@ -209,6 +241,12 @@
   "Launch.Stop": "■  Peata",
   "Launch.Running": "Käib — {0}",
   "Launch.Stopping": "Peatamine…",
+  "Launch.Card.Starting": "{0} käivitamine",
+  "Launch.Card.Loading": "Mängu ettevalmistamine · {0} s",
+  "Launch.Card.Failed": "{0} peatus",
+  "Launch.Card.FailedDetail": "{0} (kood {1})",
+  "Launch.Card.ShowConsole": "Näita konsooli",
+  "Launch.Card.Dismiss": "Sulge",
   "Launch.Exited": "Väljus koodiga {0} ({1})",
   "Launch.ExeNotFound": "SharpEmu käivitavat faili ei leitud. Ehita esmalt SharpEmu.CLI projekt (dotnet build).",
   "Launch.LogFile": "Logifail: {0}",

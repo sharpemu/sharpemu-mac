@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using Avalonia;
 using Avalonia.Controls;
 
 namespace SharpEmu.GUI;
@@ -15,6 +16,12 @@ public class SheetView : UserControl
     public double SheetWidth { get; set; } = 560;
 
     public double SheetHeight { get; set; } = double.NaN;
+
+    // A popover hangs from the control that opened it (PopoverMargin from the host's top
+    // right) over a light scrim that closes it when clicked, instead of centring on a dark one.
+    public bool IsPopover { get; set; }
+
+    public Thickness PopoverMargin { get; set; }
 
     internal SheetHost? Host { get; set; }
 

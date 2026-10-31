@@ -25,6 +25,38 @@
   "Page.GameCount.Other": "{0} oyun",
 
   "Library.SearchWatermark": "Kütüphanede ara…",
+
+  "LibraryMenu.Library": "Kütüphane",
+
+  "LibraryMenu.View": "Görünüm",
+
+  "LibraryMenu.Row": "Sıra",
+
+  "LibraryMenu.Grid": "Izgara",
+
+  "LibraryMenu.TileSizeGridOnly": "Izgara görünümünde kullanılabilir",
+
+  "LibraryMenu.Sound": "Ses",
+
+  "LibraryMenu.Volume": "Ses düzeyi",
+
+  "LibraryMenu.AddGames": "Oyun ekle",
+
+  "LibraryMenu.AddFolder": "Klasör ekle…",
+
+  "Hero.GameSettings": "Oyun ayarları",
+
+  "Hero.CustomLaunch": "Özel başlatma…",
+
+  "Hero.Console": "Konsol",
+
+  "Hint.LibraryMenu": "Kütüphane menüsü",
+
+  "Library.SearchClear": "Aramayı temizle",
+
+  "Library.TileSize": "Kutucuk boyutu",
+
+  "Options.TitleMusicVolume.Desc": "Bir oyunun başlık müziğinin kütüphanede ne kadar yüksek çalacağı.",
   "Library.AddFolder": "Klasör ekle",
   "Library.OpenFile": "Dosya aç…",
   "Library.View.Grid": "Alt alta görünüm",
@@ -170,6 +202,12 @@
   "Launch.Stop": "■  Durdur",
   "Launch.Running": "Çalışıyor — {0}",
   "Launch.Stopping": "Durduruluyor…",
+  "Launch.Card.Starting": "{0} başlatılıyor",
+  "Launch.Card.Loading": "Oyun hazırlanıyor · {0} sn",
+  "Launch.Card.Failed": "{0} durdu",
+  "Launch.Card.FailedDetail": "{0} (kod {1})",
+  "Launch.Card.ShowConsole": "Konsolu göster",
+  "Launch.Card.Dismiss": "Kapat",
   "Launch.Exited": "Çıkış kodu {0} ({1})",
   "Launch.ExeNotFound": "SharpEmu çalıştırılabilir dosyası bulunamadı. Önce SharpEmu.CLI projesini derleyin (dotnet build).",
   "Launch.LogFile": "Günlük dosyası: {0}",

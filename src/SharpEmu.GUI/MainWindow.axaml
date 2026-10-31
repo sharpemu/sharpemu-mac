@@ -133,73 +133,68 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <Border x:Name="PageHintL1" Classes="padHint" IsVisible="False" Margin="0,0,8,0">
             <TextBlock Text="L1" />
           </Border>
+          <!-- The active page sits on a raised thumb that glides between the tabs. -->
           <Border Classes="glass segmentGroup">
-            <StackPanel Orientation="Horizontal" Spacing="2">
-              <Button x:Name="LibraryTabButton"
-                      Classes="segment active"
-                      Content="{Binding [Page.Library], Source={x:Static local:Localization.Instance}}" />
-              <Button x:Name="TrophiesTabButton"
-                      Classes="segment"
-                      Content="{Binding [Page.Trophies], Source={x:Static local:Localization.Instance}}" />
-              <Button x:Name="OptionsTabButton"
-                      Classes="segment"
-                      Content="{Binding [Page.Options], Source={x:Static local:Localization.Instance}}" />
-            </StackPanel>
+            <Panel>
+              <Border x:Name="PageTabThumb" Classes="segmentThumb" />
+              <StackPanel x:Name="PageTabStrip" Orientation="Horizontal" Spacing="2">
+              <Button x:Name="LibraryTabButton" Classes="segment active">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Classes="materialSymbol compact" Text="sports_esports" />
+                  <TextBlock Text="{Binding [Page.Library], Source={x:Static local:Localization.Instance}}" />
+                </StackPanel>
+              </Button>
+              <Button x:Name="TrophiesTabButton" Classes="segment">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Classes="materialSymbol compact" Text="emoji_events" />
+                  <TextBlock Text="{Binding [Page.Trophies], Source={x:Static local:Localization.Instance}}" />
+                </StackPanel>
+              </Button>
+              <Button x:Name="OptionsTabButton" Classes="segment">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Classes="materialSymbol compact" Text="settings" />
+                  <TextBlock Text="{Binding [Page.Options], Source={x:Static local:Localization.Instance}}" />
+                </StackPanel>
+              </Button>
+              </StackPanel>
+            </Panel>
           </Border>
           <Border x:Name="PageHintR1" Classes="padHint" IsVisible="False" Margin="8,0,0,0">
             <TextBlock Text="R1" />
           </Border>
         </StackPanel>
 
+        <!-- Only search and the library menu stay on screen; search opens out from its
+             icon, and the menu holds the view, the title music and adding games. -->
         <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="12"
                     VerticalAlignment="Center">
-          <Border Classes="glass"
-                  CornerRadius="22"
-                  Height="44" Padding="4,0,18,0" VerticalAlignment="Center">
-            <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-              <Button x:Name="TitleMusicMuteButton"
-                      Classes="iconGhost"
-                      Width="36" Height="36" CornerRadius="18" Background="Transparent"
-                      VerticalAlignment="Center">
-                <TextBlock x:Name="TitleMusicMuteGlyph"
-                           Classes="materialSymbol compact"
-                           Text="volume_up" />
+          <TextBox x:Name="SearchBox"
+                   Classes="glass librarySearch"
+                   CornerRadius="22"
+                   VerticalAlignment="Center"
+                   AutomationProperties.Name="{Binding [Library.SearchWatermark], Source={x:Static local:Localization.Instance}}">
+            <TextBox.InnerLeftContent>
+              <TextBlock Classes="materialSymbol compact searchGlyph"
+                         Text="search"
+                         IsHitTestVisible="False" />
+            </TextBox.InnerLeftContent>
+            <TextBox.InnerRightContent>
+              <Button x:Name="SearchClearButton"
+                      Classes="iconGhost searchClear"
+                      IsVisible="False"
+                      ToolTip.Tip="{Binding [Library.SearchClear], Source={x:Static local:Localization.Instance}}">
+                <TextBlock Classes="materialSymbol compact" Text="close" />
               </Button>
-              <Slider x:Name="TitleMusicVolumeSlider"
-                      Width="96" Height="28"
-                      Minimum="0" Maximum="100"
-                      SmallChange="1" LargeChange="10"
-                      VerticalAlignment="Center"
-                      ToolTip.Tip="{Binding [Library.Music.Volume], Source={x:Static local:Localization.Instance}}">
-                <Slider.Resources>
-                  <GridLength x:Key="SliderPreContentMargin">8</GridLength>
-                  <GridLength x:Key="SliderPostContentMargin">8</GridLength>
-                  <x:Double x:Key="SliderHorizontalHeight">28</x:Double>
-                  <x:Double x:Key="SliderHorizontalThumbWidth">16</x:Double>
-                  <x:Double x:Key="SliderHorizontalThumbHeight">16</x:Double>
-                  <CornerRadius x:Key="SliderThumbCornerRadius">8</CornerRadius>
-                </Slider.Resources>
-              </Slider>
-            </StackPanel>
-          </Border>
-          <Button x:Name="LibraryLayoutButton"
+            </TextBox.InnerRightContent>
+          </TextBox>
+          <Button x:Name="LibraryMenuButton"
                   Classes="iconGhost glass"
                   CornerRadius="22"
-                  VerticalAlignment="Center">
-            <TextBlock x:Name="LibraryLayoutGlyph"
-                       Classes="materialSymbol compact"
-                       Text="grid_view" />
+                  VerticalAlignment="Center"
+                  ToolTip.Tip="{Binding [LibraryMenu.Library], Source={x:Static local:Localization.Instance}}"
+                  AutomationProperties.Name="{Binding [LibraryMenu.Library], Source={x:Static local:Localization.Instance}}">
+            <TextBlock Classes="materialSymbol compact" Text="tune" />
           </Button>
-          <TextBox x:Name="SearchBox"
-                   Classes="glass"
-                   CornerRadius="22"
-                   PlaceholderText="{Binding [Library.SearchWatermark], Source={x:Static local:Localization.Instance}}"
-                   Width="280"
-                   VerticalAlignment="Center" />
-          <Button x:Name="OpenFileButton"
-                  Classes="toolbarAction glass"
-                  CornerRadius="22"
-                  Content="{Binding [Library.OpenFile], Source={x:Static local:Localization.Instance}}" />
         </StackPanel>
       </Grid>
 
@@ -387,67 +382,48 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                Duration="0:0:0.18" />
               </Transitions>
             </Grid.Transitions>
-            <StackPanel Grid.Column="0" Spacing="10" VerticalAlignment="Center">
+            <!-- The selected game is the stage: its name, one quiet line of facts, and every
+                 action under it with a word on it. -->
+            <StackPanel Grid.ColumnSpan="2" Spacing="4">
               <TextBlock Classes="selectedGameTitle"
                          Text="{Binding Name}"
-                         FontWeight="SemiBold"
                          TextTrimming="CharacterEllipsis"
                          MaxLines="1" />
-              <StackPanel Orientation="Horizontal" Spacing="8">
-                <Border Classes="pill" IsVisible="{Binding HasTitleId}">
-                  <TextBlock Text="{Binding TitleId}" />
-                </Border>
-                <Border Classes="pill" IsVisible="{Binding HasVersion}">
-                  <TextBlock Text="{Binding VersionText}" />
-                </Border>
-                <Border Classes="pill">
-                  <TextBlock Text="{Binding SizeText}" />
-                </Border>
+              <StackPanel Orientation="Horizontal" Classes="heroFacts">
+                <TextBlock Text="{Binding TitleId}" IsVisible="{Binding HasTitleId}" />
+                <TextBlock Classes="heroFactDot" Text="·" IsVisible="{Binding HasTitleId}" />
+                <TextBlock Text="{Binding VersionText}" IsVisible="{Binding HasVersion}" />
+                <TextBlock Classes="heroFactDot" Text="·" IsVisible="{Binding HasVersion}" />
+                <TextBlock Text="{Binding SizeText}" />
+              </StackPanel>
+              <StackPanel x:Name="HeroActions"
+                          Orientation="Horizontal"
+                          Spacing="12"
+                          Margin="0,20,0,0">
+                <Button x:Name="LaunchButton"
+                        Classes="playButton"
+                        Content="Launch"
+                        IsEnabled="False" />
+                <Button x:Name="GameSettingsButton" Classes="heroAction glass">
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Classes="materialSymbol compact" Text="settings" />
+                    <TextBlock Text="{Binding [Hero.GameSettings], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
+                </Button>
+                <Button x:Name="LaunchCustomEnvButton" Classes="heroAction glass">
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Classes="materialSymbol compact" Text="rocket_launch" />
+                    <TextBlock Text="{Binding [Hero.CustomLaunch], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
+                </Button>
+                <ToggleButton x:Name="ConsoleToggle" Classes="heroAction glass">
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Classes="materialSymbol compact" Text="terminal" />
+                    <TextBlock Text="{Binding [Hero.Console], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
+                </ToggleButton>
               </StackPanel>
             </StackPanel>
-            <StackPanel Grid.Column="1"
-                        Orientation="Horizontal"
-                        Spacing="12"
-                        HorizontalAlignment="Right"
-                        VerticalAlignment="Center">
-              <Button x:Name="LaunchButton"
-                      Classes="playButton"
-                      Content="Launch"
-                      IsEnabled="False" />
-              <Button x:Name="LaunchCustomEnvButton"
-                      Classes="optionsCircle glass"
-                      ToolTip.Tip="{Binding [Launch.CustomEnv], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                      AutomationProperties.Name="{Binding [Launch.CustomEnv], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
-                <!-- { } for "environment variables"; a chevron read as a dropdown. -->
-                <TextBlock Classes="materialSymbol"
-                           Text="data_object" />
-              </Button>
-              <Button x:Name="GameSettingsButton"
-                      Classes="optionsCircle glass"
-                      ToolTip.Tip="{Binding [Library.Context.GameSettings],
-                                            Source={x:Static local:Localization.Instance},
-                                            x:CompileBindings=False}"
-                      AutomationProperties.Name="{Binding [Library.Context.GameSettings],
-                                                          Source={x:Static local:Localization.Instance},
-                                                          x:CompileBindings=False}">
-                <TextBlock Classes="materialSymbol"
-                           Text="more_horiz" />
-              </Button>
-              <ToggleButton x:Name="ConsoleToggle"
-                            Classes="optionsCircle glass"
-                            ToolTip.Tip="{Binding [Launch.Console],
-                                                  Source={x:Static local:Localization.Instance},
-                                                  x:CompileBindings=False}"
-                            AutomationProperties.Name="{Binding [Launch.Console],
-                                                                Source={x:Static local:Localization.Instance},
-                                                                x:CompileBindings=False}">
-                <TextBlock Classes="materialSymbol"
-                           Text="terminal" />
-              </ToggleButton>
-            </StackPanel>
-            <Border Grid.Row="1"
-                    Grid.ColumnSpan="2"
-                    Classes="selectedDetailsDivider" />
           </Grid>
 
           <!-- Empty state: a centred card, so the text never sits on the key art. -->
@@ -1513,6 +1489,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                       IsChecked="True" />
                       </local:SettingRow>
 
+                      <local:SettingRow x:Name="TitleMusicVolumeRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Library.Music.Volume], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.TitleMusicVolume.Desc], Source={x:Static local:Localization.Instance}}">
+                        <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                          <Slider x:Name="TitleMusicVolumeSlider"
+                                  Classes="appearanceSlider"
+                                  Minimum="0" Maximum="100"
+                                  SmallChange="5" LargeChange="10"
+                                  TickFrequency="5" IsSnapToTickEnabled="True" />
+                          <TextBlock x:Name="TitleMusicVolumeValue" Classes="sliderValue" />
+                        </StackPanel>
+                      </local:SettingRow>
+
                       <local:SettingRow x:Name="DiscordRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Discord.Label], Source={x:Static local:Localization.Instance}}"
@@ -2063,6 +2053,50 @@ SPDX-License-Identifier: GPL-2.0-or-later
               Cursor="BottomRightCorner"
               PointerPressed="OnResizeHandlePointerPressed" />
     </Panel>
+
+    <!-- What a launch is doing, so it reads the same with the console closed: progress
+         until the game's window opens, or why the game stopped. -->
+    <Border x:Name="LaunchCard"
+            Grid.Row="1"
+            Classes="launchCard"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Top"
+            Margin="0,112,40,0"
+            IsVisible="False"
+            ZIndex="40">
+      <Grid ColumnDefinitions="Auto,*,Auto"
+            RowDefinitions="Auto,Auto"
+            ColumnSpacing="14">
+        <Border Classes="launchCardIcon">
+          <TextBlock x:Name="LaunchCardIcon"
+                     Classes="materialSymbol"
+                     Text="rocket_launch" />
+        </Border>
+        <StackPanel Grid.Column="1"
+                    Spacing="2"
+                    VerticalAlignment="Center">
+          <TextBlock x:Name="LaunchCardTitle"
+                     Classes="launchCardTitle" />
+          <TextBlock x:Name="LaunchCardDetail"
+                     Classes="launchCardDetail" />
+        </StackPanel>
+        <StackPanel Grid.Column="2"
+                    Orientation="Horizontal"
+                    Spacing="16"
+                    VerticalAlignment="Center">
+          <Button x:Name="LaunchCardConsoleButton"
+                  Classes="link"
+                  Content="{Binding [Launch.Card.ShowConsole], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+          <Button x:Name="LaunchCardDismissButton"
+                  Classes="link"
+                  Content="{Binding [Launch.Card.Dismiss], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+        </StackPanel>
+        <ProgressBar x:Name="LaunchCardProgress"
+                     Grid.Row="1"
+                     Grid.ColumnSpan="3"
+                     Classes="launchCardProgress" />
+      </Grid>
+    </Border>
 
     <!-- Modal sheets (custom environment, patches, packing) open in the window, not in
          windows of their own, so the controller and the title bar stay with the launcher. -->

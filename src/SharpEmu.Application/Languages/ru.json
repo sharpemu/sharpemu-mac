@@ -25,6 +25,38 @@
   "Page.GameCount.Other": "Игр: {0}",
 
   "Library.SearchWatermark": "Поиск…",
+
+  "LibraryMenu.Library": "Библиотека",
+
+  "LibraryMenu.View": "Вид",
+
+  "LibraryMenu.Row": "Ряд",
+
+  "LibraryMenu.Grid": "Сетка",
+
+  "LibraryMenu.TileSizeGridOnly": "Доступно в виде сетки",
+
+  "LibraryMenu.Sound": "Звук",
+
+  "LibraryMenu.Volume": "Громкость",
+
+  "LibraryMenu.AddGames": "Добавить игры",
+
+  "LibraryMenu.AddFolder": "Добавить папку…",
+
+  "Hero.GameSettings": "Настройки игры",
+
+  "Hero.CustomLaunch": "Особый запуск…",
+
+  "Hero.Console": "Консоль",
+
+  "Hint.LibraryMenu": "Меню библиотеки",
+
+  "Library.SearchClear": "Очистить поиск",
+
+  "Library.TileSize": "Размер плиток",
+
+  "Options.TitleMusicVolume.Desc": "Громкость заглавной музыки игры в библиотеке.",
   "Library.AddFolder": "Добавить папку",
   "Library.OpenFile": "Открыть файл…",
 
@@ -207,6 +239,12 @@
   "Launch.Stop": "■  Остановить",
   "Launch.Running": "Запущено - {0}",
   "Launch.Stopping": "Остановка…",
+  "Launch.Card.Starting": "Запуск {0}",
+  "Launch.Card.Loading": "Подготовка игры · {0} с",
+  "Launch.Card.Failed": "{0} остановлена",
+  "Launch.Card.FailedDetail": "{0} (код {1})",
+  "Launch.Card.ShowConsole": "Показать консоль",
+  "Launch.Card.Dismiss": "Закрыть",
   "Launch.Exited": "Завершено с кодом {0} ({1})",
   "Launch.ExeNotFound": "Исполняемый файл SharpEmu не найден. Скомпилируйте сначала проект SharpEmu.CLI (dotnet build).",
   "Launch.LogFile": "Лог: {0}",

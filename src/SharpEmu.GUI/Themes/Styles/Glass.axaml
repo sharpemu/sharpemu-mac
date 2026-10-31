@@ -71,6 +71,74 @@ replaces the glass shadow.
     <Setter Property="BorderThickness" Value="1" />
   </Style>
 
+  <!-- Library toolbar: search with its icon and clear button, and the view pill
+       (two view segments, plus the tile-size slider in the grid). -->
+  <!-- Search rests as a round icon and opens out while it is in use or holds text. -->
+  <Style Selector="TextBox.librarySearch">
+    <Setter Property="Width" Value="44" />
+    <Setter Property="MinWidth" Value="44" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Width" Duration="0:0:0.24" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="TextBox.librarySearch.expanded">
+    <Setter Property="Width" Value="300" />
+    <Setter Property="Padding" Value="10,0,4,0" />
+    <Setter Property="Cursor" Value="IBeam" />
+  </Style>
+  <Style Selector="TextBlock.searchGlyph">
+    <Setter Property="Margin" Value="12,0,0,0" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+  </Style>
+  <Style Selector="Button.searchClear">
+    <Setter Property="Width" Value="32" />
+    <Setter Property="Height" Value="32" />
+    <Setter Property="Margin" Value="0,0,6,0" />
+    <Setter Property="CornerRadius" Value="16" />
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="Border.toolbarPill">
+    <Setter Property="Height" Value="44" />
+    <Setter Property="CornerRadius" Value="22" />
+    <Setter Property="Padding" Value="3" />
+  </Style>
+  <Style Selector="Button.viewSegment">
+    <Setter Property="Width" Value="36" />
+    <Setter Property="Height" Value="36" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="18" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.viewSegment /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.15" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.viewSegment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource TileHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.viewSegment.active /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.viewSegment:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="TextBlock.tileSizeGlyph">
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+
   <!-- The accent pill keeps its flat fill and gets the same lit top edge. -->
   <Style Selector="Button.playButton /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="BoxShadow" Value="{StaticResource AccentEdgeShadow}" />

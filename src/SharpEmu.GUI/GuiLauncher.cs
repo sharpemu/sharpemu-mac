@@ -17,6 +17,12 @@ public static class GuiLauncher
     {
         try
         {
+            using var instance = SingleInstance.TryAcquire(out var anotherIsRunning);
+            if (anotherIsRunning)
+            {
+                return 0;
+            }
+
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(Array.Empty<string>());
             return 0;
         }

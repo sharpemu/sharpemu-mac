@@ -25,6 +25,38 @@
   "Page.GameCount.Other": "{0} gier",
 
   "Library.SearchWatermark": "Szukaj w bibliotece…",
+
+  "LibraryMenu.Library": "Biblioteka",
+
+  "LibraryMenu.View": "Widok",
+
+  "LibraryMenu.Row": "Rząd",
+
+  "LibraryMenu.Grid": "Siatka",
+
+  "LibraryMenu.TileSizeGridOnly": "Dostępne w widoku siatki",
+
+  "LibraryMenu.Sound": "Dźwięk",
+
+  "LibraryMenu.Volume": "Głośność",
+
+  "LibraryMenu.AddGames": "Dodaj gry",
+
+  "LibraryMenu.AddFolder": "Dodaj folder…",
+
+  "Hero.GameSettings": "Ustawienia gry",
+
+  "Hero.CustomLaunch": "Własne uruchomienie…",
+
+  "Hero.Console": "Konsola",
+
+  "Hint.LibraryMenu": "Menu biblioteki",
+
+  "Library.SearchClear": "Wyczyść wyszukiwanie",
+
+  "Library.TileSize": "Rozmiar kafelków",
+
+  "Options.TitleMusicVolume.Desc": "Głośność muzyki tytułowej gry w bibliotece.",
   "Library.AddFolder": "Dodaj folder",
   "Library.OpenFile": "Otwórz plik…",
   "Library.View.Grid": "Widok siatki",
@@ -209,6 +241,12 @@
   "Launch.Stop": "■  Zatrzymaj",
   "Launch.Running": "Działa — {0}",
   "Launch.Stopping": "Zatrzymywanie…",
+  "Launch.Card.Starting": "Uruchamianie: {0}",
+  "Launch.Card.Loading": "Przygotowywanie gry · {0} s",
+  "Launch.Card.Failed": "{0} – zatrzymano",
+  "Launch.Card.FailedDetail": "{0} (kod {1})",
+  "Launch.Card.ShowConsole": "Pokaż konsolę",
+  "Launch.Card.Dismiss": "Zamknij",
   "Launch.Exited": "Zakończono z kodem {0} ({1})",
   "Launch.ExeNotFound": "Nie znaleziono pliku wykonywalnego SharpEmu. Najpierw zbuduj projekt SharpEmu.CLI (dotnet build).",
   "Launch.LogFile": "Plik logu: {0}",

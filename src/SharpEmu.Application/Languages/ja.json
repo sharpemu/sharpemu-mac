@@ -25,6 +25,38 @@
   "Page.GameCount.Other": "ゲーム {0}本",
 
   "Library.SearchWatermark": "ライブラリを検索…",
+
+  "LibraryMenu.Library": "ライブラリ",
+
+  "LibraryMenu.View": "表示",
+
+  "LibraryMenu.Row": "列",
+
+  "LibraryMenu.Grid": "グリッド",
+
+  "LibraryMenu.TileSizeGridOnly": "グリッド表示でのみ使用可能",
+
+  "LibraryMenu.Sound": "サウンド",
+
+  "LibraryMenu.Volume": "音量",
+
+  "LibraryMenu.AddGames": "ゲームを追加",
+
+  "LibraryMenu.AddFolder": "フォルダーを追加…",
+
+  "Hero.GameSettings": "ゲーム設定",
+
+  "Hero.CustomLaunch": "カスタム起動…",
+
+  "Hero.Console": "コンソール",
+
+  "Hint.LibraryMenu": "ライブラリメニュー",
+
+  "Library.SearchClear": "検索をクリア",
+
+  "Library.TileSize": "タイルのサイズ",
+
+  "Options.TitleMusicVolume.Desc": "ライブラリで再生されるゲームのタイトル音楽の音量です。",
   "Library.AddFolder": "フォルダーを追加",
   "Library.OpenFile": "ファイルを開く…",
 
@@ -147,6 +179,12 @@
   "Launch.Stop": "■  停止",
   "Launch.Running": "実行中 — {0}",
   "Launch.Stopping": "停止中…",
+  "Launch.Card.Starting": "{0} を起動中",
+  "Launch.Card.Loading": "ゲームを準備中 · {0} 秒",
+  "Launch.Card.Failed": "{0} が停止しました",
+  "Launch.Card.FailedDetail": "{0}（コード {1}）",
+  "Launch.Card.ShowConsole": "コンソールを表示",
+  "Launch.Card.Dismiss": "閉じる",
   "Launch.Exited": "プロセスがコード {0} ({1}) で終了しました",
   "Launch.ExeNotFound": "SharpEmuの実行ファイルが見つかりません。先に SharpEmu.CLI プロジェクトをビルドしてください（dotnet build）。",
   "Launch.LogFile": "ログファイル: {0}",

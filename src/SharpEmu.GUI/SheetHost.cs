@@ -32,7 +32,14 @@ public sealed class SheetHost : Panel
             MaxWidth = sheet.SheetWidth,
             Child = sheet,
         };
-        if (double.IsNaN(sheet.SheetHeight))
+        if (sheet.IsPopover)
+        {
+            card.Classes.Add("popover");
+            card.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right;
+            card.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top;
+            card.Margin = sheet.PopoverMargin;
+        }
+        else if (double.IsNaN(sheet.SheetHeight))
         {
             card.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center;
         }
@@ -42,10 +49,21 @@ public sealed class SheetHost : Panel
         }
 
         KeyboardNavigation.SetTabNavigation(card, KeyboardNavigationMode.Cycle);
+        var scrim = new Border { Classes = { "sheetScrim" } };
+        if (sheet.IsPopover)
+        {
+            scrim.Classes.Add("popover");
+            scrim.PointerPressed += (_, args) =>
+            {
+                args.Handled = true;
+                sheet.RequestCancel();
+            };
+        }
+
         var root = new Grid
         {
             Classes = { "sheetLayer" },
-            Children = { new Border { Classes = { "sheetScrim" } }, card },
+            Children = { scrim, card },
         };
         root.KeyDown += (_, args) =>
         {
