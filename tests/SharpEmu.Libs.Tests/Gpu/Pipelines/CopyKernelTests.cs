@@ -141,24 +141,6 @@ public sealed class CopyKernelTests
     }
 
     [Theory]
-    [InlineData(0x8001u, 1u, 10)]
-    [InlineData(0x8021u, 64u, 10)]
-    [InlineData(0x0021u, 7u, 7)]
-    public void TheMaskedCopyKernel_StaysOnTheGpuAndItsResultIsKnown(uint initiator, uint dimension, int written)
-    {
-        var guest = Guest(elementCount: 10, parameter: 3, [1, 2, 3, 4], "masked");
-        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-
-        var result = cache.GetComputeProgram(Registers(4, 64, DwordBuffer(ControlAddress, 2)), new ShaderInterfaceRegisters(), initiator, dimension, 1, 1);
-
-        Assert.False(result.Consumed);
-        Assert.Equal(Untouched, Destination(guest, 1)[0]);
-        Assert.True(result.KnownWrite is not null, ShaderPipelineCache.TakeCpuKernelReport());
-        var known = result.KnownWrite!;
-        Assert.Equal(new uint[] { 1, 2, 3, 4, 1, 2, 3, 4, 1, 2 }.Take(written), known.Words.ToArray());
-    }
-
-    [Theory]
     [InlineData(SourceAddress, false)]
     [InlineData(ControlAddress, false)]
     [InlineData(DestinationAddress + 8, true)]

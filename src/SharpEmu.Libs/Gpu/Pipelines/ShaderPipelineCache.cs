@@ -1546,7 +1546,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null, out _, out _, out _);
+            // Predicted on the CPU like the bank form (upstream's register form does the same).
+            var program = GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null,
+                out var source, out var systemRegisters, out var decoded);
+            if (program.ImageCopy is not null)
+                return program;
+            var kernel = decoded is not null && program.Available && !program.Consumed && source is not null ? KernelFor(decoded) : null;
+            return WithPrediction(program, kernel, source, systemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect: false);
         }
     }
 
