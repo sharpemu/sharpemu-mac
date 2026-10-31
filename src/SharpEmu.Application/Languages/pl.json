@@ -372,6 +372,8 @@
   "Library.Patches.Running": "Zamknij uruchomioną grę przed zmianą łatek.",
   "Options.PortableData.Label": "Dane przenośne",
   "Options.PortableData.Desc": "Przechowuje ustawienia, zapisy i pamięć podręczną obok programu zamiast w profilu systemowym. Stosowane po ponownym uruchomieniu.",
+  "Options.GlobalCustomEnv.Label": "Zmienne dla wszystkich gier",
+  "Options.GlobalCustomEnv.Desc": "Przekazywane każdej grze przy uruchomieniu, jedna NAME=VALUE w wierszu. Własne zmienne gry mają pierwszeństwo, gdy ustawiają tę samą nazwę.",
   "Library.Context.PackZar": "Spakuj jako .zar…",
   "Library.Pack.Title": "Spakuj jako .zar",
   "Library.Pack.Heading": "Pakowanie: {0}",
@@ -479,5 +481,18 @@
   "Setting.Env.LogNp.Label": "Loguj wywołania PSN",
   "Setting.Env.BthidUnavailable.Label": "Zgłaszaj Bluetooth HID jako niedostępny",
   "Setting.Env.DisableImportLoopGuard.Label": "Wyłącz ochronę przed pętlą importu",
-  "Setting.Env.WritableApp0.Label": "Zapisywalny folder gry (/app0)"
+  "Setting.Env.WritableApp0.Label": "Zapisywalny folder gry (/app0)",
+  "Setting.Scope.Global": "Globalne",
+  "Setting.Scope.Global.Tip": "Takie samo jak ustawienie dla wszystkich gier",
+  "Setting.Scope.Reset": "Użyj ustawienia dla wszystkich gier ({0})",
+  "GameSettings.AllGames.Title": "Ustawienia dla wszystkich gier",
+  "GameSettings.AllGames.Desc": "Każda gra zaczyna od tych ustawień. Własne ustawienia gry zastępują je w tej grze.",
+  "Options.Group.Games": "Gry",
+  "Options.AllGames.Desc": "Ustawienia grafiki, dziennika zdarzeń i emulacji, od których zaczyna każda gra. Ustawienia oznaczone w grze jako Globalne podążają za nimi.",
+  "Options.AllGames.Open": "Otwórz",
+  "Launch.Variables.Title": "Uruchom ze zmiennymi",
+  "Launch.Variables.Desc": "Dotyczą tylko tego uruchomienia gry {0}, po wszystkich zapisanych ustawieniach. Jedna NAME=VALUE w wierszu.",
+  "Launch.Variables.SaveToGame": "Zapisz w tej grze",
+  "Launch.Variables.Saved": "[GUI][INFO] Zapisano zmienne ({0}) w grze {1}.",
+  "Launch.Card.OneOff": "+{0} zmiennych jednorazowych"
 }

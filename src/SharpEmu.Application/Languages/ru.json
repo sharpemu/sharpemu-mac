@@ -371,6 +371,8 @@
   "Library.Patches.Running": "Закройте запущенную игру перед изменением патчей.",
   "Options.PortableData.Label": "Портативные данные",
   "Options.PortableData.Desc": "Хранит настройки, сохранения и кэш рядом с исполняемым файлом вместо системного профиля. Применяется после перезапуска.",
+  "Options.GlobalCustomEnv.Label": "Переменные для всех игр",
+  "Options.GlobalCustomEnv.Desc": "Передаются каждой игре при запуске, по одной NAME=VALUE в строке. Собственные переменные игры имеют приоритет, если задают то же имя.",
   "Library.View.Grid": "Вид стопкой",
   "Library.View.Carousel": "Вид в ряд",
   "Library.Context.PackZar": "Упаковать в .zar…",
@@ -480,5 +482,18 @@
   "Setting.Env.LogNp.Label": "Логировать вызовы PSN",
   "Setting.Env.BthidUnavailable.Label": "Сообщать, что Bluetooth HID недоступен",
   "Setting.Env.DisableImportLoopGuard.Label": "Отключить защиту от циклов импорта",
-  "Setting.Env.WritableApp0.Label": "Папка игры доступна для записи (/app0)"
+  "Setting.Env.WritableApp0.Label": "Папка игры доступна для записи (/app0)",
+  "Setting.Scope.Global": "Общее",
+  "Setting.Scope.Global.Tip": "Совпадает с настройкой для всех игр",
+  "Setting.Scope.Reset": "Использовать настройку для всех игр ({0})",
+  "GameSettings.AllGames.Title": "Настройки для всех игр",
+  "GameSettings.AllGames.Desc": "Каждая игра начинает с этих настроек. Собственные настройки игры заменяют их для этой игры.",
+  "Options.Group.Games": "Игры",
+  "Options.AllGames.Desc": "Настройки графики, логгирования и эмуляции, с которых начинает каждая игра. Настройки, помеченные в игре как «Общее», следуют этим.",
+  "Options.AllGames.Open": "Открыть",
+  "Launch.Variables.Title": "Запуск с переменными",
+  "Launch.Variables.Desc": "Применяются только к этому запуску {0}, после всех сохранённых настроек. По одной NAME=VALUE в строке.",
+  "Launch.Variables.SaveToGame": "Сохранить для этой игры",
+  "Launch.Variables.Saved": "[GUI][INFO] Переменные ({0}) сохранены для {1}.",
+  "Launch.Card.OneOff": "+{0} разовых переменных"
 }

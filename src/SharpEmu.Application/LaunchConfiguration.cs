@@ -17,13 +17,23 @@ public sealed record LaunchConfiguration(EffectiveLaunchSettings Settings, IRead
         "SHARPEMU_LOG_NP", "SHARPEMU_RENDERDOC", "SHARPEMU_VK_DISABLE_IMPLICITS", "SHARPEMU_CRASH_CAPTURE",
     ];
 
+    /// <summary>
+    /// A game's launch, later layers winning: built-in defaults, the settings for every game,
+    /// the game's own settings, then custom variables for every game and the game's own.
+    /// </summary>
     public static LaunchConfiguration Load(string gamePath, string? titleId)
     {
         SettingsSplitMigration.MigrateIfNeeded();
         var game = PerGameSettings.Load(PerGameSettings.KeyFor(titleId, gamePath));
-        return new(EffectiveLaunchSettings.Resolve(game), CustomEnvironmentVariables.Merge(
+        return new(EffectiveLaunchSettings.Resolve(PerGameSettings.LoadGlobal(), game), CustomEnvironmentVariables.Merge(
             GlobalCustomEnvironmentSettings.Load(), game?.CustomEnvironmentVariables));
     }
+
+    /// <summary>Adds variables for this launch only; they apply after every saved setting.</summary>
+    public LaunchConfiguration WithOneOff(IReadOnlyList<string>? oneOff) =>
+        oneOff is { Count: > 0 }
+            ? this with { CustomEnvironment = CustomEnvironmentVariables.Merge(CustomEnvironment, oneOff) }
+            : this;
 
     // Defaults stay sparse in the settings file, but are explicit at launch so a launcher's
     // inherited shell variables cannot silently change a game's switches. Null restores an

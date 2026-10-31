@@ -370,6 +370,8 @@
   "Library.Patches.Running": "Fermez le jeu en cours avant de modifier les correctifs.",
   "Options.PortableData.Label": "Données portables",
   "Options.PortableData.Desc": "Conserve les paramètres, les sauvegardes et les caches à côté de l'exécutable plutôt que dans le profil système. Effectif après un redémarrage.",
+  "Options.GlobalCustomEnv.Label": "Variables pour tous les jeux",
+  "Options.GlobalCustomEnv.Desc": "Transmises à chaque jeu au lancement, une NAME=VALUE par ligne. Les variables propres à un jeu l'emportent lorsqu'elles définissent le même nom.",
   "Library.Context.PackZar": "Empaqueter en .zar…",
   "Library.Pack.Title": "Empaqueter en .zar",
   "Library.Pack.Heading": "Empaquetage de {0}",
@@ -476,5 +478,18 @@
   "Setting.Env.LogNp.Label": "Journaliser les appels PSN",
   "Setting.Env.BthidUnavailable.Label": "Signaler le HID Bluetooth comme indisponible",
   "Setting.Env.DisableImportLoopGuard.Label": "Désactiver la protection contre les boucles d’import",
-  "Setting.Env.WritableApp0.Label": "Dossier du jeu accessible en écriture (/app0)"
+  "Setting.Env.WritableApp0.Label": "Dossier du jeu accessible en écriture (/app0)",
+  "Setting.Scope.Global": "Global",
+  "Setting.Scope.Global.Tip": "Identique au réglage de tous les jeux",
+  "Setting.Scope.Reset": "Utiliser le réglage de tous les jeux ({0})",
+  "GameSettings.AllGames.Title": "Réglages de tous les jeux",
+  "GameSettings.AllGames.Desc": "Chaque jeu part de ces réglages. Les réglages propres à un jeu les remplacent pour ce jeu.",
+  "Options.Group.Games": "Jeux",
+  "Options.AllGames.Desc": "Réglages de graphismes, de journalisation et d’émulation dont part chaque jeu. Les réglages marqués Global dans un jeu suivent ceux-ci.",
+  "Options.AllGames.Open": "Ouvrir",
+  "Launch.Variables.Title": "Lancer avec des variables",
+  "Launch.Variables.Desc": "Appliquées uniquement à ce lancement de {0}, après tous les réglages enregistrés. Un NAME=VALUE par ligne.",
+  "Launch.Variables.SaveToGame": "Enregistrer pour ce jeu",
+  "Launch.Variables.Saved": "[GUI][INFO] {0} variables enregistrées pour {1}.",
+  "Launch.Card.OneOff": "+{0} variables ponctuelles"
 }

@@ -374,6 +374,8 @@
   "Library.Patches.Running": "Yamaları dəyişməzdən əvvəl işləyən oyunu bağlayın.",
   "Options.PortableData.Label": "Taşınabilir məlumatlar",
   "Options.PortableData.Desc": "Parametrləri, yaddaşları və keşi sistem profili əvəzinə proqramın yanında saxlayır. Yenidən başlatdıqdan sonra tətbiq olunur.",
+  "Options.GlobalCustomEnv.Label": "Bütün oyunlar üçün dəyişənlər",
+  "Options.GlobalCustomEnv.Desc": "Hər oyuna başladılarkən ötürülür, hər sətirdə bir NAME=VALUE. Oyunun öz dəyişənləri eyni adı təyin etdikdə üstünlük təşkil edir.",
   "Library.Context.PackZar": ".zar kimi paketlə…",
   "Library.Pack.Title": ".zar kimi paketlə",
   "Library.Pack.Heading": "{0} paketlənir",
@@ -485,5 +487,18 @@
   "Setting.Env.LogNp.Label": "PSN çağırışlarını jurnala yaz",
   "Setting.Env.BthidUnavailable.Label": "Bluetooth HID-i əlçatmaz kimi bildir",
   "Setting.Env.DisableImportLoopGuard.Label": "İdxal dövrü qoruyucusunu söndür",
-  "Setting.Env.WritableApp0.Label": "Yazıla bilən oyun qovluğu (/app0)"
+  "Setting.Env.WritableApp0.Label": "Yazıla bilən oyun qovluğu (/app0)",
+  "Setting.Scope.Global": "Ümumi",
+  "Setting.Scope.Global.Tip": "Bütün oyunların ayarı ilə eynidir",
+  "Setting.Scope.Reset": "Bütün oyunların ayarını istifadə et ({0})",
+  "GameSettings.AllGames.Title": "Bütün oyunlar üçün ayarlar",
+  "GameSettings.AllGames.Desc": "Hər oyun bu ayarlardan başlayır. Oyunun öz ayarları həmin oyun üçün onları əvəz edir.",
+  "Options.Group.Games": "Oyunlar",
+  "Options.AllGames.Desc": "Hər oyunun başladığı qrafika, jurnal və emulyasiya ayarları. Oyunda Ümumi kimi qeyd olunan ayarlar bunlara tabe olur.",
+  "Options.AllGames.Open": "Aç",
+  "Launch.Variables.Title": "Dəyişənlərlə işə sal",
+  "Launch.Variables.Desc": "Yalnız {0} oyununun bu işə salınmasına, bütün saxlanmış ayarlardan sonra tətbiq olunur. Hər sətirdə bir NAME=VALUE.",
+  "Launch.Variables.SaveToGame": "Bu oyuna yadda saxla",
+  "Launch.Variables.Saved": "[GUI][INFO] {0} dəyişən {1} oyununa yadda saxlandı.",
+  "Launch.Card.OneOff": "+{0} birdəfəlik dəyişən"
 }

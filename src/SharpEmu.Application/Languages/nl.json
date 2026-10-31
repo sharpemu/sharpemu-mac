@@ -367,6 +367,8 @@
   "Library.Patches.Running": "Sluit het actieve spel voordat je patches wijzigt.",
   "Options.PortableData.Label": "Draagbare gegevens",
   "Options.PortableData.Desc": "Bewaart instellingen, opslag en cache naast het programma in plaats van in het systeemprofiel. Van kracht na een herstart.",
+  "Options.GlobalCustomEnv.Label": "Variabelen voor alle games",
+  "Options.GlobalCustomEnv.Desc": "Worden bij het starten aan elke game doorgegeven, één NAME=VALUE per regel. De eigen variabelen van een game gaan voor als ze dezelfde naam instellen.",
   "Library.View.Grid": "Gestapelde weergave",
   "Library.View.Carousel": "Rijweergave",
   "Library.Context.PackZar": "Inpakken als .zar…",
@@ -476,5 +478,18 @@
   "Setting.Env.LogNp.Label": "PSN-aanroepen loggen",
   "Setting.Env.BthidUnavailable.Label": "Bluetooth HID als niet beschikbaar melden",
   "Setting.Env.DisableImportLoopGuard.Label": "Importlusbeveiliging uitschakelen",
-  "Setting.Env.WritableApp0.Label": "Beschrijfbare gamemap (/app0)"
+  "Setting.Env.WritableApp0.Label": "Beschrijfbare gamemap (/app0)",
+  "Setting.Scope.Global": "Globaal",
+  "Setting.Scope.Global.Tip": "Hetzelfde als de instelling voor alle games",
+  "Setting.Scope.Reset": "Instelling voor alle games gebruiken ({0})",
+  "GameSettings.AllGames.Title": "Instellingen voor alle games",
+  "GameSettings.AllGames.Desc": "Elke game begint hiermee. De eigen instellingen van een game vervangen ze voor die game.",
+  "Options.Group.Games": "Games",
+  "Options.AllGames.Desc": "Grafische, logging- en emulatie-instellingen waarmee elke game begint. Instellingen die in een game als Globaal zijn gemarkeerd, volgen deze.",
+  "Options.AllGames.Open": "Openen",
+  "Launch.Variables.Title": "Starten met variabelen",
+  "Launch.Variables.Desc": "Alleen van toepassing op deze start van {0}, na alle opgeslagen instellingen. Eén NAME=VALUE per regel.",
+  "Launch.Variables.SaveToGame": "Opslaan voor deze game",
+  "Launch.Variables.Saved": "[GUI][INFO] {0} variabelen opgeslagen voor {1}.",
+  "Launch.Card.OneOff": "+{0} eenmalige variabelen"
 }

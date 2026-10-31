@@ -372,6 +372,8 @@
   "Library.Patches.Running": "Chiudi il gioco in esecuzione prima di modificare le patch.",
   "Options.PortableData.Label": "Dati portabili",
   "Options.PortableData.Desc": "Mantiene impostazioni, salvataggi e cache accanto all'eseguibile invece che nel profilo di sistema. Ha effetto dopo un riavvio.",
+  "Options.GlobalCustomEnv.Label": "Variabili per tutti i giochi",
+  "Options.GlobalCustomEnv.Desc": "Passate a ogni gioco all'avvio, una NAME=VALUE per riga. Le variabili proprie di un gioco hanno la precedenza se impostano lo stesso nome.",
   "Library.View.Grid": "Vista a pila",
   "Library.View.Carousel": "Vista a riga",
   "Library.Context.PackZar": "Comprimi come .zar…",
@@ -481,5 +483,18 @@
   "Setting.Env.LogNp.Label": "Registra le chiamate PSN",
   "Setting.Env.BthidUnavailable.Label": "Segnala il Bluetooth HID come non disponibile",
   "Setting.Env.DisableImportLoopGuard.Label": "Disattiva la protezione dai loop di importazione",
-  "Setting.Env.WritableApp0.Label": "Cartella del gioco scrivibile (/app0)"
+  "Setting.Env.WritableApp0.Label": "Cartella del gioco scrivibile (/app0)",
+  "Setting.Scope.Global": "Globale",
+  "Setting.Scope.Global.Tip": "Uguale all'impostazione di tutti i giochi",
+  "Setting.Scope.Reset": "Usa l'impostazione di tutti i giochi ({0})",
+  "GameSettings.AllGames.Title": "Impostazioni di tutti i giochi",
+  "GameSettings.AllGames.Desc": "Ogni gioco parte da queste. Le impostazioni del singolo gioco le sostituiscono per quel gioco.",
+  "Options.Group.Games": "Giochi",
+  "Options.AllGames.Desc": "Impostazioni di grafica, log ed emulazione da cui parte ogni gioco. Le impostazioni contrassegnate come Globale in un gioco seguono queste.",
+  "Options.AllGames.Open": "Apri",
+  "Launch.Variables.Title": "Avvia con variabili",
+  "Launch.Variables.Desc": "Applicate solo a questo avvio di {0}, dopo tutte le impostazioni salvate. Un NAME=VALUE per riga.",
+  "Launch.Variables.SaveToGame": "Salva in questo gioco",
+  "Launch.Variables.Saved": "[GUI][INFO] {0} variabili salvate in {1}.",
+  "Launch.Card.OneOff": "+{0} variabili una tantum"
 }

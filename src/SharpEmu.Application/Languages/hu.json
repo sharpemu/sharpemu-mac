@@ -368,6 +368,8 @@
   "Library.Patches.Running": "A javítások módosítása előtt zárd be a futó játékot.",
   "Options.PortableData.Label": "Hordozható adatok",
   "Options.PortableData.Desc": "A beállításokat, mentéseket és gyorsítótárakat a program mellett tartja a rendszerprofil helyett. Újraindítás után lép érvénybe.",
+  "Options.GlobalCustomEnv.Label": "Változók minden játékhoz",
+  "Options.GlobalCustomEnv.Desc": "Indításkor minden játék megkapja, soronként egy NAME=VALUE. Egy játék saját változói elsőbbséget élveznek, ha ugyanazt a nevet állítják be.",
   "Library.View.Grid": "Halmozott nézet",
   "Library.View.Carousel": "Soros nézet",
   "Library.Context.PackZar": "Csomagolás .zar fájlba…",
@@ -477,5 +479,18 @@
   "Setting.Env.LogNp.Label": "PSN-hívások naplózása",
   "Setting.Env.BthidUnavailable.Label": "Bluetooth HID jelentése nem elérhetőként",
   "Setting.Env.DisableImportLoopGuard.Label": "Importhurok-védelem letiltása",
-  "Setting.Env.WritableApp0.Label": "Írható játékmappa (/app0)"
+  "Setting.Env.WritableApp0.Label": "Írható játékmappa (/app0)",
+  "Setting.Scope.Global": "Globális",
+  "Setting.Scope.Global.Tip": "Megegyezik az összes játék beállításával",
+  "Setting.Scope.Reset": "Az összes játék beállításának használata ({0})",
+  "GameSettings.AllGames.Title": "Beállítások az összes játékhoz",
+  "GameSettings.AllGames.Desc": "Minden játék ezekből indul ki. A játék saját beállításai felülírják ezeket az adott játéknál.",
+  "Options.Group.Games": "Játékok",
+  "Options.AllGames.Desc": "Grafikai, naplózási és emulációs beállítások, amelyekből minden játék kiindul. A játékban Globális jelölésű beállítások ezeket követik.",
+  "Options.AllGames.Open": "Megnyitás",
+  "Launch.Variables.Title": "Indítás változókkal",
+  "Launch.Variables.Desc": "Csak a(z) {0} ezen indításakor érvényes, az összes mentett beállítás után. Soronként egy NAME=VALUE.",
+  "Launch.Variables.SaveToGame": "Mentés ehhez a játékhoz",
+  "Launch.Variables.Saved": "[GUI][INFO] {0} változó elmentve ide: {1}.",
+  "Launch.Card.OneOff": "+{0} egyszeri változó"
 }

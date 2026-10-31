@@ -407,6 +407,8 @@
   "Library.Patches.Running": "Close the running game before changing patches.",
   "Options.PortableData.Label": "Portable data",
   "Options.PortableData.Desc": "Keep settings, saves and caches next to the executable instead of the system profile. Applies after a restart.",
+  "Options.GlobalCustomEnv.Label": "Variables for every game",
+  "Options.GlobalCustomEnv.Desc": "Passed to every game at launch, one NAME=VALUE per line. A game's own custom variables win when they set the same name.",
   "Setting.Group.Performance": "Performance",
   "Setting.Group.Compatibility": "Compatibility",
   "Setting.Group.Audio": "Audio",
@@ -480,5 +482,18 @@
   "Setting.Env.LogNp.Label": "Log PSN calls",
   "Setting.Env.BthidUnavailable.Label": "Report Bluetooth HID as unavailable",
   "Setting.Env.DisableImportLoopGuard.Label": "Disable import loop guard",
-  "Setting.Env.WritableApp0.Label": "Writable game folder (/app0)"
+  "Setting.Env.WritableApp0.Label": "Writable game folder (/app0)",
+  "Setting.Scope.Global": "Global",
+  "Setting.Scope.Global.Tip": "Same as the setting for every game",
+  "Setting.Scope.Reset": "Use the setting for every game ({0})",
+  "GameSettings.AllGames.Title": "Settings for every game",
+  "GameSettings.AllGames.Desc": "Every game starts from these. A game's own settings replace them for that game.",
+  "Options.Group.Games": "Games",
+  "Options.AllGames.Desc": "Graphics, logging and emulation settings every game starts from. Settings marked Global in a game follow these.",
+  "Options.AllGames.Open": "Open",
+  "Launch.Variables.Title": "Launch with variables",
+  "Launch.Variables.Desc": "Applied to this launch of {0} only, after every saved setting. One NAME=VALUE per line.",
+  "Launch.Variables.SaveToGame": "Save to this game",
+  "Launch.Variables.Saved": "[GUI][INFO] Saved {0} variables to {1}.",
+  "Launch.Card.OneOff": "+{0} one-off variables"
 }

@@ -367,6 +367,8 @@
   "Library.Patches.Running": "أغلق اللعبة قيد التشغيل قبل تغيير التعديلات.",
   "Options.PortableData.Label": "بيانات محمولة",
   "Options.PortableData.Desc": "الاحتفاظ بالإعدادات والحفظ والذاكرة المؤقتة بجانب الملف التنفيذي بدلًا من ملف التعريف النظامي. يُطبَّق بعد إعادة التشغيل.",
+  "Options.GlobalCustomEnv.Label": "متغيرات لكل الألعاب",
+  "Options.GlobalCustomEnv.Desc": "تُمرَّر إلى كل لعبة عند التشغيل، متغير NAME=VALUE واحد في كل سطر. تتقدّم متغيرات اللعبة المخصصة عندما تحدد الاسم نفسه.",
   "Library.View.Grid": "عرض متراكب",
   "Library.View.Carousel": "عرض في صف",
   "Library.Context.PackZar": "تعبئة بصيغة .zar…",
@@ -476,5 +478,18 @@
   "Setting.Env.LogNp.Label": "تسجيل استدعاءات PSN",
   "Setting.Env.BthidUnavailable.Label": "الإبلاغ بأن Bluetooth HID غير متاح",
   "Setting.Env.DisableImportLoopGuard.Label": "تعطيل حارس حلقة الاستيراد",
-  "Setting.Env.WritableApp0.Label": "مجلد لعبة قابل للكتابة (/app0)"
+  "Setting.Env.WritableApp0.Label": "مجلد لعبة قابل للكتابة (/app0)",
+  "Setting.Scope.Global": "عام",
+  "Setting.Scope.Global.Tip": "مطابق لإعداد كل الألعاب",
+  "Setting.Scope.Reset": "استخدام إعداد كل الألعاب ({0})",
+  "GameSettings.AllGames.Title": "إعدادات كل الألعاب",
+  "GameSettings.AllGames.Desc": "تبدأ كل لعبة من هذه الإعدادات، وتحل إعدادات اللعبة الخاصة محلها لتلك اللعبة.",
+  "Options.Group.Games": "الألعاب",
+  "Options.AllGames.Desc": "إعدادات الرسومات والتسجيل والمحاكاة التي تبدأ منها كل لعبة. الإعدادات المعلَّمة بـ «عام» في لعبة ما تتبع هذه الإعدادات.",
+  "Options.AllGames.Open": "فتح",
+  "Launch.Variables.Title": "التشغيل مع متغيرات",
+  "Launch.Variables.Desc": "تُطبَّق على هذا التشغيل فقط للعبة {0}، بعد كل الإعدادات المحفوظة. متغير واحد بصيغة NAME=VALUE في كل سطر.",
+  "Launch.Variables.SaveToGame": "حفظ في هذه اللعبة",
+  "Launch.Variables.Saved": "[GUI][INFO] تم حفظ {0} متغيرات في {1}.",
+  "Launch.Card.OneOff": "+{0} متغيرات لمرة واحدة"
 }

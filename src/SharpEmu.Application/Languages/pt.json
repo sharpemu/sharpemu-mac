@@ -368,6 +368,8 @@
   "Library.Patches.Running": "Feche o jogo em execução antes de alterar os patches.",
   "Options.PortableData.Label": "Dados portáteis",
   "Options.PortableData.Desc": "Mantém as definições, os saves e as caches junto ao executável em vez do perfil do sistema. Aplica-se após reiniciar.",
+  "Options.GlobalCustomEnv.Label": "Variáveis para todos os jogos",
+  "Options.GlobalCustomEnv.Desc": "Passadas a todos os jogos ao iniciar, uma NAME=VALUE por linha. As variáveis próprias de um jogo têm prioridade quando definem o mesmo nome.",
   "Library.View.Grid": "Vista empilhada",
   "Library.View.Carousel": "Vista em linha",
   "Library.Context.PackZar": "Empacotar como .zar…",
@@ -477,5 +479,18 @@
   "Setting.Env.LogNp.Label": "Registar chamadas PSN",
   "Setting.Env.BthidUnavailable.Label": "Reportar o Bluetooth HID como indisponível",
   "Setting.Env.DisableImportLoopGuard.Label": "Desativar a proteção contra ciclos de importação",
-  "Setting.Env.WritableApp0.Label": "Pasta do jogo gravável (/app0)"
+  "Setting.Env.WritableApp0.Label": "Pasta do jogo gravável (/app0)",
+  "Setting.Scope.Global": "Global",
+  "Setting.Scope.Global.Tip": "Igual à definição de todos os jogos",
+  "Setting.Scope.Reset": "Usar a definição de todos os jogos ({0})",
+  "GameSettings.AllGames.Title": "Definições de todos os jogos",
+  "GameSettings.AllGames.Desc": "Todos os jogos partem destas. As definições próprias de um jogo substituem-nas para esse jogo.",
+  "Options.Group.Games": "Jogos",
+  "Options.AllGames.Desc": "Definições de gráficos, registos e emulação de que parte cada jogo. As definições marcadas como Global num jogo seguem estas.",
+  "Options.AllGames.Open": "Abrir",
+  "Launch.Variables.Title": "Iniciar com variáveis",
+  "Launch.Variables.Desc": "Aplicadas apenas a este arranque de {0}, depois de todas as definições guardadas. Um NAME=VALUE por linha.",
+  "Launch.Variables.SaveToGame": "Guardar neste jogo",
+  "Launch.Variables.Saved": "[GUI][INFO] {0} variáveis guardadas em {1}.",
+  "Launch.Card.OneOff": "+{0} variáveis pontuais"
 }

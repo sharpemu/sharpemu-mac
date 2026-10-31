@@ -371,6 +371,8 @@
   "Library.Patches.Running": "Yamaları değiştirmek için çalışan oyunu kapatın.",
   "Options.PortableData.Label": "Taşınabilir veri",
   "Options.PortableData.Desc": "Ayarları, kayıtları ve önbelleği sistem profili yerine programın yanında tutar. Yeniden başlatmadan sonra uygulanır.",
+  "Options.GlobalCustomEnv.Label": "Tüm oyunlar için değişkenler",
+  "Options.GlobalCustomEnv.Desc": "Başlatılırken her oyuna aktarılır, her satıra bir NAME=VALUE. Bir oyunun kendi değişkenleri aynı adı ayarladığında öncelik onlardadır.",
   "Library.Context.PackZar": ".zar olarak paketle…",
   "Library.Pack.Title": ".zar olarak paketle",
   "Library.Pack.Heading": "{0} paketleniyor",
@@ -478,5 +480,18 @@
   "Setting.Env.LogNp.Label": "PSN çağrılarını günlükle",
   "Setting.Env.BthidUnavailable.Label": "Bluetooth HID'i kullanılamıyor olarak bildir",
   "Setting.Env.DisableImportLoopGuard.Label": "İçe aktarma döngüsü korumasını devre dışı bırak",
-  "Setting.Env.WritableApp0.Label": "Yazılabilir oyun klasörü (/app0)"
+  "Setting.Env.WritableApp0.Label": "Yazılabilir oyun klasörü (/app0)",
+  "Setting.Scope.Global": "Genel",
+  "Setting.Scope.Global.Tip": "Tüm oyunların ayarıyla aynı",
+  "Setting.Scope.Reset": "Tüm oyunların ayarını kullan ({0})",
+  "GameSettings.AllGames.Title": "Tüm oyunlar için ayarlar",
+  "GameSettings.AllGames.Desc": "Her oyun bunlarla başlar. Bir oyunun kendi ayarları, o oyun için bunların yerine geçer.",
+  "Options.Group.Games": "Oyunlar",
+  "Options.AllGames.Desc": "Her oyunun başlangıç noktası olan grafik, günlükleme ve emülasyon ayarları. Bir oyunda Genel olarak işaretli ayarlar bunları izler.",
+  "Options.AllGames.Open": "Aç",
+  "Launch.Variables.Title": "Değişkenlerle başlat",
+  "Launch.Variables.Desc": "Yalnızca {0} oyununun bu başlatılışına, kaydedilmiş tüm ayarlardan sonra uygulanır. Her satıra bir NAME=VALUE.",
+  "Launch.Variables.SaveToGame": "Bu oyuna kaydet",
+  "Launch.Variables.Saved": "[GUI][INFO] {0} değişken {1} oyununa kaydedildi.",
+  "Launch.Card.OneOff": "+{0} tek seferlik değişken"
 }

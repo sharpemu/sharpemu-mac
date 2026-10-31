@@ -372,6 +372,8 @@
   "Library.Patches.Running": "Enne paikade muutmist sulge töötav mäng.",
   "Options.PortableData.Label": "Kaasaskantavad andmed",
   "Options.PortableData.Desc": "Hoiab seaded, salvestused ja vahemälu rakenduse kõrval süsteemiprofiili asemel. Rakendub pärast taaskäivitamist.",
+  "Options.GlobalCustomEnv.Label": "Muutujad kõigile mängudele",
+  "Options.GlobalCustomEnv.Desc": "Antakse käivitamisel igale mängule, üks NAME=VALUE rea kohta. Mängu enda muutujad on ülimuslikud, kui need määravad sama nime.",
   "Library.Context.PackZar": "Paki .zar-failiks…",
   "Library.Pack.Title": "Paki .zar-failiks",
   "Library.Pack.Heading": "Pakin: {0}",
@@ -479,5 +481,18 @@
   "Setting.Env.LogNp.Label": "Logi PSN-i kutseid",
   "Setting.Env.BthidUnavailable.Label": "Märgi Bluetooth HID kättesaamatuks",
   "Setting.Env.DisableImportLoopGuard.Label": "Keela impordisilmuse kaitse",
-  "Setting.Env.WritableApp0.Label": "Kirjutatav mängukaust (/app0)"
+  "Setting.Env.WritableApp0.Label": "Kirjutatav mängukaust (/app0)",
+  "Setting.Scope.Global": "Üldine",
+  "Setting.Scope.Global.Tip": "Sama mis kõigi mängude seade",
+  "Setting.Scope.Reset": "Kasuta kõigi mängude seadet ({0})",
+  "GameSettings.AllGames.Title": "Kõigi mängude seaded",
+  "GameSettings.AllGames.Desc": "Iga mäng alustab nendest. Mängu enda seaded asendavad need selle mängu jaoks.",
+  "Options.Group.Games": "Mängud",
+  "Options.AllGames.Desc": "Graafika, logimise ja emulatsiooni seaded, millest iga mäng alustab. Mängus Üldine-märgitud seaded järgivad neid.",
+  "Options.AllGames.Open": "Ava",
+  "Launch.Variables.Title": "Käivita muutujatega",
+  "Launch.Variables.Desc": "Rakendub ainult mängu {0} sellele käivitusele, pärast kõiki salvestatud seadeid. Üks NAME=VALUE rea kohta.",
+  "Launch.Variables.SaveToGame": "Salvesta sellele mängule",
+  "Launch.Variables.Saved": "[GUI][INFO] {0} muutujat salvestati mängule {1}.",
+  "Launch.Card.OneOff": "+{0} ühekordset muutujat"
 }

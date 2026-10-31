@@ -381,6 +381,7 @@ public partial class MainWindow : Window
         WireOptionsNavigation();
         WireGameOptions();
         BuildEnvironmentSettingRows();
+        BuildScopedRows();
         HideUnsupportedPlatformOptions();
         InitializeOptionGroupDividers();
 
@@ -1240,6 +1241,12 @@ public partial class MainWindow : Window
         UpdateEmptyStateTexts();
         UpdateLibraryLayoutButton();
         UpdateTitleMusicControls();
+        if (_isGameSettingsOpen)
+        {
+            UpdateGameCustomEnvironmentSummary();
+            UpdateScopeBadges();
+        }
+
         AutomationProperties.SetName(TitleMusicVolumeSlider, Localization.Instance.Get("Library.Music.Volume"));
         UpdateRunButtons();
     }
@@ -2834,7 +2841,8 @@ public partial class MainWindow : Window
     private void Launch(
         string ebootPath,
         string displayName,
-        string? titleId = null)
+        string? titleId = null,
+        IReadOnlyList<string>? oneOffVariables = null)
     {
         if (_isRunning)
         {
@@ -2845,8 +2853,9 @@ public partial class MainWindow : Window
             ? _allGames.FirstOrDefault(game =>
                 game.Path.Equals(ebootPath, GameLibraryPath.Comparison))?.TitleId
             : titleId;
-        var configuration = LaunchConfiguration.Load(ebootPath, resolvedTitleId);
+        var configuration = LaunchConfiguration.Load(ebootPath, resolvedTitleId).WithOneOff(oneOffVariables);
         var effective = configuration.Settings;
+        _launchOneOffCount = oneOffVariables?.Count ?? 0;
 
         _sndPreview.Stop();
         _consoleLines.Clear();
@@ -3095,6 +3104,7 @@ public partial class MainWindow : Window
 
         GameSettingsButton.IsEnabled =
             GameList.SelectedItem is GameEntry;
+        LaunchVariablesButton.IsEnabled = !_isRunning && GameList.SelectedItem is GameEntry;
         _libraryMenu.OpenFileButton.IsEnabled = !_isRunning;
     }
 
