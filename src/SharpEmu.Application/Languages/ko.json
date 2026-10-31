@@ -234,6 +234,7 @@
   "Common.Save": "저장",
   "Common.Edit": "편집",
   "Setting.CustomEnv.Label": "사용자 지정 변수",
+  "Setting.Group.EnvironmentVariables": "환경 변수",
   "Setting.CustomEnv.Count": "{0}개 설정됨",
   "Common.Cancel": "취소",
   "Options.About": "정보",

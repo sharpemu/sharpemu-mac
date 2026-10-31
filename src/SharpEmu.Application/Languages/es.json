@@ -244,6 +244,7 @@
   "Common.Save": "Guardar",
   "Common.Edit": "Editar",
   "Setting.CustomEnv.Label": "Variables personalizadas",
+  "Setting.Group.EnvironmentVariables": "Variables de entorno",
   "Setting.CustomEnv.Count": "{0} definidas",
   "Common.Cancel": "Cancelar",
   "Updater.Auto.Label": "Buscar actualizaciones al iniciar",

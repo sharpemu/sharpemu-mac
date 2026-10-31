@@ -234,6 +234,7 @@
   "Common.Save": "حفظ",
   "Common.Edit": "تعديل",
   "Setting.CustomEnv.Label": "متغيرات مخصصة",
+  "Setting.Group.EnvironmentVariables": "متغيرات البيئة",
   "Setting.CustomEnv.Count": "{0} معيّن",
   "Common.Cancel": "إلغاء",
   "Options.About": "حول",

@@ -239,6 +239,7 @@
   "Common.Save": "Salva",
   "Common.Edit": "Modifica",
   "Setting.CustomEnv.Label": "Variabili personalizzate",
+  "Setting.Group.EnvironmentVariables": "Variabili d’ambiente",
   "Setting.CustomEnv.Count": "{0} impostate",
   "Common.Cancel": "Annulla",
   "Options.About": "Informazioni",

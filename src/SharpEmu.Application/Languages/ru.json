@@ -215,6 +215,7 @@
   "Common.Save": "Сохранить",
   "Common.Edit": "Изменить",
   "Setting.CustomEnv.Label": "Свои переменные",
+  "Setting.Group.EnvironmentVariables": "Переменные окружения",
   "Setting.CustomEnv.Count": "Задано: {0}",
   "Common.Cancel": "Отмена",
 

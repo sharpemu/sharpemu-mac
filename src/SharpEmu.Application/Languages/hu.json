@@ -242,6 +242,7 @@
   "Common.Save": "Mentés",
   "Common.Edit": "Szerkesztés",
   "Setting.CustomEnv.Label": "Egyéni változók",
+  "Setting.Group.EnvironmentVariables": "Környezeti változók",
   "Setting.CustomEnv.Count": "{0} beállítva",
   "Common.Cancel": "Mégse",
   "About.Github.LatestCommitLabel": "Legutóbbi commit",

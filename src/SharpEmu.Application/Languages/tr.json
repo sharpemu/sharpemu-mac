@@ -273,6 +273,7 @@
   "Common.Save": "Kaydet",
   "Common.Edit": "Düzenle",
   "Setting.CustomEnv.Label": "Özel değişkenler",
+  "Setting.Group.EnvironmentVariables": "Ortam değişkenleri",
   "Setting.CustomEnv.Count": "{0} ayarlı",
   "Common.Cancel": "İptal",
   "Options.About": "Hakkında",

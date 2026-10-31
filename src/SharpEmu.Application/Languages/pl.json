@@ -217,6 +217,7 @@
   "Common.Save": "Zapisz",
   "Common.Edit": "Edytuj",
   "Setting.CustomEnv.Label": "Własne zmienne",
+  "Setting.Group.EnvironmentVariables": "Zmienne środowiskowe",
   "Setting.CustomEnv.Count": "Ustawione: {0}",
   "Common.Cancel": "Anuluj",
 

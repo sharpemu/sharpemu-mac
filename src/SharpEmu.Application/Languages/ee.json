@@ -217,6 +217,7 @@
   "Common.Save": "Salvesta",
   "Common.Edit": "Muuda",
   "Setting.CustomEnv.Label": "Kohandatud muutujad",
+  "Setting.Group.EnvironmentVariables": "Keskkonnamuutujad",
   "Setting.CustomEnv.Count": "{0} määratud",
   "Common.Cancel": "Tühista",
 

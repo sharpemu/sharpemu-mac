@@ -234,6 +234,7 @@
   "Common.Save": "Gem",
   "Common.Edit": "Rediger",
   "Setting.CustomEnv.Label": "Egne variabler",
+  "Setting.Group.EnvironmentVariables": "Miljøvariabler",
   "Setting.CustomEnv.Count": "{0} sat",
   "Common.Cancel": "Annuller",
   "Options.About": "Om",

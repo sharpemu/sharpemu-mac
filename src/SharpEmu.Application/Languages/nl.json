@@ -234,6 +234,7 @@
   "Common.Save": "Opslaan",
   "Common.Edit": "Bewerken",
   "Setting.CustomEnv.Label": "Eigen variabelen",
+  "Setting.Group.EnvironmentVariables": "Omgevingsvariabelen",
   "Setting.CustomEnv.Count": "{0} ingesteld",
   "Common.Cancel": "Annuleren",
   "Options.About": "Over",

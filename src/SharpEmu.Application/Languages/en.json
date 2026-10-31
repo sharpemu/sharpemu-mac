@@ -230,6 +230,7 @@
   "Common.Save": "Save",
   "Common.Edit": "Edit",
   "Setting.CustomEnv.Label": "Custom variables",
+  "Setting.Group.EnvironmentVariables": "Environment variables",
   "Setting.CustomEnv.Count": "{0} set",
   "Common.Cancel": "Cancel",
 

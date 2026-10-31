@@ -234,6 +234,7 @@
   "Common.Save": "保存",
   "Common.Edit": "編集",
   "Setting.CustomEnv.Label": "カスタム変数",
+  "Setting.Group.EnvironmentVariables": "環境変数",
   "Setting.CustomEnv.Count": "{0} 件設定済み",
   "Common.Cancel": "キャンセル",
   "Options.About": "情報",

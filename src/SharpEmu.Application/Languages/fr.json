@@ -244,6 +244,7 @@
   "Common.Save": "Enregistrer",
   "Common.Edit": "Modifier",
   "Setting.CustomEnv.Label": "Variables personnalisées",
+  "Setting.Group.EnvironmentVariables": "Variables d’environnement",
   "Setting.CustomEnv.Count": "{0} définies",
   "Common.Cancel": "Annuler",
   "About.Github.LatestCommitLabel": "Dernier commit",

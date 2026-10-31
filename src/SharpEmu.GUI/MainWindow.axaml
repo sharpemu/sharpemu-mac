@@ -1237,8 +1237,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </StackPanel>
                     </Border>
 
-                    <!-- Variables this game launches with, beyond the switches above. -->
-                    <Border Classes="optionsGroup">
+                    <TextBlock x:Name="GameCustomEnvironmentHeader"
+                               Classes="optionsGroupHeader"
+                               Text="{Binding [Setting.Group.EnvironmentVariables], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    <Border x:Name="GameCustomEnvironmentGroup" Classes="optionsGroup">
                       <StackPanel>
                         <local:SettingRow Classes="optionRow"
                                           Label="{Binding [Setting.CustomEnv.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"

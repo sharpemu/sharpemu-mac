@@ -234,6 +234,7 @@
   "Common.Save": "Speichern",
   "Common.Edit": "Bearbeiten",
   "Setting.CustomEnv.Label": "Eigene Variablen",
+  "Setting.Group.EnvironmentVariables": "Umgebungsvariablen",
   "Setting.CustomEnv.Count": "{0} gesetzt",
   "Common.Cancel": "Abbrechen",
   "Options.About": "Über",
