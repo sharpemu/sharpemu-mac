@@ -269,6 +269,8 @@
   "Options.Console.Language.Desc": "Langue système signalée aux jeux.",
   "Options.Section.General.Desc": "Comportement de base de l'émulation.",
   "Options.Section.Logging.Desc": "Quantité de journaux produite par l'émulateur et lieu où ils sont enregistrés.",
+  "Options.Page.General.Desc": "Langue de la console et emplacement des données de SharpEmu.",
+  "Options.Page.Logging.Desc": "Où les fichiers journaux sont enregistrés. Chaque jeu choisit son niveau de journal dans ses réglages.",
   "Options.Section.Launcher.Desc": "Apparence, langue, musique et mises à jour du lanceur.",
   "Options.Section.Rendering.Desc": "Options de fenêtre, d'affichage, de surimpression et de performances.",
   "Options.Section.Environment.Desc": "Commutateurs de débogage, ajustements de compatibilité et options audio.",

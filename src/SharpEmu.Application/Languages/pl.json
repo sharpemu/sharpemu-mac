@@ -105,6 +105,8 @@
   "Options.Section.Launcher": "LAUNCHER",
   "Options.Section.General.Desc": "Podstawowe zachowanie emulacji.",
   "Options.Section.Logging.Desc": "Ile emulator zapisuje w dziennikach i gdzie je przechowuje.",
+  "Options.Page.General.Desc": "Język konsoli i miejsce, w którym SharpEmu przechowuje dane.",
+  "Options.Page.Logging.Desc": "Gdzie zapisywane są pliki logów. Poziom logowania każda gra wybiera we własnych ustawieniach.",
   "Options.Section.Launcher.Desc": "Wygląd, język, muzyka i aktualizacje launchera.",
   "Options.Section.Rendering.Desc": "Opcje okna, ekranu, nakładki i wydajności.",
   "Options.Section.Environment.Desc": "Przełączniki debugowania, poprawki zgodności i opcje dźwięku.",

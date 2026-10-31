@@ -1339,7 +1339,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <TextBlock Classes="optionsSectionTitle"
                                Text="{Binding Text, ElementName=OptionsGeneralNavLabel}" />
                     <TextBlock Classes="optionsSectionDesc"
-                               Text="{Binding [Options.Section.General.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                               Text="{Binding [Options.Page.General.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                   </StackPanel>
                   <Border Classes="optionsGroup">
                     <StackPanel>
@@ -1393,7 +1393,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <TextBlock Classes="optionsSectionTitle"
                                Text="{Binding Text, ElementName=OptionsLoggingNavLabel}" />
                     <TextBlock Classes="optionsSectionDesc"
-                               Text="{Binding [Options.Section.Logging.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                               Text="{Binding [Options.Page.Logging.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                   </StackPanel>
                   <Border Classes="optionsGroup">
                     <StackPanel>

@@ -91,6 +91,8 @@
   "Options.Section.Launcher": "Başladıcı",
   "Options.Section.General.Desc": "Emulyasiyanın əsas davranışı.",
   "Options.Section.Logging.Desc": "Emulyatorun nə qədər jurnal yazdığı və jurnalları harada saxladığı.",
+  "Options.Page.General.Desc": "Konsol dili və SharpEmu-nun məlumatlarını saxladığı yer.",
+  "Options.Page.Logging.Desc": "Jurnal fayllarının saxlandığı yer. Hər oyun jurnal səviyyəsini öz ayarlarında seçir.",
   "Options.Section.Launcher.Desc": "Launcher-in görünüşü, dili, musiqisi və yenilənmələri.",
   "Options.Section.Rendering.Desc": "Pəncərə, ekran, üst qat və performans seçimləri.",
   "Options.Section.Environment.Desc": "Sazlama açarları, uyğunluq tənzimləmələri və səs seçimləri.",

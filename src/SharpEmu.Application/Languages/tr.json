@@ -286,6 +286,8 @@
   "About.DiscordButton": "Discord'a katıl!",
   "Options.Section.General.Desc": "Emülasyonun temel davranışı.",
   "Options.Section.Logging.Desc": "Emülatörün ne kadar günlük tuttuğu ve günlükleri nereye kaydettiği.",
+  "Options.Page.General.Desc": "Konsol dili ve SharpEmu'nun verilerini sakladığı yer.",
+  "Options.Page.Logging.Desc": "Günlük dosyalarının kaydedildiği yer. Her oyun günlük düzeyini kendi ayarlarında seçer.",
   "Options.Section.Launcher.Desc": "Başlatıcının görünümü, dili, müziği ve güncellemeleri.",
   "Options.Section.Rendering.Desc": "Pencere, ekran, bindirme ve performans seçenekleri.",
   "Options.Section.Environment.Desc": "Hata ayıklama anahtarları, uyumluluk ayarları ve ses seçenekleri.",

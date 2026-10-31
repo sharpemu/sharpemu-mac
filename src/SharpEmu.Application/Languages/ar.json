@@ -266,6 +266,8 @@
   "Options.Console.Language.Desc": "لغة النظام التي يتم إبلاغ الألعاب بها.",
   "Options.Section.General.Desc": "السلوك الأساسي للمحاكاة.",
   "Options.Section.Logging.Desc": "مقدار ما يسجله المحاكي وأين يحفظ السجلات.",
+  "Options.Page.General.Desc": "لغة الجهاز ومكان حفظ بيانات SharpEmu.",
+  "Options.Page.Logging.Desc": "مكان حفظ ملفات السجل. تختار كل لعبة مستوى سجلها في إعداداتها.",
   "Options.Section.Launcher.Desc": "مظهر المشغّل ولغته وموسيقاه وتحديثاته.",
   "Options.Section.Rendering.Desc": "خيارات النافذة والشاشة والطبقة العلوية والأداء.",
   "Options.Section.Environment.Desc": "مفاتيح التصحيح وتعديلات التوافق وخيارات الصوت.",

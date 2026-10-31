@@ -266,6 +266,8 @@
   "Options.Console.Language.Desc": "Systeemtaal die aan games wordt gemeld.",
   "Options.Section.General.Desc": "Basisgedrag van de emulatie.",
   "Options.Section.Logging.Desc": "Hoeveel de emulator logt en waar de logs worden opgeslagen.",
+  "Options.Page.General.Desc": "Consoletaal en waar SharpEmu zijn gegevens bewaart.",
+  "Options.Page.Logging.Desc": "Waar logbestanden worden opgeslagen. Elk spel kiest zijn eigen logniveau in zijn instellingen.",
   "Options.Section.Launcher.Desc": "Uiterlijk, taal, muziek en updates van de launcher.",
   "Options.Section.Rendering.Desc": "Opties voor venster, scherm, overlay en prestaties.",
   "Options.Section.Environment.Desc": "Debugschakelaars, compatibiliteitsaanpassingen en audio-opties.",

@@ -267,6 +267,8 @@
   "Options.Console.Language.Desc": "A játékoknak jelentett rendszer nyelve.",
   "Options.Section.General.Desc": "Az emuláció alapvető viselkedése.",
   "Options.Section.Logging.Desc": "Mennyit naplóz az emulátor, és hová menti a naplókat.",
+  "Options.Page.General.Desc": "A konzol nyelve és az, hogy a SharpEmu hol tárolja az adatait.",
+  "Options.Page.Logging.Desc": "Hová kerülnek a naplófájlok. Minden játék a saját beállításaiban választja a naplózási szintet.",
   "Options.Section.Launcher.Desc": "Az indító megjelenése, nyelve, zenéje és frissítései.",
   "Options.Section.Rendering.Desc": "Ablak-, kijelző-, átfedés- és teljesítménybeállítások.",
   "Options.Section.Environment.Desc": "Hibakeresési kapcsolók, kompatibilitási finomhangolások és hangbeállítások.",

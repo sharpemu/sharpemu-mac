@@ -266,6 +266,8 @@
   "Options.Console.Language.Desc": "게임에 보고할 시스템 언어입니다.",
   "Options.Section.General.Desc": "에뮬레이션의 기본 동작입니다.",
   "Options.Section.Logging.Desc": "에뮬레이터가 기록하는 로그의 양과 저장 위치입니다.",
+  "Options.Page.General.Desc": "콘솔 언어와 SharpEmu가 데이터를 저장하는 위치입니다.",
+  "Options.Page.Logging.Desc": "로그 파일이 저장되는 위치입니다. 로그 수준은 각 게임 설정에서 고릅니다.",
   "Options.Section.Launcher.Desc": "런처의 모양, 언어, 음악, 업데이트 설정입니다.",
   "Options.Section.Rendering.Desc": "창, 디스플레이, 오버레이, 성능 옵션입니다.",
   "Options.Section.Environment.Desc": "디버그 스위치, 호환성 조정, 오디오 옵션입니다.",

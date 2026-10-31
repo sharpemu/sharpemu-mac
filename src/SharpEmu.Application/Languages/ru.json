@@ -103,6 +103,8 @@
   "Options.Section.Launcher": "ЛАУНЧЕР",
   "Options.Section.General.Desc": "Базовое поведение эмуляции.",
   "Options.Section.Logging.Desc": "Сколько эмулятор записывает в журнал и куда сохраняет журналы.",
+  "Options.Page.General.Desc": "Язык консоли и место, где SharpEmu хранит данные.",
+  "Options.Page.Logging.Desc": "Куда сохраняются файлы журналов. Уровень журнала каждая игра выбирает в своих настройках.",
   "Options.Section.Launcher.Desc": "Оформление, язык, музыка и обновления лаунчера.",
   "Options.Section.Rendering.Desc": "Параметры окна, дисплея, оверлея и производительности.",
   "Options.Section.Environment.Desc": "Отладочные переключатели, настройки совместимости и параметры звука.",

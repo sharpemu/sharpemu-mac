@@ -124,6 +124,8 @@
   "Options.Section.Launcher": "LAUNCHER",
   "Options.Section.General.Desc": "Core emulation behaviour.",
   "Options.Section.Logging.Desc": "How much the emulator logs, and where it saves the logs.",
+  "Options.Page.General.Desc": "Console language and where SharpEmu keeps its data.",
+  "Options.Page.Logging.Desc": "Where log files are saved. Each game picks its log level in its own settings.",
   "Options.Section.Launcher.Desc": "Appearance, language, music and updates for the launcher.",
   "Options.Section.Rendering.Desc": "Window, display, overlay and performance options.",
   "Options.Section.Environment.Desc": "Debug switches, compatibility tweaks and audio options.",

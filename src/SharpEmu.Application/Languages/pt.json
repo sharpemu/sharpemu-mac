@@ -267,6 +267,8 @@
   "Options.Console.Language.Desc": "Idioma do sistema comunicado aos jogos.",
   "Options.Section.General.Desc": "Comportamento base da emulação.",
   "Options.Section.Logging.Desc": "Quanto o emulador regista e onde guarda os registos.",
+  "Options.Page.General.Desc": "Idioma da consola e onde o SharpEmu guarda os seus dados.",
+  "Options.Page.Logging.Desc": "Onde os ficheiros de registo são guardados. Cada jogo escolhe o seu nível de registo nas definições.",
   "Options.Section.Launcher.Desc": "Aspeto, idioma, música e atualizações do launcher.",
   "Options.Section.Rendering.Desc": "Opções de janela, ecrã, sobreposição e desempenho.",
   "Options.Section.Environment.Desc": "Interruptores de depuração, ajustes de compatibilidade e opções de áudio.",

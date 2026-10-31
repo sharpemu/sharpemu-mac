@@ -105,6 +105,8 @@
   "Options.Section.Launcher": "KÄIVITI",
   "Options.Section.General.Desc": "Emulatsiooni põhikäitumine.",
   "Options.Section.Logging.Desc": "Kui palju emulaator logib ja kuhu logid salvestatakse.",
+  "Options.Page.General.Desc": "Konsooli keel ja koht, kuhu SharpEmu oma andmed salvestab.",
+  "Options.Page.Logging.Desc": "Kuhu logifailid salvestatakse. Iga mäng valib oma logitaseme oma seadetes.",
   "Options.Section.Launcher.Desc": "Käivitaja välimus, keel, muusika ja uuendused.",
   "Options.Section.Rendering.Desc": "Akna, kuva, ülekatte ja jõudluse valikud.",
   "Options.Section.Environment.Desc": "Silumislülitid, ühilduvuse kohandused ja heliseaded.",
