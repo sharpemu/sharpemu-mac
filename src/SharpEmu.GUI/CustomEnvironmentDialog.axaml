@@ -11,7 +11,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <Grid Margin="32,28" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
     <TextBlock Grid.Row="0"
                Classes="sheetTitle"
-               Text="{Binding [Launch.CustomEnv.Title], Source={x:Static local:Localization.Instance}}" />
+               Text="{Binding [Setting.CustomEnv.Label], Source={x:Static local:Localization.Instance}}" />
 
     <TextBlock Grid.Row="1"
                Margin="0,8,0,0"
@@ -39,24 +39,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
     <Grid Grid.Row="4"
           Margin="0,18,0,0"
-          ColumnDefinitions="Auto,Auto,*,Auto,Auto"
+          ColumnDefinitions="*,Auto,Auto"
           ColumnSpacing="8">
-      <Button x:Name="SaveGameButton"
-              Grid.Column="0"
-              Classes="ghost"
-              Content="{Binding [Launch.CustomEnv.SaveGame], Source={x:Static local:Localization.Instance}}" />
-      <Button x:Name="SaveGlobalButton"
+      <Button x:Name="CancelButton"
               Grid.Column="1"
               Classes="ghost"
-              Content="{Binding [Launch.CustomEnv.SaveGlobal], Source={x:Static local:Localization.Instance}}" />
-      <Button x:Name="CancelButton"
-              Grid.Column="3"
-              Classes="ghost"
               Content="{Binding [Common.Cancel], Source={x:Static local:Localization.Instance}}" />
-      <Button x:Name="PlayButton"
-              Grid.Column="4"
+      <Button x:Name="SaveButton"
+              Grid.Column="2"
               Classes="accent"
-              Content="{Binding [Launch.CustomEnv.Play], Source={x:Static local:Localization.Instance}}" />
+              Content="{Binding [Common.Save], Source={x:Static local:Localization.Instance}}" />
     </Grid>
   </Grid>
 </local:SheetView>

@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Definições do jogo",
 
-  "Hero.CustomLaunch": "Arranque personalizado…",
 
   "Hero.Console": "Consola",
 
@@ -176,17 +175,10 @@
   "Launch.Idle": "Inativo",
   "Launch.Console": "≡ Consola",
   "Launch.Launch": "▶  Iniciar",
-  "Launch.CustomEnv": "Iniciar com variáveis de ambiente personalizadas",
-  "Launch.CustomEnv.Title": "Iniciar com variáveis de ambiente personalizadas",
   "Launch.CustomEnv.Desc": "Introduza uma variável de ambiente por linha no formato NOME=VALOR. Os valores personalizados substituem as definições da GUI e específicas do jogo com o mesmo nome.",
   "Launch.CustomEnv.Documentation": "Ver variáveis de ambiente não documentadas ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_EXEMPLO=1",
-  "Launch.CustomEnv.SaveGame": "Guardar para o jogo",
-  "Launch.CustomEnv.SaveGlobal": "Guardar globalmente",
-  "Launch.CustomEnv.Play": "Jogar",
   "Launch.CustomEnv.Invalid": "Variável de ambiente inválida: {0}",
-  "Launch.CustomEnv.SavedGame": "Guardado para este jogo.",
-  "Launch.CustomEnv.SavedGlobal": "Guardado globalmente.",
   "Launch.Stop": "■  Parar",
   "Launch.Running": "Em execução — {0}",
   "Launch.Stopping": "A parar…",
@@ -248,6 +240,9 @@
   "Options.Env.WritableApp0.Desc": "Permitir que os jogos criem e escrevam ficheiros dentro da sua pasta de instalação.\nNecessário para dumps não empacotados que escrevem os seus dados guardados ou configurações em /app0.",
   "Options.Env.LogIo.Desc": "Registar na consola a abertura e leitura de ficheiros e a resolução de caminhos.\nUtilize quando um jogo não encontrar os seus ficheiros de dados durante o arranque.",
   "Common.Save": "Guardar",
+  "Common.Edit": "Editar",
+  "Setting.CustomEnv.Label": "Variáveis personalizadas",
+  "Setting.CustomEnv.Count": "{0} definidas",
   "Common.Cancel": "Cancelar",
   "About.Github.LatestCommitLabel": "Último commit",
   "About.Github.LatestCommitDescription": "Último commit no ramo main",

@@ -43,7 +43,6 @@
 
   "Hero.GameSettings": "Game settings",
 
-  "Hero.CustomLaunch": "Custom launch…",
 
   "Hero.Console": "Console",
 
@@ -228,6 +227,9 @@
   "Common.On": "On",
   "Common.Off": "Off",
   "Common.Save": "Save",
+  "Common.Edit": "Edit",
+  "Setting.CustomEnv.Label": "Custom variables",
+  "Setting.CustomEnv.Count": "{0} set",
   "Common.Cancel": "Cancel",
 
 
@@ -244,17 +246,10 @@
   "Launch.Idle": "Idle",
   "Launch.Console": "≡ Console",
   "Launch.Launch": "▶  Launch",
-  "Launch.CustomEnv": "Launch with custom env",
-  "Launch.CustomEnv.Title": "Launch with custom env",
   "Launch.CustomEnv.Desc": "Enter environment variables one per line as NAME=VALUE. Custom values override matching GUI and per-game environment settings.",
   "Launch.CustomEnv.Documentation": "View undocumented environment variables ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_EXAMPLE=1",
-  "Launch.CustomEnv.SaveGame": "Save for game",
-  "Launch.CustomEnv.SaveGlobal": "Save globally",
-  "Launch.CustomEnv.Play": "Play",
   "Launch.CustomEnv.Invalid": "Invalid environment variable: {0}",
-  "Launch.CustomEnv.SavedGame": "Saved for this game.",
-  "Launch.CustomEnv.SavedGlobal": "Saved globally.",
   "Launch.Stop": "■  Stop",
   "Launch.Running": "Running — {0}",
   "Launch.Stopping": "Stopping…",

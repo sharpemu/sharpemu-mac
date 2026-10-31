@@ -50,6 +50,7 @@ public partial class MainWindow
     private void WireGameOptions()
     {
         GameSettingsButton.Click += (_, _) => OpenSelectedGameSettings();
+        GameCustomEnvButton.Click += async (_, _) => await EditGameCustomEnvironmentAsync();
 
         GameLogLevelBox.ItemsSource = _logLevelChoices;
         GameWindowModeBox.ItemsSource = _windowModeChoices;
@@ -115,8 +116,16 @@ public partial class MainWindow
         GameScalingModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameVSyncToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameHdrModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
-        GameOverlayEnabledToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
-        GameOverlayModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameOverlayEnabledToggle.IsCheckedChanged += (_, _) =>
+        {
+            UpdateGameOverlayRows();
+            PersistOpenGameSettings();
+        };
+        GameOverlayModeBox.SelectionChanged += (_, _) =>
+        {
+            UpdateGameOverlayRows();
+            PersistOpenGameSettings();
+        };
         GameOverlayCornerBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         foreach (var (_, toggle) in GameEnvironmentToggles())
         {
@@ -196,6 +205,7 @@ public partial class MainWindow
     private void LoadGameSettings(string titleId)
     {
         var stored = PerGameSettings.Load(titleId);
+        UpdateGameCustomEnvironmentSummary(titleId);
         var effective = EffectiveLaunchSettings.Resolve(_settings, stored);
 
         _isLoadingGameSettings = true;
@@ -220,6 +230,7 @@ public partial class MainWindow
             GameVSyncToggle.IsChecked = effective.VSync;
             GameOverlayEnabledToggle.IsChecked = effective.OverlayEnabled;
             GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "TitleBar");
+            UpdateGameOverlayRows();
             GameOverlayCornerBox.SelectedItem = FindChoice(_overlayCornerChoices, effective.OverlayCorner, "TopRight");
             GameHdrModeBox.SelectedItem = FindChoice(
                 _hdrModeChoices,
@@ -263,6 +274,45 @@ public partial class MainWindow
 
         _gameSettingsStored = stored;
         _gameSettingsBaseline = GameSettingsFromControls();
+    }
+
+    // The mode only matters while the overlay is on, and the corner only for a panel drawn
+    // in the game (not the title bar).
+    private void UpdateGameOverlayRows()
+    {
+        var on = GameOverlayEnabledToggle.IsChecked == true;
+        GameOverlayModeRow.IsVisible = on;
+        GameOverlayCornerRow.IsVisible = on && SelectedComboText(GameOverlayModeBox, "TitleBar") != "TitleBar";
+    }
+
+    // The game's own variables, edited in a sheet over the game settings and saved on Save.
+    private async Task EditGameCustomEnvironmentAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_gameSettingsTitleId))
+        {
+            return;
+        }
+
+        var titleId = _gameSettingsTitleId;
+        var dialog = new CustomEnvironmentDialog(PerGameSettings.Load(titleId)?.CustomEnvironmentVariables ?? []);
+        if (await Sheets.ShowAsync(dialog) is not IReadOnlyList<string> entries)
+        {
+            return;
+        }
+
+        var settings = PerGameSettings.Load(titleId) ?? new PerGameSettings();
+        settings.CustomEnvironmentVariables = entries.Count == 0 ? null : entries.ToList();
+        settings.RemoveInheritedValues(_settings);
+        settings.Save(titleId);
+        UpdateGameCustomEnvironmentSummary(titleId);
+    }
+
+    private void UpdateGameCustomEnvironmentSummary(string? titleId)
+    {
+        var count = PerGameSettings.Load(titleId)?.CustomEnvironmentVariables?.Count ?? 0;
+        GameCustomEnvSummary.Text = count == 0
+            ? Localization.Instance.Get("Common.Edit")
+            : string.Format(Localization.Instance.Get("Setting.CustomEnv.Count"), count);
     }
 
     private void PersistOpenGameSettings()

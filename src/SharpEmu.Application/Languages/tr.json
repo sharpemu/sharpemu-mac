@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Oyun ayarları",
 
-  "Hero.CustomLaunch": "Özel başlatma…",
 
   "Hero.Console": "Konsol",
 
@@ -186,17 +185,10 @@
   "Launch.Idle": "Boşta",
   "Launch.Console": "≡ Konsol",
   "Launch.Launch": "▶  Başlat",
-  "Launch.CustomEnv": "Özel env ile başlat",
-  "Launch.CustomEnv.Title": "Özel env ile başlat",
   "Launch.CustomEnv.Desc": "Ortam değişkenlerini NAME=VALUE biçiminde her satıra bir tane yazın. Özel değerler, aynı isimdeki GUI ve oyuna özel ortam ayarlarını geçersiz kılar.",
   "Launch.CustomEnv.Documentation": "Belgelenmemiş ortam değişkenlerini görüntüle ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_ORNEK=1",
-  "Launch.CustomEnv.SaveGame": "Oyun için kaydet",
-  "Launch.CustomEnv.SaveGlobal": "Genel olarak kaydet",
-  "Launch.CustomEnv.Play": "Oyna",
   "Launch.CustomEnv.Invalid": "Geçersiz ortam değişkeni: {0}",
-  "Launch.CustomEnv.SavedGame": "Bu oyun için kaydedildi.",
-  "Launch.CustomEnv.SavedGlobal": "Genel olarak kaydedildi.",
   "Launch.Stop": "■  Durdur",
   "Launch.Running": "Çalışıyor — {0}",
   "Launch.Stopping": "Durduruluyor…",
@@ -279,6 +271,9 @@
   "Options.Env.RenderDoc.Desc": "RenderDoc uygulama içi API'sini yükler, böylece kareler emülatörün içinden yakalanabilir.\nOyun çalışırken F12'a basınca bir kare yakalanır; kayıtlar user/logs/capture_logs/<TITLE_ID> altına düşer.\nRenderDoc'un kurulu olmasını gerektirir. GPU'yu yavaşlatır ve bazı oyunları kilitler, hata ayıklamıyorsanız kapalı bırakın.",
   "Options.Env.DisableVkImplicitLayers.Desc": "RenderDoc ayarı açıkken diğer çakışan overlayler device loss'a sebebiyet verebiliyor. Bu ayarı açmak bunu düzeltebilir.",
   "Common.Save": "Kaydet",
+  "Common.Edit": "Düzenle",
+  "Setting.CustomEnv.Label": "Özel değişkenler",
+  "Setting.CustomEnv.Count": "{0} ayarlı",
   "Common.Cancel": "İptal",
   "Options.About": "Hakkında",
   "About.Github.Label": "GitHub",

@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Paramètres du jeu",
 
-  "Hero.CustomLaunch": "Lancement personnalisé…",
 
   "Hero.Console": "Console",
 
@@ -178,17 +177,10 @@
   "Launch.Idle": "Inactif",
   "Launch.Console": "≡ Console",
   "Launch.Launch": "▶  Lancer",
-  "Launch.CustomEnv": "Lancer avec des variables d’environnement personnalisées",
-  "Launch.CustomEnv.Title": "Lancer avec des variables d’environnement personnalisées",
   "Launch.CustomEnv.Desc": "Saisissez une variable d’environnement par ligne au format NOM=VALEUR. Les valeurs personnalisées remplacent les réglages GUI et spécifiques au jeu portant le même nom.",
   "Launch.CustomEnv.Documentation": "Voir les variables d’environnement non documentées ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_EXEMPLE=1",
-  "Launch.CustomEnv.SaveGame": "Enregistrer pour le jeu",
-  "Launch.CustomEnv.SaveGlobal": "Enregistrer globalement",
-  "Launch.CustomEnv.Play": "Jouer",
   "Launch.CustomEnv.Invalid": "Variable d’environnement invalide : {0}",
-  "Launch.CustomEnv.SavedGame": "Enregistré pour ce jeu.",
-  "Launch.CustomEnv.SavedGlobal": "Enregistré globalement.",
   "Launch.Stop": "■  Arrêter",
   "Launch.Running": "En cours d’exécution — {0}",
   "Launch.Stopping": "Arrêt en cours…",
@@ -250,6 +242,9 @@
   "Options.Env.WritableApp0.Desc": "Autoriser les jeux à créer et écrire des fichiers dans leur dossier d’installation.\nNécessaire pour les dumps non empaquetés qui écrivent leurs sauvegardes ou leur configuration sous /app0.",
   "Options.Env.LogIo.Desc": "Journaliser l’ouverture et la lecture des fichiers ainsi que la résolution des chemins dans la console.\nÀ utiliser quand un jeu ne trouve pas ses fichiers de données au démarrage.",
   "Common.Save": "Enregistrer",
+  "Common.Edit": "Modifier",
+  "Setting.CustomEnv.Label": "Variables personnalisées",
+  "Setting.CustomEnv.Count": "{0} définies",
   "Common.Cancel": "Annuler",
   "About.Github.LatestCommitLabel": "Dernier commit",
   "About.Github.LatestCommitDescription": "Dernier commit sur la branche main",

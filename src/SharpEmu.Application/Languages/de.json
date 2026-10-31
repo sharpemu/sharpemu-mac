@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Spieleinstellungen",
 
-  "Hero.CustomLaunch": "Eigener Start…",
 
   "Hero.Console": "Konsole",
 
@@ -163,17 +162,10 @@
   "Launch.Idle": "Bereit",
   "Launch.Console": "≡ Konsole",
   "Launch.Launch": "▶ Starten",
-  "Launch.CustomEnv": "Mit benutzerdefinierten Umgebungsvariablen starten",
-  "Launch.CustomEnv.Title": "Mit benutzerdefinierten Umgebungsvariablen starten",
   "Launch.CustomEnv.Desc": "Gib pro Zeile eine Umgebungsvariable im Format NAME=WERT ein. Benutzerdefinierte Werte überschreiben gleichnamige GUI- und spielspezifische Einstellungen.",
   "Launch.CustomEnv.Documentation": "Undokumentierte Umgebungsvariablen anzeigen ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_BEISPIEL=1",
-  "Launch.CustomEnv.SaveGame": "Für Spiel speichern",
-  "Launch.CustomEnv.SaveGlobal": "Global speichern",
-  "Launch.CustomEnv.Play": "Spielen",
   "Launch.CustomEnv.Invalid": "Ungültige Umgebungsvariable: {0}",
-  "Launch.CustomEnv.SavedGame": "Für dieses Spiel gespeichert.",
-  "Launch.CustomEnv.SavedGlobal": "Global gespeichert.",
   "Launch.Stop": "■ Stoppen",
   "Launch.Running": "Läuft -- {0}",
   "Launch.Stopping": "Wird beendet…",
@@ -240,6 +232,9 @@
   "Options.Env.RenderDoc.Desc": "Lädt die RenderDoc-In-Application-API, damit Frames aus dem Emulator heraus aufgezeichnet werden können.\nDrücke F12 während das Spiel läuft, um ein Frame aufzuzeichnen; Aufzeichnungen landen in user/logs/capture_logs/<TITLE_ID>.\nErfordert eine RenderDoc-Installation. Verlangsamt die GPU und lässt manche Titel hängen, lass es also aus, wenn du nicht debuggst.",
   "Options.Env.DisableVkImplicitLayers.Desc": "Wenn RenderDoc aktiviert ist, können andere kollidierende Overlays einen Device Loss verursachen. Das Aktivieren dieser Option kann das Problem beheben.",
   "Common.Save": "Speichern",
+  "Common.Edit": "Bearbeiten",
+  "Setting.CustomEnv.Label": "Eigene Variablen",
+  "Setting.CustomEnv.Count": "{0} gesetzt",
   "Common.Cancel": "Abbrechen",
   "Options.About": "Über",
   "About.Github.Label": "GitHub",

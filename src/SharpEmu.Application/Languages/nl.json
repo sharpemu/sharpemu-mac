@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Game-instellingen",
 
-  "Hero.CustomLaunch": "Aangepast starten…",
 
   "Hero.Console": "Console",
 
@@ -163,17 +162,10 @@
   "Launch.Idle": "Inactief",
   "Launch.Console": "≡ Console",
   "Launch.Launch": "▶  Starten",
-  "Launch.CustomEnv": "Starten met aangepaste omgevingsvariabelen",
-  "Launch.CustomEnv.Title": "Starten met aangepaste omgevingsvariabelen",
   "Launch.CustomEnv.Desc": "Voer per regel één omgevingsvariabele in als NAAM=WAARDE. Aangepaste waarden overschrijven GUI- en spelspecifieke instellingen met dezelfde naam.",
   "Launch.CustomEnv.Documentation": "Ongedocumenteerde omgevingsvariabelen bekijken ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_VOORBEELD=1",
-  "Launch.CustomEnv.SaveGame": "Opslaan voor spel",
-  "Launch.CustomEnv.SaveGlobal": "Globaal opslaan",
-  "Launch.CustomEnv.Play": "Spelen",
   "Launch.CustomEnv.Invalid": "Ongeldige omgevingsvariabele: {0}",
-  "Launch.CustomEnv.SavedGame": "Opgeslagen voor dit spel.",
-  "Launch.CustomEnv.SavedGlobal": "Globaal opgeslagen.",
   "Launch.Stop": "■  Stoppen",
   "Launch.Running": "Actief — {0}",
   "Launch.Stopping": "Stoppen…",
@@ -240,6 +232,9 @@
   "Options.Env.RenderDoc.Desc": "Laadt de RenderDoc in-application-API zodat frames vanuit de emulator kunnen worden vastgelegd.\nDruk op F12 terwijl het spel draait om één frame vast te leggen; opnamen komen in user/logs/capture_logs/<TITLE_ID>.\nVereist een geïnstalleerde RenderDoc. Vertraagt de GPU en laat sommige games vastlopen, dus laat dit uit tenzij je aan het debuggen bent.",
   "Options.Env.DisableVkImplicitLayers.Desc": "Wanneer RenderDoc is ingeschakeld, kunnen andere conflicterende overlays device loss veroorzaken. Het inschakelen van deze optie kan het probleem oplossen.",
   "Common.Save": "Opslaan",
+  "Common.Edit": "Bewerken",
+  "Setting.CustomEnv.Label": "Eigen variabelen",
+  "Setting.CustomEnv.Count": "{0} ingesteld",
   "Common.Cancel": "Annuleren",
   "Options.About": "Over",
   "About.Github.Label": "GitHub",

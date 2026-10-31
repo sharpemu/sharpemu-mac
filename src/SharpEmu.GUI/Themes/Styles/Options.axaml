@@ -116,7 +116,7 @@ glow outside a group are never clipped.
     <Setter Property="RenderTransform" Value="none" />
   </Style>
   <Style Selector="Border.optionsInfoRow Button:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="BoxShadow" Value="{StaticResource FocusRingInsetShadow}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource FocusRingInsetShadow}" />
   </Style>
 
   <!-- Every value control in the right-hand column shares one width and height. -->

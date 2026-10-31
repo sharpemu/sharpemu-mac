@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Impostazioni del gioco",
 
-  "Hero.CustomLaunch": "Avvio personalizzato…",
 
   "Hero.Console": "Console",
 
@@ -166,17 +165,10 @@
   "Launch.Idle": "Inattivo",
   "Launch.Console": "≡ Console",
   "Launch.Launch": "▶  Avvia",
-  "Launch.CustomEnv": "Avvia con variabili d'ambiente personalizzate",
-  "Launch.CustomEnv.Title": "Avvia con variabili d'ambiente personalizzate",
   "Launch.CustomEnv.Desc": "Inserisci una variabile d'ambiente per riga nel formato NOME=VALORE. I valori personalizzati sostituiscono le impostazioni GUI e specifiche del gioco con lo stesso nome.",
   "Launch.CustomEnv.Documentation": "Visualizza le variabili d'ambiente non documentate ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_ESEMPIO=1",
-  "Launch.CustomEnv.SaveGame": "Salva per il gioco",
-  "Launch.CustomEnv.SaveGlobal": "Salva globalmente",
-  "Launch.CustomEnv.Play": "Gioca",
   "Launch.CustomEnv.Invalid": "Variabile d'ambiente non valida: {0}",
-  "Launch.CustomEnv.SavedGame": "Salvato per questo gioco.",
-  "Launch.CustomEnv.SavedGlobal": "Salvato globalmente.",
   "Launch.Stop": "■  Ferma",
   "Launch.Running": "In esecuzione — {0}",
   "Launch.Stopping": "Arresto in corso…",
@@ -245,6 +237,9 @@
   "Options.Env.RenderDoc.Desc": "Carica l'API in-application di RenderDoc per catturare i frame dall'interno dell'emulatore.\nPremi F12 mentre il gioco è in esecuzione per catturare un frame; le catture finiscono in user/logs/capture_logs/<TITLE_ID>.\nRichiede RenderDoc installato. Rallenta la GPU e blocca alcuni titoli, quindi lascialo disattivato se non stai facendo debug.",
   "Options.Env.DisableVkImplicitLayers.Desc": "Quando RenderDoc è attivo, altri overlay in conflitto possono causare una perdita del dispositivo. Abilitare questa opzione può risolvere il problema.",
   "Common.Save": "Salva",
+  "Common.Edit": "Modifica",
+  "Setting.CustomEnv.Label": "Variabili personalizzate",
+  "Setting.CustomEnv.Count": "{0} impostate",
   "Common.Cancel": "Annulla",
   "Options.About": "Informazioni",
   "About.Github.Label": "GitHub",

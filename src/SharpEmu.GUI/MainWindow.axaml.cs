@@ -359,7 +359,6 @@ public partial class MainWindow : Window
                 LaunchSelected();
             }
         };
-        LaunchCustomEnvButton.Click += async (_, _) => await OpenCustomEnvironmentDialogAsync();
         ClearLogButton.Click += (_, _) => { _consoleLines.Clear(); _allConsoleLines.Clear(); };
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
         DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
@@ -426,8 +425,16 @@ public partial class MainWindow : Window
             }
         };
         HdrModeBox.SelectionChanged += (_, _) => _settings.HdrMode = SelectedComboText(HdrModeBox, "Auto");
-        OverlayEnabledToggle.IsCheckedChanged += (_, _) => _settings.OverlayEnabled = OverlayEnabledToggle.IsChecked == true;
-        OverlayModeBox.SelectionChanged += (_, _) => _settings.OverlayMode = SelectedComboText(OverlayModeBox, "TitleBar");
+        OverlayEnabledToggle.IsCheckedChanged += (_, _) =>
+        {
+            _settings.OverlayEnabled = OverlayEnabledToggle.IsChecked == true;
+            UpdateOverlayRows();
+        };
+        OverlayModeBox.SelectionChanged += (_, _) =>
+        {
+            _settings.OverlayMode = SelectedComboText(OverlayModeBox, "TitleBar");
+            UpdateOverlayRows();
+        };
         OverlayCornerBox.SelectionChanged += (_, _) => _settings.OverlayCorner = SelectedComboText(OverlayCornerBox, "TopRight");
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
@@ -1664,6 +1671,7 @@ public partial class MainWindow : Window
         HdrModeBox.SelectedIndex = ChoiceIndex(_settings.HdrMode, "Auto", "On", "Off");
         OverlayEnabledToggle.IsChecked = _settings.OverlayEnabled;
         OverlayModeBox.SelectedIndex = ChoiceIndex(_settings.OverlayMode, "Full", "Minimal", "TitleBar");
+        UpdateOverlayRows();
         OverlayCornerBox.SelectedIndex = ChoiceIndex(_settings.OverlayCorner, "TopLeft", "TopRight", "BottomRight", "BottomLeft");
         UpdateLogFilePathText();
         ApplyEnvironmentSettingsToControls();
@@ -2924,6 +2932,14 @@ public partial class MainWindow : Window
         }
     }
 
+    // As in a game's settings: the mode needs the overlay on, the corner an in-game panel.
+    private void UpdateOverlayRows()
+    {
+        OverlayModeRow.IsVisible = _settings.OverlayEnabled;
+        OverlayCornerRow.IsVisible = _settings.OverlayEnabled &&
+            !string.Equals(_settings.OverlayMode, "TitleBar", StringComparison.OrdinalIgnoreCase);
+    }
+
     // The Options page and the library menu show the same two title-music settings.
     private void UpdateTitleMusicControls()
     {
@@ -2932,7 +2948,10 @@ public partial class MainWindow : Window
         _libraryMenu.VolumeValue.Text = volume;
         _libraryMenu.VolumeSlider.Value = _settings.TitleMusicVolume * 100.0;
         _libraryMenu.TitleMusicSwitch.IsChecked = _settings.PlayTitleMusic;
-        _libraryMenu.VolumeGlyph.Text = !_settings.PlayTitleMusic || _settings.TitleMusicVolume == 0
+        // Volume only matters while title music plays.
+        _libraryMenu.VolumeRow.IsVisible = _settings.PlayTitleMusic;
+        TitleMusicVolumeRow.IsVisible = _settings.PlayTitleMusic;
+        _libraryMenu.VolumeGlyph.Text = _settings.TitleMusicVolume == 0
             ? "volume_off"
             : _settings.TitleMusicVolume < 0.5 ? "volume_down" : "volume_up";
     }
@@ -3052,34 +3071,6 @@ public partial class MainWindow : Window
         if (!string.IsNullOrEmpty(path))
         {
             Launch(path, Path.GetFileName(path));
-        }
-    }
-
-    private async Task OpenCustomEnvironmentDialogAsync()
-    {
-        if (_isRunning || GameList.SelectedItem is not GameEntry game)
-        {
-            return;
-        }
-
-        var perGame = PerGameSettings.Load(game.TitleId);
-        var initialEntries = CustomEnvironmentVariables.Merge(
-            GlobalCustomEnvironmentSettings.Load(),
-            perGame?.CustomEnvironmentVariables);
-        var dialog = new CustomEnvironmentDialog(game.TitleId, initialEntries);
-        dialog.SaveGlobalRequested += entries => GlobalCustomEnvironmentSettings.Save(entries);
-        dialog.SaveGameRequested += (titleId, entries) =>
-        {
-            var settings = PerGameSettings.Load(titleId) ?? new PerGameSettings();
-            settings.CustomEnvironmentVariables = entries.Count == 0 ? null : entries.ToList();
-            settings.RemoveInheritedValues(_settings);
-            settings.Save(titleId);
-        };
-
-        var customEntries = await Sheets.ShowAsync(dialog) as IReadOnlyList<string>;
-        if (customEntries is not null && !_isRunning)
-        {
-            Launch(game.Path, game.Name, game.TitleId, customEntries);
         }
     }
 
@@ -3512,7 +3503,6 @@ public partial class MainWindow : Window
             LaunchButton.IsEnabled = GameList.SelectedItem is GameEntry;
         }
 
-        LaunchCustomEnvButton.IsEnabled = !_isRunning && GameList.SelectedItem is GameEntry;
 
         GameSettingsButton.IsEnabled =
             GameList.SelectedItem is GameEntry game &&

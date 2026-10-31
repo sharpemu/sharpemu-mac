@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Настройки игры",
 
-  "Hero.CustomLaunch": "Особый запуск…",
 
   "Hero.Console": "Консоль",
 
@@ -213,6 +212,9 @@
   "Common.On": "Включено",
   "Common.Off": "Выключено",
   "Common.Save": "Сохранить",
+  "Common.Edit": "Изменить",
+  "Setting.CustomEnv.Label": "Свои переменные",
+  "Setting.CustomEnv.Count": "Задано: {0}",
   "Common.Cancel": "Отмена",
 
 
@@ -229,17 +231,10 @@
   "Launch.Idle": "Ожидание",
   "Launch.Console": "≡ Консоль",
   "Launch.Launch": "▶  Запустить",
-  "Launch.CustomEnv": "Запустить с пользовательскими переменными среды",
-  "Launch.CustomEnv.Title": "Запустить с пользовательскими переменными среды",
   "Launch.CustomEnv.Desc": "Введите по одной переменной среды на строку в формате ИМЯ=ЗНАЧЕНИЕ. Пользовательские значения переопределяют одноимённые настройки GUI и игры.",
   "Launch.CustomEnv.Documentation": "Показать недокументированные переменные среды ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_PRIMER=1",
-  "Launch.CustomEnv.SaveGame": "Сохранить для игры",
-  "Launch.CustomEnv.SaveGlobal": "Сохранить глобально",
-  "Launch.CustomEnv.Play": "Играть",
   "Launch.CustomEnv.Invalid": "Недопустимая переменная среды: {0}",
-  "Launch.CustomEnv.SavedGame": "Сохранено для этой игры.",
-  "Launch.CustomEnv.SavedGlobal": "Сохранено глобально.",
   "Launch.Stop": "■  Остановить",
   "Launch.Running": "Запущено - {0}",
   "Launch.Stopping": "Остановка…",

@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "إعدادات اللعبة",
 
-  "Hero.CustomLaunch": "تشغيل مخصص…",
 
   "Hero.Console": "وحدة التحكم",
 
@@ -163,17 +162,10 @@
   "Launch.Idle": "خامل",
   "Launch.Console": "≡ نافذة السجلات",
   "Launch.Launch": "▶  تشغيل",
-  "Launch.CustomEnv": "تشغيل بمتغيرات بيئة مخصصة",
-  "Launch.CustomEnv.Title": "تشغيل بمتغيرات بيئة مخصصة",
   "Launch.CustomEnv.Desc": "أدخل متغير بيئة واحدًا في كل سطر بصيغة NAME=VALUE. القيم المخصصة تتجاوز إعدادات الواجهة وإعدادات اللعبة التي تحمل الاسم نفسه.",
   "Launch.CustomEnv.Documentation": "عرض متغيرات البيئة غير الموثقة ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_EXAMPLE=1",
-  "Launch.CustomEnv.SaveGame": "حفظ للعبة",
-  "Launch.CustomEnv.SaveGlobal": "حفظ بشكل عام",
-  "Launch.CustomEnv.Play": "تشغيل",
   "Launch.CustomEnv.Invalid": "متغير بيئة غير صالح: {0}",
-  "Launch.CustomEnv.SavedGame": "تم الحفظ لهذه اللعبة.",
-  "Launch.CustomEnv.SavedGlobal": "تم الحفظ بشكل عام.",
   "Launch.Stop": "■  إيقاف",
   "Launch.Running": "قيد التشغيل — {0}",
   "Launch.Stopping": "جارٍ الإيقاف...",
@@ -240,6 +232,9 @@
   "Options.Env.RenderDoc.Desc": "يحمّل واجهة RenderDoc داخل التطبيق حتى يمكن التقاط الإطارات من داخل المحاكي.\nاضغط F12 أثناء تشغيل اللعبة لالتقاط إطار واحد؛ تُحفظ اللقطات في user/logs/capture_logs/<TITLE_ID>.\nيتطلب تثبيت RenderDoc. يبطئ وحدة معالجة الرسوميات ويسبب تعليق بعض الألعاب، لذا اتركه معطلاً ما لم تكن تصحح الأخطاء.",
   "Options.Env.DisableVkImplicitLayers.Desc": "عند تفعيل RenderDoc، قد تتسبب التراكبات الأخرى المتعارضة في فقدان الجهاز. قد يؤدي تفعيل هذا الخيار إلى حل المشكلة.",
   "Common.Save": "حفظ",
+  "Common.Edit": "تعديل",
+  "Setting.CustomEnv.Label": "متغيرات مخصصة",
+  "Setting.CustomEnv.Count": "{0} معيّن",
   "Common.Cancel": "إلغاء",
   "Options.About": "حول",
   "About.Github.Label": "GitHub",

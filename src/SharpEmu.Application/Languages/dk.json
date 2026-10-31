@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Spilindstillinger",
 
-  "Hero.CustomLaunch": "Tilpasset start…",
 
   "Hero.Console": "Konsol",
 
@@ -163,17 +162,10 @@
   "Launch.Idle": "Inaktiv",
   "Launch.Console": "≡ Konsol",
   "Launch.Launch": "▶  Start",
-  "Launch.CustomEnv": "Start med brugerdefinerede miljøvariabler",
-  "Launch.CustomEnv.Title": "Start med brugerdefinerede miljøvariabler",
   "Launch.CustomEnv.Desc": "Indtast én miljøvariabel pr. linje som NAVN=VÆRDI. Brugerdefinerede værdier tilsidesætter GUI- og spilspecifikke indstillinger med samme navn.",
   "Launch.CustomEnv.Documentation": "Vis udokumenterede miljøvariabler ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_EKSEMPEL=1",
-  "Launch.CustomEnv.SaveGame": "Gem for spil",
-  "Launch.CustomEnv.SaveGlobal": "Gem globalt",
-  "Launch.CustomEnv.Play": "Spil",
   "Launch.CustomEnv.Invalid": "Ugyldig miljøvariabel: {0}",
-  "Launch.CustomEnv.SavedGame": "Gemt for dette spil.",
-  "Launch.CustomEnv.SavedGlobal": "Gemt globalt.",
   "Launch.Stop": "■  Stop",
   "Launch.Running": "Kører — {0}",
   "Launch.Stopping": "Stopper…",
@@ -240,6 +232,9 @@
   "Options.Env.RenderDoc.Desc": "Indlæser RenderDocs in-application-API, så frames kan optages inde fra emulatoren.\nTryk på F12 mens spillet kører for at optage ét frame; optagelser havner i user/logs/capture_logs/<TITLE_ID>.\nKræver at RenderDoc er installeret. Gør GPU'en langsommere og får nogle titler til at hænge, så lad den være slået fra, medmindre du fejlfinder.",
   "Options.Env.DisableVkImplicitLayers.Desc": "Når RenderDoc er aktiveret, kan andre konflikterende overlays forårsage device loss. Aktivering af denne indstilling kan løse problemet.",
   "Common.Save": "Gem",
+  "Common.Edit": "Rediger",
+  "Setting.CustomEnv.Label": "Egne variabler",
+  "Setting.CustomEnv.Count": "{0} sat",
   "Common.Cancel": "Annuller",
   "Options.About": "Om",
   "About.Github.Label": "GitHub",

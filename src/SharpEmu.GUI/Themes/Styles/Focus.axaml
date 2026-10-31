@@ -41,16 +41,16 @@ much weaker fill change defined next to each control.
   </Style>
   <Style Selector="Button:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
                    ToggleButton:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="BoxShadow" Value="{StaticResource FocusRingShadow}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource FocusRingShadow}" />
     <Setter Property="ClipToBounds" Value="False" />
   </Style>
   <Style Selector="ComboBox:focus-visible /template/ Border#Background">
-    <Setter Property="BoxShadow" Value="{StaticResource FocusRingShadow}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource FocusRingShadow}" />
     <Setter Property="ClipToBounds" Value="False" />
   </Style>
   <!-- A field draws its ring inside: the toolbar clipped an outer glow to square corners. -->
   <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
-    <Setter Property="BoxShadow" Value="{StaticResource FocusRingInsetShadow}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource FocusRingInsetShadow}" />
   </Style>
   <!-- The theme tints a focused combo with the accent; keep the field colour instead. -->
   <Style Selector="ComboBox:focus-visible /template/ Border#Background, ComboBox:focus /template/ Border#Background">
@@ -64,7 +64,7 @@ much weaker fill change defined next to each control.
   </Style>
   <!-- Items inside a scrolling popup: the ring is drawn inside so it is never clipped. -->
   <Style Selector="ComboBoxItem:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="BoxShadow" Value="{StaticResource FocusRingInsetShadow}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource FocusRingInsetShadow}" />
     <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
   </Style>
   <!-- Inside a settings row the whole row is the focus target, so the control

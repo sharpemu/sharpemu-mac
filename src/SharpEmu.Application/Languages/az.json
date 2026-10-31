@@ -28,7 +28,6 @@
 
   "Hero.GameSettings": "Oyun ayarları",
 
-  "Hero.CustomLaunch": "Xüsusi başlatma…",
 
   "Hero.Console": "Konsol",
 
@@ -202,6 +201,9 @@
   "Common.On": "Aktiv",
   "Common.Off": "Deaktiv",
   "Common.Save": "Yadda saxla",
+  "Common.Edit": "Redaktə et",
+  "Setting.CustomEnv.Label": "Xüsusi dəyişənlər",
+  "Setting.CustomEnv.Count": "{0} təyin edilib",
   "Common.Cancel": "Ləğv et",
 
 

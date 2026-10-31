@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "ゲーム設定",
 
-  "Hero.CustomLaunch": "カスタム起動…",
 
   "Hero.Console": "コンソール",
 
@@ -163,17 +162,10 @@
   "Launch.Idle": "待機中",
   "Launch.Console": "≡ コンソール",
   "Launch.Launch": "▶  起動",
-  "Launch.CustomEnv": "カスタム環境変数で起動",
-  "Launch.CustomEnv.Title": "カスタム環境変数で起動",
   "Launch.CustomEnv.Desc": "環境変数を 1 行に 1 つ、NAME=VALUE 形式で入力します。カスタム値は、同名の GUI およびゲーム固有の環境設定を上書きします。",
   "Launch.CustomEnv.Documentation": "未文書化の環境変数を表示 ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_EXAMPLE=1",
-  "Launch.CustomEnv.SaveGame": "ゲーム用に保存",
-  "Launch.CustomEnv.SaveGlobal": "全体設定として保存",
-  "Launch.CustomEnv.Play": "プレイ",
   "Launch.CustomEnv.Invalid": "無効な環境変数: {0}",
-  "Launch.CustomEnv.SavedGame": "このゲーム用に保存しました。",
-  "Launch.CustomEnv.SavedGlobal": "全体設定として保存しました。",
   "Launch.Stop": "■  停止",
   "Launch.Running": "実行中 — {0}",
   "Launch.Stopping": "停止中…",
@@ -240,6 +232,9 @@
   "Options.Env.RenderDoc.Desc": "RenderDoc のアプリ内 API を読み込み、エミュレーター内からフレームをキャプチャできるようにします。\nゲーム実行中に F12 を押すと 1 フレームをキャプチャします。保存先は user/logs/capture_logs/<TITLE_ID> です。\nRenderDoc のインストールが必要です。GPU が遅くなり一部のタイトルはハングするため、デバッグ時以外はオフのままにしてください。",
   "Options.Env.DisableVkImplicitLayers.Desc": "RenderDoc が有効な場合、競合する他のオーバーレイによって device loss が発生することがあります。この設定を有効にすると解決する場合があります。",
   "Common.Save": "保存",
+  "Common.Edit": "編集",
+  "Setting.CustomEnv.Label": "カスタム変数",
+  "Setting.CustomEnv.Count": "{0} 件設定済み",
   "Common.Cancel": "キャンセル",
   "Options.About": "情報",
   "About.Github.Label": "GitHub",

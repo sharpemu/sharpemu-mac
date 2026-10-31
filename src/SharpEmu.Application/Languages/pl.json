@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Ustawienia gry",
 
-  "Hero.CustomLaunch": "Własne uruchomienie…",
 
   "Hero.Console": "Konsola",
 
@@ -215,6 +214,9 @@
   "Common.On": "Włącz",
   "Common.Off": "Wyłącz",
   "Common.Save": "Zapisz",
+  "Common.Edit": "Edytuj",
+  "Setting.CustomEnv.Label": "Własne zmienne",
+  "Setting.CustomEnv.Count": "Ustawione: {0}",
   "Common.Cancel": "Anuluj",
 
 
@@ -231,17 +233,10 @@
   "Launch.Idle": "Bezczynny",
   "Launch.Console": "≡ Konsola",
   "Launch.Launch": "▶  Uruchom",
-  "Launch.CustomEnv": "Uruchom z własnymi zmiennymi środowiskowymi",
-  "Launch.CustomEnv.Title": "Uruchom z własnymi zmiennymi środowiskowymi",
   "Launch.CustomEnv.Desc": "Wpisz po jednej zmiennej środowiskowej w wierszu w formacie NAZWA=WARTOŚĆ. Własne wartości zastępują ustawienia GUI i ustawienia gry o tej samej nazwie.",
   "Launch.CustomEnv.Documentation": "Wyświetl nieudokumentowane zmienne środowiskowe ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_PRZYKLAD=1",
-  "Launch.CustomEnv.SaveGame": "Zapisz dla gry",
-  "Launch.CustomEnv.SaveGlobal": "Zapisz globalnie",
-  "Launch.CustomEnv.Play": "Graj",
   "Launch.CustomEnv.Invalid": "Nieprawidłowa zmienna środowiskowa: {0}",
-  "Launch.CustomEnv.SavedGame": "Zapisano dla tej gry.",
-  "Launch.CustomEnv.SavedGlobal": "Zapisano globalnie.",
   "Launch.Stop": "■  Zatrzymaj",
   "Launch.Running": "Działa — {0}",
   "Launch.Stopping": "Zatrzymywanie…",

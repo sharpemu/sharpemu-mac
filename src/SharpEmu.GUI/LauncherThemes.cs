@@ -104,33 +104,36 @@ internal static class LauncherThemes
             ["#111110", "#191918", "#222221", "#2A2A28", "#31312E", "#3B3A37",
              "#494844", "#62605B", "#6F6D66", "#7C7B74", "#B5B3AD", "#EEEEEC"],
             accent: "#FFC53D", accentHover: "#FFD60A", accentForeground: "#111110"),
-        // Catppuccin Mocha (catppuccin.com/palette) with its blue accent.
+        // Catppuccin Mocha (catppuccin.com/palette). Its pastel blue read only with dark
+        // text, so the accent is a deeper blue that carries a white label.
         new(
             Id: "Catppuccin",
             Background: "#1E1E2E", Chrome: "#11111B", Menu: "#181825",
             Card: "#26263A", Elevated: "#313244", RaisedHover: "#3B3D52",
             Field: "#313244", FieldHover: "#45475A", Overlay: "#2A2B3D",
             Text: "#CDD6F4", SecondaryText: "#BAC2DE", Description: "#A6ADC8", Muted: "#9399B2", Faint: "#6C7086",
-            Accent: "#89B4FA", AccentHover: "#B4BEFE", AccentPressed: "#7497D4", AccentTint: "#3389B4FA",
-            AccentForeground: "#11111B"),
-        // Nord (nordtheme.com): Polar Night surfaces, Snow Storm text, Frost accent.
+            Accent: "#3A72E8", AccentHover: "#4C7FE6", AccentPressed: "#2F62CC", AccentTint: "#333A72E8",
+            AccentForeground: "#FFFFFF"),
+        // Nord (nordtheme.com): Polar Night surfaces, Snow Storm text, and the deepest Frost
+        // blue (nord10) as the accent, so labels on it are white.
         new(
             Id: "Nord",
             Background: "#2E3440", Chrome: "#242933", Menu: "#323846",
             Card: "#3B4252", Elevated: "#434C5E", RaisedHover: "#4C566A",
             Field: "#434C5E", FieldHover: "#4C566A", Overlay: "#3B4252",
             Text: "#ECEFF4", SecondaryText: "#E5E9F0", Description: "#D8DEE9", Muted: "#B1BACB", Faint: "#7B88A1",
-            Accent: "#88C0D0", AccentHover: "#8FBCBB", AccentPressed: "#6FA3B3", AccentTint: "#3388C0D0",
-            AccentForeground: "#2E3440"),
-        // Tokyo Night (github.com/folke/tokyonight.nvim, night style).
+            Accent: "#5E81AC", AccentHover: "#6A8DB8", AccentPressed: "#4F6F96", AccentTint: "#335E81AC",
+            AccentForeground: "#FFFFFF"),
+        // Tokyo Night (github.com/folke/tokyonight.nvim, night style), its blue deepened so
+        // labels on the accent are white.
         new(
             Id: "TokyoNight",
             Background: "#1A1B26", Chrome: "#16161E", Menu: "#1F2030",
             Card: "#24283B", Elevated: "#292E42", RaisedHover: "#343A55",
             Field: "#292E42", FieldHover: "#343A55", Overlay: "#24283B",
             Text: "#C0CAF5", SecondaryText: "#A9B1D6", Description: "#9AA5CE", Muted: "#828BB8", Faint: "#565F89",
-            Accent: "#7AA2F7", AccentHover: "#8DB0FA", AccentPressed: "#6788D2", AccentTint: "#337AA2F7",
-            AccentForeground: "#16161E"),
+            Accent: "#4F74D6", AccentHover: "#5A7FD8", AccentPressed: "#4262BC", AccentTint: "#334F74D6",
+            AccentForeground: "#FFFFFF"),
     ];
 
     // Maps a 12-step dark scale (Radix roles: 1-2 backgrounds, 3-5 element fills,
@@ -387,6 +390,19 @@ internal static class LauncherThemes
         Paint(app, "GlassBrush", WithAlpha(raised, opacity));
         Paint(app, "GlassHoverBrush", WithAlpha(fieldHover, Math.Min(1, opacity + 0.1)));
         Paint(app, "GlassPressedBrush", WithAlpha(fieldHover, Math.Min(1, opacity + 0.2)));
+
+        // Focus and selection rings take the accent. A neutral accent (Graphite, Onyx) is
+        // drawn a little translucent so the ring reads grey rather than stark white.
+        var neutral = Math.Max(accent.R, Math.Max(accent.G, accent.B)) - Math.Min(accent.R, Math.Min(accent.G, accent.B)) < 24;
+        var ring = WithAlpha(accent, neutral ? 0.72 : 0.95);
+        Paint(app, "FocusRingBrush", ring);
+        app.Resources["FocusRingShadow"] = new BoxShadows(
+            new BoxShadow { Spread = 2, Color = ring },
+            [new BoxShadow { Blur = 18, Spread = 2, Color = WithAlpha(accent, neutral ? 0.16 : 0.3) }]);
+        app.Resources["FocusRingInsetShadow"] = new BoxShadows(
+            new BoxShadow { Spread = 2, Color = ring, IsInset = true });
+        app.Resources["SelectedRingShadow"] = new BoxShadows(
+            new BoxShadow { Spread = 2, Color = WithAlpha(accent, neutral ? 0.5 : 0.7) });
 
         app.Resources["SystemAccentColor"] = accent;
     }

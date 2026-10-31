@@ -57,7 +57,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     Classes="optionToggle"
                     AutomationProperties.Name="{Binding [Options.TitleMusic.Label], Source={x:Static local:Localization.Instance}}" />
     </Grid>
-    <Grid Classes="menuRow" ColumnDefinitions="Auto,*,Auto,Auto">
+    <Grid x:Name="VolumeRow" Classes="menuRow" ColumnDefinitions="Auto,*,Auto,Auto">
       <TextBlock x:Name="VolumeGlyph" Classes="materialSymbol compact menuIcon" Text="volume_up" />
       <TextBlock Grid.Column="1"
                  Classes="menuLabel"

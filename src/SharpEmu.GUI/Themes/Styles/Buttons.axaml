@@ -92,7 +92,7 @@ at least 44 pt tall.
     <Setter Property="Background" Value="Transparent" />
   </Style>
 
-  <Style Selector="Button.iconGhost">
+  <Style Selector="Button.iconGhost, ToggleButton.iconGhost">
     <Setter Property="Width" Value="{StaticResource ControlHeight}" />
     <Setter Property="Height" Value="{StaticResource ControlHeight}" />
     <Setter Property="Padding" Value="0" />
@@ -103,8 +103,15 @@ at least 44 pt tall.
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
-  <Style Selector="Button.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+  <Style Selector="Button.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource RaisedHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <!-- An icon toggle that is on (the console) lights up like a selected segment. -->
+  <Style Selector="ToggleButton.iconGhost:checked /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.iconGhost:checked:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource SegmentActiveBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 

@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "게임 설정",
 
-  "Hero.CustomLaunch": "사용자 지정 실행…",
 
   "Hero.Console": "콘솔",
 
@@ -163,17 +162,10 @@
   "Launch.Idle": "대기 중",
   "Launch.Console": "≡ 콘솔",
   "Launch.Launch": "▶  실행",
-  "Launch.CustomEnv": "사용자 지정 환경 변수로 실행",
-  "Launch.CustomEnv.Title": "사용자 지정 환경 변수로 실행",
   "Launch.CustomEnv.Desc": "환경 변수를 NAME=VALUE 형식으로 한 줄에 하나씩 입력하세요. 사용자 지정 값은 이름이 같은 GUI 및 게임별 환경 설정을 덮어씁니다.",
   "Launch.CustomEnv.Documentation": "문서화되지 않은 환경 변수 보기 ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_EXAMPLE=1",
-  "Launch.CustomEnv.SaveGame": "게임용으로 저장",
-  "Launch.CustomEnv.SaveGlobal": "전역으로 저장",
-  "Launch.CustomEnv.Play": "플레이",
   "Launch.CustomEnv.Invalid": "잘못된 환경 변수: {0}",
-  "Launch.CustomEnv.SavedGame": "이 게임용으로 저장했습니다.",
-  "Launch.CustomEnv.SavedGlobal": "전역으로 저장했습니다.",
   "Launch.Stop": "■  중지",
   "Launch.Running": "실행 중 — {0}",
   "Launch.Stopping": "중지 중…",
@@ -240,6 +232,9 @@
   "Options.Env.RenderDoc.Desc": "RenderDoc의 인앱 API를 로드하여 에뮬레이터 내부에서 프레임을 캡처할 수 있게 합니다.\n게임 실행 중 F12을 누르면 한 프레임을 캡처하며, 캡처 파일은 user/logs/capture_logs/<TITLE_ID>에 저장됩니다.\nRenderDoc이 설치되어 있어야 합니다. GPU 속도가 느려지고 일부 타이틀은 멈추므로 디버깅할 때가 아니면 꺼 두세요.",
   "Options.Env.DisableVkImplicitLayers.Desc": "RenderDoc이 활성화된 경우 다른 충돌하는 오버레이로 인해 device loss가 발생할 수 있습니다. 이 옵션을 활성화하면 문제가 해결될 수 있습니다.",
   "Common.Save": "저장",
+  "Common.Edit": "편집",
+  "Setting.CustomEnv.Label": "사용자 지정 변수",
+  "Setting.CustomEnv.Count": "{0}개 설정됨",
   "Common.Cancel": "취소",
   "Options.About": "정보",
   "About.Github.Label": "GitHub",

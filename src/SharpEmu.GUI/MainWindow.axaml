@@ -194,6 +194,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
               </Button>
             </TextBox.InnerRightContent>
           </TextBox>
+          <ToggleButton x:Name="ConsoleToggle"
+                        Classes="iconGhost glass"
+                        CornerRadius="22"
+                        VerticalAlignment="Center"
+                        ToolTip.Tip="{Binding [Hero.Console], Source={x:Static local:Localization.Instance}}"
+                        AutomationProperties.Name="{Binding [Hero.Console], Source={x:Static local:Localization.Instance}}">
+            <TextBlock Classes="materialSymbol compact" Text="terminal" />
+          </ToggleButton>
           <Button x:Name="LibraryMenuButton"
                   Classes="iconGhost glass"
                   CornerRadius="22"
@@ -413,18 +421,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <TextBlock Text="{Binding [Hero.GameSettings], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                   </StackPanel>
                 </Button>
-                <Button x:Name="LaunchCustomEnvButton" Classes="heroAction glass">
-                  <StackPanel Orientation="Horizontal" Spacing="8">
-                    <TextBlock Classes="materialSymbol compact" Text="rocket_launch" />
-                    <TextBlock Text="{Binding [Hero.CustomLaunch], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                  </StackPanel>
-                </Button>
-                <ToggleButton x:Name="ConsoleToggle" Classes="heroAction glass">
-                  <StackPanel Orientation="Horizontal" Spacing="8">
-                    <TextBlock Classes="materialSymbol compact" Text="terminal" />
-                    <TextBlock Text="{Binding [Hero.Console], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                  </StackPanel>
-                </ToggleButton>
               </StackPanel>
             </StackPanel>
           </Grid>
@@ -1228,6 +1224,22 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <Border Classes="optionsGroup">
                       <StackPanel>
                         <StackPanel x:Name="GameAudioHost" />
+                      </StackPanel>
+                    </Border>
+
+                    <!-- Variables this game launches with, beyond the switches above. -->
+                    <Border Classes="optionsGroup">
+                      <StackPanel>
+                        <local:SettingRow Classes="optionRow"
+                                          Label="{Binding [Setting.CustomEnv.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                          Description="{Binding [Launch.CustomEnv.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                          <Button x:Name="GameCustomEnvButton" Classes="ghost">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                              <TextBlock Classes="materialSymbol compact" Text="edit" />
+                              <TextBlock x:Name="GameCustomEnvSummary" />
+                            </StackPanel>
+                          </Button>
+                        </local:SettingRow>
                       </StackPanel>
                     </Border>
                   </StackPanel>

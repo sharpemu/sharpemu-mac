@@ -69,7 +69,7 @@ clips. Hover only washes the surface.
     </Style>
     <Style Selector="^:rowfocus /template/ Border#PART_RowSurface">
       <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
-      <Setter Property="BoxShadow" Value="{StaticResource FocusRingInsetShadow}" />
+      <Setter Property="BoxShadow" Value="{DynamicResource FocusRingInsetShadow}" />
     </Style>
   </ControlTheme>
 </ResourceDictionary>

@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Játékbeállítások",
 
-  "Hero.CustomLaunch": "Egyéni indítás…",
 
   "Hero.Console": "Konzol",
 
@@ -176,17 +175,10 @@
   "Launch.Idle": "Tétlen",
   "Launch.Console": "≡ Konzol",
   "Launch.Launch": "▶  Inditás",
-  "Launch.CustomEnv": "Indítás egyéni környezeti változókkal",
-  "Launch.CustomEnv.Title": "Indítás egyéni környezeti változókkal",
   "Launch.CustomEnv.Desc": "Soronként egy környezeti változót adj meg NÉV=ÉRTÉK formában. Az egyéni értékek felülírják az azonos nevű GUI- és játékspecifikus beállításokat.",
   "Launch.CustomEnv.Documentation": "Nem dokumentált környezeti változók megtekintése ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_PELDA=1",
-  "Launch.CustomEnv.SaveGame": "Mentés a játékhoz",
-  "Launch.CustomEnv.SaveGlobal": "Globális mentés",
-  "Launch.CustomEnv.Play": "Játék",
   "Launch.CustomEnv.Invalid": "Érvénytelen környezeti változó: {0}",
-  "Launch.CustomEnv.SavedGame": "Mentve ehhez a játékhoz.",
-  "Launch.CustomEnv.SavedGlobal": "Globálisan mentve.",
   "Launch.Stop": "■  Leállítás",
   "Launch.Running": "Fut — {0}",
   "Launch.Stopping": "Leállítás…",
@@ -248,6 +240,9 @@
   "Options.Env.WritableApp0.Desc": "Engedélyezi, hogy a játékok fájlokat hozzanak létre és írjanak a telepítési mappájukban.\nA kicsomagolt dumpokhoz szükséges, amelyek a mentéseiket vagy beállításaikat az /app0 alá írják.",
   "Options.Env.LogIo.Desc": "A fájlmegnyitások, olvasások és útvonal-feloldások naplózása a konzolra.\nAkkor használd, ha egy játék indításkor nem találja az adatfájljait.",
   "Common.Save": "Mentés",
+  "Common.Edit": "Szerkesztés",
+  "Setting.CustomEnv.Label": "Egyéni változók",
+  "Setting.CustomEnv.Count": "{0} beállítva",
   "Common.Cancel": "Mégse",
   "About.Github.LatestCommitLabel": "Legutóbbi commit",
   "About.Github.LatestCommitDescription": "A main ág legutóbbi commitja",

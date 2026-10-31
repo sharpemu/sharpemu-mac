@@ -134,11 +134,11 @@ Tile states:
   </Style>
   <Style Selector="ListBox.tileGrid ListBoxItem:selected Border.libraryGameCard,
                    ListBox.tileGrid ListBoxItem:selected Border.addFolderTile">
-    <Setter Property="BoxShadow" Value="{StaticResource SelectedRingShadow}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource SelectedRingShadow}" />
   </Style>
   <Style Selector="Window.padNav ListBox.tileGrid:focus-within ListBoxItem:selected Border.libraryGameCard,
                    Window.padNav ListBox.tileGrid:focus-within ListBoxItem:selected Border.addFolderTile">
-    <Setter Property="BoxShadow" Value="{StaticResource FocusRingShadow}" />
+    <Setter Property="BoxShadow" Value="{DynamicResource FocusRingShadow}" />
   </Style>
   <Style Selector="Border.libraryGameCard Border.coverClip">
     <Setter Property="CornerRadius" Value="13" />

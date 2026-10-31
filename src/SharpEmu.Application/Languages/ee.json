@@ -44,7 +44,6 @@
 
   "Hero.GameSettings": "Mängu seaded",
 
-  "Hero.CustomLaunch": "Kohandatud käivitus…",
 
   "Hero.Console": "Konsool",
 
@@ -215,6 +214,9 @@
   "Common.On": "Sisse",
   "Common.Off": "Välja",
   "Common.Save": "Salvesta",
+  "Common.Edit": "Muuda",
+  "Setting.CustomEnv.Label": "Kohandatud muutujad",
+  "Setting.CustomEnv.Count": "{0} määratud",
   "Common.Cancel": "Tühista",
 
 
@@ -231,17 +233,10 @@
   "Launch.Idle": "Ootel",
   "Launch.Console": "≡ Konsool",
   "Launch.Launch": "▶  Käivita",
-  "Launch.CustomEnv": "Käivita kohandatud keskkonnamuutujatega",
-  "Launch.CustomEnv.Title": "Käivita kohandatud keskkonnamuutujatega",
   "Launch.CustomEnv.Desc": "Sisesta üks keskkonnamuutuja rea kohta kujul NIMI=VÄÄRTUS. Kohandatud väärtused alistavad sama nimega GUI ja mängupõhised seaded.",
   "Launch.CustomEnv.Documentation": "Vaata dokumenteerimata keskkonnamuutujaid ↗",
   "Launch.CustomEnv.Placeholder": "SHARPEMU_NAIDE=1",
-  "Launch.CustomEnv.SaveGame": "Salvesta mängule",
-  "Launch.CustomEnv.SaveGlobal": "Salvesta globaalselt",
-  "Launch.CustomEnv.Play": "Mängi",
   "Launch.CustomEnv.Invalid": "Vigane keskkonnamuutuja: {0}",
-  "Launch.CustomEnv.SavedGame": "Selle mängu jaoks salvestatud.",
-  "Launch.CustomEnv.SavedGlobal": "Globaalselt salvestatud.",
   "Launch.Stop": "■  Peata",
   "Launch.Running": "Käib — {0}",
   "Launch.Stopping": "Peatamine…",

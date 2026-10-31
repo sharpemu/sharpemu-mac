@@ -46,21 +46,22 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <StackPanel x:Name="SortBar" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" />
         <Border x:Name="SearchFrame"
                 Grid.Column="1"
-                Width="260"
-                Height="32"
-                CornerRadius="16"
+                Width="280"
+                Height="40"
+                CornerRadius="20"
                 Padding="14,0,6,0"
                 VerticalAlignment="Center"
-                Background="{StaticResource FieldBrush}"
-                BorderBrush="{StaticResource CardBorderBrush}"
+                Background="{StaticResource GlassBrush}"
+                BorderBrush="{StaticResource GlassRimBrush}"
                 BorderThickness="1">
           <Border.Styles>
             <Style Selector="Border#SearchFrame:pointerover">
-              <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
+              <Setter Property="Background" Value="{StaticResource GlassHoverBrush}" />
             </Style>
+            <!-- The frame is the field: it takes the ring, the bare text box inside does not. -->
             <Style Selector="Border#SearchFrame:focus-within">
-              <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
-              <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+              <Setter Property="Background" Value="{StaticResource GlassHoverBrush}" />
+              <Setter Property="BoxShadow" Value="{DynamicResource FocusRingInsetShadow}" />
             </Style>
             <Style Selector="TextBox#SearchBox /template/ Border#PART_BorderElement">
               <Setter Property="Background" Value="Transparent" />
@@ -73,6 +74,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
             <Style Selector="TextBox#SearchBox:focus /template/ Border#PART_BorderElement">
               <Setter Property="Background" Value="Transparent" />
               <Setter Property="BorderThickness" Value="0" />
+              <Setter Property="BoxShadow" Value="none" />
             </Style>
           </Border.Styles>
           <Border.Transitions>
@@ -93,7 +95,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                      BorderThickness="0"
                      Padding="0"
                      MinHeight="0"
-                     FontSize="12.5"
+                     FontSize="14"
                      VerticalAlignment="Center"
                      VerticalContentAlignment="Center" />
             <Button x:Name="SearchClear"
