@@ -12,7 +12,8 @@ namespace SharpEmu.GUI;
 
 /// <summary>
 /// Blurred key art behind a page. The art is decoded small and blurred once on load, then
-/// scaled up, so it costs nothing per frame. With no game (or no art) it shows SharpEmu's own.
+/// scaled up, so it costs nothing per frame. With no game (or no art) it shows SharpEmu's
+/// emblem as a glow in the theme's accent.
 /// </summary>
 internal sealed class TrophyBackdrop : Grid
 {
@@ -22,6 +23,7 @@ internal sealed class TrophyBackdrop : Grid
     private const int DefaultArtWidth = 320;
     private const int BlurRadius = 3;
     private const double ArtOpacity = 0.7;
+    private const double EmblemOpacity = 0.55;
     private const string DefaultArtKey = "avares://SharpEmu.GUI/Assets/pic0.png";
 
     // Per backdrop, so clearing one never disposes art another is still showing.
@@ -29,6 +31,16 @@ internal sealed class TrophyBackdrop : Grid
 
     private readonly Image _a = CreateLayer();
     private readonly Image _b = CreateLayer();
+
+    // The emblem is a brightness mask over an accent fill, so it takes every theme's colour
+    // (and follows a theme change) instead of the art's fixed blue and purple.
+    private readonly Border _emblem = new()
+    {
+        Background = LauncherThemes.Brush("AccentBrush"),
+        Opacity = 0,
+        Transitions = [new DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(350) }],
+    };
+
     private bool _onA;
     private int _token;
 
@@ -38,6 +50,7 @@ internal sealed class TrophyBackdrop : Grid
         ClipToBounds = true;
         Children.Add(_a);
         Children.Add(_b);
+        Children.Add(_emblem);
         Children.Add(new Border
         {
             Background = LauncherThemes.Brush("TrophyBackdropFadeBrush"),
@@ -47,7 +60,8 @@ internal sealed class TrophyBackdrop : Grid
     public async void Show(GameEntry? game)
     {
         var token = ++_token;
-        var art = await LoadAsync(game?.BackgroundPath ?? game?.CoverPath ?? DefaultArtKey);
+        var path = game?.BackgroundPath ?? game?.CoverPath ?? DefaultArtKey;
+        var art = await LoadAsync(path);
         if (token != _token)
         {
             return;
@@ -55,6 +69,20 @@ internal sealed class TrophyBackdrop : Grid
 
         var next = _onA ? _b : _a;
         var previous = _onA ? _a : _b;
+        if (path == DefaultArtKey)
+        {
+            previous.Opacity = 0;
+            next.Opacity = 0;
+            if (art is not null)
+            {
+                _emblem.OpacityMask = new ImageBrush(art) { Stretch = Stretch.UniformToFill };
+                _emblem.Opacity = EmblemOpacity;
+            }
+
+            return;
+        }
+
+        _emblem.Opacity = 0;
         if (art is null)
         {
             previous.Opacity = 0;
@@ -76,6 +104,8 @@ internal sealed class TrophyBackdrop : Grid
     public void Clear()
     {
         ++_token;
+        _emblem.OpacityMask = null;
+        _emblem.Opacity = 0;
         _a.Source = null;
         _b.Source = null;
         _a.Opacity = 0;
@@ -114,7 +144,7 @@ internal sealed class TrophyBackdrop : Grid
                 {
                     using var stream = AssetLoader.Open(new Uri(DefaultArtKey));
                     using var decoded = Bitmap.DecodeToWidth(stream, DefaultArtWidth, BitmapInterpolationMode.HighQuality);
-                    return Blur(decoded);
+                    return Blur(decoded, asMask: true);
                 }
 
                 using var small = GameArtCache.Load(path, ArtWidth);
@@ -131,7 +161,8 @@ internal sealed class TrophyBackdrop : Grid
 
     // Three box passes each way approximate a Gaussian; on a 96 px image that is a few
     // hundred thousand adds, done once per game.
-    private static Bitmap Blur(Bitmap source)
+    // asMask keeps only brightness, as alpha over white, for the emblem's opacity mask.
+    private static Bitmap Blur(Bitmap source, bool asMask = false)
     {
         var size = source.PixelSize;
         var stride = size.Width * 4;
@@ -146,6 +177,16 @@ internal sealed class TrophyBackdrop : Grid
             {
                 BoxBlur(pixels, scratch, size.Width, size.Height, 4, stride);
                 BoxBlur(scratch, pixels, size.Height, size.Width, stride, 4);
+            }
+
+            if (asMask)
+            {
+                for (var i = 0; i < pixels.Length; i += 4)
+                {
+                    var bright = Math.Max(pixels[i], Math.Max(pixels[i + 1], pixels[i + 2]));
+                    var alpha = (byte)Math.Min(255, bright * 1.4);
+                    pixels[i] = pixels[i + 1] = pixels[i + 2] = pixels[i + 3] = alpha;
+                }
             }
 
             return new Bitmap(
