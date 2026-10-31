@@ -17,8 +17,38 @@ namespace SharpEmu.GUI;
 
 internal static class TrophyUi
 {
-    private static readonly IBrush ChipBrush = new SolidColorBrush(Color.FromArgb(24, 255, 255, 255));
-    private static readonly IBrush ChipBorderBrush = new SolidColorBrush(Color.FromArgb(34, 255, 255, 255));
+    // Shared token brushes: they are repainted in place when the theme changes, so nothing here copies a colour.
+    private static IBrush Token(string key) => LauncherThemes.Brush(key);
+
+    public static CornerRadius CardRadius =>
+        Avalonia.Application.Current?.TryGetResource("RadiusLg", null, out var value) == true && value is CornerRadius radius
+            ? radius
+            : new CornerRadius(14);
+
+    public static BoxShadows GlassShadow =>
+        Avalonia.Application.Current?.TryGetResource("GlassShadow", null, out var value) == true && value is BoxShadows shadows
+            ? shadows
+            : default;
+
+    // The one selected/focused state for a card: a 2px accent ring laid over it, faded in so nothing shifts.
+    public static Border SelectionRing() => new()
+    {
+        IsHitTestVisible = false,
+        Opacity = 0,
+        CornerRadius = CardRadius,
+        BorderThickness = new Thickness(2),
+        BorderBrush = Token("AccentBrush"),
+        Transitions = [new Avalonia.Animation.DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(140) }],
+    };
+
+    // Hover wash: the theme's overlay colour, faded in over the card.
+    public static Border HoverWash() => new()
+    {
+        IsHitTestVisible = false,
+        Opacity = 0,
+        Background = Token("HoverOverlayBrush"),
+        Transitions = [new Avalonia.Animation.DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(180) }],
+    };
 
     // A .zar game keeps its metadata, trophy package included, in its cache folder.
     public static string? GameDirectory(string gamePath) =>
@@ -51,13 +81,13 @@ internal static class TrophyUi
         }
     }
 
-    public static TextBlock Glyph(string name, double size, Color color) => new()
+    public static TextBlock Glyph(string name, double size, IBrush brush) => new()
     {
         Classes = { "materialSymbol" },
         Text = name,
         FontSize = size,
         LineHeight = size + 2,
-        Foreground = new SolidColorBrush(color),
+        Foreground = brush,
         HorizontalAlignment = HorizontalAlignment.Center,
         VerticalAlignment = VerticalAlignment.Center,
     };
@@ -83,11 +113,11 @@ internal static class TrophyUi
 
     public static void SetChipSelected(Border chip, bool selected)
     {
-        chip.Background = selected ? Brushes.White : ChipBrush;
-        chip.BorderBrush = selected ? Brushes.White : ChipBorderBrush;
+        chip.Background = Token(selected ? "AccentBrush" : "FieldBrush");
+        chip.BorderBrush = Token(selected ? "AccentBrush" : "CardBorderBrush");
         if (chip.Child is TextBlock text)
         {
-            text.Foreground = selected ? new SolidColorBrush(Color.Parse("#141414")) : Brushes.White;
+            text.Foreground = Token(selected ? "AccentForegroundBrush" : "TextBrush");
         }
     }
 
@@ -96,8 +126,8 @@ internal static class TrophyUi
         CornerRadius = new CornerRadius(13),
         Padding = new Thickness(4, 3, 10, 3),
         Margin = new Thickness(0, 0, 8, 4),
-        Background = ChipBrush,
-        BorderBrush = ChipBorderBrush,
+        Background = Token("FieldBrush"),
+        BorderBrush = Token("CardBorderBrush"),
         BorderThickness = new Thickness(1),
         Child = new StackPanel
         {
@@ -105,7 +135,7 @@ internal static class TrophyUi
             Spacing = 6,
             Children =
             {
-                new TrophyMedal { Width = 18, Height = 18, Grade = grade, Opacity = earned == 0 ? 0.6 : 1 },
+                new TrophyMedal { Width = 18, Height = 18, Grade = grade, Opacity = earned == 0 ? 0.7 : 1 },
                 Count(earned, total, 12),
             },
         },
@@ -113,37 +143,42 @@ internal static class TrophyUi
 
     public static TextBlock Count(int earned, int total, double size)
     {
-        var text = new TextBlock { FontSize = size, VerticalAlignment = VerticalAlignment.Center };
+        var text = new TextBlock { FontSize = size, VerticalAlignment = VerticalAlignment.Center, Foreground = Token("TextBrush") };
         text.Inlines!.Add(new Avalonia.Controls.Documents.Run(earned.ToString()) { FontWeight = FontWeight.Bold });
-        text.Inlines.Add(new Avalonia.Controls.Documents.Run($" / {total}") { Foreground = new SolidColorBrush(Color.Parse("#8A8F99")) });
+        text.Inlines.Add(new Avalonia.Controls.Documents.Run($" / {total}") { Foreground = Token("MutedBrush") });
         return text;
     }
 
-    public static Control StatusChip(string glyph, string text, Color color) => new StackPanel
+    public static Control StatusChip(string glyph, string text, IBrush brush) => new StackPanel
     {
         Orientation = Orientation.Horizontal,
         Spacing = 5,
         HorizontalAlignment = HorizontalAlignment.Right,
         Children =
         {
-            Glyph(glyph, 14, color),
-            new TextBlock { Text = text, FontSize = 12, Foreground = new SolidColorBrush(color), VerticalAlignment = VerticalAlignment.Center },
+            Glyph(glyph, 14, brush),
+            new TextBlock { Text = text, FontSize = 12, Foreground = brush, VerticalAlignment = VerticalAlignment.Center },
         },
     };
 
-    public static void Lift(Border card)
+    // Hover lifts the card a little and fades its wash in; the selection ring is the owner's job.
+    public static void Lift(Border card, Border? wash = null)
     {
-        IBrush? resting = null;
         card.PointerEntered += (_, _) =>
         {
-            resting = card.BorderBrush;
             Translate(card, -2, TimeSpan.FromMilliseconds(170));
-            card.BorderBrush = new SolidColorBrush(Color.FromArgb(150, 255, 255, 255));
+            if (wash is not null)
+            {
+                wash.Opacity = 1;
+            }
         };
         card.PointerExited += (_, _) =>
         {
             Translate(card, 0, TimeSpan.FromMilliseconds(170));
-            card.BorderBrush = resting;
+            if (wash is not null)
+            {
+                wash.Opacity = 0;
+            }
         };
     }
 

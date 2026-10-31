@@ -15,23 +15,14 @@ internal sealed class TrophyProgressRing : Control
     public static readonly StyledProperty<double> ThicknessProperty =
         AvaloniaProperty.Register<TrophyProgressRing, double>(nameof(Thickness), 8);
 
-    private static readonly IBrush TrackBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255));
+    // The track is the shared field brush, so it follows the theme; the fill is rebuilt only when the accent changes.
+    private static readonly IBrush TrackBrush = LauncherThemes.Brush("FieldBrush");
 
-    private static readonly IBrush FillBrush = new LinearGradientBrush
-    {
-        StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-        EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
-        GradientStops =
-        {
-            new GradientStop(Color.Parse("#8FE3FF"), 0),
-            new GradientStop(Color.Parse("#9B7CFF"), 0.55),
-            new GradientStop(Color.Parse("#FF8FD8"), 1),
-        },
-    };
-
-    // The pens only change with the thickness, so a count-up animation does not rebuild them every frame.
+    // The pens only change with the thickness or the accent, so a count-up animation does not rebuild them every frame.
     private Pen? _trackPen;
     private Pen? _fillPen;
+    private Color _fillFrom;
+    private Color _fillTo;
 
     static TrophyProgressRing()
     {
@@ -50,6 +41,9 @@ internal sealed class TrophyProgressRing : Control
         set => SetValue(ThicknessProperty, value);
     }
 
+    private static Color AccentColor(string key) =>
+        LauncherThemes.Brush(key) is ISolidColorBrush solid ? solid.Color : Colors.White;
+
     public override void Render(DrawingContext context)
     {
         var size = Math.Min(Bounds.Width, Bounds.Height);
@@ -60,10 +54,22 @@ internal sealed class TrophyProgressRing : Control
         }
 
         var center = new Point(Bounds.Width / 2, Bounds.Height / 2);
-        if (_trackPen is null || _trackPen.Thickness != Thickness)
+        var from = AccentColor("AccentBrush");
+        var to = AccentColor("AccentHoverBrush");
+        if (_trackPen is null || _trackPen.Thickness != Thickness || from != _fillFrom || to != _fillTo)
         {
+            _fillFrom = from;
+            _fillTo = to;
             _trackPen = new Pen(TrackBrush, Thickness);
-            _fillPen = new Pen(FillBrush, Thickness, lineCap: PenLineCap.Round);
+            _fillPen = new Pen(
+                new LinearGradientBrush
+                {
+                    StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                    EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
+                    GradientStops = { new GradientStop(from, 0), new GradientStop(to, 1) },
+                },
+                Thickness,
+                lineCap: PenLineCap.Round);
         }
 
         context.DrawEllipse(null, _trackPen, center, radius, radius);

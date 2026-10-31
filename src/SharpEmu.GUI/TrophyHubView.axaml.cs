@@ -41,20 +41,24 @@ public partial class TrophyHubView : UserControl
     private const double HeroSpinSeconds = 1.1;
     private static readonly TimeSpan PageSettleTime = TimeSpan.FromMilliseconds(260);
     private static readonly IBrush SecondaryText = LauncherThemes.Brush("SecondaryTextBrush");
-    private static readonly IBrush CardBrush = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255));
-    private static readonly IBrush CompleteCardBrush = new LinearGradientBrush
+    private static readonly IBrush CardBrush = LauncherThemes.Brush("PaneGlassBrush");
+    private static readonly IBrush CardRim = LauncherThemes.Brush("GlassRimBrush");
+    private static readonly IBrush CompleteRim = new SolidColorBrush(Color.FromArgb(150, Gold.R, Gold.G, Gold.B));
+
+    // A completed game gets a gold wash fading out from its left edge over the glass.
+    private static readonly IBrush CompleteWash = new LinearGradientBrush
     {
         StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
         EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
         GradientStops =
         {
-            new GradientStop(Color.FromArgb(56, Gold.R, Gold.G, Gold.B), 0),
-            new GradientStop(Color.FromArgb(14, 255, 255, 255), 0.6),
+            new GradientStop(Color.FromArgb(64, Gold.R, Gold.G, Gold.B), 0),
+            new GradientStop(Color.FromArgb(0, Gold.R, Gold.G, Gold.B), 0.6),
         },
     };
 
     private IReadOnlyList<GameEntry> _games = [];
-    private readonly List<(Border Card, GameSummary Summary)> _cards = [];
+    private readonly List<(Border Card, GameSummary Summary, Border Ring)> _cards = [];
     private readonly List<(Border Chip, Sort Sort)> _sortChips = [];
     private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
     private IReadOnlyList<GameSummary> _summaries = [];
@@ -295,8 +299,8 @@ public partial class TrophyHubView : UserControl
         _cards.Clear();
         foreach (var summary in Sorted())
         {
-            var card = BuildCard(summary);
-            _cards.Add((card, summary));
+            var (card, ring) = BuildCard(summary);
+            _cards.Add((card, summary, ring));
             GameList.Children.Add(card);
         }
 
@@ -382,13 +386,13 @@ public partial class TrophyHubView : UserControl
         }
     }
 
-    private Border BuildCard(GameSummary summary)
+    private (Border Card, Border Ring) BuildCard(GameSummary summary)
     {
         var cover = new Border
         {
             Width = 72,
             Height = 72,
-            CornerRadius = new CornerRadius(16),
+            CornerRadius = new CornerRadius(12),
             ClipToBounds = true,
             Background = summary.Game.PlaceholderBrush,
         };
@@ -427,7 +431,7 @@ public partial class TrophyHubView : UserControl
         var coverFrame = new Grid { Width = 72, Height = 72, VerticalAlignment = VerticalAlignment.Center };
         coverFrame.Children.Add(new Border
         {
-            CornerRadius = new CornerRadius(16),
+            CornerRadius = new CornerRadius(12),
             BoxShadow = new BoxShadows(new BoxShadow { OffsetY = 3, Blur = 8, Color = Color.FromArgb(120, 0, 0, 0) }),
             Child = cover,
         });
@@ -447,8 +451,9 @@ public partial class TrophyHubView : UserControl
         var name = new TextBlock
         {
             Text = summary.Game.Name,
-            FontSize = 17,
+            FontSize = 18,
             FontWeight = FontWeight.SemiBold,
+            Foreground = LauncherThemes.Brush("TextBrush"),
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
 
@@ -470,7 +475,7 @@ public partial class TrophyHubView : UserControl
         };
         if (latest is not null)
         {
-            details.Children.Add(TrophyUi.Glyph("workspace_premium", 14, TrophyMedal.Palette(latest.Grade).Mid));
+            details.Children.Add(TrophyUi.Glyph("workspace_premium", 14, new SolidColorBrush(TrophyMedal.Palette(latest.Grade).Mid)));
             details.Children.Add(new TextBlock
             {
                 Text = Localization.Instance.Format("Trophies.Latest", latest.Name, latest.UnlockedAtUtc!.Value.ToLocalTime().ToString("d")),
@@ -510,11 +515,11 @@ public partial class TrophyHubView : UserControl
             Children = { name, details, medals },
         };
 
-        var ring = new Grid { Width = 44, Height = 44, VerticalAlignment = VerticalAlignment.Center };
+        var percentRing = new Grid { Width = 44, Height = 44, VerticalAlignment = VerticalAlignment.Center };
         var progressRing = new TrophyProgressRing { Thickness = 4 };
         TrophyUi.Animate(progressRing, _animated ? summary.Percent : 0, summary.Percent, TimeSpan.FromMilliseconds(_animated ? 1 : 700), value => progressRing.Value = value);
-        ring.Children.Add(progressRing);
-        ring.Children.Add(new TextBlock
+        percentRing.Children.Add(progressRing);
+        percentRing.Children.Add(new TextBlock
         {
             Text = $"{Math.Round(summary.Percent)}%",
             FontSize = 12,
@@ -527,15 +532,16 @@ public partial class TrophyHubView : UserControl
         grid.Children.Add(coverFrame);
         Grid.SetColumn(middle, 1);
         grid.Children.Add(middle);
-        Grid.SetColumn(ring, 2);
-        grid.Children.Add(ring);
+        Grid.SetColumn(percentRing, 2);
+        grid.Children.Add(percentRing);
 
+        // The spotlight is the theme's text colour seen through a soft radial mask that follows the pointer.
         var spotlightBrush = new RadialGradientBrush
         {
             RadiusX = new RelativeScalar(0.3, RelativeUnit.Relative),
             GradientStops =
             {
-                new GradientStop(Color.FromArgb(30, 255, 255, 255), 0),
+                new GradientStop(Colors.White, 0),
                 new GradientStop(Color.FromArgb(0, 255, 255, 255), 1),
             },
         };
@@ -543,28 +549,44 @@ public partial class TrophyHubView : UserControl
         {
             IsHitTestVisible = false,
             Opacity = 0,
-            Background = spotlightBrush,
+            Background = LauncherThemes.Brush("TextBrush"),
+            OpacityMask = spotlightBrush,
             Transitions = [new Avalonia.Animation.DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(220) }],
         };
+        var wash = TrophyUi.HoverWash();
+        var ring = TrophyUi.SelectionRing();
         var layers = new Grid();
+        if (summary.Complete)
+        {
+            layers.Children.Add(new Border { IsHitTestVisible = false, Background = CompleteWash });
+        }
+
+        layers.Children.Add(wash);
         layers.Children.Add(spotlight);
         layers.Children.Add(grid);
+        layers.Children.Add(ring);
 
         var card = new Border
         {
-            CornerRadius = new CornerRadius(18),
+            CornerRadius = TrophyUi.CardRadius,
             BorderThickness = new Thickness(1),
             ClipToBounds = true,
-            Background = summary.Complete ? CompleteCardBrush : CardBrush,
-            BorderBrush = RestingBorder(summary, selected: false),
+            Background = CardBrush,
+            BorderBrush = summary.Complete ? CompleteRim : CardRim,
+            BoxShadow = TrophyUi.GlassShadow,
             Cursor = new Cursor(StandardCursorType.Hand),
             Child = layers,
         };
-        TrophyUi.Lift(card);
+        TrophyUi.Lift(card, wash);
         card.PointerEntered += (_, _) =>
         {
-            _selected = _cards.FindIndex(c => c.Card == card);
-            spotlight.Opacity = 1;
+            var index = _cards.FindIndex(c => c.Card == card);
+            if (index >= 0)
+            {
+                ShowSelection(index);
+            }
+
+            spotlight.Opacity = 0.14;
             SetBackdrop(summary.Game);
         };
         card.PointerExited += (_, _) => spotlight.Opacity = 0;
@@ -579,13 +601,18 @@ public partial class TrophyHubView : UserControl
             spotlightBrush.RadiusY = new RelativeScalar(0.3 * width / height, RelativeUnit.Relative);
         };
         card.PointerPressed += (_, _) => Open(summary);
-        return card;
+        return (card, ring);
     }
 
-    private static IBrush RestingBorder(GameSummary summary, bool selected) =>
-        new SolidColorBrush(selected
-            ? Color.FromArgb(150, 255, 255, 255)
-            : summary.Complete ? Color.FromArgb(120, Gold.R, Gold.G, Gold.B) : Color.FromArgb(22, 255, 255, 255));
+    // Keyboard, pad and pointer share one selected state: the accent ring on exactly one card.
+    private void ShowSelection(int index)
+    {
+        _selected = index;
+        for (var i = 0; i < _cards.Count; i++)
+        {
+            _cards[i].Ring.Opacity = i == index ? 1 : 0;
+        }
+    }
 
     private void SetBackdrop(GameEntry game) => Backdrop?.Show(game);
 
@@ -596,12 +623,7 @@ public partial class TrophyHubView : UserControl
             return;
         }
 
-        _selected = index;
-        for (var i = 0; i < _cards.Count; i++)
-        {
-            _cards[i].Card.BorderBrush = RestingBorder(_cards[i].Summary, i == index);
-        }
-
+        ShowSelection(index);
         _cards[index].Card.BringIntoView();
         SetBackdrop(_cards[index].Summary.Game);
     }

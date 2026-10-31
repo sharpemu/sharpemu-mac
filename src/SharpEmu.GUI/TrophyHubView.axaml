@@ -25,9 +25,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Grid>
         <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
           <TextBlock Text="{Binding [Trophies.Title], Source={x:Static local:Localization.Instance}}"
-                     FontSize="22"
+                     FontSize="24"
                      FontWeight="Bold" />
-          <TextBlock x:Name="TotalOfText" Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" />
+          <TextBlock x:Name="TotalOfText" Foreground="{StaticResource SecondaryTextBrush}" FontSize="13" />
           <WrapPanel x:Name="TotalGrades" Orientation="Horizontal" Margin="0,4,0,0" />
         </StackPanel>
         <Grid Grid.Column="2" Width="84" Height="84" VerticalAlignment="Center">
@@ -36,7 +36,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
             <TextBlock x:Name="TotalEarnedText" FontSize="21" FontWeight="Bold" HorizontalAlignment="Center" />
             <TextBlock Text="{Binding [Trophies.EarnedTotal], Source={x:Static local:Localization.Instance}}"
                        Foreground="{StaticResource SecondaryTextBrush}"
-                       FontSize="10.5"
+                       FontSize="11"
                        HorizontalAlignment="Center" />
           </StackPanel>
         </Grid>
@@ -51,16 +51,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 CornerRadius="16"
                 Padding="14,0,6,0"
                 VerticalAlignment="Center"
-                Background="#16FFFFFF"
-                BorderBrush="#26FFFFFF"
+                Background="{StaticResource FieldBrush}"
+                BorderBrush="{StaticResource CardBorderBrush}"
                 BorderThickness="1">
           <Border.Styles>
             <Style Selector="Border#SearchFrame:pointerover">
-              <Setter Property="Background" Value="#1FFFFFFF" />
+              <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
             </Style>
             <Style Selector="Border#SearchFrame:focus-within">
-              <Setter Property="Background" Value="#24FFFFFF" />
-              <Setter Property="BorderBrush" Value="#40FFFFFF" />
+              <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
+              <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
             </Style>
             <Style Selector="TextBox#SearchBox /template/ Border#PART_BorderElement">
               <Setter Property="Background" Value="Transparent" />
@@ -122,7 +122,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <ProgressBar IsIndeterminate="{Binding $parent[StackPanel].IsVisible}" Width="180" Height="3" />
         <TextBlock Text="{Binding [Trophies.Loading], Source={x:Static local:Localization.Instance}}"
                    FontSize="13"
-                   Foreground="{StaticResource MutedBrush}"
+                   Foreground="{StaticResource SecondaryTextBrush}"
                    HorizontalAlignment="Center" />
       </StackPanel>
     </Grid>

@@ -27,7 +27,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 Height="128"
                 CornerRadius="22"
                 ClipToBounds="True"
-                Background="#22FFFFFF"
+                Background="{StaticResource ElevatedBrush}"
                 BoxShadow="0 14 32 0 #A0000000">
           <Image x:Name="CoverImage" Stretch="UniformToFill" />
         </Border>
