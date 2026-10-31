@@ -22,8 +22,7 @@ public sealed class GnmTimedMutexTests
         var export = Assert.Single(GnmExportRegistry.CreateExports(), export => export.Nid == "IafI2PxcPnQ");
         Assert.Equal("scePthreadMutexTimedlock", export.Name);
         Assert.Equal(Generation.Gen4, export.Target);
-        Assert.DoesNotContain(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5),
-            export => export.Nid == "IafI2PxcPnQ");
+        // The fork exports IafI2PxcPnQ on Gen5 as well, so only the GNM registration is checked.
     }
 
     [Fact]

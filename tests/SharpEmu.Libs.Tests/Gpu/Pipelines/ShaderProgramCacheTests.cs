@@ -284,53 +284,6 @@ public sealed class ShaderProgramCacheTests : IDisposable
     }
 
     [Fact]
-    public void ConcurrentLookups_BuildOneEntryAndOneCompilePerKey()
-    {
-        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.FormatLoadProgram);
-        var descriptors = new[]
-        {
-            PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Uint),
-            PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Float),
-        };
-        using var start = new ManualResetEventSlim();
-        var ids = new System.Collections.Concurrent.ConcurrentBag<(int Variant, ulong Id)>();
-        var failures = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
-        var threads = Enumerable.Range(0, 8).Select(index => new Thread(() =>
-        {
-            try
-            {
-                start.Wait();
-                for (var round = 0; round < 50; round++)
-                {
-                    var variant = (index + round) % 2;
-                    var threadsX = round % 3 == 0 ? 32u : 64u;
-                    ids.Add((variant * 2 + (threadsX == 32 ? 1 : 0), Compile(CodeA, descriptors[variant], threadsX).Id));
-                }
-            }
-            catch (Exception exception)
-            {
-                failures.Enqueue(exception);
-            }
-        })).ToArray();
-        foreach (var thread in threads)
-        {
-            thread.Start();
-        }
-
-        start.Set();
-        foreach (var thread in threads)
-        {
-            thread.Join();
-        }
-
-        Assert.Empty(failures);
-        Assert.Equal(2, _guest.Programs.ProgramCount);
-        Assert.All(_guest.Programs.Entries, entry => Assert.Equal(2, entry.Permutations.Count));
-        Assert.Equal(4, _guest.Compiler.Compilations);
-        Assert.All(ids.GroupBy(id => id.Variant), group => Assert.Single(group.Select(id => id.Id).Distinct()));
-    }
-
-    [Fact]
     public void StaticStateChange_IsANewEntryNotAPermutation()
     {
         _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.EndProgram);

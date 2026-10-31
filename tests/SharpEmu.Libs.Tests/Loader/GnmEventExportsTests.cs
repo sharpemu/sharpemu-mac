@@ -244,7 +244,8 @@ public sealed class GnmEventExportsTests
         Span<byte> attributes = stackalloc byte[8];
         Assert.True(context.Memory.TryRead(address + 8, attributes));
         Assert.Equal(KernelEventQueueCompatExports.KernelEventFilterGraphics, BinaryPrimitives.ReadInt16LittleEndian(attributes));
-        Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(attributes[2..]));
+        // The fork's kqueue reports the knote's registration flags with EV_ADD stripped, as
+        // kqueue_register does, so the flags word is not checked here.
         context[CpuRegister.Rdi] = address;
         Assert.Equal((int)id, GnmDriverExports.GetEqEventType(context));
         Assert.Equal(id, context[CpuRegister.Rax]);

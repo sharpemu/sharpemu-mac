@@ -13,6 +13,10 @@ public sealed class FontWritingTests
 {
     private const ulong Base = 0x3_0000_0000;
 
+    // The fork's font exports take their factory from the host composition root; the process
+    // composes one, shared with FontExportsTests.
+    public FontWritingTests() => GuestFontServices.Initialize(FontExportsTests.Factory);
+
     [Fact]
     public void Writing_RenderingAtStepPositioningPlacesSuccessiveGlyphsApart()
     {

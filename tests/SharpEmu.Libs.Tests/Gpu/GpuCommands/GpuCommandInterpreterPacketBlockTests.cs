@@ -196,7 +196,8 @@ public sealed class GpuCommandInterpreterPacketBlockTests
         runner.Run(Instances(1), Instances(2), Instances(3));
 
         Assert.Empty(runner.Host.BlockReads);
-        Assert.Equal(3, runner.Host.GuestReads.Count);
+        // Upstream's packet window reads the three packets from the host in one read.
+        Assert.Single(runner.Host.GuestReads);
     }
 
     [Fact]

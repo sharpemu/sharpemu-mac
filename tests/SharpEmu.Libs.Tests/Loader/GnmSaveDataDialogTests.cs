@@ -51,14 +51,17 @@ public sealed class GnmSaveDataDialogTests : IDisposable
         Assert.Equal(unchecked((int)0x80B8000B), GnmSaveDataDialogExports.Close(_context));
     }
 
+    // List mode (1) is left out: the fork ends a list with nothing to show as USER_CANCELED
+    // with no button (SaveDataDialogExports.DecideListOutcome).
     [Theory]
-    [InlineData(1u)]
     [InlineData(3u)]
     [InlineData(4u)]
     public void UserPromptsStillCompleteWithoutAHostDialog(uint mode)
     {
         Assert.True(_context.TryWriteUInt32(Address + 0x34, mode));
         Assert.Equal(0, GnmSaveDataDialogExports.Open(_context));
+        // The fork reports RUNNING on the first poll after Open and finishes on the next.
+        Assert.Equal(2, GnmSaveDataDialogExports.GetStatus(_context));
         Assert.Equal(3, GnmSaveDataDialogExports.GetStatus(_context));
         _context[CpuRegister.Rdi] = Address + 0x100;
         Assert.Equal(0, SaveDataDialogExports.SaveDataDialogGetResult(_context));
@@ -83,6 +86,7 @@ public sealed class GnmSaveDataDialogTests : IDisposable
         Assert.Equal(0, SaveDataDialogExports.SaveDataDialogInitialize(_context));
         _context[CpuRegister.Rdi] = Address;
         Assert.Equal(0, GnmSaveDataDialogExports.Open(_context));
+        Assert.Equal(2, GnmSaveDataDialogExports.GetStatus(_context));
         Assert.Equal(3, GnmSaveDataDialogExports.GetStatus(_context));
     }
 

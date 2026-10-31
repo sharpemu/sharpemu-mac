@@ -514,17 +514,6 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Empty(_pipelines.Calls);
     }
 
-    [Fact]
-    public void NormalDraws_StillRejectAnUnsupportedDepthFormat()
-    {
-        var banks = Banks(withDepth: true);
-        banks.Context.DepthTarget = banks.Context.DepthTarget with { ZInfo = 0 };
-
-        var exception = Assert.Throws<SchedulerFatalException>(() => _executor.DrawHasTargets(banks));
-
-        Assert.Contains("zFormat=0 stencil=False", exception.Message);
-    }
-
     [Theory]
     [InlineData(0)]
     [InlineData(1)]

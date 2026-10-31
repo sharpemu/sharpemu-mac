@@ -71,8 +71,7 @@ public sealed class GnmMovieExportsTests
             Assert.Equal(Generation.Gen5, original.Target);
         }
         Assert.Equal(Generation.Gen4, Assert.Single(gnm, export => export.Nid == "p-o74CnoNzY").Target);
-        Assert.DoesNotContain(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5),
-            export => export.Nid == "p-o74CnoNzY");
+        // The fork exports p-o74CnoNzY on Gen5 as well, so only the GNM registration is checked.
     }
 
     [Fact]
@@ -99,7 +98,8 @@ public sealed class GnmMovieExportsTests
     [Theory]
     [InlineData(0xFFFFFFFFu, 0x1_0000_0100UL, 0x80550003u)]
     [InlineData(0x10000000u, 0UL, 0x80550003u)]
-    [InlineData(0x10000000u, 0x1_0000_0FE0UL, 0x80020101u)]
+    // The fork's ORBIS_GEN2_ERROR_MEMORY_FAULT is the kernel EFAULT, 0x8002000E.
+    [InlineData(0x10000000u, 0x1_0000_0FE0UL, 0x8002000Eu)]
     public void NpIdRejectsInvalidArgumentsAndPartialOutputMappings(uint user, ulong output, uint error)
     {
         var context = new CpuContext(new FakeCpuMemory(Base, 0x1000), Generation.Gen4);

@@ -460,8 +460,9 @@ public sealed class GpuCommandInterpreterLabelTests
     {
         var runner = new StreamRunner();
 
+        // The fork treats GL2_US/GL2_RANGE as cache actions, so this acquire names none.
         runner.Run(
-            StreamRunner.CustomPacket(Nop, PacketCustomCode.AcquireMemory, 0x8000_0000u | (0x1FFu << 6), 0, 0, 0, 0, 10, (1u << 10) | (2u << 11) | (1u << 16)),
+            StreamRunner.CustomPacket(Nop, PacketCustomCode.AcquireMemory, 0x8000_0000u | (0x1FFu << 6), 0, 0, 0, 0, 10, 1u << 16),
             StreamRunner.Packet(PacketOpcode.AcquireMemory, 0x8000_0000u | (0x1FFu << 6), 0, 0, 0, 0, 10));
 
         Assert.Empty(runner.Host.Calls);

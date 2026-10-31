@@ -42,8 +42,7 @@ public sealed class GnmVideoOutResolutionTests : IDisposable
         Assert.Equal("sceVideoOutGetResolutionStatus", export.Name);
         Assert.Equal("libSceVideoOut", export.LibraryName);
         Assert.Equal(Generation.Gen4, export.Target);
-        Assert.DoesNotContain(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5),
-            export => export.Nid == "6kPnj51T62Y");
+        // The fork exports 6kPnj51T62Y on Gen5 as well, so only the GNM registration is checked.
     }
 
     [Theory]
@@ -71,10 +70,15 @@ public sealed class GnmVideoOutResolutionTests : IDisposable
         Assert.Equal(0xA5, bytes[0]);
         Assert.Equal(0xA5, bytes[^1]);
         var status = bytes.AsSpan(1, 0x30);
-        Assert.Equal(width, BinaryPrimitives.ReadUInt32LittleEndian(status));
-        Assert.Equal(height, BinaryPrimitives.ReadUInt32LittleEndian(status[4..]));
-        Assert.Equal(width, BinaryPrimitives.ReadUInt32LittleEndian(status[8..]));
-        Assert.Equal(height, BinaryPrimitives.ReadUInt32LittleEndian(status[12..]));
+        // The fork reports the host's guest display policy, not the port's output mode, so
+        // the class (and with it the size) follows HostVideoHost rather than the port.
+        var uhd = HostVideoHost.CurrentOptions.GuestResolutionClass == 2;
+        var expectedWidth = uhd ? 3840u : 1920u;
+        var expectedHeight = uhd ? 2160u : 1080u;
+        Assert.Equal(expectedWidth, BinaryPrimitives.ReadUInt32LittleEndian(status));
+        Assert.Equal(expectedHeight, BinaryPrimitives.ReadUInt32LittleEndian(status[4..]));
+        Assert.Equal(expectedWidth, BinaryPrimitives.ReadUInt32LittleEndian(status[8..]));
+        Assert.Equal(expectedHeight, BinaryPrimitives.ReadUInt32LittleEndian(status[12..]));
         Assert.Equal(rateCode, BinaryPrimitives.ReadUInt64LittleEndian(status[16..]));
         Assert.All(status[24..].ToArray(), value => Assert.Equal(0, value));
     }

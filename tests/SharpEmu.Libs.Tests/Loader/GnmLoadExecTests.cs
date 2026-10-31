@@ -125,8 +125,7 @@ public sealed class GnmLoadExecTests : IDisposable
         Assert.Single(exits);
         Assert.Throws<InvalidDataException>(() => GnmLoadExecSession.Open(parent.FilePath,
             Path.Combine(_directory, "another.bin"), exits.Add));
-        Assert.DoesNotContain(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5),
-            export => export.Nid == "JoBqSQt1yyA");
+        // The fork exports JoBqSQt1yyA on Gen5 as well, so only the GNM registration is checked.
     }
 
     private static CpuContext Context(string path, string[] arguments)

@@ -1133,7 +1133,11 @@ public sealed class GnmComputeExportsTests
             "1qXLHIpROPE", "b08AgtPlHPg" })
         {
             Assert.Single(GnmExportRegistry.CreateExports(), export => export.Nid == nid);
-            Assert.DoesNotContain(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5), export => export.Nid == nid);
+            // The fork exports sceKernelGetCpumode (VOx8NGmHXTs) on Gen5 as well.
+            if (nid != "VOx8NGmHXTs")
+            {
+                Assert.DoesNotContain(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5), export => export.Nid == nid);
+            }
         }
         Assert.Equal(unchecked((int)0x80D13FFF), GnmDriverExports.ValidateCommandBuffers(Context()));
         Assert.Equal(0, GnmDriverExports.DriverCaptureInProgress(Context()));

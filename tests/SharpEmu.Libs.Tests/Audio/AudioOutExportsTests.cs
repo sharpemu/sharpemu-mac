@@ -537,7 +537,8 @@ public sealed class AudioOutExportsTests : IDisposable
         context[CpuRegister.Rsi] = FirstSourceAddress;
 
         Assert.True(manager.TryDispatch("QOQtbeDqsT4", context, out var result));
-        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, result);
+        // The fork's sceAudioOutOutput returns the port's frame count, like sceAudioOutOutputs.
+        Assert.Equal(2, (int)result);
         Assert.Equal(samples, Assert.Single(Assert.Single(_streams).Submissions));
     }
 
