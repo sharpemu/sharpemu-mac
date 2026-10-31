@@ -24,6 +24,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <x:Double x:Key="LibraryTileWidth">160</x:Double>
     <x:Double x:Key="LibraryRailItemHeight">172</x:Double>
     <x:Double x:Key="LibraryGridItemHeight">200</x:Double>
+    <x:Double x:Key="LibraryCoverSizeSelected">148</x:Double>
+    <x:Double x:Key="LibraryTileWidthSelected">160</x:Double>
+    <x:Double x:Key="LibraryRailItemHeightSelected">172</x:Double>
     <DataTemplate x:Key="LocalizedChoiceTemplate" x:DataType="local:LocalizedChoice">
       <TextBlock Text="{Binding Label}"
                  HorizontalAlignment="Left"
@@ -290,8 +293,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <DataTemplate x:DataType="local:GameEntry" x:CompileBindings="True">
                 <StackPanel Spacing="7">
                   <Border Classes="coverShadow libraryGameCard"
-                          Width="{DynamicResource LibraryCoverSize}"
-                          Height="{DynamicResource LibraryCoverSize}"
                           ToolTip.Tip="{Binding Name}"
                           AutomationProperties.Name="{Binding Name}">
                     <Border Classes="coverClip">
@@ -318,8 +319,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
               </DataTemplate>
               <DataTemplate x:DataType="local:AddFolderTile">
                 <Border Classes="addFolderTile"
-                        Width="{DynamicResource LibraryCoverSize}"
-                        Height="{DynamicResource LibraryCoverSize}"
                         ToolTip.Tip="{Binding [Library.AddFolder],
                                               Source={x:Static local:Localization.Instance},
                                               x:CompileBindings=False}"

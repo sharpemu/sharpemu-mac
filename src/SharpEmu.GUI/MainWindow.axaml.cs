@@ -39,12 +39,13 @@ public partial class MainWindow : Window
     private static readonly TimeSpan NavigationIndicatorAnimationDuration =
         TimeSpan.FromMilliseconds(180);
 
-    private static readonly IBrush DefaultLineBrush = new SolidColorBrush(Color.Parse("#C7CFDE"));
-    private static readonly IBrush DimLineBrush = new SolidColorBrush(Color.Parse("#6B7488"));
-    private static readonly IBrush InfoLineBrush = new SolidColorBrush(Color.Parse("#6FA8FF"));
-    private static readonly IBrush WarningLineBrush = new SolidColorBrush(Color.Parse("#E8B341"));
-    private static readonly IBrush ErrorLineBrush = new SolidColorBrush(Color.Parse("#F2777C"));
-    private static readonly IBrush SuccessLineBrush = new SolidColorBrush(Color.Parse("#63D489"));
+    // Console lines use the theme's text and status colours.
+    private static IBrush DefaultLineBrush => LauncherThemes.Brush("SecondaryTextBrush");
+    private static IBrush DimLineBrush => LauncherThemes.Brush("MutedBrush");
+    private static IBrush InfoLineBrush => LauncherThemes.Brush("InfoBrush");
+    private static IBrush WarningLineBrush => LauncherThemes.Brush("WarningBrush");
+    private static IBrush ErrorLineBrush => LauncherThemes.Brush("DangerBrush");
+    private static IBrush SuccessLineBrush => LauncherThemes.Brush("SuccessBrush");
     private readonly LocalizedChoice[] _consoleLanguageChoices =
     [
         LocalizedChoice.Literal("Japanese", "日本語"),
@@ -639,7 +640,10 @@ public partial class MainWindow : Window
         Resources["LibraryTileWidth"] = metrics.ItemWidth;
         Resources["LibraryRailItemHeight"] = metrics.RailItemHeight;
         Resources["LibraryGridItemHeight"] = metrics.GridItemHeight;
-        _libraryRailRowHeight = metrics.RailItemHeight + 16 + 48;
+        Resources["LibraryCoverSizeSelected"] = metrics.SelectedCoverSize;
+        Resources["LibraryTileWidthSelected"] = metrics.SelectedItemWidth;
+        Resources["LibraryRailItemHeightSelected"] = metrics.SelectedRailItemHeight;
+        _libraryRailRowHeight = metrics.SelectedRailItemHeight + 16 + 48;
         _libraryGridRowHeight = metrics.GridItemHeight + 16;
         UpdateCarouselPadding();
         Dispatcher.UIThread.Post(

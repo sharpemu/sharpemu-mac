@@ -30,6 +30,9 @@ Shadows belong to floating layers (sheets, menus, toasts, dialogs) alone.
   <SolidColorBrush x:Key="CardBorderBrush" Color="#14FFFFFF" />
   <SolidColorBrush x:Key="TileHoverBrush" Color="#0BFFFFFF" />
   <SolidColorBrush x:Key="TileSelectedBrush" Color="#12FFFFFF" />
+  <!-- Hover and pressed washes over any surface; LauncherThemes derives them from the text colour. -->
+  <SolidColorBrush x:Key="HoverOverlayBrush" Color="#0FFFFFFF" />
+  <SolidColorBrush x:Key="PressedOverlayBrush" Color="#1AFFFFFF" />
 
   <!-- Text: primary, secondary (>= 7:1 on every surface), muted (>= 4.5:1). -->
   <SolidColorBrush x:Key="TextBrush" Color="#F5F5F5" />

@@ -222,7 +222,7 @@ internal static class LauncherThemes
             AccentHover: Hex(Mix(ac, Colors.White, 0.15)),
             AccentPressed: Hex(Mix(ac, Colors.Black, 0.15)),
             AccentTint: $"#38{ac.R:X2}{ac.G:X2}{ac.B:X2}",
-            AccentForeground: Luminance(ac) > 0.45 ? "#111111" : "#FFFFFF");
+            AccentForeground: ForegroundOn(ac));
     }
 
     /// <summary>
@@ -305,6 +305,11 @@ internal static class LauncherThemes
         return (0.2126 * Channel(color.R)) + (0.7152 * Channel(color.G)) + (0.0722 * Channel(color.B));
     }
 
+    // White label text while it keeps 3:1 (large, bold button text), dark text otherwise:
+    // mid-bright accents like green fell under 2.5:1 with white.
+    private static string ForegroundOn(Color accent) =>
+        1.05 / (Luminance(accent) + 0.05) >= 3 ? "#FFFFFF" : "#111111";
+
     private static string Hex(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
 
     /// <summary>Resolves a token brush so code-built views share the themed instance.</summary>
@@ -362,6 +367,15 @@ internal static class LauncherThemes
         Paint(app, "ComboBoxForegroundFocusedPressed", text);
         Paint(app, "ComboBoxDropDownGlyphForegroundFocused", text);
         Paint(app, "ComboBoxDropDownGlyphForegroundFocusedPressed", text);
+
+        // Overlays, hairlines and the selected segment come from the theme's text colour, so
+        // tinted themes get tinted overlays instead of Graphite's neutral white.
+        Paint(app, "CardBorderBrush", WithAlpha(text, 0.08));
+        Paint(app, "TileHoverBrush", WithAlpha(text, 0.045));
+        Paint(app, "TileSelectedBrush", WithAlpha(text, 0.07));
+        Paint(app, "HoverOverlayBrush", WithAlpha(text, 0.06));
+        Paint(app, "PressedOverlayBrush", WithAlpha(text, 0.1));
+        Paint(app, "SegmentActiveBrush", WithAlpha(text, 0.18));
 
         Tint(app, "ArtScrimBrush", background);
         Tint(app, "TrophyBackdropFadeBrush", Color.Parse(palette.Menu));

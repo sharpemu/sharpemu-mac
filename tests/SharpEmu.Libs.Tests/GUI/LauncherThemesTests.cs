@@ -30,6 +30,7 @@ public sealed class LauncherThemesTests
     [InlineData("#FFD60A", "#111111")]
     [InlineData("#2E7CF6", "#FFFFFF")]
     [InlineData("#7C5CFC", "#FFFFFF")]
+    [InlineData("#30C26B", "#111111")]
     public void Derive_PicksAReadableColourOnTheAccent(string accent, string foreground)
     {
         Assert.Equal(foreground, LauncherThemes.Derive("#121212", accent).AccentForeground);
