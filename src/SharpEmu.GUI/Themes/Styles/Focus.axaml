@@ -56,8 +56,8 @@ much weaker fill change defined next to each control.
   </Style>
   <!-- Items inside a scrolling popup: the ring is drawn inside so it is never clipped. -->
   <Style Selector="ComboBoxItem:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="BoxShadow" Value="inset 0 0 0 2 #FFFFFFFF" />
-    <Setter Property="Background" Value="#26FFFFFF" />
+    <Setter Property="BoxShadow" Value="{StaticResource FocusRingInsetShadow}" />
+    <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
   </Style>
   <!-- The ring is drawn outside the field; a clipping TextBox left only its corners. -->
   <Style Selector="TextBox:focus">

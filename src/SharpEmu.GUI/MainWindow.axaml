@@ -779,9 +779,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       Margin="0,48,0,0">
                 <ScrollViewer x:Name="GameOptionsGeneralPanel"
                               Classes="optionsSectionPanel active">
-                  <StackPanel Spacing="8">
+                  <StackPanel>
+                    <StackPanel Classes="optionsSectionHeader">
+                      <TextBlock Classes="optionsSectionTitle"
+                                 Text="{Binding [Options.General], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                      <TextBlock Classes="optionsSectionDesc"
+                                 Text="{Binding [Options.Section.General.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    </StackPanel>
                     <Border Classes="optionsGroup">
-                      <StackPanel Spacing="8">
+                      <StackPanel>
                         <local:SettingRow x:Name="GameStrictRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.Strict.Label],
@@ -796,7 +802,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </StackPanel>
                     </Border>
 
-                    <UniformGrid Margin="0,16,-12,-12"
+                    <UniformGrid Margin="0,0,-12,-12"
                                  Columns="2">
                       <Button x:Name="GameOptionsOpenFolderButton"
                               Classes="gameAction"
@@ -857,8 +863,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 <ScrollViewer x:Name="GameOptionsLoggingPanel"
                               Classes="optionsSectionPanel">
                   <StackPanel>
+                    <StackPanel Classes="optionsSectionHeader">
+                      <TextBlock Classes="optionsSectionTitle"
+                                 Text="{Binding [Options.Logging], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                      <TextBlock Classes="optionsSectionDesc"
+                                 Text="{Binding [Options.Section.Logging.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    </StackPanel>
                     <Border Classes="optionsGroup">
-                      <StackPanel Spacing="8">
+                      <StackPanel>
                         <local:SettingRow x:Name="GameLogLevelRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.LogLevel.Label],
@@ -923,8 +935,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 <ScrollViewer x:Name="GameOptionsRenderingPanel"
                               Classes="optionsSectionPanel">
                   <StackPanel>
+                    <StackPanel Classes="optionsSectionHeader">
+                      <TextBlock Classes="optionsSectionTitle"
+                                 Text="{Binding [Options.Graphics], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                      <TextBlock Classes="optionsSectionDesc"
+                                 Text="{Binding [Options.Section.Rendering.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    </StackPanel>
                     <Border Classes="optionsGroup">
-                      <StackPanel Spacing="8">
+                      <StackPanel>
                         <local:SettingRow x:Name="GameWindowModeRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.WindowMode.Label],
@@ -1057,11 +1075,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                     ToolTip.Tip="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
                                     ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
                         </local:SettingRow>
+                      </StackPanel>
+                    </Border>
 
-                        <Border Classes="optionsGroupDivider" />
-
-                        <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Performance], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                        <StackPanel x:Name="GamePerformanceHost" Spacing="8" />
+                    <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Performance], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    <Border Classes="optionsGroup">
+                      <StackPanel>
+                        <StackPanel x:Name="GamePerformanceHost" />
                       </StackPanel>
                     </Border>
                   </StackPanel>
@@ -1070,9 +1090,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 <ScrollViewer x:Name="GameOptionsEnvironmentPanel"
                               Classes="optionsSectionPanel">
                   <StackPanel>
+                    <StackPanel Classes="optionsSectionHeader">
+                      <TextBlock Classes="optionsSectionTitle"
+                                 Text="{Binding [Options.Env.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                      <TextBlock Classes="optionsSectionDesc"
+                                 Text="{Binding [Options.Section.Environment.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    </StackPanel>
+                    <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Debug], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                     <Border Classes="optionsGroup">
-                      <StackPanel Spacing="8">
-                        <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Debug], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                      <StackPanel>
                         <local:SettingRow Classes="optionRow"
                                           Label="{Binding [Setting.Env.ProfilePerformance.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_PROFILE_PERFORMANCE"
                                           Description="{Binding [Options.Env.PerformanceProfile.Desc],
@@ -1157,11 +1183,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
 
-                        <StackPanel x:Name="GameDebugExtraHost" Spacing="8" />
+                        <StackPanel x:Name="GameDebugExtraHost" />
+                      </StackPanel>
+                    </Border>
 
-                        <Border Classes="optionsGroupDivider" />
-
-                        <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.General], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.General], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    <Border Classes="optionsGroup">
+                      <StackPanel>
                         <local:SettingRow Classes="optionRow"
                                           Label="{Binding [Setting.Env.BthidUnavailable.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_BTHID_UNAVAILABLE"
                                           Description="{Binding [Options.Env.Bthid.Desc],
@@ -1186,16 +1214,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <ToggleSwitch x:Name="GameEnvWritableApp0Toggle"
                                         Classes="optionToggle" />
                         </local:SettingRow>
+                      </StackPanel>
+                    </Border>
 
-                        <Border Classes="optionsGroupDivider" />
+                    <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Compatibility], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    <Border Classes="optionsGroup">
+                      <StackPanel>
+                        <StackPanel x:Name="GameCompatibilityHost" />
+                      </StackPanel>
+                    </Border>
 
-                        <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Compatibility], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                        <StackPanel x:Name="GameCompatibilityHost" Spacing="8" />
-
-                        <Border Classes="optionsGroupDivider" />
-
-                        <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Audio], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                        <StackPanel x:Name="GameAudioHost" Spacing="8" />
+                    <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Audio], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    <Border Classes="optionsGroup">
+                      <StackPanel>
+                        <StackPanel x:Name="GameAudioHost" />
                       </StackPanel>
                     </Border>
                   </StackPanel>
@@ -1303,8 +1335,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <ScrollViewer x:Name="OptionsGeneralPanel"
                             Classes="optionsSectionPanel active">
                 <StackPanel>
+                  <StackPanel Classes="optionsSectionHeader">
+                    <TextBlock Classes="optionsSectionTitle"
+                               Text="{Binding Text, ElementName=OptionsGeneralNavLabel}" />
+                    <TextBlock Classes="optionsSectionDesc"
+                               Text="{Binding [Options.Section.General.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <local:SettingRow x:Name="ConsoleLanguageRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Console.Language.Label], Source={x:Static local:Localization.Instance}}"
@@ -1331,8 +1369,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <ScrollViewer x:Name="OptionsLoggingPanel"
                             Classes="optionsSectionPanel">
                 <StackPanel>
+                  <StackPanel Classes="optionsSectionHeader">
+                    <TextBlock Classes="optionsSectionTitle"
+                               Text="{Binding Text, ElementName=OptionsLoggingNavLabel}" />
+                    <TextBlock Classes="optionsSectionDesc"
+                               Text="{Binding [Options.Section.Logging.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <local:SettingRow x:Name="LogLevelRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.LogLevel.Label], Source={x:Static local:Localization.Instance}}"
@@ -1408,8 +1452,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <ScrollViewer x:Name="OptionsLauncherPanel"
                             Classes="optionsSectionPanel">
                 <StackPanel>
+                  <StackPanel Classes="optionsSectionHeader">
+                    <TextBlock Classes="optionsSectionTitle"
+                               Text="{Binding Text, ElementName=OptionsLauncherNavLabel}" />
+                    <TextBlock Classes="optionsSectionDesc"
+                               Text="{Binding [Options.Section.Launcher.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <local:SettingRow x:Name="ThemeRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Theme.Label], Source={x:Static local:Localization.Instance}}"
@@ -1535,8 +1585,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <ScrollViewer x:Name="OptionsAboutPanel"
                             Classes="optionsSectionPanel">
                 <StackPanel>
+                  <StackPanel Classes="optionsSectionHeader">
+                    <TextBlock Classes="optionsSectionTitle"
+                               Text="{Binding Text, ElementName=OptionsAboutNavLabel}" />
+                    <TextBlock Classes="optionsSectionDesc"
+                               Text="{Binding [Options.Section.About.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <!--Latest commit info-->
                       <Border Classes="optionsInfoRow">
                         <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="18">
@@ -1545,7 +1601,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Width="20" Height="20"
                                  VerticalAlignment="Center"
                                  Margin="0,0,12,0" />
-                          <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                          <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
                             <TextBlock x:Name="LatestCommitLabel"
                                        Text="{Binding [About.Github.LatestCommitLabel], Source={x:Static local:Localization.Instance}}"
                                        FontSize="{StaticResource FontSizeBody}"
@@ -1575,7 +1631,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Width="20" Height="20"
                                  VerticalAlignment="Center"
                                  Margin="0,0,12,0" />
-                          <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                          <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
                             <TextBlock x:Name="UpdateLabel"
                                        Text="{Binding [Updater.Label], Source={x:Static local:Localization.Instance}}"
                                        FontSize="{StaticResource FontSizeBody}"
@@ -1602,7 +1658,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Width="20" Height="20"
                                  VerticalAlignment="Center"
                                  Margin="0,0,12,0" />
-                          <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                          <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
                             <TextBlock x:Name="GithubLabel"
                                        Text="{Binding [About.Github.Label], Source={x:Static local:Localization.Instance}}"
                                        FontSize="{StaticResource FontSizeBody}"
@@ -1629,7 +1685,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Width="20" Height="20"
                                  VerticalAlignment="Center"
                                  Margin="0,0,12,0" />
-                          <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                          <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
                             <TextBlock x:Name="DiscordServerLabel"
                                       Text="{Binding [About.Discord.Label], Source={x:Static local:Localization.Instance}}"
                                       FontSize="{StaticResource FontSizeBody}"
@@ -1642,7 +1698,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           </StackPanel>
                           <Button Grid.Column="2"
                                   x:Name="DiscordButton"
-                                  Classes="ghost"
+                                  Classes="optionAction"
                                   Content="{Binding [About.DiscordButton], Source={x:Static local:Localization.Instance}}"
                                   VerticalAlignment="Center" />
                         </Grid>
@@ -1654,9 +1710,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
               <ScrollViewer x:Name="OptionsRenderingPanel"
                             Classes="optionsSectionPanel">
-                <StackPanel Spacing="16">
+                <StackPanel>
+                  <StackPanel Classes="optionsSectionHeader">
+                    <TextBlock Classes="optionsSectionTitle"
+                               Text="{Binding Text, ElementName=OptionsRenderingNavLabel}" />
+                    <TextBlock Classes="optionsSectionDesc"
+                               Text="{Binding [Options.Section.Rendering.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
+                    <StackPanel>
                       <local:SettingRow x:Name="WindowModeRow"
                                         Classes="optionRow"
                         Label="{Binding [Options.WindowMode.Label], Source={x:Static local:Localization.Instance}}"
@@ -1764,11 +1826,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   ToolTip.Tip="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
                       </local:SettingRow>
+                    </StackPanel>
+                  </Border>
 
-                      <Border Classes="optionsGroupDivider" />
-
-                      <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Performance], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                      <StackPanel x:Name="OptionsPerformanceHost" Spacing="8" />
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Performance], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <StackPanel x:Name="OptionsPerformanceHost" />
 
                       <local:SettingRow x:Name="ShaderCacheFolderRow"
                                         Classes="optionRow"
@@ -1796,9 +1860,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <ScrollViewer x:Name="OptionsEnvironmentPanel"
                             Classes="optionsSectionPanel">
                 <StackPanel>
+                  <StackPanel Classes="optionsSectionHeader">
+                    <TextBlock Classes="optionsSectionTitle"
+                               Text="{Binding Text, ElementName=OptionsEnvironmentNavLabel}" />
+                    <TextBlock Classes="optionsSectionDesc"
+                               Text="{Binding [Options.Section.Environment.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Trophies], Source={x:Static local:Localization.Instance}}" />
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
-                      <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Trophies], Source={x:Static local:Localization.Instance}}" />
+                    <StackPanel>
                       <local:SettingRow Classes="optionRow"
                                         Label="{Binding [Options.Env.TrophyTest.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Env.TrophyTest.Desc], Source={x:Static local:Localization.Instance}}">
@@ -1820,11 +1890,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </StackPanel>
                   </Border>
 
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Debug], Source={x:Static local:Localization.Instance}}" />
                   <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
-                      <Border Classes="optionsGroupDivider" />
-
-                      <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.Debug], Source={x:Static local:Localization.Instance}}" />
+                    <StackPanel>
                       <local:SettingRow x:Name="PerformanceProfileRow" Classes="optionRow" Label="{Binding [Setting.Env.ProfilePerformance.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" ToolTip.Tip="SHARPEMU_PROFILE_PERFORMANCE"
                                         Description="{Binding [Options.Env.PerformanceProfile.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="PerformanceProfileToggle" Classes="optionToggle" />
@@ -1881,11 +1949,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         <ToggleSwitch x:Name="EnvLogNpToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <StackPanel x:Name="OptionsDebugExtraHost" Spacing="8" />
+                      <StackPanel x:Name="OptionsDebugExtraHost" />
+                    </StackPanel>
+                  </Border>
 
-                      <Border Classes="optionsGroupDivider" />
-
-                      <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.General], Source={x:Static local:Localization.Instance}}" />
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Env.Group.General], Source={x:Static local:Localization.Instance}}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
                       <local:SettingRow x:Name="BinkPlaybackRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Env.BinkPlayback.Label], Source={x:Static local:Localization.Instance}}"
@@ -1910,17 +1980,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Description="{Binding [Options.Env.WritableApp0.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvWritableApp0Toggle" Classes="optionToggle" />
                       </local:SettingRow>
+                    </StackPanel>
+                  </Border>
 
-                      <Border Classes="optionsGroupDivider" />
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Compatibility], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <StackPanel x:Name="OptionsCompatibilityHost" />
+                    </StackPanel>
+                  </Border>
 
-                      <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Compatibility], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                      <StackPanel x:Name="OptionsCompatibilityHost" Spacing="8" />
-
-                      <Border Classes="optionsGroupDivider" />
-
-                      <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Audio], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                      <StackPanel x:Name="OptionsAudioHost" Spacing="8" />
-
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Setting.Group.Audio], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <StackPanel x:Name="OptionsAudioHost" />
                     </StackPanel>
                   </Border>
 

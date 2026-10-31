@@ -63,13 +63,22 @@ Shadows belong to floating layers (sheets, menus, toasts, dialogs) alone.
   <SolidColorBrush x:Key="DangerBrush" Color="#FF7A86" />
   <SolidColorBrush x:Key="DangerHoverBrush" Color="#FF98A1" />
   <SolidColorBrush x:Key="DangerTintBrush" Color="#1FFF7A86" />
+  <SolidColorBrush x:Key="DangerHoverTintBrush" Color="#33FF7A86" />
+  <SolidColorBrush x:Key="DangerStrongTintBrush" Color="#47FF7A86" />
   <SolidColorBrush x:Key="SuccessBrush" Color="#5DE3A4" />
+  <SolidColorBrush x:Key="SuccessTintBrush" Color="#1E46C46B" />
+  <SolidColorBrush x:Key="SuccessRimBrush" Color="#5546C46B" />
   <SolidColorBrush x:Key="WarningBrush" Color="#F5C46E" />
   <SolidColorBrush x:Key="InfoBrush" Color="#6DAEFF" />
+  <SolidColorBrush x:Key="InfoTintBrush" Color="#1E58A6FF" />
+  <SolidColorBrush x:Key="InfoRimBrush" Color="#5558A6FF" />
 
   <!-- Focus is the strongest thing on screen: a crisp white ring with a soft glow. -->
   <SolidColorBrush x:Key="FocusRingBrush" Color="#FFFFFF" />
   <BoxShadows x:Key="FocusRingShadow">0 0 0 2 #FFFFFFFF, 0 0 22 4 #4DFFFFFF</BoxShadows>
+  <!-- The same ring drawn inside the element, for rows and list items that sit in a
+       clipping container. -->
+  <BoxShadows x:Key="FocusRingInsetShadow">inset 0 0 0 2 #FFFFFFFF</BoxShadows>
   <BoxShadows x:Key="SelectedRingShadow">0 0 0 2 #B3FFFFFF</BoxShadows>
   <BoxShadows x:Key="SheetShadow">0 8 32 0 #66000000</BoxShadows>
   <!-- Glass: controls that float over key art. The theme's raised colour, mostly

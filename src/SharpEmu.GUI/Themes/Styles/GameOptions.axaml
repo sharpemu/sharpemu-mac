@@ -89,12 +89,12 @@ Contextual per-game options reveal, actions, and selected-game motion.
 
   <!-- While a session is running the same button stops it: tinted red, not solid. -->
   <Style Selector="Button.playButton.danger">
-    <Setter Property="Background" Value="#33FF7A86" />
+    <Setter Property="Background" Value="{StaticResource DangerHoverTintBrush}" />
     <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
   </Style>
 
   <Style Selector="Button.playButton.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#47FF7A86" />
+    <Setter Property="Background" Value="{StaticResource DangerStrongTintBrush}" />
     <Setter Property="Foreground" Value="{StaticResource DangerHoverBrush}" />
   </Style>
 
@@ -195,7 +195,7 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="Padding" Value="20,0" />
     <Setter Property="HorizontalContentAlignment" Value="Left" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
-    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
     <Setter Property="Background" Value="{StaticResource PaneGlassBrush}" />
     <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
     <Setter Property="BorderThickness" Value="1" />
@@ -214,7 +214,7 @@ Contextual per-game options reveal, actions, and selected-game motion.
   </Style>
 
   <Style Selector="Button.gameAction.dangerAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#33FF7A86" />
+    <Setter Property="Background" Value="{StaticResource DangerHoverTintBrush}" />
   </Style>
 
   <!-- The game's menu shares its height with the header band, so its rows are a step

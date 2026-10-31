@@ -48,7 +48,7 @@ at least 44 pt tall.
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
   <Style Selector="Button.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#33FF7A86" />
+    <Setter Property="Background" Value="{StaticResource DangerHoverTintBrush}" />
     <Setter Property="Foreground" Value="{StaticResource DangerHoverBrush}" />
   </Style>
 
@@ -225,7 +225,7 @@ at least 44 pt tall.
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
   <Style Selector="Button.optionsNav:pressed /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#1AFFFFFF" />
+    <Setter Property="Background" Value="{StaticResource PressedOverlayBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 </Styles>

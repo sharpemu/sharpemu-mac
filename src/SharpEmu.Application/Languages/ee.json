@@ -105,6 +105,12 @@
   "Options.Section.Logging": "LOGIMINE",
   "Options.Section.Launcher": "KÄIVITI",
   "Options.Section.Rendering": "RENDERDAMINE",
+  "Options.Section.General.Desc": "Emulatsiooni põhikäitumine.",
+  "Options.Section.Logging.Desc": "Kui palju emulaator logib ja kuhu logid salvestatakse.",
+  "Options.Section.Launcher.Desc": "Käivitaja välimus, keel, muusika ja uuendused.",
+  "Options.Section.Rendering.Desc": "Akna, kuva, ülekatte ja jõudluse valikud.",
+  "Options.Section.Environment.Desc": "Silumislülitid, ühilduvuse kohandused ja heliseaded.",
+  "Options.Section.About.Desc": "Versiooniteave, uuendused ja kogukonna lingid.",
   "Options.Section.Display": "KUVA",
   "Options.Graphics": "Graafika",
 

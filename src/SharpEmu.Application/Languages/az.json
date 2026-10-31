@@ -91,6 +91,12 @@
   "Options.Section.Logging": "Jurnala yazma",
   "Options.Section.Launcher": "Başladıcı",
   "Options.Section.Rendering": "Təsvirin yaradılması",
+  "Options.Section.General.Desc": "Emulyasiyanın əsas davranışı.",
+  "Options.Section.Logging.Desc": "Emulyatorun nə qədər jurnal yazdığı və jurnalları harada saxladığı.",
+  "Options.Section.Launcher.Desc": "Launcher-in görünüşü, dili, musiqisi və yenilənmələri.",
+  "Options.Section.Rendering.Desc": "Pəncərə, ekran, üst qat və performans seçimləri.",
+  "Options.Section.Environment.Desc": "Sazlama açarları, uyğunluq tənzimləmələri və səs seçimləri.",
+  "Options.Section.About.Desc": "Quruluş məlumatı, yenilənmələr və icma keçidləri.",
   "Options.Section.Display": "Ekran",
   "Options.Graphics": "Qrafika",
 

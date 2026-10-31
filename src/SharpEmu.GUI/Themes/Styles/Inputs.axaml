@@ -72,7 +72,7 @@ Shared text input, combo box and context-menu styles.
     <Setter Property="Margin" Value="0,2" />
   </Style>
   <Style Selector="ComboBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#14FFFFFF" />
+    <Setter Property="Background" Value="{StaticResource HoverOverlayBrush}" />
   </Style>
   <Style Selector="ComboBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />

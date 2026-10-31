@@ -39,18 +39,18 @@ Shared card, badge, hint and cover surfaces.
     <Setter Property="BorderThickness" Value="1" />
   </Style>
   <Style Selector="Border.badge.running">
-    <Setter Property="Background" Value="#1E46C46B" />
-    <Setter Property="BorderBrush" Value="#5546C46B" />
+    <Setter Property="Background" Value="{StaticResource SuccessTintBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource SuccessRimBrush}" />
   </Style>
   <Style Selector="Border.badge.key">
-    <Setter Property="Background" Value="#1E58A6FF" />
-    <Setter Property="BorderBrush" Value="#5558A6FF" />
+    <Setter Property="Background" Value="{StaticResource InfoTintBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource InfoRimBrush}" />
   </Style>
 
   <!-- Gamepad shoulder-button keycap (L1/R1): shown only while a controller is connected. -->
   <Style Selector="Border.padHint">
-    <Setter Property="Background" Value="#26FFFFFF" />
-    <Setter Property="BorderBrush" Value="#59FFFFFF" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
     <Setter Property="BorderThickness" Value="1" />
     <Setter Property="CornerRadius" Value="{StaticResource RadiusSm}" />
     <Setter Property="MinWidth" Value="36" />

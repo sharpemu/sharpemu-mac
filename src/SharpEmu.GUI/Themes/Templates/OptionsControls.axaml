@@ -12,7 +12,7 @@ Options-only control resources: compact toggle theme
     <Setter Property="MinWidth" Value="54" />
     <Setter Property="MinHeight" Value="32" />
     <Setter Property="Padding" Value="0" />
-    <Setter Property="Background" Value="#3DFFFFFF" />
+    <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="FocusAdorner" Value="{x:Null}" />
@@ -61,7 +61,7 @@ Options-only control resources: compact toggle theme
       </ControlTemplate>
     </Setter>
     <Style Selector="^:pointerover /template/ Border#PART_Track">
-      <Setter Property="Background" Value="#52FFFFFF" />
+      <Setter Property="Background" Value="{StaticResource RaisedHoverBrush}" />
     </Style>
     <Style Selector="^:checked /template/ Border#PART_Track">
       <Setter Property="Background" Value="{StaticResource AccentBrush}" />

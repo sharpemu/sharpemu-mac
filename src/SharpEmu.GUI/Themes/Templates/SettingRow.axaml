@@ -3,9 +3,15 @@ Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 Control theme for the shared launcher settings row.
 
+A row is one line of an inset list: it has no card of its own. Rows sit in a
+Border.optionsGroup glass container, separated by a hairline drawn at the top of
+each row (Options.axaml hides it on the first row of a group). The highlight is a
+rounded surface inset from the group edge, so it never meets the group's corners.
+
 The whole row is the focus target: when the control inside it takes keyboard or
 D-pad focus the row gets the :rowfocus pseudo-class (see SettingRow.cs) and
-draws the shared white ring. Hover only brightens the fill.
+draws an accent fill with the shared white ring, inside the row because the group
+clips. Hover only washes the surface.
 -->
 
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
@@ -13,63 +19,57 @@ draws the shared white ring. Hover only brightens the fill.
                     xmlns:local="clr-namespace:SharpEmu.GUI">
   <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
     <Setter Property="MinHeight" Value="{StaticResource RowHeight}" />
-    <Setter Property="RenderTransformOrigin" Value="50%,50%" />
-    <Setter Property="RenderTransform" Value="none" />
-    <Setter Property="ClipToBounds" Value="False" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <TransformOperationsTransition Property="RenderTransform"
-                                       Duration="0:0:0.15"
-                                       Easing="CubicEaseOut" />
-      </Transitions>
-    </Setter>
     <Setter Property="Template">
       <ControlTemplate>
-        <Border x:Name="PART_RowSurface"
-                Classes="settingRowSurface"
-                Background="{StaticResource PaneGlassBrush}"
-                BorderBrush="{StaticResource GlassRimBrush}"
-                BorderThickness="1"
-                BoxShadow="{StaticResource GlassShadow}"
-                CornerRadius="{StaticResource RadiusMd}"
-                Padding="24,14">
-          <Grid ColumnDefinitions="*,Auto">
-            <StackPanel VerticalAlignment="Center" Spacing="4" Margin="0,0,24,0">
-              <TextBlock x:Name="PART_Label"
-                         Text="{TemplateBinding Label}"
-                         FontSize="{StaticResource FontSizeBody}"
-                         FontWeight="Medium"
-                         TextWrapping="Wrap"
-                         Foreground="{StaticResource TextBrush}" />
-              <TextBlock Text="{TemplateBinding Description}"
-                         FontSize="{StaticResource FontSizeDescription}"
-                         FontWeight="Normal"
-                         Foreground="{StaticResource SettingsDescriptionBrush}"
-                         LineHeight="20"
-                         MaxWidth="560"
-                         HorizontalAlignment="Left"
-                         TextAlignment="Left"
-                         TextWrapping="Wrap"
-                         IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
-                                     Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
-            </StackPanel>
-            <ContentPresenter Grid.Column="1"
-                              Content="{TemplateBinding Content}"
-                              VerticalAlignment="Center" />
-          </Grid>
-        </Border>
+        <Panel>
+          <Border x:Name="PART_Divider"
+                  Height="1"
+                  VerticalAlignment="Top"
+                  Background="{StaticResource CardBorderBrush}"
+                  IsHitTestVisible="False" />
+          <Border x:Name="PART_RowSurface"
+                  Classes="settingRowSurface"
+                  Margin="8,4"
+                  Background="Transparent"
+                  CornerRadius="{StaticResource RadiusMd}"
+                  Padding="16,10">
+            <Grid ColumnDefinitions="*,Auto">
+              <StackPanel VerticalAlignment="Center" Spacing="4" Margin="0,0,24,0">
+                <TextBlock x:Name="PART_Label"
+                           Text="{TemplateBinding Label}"
+                           FontSize="{StaticResource FontSizeBody}"
+                           FontWeight="Medium"
+                           TextWrapping="Wrap"
+                           Foreground="{StaticResource TextBrush}" />
+                <TextBlock Text="{TemplateBinding Description}"
+                           FontSize="{StaticResource FontSizeDescription}"
+                           FontWeight="Normal"
+                           Foreground="{StaticResource SettingsDescriptionBrush}"
+                           LineHeight="20"
+                           MaxWidth="560"
+                           HorizontalAlignment="Left"
+                           TextAlignment="Left"
+                           TextWrapping="Wrap"
+                           IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
+                                       Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+              </StackPanel>
+              <ContentPresenter Grid.Column="1"
+                                Content="{TemplateBinding Content}"
+                                VerticalAlignment="Center" />
+            </Grid>
+          </Border>
+        </Panel>
       </ControlTemplate>
     </Setter>
     <Style Selector="^:pointerover /template/ Border#PART_RowSurface">
-      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="Background" Value="{StaticResource HoverOverlayBrush}" />
     </Style>
     <Style Selector="^:rowfocus">
-      <Setter Property="RenderTransform" Value="scale(1.015)" />
       <Setter Property="ZIndex" Value="3" />
     </Style>
     <Style Selector="^:rowfocus /template/ Border#PART_RowSurface">
-      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-      <Setter Property="BoxShadow" Value="{StaticResource FocusRingShadow}" />
+      <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
+      <Setter Property="BoxShadow" Value="{StaticResource FocusRingInsetShadow}" />
     </Style>
   </ControlTheme>
 </ResourceDictionary>
