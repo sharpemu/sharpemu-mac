@@ -143,6 +143,7 @@ public partial class MainWindow
 
         _gameSettingsTitleId = game.TitleId;
         GameOptionsOverlay.DataContext = game;
+        GameOptionsBackdrop.Show(game);
         LoadGameSettings(game.TitleId);
         SetGameOptionsSection(0, animateIndicator: false);
         GameOptionsLaunchButton.IsEnabled = !_isRunning;

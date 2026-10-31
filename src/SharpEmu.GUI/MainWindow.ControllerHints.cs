@@ -53,7 +53,10 @@ public partial class MainWindow
         var bottom = MainContentBottomMargin + (connected ? HintBarClearance : 0);
         MainContent.Margin = new Thickness(40, 16, 40, bottom);
         OptionsPageSurface.Margin = new Thickness(-40, -16, -40, -bottom);
+        OptionsBackdrop.Margin = OptionsPageSurface.Margin;
+        TrophyBackdropHost.Margin = OptionsPageSurface.Margin;
         GameOptionsMenuSurface.Margin = new Thickness(-40, 0, -40, -bottom);
+        GameOptionsBackdrop.Margin = GameOptionsMenuSurface.Margin;
 
         if (connected && _activePageIndex == 0 && !_isGameSettingsOpen)
         {

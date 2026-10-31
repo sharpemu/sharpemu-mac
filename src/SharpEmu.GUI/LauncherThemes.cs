@@ -336,6 +336,7 @@ internal static class LauncherThemes
         Paint(app, "ChromeBrush", Color.Parse(palette.Chrome));
         Paint(app, "GameOptionsMenuBrush", Color.Parse(palette.Menu));
         Paint(app, "CardBrush", Color.Parse(palette.Card));
+        Paint(app, "PaneGlassBrush", WithAlpha(Color.Parse(palette.Card), 0.65));
         Paint(app, "ElevatedBrush", Color.Parse(palette.Elevated));
         Paint(app, "RaisedHoverBrush", Color.Parse(palette.RaisedHover));
         Paint(app, "FieldBrush", field);

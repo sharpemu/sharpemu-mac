@@ -578,6 +578,11 @@ public partial class MainWindow : Window
         LibraryToolbar.IsVisible = index == 0;
         OptionsPageSurface.IsVisible = index is 1 or 2;
         TrophyBackdropHost.IsVisible = index == 2;
+        OptionsBackdrop.IsVisible = index == 1;
+        if (index == 1)
+        {
+            OptionsBackdrop.Show(null);
+        }
         OptionsPage.IsVisible = index == 1;
         AnimatePageChange(previousPage, index);
         UpdateEmbeddedConsoleVisibility();
@@ -628,7 +633,8 @@ public partial class MainWindow : Window
     {
         var metrics = LibraryLayoutMetrics.Calculate(
             LibraryPage.Bounds.Width,
-            _isLibraryGridLayout ? _settings.LibraryTileScale : 1.0);
+            _settings.LibraryTileScale,
+            rail: !_isLibraryGridLayout);
         Resources["LibraryCoverSize"] = metrics.CoverSize;
         Resources["LibraryTileWidth"] = metrics.ItemWidth;
         Resources["LibraryRailItemHeight"] = metrics.RailItemHeight;
@@ -683,8 +689,6 @@ public partial class MainWindow : Window
     {
         SetActiveClass(_libraryMenu.CarouselViewButton, !_isLibraryGridLayout);
         SetActiveClass(_libraryMenu.GridViewButton, _isLibraryGridLayout);
-        _libraryMenu.TileSizeSlider.IsEnabled = _isLibraryGridLayout;
-        _libraryMenu.TileSizeHint.IsVisible = !_isLibraryGridLayout;
     }
 
     private static void SetActiveClass(Button button, bool active) =>

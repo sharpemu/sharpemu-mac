@@ -27,9 +27,10 @@ draws the shared white ring. Hover only brightens the fill.
       <ControlTemplate>
         <Border x:Name="PART_RowSurface"
                 Classes="settingRowSurface"
-                Background="{StaticResource CardBrush}"
-                BorderBrush="{StaticResource CardBorderBrush}"
+                Background="{StaticResource PaneGlassBrush}"
+                BorderBrush="{StaticResource GlassRimBrush}"
                 BorderThickness="1"
+                BoxShadow="{StaticResource GlassShadow}"
                 CornerRadius="{StaticResource RadiusMd}"
                 Padding="24,14">
           <Grid ColumnDefinitions="*,Auto">

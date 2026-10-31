@@ -74,9 +74,10 @@ the same amount, so a focused row's ring, glow and scale-up are never clipped.
     <Setter Property="MinHeight" Value="{StaticResource RowHeight}" />
     <Setter Property="Padding" Value="24,14" />
     <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
-    <Setter Property="Background" Value="{StaticResource CardBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="Background" Value="{StaticResource PaneGlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
     <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BoxShadow" Value="{StaticResource GlassShadow}" />
   </Style>
 
   <!-- Every value control in the right-hand column shares one width and height. -->

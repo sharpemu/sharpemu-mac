@@ -20,14 +20,24 @@ internal static class LibraryLayoutMetrics
     private const double GridHeightExtra = 52;
     private const double TargetColumnCount = 9;
 
+    // The row shows fewer, larger covers: it is one line under the selected game, not a wall.
+    internal const double MinimumRailCoverSize = 150;
+    internal const double MaximumRailCoverSize = 240;
+    private const double RailColumnCount = 6.5;
+
     // scale is the user's tile size: it multiplies the cover that fits the width.
-    internal static LibraryTileMetrics Calculate(double availableWidth, double scale = 1.0)
+    internal static LibraryTileMetrics Calculate(double availableWidth, double scale = 1.0, bool rail = false)
     {
         var contentWidth = Math.Max(0, availableWidth - HorizontalPadding);
-        var coverSize = Math.Clamp(
-            (contentWidth / TargetColumnCount) - ItemWidthExtra - ItemMargin,
-            MinimumCoverSize,
-            MaximumCoverSize) * scale;
+        var coverSize = (rail
+            ? Math.Clamp(
+                (contentWidth / RailColumnCount) - ItemWidthExtra - ItemMargin,
+                MinimumRailCoverSize,
+                MaximumRailCoverSize)
+            : Math.Clamp(
+                (contentWidth / TargetColumnCount) - ItemWidthExtra - ItemMargin,
+                MinimumCoverSize,
+                MaximumCoverSize)) * scale;
 
         return new LibraryTileMetrics(
             CoverSize: coverSize,

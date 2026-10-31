@@ -50,6 +50,15 @@ public partial class MainWindow
             FadeOut(OptionsPageSurface, token);
         }
 
+        if (to == 1)
+        {
+            FadeTo(OptionsBackdrop, 1, fromZero: from != 1);
+        }
+        else if (from == 1)
+        {
+            FadeOut(OptionsBackdrop, token);
+        }
+
         if (to == 2)
         {
             FadeTo(TrophyBackdropHost, 1, fromZero: from != 2);

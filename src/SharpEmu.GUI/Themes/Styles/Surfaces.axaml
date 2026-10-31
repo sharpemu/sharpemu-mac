@@ -135,6 +135,7 @@ Shared card, badge, hint and cover surfaces.
   </Style>
   <Style Selector="Slider.menuSlider">
     <Setter Property="Width" Value="128" />
+    <Setter Property="Margin" Value="16,0,0,0" />
     <Setter Property="VerticalAlignment" Value="Center" />
   </Style>
   <Style Selector="Border.menuSegments">
@@ -187,7 +188,7 @@ Shared card, badge, hint and cover surfaces.
 
   <!-- Launch card: what a launch is doing while the console is closed. -->
   <Style Selector="Border.launchCard">
-    <Setter Property="Width" Value="420" />
+    <Setter Property="Width" Value="380" />
     <Setter Property="Padding" Value="16,14,16,12" />
     <Setter Property="Background" Value="{StaticResource ToastBrush}" />
     <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
@@ -217,8 +218,9 @@ Shared card, badge, hint and cover surfaces.
   <Style Selector="TextBlock.launchCardTitle">
     <Setter Property="FontSize" Value="15" />
     <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="TextWrapping" Value="Wrap" />
     <Setter Property="TextTrimming" Value="CharacterEllipsis" />
-    <Setter Property="MaxLines" Value="1" />
+    <Setter Property="MaxLines" Value="2" />
   </Style>
   <Style Selector="TextBlock.launchCardDetail">
     <Setter Property="FontSize" Value="13" />

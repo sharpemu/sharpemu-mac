@@ -303,8 +303,12 @@ public partial class TrophyHubView : UserControl
         if (_cards.Count == 0)
         {
             GameList.Children.Add(BuildEmptyState(noGames: _summaries.Count == 0));
+            Backdrop?.Show(null);
             return;
         }
+
+        // The page always has art behind it, not only once a card is hovered.
+        SetBackdrop(_cards[Math.Clamp(_selected, 0, _cards.Count - 1)].Summary.Game);
 
         if (stagger)
         {

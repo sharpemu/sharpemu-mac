@@ -196,8 +196,9 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="HorizontalContentAlignment" Value="Left" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
-    <Setter Property="Background" Value="{StaticResource CardBrush}" />
-    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Background" Value="{StaticResource PaneGlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
     <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="Medium" />

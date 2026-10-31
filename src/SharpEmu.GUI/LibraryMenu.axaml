@@ -43,9 +43,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
               TickFrequency="5" IsSnapToTickEnabled="True"
               AutomationProperties.Name="{Binding [Library.TileSize], Source={x:Static local:Localization.Instance}}" />
     </Grid>
-    <TextBlock x:Name="TileSizeHint"
-               Classes="menuHint"
-               Text="{Binding [LibraryMenu.TileSizeGridOnly], Source={x:Static local:Localization.Instance}}" />
 
     <Border Classes="menuDivider" />
     <TextBlock Classes="menuSection"

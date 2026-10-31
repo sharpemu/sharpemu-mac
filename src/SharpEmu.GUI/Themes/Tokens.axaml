@@ -75,6 +75,8 @@ Shadows belong to floating layers (sheets, menus, toasts, dialogs) alone.
   <SolidColorBrush x:Key="GlassBrush" Color="#BF353535" />
   <SolidColorBrush x:Key="GlassHoverBrush" Color="#D93D3D3D" />
   <SolidColorBrush x:Key="GlassPressedBrush" Color="#F23D3D3D" />
+  <!-- Glass panes: settings rows and panels over the blurred page art. -->
+  <SolidColorBrush x:Key="PaneGlassBrush" Color="#A6222222" />
   <!-- The selected page inside the page switcher capsule. -->
   <SolidColorBrush x:Key="SegmentActiveBrush" Color="#2EFFFFFF" />
   <LinearGradientBrush x:Key="GlassRimBrush" StartPoint="0%,0%" EndPoint="0%,100%">
@@ -94,9 +96,9 @@ Shadows belong to floating layers (sheets, menus, toasts, dialogs) alone.
   </LinearGradientBrush>
   <!-- Fade that keeps trophy text legible over the blurred game art. -->
   <LinearGradientBrush x:Key="TrophyBackdropFadeBrush" StartPoint="0%,0%" EndPoint="0%,100%">
-    <GradientStop Offset="0" Color="#801A1A1A" />
-    <GradientStop Offset="0.45" Color="#E01A1A1A" />
-    <GradientStop Offset="1" Color="#FA1A1A1A" />
+    <GradientStop Offset="0" Color="#4D1A1A1A" />
+    <GradientStop Offset="0.5" Color="#991A1A1A" />
+    <GradientStop Offset="1" Color="#D91A1A1A" />
   </LinearGradientBrush>
 
   <!-- Radius scale: chips 6, buttons/inputs/rows 10, cards/tiles/panels 14. -->

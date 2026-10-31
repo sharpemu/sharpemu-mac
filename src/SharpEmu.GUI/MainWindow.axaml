@@ -118,6 +118,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
               Margin="-40,-16,-40,-24"
               Background="{StaticResource GameOptionsMenuBrush}"
               IsVisible="False" />
+      <local:TrophyBackdrop x:Name="OptionsBackdrop"
+                            Grid.RowSpan="4"
+                            Margin="-40,-16,-40,-24"
+                            IsVisible="False" />
       <local:TrophyBackdrop x:Name="TrophyBackdropHost"
                             Grid.RowSpan="4"
                             Margin="-40,-16,-40,-24"
@@ -531,6 +535,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       Grid.Row="1"
                       Margin="-40,0,-40,-24"
                       Background="{StaticResource GameOptionsMenuBrush}" />
+              <local:TrophyBackdrop x:Name="GameOptionsBackdrop"
+                                    Grid.Row="1"
+                                    Margin="-40,0,-40,-24" />
               <Border Grid.Row="1"
                       Height="1"
                       Margin="-40,0,-40,0"
@@ -567,7 +574,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
               </Border>
 
               <Border Padding="268,24,40,24" Margin="-40,0,-40,0"
-                      Background="{StaticResource ArtScrimBrush}">
+                      Background="{StaticResource PaneGlassBrush}"
+                      BorderBrush="{StaticResource GlassRimBrush}"
+                      BorderThickness="0,1,0,0">
                 <Grid ColumnDefinitions="*,Auto,Auto"
                       ColumnSpacing="40">
                   <StackPanel Spacing="6"
@@ -2064,8 +2073,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
             Margin="0,112,40,0"
             IsVisible="False"
             ZIndex="40">
-      <Grid ColumnDefinitions="Auto,*,Auto"
-            RowDefinitions="Auto,Auto"
+      <!-- The links sit under the text, so a long title keeps the card's full width. -->
+      <Grid ColumnDefinitions="Auto,*"
+            RowDefinitions="Auto,Auto,Auto"
             ColumnSpacing="14">
         <Border Classes="launchCardIcon">
           <TextBlock x:Name="LaunchCardIcon"
@@ -2080,10 +2090,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <TextBlock x:Name="LaunchCardDetail"
                      Classes="launchCardDetail" />
         </StackPanel>
-        <StackPanel Grid.Column="2"
+        <StackPanel Grid.Row="1"
+                    Grid.Column="1"
                     Orientation="Horizontal"
                     Spacing="16"
-                    VerticalAlignment="Center">
+                    Margin="0,6,0,0">
           <Button x:Name="LaunchCardConsoleButton"
                   Classes="link"
                   Content="{Binding [Launch.Card.ShowConsole], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
@@ -2092,8 +2103,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   Content="{Binding [Launch.Card.Dismiss], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
         </StackPanel>
         <ProgressBar x:Name="LaunchCardProgress"
-                     Grid.Row="1"
-                     Grid.ColumnSpan="3"
+                     Grid.Row="2"
+                     Grid.ColumnSpan="2"
                      Classes="launchCardProgress" />
       </Grid>
     </Border>
