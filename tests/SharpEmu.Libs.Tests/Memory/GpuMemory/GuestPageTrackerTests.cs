@@ -389,7 +389,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, size);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void ASweepPlanNeedsSortedDisjointSpansInsideTheTrackedSpace()
     {
         Assert.NotNull(GuestPageTracker.PlanSweep([]));

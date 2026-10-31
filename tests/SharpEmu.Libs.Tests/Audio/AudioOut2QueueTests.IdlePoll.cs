@@ -138,15 +138,21 @@ public sealed partial class AudioOut2QueueTests
         Assert.Equal(0, KernelEventFlagCompatExports.KernelCreateEventFlag(ctx));
         Assert.True(ctx.TryReadUInt64(PollEventHandleSlot, out var flag));
 
-        // Another thread sets the flag 5 ms in: the wait ends then, not at the 50 ms cap.
-        var setter = Task.Run(() =>
+        // Another thread sets the flag 5 ms in: the wait ends then, not at the 50 ms cap. A dedicated
+        // thread, not the pool: a busy test host can start a pool task only after the cap.
+        var clock = Stopwatch.StartNew();
+        var setAtMs = -1L;
+        var setResult = -1;
+        var setter = new Thread(() =>
         {
             Thread.Sleep(5);
             var setCtx = new CpuContext(_memory, Generation.Gen5) { FsBase = PollFsBase + 0x400 };
             setCtx[CpuRegister.Rdi] = flag;
             setCtx[CpuRegister.Rsi] = 1;
-            Assert.Equal(0, KernelEventFlagCompatExports.KernelSetEventFlag(setCtx));
-        });
+            Volatile.Write(ref setAtMs, clock.ElapsedMilliseconds);
+            setResult = KernelEventFlagCompatExports.KernelSetEventFlag(setCtx);
+        }) { IsBackground = true };
+        setter.Start();
         _ctx[CpuRegister.Rdi] = context;
         _ctx[CpuRegister.Rsi] = PollLevelAddress;
         _ctx[CpuRegister.Rdx] = PollAvailableAddress;
@@ -158,10 +164,17 @@ public sealed partial class AudioOut2QueueTests
         _ctx[CpuRegister.Rdx] = 0x12;
         _ctx[CpuRegister.Rcx] = PollResultSlot;
         _ctx[CpuRegister.R8] = PollTimeoutSlot;
-        var stopwatch = Stopwatch.StartNew();
         Assert.Equal(0, KernelEventFlagCompatExports.KernelWaitEventFlag(_ctx));
-        Assert.True(stopwatch.ElapsedMilliseconds < 40, $"wait took {stopwatch.ElapsedMilliseconds} ms");
-        setter.Wait();
+        var endedAtMs = clock.ElapsedMilliseconds;
+        setter.Join();
+        Assert.Equal(0, setResult);
+
+        // Measured from the set: a setter the host scheduled only after the cap says nothing.
+        var setAt = Volatile.Read(ref setAtMs);
+        if (setAt >= 0 && setAt < endedAtMs)
+        {
+            Assert.True(endedAtMs - setAt < 35, $"wait ended {endedAtMs - setAt} ms after the flag was set");
+        }
     }
 
     // Optional benchmark: SHARPEMU_AUDIO_IDLE_WAIT_BENCH_OUTPUT=<json path>. Run it once as is and once
