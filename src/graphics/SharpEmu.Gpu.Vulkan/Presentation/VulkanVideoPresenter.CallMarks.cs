@@ -37,7 +37,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         long IShaderPipelineHost.CallMarkedAt(uint bit) => Volatile.Read(ref _callMarkedAt[bit & (CallMarks.Bits - 1)]);
 
-        private DescriptorBufferInfo CallMarksDescriptor()
+        internal DescriptorBufferInfo CallMarksDescriptor()
         {
             var marks = _callMarks ?? throw SubmissionScheduler.Fatal("A program marks calls before the call marks exist.");
             return new DescriptorBufferInfo { Buffer = marks.Handle, Offset = 0, Range = marks.Size };
@@ -45,7 +45,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // Before the descriptors of a dispatch that marks are written: creates the bitset, or takes the marks of the dispatches
         // recorded since the last copy and clears them.
-        private void PollCallMarks()
+        internal void PollCallMarks()
         {
             if (_callMarks is null)
             {

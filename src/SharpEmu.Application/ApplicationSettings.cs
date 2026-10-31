@@ -45,6 +45,8 @@ public sealed class ApplicationSettings
 
     public bool TrophySound { get; set; } = true;
 
+    public string GnmTrophyKey { get; set; } = string.Empty;
+
     public string LibraryLayout { get; set; } = "Carousel";
 
     public double EmbeddedConsoleHeight { get; set; } = 240;
@@ -88,6 +90,8 @@ public sealed class ApplicationSettings
     // What the guest is told the display is, which is what decides how much pixel work a
     // title does. Not the window size: see GuestDisplayResolution.
     public string GuestDisplayResolution { get; set; } = "1080p";
+
+    public string GpuReadbacks { get; set; } = "Full";
 
     public bool OverlayEnabled { get; set; } = true;
     public string OverlayCorner { get; set; } = "TopRight";
@@ -145,6 +149,8 @@ public sealed class ApplicationSettings
         settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles ?? ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"]);
         settings.LogLevel ??= "Info";
         settings.Language ??= "en";
+        settings.GnmTrophyKey = TryNormalizeTrophyKey(settings.GnmTrophyKey, out var trophyKey)
+            ? trophyKey : string.Empty;
         var legacyProfile = settings.EnvironmentToggles
             .Select(entry => entry.Split('=', 2, StringSplitOptions.TrimEntries))
             .FirstOrDefault(parts =>
@@ -202,6 +208,7 @@ public sealed class ApplicationSettings
         settings.HdrMode = NormalizeChoice(settings.HdrMode, "Auto", "On", "Off");
         settings.GuestDisplayResolution = NormalizeChoice(
             settings.GuestDisplayResolution, "1080p", "720p", "1440p", "2160p");
+        settings.GpuReadbacks = NormalizeChoice(settings.GpuReadbacks, "Full", "Off");
         settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Guest", "Host", "Skip");
         settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
         settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "TitleBar", "Full", "Minimal");
@@ -228,6 +235,14 @@ public sealed class ApplicationSettings
         }
 
         return source.Where(entry => !string.IsNullOrEmpty(entry)).ToList();
+    }
+
+    // The rule GnmTrophyPackageReader.TryNormalizeKey applies: empty, or 32 hexadecimal digits.
+    // Kept here so the settings assembly does not depend on the GnmMode runtime.
+    private static bool TryNormalizeTrophyKey(string? key, out string normalized)
+    {
+        normalized = key?.Trim().ToUpperInvariant() ?? string.Empty;
+        return normalized.Length == 0 || normalized.Length == 32 && normalized.All(char.IsAsciiHexDigit);
     }
 
     private static string NormalizeChoice(string? value, string fallback, params string[] choices) =>

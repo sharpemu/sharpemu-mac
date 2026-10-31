@@ -37,6 +37,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 _imageCache.RunGarbageCollector(endsFrame);
             }
 
+            if (_imageCache.HoldsManyDestroyedImages && _scheduler.CurrentTick > 1 && !_scheduler.InsideTickCallback)
+            {
+                _imageCache.NoteDestroyedImageReclaim();
+                _scheduler.Wait(_scheduler.CurrentTick - 1);
+                _scheduler.RunCompletedOperations();
+            }
+
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.BufferCollect))
             {
                 _bufferCache.RunGarbageCollector();
@@ -69,7 +76,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         return;
                     }
 
-                    var waitMilliseconds = gpuWorkInFlight ? 1 : 8;
+                    var waitMilliseconds = gpuWorkInFlight || _batchDrawCount > 0 ? 1 : 8;
 
                     var waitPhase = _commandStream.HasPending
                         ? RenderPhaseProfile.Phase.IdleBlockedCommands
@@ -113,23 +120,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private Func<bool>? _commandThreadHasWork;
-        private Func<bool>? _guestQueueWaits;
-
-        private bool KeepBatchOpen()
-        {
-            // A minimized window waits in its loop before the next turn, so the batch goes out now.
-            if (!_batchOpen || _commandThread is null || _window.IsMinimized)
-            {
-                return false;
-            }
-
-            _commandThreadHasWork ??= () => _commandThread?.HasWork == true;
-            _guestQueueWaits ??= () => _commandStream.BlockedQueueCount != 0;
-            return OpenBatchPolicy.KeepOpen(_batchOpenedTicks, System.Diagnostics.Stopwatch.GetTimestamp,
-                _commandThreadHasWork, _guestQueueWaits);
-        }
-
         private void RenderCore()
         {
             using var profileScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Unattributed);
@@ -148,16 +138,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            if (_commandThread is not null)
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueRelay))
             {
-                RunRelayCommandsWithPrefetchHeld();
-            }
-            else
-            {
-                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueRelay))
-                {
-                    _relay.RunPendingCommands();
-                }
+                _relay.RunPendingCommands();
             }
             if (_deviceLost)
             {
@@ -184,7 +167,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 : long.MaxValue;
             RunCommandStreamSlices(renderWorkDeadline);
 
-            if (!KeepBatchOpen())
+            if (BatchShouldFlush)
             {
                 using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Flush))
                 {
@@ -421,18 +404,30 @@ internal static unsafe partial class VulkanVideoPresenter
                     ClearValueCount = 1,
                     PClearValues = &clearValue,
                 };
-                _vk.CmdBeginRenderPass(
-                    _commandBuffer,
-                    &renderPassInfo,
-                    SubpassContents.Inline);
-                _vk.CmdBindPipeline(
-                    _commandBuffer,
-                    PipelineBindPoint.Graphics,
-                    _barycentricPipeline);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdBeginRenderPass(
+                        _commandBuffer,
+                        &renderPassInfo,
+                        SubpassContents.Inline);
+                }
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdBindPipeline(
+                        _commandBuffer,
+                        PipelineBindPoint.Graphics,
+                        _barycentricPipeline);
+                }
                 SharpEmu.Gpu.Vulkan.GraphicsDynamicStateEpoch.Advance();
                 SharpEmu.Gpu.Vulkan.NativeBindingEpoch.Advance();
-                _vk.CmdDraw(_commandBuffer, 3, 1, 0, 0);
-                _vk.CmdEndRenderPass(_commandBuffer);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdDraw(_commandBuffer, 3, 1, 0, 0);
+                }
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdEndRenderPass(_commandBuffer);
+                }
                 waitStage = PipelineStageFlags.ColorAttachmentOutputBit;
             }
             else if (presentedGuestImage is not null)

@@ -27,7 +27,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private readonly SdlHostWindow _window;
 
-        private Vk _vk = null!;
+        internal Vk _vk = null!;
         private KhrSurface _surfaceApi = null!;
         private KhrSwapchain _swapchainApi = null!;
         private delegate* unmanaged<Device, DebugUtilsObjectNameInfoEXT*, Result> _setDebugUtilsObjectName;
@@ -47,13 +47,13 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _maxComputeWorkGroupSizeY;
         private uint _maxComputeWorkGroupSizeZ;
         private uint _maxComputeWorkGroupInvocations;
-        private ulong _minStorageBufferOffsetAlignment = 1;
+        internal ulong _minStorageBufferOffsetAlignment = 1;
         private bool _supportsIndependentBlend;
         private bool _supportsDualSourceBlend;
-        private bool _supportsDepthBiasClamp;
+        internal bool _supportsDepthBiasClamp;
         private bool _supportsShaderSignedZeroInfNanPreserveFloat32;
         private uint _maxColorAttachments;
-        private Device _device;
+        internal Device _device;
         private PipelineCache _pipelineCache;
         private string? _pipelineCachePath;
         private bool _pipelineCacheDirty;
@@ -205,7 +205,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private void SetDebugName(ObjectType objectType, ulong objectHandle, string name)
+        internal void SetDebugName(ObjectType objectType, ulong objectHandle, string name)
         {
             if (_setDebugUtilsObjectName is null ||
                 _device.Handle == 0 ||
@@ -228,7 +228,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private void InsertDebugLabel(CommandBuffer commandBuffer, string name)
+        internal void InsertDebugLabel(CommandBuffer commandBuffer, string name)
         {
             if (_cmdInsertDebugUtilsLabel is null || commandBuffer.Handle == 0) return;
             var bytes = NullTerminatedUtf8(name);
@@ -777,17 +777,19 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsFragmentShaderBarycentric;
         private bool _supportsPerVertexPixelInputs;
         private bool _supportsShaderLayer;
-        private bool _supportsShaderClipDistance;
-        private bool _supportsMeshShader;
-        private MeshShaderLimits _meshShaderLimits;
-        private delegate* unmanaged<CommandBuffer, uint, uint, uint, void> _cmdDrawMeshTasks;
+        internal bool _supportsShaderClipDistance;
+        internal bool _supportsMeshShader;
+        internal MeshShaderLimits _meshShaderLimits;
+        internal delegate* unmanaged<CommandBuffer, uint, uint, uint, void> _cmdDrawMeshTasks;
         private const string FragmentShaderBarycentricExtensionName = "VK_KHR_fragment_shader_barycentric";
         private const string Maintenance5ExtensionName = "VK_KHR_maintenance5";
         private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
         private const string FillRectangleExtensionName = "VK_NV_fill_rectangle";
         private const string ShaderImageAtomicInt64ExtensionName = "VK_EXT_shader_image_atomic_int64";
+        private const string UnifiedImageLayoutsExtensionName = "VK_KHR_unified_image_layouts";
         private bool _supportsImageViewMinLod;
         private const string MeshShaderExtensionName = "VK_EXT_mesh_shader";
+        private bool _supportsUnifiedImageLayouts;
 
         private void CreateDevice()
         {
@@ -826,9 +828,11 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsShaderClipDistance = supportedFeatures.ShaderClipDistance;
             _supportsFillRectangle = IsDeviceExtensionAvailable(FillRectangleExtensionName);
             _supportsRectangleGeometry = supportedFeatures.GeometryShader;
+            _supportsTessellation = supportedFeatures.TessellationShader;
             _supportsPreciseOcclusion = supportedFeatures.OcclusionQueryPrecise;
             var enabledFeatures = new PhysicalDeviceFeatures
             {
+                TessellationShader = supportedFeatures.TessellationShader,
                 DepthBounds = supportedFeatures.DepthBounds,
                 GeometryShader = supportedFeatures.GeometryShader,
                 OcclusionQueryPrecise = supportedFeatures.OcclusionQueryPrecise,
@@ -849,6 +853,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 DepthBiasClamp = supportedFeatures.DepthBiasClamp,
                 SampleRateShading = supportedFeatures.SampleRateShading,
                 SamplerAnisotropy = supportedFeatures.SamplerAnisotropy,
+                DrawIndirectFirstInstance = supportedFeatures.DrawIndirectFirstInstance,
             };
 
             if (!supportedFeatures.SampleRateShading)
@@ -988,6 +993,21 @@ internal static unsafe partial class VulkanVideoPresenter
                     "translated shaders using an atomic on a 64-bit image texel will fail to compile.");
             }
 
+            var unifiedImageLayoutsFeatures = new PhysicalDeviceUnifiedImageLayoutsFeaturesKHR
+            {
+                SType = StructureType.PhysicalDeviceUnifiedImageLayoutsFeaturesKhr,
+            };
+            if (IsDeviceExtensionAvailable(UnifiedImageLayoutsExtensionName))
+            {
+                var unifiedImageLayoutsQuery = new PhysicalDeviceFeatures2
+                {
+                    SType = StructureType.PhysicalDeviceFeatures2,
+                    PNext = &unifiedImageLayoutsFeatures,
+                };
+                _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &unifiedImageLayoutsQuery);
+                _supportsUnifiedImageLayouts = unifiedImageLayoutsFeatures.UnifiedImageLayouts;
+            }
+
             // MoltenVK exposes the barycentric builtins, but SPIRV-Cross rejects PerVertexKHR inputs.
             _supportsPerVertexPixelInputs = _supportsFragmentShaderBarycentric &&
                 !IsDeviceExtensionAvailable(PortabilitySubsetExtensionName);
@@ -1032,10 +1052,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 PNext = &vulkan12Features,
             };
             var meshExtensionAvailable = IsDeviceExtensionAvailable(MeshShaderExtensionName);
+            var drawParametersFeatures = new PhysicalDeviceShaderDrawParametersFeatures
+            {
+                SType = StructureType.PhysicalDeviceShaderDrawParametersFeatures,
+                PNext = meshExtensionAvailable ? &meshFeatures : &vulkan12Features,
+            };
             var featuresQuery = new PhysicalDeviceFeatures2
             {
                 SType = StructureType.PhysicalDeviceFeatures2,
-                PNext = meshExtensionAvailable ? &meshFeatures : &vulkan12Features,
+                PNext = &drawParametersFeatures,
             };
             _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &featuresQuery);
             _supportsMeshShader = meshExtensionAvailable && meshFeatures.MeshShader &&
@@ -1047,6 +1072,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsShaderLayer = vulkan12Features.ShaderOutputLayer;
             var supportsViewportIndexLayer = IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer") &&
                 vulkan12Features.ShaderOutputViewportIndex && vulkan12Features.ShaderOutputLayer;
+            _supportsShaderDrawParameters = drawParametersFeatures.ShaderDrawParameters;
             var supportsMaintenance8 = maintenance8Features.Maintenance8;
             var supportsRobustBufferAccess2 = robustness2Features.RobustBufferAccess2;
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
@@ -1104,9 +1130,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var fillRectangleExtension = (byte*)SilkMarshal.StringToPtr(FillRectangleExtensionName);
             var meshExtension = (byte*)SilkMarshal.StringToPtr(MeshShaderExtensionName);
             var imageAtomicInt64Extension = (byte*)SilkMarshal.StringToPtr(ShaderImageAtomicInt64ExtensionName);
+            var unifiedImageLayoutsExtension = (byte*)SilkMarshal.StringToPtr(UnifiedImageLayoutsExtensionName);
             try
             {
-                var extensions = stackalloc byte*[15];
+                var extensions = stackalloc byte*[24];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
@@ -1150,6 +1177,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (_supportsImageViewMinLod)
                 {
                     extensions[extensionCount++] = imageViewMinLodExtension;
+                }
+
+                if (_supportsUnifiedImageLayouts)
+                {
+                    extensions[extensionCount++] = unifiedImageLayoutsExtension;
                 }
 
                 if (_supportsFillRectangle)
@@ -1222,6 +1254,18 @@ internal static unsafe partial class VulkanVideoPresenter
                     };
                     renderingChain = &meshFeatures;
                 }
+
+                if (_supportsShaderDrawParameters)
+                {
+                    drawParametersFeatures = new PhysicalDeviceShaderDrawParametersFeatures
+                    {
+                        SType = StructureType.PhysicalDeviceShaderDrawParametersFeatures,
+                        ShaderDrawParameters = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &drawParametersFeatures;
+                }
+
                 if (_supportsFragmentShaderBarycentric)
                 {
                     barycentricFeatures.PNext = renderingChain;
@@ -1257,6 +1301,17 @@ internal static unsafe partial class VulkanVideoPresenter
                         PNext = renderingChain,
                     };
                     renderingChain = &imageAtomicInt64Features;
+                }
+
+                if (_supportsUnifiedImageLayouts)
+                {
+                    unifiedImageLayoutsFeatures = new PhysicalDeviceUnifiedImageLayoutsFeaturesKHR
+                    {
+                        SType = StructureType.PhysicalDeviceUnifiedImageLayoutsFeaturesKhr,
+                        UnifiedImageLayouts = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &unifiedImageLayoutsFeatures;
                 }
                 if (_supportsDepthClipEnable)
                 {
@@ -1335,6 +1390,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)maintenance8Extension);
                 SilkMarshal.Free((nint)maintenance5Extension);
                 SilkMarshal.Free((nint)imageViewMinLodExtension);
+                SilkMarshal.Free((nint)unifiedImageLayoutsExtension);
                 SilkMarshal.Free((nint)fillRectangleExtension);
                 SilkMarshal.Free((nint)imageAtomicInt64Extension);
                 SilkMarshal.Free((nint)robustness2Extension);
@@ -1360,6 +1416,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CreateBufferCache();
             CreateImageCache();
             _descriptorHeap = new DescriptorHeap(_deviceInfo, _scheduler);
+            _contentUploads = new ContentUploadArena(_deviceInfo, _scheduler);
             CreateBindlessHeapLayout();
             CreateCommandStream();
             LoadDebugUtilsCommands();

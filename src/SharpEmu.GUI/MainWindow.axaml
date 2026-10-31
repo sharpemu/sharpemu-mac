@@ -413,6 +413,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   <TextBlock Text="{Binding VersionText}" FontSize="11" FontWeight="SemiBold"
                              Foreground="{StaticResource MutedBrush}" />
                 </Border>
+                <Border Classes="pill" IsVisible="{Binding CompatibilityMode}">
+                  <TextBlock Text="{Binding [Library.Stat.CompatibilityMode],
+                                            Source={x:Static local:Localization.Instance},
+                                            x:CompileBindings=False}"
+                             FontSize="11" FontWeight="SemiBold"
+                             Foreground="{StaticResource MutedBrush}" />
+                </Border>
                 <Border Classes="pill">
                   <TextBlock Text="{Binding SizeText}" FontSize="11" FontWeight="SemiBold"
                              Foreground="{StaticResource MutedBrush}" />
@@ -1024,6 +1031,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                     HorizontalContentAlignment="Left"
                                     VerticalAlignment="Center" />
                         </local:SettingRow>
+
+                        <local:SettingRow x:Name="GameGpuReadbacksRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.GpuReadbacks.Label],
+                                                          Source={x:Static local:Localization.Instance},
+                                                          x:CompileBindings=False}"
+                                          Description="{Binding [Options.GpuReadbacks.Desc],
+                                                                Source={x:Static local:Localization.Instance},
+                                                                x:CompileBindings=False}">
+                          <ComboBox x:Name="GameGpuReadbacksBox"
+                                    Classes="optionValue"
+                                    ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                    HorizontalContentAlignment="Left"
+                                    VerticalAlignment="Center" />
+                        </local:SettingRow>
                         <local:SettingRow x:Name="GameOverlayEnabledRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.OverlayEnabled.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
@@ -1257,6 +1279,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Text="Environment" />
                     </Grid>
                   </Button>
+                  <Button x:Name="OptionsGnmModeNav" Classes="optionsNav">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0" Classes="materialSymbol optionsNavIcon" Text="sports_esports" />
+                      <TextBlock x:Name="OptionsGnmModeNavLabel" Grid.Column="1" Classes="optionsNavLabel" Text="GnmMode" />
+                    </Grid>
+                  </Button>
                   <Button x:Name="OptionsAboutNav" Classes="optionsNav">
                     <Grid ColumnDefinitions="36,*">
                       <TextBlock Grid.Column="0"
@@ -1402,6 +1430,25 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </StackPanel>
               </ScrollViewer>
 
+              <ScrollViewer x:Name="OptionsGnmModePanel" Classes="optionsSectionPanel">
+                <StackPanel>
+                  <Border Classes="optionsGroup">
+                    <StackPanel Spacing="8">
+                      <local:SettingRow Classes="optionRow"
+                                        Label="{Binding [Options.GnmMode.TrophyKey.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.GnmMode.TrophyKey.Desc], Source={x:Static local:Localization.Instance}}">
+                        <StackPanel Spacing="8" Width="330">
+                          <TextBox x:Name="GnmTrophyKeyBox" Classes="optionValue" Width="330" PasswordChar="●" MaxLength="64"
+                                   PlaceholderText="{Binding [Options.GnmMode.TrophyKey.Placeholder], Source={x:Static local:Localization.Instance}}"
+                                   VerticalAlignment="Center" />
+                          <TextBlock x:Name="GnmTrophyKeyError" IsVisible="False" TextWrapping="Wrap" Foreground="#FF8F8F"
+                                     Text="{Binding [Options.GnmMode.TrophyKey.Invalid], Source={x:Static local:Localization.Instance}}" />
+                        </StackPanel>
+                      </local:SettingRow>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+              </ScrollViewer>
               <ScrollViewer x:Name="OptionsLauncherPanel"
                             Classes="optionsSectionPanel">
                 <StackPanel>
@@ -1654,6 +1701,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Label="{Binding [Options.Hdr.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Hdr.Desc], Source={x:Static local:Localization.Instance}}">
                         <ComboBox x:Name="HdrModeBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="GpuReadbacksRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.GpuReadbacks.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.GpuReadbacks.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ComboBox x:Name="GpuReadbacksBox"
                                   Classes="optionValue"
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
                                   HorizontalContentAlignment="Left"

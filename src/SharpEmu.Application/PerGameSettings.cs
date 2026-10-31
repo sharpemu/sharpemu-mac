@@ -38,6 +38,7 @@ public sealed class PerGameSettings
     public string? HdrMode { get; set; }
 
     public string? GuestDisplayResolution { get; set; }
+    public string? GpuReadbacks { get; set; }
 
     public bool? OverlayEnabled { get; set; }
     public string? OverlayCorner { get; set; }
@@ -61,6 +62,7 @@ public sealed class PerGameSettings
         VSync is null &&
         HdrMode is null &&
         GuestDisplayResolution is null &&
+        GpuReadbacks is null &&
         OverlayEnabled is null &&
         OverlayCorner is null &&
         OverlayMode is null &&
@@ -179,6 +181,11 @@ public sealed class PerGameSettings
             HdrMode = null;
         }
 
+        if (string.Equals(GpuReadbacks, global.GpuReadbacks, StringComparison.OrdinalIgnoreCase))
+        {
+            GpuReadbacks = null;
+        }
+
         if (OverlayEnabled == global.OverlayEnabled)
         {
             OverlayEnabled = null;
@@ -291,7 +298,8 @@ public sealed record EffectiveLaunchSettings(
     bool OverlayEnabled,
     string OverlayCorner,
     string OverlayMode,
-    IReadOnlyList<string> EnvironmentToggles)
+    IReadOnlyList<string> EnvironmentToggles,
+    string GpuReadbacks)
 {
     public static EffectiveLaunchSettings Resolve(ApplicationSettings global, PerGameSettings? perGame) => new(
         perGame?.LogLevel ?? global.LogLevel,
@@ -309,5 +317,6 @@ public sealed record EffectiveLaunchSettings(
         perGame?.OverlayEnabled ?? global.OverlayEnabled,
         perGame?.OverlayCorner ?? global.OverlayCorner,
         perGame?.OverlayMode ?? global.OverlayMode,
-        perGame?.EnvironmentToggles ?? global.EnvironmentToggles);
+        perGame?.EnvironmentToggles ?? global.EnvironmentToggles,
+        perGame?.GpuReadbacks ?? global.GpuReadbacks);
 }

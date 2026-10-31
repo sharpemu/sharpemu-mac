@@ -3,6 +3,7 @@
 
 using System.IO.Hashing;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
@@ -13,9 +14,32 @@ using SharpEmu.Gpu.Vulkan.Scheduling;
 
 namespace SharpEmu.Gpu.Vulkan.Images;
 
-public readonly record struct ImageAccessState(PipelineStageFlags Stage, AccessFlags Access, ImageLayout Layout)
+public readonly record struct ImageAccessState(PipelineStageFlags Stage, AccessFlags Access, ImageLayout Layout, bool Guest = false)
 {
+    public const AccessFlags GuestStorageAccess = AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit;
+
+    public const AccessFlags AttachmentAccess =
+        AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit |
+        AccessFlags.DepthStencilAttachmentReadBit | AccessFlags.DepthStencilAttachmentWriteBit;
+
+    private const AccessFlags WriteAccess = AccessFlags.TransferWriteBit | AccessFlags.ShaderWriteBit | AccessFlags.MemoryWriteBit |
+                                            AccessFlags.HostWriteBit | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit;
+
     public static ImageAccessState Initial => new(PipelineStageFlags.AllCommandsBit, AccessFlags.None, ImageLayout.Undefined);
+
+    public static readonly ThreadCounter Barriers = new();
+    public static readonly ThreadCounter BarriersElided = new();
+
+    public bool RepeatsGuestStorageAccess(AccessFlags access, bool guest) =>
+        guest && Guest && access == GuestStorageAccess && Access == access && Layout == ImageLayout.General;
+
+    public static bool OnlyReadsOutsideAttachments(AccessFlags access) => (access & (WriteAccess | AttachmentAccess)) == 0;
+
+    public bool ReadsAfterRead(AccessFlags access) =>
+        Layout == ImageLayout.General && OnlyReadsOutsideAttachments(Access) && OnlyReadsOutsideAttachments(access);
+
+    public bool RepeatsAttachmentAccess(AccessFlags access) =>
+        Layout == ImageLayout.General && Access == access && access != 0 && (access & ~AttachmentAccess) == 0;
 }
 
 public struct ImageUses
@@ -79,6 +103,7 @@ public sealed unsafe partial class CachedImage : IDisposable
     internal SurfaceMetadata? MetadataRegistration;
     public readonly ImageBacking Backing = new();
     public readonly List<CachedImageView> Views = new();
+    private CachedImageView[] _viewSnapshot = [];
     public ImageUses Uses;
     public ImageBindingState Binding;
 
@@ -91,6 +116,8 @@ public sealed unsafe partial class CachedImage : IDisposable
     public ResourceSlotIdentifier DepthOwner;
     public ulong LastAccessTick;
     public int RecencyEntryIndex;
+    public bool Parked;
+    public ulong ParkedTick;
 
     public CachedImage(GpuDeviceInfo device, SubmissionScheduler scheduler, IGuestBackedSpace guestBacking, in ImageDescription description,
         ImageBackingPool? pool = null, Action? reportAllocationFailure = null)
@@ -616,14 +643,28 @@ public sealed unsafe partial class CachedImage : IDisposable
                 $"exists={image.Exists} formatValid={formatCompatible} usageValid={usageValid} rangesValid={rangesValid} mappingValid={mappingValid} typeValid={typeValid} aspectValid={aspectValid}.");
         }
 
-        foreach (var cached in Views)
+        foreach (var cached in Volatile.Read(ref _viewSnapshot))
         {
-            if (cached.Description.Equals(normalized))
-            {
-                return cached.View;
-            }
+            if (cached.Description.Equals(normalized)) return cached.View;
         }
 
+        lock (Views)
+        {
+            foreach (var cached in Views)
+            {
+                if (cached.Description.Equals(normalized))
+                {
+                    return cached.View;
+                }
+            }
+
+            return CreateView(in requested, in normalized, isStorage);
+        }
+    }
+
+    private ImageView CreateView(in ImageViewDescription requested, in ImageViewDescription normalized, bool isStorage)
+    {
+        var image = Backing;
         var minLod = new ImageViewMinLodCreateInfoEXT
         {
             SType = StructureType.ImageViewMinLodCreateInfoExt,
@@ -654,12 +695,14 @@ public sealed unsafe partial class CachedImage : IDisposable
         }
 
         Views.Add(new CachedImageView(normalized, view));
+        Volatile.Write(ref _viewSnapshot, Views.ToArray());
         return view;
     }
 
     // Immediate destruction; the owner waits for GPU work before disposing.
     public void Dispose()
     {
+        Volatile.Write(ref _viewSnapshot, []);
         foreach (var cached in Views)
         {
             _device.Vk.DestroyImageView(_device.Device, cached.View, null);

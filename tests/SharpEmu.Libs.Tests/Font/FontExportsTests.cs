@@ -17,7 +17,7 @@ public sealed class FontExportsTests
     private readonly FakeCpuMemory _memory = new(Base, 0x1000);
     private readonly CpuContext _ctx;
 
-    private static readonly SharpEmu.Fonts.Skia.SkiaFontFactory Factory = new();
+    internal static readonly SharpEmu.Fonts.Skia.SkiaFontFactory Factory = new();
 
     public FontExportsTests()
     {

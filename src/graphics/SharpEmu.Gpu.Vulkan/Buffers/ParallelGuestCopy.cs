@@ -113,6 +113,7 @@ internal sealed unsafe class ParallelGuestCopy(ICpuMemory guest, int helperCount
 
     private void HelperLoop()
     {
+        SharpEmu.HLE.Host.HostLaneReservation.ApplyToHostWorkerThread();
         var seen = 0L;
         while (true)
         {

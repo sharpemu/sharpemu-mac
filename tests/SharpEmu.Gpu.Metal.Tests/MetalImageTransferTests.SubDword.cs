@@ -49,13 +49,13 @@ public sealed partial class MetalImageTransferTests
                 Assert.Equal((4 / bytes, 1u), MetalTilerShaders.DwordGroup(kind, bytes, tiledSide: false));
 
                 // The tiled side's dword follows the kind's addressing. The one-byte
-                // depth kind interleaves x and y in the two low address bits, so its
-                // dword is a 2x2 quad; every other kind keeps x's low bits there and
-                // takes a run along x.
-                var quad = kind == TileBlockKind.Depth64KB && bytes == 1;
+                // depth and GCN 1D-thin kinds interleave x and y in the two low address
+                // bits, so their dword is a 2x2 quad; every other kind keeps x's low bits
+                // there and takes a run along x.
+                var quad = kind is TileBlockKind.Depth64KB or TileBlockKind.GcnThin1D && bytes == 1;
                 Assert.Equal(quad ? (2u, 2u) : (4 / bytes, 1u), MetalTilerShaders.DwordGroup(kind, bytes, tiledSide: true));
 
-                // One thread covers whole dwords on both sides, so the depth kind's
+                // One thread covers whole dwords on both sides, so the quad kinds'
                 // one-byte copies take two of each and everything else takes one.
                 Assert.Equal(quad ? (4u, 2u) : (4 / bytes, 1u), MetalTilerShaders.WideGroup(kind, bytes));
             }

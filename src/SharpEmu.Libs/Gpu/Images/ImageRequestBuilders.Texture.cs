@@ -5,6 +5,7 @@ using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
@@ -33,6 +34,27 @@ public static partial class ImageRequestBuilders
 
     private static Exception InvalidDescriptor(string message) =>
         _rejectInvalidDescriptors > 0 ? new TextureDescriptorRejectedException(message) : GpuFatal.Fatal(message);
+
+    internal static ShaderImageShape ShapeOf(ImageResource image) => new(
+        Volume: image.Dimension == ImageDimension.Dim3D,
+        Arrayed: image.Cube || image.Dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray,
+        Cube: image.Cube,
+        Storage: image.ResourceClass == ImageResourceClass.Storage,
+        DynamicMip: image.MipMode == ImageMipMode.DynamicStorage,
+        NumericClass: NumericClassOf(image),
+        OneDimensional: image.Dimension is ImageDimension.Dim1D or ImageDimension.Dim1DArray,
+        R128: image.R128,
+        Multisampled: image.Dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray,
+        DepthCompare: image.DepthCompare,
+        Atomic: image.Atomic,
+        Atomic64: image.Atomic64);
+
+    private static TextureNumericClass NumericClassOf(ImageResource image) => image.NumericClass switch
+    {
+        ImageNumericClass.Uint or ImageNumericClass.Uint64 => TextureNumericClass.Uint,
+        ImageNumericClass.Sint => TextureNumericClass.Sint,
+        _ => TextureNumericClass.Float,
+    };
 
     // A null descriptor binds a one-texel image of the numeric class the shader expects.
     public static ImageRequest NullTexture(in ShaderImageShape shape)

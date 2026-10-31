@@ -66,6 +66,7 @@
   "Library.Stat.Version": "Version",
   "Library.Stat.Installed": "Installed",
   "Library.Stat.TitleId": "Title ID",
+  "Library.Stat.CompatibilityMode": "Compatibility Mode",
   "Common.Back": "Back",
 
   "Library.Music.Volume": "Title music volume",
@@ -127,6 +128,9 @@
   "Options.Hdr.Label": "HDR output",
   "Options.Hdr.Desc": "Use HDR when the selected display and graphics backend support it. Auto falls back to SDR.",
   "Options.Hdr.Auto": "Auto",
+  "Options.GpuReadbacks.Label": "GPU readbacks",
+  "Options.GpuReadbacks.Desc": "Full: the command processor waits for values written by the GPU. Most accurate, but it can cause stutter.\nOff: waits continue with the value already in memory when it meets the condition. Smoother, but some games can show graphics errors.\nApplies from the next game launch.",
+  "Options.GpuReadbacks.Full": "Full",
   "Options.Env.BinkPlayback.Label": "Bink video playback",
   "Options.Env.BinkPlayback.Desc": "Host plays Bink videos through the FFmpeg bridge, but some games may have issues.\nGuest uses the game engine's own decoder.\nSkip skips Bink videos, which can make development easier.",
   "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
@@ -281,6 +285,7 @@
   "Library.Context.Trophies": "Trophies…",
   "Trophies.Title": "Trophies",
   "Trophies.None": "This game has no trophies.",
+  "Trophies.GnmMode.KeyHint": "PS4 trophies may require a trophy key to load. Enter it under {0} → GnmMode → {1}.",
   "Trophies.Loading": "Loading trophies…",
   "Trophies.Hidden": "Hidden trophy",
   "Trophies.HiddenDescription": "Click to reveal this trophy.",
@@ -300,6 +305,12 @@
   "Options.Env.TrophyTest.Show": "Show notification",
   "Options.Env.TrophySound.Label": "Trophy sound",
   "Options.Env.TrophySound.Desc": "Play a short chime when a trophy is unlocked.",
+
+  "Options.GnmMode.TrophyKey.Label": "Trophy key",
+  "Options.GnmMode.TrophyKey.Desc": "PS4 trophy key for encrypted trophy names and descriptions. Used by GnmMode trophy lists and unlock notifications. Saved locally; restart a running game after changing it.",
+  "Options.GnmMode.TrophyKey.Placeholder": "32 hexadecimal characters",
+  "Options.GnmMode.TrophyKey.Invalid": "Enter exactly 32 hexadecimal characters (0–9, A–F), or clear the field to remove the key. The previous valid key is kept until the entry is valid.",
+
   "Trophies.Completed": "complete",
   "Trophies.EarnedTotal": "earned",
   "Trophies.HubSummary": "{0} of {1} trophies earned across {2} games",

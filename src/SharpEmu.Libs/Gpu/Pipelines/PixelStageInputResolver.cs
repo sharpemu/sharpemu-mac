@@ -60,7 +60,8 @@ public static class PixelStageInputResolver
     // The semantics a pixel program's header declares are static, but the guest owns the table, so every
     // draw still reads it. One read for all of them: this was one guest read per input (up to 32), each
     // taking the memory read lock, to decode a few words.
-    private static uint CustomInterpolationMask(CpuContext context, RegisteredShader shader, uint semanticCount)
+    // semantics: the words a shader frontend already read (IShaderFrontend), instead of the guest table.
+    private static uint CustomInterpolationMask(CpuContext context, RegisteredShader shader, uint semanticCount, uint[]? semantics = null)
     {
         if (semanticCount == 0)
         {
@@ -69,7 +70,11 @@ public static class PixelStageInputResolver
 
         Span<uint> words = stackalloc uint[PixelInputInfo.InterpolatorCount];
         words = words[..(int)semanticCount];
-        if (!context.Memory.TryRead(shader.InputSemanticsAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(words)))
+        if (semantics is not null)
+        {
+            semantics.AsSpan(0, (int)semanticCount).CopyTo(words);
+        }
+        else if (!context.Memory.TryRead(shader.InputSemanticsAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(words)))
         {
             // A word is unmapped: read them one at a time to name it.
             for (var index = 0u; index < semanticCount; index++)
@@ -103,11 +108,12 @@ public static class PixelStageInputResolver
         uint inputCount,
         bool depthAspectBound,
         bool stencilAspectBound = false,
-        PixelInputArrays? reuse = null)
+        PixelInputArrays? reuse = null,
+        uint[]? semantics = null)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         var semanticCount = Math.Min(Math.Min(shader.InputSemanticsCount, inputCount), (uint)PixelInputInfo.InterpolatorCount);
-        var customMask = CustomInterpolationMask(context, shader, semanticCount);
+        var customMask = CustomInterpolationMask(context, shader, semanticCount, semantics);
 
         Span<uint> interpolators = stackalloc uint[PixelInputInfo.InterpolatorCount];
         for (var index = 0u; index < inputCount; index++)

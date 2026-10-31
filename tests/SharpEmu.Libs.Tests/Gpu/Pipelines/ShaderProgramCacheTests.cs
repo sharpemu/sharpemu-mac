@@ -1,11 +1,15 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
+using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using TestProgram = SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
@@ -21,6 +25,44 @@ public sealed class ShaderProgramCacheTests : IDisposable
     private const ulong DataBase = PipelineTestGuest.MemoryBase + 0x4_0000;
     private const uint Format32x4Uint = 75;
     private const uint Format32x4Float = 77;
+
+    private sealed class ImageFrontend(bool ordered) : IShaderFrontend
+    {
+        public ulong CacheDomain => 1;
+        public bool RequiresOrderedImagePreparation => ordered;
+        public ImageDescriptorNormalizer NormalizeImageDescriptor => (words, _, _, _) => words.ToArray();
+
+        public RegisteredShader ReadShader(CpuContext context, ulong codeAddress, string label, ReadOnlySpan<uint> userData = default) =>
+            throw new NotSupportedException();
+
+        public bool TryDecode(CpuContext context, RegisteredShader shader, out Gen5ShaderProgram program, out string error)
+        {
+            program = TestProgram.Program(TestProgram.Image(0, "ImageLoad", 0, dmask: 1), TestProgram.EndProgram(8));
+            error = string.Empty;
+            return true;
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FrontendImageNormalizationUsesTheHostWhenPreparationRequiresGpuOrdering(bool ordered)
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.EndProgram);
+        var words = RegisterWords.Texture(DataBase, GuestPixelFormat.Bits8_8_8_8UNorm, 16, 16);
+        var frontend = new ImageFrontend(ordered);
+        var source = _guest.Source(CodeA, ShaderStage.Compute, words);
+        source = source with { Registered = source.Registered with { Frontend = frontend } };
+        var cursor = 0u;
+
+        var compiled = _guest.Programs.GetOrCompile(source,
+            new StageCompileOptions { ComputeInfo = new ComputeInputInfo { ThreadsX = 1, ThreadsY = 1, ThreadsZ = 1 } },
+            ref cursor, out var stage);
+
+        Assert.True(compiled.IsValid);
+        Assert.Equal(words, Assert.Single(stage.Resources.Images));
+        Assert.Equal(ordered, _guest.Host.ImageNormalizations > 0);
+    }
 
     [Fact]
     public void EmbeddedFetchIsReplacedBeforeTheProgramRequestsResourceTables()
@@ -222,6 +264,23 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.Equal(1, _guest.Programs.ProgramCount);
         Assert.Single(_guest.Host.Modules);
         Assert.Equal(1, _guest.Compiler.Compilations);
+    }
+
+    [Fact]
+    public void Materializations_AreTalliedByOutcome()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.FormatLoadProgram);
+        _ = MaterializationTally.TakeReport();
+        var cursor = 0u;
+        _ = Compile(CodeA, PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Uint), ref cursor, out _);
+        cursor = 0;
+        _ = Compile(CodeA, PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Uint), ref cursor, out var stage);
+        _ = _guest.Programs.Revalidate(stage);
+
+        var report = MaterializationTally.TakeReport();
+        Assert.StartsWith("materialize=", report);
+        Assert.Matches(@"(FastHit|FastMiss|FastFallback|CacheHit|CacheRebaseHit|TableRefresh|Volatile|Full)=[1-9]", report);
+        Assert.Matches(@"(KeptRevalidated|KeptStale|RevalidateRefused)=[1-9]", report);
     }
 
     [Fact]

@@ -196,7 +196,8 @@ public sealed partial class ScalarValueGraph
             {
                 var register = _graph.UserDataBase + index;
                 if (register < ScalarRegisterCount &&
-                    (register >= 64 || (_graph.ExcludedUserDataRegisters & (1UL << (int)register)) == 0))
+                    (register >= 64 || (_graph.ExcludedUserDataRegisters & (1UL << (int)register)) == 0) &&
+                    index != (uint)_graph.DynamicUserData)
                 {
                     state.Scalars[register] = _graph.UserData(register);
                 }

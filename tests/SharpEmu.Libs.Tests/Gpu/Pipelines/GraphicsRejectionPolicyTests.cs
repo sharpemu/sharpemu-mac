@@ -73,10 +73,10 @@ public sealed class GraphicsRejectionPolicyTests
                 userDataAddress: PipelineTestGuest.MemoryBase + 0xA000);
             guest.Compiler.Rejection = "The test instruction is not supported.";
             var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-            GraphicsPrograms Lookup() => cache.GetGraphicsPrograms(
-                new VertexStageRegisters { ExportAddress = VertexAddress }, new PixelStageRegisters { Address = PixelAddress },
-                new ShaderInterfaceRegisters(), new ContextRegisters(), [], pixelActive, depthBound: false,
-                depthAspectBound: false);
+            var banks = new RegisterBanks(static message => new InvalidOperationException(message));
+            banks.Shader.Vertex.ExportAddress = VertexAddress;
+            banks.Shader.Pixel.Address = PixelAddress;
+            GraphicsPrograms Lookup() => cache.GetGraphicsPrograms(banks, [], pixelActive, depthBound: false);
             if (setting != "0")
                 Assert.Contains("cannot be compiled", Assert.Throws<SchedulerFatalException>(() => Lookup()).Message);
             else Assert.False(Lookup().Available);

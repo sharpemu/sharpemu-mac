@@ -6,6 +6,7 @@ using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.HLE;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
@@ -17,6 +18,39 @@ public sealed class LinkedShaderProgramCacheTests
     private const ulong HeaderAddress = PipelineTestGuest.MemoryBase + 0x8000;
     private const ulong TableAddress = PipelineTestGuest.MemoryBase + 0x10000;
     private const ulong FunctionAddress = PipelineTestGuest.MemoryBase + 0x20000;
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LinkedFrontend_PreservesNormalizationAndBufferLengths(bool deferred)
+    {
+        using var fatal = new FatalScope();
+        var guest = CreateGuest();
+        var frontend = new NormalizingFrontend();
+        var original = guest.Source(CodeAddress, ShaderStage.Compute, PipelineTestGuest.BufferDescriptor(TableAddress, 16, 1, 0));
+        var source = original with { Registered = original.Registered with { Frontend = frontend } };
+        var programs = new ShaderProgramCache(guest.Context, guest.Compiler, guest.Host) { DeferLinking = deferred };
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        ShaderStageResources stage;
+        string rejection;
+        bool ready;
+        do
+        {
+            var cursor = 0u;
+            ready = programs.TryGetProgram(source, PipelineTestGuest.ComputeOptions(32), true,
+                ref cursor, out _, out stage, out rejection);
+            if (!ready) Thread.Sleep(1);
+        } while (!ready && rejection.Length == 0 && DateTime.UtcNow < deadline);
+        Assert.True(ready, rejection);
+        var linked = Assert.Single(programs.Entries, entry => !entry.HasShaderCalls);
+        Assert.Same(frontend.NormalizeBufferDescriptor, linked.Plan.NormalizeBufferDescriptor);
+        Assert.Same(frontend.NormalizeImageDescriptor, linked.Plan.NormalizeImageDescriptor);
+        Assert.Same(frontend.ImageNormalizationVersion, linked.Plan.ImageNormalizationVersion);
+        var request = Assert.Single(guest.Compiler.Requests);
+        Assert.True(request.Bindings.UsesBufferLengths);
+        Assert.Equal(1u, request.Bindings.CallArgumentCount);
+        Assert.Equal([0x3000ul], stage.CallArguments!);
+    }
 
     [Fact]
     public void LinkedLibrary_ReusesModulesAndTracksTableCodeAndCallerBase()
@@ -199,5 +233,18 @@ public sealed class LinkedShaderProgramCacheTests
     {
         var cursor = 0u;
         return guest.Programs.GetOrCompile(source, PipelineTestGuest.ComputeOptions(32), ref cursor, out stage);
+    }
+
+    private sealed class NormalizingFrontend : IShaderFrontend
+    {
+        public ulong CacheDomain => 0x474E4D;
+        public bool RequiresExplicitBufferLengths => true;
+        public BufferDescriptorNormalizer NormalizeBufferDescriptor { get; } = static words => words.ToArray();
+        public ImageDescriptorNormalizer NormalizeImageDescriptor { get; } = static (words, _, _, _) => words.ToArray();
+        public Func<long> ImageNormalizationVersion { get; } = static () => 1;
+        public RegisteredShader ReadShader(CpuContext context, ulong codeAddress, string label, ReadOnlySpan<uint> userData = default) =>
+            throw new NotSupportedException();
+        public bool TryDecode(CpuContext context, RegisteredShader shader, out Gen5ShaderProgram program, out string error) =>
+            Gen5ShaderTranslator.TryDecodeProgram(context, shader.CodeAddress, out program, out error);
     }
 }

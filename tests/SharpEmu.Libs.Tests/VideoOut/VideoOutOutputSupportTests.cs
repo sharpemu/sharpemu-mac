@@ -127,6 +127,7 @@ public sealed class VideoOutOutputSupportTests
             var expected = new byte[0x32];
             expected[0] = 0xA5;
             expected[^1] = 0xA5;
+            // The class is the host's display policy (default 1080p, the HD class) for either generation.
             BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(1), 1);
             BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(5), 1);
             BinaryPrimitives.WriteUInt64LittleEndian(expected.AsSpan(9), 3);

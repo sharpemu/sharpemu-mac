@@ -238,7 +238,7 @@ public static partial class AgcExports
         private RegisterBanks? _interpreterBanks;
 
         public Dictionary<uint, uint> CxRegisters { get; private set; } = new();
-        public DenseShaderRegisterMap ShRegisters { get; private set; } = new();
+        public ShaderRegisterMirror ShRegisters { get; private set; } = new();
         public Dictionary<uint, uint> UcRegisters { get; private set; } = new();
 
         // With an interpreter attached the banks and the composite extent are its own.
@@ -304,6 +304,7 @@ public static partial class AgcExports
     private sealed class SubmittedGpuState
     {
         public object Gate { get; } = new();
+        public ulong TessellationFactorRingAddress { get; set; }
         public object CommandSubmissionGate { get; } = new();
         public SubmittedDcbState Graphics { get; } = new();
         // The submit-time geometry prepass shadow; only the prepass reads or writes it.

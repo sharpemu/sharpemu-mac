@@ -29,7 +29,7 @@ public sealed partial class LocalDeferredDrawReuseTests
         public bool IsProducerThread => true;
         public long Gate => 0;
         public readonly List<AgcExports.DeferredWork> Work = new();
-        public void EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw) => Work.Add(work);
+        public long EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw) { Work.Add(work); return 0; }
     }
 
     private sealed class Fixture : IDisposable
@@ -59,6 +59,8 @@ public sealed partial class LocalDeferredDrawReuseTests
             // native shader compilation. The production constructor composes its own provider.
             typeof(AgcExports.CommandStreamTranslation).GetField("_executor", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(Translation, executor);
             typeof(AgcExports.CommandStreamTranslation).GetField("_parallel", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(Translation, Prefetch);
+            // A concurrent-resolve host (Metal) defers whole draws; the fake host is not one.
+            typeof(AgcExports.CommandStreamTranslation).GetField("_defersWholeWork", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(Translation, true);
             Translation.BeginSubmission(0, 1, null, Interpreter);
             Host.WriteGuest(IndexBase, new byte[1024]);
         }

@@ -26,6 +26,7 @@ public partial class TrophyGameView : UserControl
 
     private string _gameDirectory = string.Empty;
     private string _titleId = string.Empty;
+    private bool _compatibilityMode;
     private readonly DispatcherTimer _refreshTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly Dictionary<int, (Bitmap? Sharp, Bitmap? Soft)> _icons = [];
     private readonly Dictionary<int, (Image Image, bool Hidden)> _iconImages = [];
@@ -61,6 +62,7 @@ public partial class TrophyGameView : UserControl
     {
         _gameDirectory = gameDirectory;
         _titleId = game.TitleId ?? string.Empty;
+        _compatibilityMode = game.CompatibilityMode;
         GameNameText.Text = game.Name;
         CoverImage.Source = game.Cover;
         CoverFrame.IsVisible = game.Cover is not null;
@@ -103,6 +105,7 @@ public partial class TrophyGameView : UserControl
     {
         _gameDirectory = string.Empty;
         _titleId = string.Empty;
+        _compatibilityMode = false;
         _stamp = 0;
         TrophyList.Children.Clear();
         GradeCounts.Children.Clear();
@@ -242,7 +245,11 @@ public partial class TrophyGameView : UserControl
         {
             TrophyList.Children.Add(new TextBlock
             {
-                Text = Localization.Instance.Get("Trophies.None"),
+                Text = _compatibilityMode && _trophies.Count == 0
+                    ? Localization.Instance.Format("Trophies.GnmMode.KeyHint",
+                        Localization.Instance.Get("Page.Options"), Localization.Instance.Get("Options.GnmMode.TrophyKey.Label"))
+                    : Localization.Instance.Get("Trophies.None"),
+                TextWrapping = TextWrapping.Wrap,
                 Foreground = new SolidColorBrush(Color.Parse("#8E89A6")),
                 FontSize = 15,
                 Margin = new Thickness(4, 12),

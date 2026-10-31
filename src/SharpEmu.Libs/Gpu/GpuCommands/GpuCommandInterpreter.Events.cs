@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -141,6 +142,12 @@ public sealed partial class GpuCommandInterpreter
 
     private static long _acquireBarriers;
 
+    private static readonly ThreadCounter _acquireMemoryPackets = new();
+    private static readonly ThreadCounter _acquireMemoryBarriers = new();
+
+    public static string TakeAcquireMemoryReport() =>
+        FormattableString.Invariant($"acquire_mem={_acquireMemoryPackets.Take()}/{_acquireMemoryBarriers.Take()}");
+
     internal uint AcquireMemoryPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
         // The library's wrapped form and the gfx10 packet share one body: COHER_CNTL with the
@@ -176,9 +183,12 @@ public sealed partial class GpuCommandInterpreter
             Console.Error.WriteLine($"[LOADER][WARN] command_stream.acquire_mem_unknown_gcr bits=0x{unknown:X8}");
         }
 
+        _acquireMemoryPackets.Increment();
         if ((coherControl & CoherCacheActionMask) != 0 || (gcrControl & AcquireGcrCacheActionMask) != 0)
         {
             Interlocked.Increment(ref _acquireBarriers);
+            _acquireMemoryBarriers.Increment();
+            Diagnostics.DispatchRunTally.NoteSync();
             _host.EmitGlobalBarrier();
         }
 

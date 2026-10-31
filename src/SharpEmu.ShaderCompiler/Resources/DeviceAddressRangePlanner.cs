@@ -3,6 +3,7 @@
 
 using System.Collections.Generic;
 using System.Linq;
+using SharpEmu.HLE.Diagnostics;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
@@ -17,7 +18,8 @@ public sealed record DeviceAddressRangePlan(
     bool Bounded,
     long FirstByte,
     long EndByte,
-    bool Plannable)
+    bool Plannable,
+    DeviceAddressUnboundedReason UnboundedReason = DeviceAddressUnboundedReason.None)
 {
     public ulong Extent => Bounded && EndByte > FirstByte ? (ulong)(EndByte - FirstByte) : 0;
 }
@@ -44,6 +46,19 @@ public sealed record DeviceDescriptorTablePlan(
     IReadOnlyList<ScalarValue> Words,
     ScalarValue? RecordTable = null,
     uint RecordStride = 0);
+
+public enum DeviceAddressUnboundedReason
+{
+    None,
+    ScalarRuntimeOffset,
+    VectorOffset,
+    ConstantOffset,
+    UserDataOffset,
+    LoadedOffset,
+    ComputedOffset,
+    OtherOffset,
+    Count,
+}
 
 // Bounds every device-address handle after tracking. The pass is optional: an
 // unplannable handle never fails the plan, it is reported for the hosts to decide.
@@ -709,6 +724,21 @@ public static class DeviceAddressRangePlanner
         }
     }
 
+    private static readonly ThreadCounter BoundedEvaluations = new();
+    private static readonly ThreadCounter[] UnboundedEvaluations =
+        Enumerable.Range(0, (int)DeviceAddressUnboundedReason.Count).Select(_ => new ThreadCounter()).ToArray();
+
+    public static string TakeUnboundedReport()
+    {
+        var parts = new List<string> { FormattableString.Invariant($"bounded={BoundedEvaluations.Take()}") };
+        for (var reason = 1; reason < (int)DeviceAddressUnboundedReason.Count; reason++)
+        {
+            parts.Add(FormattableString.Invariant($"{(DeviceAddressUnboundedReason)reason}={UnboundedEvaluations[reason].Take()}"));
+        }
+
+        return string.Join(" ", parts);
+    }
+
     public static IReadOnlyList<DeviceAddressRangePlan> Plan(ShaderResourcePlan plan)
     {
         var ranges = new List<DeviceAddressRangePlan>();
@@ -768,11 +798,13 @@ public static class DeviceAddressRangePlanner
             var written = memory.Access is MemoryAccess.Write or MemoryAccess.Atomic;
             var bytes = Math.Max((memory.DataBits + 7) / 8, 1u) * Math.Max(memory.DataDwords, 1u);
             var firstByte = (long)unchecked((int)memory.Offset);
+            var reason = UnboundedReasonOf(plan, index);
             ranges[slot] = ranges[slot] with
             {
                 MemoryIndices = [.. ranges[slot].MemoryIndices, index],
                 Written = ranges[slot].Written || written,
-                Bounded = ranges[slot].Bounded && IsBoundedOffset(plan, index),
+                Bounded = ranges[slot].Bounded && reason == DeviceAddressUnboundedReason.None,
+                UnboundedReason = ranges[slot].UnboundedReason != DeviceAddressUnboundedReason.None ? ranges[slot].UnboundedReason : reason,
                 FirstByte = Math.Min(ranges[slot].FirstByte, firstByte),
                 EndByte = Math.Max(ranges[slot].EndByte, firstByte + bytes),
             };
@@ -995,17 +1027,24 @@ public static class DeviceAddressRangePlanner
 
     // An access is bounded when its only run-time term is the record's immediate offset:
     // a scalar read, or a global access whose vector offset is a constant zero.
-    private static bool IsBoundedOffset(ShaderResourcePlan plan, int memoryIndex)
+    private static DeviceAddressUnboundedReason UnboundedReasonOf(ShaderResourcePlan plan, int memoryIndex)
     {
         var memory = plan.Memory[memoryIndex];
         if (memory.Kind == MemoryResourceKind.ScalarAddress)
         {
             var read = plan.Accesses[memoryIndex]?.Read;
-            return read is not null && read.Operands[1].IsConstant;
+            return read is not null && read.Operands[1].IsConstant ? DeviceAddressUnboundedReason.None : DeviceAddressUnboundedReason.ScalarRuntimeOffset;
         }
 
-        var offset = plan.Accesses[memoryIndex]?.Offset;
-        return offset is { IsConstant: true } && offset.ConstantU32 == 0;
+        return plan.Accesses[memoryIndex]?.Offset switch
+        {
+            null or { Kind: ScalarValueKind.Undefined } => DeviceAddressUnboundedReason.VectorOffset,
+            { IsConstant: true } offset => offset.ConstantU32 == 0 ? DeviceAddressUnboundedReason.None : DeviceAddressUnboundedReason.ConstantOffset,
+            { Kind: ScalarValueKind.UserData } => DeviceAddressUnboundedReason.UserDataOffset,
+            { Kind: ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord or ScalarValueKind.ResourceTableWord } => DeviceAddressUnboundedReason.LoadedOffset,
+            { Kind: ScalarValueKind.Operation or ScalarValueKind.Select or ScalarValueKind.Phi or ScalarValueKind.FirstLane } => DeviceAddressUnboundedReason.ComputedOffset,
+            _ => DeviceAddressUnboundedReason.OtherOffset,
+        };
     }
 
     // Evaluates the planned ranges for one draw. A bounded range spans its lowest byte to
@@ -1026,6 +1065,15 @@ public static class DeviceAddressRangePlanner
             var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
             var baseAddress = planned ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
             var size = range.Bounded ? range.Extent : MaxRangeBytes;
+            if (range.Bounded)
+            {
+                BoundedEvaluations.Increment();
+            }
+            else
+            {
+                UnboundedEvaluations[(int)range.UnboundedReason].Increment();
+            }
+
             result[index] = new DeviceAddressRange(range.Handle, baseAddress, planned ? size : 0, planned, range.Written);
         }
 

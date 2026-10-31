@@ -49,7 +49,7 @@ public sealed class MetalSubsetJoinTests
         for (var index = 0; index < formats.Length; index++)
         {
             open.ColorAttachments[index] = new RenderingAttachment(
-                new GpuImageHandle((ulong)index + 1), GpuImageLayout.ColorAttachmentOptimal, formats[index],
+                new GpuImageHandle((ulong)index + 1), formats[index],
                 0, 0, 0, 0, false, false, false, false, false);
         }
 

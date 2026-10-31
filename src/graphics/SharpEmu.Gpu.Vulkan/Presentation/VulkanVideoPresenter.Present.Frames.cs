@@ -102,13 +102,16 @@ internal static unsafe partial class VulkanVideoPresenter
                 },
                 ImageExtent = new Extent3D(_extent.Width, _extent.Height, 1),
             };
-            _vk.CmdCopyBufferToImage(
-                _commandBuffer,
-                _frameUploadBuffers[frameSlot],
-                presentationTarget,
-                ImageLayout.TransferDstOptimal,
-                1,
-                &copyRegion);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdCopyBufferToImage(
+                    _commandBuffer,
+                    _frameUploadBuffers[frameSlot],
+                    presentationTarget,
+                    ImageLayout.TransferDstOptimal,
+                    1,
+                    &copyRegion);
+            }
 
             var toFinalLayout = new ImageMemoryBarrier2
             {
@@ -425,13 +428,16 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 var clearColor = new ClearColorValue(0f, 0f, 0f, 1f);
                 var clearRange = ColorSubresourceRange();
-                _vk.CmdClearColorImage(
-                    _commandBuffer,
-                    encodeForPresent ? encodeImage : presentationTarget,
-                    ImageLayout.TransferDstOptimal,
-                    &clearColor,
-                    1,
-                    &clearRange);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdClearColorImage(
+                        _commandBuffer,
+                        encodeForPresent ? encodeImage : presentationTarget,
+                        ImageLayout.TransferDstOptimal,
+                        &clearColor,
+                        1,
+                        &clearRange);
+                }
                 var clearComplete = new MemoryBarrier2
                 {
                     SType = StructureType.MemoryBarrier2,
@@ -505,26 +511,32 @@ internal static unsafe partial class VulkanVideoPresenter
                         0),
                     Extent = new Extent3D(sourceWidth, sourceHeight, 1),
                 };
-                _vk.CmdCopyImage(
-                    _commandBuffer,
-                    source.Image,
-                    ImageLayout.TransferSrcOptimal,
-                    presentationTarget,
-                    ImageLayout.TransferDstOptimal,
-                    1,
-                    &copy);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdCopyImage(
+                        _commandBuffer,
+                        source.Image,
+                        ImageLayout.TransferSrcOptimal,
+                        presentationTarget,
+                        ImageLayout.TransferDstOptimal,
+                        1,
+                        &copy);
+                }
             }
             else
             {
-                _vk.CmdBlitImage(
-                    _commandBuffer,
-                    source.Image,
-                    ImageLayout.TransferSrcOptimal,
-                    encodeForPresent ? encodeImage : presentationTarget,
-                    ImageLayout.TransferDstOptimal,
-                    1,
-                    &region,
-                    isIntegerUpscale ? Filter.Nearest : Filter.Linear);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdBlitImage(
+                        _commandBuffer,
+                        source.Image,
+                        ImageLayout.TransferSrcOptimal,
+                        encodeForPresent ? encodeImage : presentationTarget,
+                        ImageLayout.TransferDstOptimal,
+                        1,
+                        &region,
+                        isIntegerUpscale ? Filter.Nearest : Filter.Linear);
+                }
             }
 
             if (encodeForPresent)
@@ -578,14 +590,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 VulkanSynchronization.PipelineBarrier(_vk,
                     _commandBuffer, PipelineStageFlags.TransferBit, PipelineStageFlags.TransferBit,
                     0, 0, null, 0, null, 1, &bounceToTransferDst);
-                _vk.CmdCopyImage(
-                    _commandBuffer,
-                    encodeImage,
-                    ImageLayout.TransferSrcOptimal,
-                    bounceImage,
-                    ImageLayout.TransferDstOptimal,
-                    1,
-                    &encodedCopy);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdCopyImage(
+                        _commandBuffer,
+                        encodeImage,
+                        ImageLayout.TransferSrcOptimal,
+                        bounceImage,
+                        ImageLayout.TransferDstOptimal,
+                        1,
+                        &encodedCopy);
+                }
                 var bounceToTransferSrc = new ImageMemoryBarrier2
                 {
                     SType = StructureType.ImageMemoryBarrier2,
@@ -601,14 +616,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 VulkanSynchronization.PipelineBarrier(_vk,
                     _commandBuffer, PipelineStageFlags.TransferBit, PipelineStageFlags.TransferBit,
                     0, 0, null, 0, null, 1, &bounceToTransferSrc);
-                _vk.CmdCopyImage(
-                    _commandBuffer,
-                    bounceImage,
-                    ImageLayout.TransferSrcOptimal,
-                    presentationTarget,
-                    ImageLayout.TransferDstOptimal,
-                    1,
-                    &encodedCopy);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdCopyImage(
+                        _commandBuffer,
+                        bounceImage,
+                        ImageLayout.TransferSrcOptimal,
+                        presentationTarget,
+                        ImageLayout.TransferDstOptimal,
+                        1,
+                        &encodedCopy);
+                }
             }
 
             if (traceDestination)
@@ -646,13 +664,16 @@ internal static unsafe partial class VulkanVideoPresenter
                     },
                     ImageExtent = new Extent3D(_extent.Width, _extent.Height, 1),
                 };
-                _vk.CmdCopyImageToBuffer(
-                    _commandBuffer,
-                    presentationTarget,
-                    ImageLayout.TransferSrcOptimal,
-                    _stagingBuffer,
-                    1,
-                    &copyRegion);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdCopyImageToBuffer(
+                        _commandBuffer,
+                        presentationTarget,
+                        ImageLayout.TransferSrcOptimal,
+                        _stagingBuffer,
+                        1,
+                        &copyRegion);
+                }
                 _swapchainReadbackPending = true;
             }
 
@@ -745,7 +766,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (dumpDir is not null)
                 {
                     Directory.CreateDirectory(dumpDir);
-                    var seq = Interlocked.Increment(ref _guestImageDumpSequence);
+                    var seq = Interlocked.Increment(ref RecordingHost._guestImageDumpSequence);
                     var path = Path.Combine(
                         dumpDir,
                         $"present-{seq:D4}-{_extent.Width}x{_extent.Height}-{_swapchainFormat}.bgra");

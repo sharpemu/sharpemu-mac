@@ -11,14 +11,37 @@ public sealed record TrophyEntry(
     bool Hidden,
     bool Unlocked,
     DateTime? UnlockedAtUtc,
-    byte[]? IconPng);
+    byte[]? IconPng)
+{
+    public int GroupId { get; init; } = -1;
+    public int PlatinumId { get; init; } = -1;
+}
+
+public interface ITrophyPackageReader
+{
+    string ConfigurationStamp { get; }
+    IReadOnlyList<TrophyEntry> Load(string gameDirectory, bool includeIcons, string? language);
+}
 
 public sealed record TrophyUnlockNotice(string TitleId, int TrophyId, int Grade, string Name);
 
 public static class TrophyCatalog
 {
-    public static string PackagePath(string gameDirectory) =>
-        Path.Combine(gameDirectory, "sce_sys", "trophy2", "trophy00.ucp");
+    public static ITrophyPackageReader? CompatibilityReader { get; set; }
+
+    public static string PackagePath(string gameDirectory)
+    {
+        var path = Path.Combine(gameDirectory, "sce_sys", "trophy2", "trophy00.ucp");
+        return File.Exists(path) ? path : Path.Combine(gameDirectory, "sce_sys", "trophy", "trophy00.trp");
+    }
+
+    public static string ContentStamp(string gameDirectory)
+    {
+        var package = new FileInfo(PackagePath(gameDirectory));
+        var binding = new FileInfo(Path.Combine(gameDirectory, "sce_sys", "npbind.dat"));
+        return $"{package.FullName}|{(package.Exists ? package.Length : 0)}|{(package.Exists ? package.LastWriteTimeUtc.Ticks : 0)}|" +
+            $"{(binding.Exists ? binding.LastWriteTimeUtc.Ticks : 0)}|{CompatibilityReader?.ConfigurationStamp}";
+    }
 
     public static IReadOnlyDictionary<int, DateTime> ReadUnlocks(string titleId)
     {
@@ -54,11 +77,9 @@ public static class TrophyCatalog
 
     public static long Stamp(string gameDirectory, string titleId)
     {
-        var package = new FileInfo(Path.Combine(gameDirectory, "sce_sys", "trophy2", "trophy00.ucp"));
         var unlocks = new FileInfo(TrophyService.UnlockFilePath(titleId.ToUpperInvariant()));
         return HashCode.Combine(
-            package.Exists ? package.LastWriteTimeUtc.Ticks : 0,
-            package.Exists ? package.Length : 0,
+            ContentStamp(gameDirectory),
             unlocks.Exists ? unlocks.LastWriteTimeUtc.Ticks : 0,
             unlocks.Exists ? unlocks.Length : 0);
     }
@@ -67,14 +88,7 @@ public static class TrophyCatalog
     {
         try
         {
-            var packagePath = Path.Combine(gameDirectory, "sce_sys", "trophy2", "trophy00.ucp");
-            if (!File.Exists(packagePath))
-            {
-                return [];
-            }
-
-            using var stream = new FileStream(packagePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, FileOptions.RandomAccess);
-            var trophies = TrophyService.ReadTrophies(stream, includeIcons, language);
+            var trophies = ReadDefinitions(gameDirectory, includeIcons, language);
             TrophyService.ApplyUnlocks(trophies, TrophyService.UnlockFilePath(titleId.ToUpperInvariant()));
             return trophies
                 .Select(t => new TrophyEntry(
@@ -85,7 +99,7 @@ public static class TrophyCatalog
                     t.Hidden,
                     t.Unlocked,
                     t.Unlocked ? new DateTime(t.UnlockedAt * 10, DateTimeKind.Utc) : null,
-                    t.IconPng))
+                    t.IconPng) { GroupId = t.GroupId, PlatinumId = t.PlatinumId })
                 .ToArray();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException
@@ -93,6 +107,24 @@ public static class TrophyCatalog
         {
             return [];
         }
+    }
+
+    internal static TrophyService.Trophy[] ReadDefinitions(string gameDirectory, bool includeIcons, string? language)
+    {
+        var path = PackagePath(gameDirectory);
+        if (!File.Exists(path))
+            return [];
+        if (Path.GetExtension(path).Equals(".trp", StringComparison.OrdinalIgnoreCase))
+        {
+            return CompatibilityReader?.Load(gameDirectory, includeIcons, language).Select(t => new TrophyService.Trophy
+            {
+                Id = t.Id, Grade = t.Grade, Name = t.Name, Description = t.Description, Hidden = t.Hidden,
+                GroupId = t.GroupId, PlatinumId = t.PlatinumId, IconPng = t.IconPng,
+            }).ToArray() ?? [];
+        }
+
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, FileOptions.RandomAccess);
+        return TrophyService.ReadTrophies(stream, includeIcons, language);
     }
 
     public static bool TryParseUnlockLine(string line, out TrophyUnlockNotice notice)

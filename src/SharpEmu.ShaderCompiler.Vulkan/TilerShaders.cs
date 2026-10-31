@@ -16,6 +16,7 @@ public enum TilerBlockShape
     RenderTarget64KB,
     Depth64KB,
     RenderTarget64KBGen5,
+    GcnThin1D,
 }
 
 // Assembles the tiler compute shaders: block copies per shape and element size,
@@ -327,8 +328,19 @@ public static class TilerShaders
         TilerBlockShape.Standard64KB or TilerBlockShape.Prt64KB or TilerBlockShape.RenderTarget64KB or TilerBlockShape.RenderTarget64KBGen5 => (ThinExtent(65536, bytes, 256, 128, 64), 65536),
         TilerBlockShape.Standard64KB3D or TilerBlockShape.Prt64KB3D => (Thick64KBExtent(bytes), 65536),
         TilerBlockShape.Depth64KB => (ThinExtent(65536, bytes, 256, 128, 128), 65536),
+        TilerBlockShape.GcnThin1D => ((8, 8, 1), 64 * bytes),
         _ => throw new ArgumentOutOfRangeException(nameof(shape)),
     };
+
+    private static Term[] GcnThin1DTerms(uint bytes)
+    {
+        var b = (int)Log2(bytes);
+        return
+        [
+            X(b, 1u << b), Y(b + 1, 1u << (b + 1)), X(b + 1, 1u << (b + 2)),
+            Y(b + 2, 1u << (b + 3)), X(b + 2, 1u << (b + 4)), Y(b + 3, 1u << (b + 5)),
+        ];
+    }
 
     private static uint BlockOffset(ShaderModuleContext shaderModule, TilerBlockShape shape, uint bytes, uint x, uint y, uint z)
     {
@@ -362,6 +374,8 @@ public static class TilerShaders
                 return shaderModule.Xor(XorTerms(shaderModule, x, y, z, Gen5RenderTargetTerms(bytes)), ZSpread(shaderModule, z));
             case TilerBlockShape.Depth64KB:
                 return shaderModule.Xor(ZSpread(shaderModule, z), XorTerms(shaderModule, x, y, z, DepthTerms(bytes)));
+            case TilerBlockShape.GcnThin1D:
+                return XorTerms(shaderModule, x, y, z, GcnThin1DTerms(bytes));
             default:
                 throw new ArgumentOutOfRangeException(nameof(shape));
         }

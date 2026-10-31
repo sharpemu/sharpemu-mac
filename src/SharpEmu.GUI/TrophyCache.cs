@@ -10,7 +10,7 @@ internal static class TrophyCache
 {
     private sealed record CachedTrophy(int Id, int Grade, string Name, string Description, bool Hidden);
 
-    private sealed record CachedGame(long PackageSize, Dictionary<string, List<CachedTrophy>> Languages);
+    private sealed record CachedGame(long PackageSize, Dictionary<string, List<CachedTrophy>> Languages, string? ContentStamp = null);
 
     private static readonly string FilePath = Path.Combine(SharpEmu.Logging.SharpEmuPaths.DataRoot, "user", "trophy_cache.json");
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
@@ -27,11 +27,12 @@ internal static class TrophyCache
         }
 
         var key = Path.GetFullPath(gameDirectory);
+        var contentStamp = TrophyCatalog.ContentStamp(gameDirectory);
         List<CachedTrophy>? trophies = null;
         lock (Gate)
         {
             EnsureLoaded();
-            if (_games!.TryGetValue(key, out var cached) && cached.PackageSize == package.Length)
+            if (_games!.TryGetValue(key, out var cached) && cached.ContentStamp == contentStamp)
             {
                 cached.Languages.TryGetValue(language, out trophies);
             }
@@ -44,9 +45,9 @@ internal static class TrophyCache
                 .ToList();
             lock (Gate)
             {
-                if (!_games!.TryGetValue(key, out var cached) || cached.PackageSize != package.Length)
+                if (!_games!.TryGetValue(key, out var cached) || cached.ContentStamp != contentStamp)
                 {
-                    cached = new CachedGame(package.Length, new Dictionary<string, List<CachedTrophy>>(StringComparer.OrdinalIgnoreCase));
+                    cached = new CachedGame(package.Length, new Dictionary<string, List<CachedTrophy>>(StringComparer.OrdinalIgnoreCase), contentStamp);
                     _games[key] = cached;
                 }
 

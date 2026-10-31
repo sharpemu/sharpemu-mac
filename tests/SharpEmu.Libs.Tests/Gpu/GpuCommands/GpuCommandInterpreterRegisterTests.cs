@@ -279,6 +279,24 @@ public sealed class GpuCommandInterpreterRegisterTests
     }
 
     [Fact]
+    public void HullTableAddress_PreservesByteAddressAndSnapshotAcrossDirectAndIndirectWrites()
+    {
+        var runner = new StreamRunner();
+        runner.Run(StreamRunner.Packet(PacketOpcode.SetShaderRegister,
+            ShaderRegisterOffset.SpiShaderUserDataAddrLoHs, 0x12345678, 0xABCD0042));
+        Assert.Equal(0x4212345678ul, runner.Interpreter.TypedRegisters.Shader.Vertex.HullUserDataAddress);
+        var snapshot = runner.Interpreter.TypedRegisters.Snapshot();
+
+        runner.Host.WriteWords(Table, Pairs(
+            (ShaderRegisterOffset.SpiShaderUserDataAddrHiHs, 0x77),
+            (ShaderRegisterOffset.SpiShaderUserDataAddrLoHs, 0x87654321)));
+        runner.Run(Table5(PacketOpcode.SetShaderRegisterIndirect, Table, 2));
+
+        Assert.Equal(0x7787654321ul, runner.Interpreter.TypedRegisters.Shader.Vertex.HullUserDataAddress);
+        Assert.Equal(0x4212345678ul, snapshot.Shader.Vertex.HullUserDataAddress);
+    }
+
+    [Fact]
     public void WrappedTables_CarryTheCountFirst()
     {
         var runner = new StreamRunner();

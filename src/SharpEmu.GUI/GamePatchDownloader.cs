@@ -9,6 +9,7 @@ namespace SharpEmu.GUI;
 internal static class GamePatchDownloader
 {
     internal const string RepositoryRoot = "https://raw.githubusercontent.com/sharpemu/ps5patches/main/";
+    internal const string Ps4RepositoryRoot = "https://raw.githubusercontent.com/sharpemu/ps4patches/main/";
     private static readonly HttpClient Http = new()
     {
         Timeout = TimeSpan.FromSeconds(30),
@@ -19,11 +20,13 @@ internal static class GamePatchDownloader
     private sealed record PatchFile(string File, string[] TitleIds, string[] Versions);
 
     internal static async Task<int> DownloadAsync(string titleId, string? version, string directory,
-        CancellationToken cancellationToken = default, HttpClient? client = null)
+        CancellationToken cancellationToken = default, HttpClient? client = null, bool compatibilityMode = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(titleId);
         client ??= Http;
-        var indexBytes = await client.GetByteArrayAsync(RepositoryRoot + "patches.json", cancellationToken);
+        var repositoryRoot = compatibilityMode ? Ps4RepositoryRoot : RepositoryRoot;
+        var patchDirectory = compatibilityMode ? "orbis_patches/" : "prospero_patches/";
+        var indexBytes = await client.GetByteArrayAsync(repositoryRoot + "patches.json", cancellationToken);
         var index = JsonSerializer.Deserialize<PatchIndex>(indexBytes, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         if (index is not { FormatVersion: 1, Files: { Length: <= 4096 } })
             throw new InvalidDataException("The patch repository index is invalid or unsupported.");
@@ -46,7 +49,7 @@ internal static class GamePatchDownloader
                 continue;
 
             if (downloads.Count >= 32) throw new InvalidDataException("Too many patch files match this game.");
-            var bytes = await client.GetByteArrayAsync(RepositoryRoot + "prospero_patches/" + Uri.EscapeDataString(file.File), cancellationToken);
+            var bytes = await client.GetByteArrayAsync(repositoryRoot + patchDirectory + Uri.EscapeDataString(file.File), cancellationToken);
             totalBytes = checked(totalBytes + bytes.Length);
             if (totalBytes > 16 << 20)
                 throw new InvalidDataException("The patch download exceeds its size limit.");

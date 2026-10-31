@@ -283,6 +283,24 @@ public sealed class DeferredSignalPublicationTests
     }
 
     [Fact]
+    public void GpuCompletionLabelWaitsForItsTickWithoutAnEarlierDump()
+    {
+        using var harness = new DeferredSignalHarness();
+        var runner = harness.Runner;
+        runner.Interpreter.CompletionLabelsRequireGpu = true;
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(Label(StreamRunner.LabelAddress, 7)));
+        Assert.Equal(0u, runner.Host.ReadDword(StreamRunner.LabelAddress));
+        Assert.Equal(1, harness.Pending.Count);
+        harness.Scheduler.RunCompletedOperations();
+        Assert.Equal(0u, runner.Host.ReadDword(StreamRunner.LabelAddress));
+        harness.Scheduler.Flush();
+        harness.Device.Complete(1);
+        harness.Scheduler.RunCompletedOperations();
+        Assert.Equal(7u, runner.Host.ReadDword(StreamRunner.LabelAddress));
+        Assert.Equal(0, harness.Pending.Count);
+    }
+
+    [Fact]
     public void LaterOverlappingLabelWinsAndUnrelatedQueueStaysImmediate()
     {
         using var harness = new DeferredSignalHarness();

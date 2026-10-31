@@ -41,6 +41,20 @@ public sealed class MetadataWriteRanges
         if (size == 0) return false;
         var last = address + Math.Min(size - 1, ulong.MaxValue - address);
         var ranges = System.Threading.Volatile.Read(ref _ranges);
+        var low = First(ranges, address);
+        return low < ranges.Length && ranges[low].First <= last;
+    }
+
+    public bool Contains(ulong address, ulong size)
+    {
+        var last = address + Math.Min(Math.Max(1UL, size) - 1, ulong.MaxValue - address);
+        var ranges = System.Threading.Volatile.Read(ref _ranges);
+        var low = First(ranges, address);
+        return low < ranges.Length && ranges[low].First <= address && ranges[low].Last >= last;
+    }
+
+    private static int First(Interval[] ranges, ulong address)
+    {
         var low = 0;
         var high = ranges.Length;
         while (low < high)
@@ -49,6 +63,6 @@ public sealed class MetadataWriteRanges
             if (ranges[middle].Last < address) low = middle + 1;
             else high = middle;
         }
-        return low < ranges.Length && ranges[low].First <= last;
+        return low;
     }
 }

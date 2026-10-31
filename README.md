@@ -233,6 +233,9 @@ One of the few PS5 emulator projects available and very useful for studying nati
 * **Ryujinx**
 Provided valuable references for filesystem handling and low-level C# implementation patterns.
 
+* **[OpenGNM](https://github.com/PS4-OpenGNM/opengnm)**
+Used as a reference for the general GCN architecture.
+
 ## License
 
 SharpEmu is licensed under the [**GPL-2.0-or-later**](./LICENSE.txt) license; see

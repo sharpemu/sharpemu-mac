@@ -61,6 +61,35 @@ public sealed class MipStatistics
         }
     }
 
+    public void NoteSampled(in TextureDescriptorWords texture, uint statistics)
+    {
+        if (statistics == ResourceSnapshot.NoMipStatistics)
+        {
+            NoteSampled(texture);
+        }
+        else if ((statistics & ResourceSnapshot.MipStatisticsEnabled) != 0 && !texture.IsNull)
+        {
+            _bindingsBySlot[statistics & ResourceSnapshot.MipStatisticsSlotWordMask]++;
+        }
+    }
+
+    public static uint ImageField(ReadOnlySpan<uint> texture, uint statistics)
+    {
+        if (statistics == ResourceSnapshot.NoMipStatistics)
+        {
+            return ImageField(texture);
+        }
+
+        if ((statistics & ResourceSnapshot.MipStatisticsEnabled) == 0)
+        {
+            return NoCounterField;
+        }
+
+        var baseLevel = (texture[3] >> 12) & 0xF;
+        var minLod = (texture[1] >> 8) & 0xFFF;
+        return (statistics & ResourceSnapshot.MipStatisticsSlotWordMask) | (baseLevel << 8) | (minLod << 16);
+    }
+
     public static uint ImageField(ReadOnlySpan<uint> texture)
     {
         if (((texture[5] >> 25) & 1) == 0)
@@ -87,6 +116,23 @@ public sealed class MipStatistics
             var words = index < images.Length ? images[index] : null;
             shaderData[(int)(layout.MipStatisticsDword + (uint)index)] = image is { MipStatistics: true } && words is { Length: >= 8 }
                 ? ImageField(words)
+                : NoCounterField;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="WriteImageFields(Span{uint}, BindingLayout, ShaderResourceInfo, uint[][])"/> with the
+    /// statistics the snapshot read for each image (<see cref="ResourceSnapshot.NoMipStatistics"/> when none).
+    /// </summary>
+    public static void WriteImageFields(Span<uint> shaderData, BindingLayout layout, ShaderResourceInfo info, uint[][] images, uint[]? statistics)
+    {
+        for (var index = 0; index < layout.MipStatisticsCount; index++)
+        {
+            var image = index < info.Images.Count ? info.Images[index] : null;
+            var words = index < images.Length ? images[index] : null;
+            var current = statistics is not null && index < statistics.Length ? statistics[index] : ResourceSnapshot.NoMipStatistics;
+            shaderData[(int)(layout.MipStatisticsDword + (uint)index)] = image is { MipStatistics: true } && words is { Length: >= 8 }
+                ? ImageField(words, current)
                 : NoCounterField;
         }
     }

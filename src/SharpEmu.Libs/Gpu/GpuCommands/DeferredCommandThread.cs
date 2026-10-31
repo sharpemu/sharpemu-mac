@@ -200,12 +200,15 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     // The producer side, on the command stream thread.
 
-    public void EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw)
+    // Items are not numbered: the whole draws and dispatches this thread runs resolve where they
+    // run, so no pending-write sequence waits on them.
+    public long EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw)
     {
         var item = RentAsyncItem(Kind.Deferred);
         item.Work = work;
         item.IsDraw = isDraw;
         Enqueue(item);
+        return 0;
     }
 
     public void Post(Action action)

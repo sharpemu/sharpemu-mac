@@ -85,7 +85,10 @@ public static partial class ImageRequestBuilders
             }
 
             var built = DepthTargetCore(in depthWords, device, copyMode: false, writeBuffer: false);
-            _depthTargetMemo = new DepthTargetMemo(depthWords, device, built);
+            var kept = _depthTargetMemo ??= new DepthTargetMemo();
+            kept.Words = depthWords;
+            kept.Device = device;
+            kept.Result = built;
             return built;
         }
 
@@ -113,7 +116,12 @@ public static partial class ImageRequestBuilders
         return result;
     }
 
-    private sealed record DepthTargetMemo(DepthTargetWords Words, IImageFormatSupport Device, DepthTargetResolution? Result);
+    private sealed class DepthTargetMemo
+    {
+        public DepthTargetWords Words;
+        public IImageFormatSupport? Device;
+        public DepthTargetResolution? Result;
+    }
 
     [ThreadStatic]
     private static DepthTargetMemo? _depthTargetMemo;

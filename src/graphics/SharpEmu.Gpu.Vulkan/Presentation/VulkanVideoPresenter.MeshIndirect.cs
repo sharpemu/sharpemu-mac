@@ -23,14 +23,23 @@ internal static unsafe partial class VulkanVideoPresenter
 {
     private sealed partial class Presenter
     {
-        private delegate* unmanaged<CommandBuffer, Silk.NET.Vulkan.Buffer, ulong, uint, uint, void> _cmdDrawMeshTasksIndirect;
-        private MeshIndirectPipeline? _meshIndirectPipeline;
+        internal delegate* unmanaged<CommandBuffer, Silk.NET.Vulkan.Buffer, ulong, uint, uint, void> _cmdDrawMeshTasksIndirect;
+        internal MeshIndirectPipeline? _meshIndirectPipeline;
+    }
+
+    private sealed partial class RecordingHost
+    {
         private static int _clampWarned;
 
-        public bool SupportsIndirectMeshDraw => _supportsMeshShader && _cmdDrawMeshTasksIndirect is not null;
+        public bool SupportsIndirectMeshDraw => _presenter._supportsMeshShader && _presenter._cmdDrawMeshTasksIndirect is not null;
 
         public IIndirectMeshDraw PrepareIndirectMeshDraw(in IndirectMeshDrawRequest request)
         {
+            if (_worker)
+            {
+                throw Serial("indirect mesh draw", resumable: true);
+            }
+
             _ = RequirePreparation();
             if (!SupportsIndirectMeshDraw) throw SubmissionScheduler.Fatal("The Vulkan device has no indirect mesh command.");
             var indexBase = request.IndexAddress & ~3ul;
@@ -42,8 +51,8 @@ internal static unsafe partial class VulkanVideoPresenter
             try
             {
                 indices = RetainMeshInput(indexBase, size);
-                _meshIndirectPipeline ??= new MeshIndirectPipeline(_deviceInfo);
-                resources = _meshIndirectPipeline.Prepare(_scheduler, arguments.Binding, indices.Binding, prefix, request);
+                var pipeline = _presenter._meshIndirectPipeline ??= new MeshIndirectPipeline(_deviceInfo);
+                resources = pipeline.Prepare(_scheduler, arguments.Binding, indices.Binding, prefix, request);
                 return new PreparedIndirectMesh(this, resources, arguments, indices, request.ArgumentsAddress, request.IndexCapacity);
             }
             catch
@@ -84,7 +93,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private sealed class PreparedIndirectMesh(Presenter owner, MeshIndirectPipeline.PreparedDraw resources,
+        private sealed class PreparedIndirectMesh(RecordingHost owner, MeshIndirectPipeline.PreparedDraw resources,
             RetainedMeshInput arguments, RetainedMeshInput indices, ulong argumentsAddress, uint capacity) : IIndirectMeshDraw
         {
             private bool _recorded;
@@ -122,8 +131,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     throw SubmissionScheduler.Fatal("The indirect mesh draw lost its recording lifetime.");
                 var command = owner.BeginBatchedGuestCommands();
                 owner._gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
-                owner._cmdDrawMeshTasksIndirect(command, resources.CommandBuffer, 0, 1, 12);
-                owner._occlusionQueries?.TraceDraw();
+                owner._presenter._cmdDrawMeshTasksIndirect(command, resources.CommandBuffer, 0, 1, 12);
+                owner._presenter._occlusionQueries?.TraceDraw();
                 if (MeshDrawTrace.Active) MeshDrawTrace.RecordedCommand((ulong)command.Handle);
                 owner._gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.MeshDraw,
                     owner._boundGraphicsPipeline?.Id ?? 0, 0, 0, 0,

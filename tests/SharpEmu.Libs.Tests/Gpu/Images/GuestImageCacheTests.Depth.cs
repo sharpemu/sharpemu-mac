@@ -265,10 +265,10 @@ public sealed unsafe partial class GuestImageCacheTests
         harness.Worker.Run(() =>
         {
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            image.Transition(AccessFlags.TransferWriteBit, null, command);
             var clear = new ClearColorValue { Uint32_0 = texel[0], Uint32_1 = texel[1], Uint32_2 = texel[2], Uint32_3 = texel[3] };
             var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, levels, 0, layers);
-            harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+            harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
         });
         harness.MarkGpuWritten(identifier);
         harness.Worker.Run(() =>
@@ -315,11 +315,11 @@ public sealed unsafe partial class GuestImageCacheTests
         harness.Worker.Run(() =>
         {
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            image.Transition(AccessFlags.TransferWriteBit, null, command);
             var clear = new ClearColorValue { Uint32_0 = 0, Uint32_1 = 0, Uint32_2 = 0, Uint32_3 = 0 };
             clear.Float32_0 = 1f;
             var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, levels, 0, layers);
-            harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+            harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
         });
         harness.MarkGpuWritten(identifier);
         harness.Worker.Run(() =>
@@ -374,10 +374,10 @@ public sealed unsafe partial class GuestImageCacheTests
         {
             var image = harness.Image(layeredColorId);
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            image.Transition(AccessFlags.TransferWriteBit, null, command);
             var clear = new ClearColorValue { Float32_0 = 1.0f };
             var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 6);
-            harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+            harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
         });
         harness.MarkGpuWritten(layeredColorId);
 
@@ -427,12 +427,12 @@ public sealed unsafe partial class GuestImageCacheTests
         {
             var image = harness.Image(colorIdentifier);
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            image.Transition(AccessFlags.TransferWriteBit, null, command);
             for (uint layer = 0; layer < layers; layer++)
             {
                 var clear = new ClearColorValue { Float32_0 = (layer + 1) / 8f };
                 var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, layer, 1);
-                harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+                harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
             }
         });
         harness.MarkGpuWritten(colorIdentifier);
@@ -567,7 +567,7 @@ public sealed unsafe partial class GuestImageCacheTests
         Assert.NotEqual(0UL, depthView.Handle);
         var depthImage = harness.Image(depthId);
         Assert.Equal(2u, depthImage.Backing.Samples);
-        Assert.Equal(GpuImageLayout.DepthStencilAttachmentOptimal, depthImage.Backing.State.Layout.ToNeutral());
+        Assert.Equal(ImageLayout.General, depthImage.Backing.State.Layout);
         Assert.True(depthImage.IsGpuModified);
         Assert.Equal(0u, depthImage.Description.HtileClearMask);
         Assert.Equal(depth.Description.Metadata.Range, depthImage.Description.Metadata.Range);

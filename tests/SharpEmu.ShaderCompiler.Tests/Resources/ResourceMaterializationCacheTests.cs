@@ -228,6 +228,37 @@ public sealed class ResourceMaterializationCacheTests
     }
 
     [Fact]
+    public void ToggledMipStatisticsBitsReuseTheMaterializationWithTheCurrentSlot()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var first, out _));
+        Assert.Null(first.MipStatistics);
+        var record = HeapBase + 0x100 + 5 * 32;
+        var image = Array.FindIndex(first.Images, words => words[0] == 0x1000);
+        Assert.True(image >= 0);
+
+        heap.Words[record + 5 * 4] = 1u << 25;
+        heap.Words[record + 6 * 4] = 0x2A;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var second, out _));
+        Assert.Same(first.Images, second.Images);
+        Assert.Equal((1, 1), (cache.Hits, cache.Misses));
+        Assert.Equal(0x2Au | ResourceSnapshot.MipStatisticsEnabled, second.MipStatistics![image]);
+        Assert.Equal(0u, second.MipStatistics[1 - image]);
+
+        heap.Words[record + 6 * 4] = 0x2B;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var third, out _));
+        Assert.Same(first.Images, third.Images);
+        Assert.Equal(0x2Bu | ResourceSnapshot.MipStatisticsEnabled, third.MipStatistics![image]);
+
+        heap.Words[record] = 0x3000;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var fourth, out _));
+        Assert.NotSame(first.Images, fourth.Images);
+        Assert.Equal((2, 2), (cache.Hits, cache.Misses));
+    }
+
+    [Fact]
     public void AChangedDescriptorWordMaterializesAgain()
     {
         var plan = Plan();
@@ -858,5 +889,109 @@ public sealed class ResourceMaterializationCacheTests
             Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _, shaderBase: draw * 0x100));
         Assert.True(cache.EntryCount <= 128);
         Assert.True(cache.RetainedBytes < ResourceMaterializationCache.DefaultByteBudget);
+    }
+
+    private static bool RunAfterChange(ResourceMaterializationCache cache, ShaderResourcePlan plan, Heap heap, ref uint value,
+        out ResourceSnapshot snapshot)
+    {
+        value += 0x1000;
+        heap.Words[HeapBase + 0x100 + 5 * 32] = value;
+        return Run(cache, plan, heap, [0x1000, 0], out snapshot, out _);
+    }
+
+    [Fact]
+    public void WithChurnLimitedAKeyIsStoredOnItsSecondSighting()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(limitChurn: true);
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var first, out _));
+        Assert.Equal((0, 0, 1), (cache.Hits, cache.Misses, cache.Unrecorded));
+
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var second, out _));
+        Assert.Equal((0, 1, 1), (cache.Hits, cache.Misses, cache.Unrecorded));
+        Assert.Equal(first.Images.Select(image => image.ToArray()), second.Images.Select(image => image.ToArray()));
+
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var third, out _));
+        Assert.Same(second, third);
+        Assert.Equal((1, 1, 1), (cache.Hits, cache.Misses, cache.Unrecorded));
+    }
+
+    [Fact]
+    public void WithChurnLimitedAKeyThatIsStaleOnEveryLookupStopsBeingStored()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(limitChurn: true);
+        uint value = 0x3000;
+        for (var lookup = 0; lookup < 4; lookup++)
+        {
+            Assert.True(RunAfterChange(cache, plan, heap, ref value, out _));
+        }
+
+        Assert.Equal((0, 3, 1), (cache.Hits, cache.Misses, cache.Unrecorded));
+
+        for (var lookup = 0; lookup < 33; lookup++)
+        {
+            Assert.True(RunAfterChange(cache, plan, heap, ref value, out var snapshot));
+            var reference = new ResourceSnapshot();
+            var referenceSpecialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: heap.Read),
+                ref reference, ref referenceSpecialization));
+            Assert.Equal(reference.Images.Select(image => image.ToArray()), snapshot.Images.Select(image => image.ToArray()));
+        }
+
+        Assert.Equal((0, 3, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
+
+        Assert.True(RunAfterChange(cache, plan, heap, ref value, out _));
+        Assert.Equal((0, 4, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
+        Assert.True(RunAfterChange(cache, plan, heap, ref value, out _));
+        Assert.Equal((0, 4, 35), (cache.Hits, cache.Misses, cache.Unrecorded));
+    }
+
+    [Fact]
+    public void WithChurnLimitedAVolatileKeyIsStoredAgainOnceItSettles()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(limitChurn: true);
+        uint value = 0x3000;
+        for (var lookup = 0; lookup < 37; lookup++)
+        {
+            Assert.True(RunAfterChange(cache, plan, heap, ref value, out _));
+        }
+
+        Assert.Equal((0, 3, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
+
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var stored, out _));
+        Assert.Equal((0, 4, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var reused, out _));
+        Assert.Same(stored, reused);
+        Assert.Equal((1, 4, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
+    }
+
+    [Fact]
+    public void AStoredSnapshotRevalidatesUntilItsBytesChange()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var snapshot, out _));
+        Assert.True(cache.Revalidate(snapshot, heap.ReadResident));
+        Assert.True(cache.Revalidate(snapshot, heap.ReadResident));
+        heap.Words[HeapBase + 0x100 + 5 * 32] = 0x3000;
+        Assert.False(cache.Revalidate(snapshot, heap.ReadResident));
+    }
+
+    [Fact]
+    public void AnUnrecordedSnapshotDoesNotRevalidate()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(limitChurn: true);
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var snapshot, out _));
+        Assert.False(cache.Revalidate(snapshot, heap.ReadResident));
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var stored, out _));
+        Assert.True(cache.Revalidate(stored, heap.ReadResident));
     }
 }

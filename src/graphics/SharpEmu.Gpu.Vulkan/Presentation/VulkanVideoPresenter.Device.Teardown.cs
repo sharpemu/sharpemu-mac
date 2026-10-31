@@ -35,11 +35,12 @@ internal static unsafe partial class VulkanVideoPresenter
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
-            DestroyFeedbackSnapshotPool();
+            _recording?.DestroyFeedbackSnapshotPool();
             DestroyRenderPipelines();
             DestroyBindlessHeap();
             DestroyCallMarks();
             _descriptorHeap.Dispose();
+            _contentUploads.Dispose();
             _imageCache.Dispose();
             _samplerStore.Dispose();
             _bufferCache.AsyncReadback?.Dispose();

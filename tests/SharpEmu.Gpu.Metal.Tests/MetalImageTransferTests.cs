@@ -42,8 +42,8 @@ public sealed partial class MetalImageTransferTests(ITestOutputHelper output)
             }
         }
 
-        // Nine kinds take all five element sizes; Depth64KB stops at eight bytes.
-        Assert.Equal(2 * (9 * 5 + 4), variants);
+        // Ten kinds take all five element sizes; Depth64KB stops at eight bytes.
+        Assert.Equal(2 * (10 * 5 + 4), variants);
         var conversions = MetalTilerShaders.CreateConversionLibrary();
         foreach (var name in new[]
                  {
@@ -60,7 +60,8 @@ public sealed partial class MetalImageTransferTests(ITestOutputHelper output)
     public void CpuTwinCasesCoverEveryKindAndElementSize()
     {
         var cases = MetalTilerCases.All().ToList();
-        Assert.Equal(44 + 39 + 9 + 15, cases.Count);
+        // The last ten are the GCN 1D-thin kind's (one per element size and direction).
+        Assert.Equal(44 + 39 + 9 + 15 + 10, cases.Count);
         Assert.All(cases, tilerCase => Assert.Equal((int)tilerCase.Transfer.TiledSize, tilerCase.Tiled.Length));
     }
 
