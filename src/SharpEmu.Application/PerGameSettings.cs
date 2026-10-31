@@ -14,9 +14,11 @@ namespace SharpEmu.Application;
 /// </summary>
 public sealed class PerGameSettings
 {
+    // A null value is the default, so it is left out: the file names only what the game changes.
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
     public string? LogLevel { get; set; }
