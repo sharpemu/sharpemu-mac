@@ -130,6 +130,9 @@ public sealed class MacHostWindow : IMetalHostWindow
         }
     }
 
+    /// <summary>Drawable pixels per logical point; 1 until the layer has a scale.</summary>
+    public double ContentsScale => _contentsScale <= 0 ? 1.0 : _contentsScale;
+
     public (int Width, int Height) PixelSize
     {
         get

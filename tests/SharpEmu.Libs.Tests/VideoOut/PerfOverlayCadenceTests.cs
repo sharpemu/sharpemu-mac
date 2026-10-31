@@ -26,9 +26,25 @@ public sealed class PerfOverlayCadenceTests
         }
         Assert.Equal(0, ReadPublishedFps());
 
+        // One guest frame over this window and the empty one before it.
         PerfOverlay.RecordGuestPresent();
         for (var index = 0; index < 120; index++) PerfOverlay.RecordPresent();
-        Assert.InRange(ReadPublishedFps(), .9, 1.0);
+        Assert.InRange(ReadPublishedFps(), .45, .55);
+    }
+
+    [Fact]
+    public void SlowGuestCadenceDoesNotReadZeroBetweenFrames()
+    {
+        using var state = new OverlayState();
+        // Two flips a second, the second half of a window holding none.
+        PerfOverlay.RecordSubmit();
+        PerfOverlay.RecordSubmit();
+        Assert.InRange(ReadPublishedFps(), 1.9, 2.0);
+        Assert.InRange(ReadPublishedFps(), .95, 1.0);
+
+        // A real stall still reaches zero once the averaging span has passed.
+        for (var window = 0; window < 4; window++) ReadPublishedFps();
+        Assert.Equal(0, ReadPublishedFps());
     }
 
     private static double ReadPublishedFps()
@@ -64,6 +80,7 @@ public sealed class PerfOverlayCadenceTests
                          "_lastSubmitTimestamp", "_lastPresentTimestamp", "_sessionStartTimestamp" })
                 Field(name).SetValue(null, 0L);
             Field("_trackPresentedGuestFrames").SetValue(null, false);
+            Field("_fpsAverage").SetValue(null, Activator.CreateInstance(Field("_fpsAverage").FieldType));
             Field("_gpuUsage").SetValue(null, null);
         }
 

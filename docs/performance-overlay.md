@@ -67,3 +67,10 @@ GPU usage on macOS is the utilization of the whole GPU, read from the
 `Device Utilization %` statistic of the `IOAccelerator` service. macOS has no
 per-process GPU engine counters, so the value includes other applications. It
 shows **N/A** when the statistic cannot be read.
+
+The Metal presenter draws Full and Minimal panels in the final present pass, at the
+window's logical scale and selected corner. It refreshes the panel every 100 ms
+even when the guest image is unchanged. FPS averages the last four statistics
+windows so slow guest frame rates do not alternate between a positive value and
+zero every second; four empty windows still report a stall. Title bar mode keeps
+using the window title.
