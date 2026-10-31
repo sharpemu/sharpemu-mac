@@ -2505,6 +2505,13 @@ public static partial class Gen5SpirvTranslator
                 return TryEmitGlobalMemory(instruction, globalMemory, out error);
             }
 
+            if (instruction.Opcode is "BufferGl0Inv" or "BufferGl1Inv")
+            {
+                // The decoder plans no memory access for these, so they carry no buffer
+                // control; the host storage path is already coherent.
+                return true;
+            }
+
             if (instruction.Control is Gen5BufferMemoryControl bufferMemory)
             {
                 return TryEmitBufferMemory(instruction, bufferMemory, out error);
