@@ -44,6 +44,9 @@ public static partial class ResourceMaterializer
         public IndirectSelectorDiagnostic? SelectorDiagnostic;
         // The search has no analysis of the values its selector takes, so it reads every key the table holds.
         public bool UnboundedSelector;
+        // A counted loop's records (ResourceRuntimeInputs.NullsOffClassLoopRecords): one whose texture is of another
+        // class reads as null.
+        public bool LoopSelected;
     }
 
     // A counted loop's counter against its bound, ordered as the loop's comparison orders them.
@@ -338,7 +341,11 @@ public static partial class ResourceMaterializer
                     {
                         return false;
                     }
-                    var directTable = new IndirectImageTable { Resource = (uint)imageIndex };
+                    var directTable = new IndirectImageTable
+                    {
+                        Resource = (uint)imageIndex,
+                        LoopSelected = inputs.NullsOffClassLoopRecords && directCandidates.Any(candidate => candidate.Counter is not null),
+                    };
                     var nextReached = 0;
                     for (var candidateIndex = 0; candidateIndex < directCandidates.Count; candidateIndex++)
                     {
@@ -2074,7 +2081,12 @@ public static partial class ResourceMaterializer
             var imageClass = images[(int)exemplar];
             var capturedMismatch = false;
             var sharedSelector = plan.DescriptorSources[(int)info.Images[rootIndex].Source].IndirectImage is { SharedSelector: true };
-            var unboundedSelector = snapshot.IndirectImages.Find(table => table.Resource == rootIndex) is { UnboundedSelector: true };
+            var rootTable = snapshot.IndirectImages.Find(table => table.Resource == rootIndex);
+            var unboundedSelector = rootTable is { UnboundedSelector: true };
+            // Demon's Souls' vertex program 0x536AAA4B8B5F3E90 walks up to its count of 160-byte volume records and
+            // samples a texture each names; while a stage loads, one record named a texture of another class, and
+            // the failed program stopped the GPU host. The other records keep their textures.
+            var offClassReadsNull = unboundedSelector || rootTable is { LoopSelected: true };
             // A shader dump records the first mismatched candidate of a table, as it is before it reads as null.
             void CaptureMismatch(int candidate)
             {
@@ -2120,8 +2132,9 @@ public static partial class ResourceMaterializer
                 // address do: a shared selector read such a table as null before it had one, and
                 // GTA V's compute pass 0xD44EDA1B8D4FAA6B searches ten 2D array images and three
                 // cubes through a selector with no analysed range. A candidate a bounded selector
-                // reaches, or one whose bound could not be evaluated, still fails below.
-                if ((sharedSelector || unboundedSelector) && !NullImageDescriptor(snapshot.Images[candidate]) &&
+                // reaches, or one whose bound could not be evaluated, still fails below, unless it is
+                // a counted loop's record and the caller asked for those to read as null.
+                if ((sharedSelector || offClassReadsNull) && !NullImageDescriptor(snapshot.Images[candidate]) &&
                     !CompatibleCandidates(image, imageClass, separateSampledDimensions))
                 {
                     CaptureMismatch(candidate);

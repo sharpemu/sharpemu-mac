@@ -1723,6 +1723,7 @@ public sealed partial class ResourceMaterializationCache
                 DataWritePending = inputs.DataWritePending,
                 ComputeState = inputs.ComputeState,
                 TablePhase = NoteTablePhase,
+                NullsOffClassLoopRecords = inputs.NullsOffClassLoopRecords,
             };
             // Keep the caller's outputs intact if the required recorded rewalk fails.
             var walkedSnapshot = snapshot;
@@ -1762,6 +1763,7 @@ public sealed partial class ResourceMaterializationCache
                     DataWritePending = inputs.DataWritePending,
                     ComputeState = inputs.ComputeState,
                     TablePhase = recorder.TablePhase,
+                    NullsOffClassLoopRecords = inputs.NullsOffClassLoopRecords,
                 };
             }
 
