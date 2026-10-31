@@ -15,7 +15,7 @@ public sealed class GuiSettingsTests
         var effective = EffectiveLaunchSettings.Resolve(null);
         Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], effective.EnvironmentToggles);
         Assert.True(effective.OverlayEnabled);
-        Assert.Equal("TitleBar", effective.OverlayMode);
+        Assert.Equal("Full", effective.OverlayMode);
         Assert.Equal("Guest", effective.BinkPlaybackMode);
     }
 

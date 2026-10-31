@@ -100,7 +100,7 @@ public sealed class PerGameSettingsTests
             GuestDisplayResolution = "1080P",
             OverlayEnabled = true,
             OverlayCorner = "topright",
-            OverlayMode = "titlebar",
+            OverlayMode = "full",
             BinkPlaybackMode = "guest",
             EnvironmentToggles = ["SHARPEMU_WRITABLE_APP0=1", "sharpemu_disable_import_loop_guard"],
             EnvironmentChanges = ["SHARPEMU_LOG_IO=0", "SHARPEMU_WRITABLE_APP0"],

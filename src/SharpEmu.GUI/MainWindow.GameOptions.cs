@@ -206,7 +206,7 @@ public partial class MainWindow
                 "Fit");
             GameVSyncToggle.IsChecked = effective.VSync;
             GameOverlayEnabledToggle.IsChecked = effective.OverlayEnabled;
-            GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "TitleBar");
+            GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "Full");
             UpdateGameOverlayRows();
             GameOverlayCornerBox.SelectedItem = FindChoice(_overlayCornerChoices, effective.OverlayCorner, "TopRight");
             GameHdrModeBox.SelectedItem = FindChoice(
@@ -260,7 +260,7 @@ public partial class MainWindow
     {
         var on = GameOverlayEnabledToggle.IsChecked == true;
         GameOverlayModeRow.IsVisible = on;
-        GameOverlayCornerRow.IsVisible = on && SelectedComboText(GameOverlayModeBox, "TitleBar") != "TitleBar";
+        GameOverlayCornerRow.IsVisible = on && SelectedComboText(GameOverlayModeBox, "Full") != "TitleBar";
     }
 
     // The game's own variables, edited in a sheet over the game settings and saved on Save.
@@ -376,7 +376,7 @@ public partial class MainWindow
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
             GuestDisplayResolution = SelectedComboText(GameGuestResolutionBox, "1080p"),
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
-            OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),
+            OverlayMode = SelectedComboText(GameOverlayModeBox, "Full"),
             OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),
             BinkPlaybackMode = SelectedComboText(GameBinkPlaybackBox, "Guest"),
             EnvironmentToggles = BuildGameEnvironmentEntries(),

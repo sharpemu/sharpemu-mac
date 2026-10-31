@@ -39,7 +39,7 @@ public sealed class SettingsSplitMigrationTests : IDisposable
           "GuestDisplayResolution": "1440p",
           "OverlayEnabled": true,
           "OverlayCorner": "BottomRight",
-          "OverlayMode": "Full",
+          "OverlayMode": "Minimal",
           "EnvironmentToggles": [
             "SHARPEMU_WRITABLE_APP0",
             "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
@@ -99,7 +99,7 @@ public sealed class SettingsSplitMigrationTests : IDisposable
 
         Assert.Equal("Graphite", (string?)saved["LauncherTheme"]);
         Assert.False((bool)saved["VSync"]!);
-        Assert.Equal("Full", (string?)saved["OverlayMode"]);
+        Assert.Equal("Minimal", (string?)saved["OverlayMode"]);
     }
 
     [Fact]
@@ -120,7 +120,7 @@ public sealed class SettingsSplitMigrationTests : IDisposable
 
         var own = EffectiveLaunchSettings.Resolve(Game("PPSA00001"));
         Assert.Equal("TopLeft", own.OverlayCorner);
-        Assert.Equal("Full", own.OverlayMode);
+        Assert.Equal("Minimal", own.OverlayMode);
         Assert.False(own.VSync);
         Assert.True(own.LogToFile);
         Assert.Equal("1440p", own.GuestDisplayResolution);
@@ -131,7 +131,7 @@ public sealed class SettingsSplitMigrationTests : IDisposable
 
         var library = Game("PPSA00002");
         Assert.Equal("BottomRight", library.OverlayCorner);
-        Assert.Equal("Full", library.OverlayMode);
+        Assert.Equal("Minimal", library.OverlayMode);
         Assert.False(library.VSync);
         Assert.Equal("Host", library.BinkPlaybackMode);
         Assert.Contains("SHARPEMU_CRASH_CAPTURE", EffectiveLaunchSettings.Resolve(library).EnvironmentToggles);
@@ -215,7 +215,7 @@ public sealed class SettingsSplitMigrationTests : IDisposable
         Assert.True(Migrate("PPSA00002"));
 
         Assert.Equal("Minimal", Game("PPSA00001").OverlayMode);
-        Assert.Equal("Full", Game("PPSA00002").OverlayMode);
+        Assert.Equal("Minimal", Game("PPSA00002").OverlayMode);
         Assert.DoesNotContain("OverlayMode", File.ReadAllText(SettingsPath));
         Assert.Equal(LegacyGlobal, File.ReadAllText(SettingsPath + SettingsSplitMigration.BackupSuffix));
     }

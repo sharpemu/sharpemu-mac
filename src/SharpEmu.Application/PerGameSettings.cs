@@ -320,7 +320,7 @@ public sealed record EffectiveLaunchSettings(
         GuestDisplayResolution: "1080p",
         OverlayEnabled: true,
         OverlayCorner: "TopRight",
-        OverlayMode: "TitleBar",
+        OverlayMode: "Full",
         BinkPlaybackMode: "Guest",
         EnvironmentToggles: ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"]);
 

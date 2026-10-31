@@ -136,6 +136,9 @@ public static class SettingsSplitMigration
         legacy.OverlayCorner = ApplicationSettings.NormalizeChoice(
             legacy.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
         legacy.OverlayMode = ApplicationSettings.NormalizeChoice(legacy.OverlayMode, "TitleBar", "Full", "Minimal");
+        // The old file always wrote its default, Title bar, so that value is not a choice; games
+        // take the current default (Full) instead.
+        if (legacy.OverlayMode == "TitleBar") legacy.OverlayMode = null;
         legacy.DisplayIndex = legacy.DisplayIndex is { } displayIndex ? Math.Max(0, displayIndex) : null;
         legacy.RefreshRate = legacy.RefreshRate is { } refreshRate ? Math.Clamp(refreshRate, 0, 1000) : null;
         // Nothing reads SHARPEMU_DEFAULT_PROFILE any more; older files may still carry it.
