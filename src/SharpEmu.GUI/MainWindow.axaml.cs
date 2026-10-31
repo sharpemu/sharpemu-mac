@@ -191,7 +191,6 @@ public partial class MainWindow : Window
     private int _detailLoadGeneration;
     private int _backdropGeneration;
     private bool _isClosing;
-    private bool _restoringGameSelection;
     private bool _addFolderInProgress;
     private bool _isLibraryGridLayout;
     private GameEntry? _lastSelectedGame;
@@ -337,6 +336,15 @@ public partial class MainWindow : Window
         UpdateWindowChromeState();
         GameList.SelectionChanged += (_, _) => OnGameListSelectionChanged();
         GameList.DoubleTapped += OnGameListDoubleTapped;
+        GameList.Tapped += OnGameListTapped;
+        GameList.KeyDown += (_, args) =>
+        {
+            if (args.Key == Key.Enter && !args.Handled)
+            {
+                args.Handled = true;
+                LaunchSelected();
+            }
+        };
         SearchBox.TextChanged += (_, _) => RefreshVisibleGames();
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
         InitializeLibraryToolbar();
@@ -2335,32 +2343,22 @@ public partial class MainWindow : Window
 
     private void OnGameListSelectionChanged()
     {
-        if (_restoringGameSelection)
-        {
-            return;
-        }
-
+        // The add-folder tile is selected like a game and opens the picker only when it
+        // is activated (Cross, Enter or a click); the backdrop keeps the last game's art.
         if (GameList.SelectedItem is AddFolderTile)
         {
-            _restoringGameSelection = true;
-            try
-            {
-                GameList.SelectedItem = _lastSelectedGame;
-            }
-            finally
-            {
-                _restoringGameSelection = false;
-            }
-
-            // A held direction must not reopen the picker after it closes.
-            _navLeftNextAt = new NavigationRepeat(long.MaxValue, 0);
-            _navRightNextAt = new NavigationRepeat(long.MaxValue, 0);
-            StartAddFolderFromTile();
-            return;
+            LibrarySelectedDetails.DataContext = null;
+            LibrarySelectedDetails.IsVisible = false;
+            _sndPreview.Stop();
+            UpdateLibraryMinimumHeight();
+            UpdateRunButtons();
+        }
+        else
+        {
+            _lastSelectedGame = GameList.SelectedItem as GameEntry;
+            UpdateSelectedGame();
         }
 
-        _lastSelectedGame = GameList.SelectedItem as GameEntry;
-        UpdateSelectedGame();
         Dispatcher.UIThread.Post(() => AnchorCarouselSelection(animate: true), DispatcherPriority.Loaded);
     }
 
@@ -2550,6 +2548,17 @@ public partial class MainWindow : Window
         }
 
         RequestAnimationFrame(OnCarouselAnimationFrame);
+    }
+
+    // One click on the add-folder tile opens the picker; a game needs a double click.
+    private void OnGameListTapped(object? sender, TappedEventArgs e)
+    {
+        var item = (e.Source as Visual)?.FindAncestorOfType<ListBoxItem>(includeSelf: true);
+        if (item?.DataContext is AddFolderTile)
+        {
+            e.Handled = true;
+            StartAddFolderFromTile();
+        }
     }
 
     private void OnGameListDoubleTapped(object? sender, TappedEventArgs e)
@@ -3076,7 +3085,11 @@ public partial class MainWindow : Window
 
     private void LaunchSelected()
     {
-        if (GameList.SelectedItem is GameEntry game)
+        if (GameList.SelectedItem is AddFolderTile)
+        {
+            StartAddFolderFromTile();
+        }
+        else if (GameList.SelectedItem is GameEntry game)
         {
             Launch(game.Path, game.Name, game.TitleId);
         }
