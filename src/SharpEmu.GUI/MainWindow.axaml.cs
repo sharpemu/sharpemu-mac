@@ -3216,6 +3216,26 @@ public partial class MainWindow : Window
         return string.IsNullOrEmpty(directory) ? timestampedName : Path.Combine(directory, timestampedName);
     }
 
+    // A solid play or stop shape beside the label. The strings carry a ▶ or ■ text glyph for
+    // places that show plain text; on the button it sat high, and the symbol font has only
+    // outlined icons, so the shape is drawn and takes the button's text colour.
+    private static StackPanel IconLabel(bool stop, string label) => new()
+    {
+        Orientation = Avalonia.Layout.Orientation.Horizontal,
+        Spacing = 10,
+        Children =
+        {
+            new PathIcon
+            {
+                Data = StreamGeometry.Parse(stop ? "M1,1 H11 V11 H1 Z" : "M1,0 L12,7 L1,14 Z"),
+                Width = stop ? 12 : 13,
+                Height = stop ? 12 : 14,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+            },
+            new TextBlock { Text = label.TrimStart('▶', '■', ' ', '\u00A0') },
+        },
+    };
+
     private void UpdateRunButtons()
     {
         LaunchButton.Classes.Remove("accent");
@@ -3224,14 +3244,15 @@ public partial class MainWindow : Window
         if (_isRunning)
         {
             LaunchButton.Classes.Add("danger");
-            LaunchButton.Content = Localization.Instance.Get(
-                _isStopping ? "Launch.Stopping" : "Launch.Stop");
+            LaunchButton.Content = _isStopping
+                ? Localization.Instance.Get("Launch.Stopping")
+                : IconLabel(stop: true, Localization.Instance.Get("Launch.Stop"));
             LaunchButton.IsEnabled = !_isStopping;
         }
         else
         {
             LaunchButton.Classes.Add("accent");
-            LaunchButton.Content = Localization.Instance.Get("Launch.Launch");
+            LaunchButton.Content = IconLabel(stop: false, Localization.Instance.Get("Launch.Launch"));
             LaunchButton.IsEnabled = GameList.SelectedItem is GameEntry;
         }
 
