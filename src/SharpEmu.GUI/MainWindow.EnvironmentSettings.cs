@@ -311,14 +311,16 @@ public partial class MainWindow
     }
 
     // The analysis cache path a launch would see: the global custom variables win over the
-    // launcher's own environment, as they do in LaunchConfiguration.
+    // launcher's own environment, as they do in LaunchConfiguration. Windows matches variable
+    // names without regard to case.
     private static string? LaunchVariable(string name)
     {
         string? value = null;
         foreach (var entry in GlobalCustomEnvironmentSettings.Load())
         {
             if (CustomEnvironmentVariables.TryParseEntry(entry, out var entryName, out var entryValue) &&
-                string.Equals(entryName, name, StringComparison.Ordinal))
+                string.Equals(entryName, name,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
             {
                 value = entryValue;
             }

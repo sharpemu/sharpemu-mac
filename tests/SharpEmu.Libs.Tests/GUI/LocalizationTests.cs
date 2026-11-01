@@ -190,7 +190,7 @@ public sealed class LocalizationTests : IDisposable
     [Fact]
     public void EmbeddedLanguages_LabelEveryEnvironmentSetting()
     {
-        var assembly = typeof(Localization).Assembly;
+        var assembly = typeof(LauncherLocalization).Assembly;
         var keys = new List<string>();
         foreach (var setting in EnvironmentSettings.All)
         {
@@ -204,7 +204,9 @@ public sealed class LocalizationTests : IDisposable
         var resourceNames = assembly.GetManifestResourceNames()
             .Where(name =>
                 name.StartsWith("Languages.", StringComparison.Ordinal) &&
-                name.EndsWith(".json", StringComparison.Ordinal));
+                name.EndsWith(".json", StringComparison.Ordinal))
+            .ToArray();
+        Assert.NotEmpty(resourceNames);
         foreach (var resourceName in resourceNames)
         {
             var language = ReadEmbeddedLanguage(assembly, resourceName);

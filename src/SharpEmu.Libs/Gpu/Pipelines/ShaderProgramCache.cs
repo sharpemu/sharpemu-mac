@@ -2555,7 +2555,6 @@ internal static class CompiledShaderDump
         if (!ShouldWrite(shaderAddress, hash)) return;
         var payload = shader.Payload;
         if (payload.Length == 0) return;
-        var basePath = GetBasePath(stage, shaderAddress, hash);
         var lines = new List<string>(program.Instructions.Count + 2)
         {
             $"address=0x{program.Address:X16}",
@@ -2568,8 +2567,10 @@ internal static class CompiledShaderDump
                 $"{string.Join(',', instruction.Destinations)} <- {string.Join(',', instruction.Sources)} {instruction.Control}");
         }
 
+        // The dump is optional: a folder that cannot be made or written warns and the shader goes on.
         try
         {
+            var basePath = GetBasePath(stage, shaderAddress, hash);
             File.WriteAllBytes($"{basePath}.{shader.PayloadFileExtension}", payload);
             File.WriteAllLines($"{basePath}.ir.txt", lines);
         }
