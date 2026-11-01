@@ -580,6 +580,7 @@ public static partial class Gen5SpirvTranslator
                 var continueLabel = context._module.AllocateId();
                 var mergeLabel = context._module.AllocateId();
                 context._module.AddStatement(SpirvOp.Branch, header);
+                context._module.DeclareLoopHeader(header);
                 context._module.AddLabel(header);
                 var arrived = context._module.AddInstruction(
                     SpirvOp.AtomicLoad,

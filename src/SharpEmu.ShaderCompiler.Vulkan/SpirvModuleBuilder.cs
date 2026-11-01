@@ -520,6 +520,10 @@ public sealed partial class SpirvModuleBuilder
         {
             _changingInputs.Add(target);
         }
+        else if (decoration == SpirvDecoration.BuiltIn && operands is [(uint)SpirvBuiltIn.SubgroupLocalInvocationId])
+        {
+            _laneIdInputs.Add(target);
+        }
 
         var values = new uint[2 + operands.Length];
         values[0] = target;
@@ -910,7 +914,7 @@ public sealed partial class SpirvModuleBuilder
         }
 
         Emit(_functions, SpirvOp.Label, result);
-        ResetBlockState();
+        EnterBlock(result);
         return result;
     }
 

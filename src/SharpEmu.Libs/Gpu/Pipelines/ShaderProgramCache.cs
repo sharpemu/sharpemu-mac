@@ -2088,7 +2088,6 @@ internal static class CompiledShaderDump
     {
         if (shader.Payload.Length == 0 || !ShouldWrite(shaderAddress, hash)) return;
         var basePath = GetBasePath(stage, shaderAddress, hash);
-        File.WriteAllBytes($"{basePath}.{shader.PayloadFileExtension}", shader.Payload);
         var lines = new List<string>(program.Instructions.Count + 2)
         {
             $"address=0x{program.Address:X16}",
@@ -2101,6 +2100,14 @@ internal static class CompiledShaderDump
                 $"{string.Join(',', instruction.Destinations)} <- {string.Join(',', instruction.Sources)} {instruction.Control}");
         }
 
-        File.WriteAllLines($"{basePath}.ir.txt", lines);
+        try
+        {
+            File.WriteAllBytes($"{basePath}.{shader.PayloadFileExtension}", shader.Payload);
+            File.WriteAllLines($"{basePath}.ir.txt", lines);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[SHADER][WARN] Cannot write the compiled shader dump: {exception.Message}");
+        }
     }
 }

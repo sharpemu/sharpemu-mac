@@ -15,6 +15,9 @@ public static partial class Gen5SpirvTranslator
 
     private const ulong DeviceAddressMask = DeviceAddressPaging.AddressMask;
 
+    private const int MaxLoggedInheritanceRetries = 16;
+    private static long _inheritanceRetries;
+
     public static bool TryCompileProgram(ShaderCompileRequest request, out Gen5SpirvShader shader, out string error)
     {
         var profile = new ShaderTranslationProfile.Scope(ShaderTranslationProfile.Part.Validation);
@@ -134,8 +137,22 @@ public static partial class Gen5SpirvTranslator
         }
 
         request = ShareLinkedCallBodies(request, out var sharedCalls);
-        return new CompilationContext(request, sharedCalls, request.Bindings.CallArgumentCount != 0 ? callArguments : null,
-                request.Bindings.CallTargetCount != 0 ? callTargets : null)
+        var arguments = request.Bindings.CallArgumentCount != 0 ? callArguments : null;
+        var targetSlots = request.Bindings.CallTargetCount != 0 ? callTargets : null;
+        var context = new CompilationContext(request, sharedCalls, arguments, targetSlots);
+        var compiled = context.TryCompile(out shader, out error, ref profile);
+        if (!compiled || context.InheritedBlocksHeld)
+        {
+            return compiled;
+        }
+
+        if (Interlocked.Increment(ref _inheritanceRetries) <= MaxLoggedInheritanceRetries)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][INFO] SPIR-V block inheritance did not hold: shader=0x{request.Hash:X16} retrying without it");
+        }
+
+        return new CompilationContext(request, sharedCalls, arguments, targetSlots, inheritBlockState: false)
             .TryCompile(out shader, out error, ref profile);
     }
 
@@ -187,9 +204,12 @@ public static partial class Gen5SpirvTranslator
             SpirvImageDim Dimension,
             IReadOnlyList<uint> Resources);
 
+        public bool InheritedBlocksHeld => _module.InheritedBlocksHeld;
+
         public CompilationContext(ShaderCompileRequest request, SharedCallBodies? sharedCalls = null,
-            ulong[]? callArguments = null, ulong[]? callTargets = null)
+            ulong[]? callArguments = null, ulong[]? callTargets = null, bool inheritBlockState = true)
         {
+            _module = new SpirvModuleBuilder { InheritBlockState = inheritBlockState };
             _request = request;
             _compactMemoryAccess = Gen5ShaderCallLinker.IsLinked(request.Program);
             _sharedCalls = sharedCalls;

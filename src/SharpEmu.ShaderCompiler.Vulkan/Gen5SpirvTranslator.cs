@@ -69,7 +69,7 @@ public static partial class Gen5SpirvTranslator
         // the V_MOVREL* instructions, and as the LDS/GDS base elsewhere.
         private const uint M0ScalarRegister = 124;
 
-        private readonly SpirvModuleBuilder _module = new();
+        private readonly SpirvModuleBuilder _module;
         private readonly Gen5SpirvStage _stage;
         // A tessellation evaluation stage exports positions and parameters like a vertex stage.
         private bool HasVertexOutputs => _stage is Gen5SpirvStage.Vertex or Gen5SpirvStage.TessellationEvaluation;
@@ -1613,6 +1613,7 @@ public static partial class Gen5SpirvTranslator
             }
 
             _module.AddStatement(SpirvOp.Branch, loopHeader);
+            _module.DeclareLoopHeader(loopHeader);
             _module.AddLabel(loopHeader);
             // Check before the first block can write from an inactive invocation.
             var programIsActive = Load(_boolType, _programActive);
@@ -2162,6 +2163,7 @@ public static partial class Gen5SpirvTranslator
             var mergeLabel = _module.AllocateId();
             _structuredLoopMerge = mergeLabel;
             _module.AddStatement(SpirvOp.Branch, headerLabel);
+            _module.DeclareLoopHeader(headerLabel);
             _module.AddLabel(headerLabel);
             _module.AddStatement(SpirvOp.LoopMerge, mergeLabel, continueLabel, 0);
             _module.AddStatement(SpirvOp.Branch, bodyLabel);
@@ -2322,6 +2324,7 @@ public static partial class Gen5SpirvTranslator
             {
                 _module.AddStatement(SpirvOp.Branch, loopHeader);
             }
+            _module.DeclareLoopHeader(loopHeader);
             _module.AddLabel(loopHeader);
             // Skip inactive loop regions before the body reaches the driver optimizer.
             // Permit forward branches into any block in the loop, not only its header.
@@ -4484,15 +4487,10 @@ public static partial class Gen5SpirvTranslator
                 _boolType,
                 LogicalNot(hasComponent),
                 inRange);
-            var packed = UInt(0);
-            for (uint index = 0; index < sizeof(uint); index++)
-            {
-                var address = index == 0 ? componentAddress : IAdd(componentAddress, UInt(index));
-                var word = LoadDeviceBufferWord(baseAddress, size, address, accessAllowed);
-                var shift = ShiftLeftLogical(BitwiseAnd(address, UInt(3)), UInt(3));
-                var value = BitwiseAnd(ShiftRightLogical(word, shift), UInt(0xFF));
-                packed = BitwiseOr(packed, ShiftLeftLogical(value, UInt(index * 8)));
-            }
+            var packed = SpliceUnalignedWord(
+                componentAddress,
+                LoadDeviceBufferWord(baseAddress, size, componentAddress, accessAllowed),
+                LoadDeviceBufferWord(baseAddress, size, IAdd(componentAddress, UInt(sizeof(uint))), accessAllowed));
 
             var raw = _module.AddInstruction(SpirvOp.BitFieldUExtract, _uintType, packed, bitOffset, bitCount);
             var converted = ConvertGfx10BufferComponent(raw, bitCount, numberFormat, dataFormat);
@@ -5533,23 +5531,30 @@ public static partial class Gen5SpirvTranslator
                 whenTrue,
                 whenFalse);
 
-        private uint LoadUnalignedBufferWord(int bindingIndex, uint byteAddress)
+        private uint LoadUnalignedBufferWord(int bindingIndex, uint byteAddress, uint byteCount = sizeof(uint))
         {
-            var result = UInt(0);
-            for (uint index = 0; index < 4; index++)
+            var dwordAddress = ShiftRightLogical(byteAddress, UInt(2));
+            var low = LoadBufferWord(bindingIndex, dwordAddress);
+            if (byteCount == 1)
             {
-                var address = index == 0
-                    ? byteAddress
-                    : IAdd(byteAddress, UInt(index));
-                var dwordAddress = ShiftRightLogical(address, UInt(2));
-                var bitOffset = ShiftLeftLogical(BitwiseAnd(address, UInt(3)), UInt(3));
-                var value = BitwiseAnd(
-                    ShiftRightLogical(LoadBufferWord(bindingIndex, dwordAddress), bitOffset),
-                    UInt(0xFF));
-                result = BitwiseOr(result, ShiftLeftLogical(value, UInt(index * 8)));
+                return ShiftRightLogical(low, ShiftLeftLogical(BitwiseAnd(byteAddress, UInt(3)), UInt(3)));
             }
 
-            return result;
+            return SpliceUnalignedWord(byteAddress, low, LoadBufferWord(bindingIndex, IAdd(dwordAddress, UInt(1))));
+        }
+
+        private uint SpliceUnalignedWord(uint byteAddress, uint low, uint high)
+        {
+            var bitOffset = ShiftLeftLogical(BitwiseAnd(byteAddress, UInt(3)), UInt(3));
+            var spliced = BitwiseOr(
+                ShiftRightLogical(low, bitOffset),
+                ShiftLeftLogical(high, _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(32), bitOffset)));
+            return _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, bitOffset, UInt(0)),
+                low,
+                spliced);
         }
 
         private uint LoadSubdwordBufferValue(
@@ -5563,7 +5568,7 @@ public static partial class Gen5SpirvTranslator
         {
             var width = byteCount * 8;
             var raw = BitwiseAnd(
-                LoadUnalignedBufferWord(bindingIndex, byteAddress),
+                LoadUnalignedBufferWord(bindingIndex, byteAddress, byteCount),
                 UInt(byteCount == 1 ? 0xFFu : 0xFFFFu));
             if (signExtend)
             {
