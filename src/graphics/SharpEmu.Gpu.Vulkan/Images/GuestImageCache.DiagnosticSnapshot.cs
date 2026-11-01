@@ -52,7 +52,7 @@ public sealed unsafe partial class GuestImageCache
         _scheduler.EndRendering();
         image.DownloadToBuffer([copy], download.Handle, 0, size);
         var command = new CommandBuffer(_scheduler.Current.Handle);
-        image.Transition(state.Layout, state.Access, null, command);
+        image.Transition(state.Access, null, command);
         var barrier = new MemoryBarrier2
         {
             SType = StructureType.MemoryBarrier2,

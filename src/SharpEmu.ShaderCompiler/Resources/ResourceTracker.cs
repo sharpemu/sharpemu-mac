@@ -198,6 +198,34 @@ public sealed partial class ResourceTracker
     /// Names the instructions that produced the undefined leaves <paramref name="value"/>
     /// rests on, so a rejected descriptor dword points at an opcode.
     /// </summary>
+    // SHARPEMU_TRACE_NULL_DESCRIPTORS=1: every image or sampler the tracker reads as null because its
+    // descriptor has no single source, once per program and instruction, so a missing texture can be
+    // told from a slot the title leaves empty.
+    private static readonly bool TraceNullDescriptors =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_NULL_DESCRIPTORS") == "1";
+
+    private static readonly HashSet<(ulong, uint, ScalarValueKind)> TracedNullDescriptors = [];
+
+    private void TraceNullDescriptorFallback(uint pc, ScalarValueKind expected, ScalarValue badDword, bool controlDependent)
+    {
+        if (!TraceNullDescriptors)
+        {
+            return;
+        }
+
+        lock (TracedNullDescriptors)
+        {
+            if (!TracedNullDescriptors.Add((_plan.Hash, pc, expected)))
+            {
+                return;
+            }
+        }
+
+        Console.Error.WriteLine(
+            $"[SHADER][NULL-DESCRIPTOR] hash=0x{_plan.Hash:X16} stage={_plan.Stage} pc=0x{pc:X4} {expected} " +
+            $"control_dependent={controlDependent}{DescribeUndefinedLeaves(badDword)} shape={DescribeValueShape(badDword)}");
+    }
+
     private string DescribeUndefinedLeaves(ScalarValue value)
     {
         var origins = new List<string>();
@@ -647,8 +675,13 @@ public sealed partial class ResourceTracker
                  (expected == ScalarValueKind.ImageHandle && _plan.Stage != ShaderStage.Compute &&
                   source.Dwords.Any(HasLaneChosenValue)) ||
                  (expected == ScalarValueKind.SamplerHandle && source.Dwords.All(dword => dword.IsUndefined)));
-            if (dynamicImageFallback)
+            if (expected == ScalarValueKind.SamplerHandle && TryFirstIterationSource(source, out var firstIteration))
             {
+                source = firstIteration;
+            }
+            else if (dynamicImageFallback)
+            {
+                TraceNullDescriptorFallback(pc, expected, source.Dwords[badDword], controlDependent);
                 source = new DescriptorSource
                 {
                     Dwords = Enumerable.Repeat(_graph.Constant(0u), (int)source.DwordCount).ToArray(),
@@ -667,9 +700,11 @@ public sealed partial class ResourceTracker
         return InternSource(source);
     }
 
+    private static readonly bool DeepShapes = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DEEP_SHAPES") == "1";
+
     private string DescribeValueShape(ScalarValue value, int depth = 0)
     {
-        if (depth >= 4)
+        if (depth >= (DeepShapes ? 9 : 4))
         {
             return $"{value.Kind}#{value.Id}";
         }
@@ -689,6 +724,11 @@ public sealed partial class ResourceTracker
         if (value.Kind == ScalarValueKind.Undefined && _graph.TryGetUndefinedOrigin(value, out var origin))
         {
             return $"Undefined#{value.Id}({origin.Opcode}@0x{origin.Pc:X})";
+        }
+
+        if (DeepShapes && value.Operands.Length != 0)
+        {
+            return $"{value.Kind}#{value.Id}({string.Join(',', value.Operands.Select(operand => DescribeValueShape(operand, depth + 1)))})";
         }
 
         return $"{value.Kind}#{value.Id}";
@@ -1511,7 +1551,8 @@ public sealed partial class ResourceTracker
 
             if (TryMakeIndirectImage(handle, memory.Pc, out var plan) ||
                 TryMakeDenseIndirectImage(handle, memory.Pc, out plan) ||
-                TryMakeDirectImage(handle, out plan))
+                TryMakeDirectImage(handle, out plan) ||
+                TryMakeChainedDirectImage(handle, out plan))
             {
                 _indirectImages.Add(plan);
             }

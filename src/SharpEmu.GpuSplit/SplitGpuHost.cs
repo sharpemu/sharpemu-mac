@@ -239,8 +239,7 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 var message = GpuSplitWire.Read<TessellationRingsMessage>(payload);
                 TessellationRings.TessFactorRing = message.FactorRing;
                 TessellationRings.TessFactorRingSize = message.FactorRingSize;
-                TessellationRings.OffchipBuffer = message.OffchipBuffer;
-                TessellationRings.OffchipParameter = message.OffchipParameter;
+                TessellationRings.SetOffchip(message.OffchipBuffer, message.OffchipParameter);
                 break;
             }
 

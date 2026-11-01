@@ -269,7 +269,7 @@ public static partial class Gen5MslTranslator
         /// Only a dispatch that asked for the whole 32 KB leaves no room for its own
         /// slots.</summary>
         private bool AliasesWaveScratchIntoLds =>
-            _stage == Gen5MslStage.Compute && _usesLds &&
+            _stage == Gen5MslStage.Compute && _usesLds && !IsBridgedComputeWaves &&
             _computeLdsDwords + WaveScratchDwords > LdsDwordCount;
 
 

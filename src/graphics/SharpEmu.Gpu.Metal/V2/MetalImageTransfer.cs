@@ -290,7 +290,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             (GpuFormat.D32Sfloat or GpuFormat.D32SfloatS8Uint, GpuFormat.R32Sfloat) or
             (GpuFormat.D16Unorm, GpuFormat.R16Unorm);
         if (_disposed || !pairs || !depthDescription.IsDepth || colorDescription.IsDepth ||
-            !SameTransferGrid(depthDescription, colorDescription) ||
+            !SameSampledGrid(depthDescription, colorDescription) ||
             depthDescription.TileMode != colorDescription.TileMode ||
             depthDescription.Pitch != colorDescription.Pitch ||
             depthDescription.Data.Size != colorDescription.Data.Size ||
@@ -551,6 +551,20 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
     // The two surfaces cover the same texel grid, so a copy between them is a copy and
     // not a resample.
+    // The grid a sampled twin shares with its depth image: the transfer grid, at any sample count
+    // both have. A multisampled depth texture binds to a texture2d_ms<float> argument as a
+    // one-sample one binds to texture2d<float> (MetalDepthTwinTests): Ghost of Tsushima's lighting
+    // reads its two-sample checkerboard depth through a two-sample R32 view, which nothing else
+    // could fill - multisampled textures have no blit to or from a buffer - so it read zero, the
+    // far plane, and lit only sky.
+    private static bool SameSampledGrid(in ImageDescription left, in ImageDescription right) =>
+        left.Extent.Width == right.Extent.Width &&
+        left.Extent.Height == right.Extent.Height &&
+        left.Extent.Depth == right.Extent.Depth &&
+        left.TransferLayers == right.TransferLayers &&
+        left.Samples == right.Samples &&
+        !left.IsVolume && !right.IsVolume;
+
     private static bool SameTransferGrid(in ImageDescription left, in ImageDescription right) =>
         left.Extent.Width == right.Extent.Width &&
         left.Extent.Height == right.Extent.Height &&
@@ -662,7 +676,11 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
     {
         if (MetalGuestFormats.IsDepthStencil(format))
         {
-            return MtlTextureUsage.ShaderRead | MtlTextureUsage.RenderTarget;
+            // A multisampled one with a stencil plane may be read through a stencil view
+            // (MetalImageCache.StencilTwin.cs), which takes the view usage.
+            return description.Samples > 1 && format == MtlPixelFormat.Depth32FloatStencil8
+                ? MtlTextureUsage.ShaderRead | MtlTextureUsage.RenderTarget | MtlTextureUsage.PixelFormatView
+                : MtlTextureUsage.ShaderRead | MtlTextureUsage.RenderTarget;
         }
 
         // A compressed texture is only ever sampled: Metal rejects a render-target or
@@ -1772,6 +1790,7 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
     private static int _multisampledDepthWarned;
     private static int _mipmappedDepthWarned;
+    private static int _oversizedDepthWarned;
 
     private static TransferPlan PlanDepth(in ImageDescription description)
     {
@@ -1854,6 +1873,21 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
                 plan.StencilPlane = false;
                 return plan;
+            }
+
+            // Dynamic resolution keeps the full-size allocation and describes a smaller extent over it (Ghost of
+            // Tsushima's 1600x1800 checkerboard depth in a 1920x2160 one's bytes): one slice larger than its layout
+            // holds the layout's tiles first, and the rest is not part of this image.
+            if (layers == 1 && plan.SliceSize > surface.BlockSliceSize)
+            {
+                if (Interlocked.Exchange(ref _oversizedDepthWarned, 1) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[METAL-V2][WARN] A depth surface is larger than its tile layout; its layout's tiles are transferred: " +
+                        $"slice=0x{plan.SliceSize:x} layout=0x{surface.BlockSliceSize:x} extent={description.Extent.Width}x{description.Extent.Height}.");
+                }
+
+                plan.SliceSize = surface.BlockSliceSize;
             }
 
             if (plan.SliceSize != surface.BlockSliceSize)

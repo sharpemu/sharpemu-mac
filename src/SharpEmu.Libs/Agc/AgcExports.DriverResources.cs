@@ -321,10 +321,11 @@ public static partial class AgcExports
     }
 
     // Tessellation-factor ring and hull-shader off-chip buffers are guest-driver
-    // configuration for on-hardware tessellation memory. Our translator handles
-    // shader execution directly, so there is no guest-side ring to program: the
-    // guest driver only needs these to report success so init proceeds. Games
-    // (e.g. Unity titles) call them during GPU setup and stall if unresolved.
+    // configuration for on-hardware tessellation memory. The hull writes its factors
+    // through its own buffer descriptor, so the factor ring needs no host state. The
+    // off-chip parameter decides how many hull groups may run together; it is kept for
+    // the tessellation draws. Games (e.g. Unity titles) call these during GPU setup and
+    // stall if unresolved.
     [SysAbiExport(
         Nid = "XlNp7jzGiPo",
         ExportName = "sceAgcDriverSetTFRing",
@@ -349,8 +350,7 @@ public static partial class AgcExports
         LibraryName = "libSceAgcDriver")]
     public static int DriverSetHsOffchipParam(CpuContext ctx)
     {
-        TessellationRings.OffchipBuffer = ctx[CpuRegister.Rdi];
-        TessellationRings.OffchipParameter = (uint)ctx[CpuRegister.Rsi];
+        TessellationRings.SetOffchip(ctx[CpuRegister.Rdi], (uint)ctx[CpuRegister.Rsi]);
         TessellationRings.Observer?.Invoke();
         Console.Error.WriteLine(
             $"[AGC][INFO] Hull-shader off-chip buffer: address=0x{ctx[CpuRegister.Rdi]:X16} param=0x{(uint)ctx[CpuRegister.Rsi]:X8}.");
@@ -368,6 +368,16 @@ public static class TessellationRings
     public static uint TessFactorRingSize;
     public static ulong OffchipBuffer;
     public static uint OffchipParameter;
+
+    // The one place the off-chip parameter is taken (the guest's call, or the split's mirror of it
+    // in the GPU process): the decoded buffer count and size the native tessellation path reads
+    // (Gpu.TessellationOffchip) follow it.
+    public static void SetOffchip(ulong buffer, uint parameter)
+    {
+        OffchipBuffer = buffer;
+        OffchipParameter = parameter;
+        Gpu.TessellationOffchip.Configure(parameter);
+    }
 
     /// <summary>Told after the guest sets either; the two-process split mirrors them into the GPU process,
     /// which draws the tessellated draws (without them it skips every one).</summary>

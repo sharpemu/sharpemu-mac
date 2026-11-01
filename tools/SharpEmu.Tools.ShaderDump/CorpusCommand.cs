@@ -69,6 +69,39 @@ internal static partial class CorpusCommand
                 return false;
             }
 
+            // SHARPEMU_CORPUS_MSL_OUT=<dir>: each record's translated MSL, for reading a program's code.
+            if (Environment.GetEnvironmentVariable("SHARPEMU_CORPUS_MSL_OUT") is { Length: > 0 } mslDirectory)
+            {
+                Directory.CreateDirectory(mslDirectory);
+                File.WriteAllText(Path.Combine(mslDirectory, Path.GetFileNameWithoutExtension(file) + ".metal"), shader.Source);
+            }
+
+            // SHARPEMU_CORPUS_LIST_OUT=<dir>: each record's instructions by pc, for aiming SHARPEMU_MSL_PC_PROBE.
+            if (Environment.GetEnvironmentVariable("SHARPEMU_CORPUS_LIST_OUT") is { Length: > 0 } listDirectory)
+            {
+                Directory.CreateDirectory(listDirectory);
+                File.WriteAllLines(Path.Combine(listDirectory, Path.GetFileNameWithoutExtension(file) + ".txt"),
+                    request.Program.Instructions.Select(instruction =>
+                        $"{instruction.Pc:X5} [{string.Join(" ", instruction.Words.Select(word => word.ToString("X8")))}] {instruction.Opcode} {string.Join(",", instruction.Destinations)} <- " +
+                        $"{string.Join(",", instruction.Sources)}{(instruction.Control is { } control ? " " + control : string.Empty)}"));
+            }
+
+            // SHARPEMU_CORPUS_PLAN_OUT=<dir>: each record's image plan - class, first use and descriptor source - for
+            // telling a table-selected image the planner bound directly from one it selects at run time.
+            if (Environment.GetEnvironmentVariable("SHARPEMU_CORPUS_PLAN_OUT") is { Length: > 0 } planDirectory)
+            {
+                Directory.CreateDirectory(planDirectory);
+                var info = request.Resources.Info;
+                File.WriteAllLines(Path.Combine(planDirectory, Path.GetFileNameWithoutExtension(file) + ".txt"),
+                    info.Images.Select((image, index) =>
+                        $"image {index} pc=0x{image.FirstUsePc:X} class={image.ResourceClass} numeric={image.NumericClass} " +
+                        $"dim={image.Dimension} bindless={image.BindlessSlot} root={image.IndirectRoot} source={image.Source} " +
+                        $"indirect=[{string.Join(",", image.IndirectResources)}] search={image.IndirectSearchIterations}")
+                    .Concat(info.Buffers.Select((buffer, index) =>
+                        $"buffer {index} pc=0x{buffer.FirstUsePc:X} source={buffer.Source} read={buffer.Read} written={buffer.Written} " +
+                        $"formatted={buffer.Formatted} extent=0x{buffer.MaxByteExtent:X}")));
+            }
+
             return !metal || TryCompileMsl(shader, out error);
         }
         catch (Exception exception)

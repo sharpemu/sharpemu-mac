@@ -540,7 +540,7 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void Wave64InALargerWorkgroupTranslatesWithoutTheThreadgroupBridge()
+    public void Wave64InALargerWorkgroupBridgesOnlyAProgramThatReadsAnUpperLane()
     {
         // The SPIR-V translator bridges only a 64-thread (one-wave) workgroup; a 256-thread
         // group would share the half-indexed scratch between its four waves.
@@ -548,12 +548,17 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
             Gen5ComputeFixtures.Wave64Broadcast, waveLaneCount: 64, localSizeX: 64);
         Assert.Contains("sharpemu_wave_scratch", bridged.Source);
 
-        foreach (var fixture in new[] { Gen5ComputeFixtures.Wave64Broadcast, Gen5ComputeFixtures.Wave64ReadLane })
-        {
-            var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount: 64, localSizeX: 256);
-            Assert.DoesNotContain("sharpemu_wave_scratch", shader.Source);
-            Assert.DoesNotContain("threadgroup_barrier", shader.Source);
-        }
+        var broadcast = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64Broadcast, waveLaneCount: 64, localSizeX: 256);
+        Assert.DoesNotContain("sharpemu_wave_scratch", broadcast.Source);
+        Assert.DoesNotContain("threadgroup_barrier", broadcast.Source);
+
+        // V_READLANE of lane 63 combines the halves itself: each of the four waves gets slots
+        // of its own and meets its partner half at a pair barrier.
+        var readLane = Gen5ComputeFixtures.CompileRequestOrThrow(
+            Gen5ComputeFixtures.Wave64ReadLane, waveLaneCount: 64, localSizeX: 256);
+        Assert.Contains("sharpemu_wave_scratch[32]", readLane.Source);
+        Assert.Contains("sharpemu_wave_pair[sharpemu_tg_index >> 6u]", readLane.Source);
     }
 
     [Fact]

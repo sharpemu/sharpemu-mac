@@ -58,6 +58,14 @@ public sealed unsafe class SamplerStore : IDisposable
 
     public Sampler GetSampler(in SamplerDescriptorWords words, bool integerView)
     {
+        lock (_samplers)
+        {
+            return GetSamplerCore(in words, integerView);
+        }
+    }
+
+    private Sampler GetSamplerCore(in SamplerDescriptorWords words, bool integerView)
+    {
         var key = (words[0], words[1], words[2], words[3], integerView);
         // Every sampler binding of every draw asks; only the first of each kind creates.
         if (_samplers.TryGetValue(key, out var found))

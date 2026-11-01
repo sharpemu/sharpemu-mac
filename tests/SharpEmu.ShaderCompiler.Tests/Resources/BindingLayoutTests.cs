@@ -10,6 +10,43 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class BindingLayoutTests
 {
+    [Fact]
+    public void TableBlocksAndTessellationKeepTheirShaderDataRangesSeparate()
+    {
+        var info = new ShaderResourceInfo { Buffers = Enumerable.Range(0, 5).Select(_ => new BufferResource { Read = true }).ToList() };
+        var layout = BindingLayout.Allocate(info, [0u], false, false, true,
+            usesDispatchThreadLimits: true, callArgumentCount: 2, callTargetCount: 1,
+            tableBlock: true, usesBufferLengths: true, usesTessellationData: true);
+        Assert.True(layout.UsesTableBlock);
+        Assert.False(layout.UsesBufferLengths);
+        Assert.Equal(0u, layout.MemoryOffsetCount);
+        Assert.Equal(5u, layout.DispatchThreadLimitsDword);
+        Assert.Equal(8u, layout.TessellationDataDword);
+        Assert.Equal(8u + Gen5TessellationData.DwordCount, layout.MipStatisticsDword);
+        Assert.Equal(14u + Gen5TessellationData.DwordCount, layout.ShaderDataDwordCount);
+        BindingLayoutValidator.Validate(layout, info, [0u], false, false, true, Hash, ShaderStage.Compute);
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(30u)]
+    public void ExplicitBufferLengthsHaveTheirOwnShaderDataAndLeaveTheDefaultLayoutUnchanged(uint cursor)
+    {
+        var info = new ShaderResourceInfo { Buffers = Enumerable.Range(0, 5).Select(_ => new BufferResource { Read = true }).ToList() };
+        var plain = BindingLayout.Allocate(info, [0u], false, false, true, cursor, usesDispatchThreadLimits: true);
+        var explicitLengths = BindingLayout.Allocate(info, [0u], false, false, true, cursor,
+            usesDispatchThreadLimits: true, usesBufferLengths: true);
+        Assert.False(plain.UsesBufferLengths);
+        Assert.Equal(8u, plain.ShaderDataDwordCount);
+        Assert.True(explicitLengths.UsesBufferLengths);
+        Assert.Equal(5u, explicitLengths.BufferLengthsDword);
+        Assert.Equal(10u, explicitLengths.DispatchThreadLimitsDword);
+        Assert.Equal(13u, explicitLengths.ShaderDataDwordCount);
+        Assert.Equal(cursor == 0, explicitLengths.UsesPushData);
+        Assert.NotEqual(plain, explicitLengths);
+        BindingLayoutValidator.Validate(explicitLengths, info, [0u], false, false, true, Hash, ShaderStage.Compute);
+    }
+
     [Theory]
     [InlineData(0u)]
     [InlineData(30u)]

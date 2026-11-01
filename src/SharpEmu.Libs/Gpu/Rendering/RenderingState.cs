@@ -9,7 +9,6 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 // One attachment of a dynamic rendering scope, with the format the pipeline must match.
 public readonly record struct RenderingAttachment(
     GpuImageHandle View,
-    GpuImageLayout Layout,
     GpuFormat Format,
     uint ClearWord0,
     uint ClearWord1,
@@ -25,7 +24,6 @@ public readonly record struct RenderingAttachment(
     // and boxes both views, which a draw pays for every attachment it re-checks.
     public bool Equals(RenderingAttachment other) =>
         View.Handle == other.View.Handle &&
-        Layout == other.Layout &&
         Format == other.Format &&
         ClearWord0 == other.ClearWord0 &&
         ClearWord1 == other.ClearWord1 &&
@@ -39,7 +37,7 @@ public readonly record struct RenderingAttachment(
 
     public override int GetHashCode() => HashCode.Combine(
         View.Handle,
-        HashCode.Combine(Layout, Format, ClearWord0, ClearWord1, ClearWord2, ClearWord3),
+        HashCode.Combine(Format, ClearWord0, ClearWord1, ClearWord2, ClearWord3),
         HashCode.Combine(IsClear, HasDepth, DepthClear, HasStencil, StencilClear));
 }
 
@@ -77,7 +75,7 @@ public struct RenderingState : IEquatable<RenderingState>
             return false;
         }
 
-        for (var i = 0; i < ColorAttachmentCapacity; i++)
+        for (var i = 0; i < ColorAttachmentCount; i++)
         {
             if (!ColorAttachments[i].Equals(other.ColorAttachments[i]))
             {
@@ -93,7 +91,7 @@ public struct RenderingState : IEquatable<RenderingState>
     public override readonly int GetHashCode()
     {
         var hash = HashCode.Combine(Width, Height, Layers, ColorAttachmentCount, Samples, DepthStencilAttachment, RasterizesWithoutAttachments);
-        for (var i = 0; i < ColorAttachmentCapacity; i++)
+        for (var i = 0; i < ColorAttachmentCount; i++)
         {
             hash = HashCode.Combine(hash, ColorAttachments[i]);
         }

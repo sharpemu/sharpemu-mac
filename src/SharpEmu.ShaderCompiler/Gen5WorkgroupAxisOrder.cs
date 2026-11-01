@@ -70,4 +70,31 @@ public static class Gen5WorkgroupAxisOrder
             physicalAxisOfLogical[byDescendingSize[physical]] = physical;
         }
     }
+
+    /// <summary>
+    /// The axis order of the workgroup IDs: the thread order, except that a one-dimensional
+    /// program that reads only its Y group ID runs its groups on the X axis, whose group count
+    /// limit is the largest. A backend that bakes this into its programs permutes the dispatch
+    /// group counts the same way.
+    /// </summary>
+    public static int[] ComputeGroups(uint sizeX, uint sizeY, uint sizeZ, bool groupX, bool groupY, bool groupZ)
+    {
+        var order = Compute(sizeX, sizeY, sizeZ);
+        return order is [0, 1, 2] && RunsYGroupsOnX(sizeY, sizeZ, groupX, groupY, groupZ) ? [1, 0, 2] : order;
+    }
+
+    /// <summary>The same group order written into a caller-owned span of three, without allocating.</summary>
+    public static void ComputeGroupsInto(uint sizeX, uint sizeY, uint sizeZ, bool groupX, bool groupY, bool groupZ,
+        Span<int> physicalAxisOfLogical)
+    {
+        ComputeInto(sizeX, sizeY, sizeZ, physicalAxisOfLogical);
+        if (physicalAxisOfLogical is [0, 1, 2] && RunsYGroupsOnX(sizeY, sizeZ, groupX, groupY, groupZ))
+        {
+            physicalAxisOfLogical[0] = 1;
+            physicalAxisOfLogical[1] = 0;
+        }
+    }
+
+    private static bool RunsYGroupsOnX(uint sizeY, uint sizeZ, bool groupX, bool groupY, bool groupZ) =>
+        sizeY <= 1 && sizeZ <= 1 && groupY && !groupX && !groupZ;
 }

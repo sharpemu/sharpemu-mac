@@ -5,12 +5,23 @@ namespace SharpEmu.Libs.Gpu.Buffers;
 
 public sealed class WriteTickMap
 {
-    private readonly List<Entry> _entries = [];
+    private const int ChunkShift = 22;
+    private const int GranuleShift = 12;
+    private const ulong ChunkBytes = 1UL << ChunkShift;
+    private const int GranulesPerChunk = 1 << (ChunkShift - GranuleShift);
+
+    private sealed class Chunk
+    {
+        public ulong UniformTick;
+        public ulong MaxTick;
+        public ulong[]? Granules;
+    }
+
+    private Chunk?[] _chunks = [];
+    private int _count;
     private ulong _floor;
 
-    private readonly record struct Entry(ulong Begin, ulong End, ulong Tick);
-
-    public int Count => _entries.Count;
+    public int Count => _count;
 
     public ulong Floor => _floor;
 
@@ -22,53 +33,34 @@ public sealed class WriteTickMap
         }
 
         var end = begin + size;
-        var index = FirstEndingAfter(begin);
-        var removed = 0;
-        while (index + removed < _entries.Count && _entries[index + removed].Begin < end)
+        var lastChunk = (end - 1) >> ChunkShift;
+        if (lastChunk >= (ulong)_chunks.Length)
         {
-            removed++;
+            Array.Resize(ref _chunks, (int)Math.Max(lastChunk + 1, (ulong)_chunks.Length * 2));
         }
 
-        Entry? left = null;
-        Entry? right = null;
-        if (removed != 0)
+        for (var index = begin >> ChunkShift; index <= lastChunk; index++)
         {
-            var first = _entries[index];
-            if (first.Begin < begin)
+            var chunk = _chunks[index];
+            if (chunk == null)
             {
-                left = first with { End = begin };
+                chunk = new Chunk();
+                _chunks[index] = chunk;
+                _count++;
             }
 
-            var last = _entries[index + removed - 1];
-            if (last.End > end)
+            var chunkBegin = index << ChunkShift;
+            var from = Math.Max(begin, chunkBegin) - chunkBegin;
+            var to = Math.Min(end, chunkBegin + ChunkBytes) - chunkBegin;
+            if (from == 0 && to == ChunkBytes)
             {
-                right = last with { Begin = end };
+                chunk.UniformTick = Math.Max(chunk.UniformTick, tick);
+                chunk.MaxTick = Math.Max(chunk.MaxTick, tick);
             }
-
-            _entries.RemoveRange(index, removed);
-        }
-
-        var insert = index;
-        if (left is { } leftPiece)
-        {
-            _entries.Insert(insert++, leftPiece);
-        }
-
-        _entries.Insert(insert, new Entry(begin, end, tick));
-        var middle = insert++;
-        if (right is { } rightPiece)
-        {
-            _entries.Insert(insert, rightPiece);
-        }
-
-        if (middle + 1 < _entries.Count)
-        {
-            _ = TryMerge(middle, middle + 1);
-        }
-
-        if (middle > 0)
-        {
-            _ = TryMerge(middle - 1, middle);
+            else if (tick > chunk.UniformTick)
+            {
+                AssignGranules(chunk, (int)(from >> GranuleShift), (int)((to - 1) >> GranuleShift) + 1, tick);
+            }
         }
     }
 
@@ -81,9 +73,30 @@ public sealed class WriteTickMap
         }
 
         var end = begin + size;
-        for (var index = FirstEndingAfter(begin); index < _entries.Count && _entries[index].Begin < end; index++)
+        var lastChunk = (end - 1) >> ChunkShift;
+        for (var index = begin >> ChunkShift; index <= lastChunk && index < (ulong)_chunks.Length; index++)
         {
-            tick = Math.Max(tick, _entries[index].Tick);
+            var chunk = _chunks[index];
+            if (chunk == null || chunk.MaxTick <= tick)
+            {
+                continue;
+            }
+
+            var chunkBegin = index << ChunkShift;
+            var from = Math.Max(begin, chunkBegin) - chunkBegin;
+            var to = Math.Min(end, chunkBegin + ChunkBytes) - chunkBegin;
+            if ((from == 0 && to == ChunkBytes) || chunk.Granules is not { } granules)
+            {
+                tick = Math.Max(tick, from == 0 && to == ChunkBytes ? chunk.MaxTick : chunk.UniformTick);
+                continue;
+            }
+
+            tick = Math.Max(tick, chunk.UniformTick);
+            var last = (int)((to - 1) >> GranuleShift);
+            for (var granule = (int)(from >> GranuleShift); granule <= last && tick < chunk.MaxTick; granule++)
+            {
+                tick = Math.Max(tick, granules[granule]);
+            }
         }
 
         return tick;
@@ -91,53 +104,30 @@ public sealed class WriteTickMap
 
     public void Prune(ulong below)
     {
-        var kept = 0;
-        for (var index = 0; index < _entries.Count; index++)
+        for (var index = 0; index < _chunks.Length; index++)
         {
-            var entry = _entries[index];
-            if (entry.Tick < below)
+            if (_chunks[index] is { } chunk && chunk.MaxTick < below)
             {
-                _floor = Math.Max(_floor, entry.Tick);
-                continue;
+                _floor = Math.Max(_floor, chunk.MaxTick);
+                _chunks[index] = null;
+                _count--;
             }
-
-            _entries[kept++] = entry;
         }
-
-        _entries.RemoveRange(kept, _entries.Count - kept);
     }
 
-    private bool TryMerge(int left, int right)
+    private static void AssignGranules(Chunk chunk, int first, int end, ulong tick)
     {
-        var a = _entries[left];
-        var b = _entries[right];
-        if (a.End != b.Begin || a.Tick != b.Tick)
+        var granules = (chunk.Granules ??= new ulong[GranulesPerChunk]).AsSpan(first, end - first);
+        if (tick >= chunk.MaxTick)
         {
-            return false;
+            granules.Fill(tick);
+            chunk.MaxTick = tick;
+            return;
         }
 
-        _entries[left] = a with { End = b.End };
-        _entries.RemoveAt(right);
-        return true;
-    }
-
-    private int FirstEndingAfter(ulong address)
-    {
-        var low = 0;
-        var high = _entries.Count;
-        while (low < high)
+        foreach (ref var granule in granules)
         {
-            var middle = low + ((high - low) >> 1);
-            if (_entries[middle].End <= address)
-            {
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle;
-            }
+            granule = Math.Max(granule, tick);
         }
-
-        return low;
     }
 }

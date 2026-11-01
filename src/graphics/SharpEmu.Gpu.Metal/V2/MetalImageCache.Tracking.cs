@@ -91,6 +91,13 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        if (TracedImageAddress != 0 && image.Description.Data.Address == TracedImageAddress)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][IMAGE-TRACE] release 0x{image.Description.Data.Address:X} cause={cause} gpuModified={image.IsGpuModified} " +
+                $"cpuDirty={image.IsCpuDirty} tex=0x{image.Texture:X} slot={imageIdentifier.Index}{Environment.NewLine}{Environment.StackTrace}");
+        }
+
         NoteImageSetChanged(image.Description.Data);
         NoteReleasedForTelemetry(image, cause);
         // Chunks whose guest copy the texture holds get their bytes back before it goes.

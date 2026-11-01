@@ -63,50 +63,6 @@ public readonly record struct DepthStencilState(
 
     public bool IsReadOnly(GpuFormat format) => AttachmentWriteAspects(format) == GpuImageAspect.None;
 
-    // The layout for an attachment the draw does not also sample: writable in every aspect the
-    // format has, so draws that toggle depth or stencil writes keep one layout (and one rendering
-    // scope). Only a sampled attachment needs the read-only layouts of AttachmentLayout.
-    public static GpuImageLayout WritableAttachmentLayout(GpuFormat format)
-    {
-        var available = ViewFormatRules.DepthAspects(format);
-        var hasDepth = (available & GpuImageAspect.DepthBit) != 0;
-        var hasStencil = (available & GpuImageAspect.StencilBit) != 0;
-        return hasDepth && hasStencil ? GpuImageLayout.DepthStencilAttachmentOptimal
-            : hasStencil ? GpuImageLayout.StencilAttachmentOptimal
-            : GpuImageLayout.DepthAttachmentOptimal;
-    }
-
-    public GpuImageLayout AttachmentLayout(GpuFormat format)
-    {
-        var available = ViewFormatRules.DepthAspects(format);
-        var writes = AttachmentWriteAspects(format);
-        var hasDepth = (available & GpuImageAspect.DepthBit) != 0;
-        var hasStencil = (available & GpuImageAspect.StencilBit) != 0;
-        var depthWrite = (writes & GpuImageAspect.DepthBit) != 0;
-        var stencilWrite = (writes & GpuImageAspect.StencilBit) != 0;
-        if (!hasStencil)
-        {
-            return depthWrite ? GpuImageLayout.DepthAttachmentOptimal : GpuImageLayout.DepthReadOnlyOptimal;
-        }
-
-        if (!hasDepth)
-        {
-            return stencilWrite ? GpuImageLayout.StencilAttachmentOptimal : GpuImageLayout.StencilReadOnlyOptimal;
-        }
-
-        if (depthWrite && stencilWrite)
-        {
-            return GpuImageLayout.DepthStencilAttachmentOptimal;
-        }
-
-        if (depthWrite)
-        {
-            return GpuImageLayout.DepthAttachmentStencilReadOnlyOptimal;
-        }
-
-        return stencilWrite ? GpuImageLayout.DepthReadOnlyStencilAttachmentOptimal : GpuImageLayout.DepthStencilReadOnlyOptimal;
-    }
-
     private bool FaceWrites(in StencilOperations operations, in StencilMasks masks)
     {
         if (masks.WriteMask == 0)
@@ -164,9 +120,23 @@ public static class DepthTargetResolver
         return new DepthTargetState(target, ResolveState(context, target.HasStencil, fatal));
     }
 
+    // SHARPEMU_TRACE_DEPTH_CONTROL=1: each distinct DB_DEPTH_CONTROL that tests with ZFUNC NEVER or sets the colour-write
+    // bits 30/31 (ENABLE_COLOR_WRITES_ON_DEPTH_FAIL, DISABLE_COLOR_WRITES_ON_DEPTH_PASS), raw, once.
+    private static readonly bool TraceDepthControl = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DEPTH_CONTROL") == "1";
+    private static readonly HashSet<uint> TracedDepthControls = [];
+
     public static DepthStencilState ResolveState(ContextRegisters context, bool hasStencil, Func<string, Exception> fatal)
     {
         var depth = context.DepthTarget;
+        if (TraceDepthControl && ((depth.DepthTestEnabled && depth.DepthCompare == 0) || (depth.DepthControl & 0xC000_0000u) != 0))
+        {
+            lock (TracedDepthControls)
+            {
+                if (TracedDepthControls.Add(depth.DepthControl))
+                    Console.Error.WriteLine($"[GPU][DEPTH-CONTROL] raw=0x{depth.DepthControl:X8} test={depth.DepthTestEnabled} " +
+                        $"write={depth.DepthWriteEnabled} zfunc={depth.DepthCompare} stencil={depth.StencilTestEnabled}");
+            }
+        }
         var control = context.StencilControl;
         var masks = context.StencilMask;
         var stencilTest = hasStencil && depth.StencilTestEnabled;

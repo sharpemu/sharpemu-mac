@@ -40,6 +40,7 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
     private string _name;
     private string? _titleId;
     private string? _version;
+    private bool _compatibilityMode;
     private string? _coverPath;
     private string? _backgroundPath;
     private string _initials;
@@ -48,11 +49,12 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
 
     public GameEntry(
         string name, string? titleId, string? version, string path, long sizeBytes,
-        string? coverPath, string? backgroundPath)
+        string? coverPath, string? backgroundPath, bool compatibilityMode = false)
     {
         _name = name;
         _titleId = titleId;
         _version = version;
+        _compatibilityMode = compatibilityMode;
         Path = path;
         _sizeBytes = sizeBytes;
         _coverPath = coverPath;
@@ -138,6 +140,8 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
 
     public bool HasVersion => Version is not null;
 
+    public bool CompatibilityMode => _compatibilityMode;
+
     /// <summary>Formatted install size badge shown in the launch bar.</summary>
     public string SizeText => FormatSize(SizeBytes);
 
@@ -178,6 +182,13 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
             RaisePropertyChanged(nameof(Version));
             RaisePropertyChanged(nameof(VersionText));
             RaisePropertyChanged(nameof(HasVersion));
+            changes |= GameEntryChanges.Metadata;
+        }
+
+        if (_compatibilityMode != scanned.CompatibilityMode)
+        {
+            _compatibilityMode = scanned.CompatibilityMode;
+            RaisePropertyChanged(nameof(CompatibilityMode));
             changes |= GameEntryChanges.Metadata;
         }
 

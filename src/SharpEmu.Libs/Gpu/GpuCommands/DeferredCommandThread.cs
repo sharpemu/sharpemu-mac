@@ -200,12 +200,15 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     // The producer side, on the command stream thread.
 
-    public void EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw)
+    // Items are not numbered: the whole draws and dispatches this thread runs resolve where they
+    // run, so no pending-write sequence waits on them.
+    public long EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw)
     {
         var item = RentAsyncItem(Kind.Deferred);
         item.Work = work;
         item.IsDraw = isDraw;
         Enqueue(item);
+        return 0;
     }
 
     public void Post(Action action)
@@ -491,6 +494,33 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         }
     }
 
+    // SHARPEMU_CT_ITEM_KINDS=1 (diagnostic): every two seconds, the non-draw items the stream handed over, by kind and
+    // by the deferred work's type or the posted action's method.
+    private static readonly bool TraceItemKinds = Environment.GetEnvironmentVariable("SHARPEMU_CT_ITEM_KINDS") == "1";
+    private readonly Dictionary<string, int> _itemKinds = new(StringComparer.Ordinal);
+    private long _itemKindsReported;
+
+    private void NoteItemKind(Item item)
+    {
+        var key = item.Kind switch
+        {
+            Kind.Deferred => $"deferred:{item.Work?.GetType().Name}",
+            Kind.Call => $"call:{item.Action?.Method.DeclaringType?.Name}.{item.Action?.Method.Name}{(item.RangeSize != 0 ? ":range" : string.Empty)}",
+            _ => $"write:{item.Data?.Length}",
+        };
+        _itemKinds[key] = _itemKinds.GetValueOrDefault(key) + 1;
+        var now = Stopwatch.GetTimestamp();
+        if (now - _itemKindsReported < 2 * Stopwatch.Frequency)
+        {
+            return;
+        }
+
+        _itemKindsReported = now;
+        Console.Error.WriteLine("[GPU][CT-ITEMS] " + string.Join(" ",
+            _itemKinds.OrderByDescending(static pair => pair.Value).Take(12).Select(static pair => $"{pair.Key}={pair.Value}")));
+        _itemKinds.Clear();
+    }
+
     private void Enqueue(Item item)
     {
         ThrowIfFailed();
@@ -498,6 +528,10 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         {
             item.JobsBefore = _prefetch?.Submitted ?? 0;
             _enqueuedNonDraw++;
+            if (TraceItemKinds)
+            {
+                NoteItemKind(item);
+            }
         }
 
         if (CountItemSites && !item.IsDraw)

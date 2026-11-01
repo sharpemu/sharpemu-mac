@@ -17,79 +17,55 @@
   "Options.OverlayCorner.TopRight": "Rechtsboven",
   "Options.OverlayCorner.BottomRight": "Rechtsonder",
   "Options.OverlayCorner.BottomLeft": "Linksonder",
-
   "Page.Library": "Bibliotheek",
   "Page.Options": "Opties",
   "Page.Trophies": "Trofeeën",
   "Page.GameCount.One": "1 game",
   "Page.GameCount.Other": "{0} games",
-
   "Library.SearchWatermark": "Zoeken in bibliotheek…",
-
   "LibraryMenu.Library": "Bibliotheek",
-
   "LibraryMenu.View": "Weergave",
-
   "LibraryMenu.Row": "Rij",
-
   "LibraryMenu.Grid": "Raster",
-
   "LibraryMenu.Sound": "Geluid",
-
   "LibraryMenu.Volume": "Volume",
-
   "LibraryMenu.AddGames": "Games toevoegen",
-
   "LibraryMenu.AddFolder": "Map toevoegen…",
-
   "Hero.GameSettings": "Game-instellingen",
-
-
   "Hero.Console": "Console",
-
   "Hint.LibraryMenu": "Bibliotheekmenu",
-
   "Library.SearchClear": "Zoekopdracht wissen",
-
   "Library.TileSize": "Tegelgrootte",
-
   "Options.TitleMusicVolume.Desc": "Hoe luid de titelmuziek van een game in de bibliotheek speelt.",
   "Library.AddFolder": "Map toevoegen",
   "Library.OpenFile": "Bestand openen…",
-
   "Library.Context.Launch": "Starten",
   "Library.Context.OpenFolder": "Gamemap openen",
   "Library.Context.CopyPath": "Pad kopiëren",
   "Library.Context.CopyTitleId": "Titel-ID kopiëren",
   "Library.Context.Remove": "Verwijderen uit bibliotheek",
-
   "Library.Empty.Title": "Je bibliotheek is leeg",
   "Library.Empty.Hint": "Voeg een map met je games toe om te beginnen.",
   "Library.Empty.SearchTitle": "Geen games komen overeen met je zoekopdracht",
   "Library.Empty.SearchHint": "Niets in de bibliotheek komt overeen met “{0}”.",
   "Library.Empty.AddFolder": "＋ Gamemap toevoegen",
-
   "Library.Loading": "Bibliotheek laden…",
   "Library.ScanningFolder": "Map wordt gescand…",
   "Library.Stat.Version": "Versie",
   "Library.Stat.Installed": "Geïnstalleerd",
   "Library.Stat.TitleId": "Titel-ID",
+  "Library.Stat.CompatibilityMode": "Compatibiliteitsmodus",
   "Common.Back": "Terug",
-
   "Library.Music.Volume": "Volume van gamemuziek",
   "Library.Music.Mute": "Gamemuziek dempen",
   "Library.Music.Unmute": "Dempen van gamemuziek opheffen",
-
   "Options.General": "Algemeen",
   "Options.Logging": "Logging",
   "Options.Section.Emulation": "EMULATIE",
   "Options.Section.Logging": "LOGGING",
   "Options.Section.Launcher": "LAUNCHER",
-
-
   "Options.Strict.Label": "Strikte dynlib-resolutie",
   "Options.Strict.Desc": "Laat het opstarten mislukken wanneer een geïmporteerd symbool niet kan worden opgelost.",
-
   "Options.LogLevel.Label": "Logniveau",
   "Options.LogLevel.Desc": "Uitgebreidheid van de console-uitvoer van de emulator.",
   "Options.LogLevel.Trace": "Trace",
@@ -98,31 +74,24 @@
   "Options.LogLevel.Warning": "Waarschuwing",
   "Options.LogLevel.Error": "Fout",
   "Options.LogLevel.Critical": "Kritiek",
-
   "Options.TraceImports.Label": "Tracelimiet voor imports",
   "Options.TraceImports.Desc": "Traceer de eerste N imports per module (0 = uit).",
-
   "Options.CrashDump.Label": "Crashdumps",
   "Options.CrashDump.Desc": "Sla crashdumps naast het uitvoeringslog op (alleen Windows x64). Dumps kunnen groot zijn en privégegevens bevatten.",
   "Options.LogToFile.Label": "Loggen naar bestand",
   "Options.LogToFile.Desc": "Stuur de uitvoer van de emulator ook naar een logbestand.",
-
   "Options.LogsFolder.Label": "Logmap",
   "Options.LogsFolder.Desc": "Alle logs, traces en dumps: {0} ({1})",
   "Options.LogsFolder.Open": "Openen",
   "Options.LogFilePath.Label": "Pad naar logbestand",
   "Options.LogFilePath.Default": "Geen aangepast pad — logs komen terecht in user/logs naast de emulator.",
   "Options.LogFilePath.Select": "Selecteren…",
-
   "Options.OverrideLogFile.Label": "Logbestand overschrijven",
   "Options.OverrideLogFile.Desc": "Gebruik het exacte bestandspad in plaats van de titel-ID en tijdstempel toe te voegen.",
-
   "Options.TitleMusic.Label": "Titelmuziek",
   "Options.TitleMusic.Desc": "Herhaal de voorbeeldmuziek van de geselecteerde game in de bibliotheek.",
-
   "Options.Discord.Label": "Discord-aanwezigheid",
   "Options.Discord.Desc": "Toon de actieve game op je Discord-profiel.",
-
   "Options.Language.Label": "Taal van de emulator",
   "Options.Language.Desc": "Taal die in de hele launcher wordt gebruikt. Wordt direct toegepast.",
   "Options.Theme.Label": "Thema",
@@ -145,10 +114,8 @@
   "Options.Theme.Glass.Desc": "Hoe dekkend de bediening boven de game-afbeelding is. Lager laat meer van de afbeelding door.",
   "Options.Theme.Contrast.Label": "Contrast",
   "Options.Theme.Contrast.Desc": "Onderscheid tussen vlakken en tussen primaire en secundaire tekst.",
-
   "Common.On": "Aan",
   "Common.Off": "Uit",
-
   "Console.Title": "CONSOLE",
   "Console.SearchWatermark": "Zoeken...",
   "Console.AutoScroll": "Automatisch scrollen",
@@ -156,7 +123,6 @@
   "Console.Copy": "Kopiëren",
   "Console.Clear": "Wissen",
   "Console.WindowTitle": "SharpEmu-console",
-
   "Launch.NoGameSelected": "Geen game geselecteerd",
   "Launch.NoGameHint": "Kies een game uit de bibliotheek, of open direct een eboot.bin-bestand.",
   "Launch.Idle": "Inactief",
@@ -181,14 +147,12 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "Starten van de emulator mislukt: {0}",
   "Launch.ProcessExited": "Proces afgesloten met code {0} ({1}).",
-
   "Exit.Ok": "OK",
   "Exit.InvalidArguments": "ongeldige argumenten",
   "Exit.EbootNotFound": "eboot niet gevonden",
   "Exit.RuntimeException": "runtime-uitzondering",
   "Exit.EmulationError": "emulatiefout",
   "Exit.Unknown": "onbekend",
-
   "Status.EmulatorLocating": "Emulator: zoeken…",
   "Status.EmulatorPath": "Emulator: {0}",
   "Status.EmulatorNotFound": "Emulator: SharpEmu-uitvoerbaar bestand niet gevonden — bouw eerst SharpEmu.CLI.",
@@ -201,20 +165,16 @@
   "Status.Running": "Actief {0}",
   "Status.Stopping": "Stoppen…",
   "Status.Idle": "Inactief",
-
   "Clipboard.Path": "Pad",
   "Clipboard.TitleId": "Titel-ID",
-
   "Discord.Playing": "Speelt {0}",
   "Discord.Browsing": "Bladert door de bibliotheek",
-
   "Dialog.ChooseGameFolder": "Kies een map met games",
   "Dialog.OpenExecutable": "Open een uitvoerbaar bestand om te starten",
   "Dialog.PsExecutables": "PS-uitvoerbare bestanden",
   "Dialog.SaveLogFile": "Selecteer waar het logbestand moet worden opgeslagen",
   "Dialog.PlainTextFiles": "Platte tekstbestanden",
   "Dialog.LogFiles": "Logbestanden",
-
   "Library.Context.GameSettings": "Game-instellingen…",
   "Options.Env.Tab": "Omgeving",
   "Options.Section.Environment": "OMGEVINGSVARIABELEN",
@@ -262,7 +222,6 @@
   "Updater.Status.ChecksumFailed": "De gedownloade update is niet door de SHA-256-verificatie gekomen.",
   "Updater.Status.Unsupported": "Automatisch updaten vereist een x64-build voor Windows, Linux of macOS.",
   "Options.Graphics": "Grafisch",
-
   "Options.Console.Language.Label": "Consoletaal",
   "Options.Console.Language.Desc": "Systeemtaal die aan games wordt gemeld.",
   "Options.Section.General.Desc": "Basisgedrag van de emulatie.",
@@ -297,6 +256,9 @@
   "Options.Hdr.Label": "HDR-uitvoer",
   "Options.Hdr.Desc": "Gebruik HDR wanneer het geselecteerde beeldscherm en de grafische backend dit ondersteunen. Automatisch valt terug op SDR.",
   "Options.Hdr.Auto": "Automatisch",
+  "Options.GpuReadbacks.Label": "GPU-teruglezen",
+  "Options.GpuReadbacks.Desc": "Volledig: de opdrachtprocessor wacht op de waarden die de GPU schrijft. Het nauwkeurigst, maar kan haperingen veroorzaken.\nUit: wachtopdrachten gaan verder met de waarde die al in het geheugen staat als die aan de voorwaarde voldoet. Vloeiender, maar sommige games kunnen grafische fouten tonen.\nGeldt vanaf de volgende keer dat de game start.",
+  "Options.GpuReadbacks.Full": "Volledig",
   "Options.Env.BinkPlayback.Label": "Bink-video afspelen",
   "Options.Env.BinkPlayback.Desc": "Host speelt Bink-video's af via de FFmpeg-brug, maar sommige games kunnen problemen hebben.\nGuest gebruikt de eigen decoder van de game-engine.\nSkip slaat Bink-video's over, wat de ontwikkeling kan vergemakkelijken.",
   "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
@@ -307,10 +269,14 @@
   "Options.Env.TrophyTest.Desc": "Kies een game en een trofee en toon vervolgens de ontgrendelingsmelding. Er wordt niets ontgrendeld.",
   "Options.Env.TrophyTest.Show": "Melding tonen",
   "Options.Env.TrophySound.Label": "Trofee-geluid",
-  "Options.Env.TrophySound.Desc": "Speelt een kort geluidje af wanneer een trofee wordt ontgrendeld."
-,
+  "Options.Env.TrophySound.Desc": "Speelt een kort geluidje af wanneer een trofee wordt ontgrendeld.",
+  "Options.GnmMode.TrophyKey.Label": "Trofeesleutel",
+  "Options.GnmMode.TrophyKey.Desc": "PS4-trofeesleutel voor versleutelde trofeenamen en beschrijvingen. Gebruikt door de trofeelijsten en ontgrendelingsmeldingen van GnmMode. Wordt lokaal opgeslagen; herstart een actief spel na een wijziging.",
+  "Options.GnmMode.TrophyKey.Placeholder": "32 hexadecimale tekens",
+  "Options.GnmMode.TrophyKey.Invalid": "Voer precies 32 hexadecimale tekens (0–9, A–F) in of wis het veld om de sleutel te verwijderen. De vorige geldige sleutel blijft behouden totdat de invoer geldig is.",
   "Trophies.Title": "Trofeeën",
   "Trophies.None": "Deze game heeft geen trofeeën.",
+  "Trophies.GnmMode.KeyHint": "Voor het laden van PS4-trofeeën kan een trofeesleutel nodig zijn. Voer deze in via {0} → GnmMode → {1}.",
   "Trophies.Loading": "Trofeeën laden…",
   "Trophies.Hidden": "Verborgen trofee",
   "Trophies.HiddenDescription": "Klik om deze trofee te onthullen.",

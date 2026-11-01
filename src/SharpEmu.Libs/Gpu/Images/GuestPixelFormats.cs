@@ -474,7 +474,8 @@ public static class GuestPixelFormats
         (GuestPixelFormat.Bits32_32_32_32UInt, GpuFormat.R32G32B32A32Uint),
         (GuestPixelFormat.Bits32_32_32_32SInt, GpuFormat.R32G32B32A32Sint),
         (GuestPixelFormat.Bits32_32_32_32Float, GpuFormat.R32G32B32A32Sfloat),
-        // Narrow sRGB formats are optional in Vulkan; a same-width UNORM format stands in.
+        // Narrow sRGB formats are optional in Vulkan; a same-width UNORM format stands in
+        // unless the backend has them (NarrowSrgbFormats).
         (GuestPixelFormat.Bits8Srgb, GpuFormat.R8Unorm),
         (GuestPixelFormat.Bits8_8Srgb, GpuFormat.R8G8Unorm),
         (GuestPixelFormat.Bits8_8_8_8Srgb, GpuFormat.R8G8B8A8Srgb),
@@ -562,8 +563,18 @@ public static class GuestPixelFormats
             _ => format,
         };
 
-    public static GpuFormat HostFormat(GuestPixelFormat format) =>
-        (uint)format < LookupSize ? HostLookup[(int)format] : GpuFormat.Undefined;
+    // A backend with native narrow sRGB formats (Metal on Apple GPUs) turns this on, so 8_SRGB
+    // and 8_8_SRGB decode on read and encode on a render-target write as the guest's do. With the
+    // UNORM stand-ins a title that encodes by hand through a UNORM view and samples through the
+    // sRGB descriptor reads the encoded value: Ghost of Tsushima's shadow mask (89 = linear 0.1).
+    public static bool NarrowSrgbFormats { get; set; }
+
+    public static GpuFormat HostFormat(GuestPixelFormat format) => format switch
+    {
+        GuestPixelFormat.Bits8Srgb when NarrowSrgbFormats => GpuFormat.R8Srgb,
+        GuestPixelFormat.Bits8_8Srgb when NarrowSrgbFormats => GpuFormat.R8G8Srgb,
+        _ => (uint)format < LookupSize ? HostLookup[(int)format] : GpuFormat.Undefined,
+    };
 
     public static RenderTargetEncoding ResolveRenderTargetEncoding(ChannelLayout layout, ChannelType type)
     {

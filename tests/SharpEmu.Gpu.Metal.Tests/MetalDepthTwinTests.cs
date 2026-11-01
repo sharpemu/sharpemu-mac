@@ -44,6 +44,20 @@ public sealed unsafe class MetalDepthTwinTests(ITestOutputHelper output)
         }
         """;
 
+    private const string StencilKernel = """
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void read_stencil(texture2d_ms<uint, access::read> t [[texture(0)]],
+                                 device uint* o [[buffer(0)]],
+                                 uint2 p [[thread_position_in_grid]])
+        {
+            if (p.x < t.get_width() && p.y < t.get_height())
+            {
+                o[p.y * t.get_width() + p.x] = t.read(p, 0).r | (t.read(p, 1).r << 8);
+            }
+        }
+        """;
+
     public static IEnumerable<object[]> Pairs()
     {
         var identity = new GpuComponentMapping(GpuComponentSwizzle.R, GpuComponentSwizzle.G, GpuComponentSwizzle.B, GpuComponentSwizzle.A);
@@ -128,6 +142,67 @@ public sealed unsafe class MetalDepthTwinTests(ITestOutputHelper output)
         var storage = rig.Cache.FindImage(ref storageRequest);
         Assert.NotEqual(depth, storage);
         Assert.Equal((0L, 0L), rig.Cache.TakeDepthTwinCounters());
+        rig.Harness.Submit();
+    }
+
+    // SHARPEMU_METAL_V2_STENCIL_TWIN: the stencil plane of a two-sample depth target read as 8-bit integers binds
+    // a stencil view of the depth texture (MetalImageCache.StencilTwin.cs); nothing else can fill an 8-bit
+    // multisampled image of it, and Ghost of Tsushima's depth copy read every object's stencil as zero from one.
+    [Fact]
+    public void AMultisampledStencilPlaneReadAsR8UintBindsTheDepthTexturesStencilView()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var identity = new GpuComponentMapping(GpuComponentSwizzle.R, GpuComponentSwizzle.G, GpuComponentSwizzle.B, GpuComponentSwizzle.A);
+        var depthRequest = Request(GpuFormat.D32SfloatS8Uint, ImageRole.DepthTarget, identity);
+        depthRequest = depthRequest with { Description = depthRequest.Description with { Samples = 2 } };
+        var depth = rig.Cache.FindImage(ref depthRequest);
+        var target = rig.Cache.AcquireDepthTargetView(depth, in depthRequest);
+        Assert.NotEqual(0, target);
+
+        // The stencil the GPU leaves in the depth texture, never in guest memory.
+        var pass = MetalNative.Send(MetalNative.Class("MTLRenderPassDescriptor"), MetalNative.Selector("renderPassDescriptor"));
+        var stencil = MetalNative.Send(pass, MetalNative.Selector("stencilAttachment"));
+        MetalNative.SendVoid(stencil, MetalNative.Selector("setTexture:"), target);
+        MetalV2Native.SendVoidValue(stencil, MetalNative.Selector("setLoadAction:"), Mtl.LoadActionClear);
+        MetalV2Native.SendVoidValue(stencil, MetalNative.Selector("setStoreAction:"), Mtl.StoreActionStore);
+        MetalV2Native.SendVoidUInt(stencil, MetalNative.Selector("setClearStencil:"), 0x4C);
+        var encoder = MetalNative.Send(rig.Harness.CommandBuffer, MetalNative.Selector("renderCommandEncoderWithDescriptor:"), pass);
+        MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+
+        var description = ImageDescription.Create();
+        description.Data = depthRequest.Description.Stencil;
+        description.PixelFormat = GpuFormat.R8Uint;
+        description.GuestFormat = GuestPixelFormat.Bits8UInt;
+        description.Type = GuestImageType.Color2D;
+        description.Extent = new GpuExtent3D(Width, Height, 1);
+        description.Resources = new SubresourceCount(1, 1);
+        description.Pitch = TileGeometry.DepthPitch(Width, 1);
+        description.BytesPerBlock = 1;
+        description.Samples = 2;
+        description.TileMode = GuestTileMode.Depth;
+        var view = ImageViewDescription.Default with
+        {
+            Format = GpuFormat.R8Uint,
+            Type = GpuImageViewType.Type2D,
+            Aspect = GpuImageAspect.ColorBit,
+            LayerCount = 1,
+            Mapping = identity,
+            Usage = GpuImageUsage.SampledBit,
+        };
+        var read = new ImageRequest(description, view, ImageRole.Texture);
+        Assert.True(rig.Cache.TryFindStencilTwin(in read, out var twin));
+        Assert.Equal(depth, twin);
+        var stencilView = rig.Cache.AcquireTextureView(twin, in read);
+        Assert.NotEqual(0, stencilView);
+        Assert.Equal(1L, rig.Cache.TakeStencilTwinBinds());
+
+        var values = rig.ReadStencilSamples(stencilView);
+        Assert.All(values, value => Assert.Equal(0x4C4Cu, value));
+
+        // An ordinary sampled read of a one-sample stencil plane keeps its own image.
+        var single = read with { Description = read.Description with { Samples = 1 } };
+        Assert.False(rig.Cache.TryFindStencilTwin(in single, out _));
         rig.Harness.Submit();
     }
 
@@ -271,6 +346,33 @@ public sealed unsafe class MetalDepthTwinTests(ITestOutputHelper output)
             }
 
             return MemoryMarshal.Cast<byte, float>(Harness.Read(buffer, 0, (ulong)count * sizeof(float))).ToArray();
+        }
+
+        // Both samples of each texel of a two-sample stencil view, one word each (sample 1 in bits 8..15).
+        public uint[] ReadStencilSamples(nint view)
+        {
+            var count = (int)(Width * Height);
+            var buffer = Harness.Buffer((ulong)count * sizeof(uint));
+            var pipeline = MetalGuestWindowResidencyTests.ComputePipeline(StencilKernel, "read_stencil");
+            try
+            {
+                var encoder = MetalNative.Send(Harness.CommandBuffer, MetalNative.Selector("computeCommandEncoder"));
+                MetalNative.SendVoid(encoder, MetalNative.Selector("setComputePipelineState:"), pipeline);
+                MetalNative.SendSetAtIndex(encoder, MetalNative.Selector("setTexture:atIndex:"), view, 0);
+                MetalNative.SendSetBuffer(encoder, MetalNative.Selector("setBuffer:offset:atIndex:"), buffer, 0, 0);
+                MetalNative.SendDispatch(encoder, MetalNative.Selector("dispatchThreads:threadsPerThreadgroup:"),
+                    new MtlSize { Width = Width, Height = Height, Depth = 1 },
+                    new MtlSize { Width = 16, Height = 16, Depth = 1 });
+                MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
+                Harness.Submit();
+                Harness.Begin();
+            }
+            finally
+            {
+                MetalNative.SendVoid(pipeline, MetalNative.Selector("release"));
+            }
+
+            return MemoryMarshal.Cast<byte, uint>(Harness.Read(buffer, 0, (ulong)count * sizeof(uint))).ToArray();
         }
 
         public void Dispose()

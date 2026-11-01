@@ -17,79 +17,55 @@
   "Options.OverlayCorner.TopRight": "In alto a destra",
   "Options.OverlayCorner.BottomRight": "In basso a destra",
   "Options.OverlayCorner.BottomLeft": "In basso a sinistra",
-
   "Page.Library": "Libreria",
   "Page.Options": "Opzioni",
   "Page.Trophies": "Trofei",
   "Page.GameCount.One": "1 gioco",
   "Page.GameCount.Other": "{0} giochi",
-
   "Library.SearchWatermark": "Cerca nella libreria…",
-
   "LibraryMenu.Library": "Libreria",
-
   "LibraryMenu.View": "Vista",
-
   "LibraryMenu.Row": "Riga",
-
   "LibraryMenu.Grid": "Griglia",
-
   "LibraryMenu.Sound": "Audio",
-
   "LibraryMenu.Volume": "Volume",
-
   "LibraryMenu.AddGames": "Aggiungi giochi",
-
   "LibraryMenu.AddFolder": "Aggiungi cartella…",
-
   "Hero.GameSettings": "Impostazioni del gioco",
-
-
   "Hero.Console": "Console",
-
   "Hint.LibraryMenu": "Menu della libreria",
-
   "Library.SearchClear": "Cancella ricerca",
-
   "Library.TileSize": "Dimensione riquadri",
-
   "Options.TitleMusicVolume.Desc": "Volume della musica del titolo di un gioco nella libreria.",
   "Library.AddFolder": "Aggiungi cartella",
   "Library.OpenFile": "Apri file…",
-
   "Library.Context.Launch": "Avvia",
   "Library.Context.OpenFolder": "Apri cartella gioco",
   "Library.Context.CopyPath": "Copia percorso",
   "Library.Context.CopyTitleId": "Copia ID titolo",
   "Library.Context.Remove": "Rimuovi dalla libreria",
-
   "Library.Empty.Title": "La tua libreria è vuota",
   "Library.Empty.Hint": "Aggiungi la cartella che contiene i tuoi giochi per partire.",
   "Library.Empty.SearchTitle": "Nessun gioco corrisponde alla ricerca",
   "Library.Empty.SearchHint": "Nulla nella libreria corrisponde a “{0}”.",
   "Library.Empty.AddFolder": "＋ Aggiungi cartella giochi",
-
   "Library.Loading": "Caricamento libreria…",
   "Library.ScanningFolder": "Analisi della cartella…",
   "Library.Stat.Version": "Versione",
   "Library.Stat.Installed": "Installato",
   "Library.Stat.TitleId": "ID titolo",
+  "Library.Stat.CompatibilityMode": "Modalità compatibilità",
   "Common.Back": "Indietro",
-
   "Library.Music.Volume": "Volume della musica del gioco",
   "Library.Music.Mute": "Disattiva audio della musica del gioco",
   "Library.Music.Unmute": "Riattiva audio della musica del gioco",
-
   "Options.General": "Generale",
   "Options.Logging": "Log",
   "Options.Section.Emulation": "EMULAZIONE",
   "Options.Section.Logging": "LOG",
   "Options.Section.Launcher": "LAUNCHER",
-
-
   "Options.Strict.Label": "Risoluzione rigorosa dynlib",
   "Options.Strict.Desc": "Interrompi l'avvio quando un simbolo importato non può essere trovato.",
-
   "Options.LogLevel.Label": "Livello Log",
   "Options.LogLevel.Desc": "Livello di dettaglio dell'output console dell'emulatore.",
   "Options.LogLevel.Trace": "Traccia",
@@ -98,34 +74,24 @@
   "Options.LogLevel.Warning": "Avviso",
   "Options.LogLevel.Error": "Errore",
   "Options.LogLevel.Critical": "Critico",
-
   "Options.TraceImports.Label": "Limite tracciamento import",
   "Options.TraceImports.Desc": "Traccia i primi N import per modulo (0 = disattivato).",
-
-
   "Options.CrashDump.Label": "Dump degli arresti anomali",
   "Options.CrashDump.Desc": "Salva i dump accanto al registro di esecuzione (solo Windows x64). I file possono essere grandi e contenere dati privati.",
   "Options.LogToFile.Label": "Salva log su file",
   "Options.LogToFile.Desc": "Duplica l'output dell'emulatore in un file di log.",
-
-
   "Options.LogsFolder.Label": "Cartella dei log",
   "Options.LogsFolder.Desc": "Tutti i log, le tracce e i dump: {0} ({1})",
   "Options.LogsFolder.Open": "Apri",
   "Options.LogFilePath.Label": "Percorso file di log",
   "Options.LogFilePath.Default": "Nessun percorso personalizzato — i log vengono salvati in user/logs accanto all'emulatore.",
   "Options.LogFilePath.Select": "Seleziona…",
-
   "Options.OverrideLogFile.Label": "Sovrascrivi file di log",
   "Options.OverrideLogFile.Desc": "Usa esattamente il percorso specificato invece di aggiungere Title ID e timestamp.",
-
-
   "Options.TitleMusic.Label": "Musica del titolo",
   "Options.TitleMusic.Desc": "Riproduci in loop la musica di anteprima del gioco selezionato nella libreria.",
-
   "Options.Discord.Label": "Presenza Discord",
   "Options.Discord.Desc": "Mostra il gioco in esecuzione sul tuo profilo Discord.",
-
   "Options.Language.Label": "Lingua dell'emulatore",
   "Options.Language.Desc": "Lingua utilizzata in tutto il launcher. Viene applicata immediatamente.",
   "Options.Theme.Label": "Tema",
@@ -148,10 +114,8 @@
   "Options.Theme.Glass.Desc": "Quanto sono pieni i controlli sopra l’immagine del gioco. Valori più bassi lasciano vedere più immagine.",
   "Options.Theme.Contrast.Label": "Contrasto",
   "Options.Theme.Contrast.Desc": "Separazione tra le superfici e tra testo principale e secondario.",
-
   "Common.On": "Attivo",
   "Common.Off": "Disattivato",
-
   "Console.Title": "CONSOLE",
   "Console.SearchWatermark": "Cerca...",
   "Console.AutoScroll": "Scorrimento automatico",
@@ -159,7 +123,6 @@
   "Console.Copy": "Copia",
   "Console.Clear": "Cancella",
   "Console.WindowTitle": "Console SharpEmu",
-
   "Launch.NoGameSelected": "Nessun gioco selezionato",
   "Launch.NoGameHint": "Scegli un gioco dalla libreria, oppure apri direttamente un eboot.bin.",
   "Launch.Idle": "Inattivo",
@@ -184,16 +147,12 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "Impossibile avviare l'emulatore: {0}",
   "Launch.ProcessExited": "Processo terminato con codice {0} ({1}).",
-
-
   "Exit.Ok": "OK",
   "Exit.InvalidArguments": "argomenti non validi",
   "Exit.EbootNotFound": "eboot non trovato",
   "Exit.RuntimeException": "errore di runtime",
   "Exit.EmulationError": "errore di emulazione",
   "Exit.Unknown": "sconosciuto",
-
-  
   "Status.EmulatorLocating": "Emulatore: ricerca in corso…",
   "Status.EmulatorPath": "Emulatore: {0}",
   "Status.EmulatorNotFound": "Emulatore: eseguibile SharpEmu non trovato — compila prima SharpEmu.CLI.",
@@ -206,20 +165,16 @@
   "Status.Running": "In esecuzione: {0}",
   "Status.Stopping": "Arresto in corso…",
   "Status.Idle": "Inattivo",
-
   "Clipboard.Path": "Percorso",
   "Clipboard.TitleId": "ID Titolo",
-
   "Discord.Playing": "Sta giocando a {0}",
   "Discord.Browsing": "Sta esplorando la libreria",
-  
   "Dialog.ChooseGameFolder": "Scegli una cartella contenente giochi",
   "Dialog.OpenExecutable": "Apri un eseguibile da avviare",
   "Dialog.PsExecutables": "Eseguibili PS",
   "Dialog.SaveLogFile": "Scegli dove salvare il file di log",
   "Dialog.PlainTextFiles": "File di testo semplice",
   "Dialog.LogFiles": "File di log",
-
   "Library.Context.GameSettings": "Impostazioni del gioco…",
   "Options.Env.Tab": "Ambiente",
   "Options.Section.Environment": "VARIABILI D'AMBIENTE",
@@ -267,7 +222,6 @@
   "Updater.Status.ChecksumFailed": "L'aggiornamento scaricato non ha superato la verifica SHA-256.",
   "Updater.Status.Unsupported": "L'aggiornamento automatico richiede un build x64 per Windows, Linux o macOS.",
   "Options.Graphics": "Grafica",
-
   "Options.Console.Language.Label": "Lingua della console",
   "Options.Console.Language.Desc": "Lingua di sistema comunicata ai giochi.",
   "Options.Section.General.Desc": "Comportamento di base dell'emulazione.",
@@ -302,6 +256,9 @@
   "Options.Hdr.Label": "Output HDR",
   "Options.Hdr.Desc": "Usa HDR quando lo schermo selezionato e il backend grafico lo supportano. La modalità automatica torna a SDR.",
   "Options.Hdr.Auto": "Automatico",
+  "Options.GpuReadbacks.Label": "Rilettura GPU",
+  "Options.GpuReadbacks.Desc": "Completa: il processore dei comandi attende i valori scritti dalla GPU. È l'opzione più precisa, ma può causare scatti.\nOff: le attese proseguono con il valore già presente in memoria se soddisfa la condizione. Più fluido, ma alcuni giochi possono mostrare errori grafici.\nSi applica al prossimo avvio del gioco.",
+  "Options.GpuReadbacks.Full": "Completa",
   "Options.Env.BinkPlayback.Label": "Riproduzione video Bink",
   "Options.Env.BinkPlayback.Desc": "Host riproduce i video Bink tramite il bridge FFmpeg, ma alcuni giochi potrebbero avere problemi.\nGuest usa il decoder del motore di gioco.\nSkip salta i video Bink, facilitando lo sviluppo.",
   "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
@@ -312,10 +269,14 @@
   "Options.Env.TrophyTest.Desc": "Scegli un gioco e un trofeo, poi mostra la relativa notifica di sblocco. Non viene sbloccato nulla.",
   "Options.Env.TrophyTest.Show": "Mostra notifica",
   "Options.Env.TrophySound.Label": "Suono dei trofei",
-  "Options.Env.TrophySound.Desc": "Riproduce un breve suono quando un trofeo viene sbloccato."
-,
+  "Options.Env.TrophySound.Desc": "Riproduce un breve suono quando un trofeo viene sbloccato.",
+  "Options.GnmMode.TrophyKey.Label": "Chiave dei trofei",
+  "Options.GnmMode.TrophyKey.Desc": "Chiave dei trofei PS4 per nomi e descrizioni dei trofei cifrati. Utilizzata dagli elenchi dei trofei e dalle notifiche di sblocco di GnmMode. Salvata localmente; riavvia il gioco in esecuzione dopo averla modificata.",
+  "Options.GnmMode.TrophyKey.Placeholder": "32 caratteri esadecimali",
+  "Options.GnmMode.TrophyKey.Invalid": "Inserisci esattamente 32 caratteri esadecimali (0–9, A–F), oppure svuota il campo per rimuovere la chiave. La chiave valida precedente viene mantenuta finché il valore inserito non è valido.",
   "Trophies.Title": "Trofei",
   "Trophies.None": "Questo gioco non ha trofei.",
+  "Trophies.GnmMode.KeyHint": "Per caricare i trofei PS4 potrebbe essere necessaria una chiave dei trofei. Inseriscila in {0} → GnmMode → {1}.",
   "Trophies.Loading": "Caricamento trofei…",
   "Trophies.Hidden": "Trofeo nascosto",
   "Trophies.HiddenDescription": "Fai clic per rivelare questo trofeo.",

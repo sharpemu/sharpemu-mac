@@ -342,6 +342,10 @@ public static partial class TileGeometry
         uint offset;
         switch (layout.Kind)
         {
+            case TileBlockKind.GcnThin1D:
+                offset = ((x & 1) | ((y & 1) << 1) | ((x & 2) << 1) |
+                    ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3)) * bytes;
+                break;
             case TileBlockKind.Standard256B:
                 offset = Standard256BOffset(x, y, bytes);
                 break;

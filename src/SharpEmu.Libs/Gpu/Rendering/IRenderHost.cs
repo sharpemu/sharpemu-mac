@@ -19,7 +19,6 @@ public readonly record struct RenderHostLimits(uint MaxFramebufferWidth, uint Ma
 public readonly record struct ColorAttachmentAcquisition(
     ResourceSlotIdentifier Image,
     GpuImageHandle View,
-    GpuImageLayout Layout,
     uint Samples,
     bool MetadataClear,
     GpuClearColor MetadataClearValue);
@@ -89,9 +88,15 @@ public interface IResourcePreparation : IDisposable
 {
 }
 
+public readonly record struct DrawScopeToken(long Scope, ulong Lookups, long Metadata)
+{
+    public bool IsActive => Scope != 0;
+}
+
 // Everything the executor needs from the renderer, the caches and the pipeline objects.
 public interface IRenderHost
 {
+    bool TryCopyImage(in ImageRequest source, in ImageRequest destination) => false;
     int BeginImageSnapshot(IPreparedBindings? pixelBindings) => 0;
 
     int BeginComputeImageSnapshot(IPreparedBindings bindings) => 0;
@@ -103,9 +108,17 @@ public interface IRenderHost
     // Records a draw's color-target base for the image-clear trace; see docs/image-clear-tracing.md.
     void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) { }
 
+    DrawScopeToken DrawScope => default;
+
+    void KeepDepthAttachment(in DepthAttachmentState depth)
+    {
+    }
+
     RenderHostLimits Limits { get; }
 
     bool SupportsNativeRectangles => false;
+
+    bool SupportsTessellation => false;
 
     IImageFormatSupport FormatSupport { get; }
 
@@ -127,17 +140,24 @@ public interface IRenderHost
 
     void ResetBindings();
 
-    // Finds the image again when it changed, makes the view, sets the layout and resolves a metadata clear.
+    // Finds the image again when it changed, makes the view and resolves a metadata clear.
     ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target);
 
-    // Makes the view and consumes the metadata clear state; the layout follows in a second call.
+    // Makes the view and consumes the metadata clear state; the transition follows in a second call.
     DepthAttachmentAcquisition AcquireDepthAttachment(in DepthAttachmentState depth);
 
-    void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageLayout layout, GpuImageAspect writeAspects);
+    void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageAspect writeAspects);
 
     BufferBinding NullBuffer { get; }
 
     BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten);
+
+    void PrepareBufferAllocations(ReadOnlySpan<SharpEmu.HLE.GpuMemory.GuestSpan> ranges) =>
+        throw new NotSupportedException("The render host does not support tessellation buffer preparation.");
+
+    // The device address of a guest range's cached buffer, for shaders that read it through a physical pointer.
+    ulong ObtainBufferDeviceAddress(ulong address, ulong size, bool isWritten) =>
+        throw new NotSupportedException("The render host does not expose buffer addresses for tessellation.");
 
     void TraceVertexBuffer(ulong shaderHash, VertexAttributeResource attribute, VertexInputBuffer input,
         BufferBinding binding, ulong requestedBytes, ulong acquiredBytes) { }
@@ -150,21 +170,25 @@ public interface IRenderHost
     // and DrawPatches.
     bool SupportsTessellationEmulation => false;
 
-    // Binds the hull kernel's launch to the dispatch recorded next: the patch count and first
-    // instance (Gen5TessellationLaunch.HullLaunchBufferIndex) and each control point's vertex
-    // index in patch order (HullVertexBufferIndex).
-    void BindHullLaunch(ReadOnlySpan<uint> vertexIds, uint patchCount, uint firstInstance) =>
+    // Binds the hull kernel's launch to the dispatch recorded next: the patch count (every instance's
+    // patches, instance after instance), the first instance and the patches of one instance
+    // (Gen5TessellationLaunch.HullLaunchBufferIndex), and each control point's vertex index in the
+    // patch order of one instance (HullVertexBufferIndex).
+    void BindHullLaunch(ReadOnlySpan<uint> vertexIds, uint patchCount, uint firstInstance, uint instancePatches) =>
         throw new NotSupportedException("The renderer does not run tessellated draws.");
 
     // After the hull kernel's dispatch: the host's tessellation factors for the next DrawPatches,
     // from the guest's factor ring at ringAddress (four floats per triangle patch, the edges and
-    // the inside), clamped to the guest's VGT_HOS_MIN/MAX_TESS_LEVEL. A patch with an edge factor
-    // that is not above zero is culled, as the guest's tessellator culls it.
-    void PrepareTessellationFactors(ulong ringAddress, uint patchCount, float minFactor, float maxFactor) =>
+    // the inside; six per quad patch, four edges and two inside), clamped to the guest's
+    // VGT_HOS_MIN/MAX_TESS_LEVEL. A patch with an edge factor that is not above zero is culled, as
+    // the guest's tessellator culls it.
+    void PrepareTessellationFactors(ulong ringAddress, uint patchCount, bool quad, float minFactor, float maxFactor) =>
         throw new NotSupportedException("The renderer does not run tessellated draws.");
 
-    // Draws patchCount patches with the factors PrepareTessellationFactors made; the bound
-    // pipeline's vertex function is the domain program's post-tessellation form.
+    // Draws patchCount patches of each instance with the factors PrepareTessellationFactors made
+    // (each instance's own); the bound pipeline's vertex function is the domain program's
+    // post-tessellation form, which finds an instance's patches in the off-chip buffer from the
+    // patch count and first instance (Gen5TessellationLaunch.DomainLaunchBufferIndex).
     void DrawPatches(uint controlPoints, uint patchCount, uint instanceCount, uint firstInstance) =>
         throw new NotSupportedException("The renderer does not run tessellated draws.");
 
@@ -207,6 +231,9 @@ public interface IRenderHost
     IResourcePreparation BeginPreparation();
 
     IPreparedBindings PrepareBindings(ShaderStageResources stage);
+
+    void UpdateTessellationData(IPreparedBindings prepared, uint[] data) =>
+        throw new NotSupportedException("The render host does not support tessellation runtime data.");
 
     void PrepareDeviceAddresses();
 
@@ -257,8 +284,17 @@ public interface IRenderHost
     // reports why passes ended; the others just end it.
     void EndRendering(string why) => EndRendering();
 
+    // Ends the pass for a counted reason; a host that does not count them treats it as any other end.
+    void EndRendering(ScopeBreak reason) => EndRendering(reason.ToString());
+
     // Whether a texture bound for the draw being prepared reads the depth attachment's subresources.
     bool SamplesDepthAttachment(in DepthAttachmentState depth) => true;
+
+    /// <summary>
+    /// Whether a pass may attach a depth target with more samples than its colour targets: the
+    /// host then draws the pass at the colour's sample count against a stand-in for the depth.
+    /// </summary>
+    bool SupportsMixedDepthSamples => false;
 
     // The next draw stores to buffers or storage images; called before its BeginRendering.
     void PrepareMemoryWritingDraw() { }
@@ -334,7 +370,13 @@ public interface IRenderHost
 
     // Executes a dispatch from three uint32 group counts in guest memory when the backend can
     // consume the guest buffer directly. Backends without native indirect dispatch return false.
-    bool TryDispatchIndirect(ulong argumentsAddress);
+    // physicalAxisOfLogical is the group axis order the program was compiled for.
+    bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical);
+
+    // True when the host's compute programs run the groups of a one-dimensional program that reads
+    // only its Y group ID on the X axis (Gen5WorkgroupAxisOrder.ComputeGroups), so the executor
+    // permutes that dispatch's group counts to match.
+    bool RunsYOnlyGroupsOnX => false;
 
     // Orders the buffer writes of the given shader stages before every later access.
     void ShaderWriteBarrier(GpuPipelineStage sourceStages);
@@ -357,6 +399,28 @@ public interface IRenderHost
     void ShaderWriteHazardBarrier();
 
     void ShaderAccessBarrier();
+
+    // False when the host recorded the barrier at once; true when it waits for the next native
+    // command outside a checked dispatch or the next barrier request.
+    bool TryDeferShaderAccessBarrier()
+    {
+        ShaderAccessBarrier();
+        return false;
+    }
+
+    void BeginCheckedDispatch()
+    {
+    }
+
+    void EndCheckedDispatch()
+    {
+    }
+
+    long DeferredBarrierPromotions => 0;
+
+    void NoteKnownGpuContents(ulong address, ReadOnlySpan<uint> words)
+    {
+    }
 
     // Clears the bound color targets to one colour in place of the draw.
     void ClearColorTargets(ReadOnlySpan<ColorTargetState> targets, SolidColorClear clear);

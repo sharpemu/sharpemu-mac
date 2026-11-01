@@ -254,6 +254,15 @@ internal sealed class MetalCachedImage : IDisposable
     /// </summary>
     public bool StencilPlaneStale { get; set; }
 
+    /// <summary>
+    /// An image over this depth image's stencil bytes whose texture holds a newer stencil, to copy in on the
+    /// device once this image has reloaded its depth plane from guest memory (MetalImageCache.SynchronizeStencilPlanes).
+    /// </summary>
+    public MetalCachedImage? PendingStencilSource { get; set; }
+
+    /// <summary>The cache slot of <see cref="PendingStencilSource"/>, to tell it is still the live image there.</summary>
+    public SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier PendingStencilSourceSlot { get; set; }
+
     /// <summary>Records that this texture's stencil plane is a device copy of the source as it is.</summary>
     public void NoteStencilFrom(MetalCachedImage source)
     {
@@ -546,7 +555,8 @@ internal sealed class MetalCachedImage : IDisposable
     /// The texture usage a view needs that the texture may lack: pixel-format-view for a
     /// view of another format, unless the two formats are only the sRGB and linear
     /// variants of one format, which Metal views without it; and for a component swizzle,
-    /// which this cache only makes on a texture that has it.
+    /// which this cache makes on a texture that has it (a texture it cannot promote, such as
+    /// a compressed one, still gets a same-format swizzled view: GetOrCreateView).
     /// </summary>
     public ulong UsageNeededFor(in ImageViewDescription requested)
     {
@@ -975,12 +985,7 @@ internal sealed class MetalCachedImage : IDisposable
     }
 
     /// <summary>The view for a request, with its cached gpuResourceID.</summary>
-    /// <param name="sameFormatSwizzle">
-    /// The view keeps the texture's format, and its swizzle is made without the
-    /// pixel-format-view usage: Metal gives a depth texture a same-format swizzled view
-    /// without it (MetalImageCache.DepthTwin.cs).
-    /// </param>
-    public nint GetOrCreateView(in ImageViewDescription requested, out ulong resourceId, bool sameFormatSwizzle = false)
+    public nint GetOrCreateView(in ImageViewDescription requested, out ulong resourceId)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ImageViewLookup);
         resourceId = 0;
@@ -991,6 +996,12 @@ internal sealed class MetalCachedImage : IDisposable
         }
 
         var viewFormat = MetalV2Formats.PixelFormat(requested.Format);
+        if (Shape.PixelFormat == MtlFormat.Depth32FloatStencil8 && viewFormat == MtlFormat.R8Uint)
+        {
+            // The stencil plane read as 8-bit integers (MetalImageCache.StencilTwin.cs).
+            viewFormat = MtlFormat.X32Stencil8;
+        }
+
         var viewType = MetalV2Formats.ViewTextureType(requested.Type, Shape.SampleCount);
         var swizzle = SwizzleOf(requested.Mapping, out var identitySwizzle);
         // MTLTextureUsagePixelFormatView is only needed to reinterpret the pixel
@@ -1002,16 +1013,18 @@ internal sealed class MetalCachedImage : IDisposable
         if (viewable && MetalGuestFormats.HasSrgbTwin((MtlPixelFormat)Shape.PixelFormat))
         {
             // A compressed texture has the view usage only for its sRGB/linear twin (see
-            // MetalImageTransfer.UsageOf); any other format or a swizzle stays unviewed, as
-            // before, since Metal raises on a reinterpretation it does not allow.
-            identitySwizzle = true;
+            // MetalImageTransfer.UsageOf); any other format stays unviewed, as before, since
+            // Metal raises on a reinterpretation it does not allow. The twin keeps its swizzle.
             viewable = viewFormat == Shape.PixelFormat ||
                 MetalGuestFormats.AreSrgbTwins((MtlPixelFormat)Shape.PixelFormat, (MtlPixelFormat)viewFormat);
         }
 
-        if (!viewable && !identitySwizzle && !(sameFormatSwizzle && viewFormat == Shape.PixelFormat))
+        // A view that keeps the texture's format may swizzle without the usage (checked under
+        // API validation for depth, BC1/BC4/BC5 and R8): a BC4 mask whose T# replicates R reads
+        // zero in G and B otherwise, which blanks every material layer a shader masks with .g.
+        if (!viewable && !identitySwizzle && viewFormat != Shape.PixelFormat)
         {
-            // Metal raises on a swizzled view of a texture without the usage, so the view
+            // Metal raises on a swizzled reinterpretation of a texture without the usage, so the view
             // reads the components in the texture's own order, and that is reported. The report's
             // key is formatted on every bind, so this image remembers the one it last asked about.
             if (!SwizzleWarningAsked(requested.Mapping))
@@ -1043,6 +1056,19 @@ internal sealed class MetalCachedImage : IDisposable
                     $"layers={requested.BaseLayer}+{requested.LayerCount} usage={requested.Usage}.");
             }
 
+            resourceId = TextureResourceId();
+            return Texture;
+        }
+
+        // Nor can a flat texture be viewed as a volume: a binding whose descriptor is a volume over an image the
+        // cache holds flat is wrong either way, and Metal raises on the view.
+        if (Shape.TextureType != Mtl.TextureType3D && viewType == Mtl.TextureType3D)
+        {
+            MetalV2Diagnostics.WarnOnce(
+                $"flat-volume-view:{Shape.TextureType}",
+                $"A flat texture cannot be viewed as a volume; binding the texture instead: type={Shape.TextureType}->3D " +
+                $"format={Shape.PixelFormat}->{viewFormat} extent={Description.Extent.Width}x{Description.Extent.Height}x" +
+                $"{Description.Extent.Depth} address=0x{Description.Data.Address:X16}.{Environment.NewLine}{Environment.StackTrace}");
             resourceId = TextureResourceId();
             return Texture;
         }

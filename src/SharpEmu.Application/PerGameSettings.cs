@@ -47,6 +47,7 @@ public sealed class PerGameSettings
     public string? HdrMode { get; set; }
 
     public string? GuestDisplayResolution { get; set; }
+    public string? GpuReadbacks { get; set; }
 
     public bool? OverlayEnabled { get; set; }
     public string? OverlayCorner { get; set; }
@@ -79,6 +80,7 @@ public sealed class PerGameSettings
         VSync is null &&
         HdrMode is null &&
         GuestDisplayResolution is null &&
+        GpuReadbacks is null &&
         OverlayEnabled is null &&
         OverlayCorner is null &&
         OverlayMode is null &&
@@ -201,6 +203,7 @@ public sealed class PerGameSettings
         ScalingMode = UnlessEqual(ScalingMode, defaults.ScalingMode);
         VSync = UnlessEqual(VSync, defaults.VSync);
         HdrMode = UnlessEqual(HdrMode, defaults.HdrMode);
+        GpuReadbacks = UnlessEqual(GpuReadbacks, defaults.GpuReadbacks);
         GuestDisplayResolution = UnlessEqual(GuestDisplayResolution, defaults.GuestDisplayResolution);
         OverlayEnabled = UnlessEqual(OverlayEnabled, defaults.OverlayEnabled);
         OverlayCorner = UnlessEqual(OverlayCorner, defaults.OverlayCorner);
@@ -332,6 +335,7 @@ public sealed record EffectiveLaunchSettings(
     bool VSync,
     string HdrMode,
     string GuestDisplayResolution,
+    string GpuReadbacks,
     bool OverlayEnabled,
     string OverlayCorner,
     string OverlayMode,
@@ -357,6 +361,7 @@ public sealed record EffectiveLaunchSettings(
         // What the guest is told the display is, which is what decides how much pixel work a
         // title does. Not the window size: see GuestDisplayResolution.
         GuestDisplayResolution: "1080p",
+        GpuReadbacks: "Full",
         OverlayEnabled: true,
         OverlayCorner: "TopRight",
         OverlayMode: "Full",
@@ -390,6 +395,7 @@ public sealed record EffectiveLaunchSettings(
             perGame?.VSync ?? defaults.VSync,
             perGame?.HdrMode ?? defaults.HdrMode,
             perGame?.GuestDisplayResolution ?? defaults.GuestDisplayResolution,
+            perGame?.GpuReadbacks ?? defaults.GpuReadbacks,
             perGame?.OverlayEnabled ?? defaults.OverlayEnabled,
             perGame?.OverlayCorner ?? defaults.OverlayCorner,
             perGame?.OverlayMode ?? defaults.OverlayMode,

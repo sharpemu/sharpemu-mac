@@ -1367,7 +1367,8 @@ internal sealed partial class MetalRenderHost
             report?.Append(
                 System.Globalization.CultureInfo.InvariantCulture,
                 $" a{index}:fmt={(int)format}:off={vertexInput.Attributes[index].Offset}" +
-                $":buf={VertexBufferSlotBase + binding}:guest={resource.Descriptor.Format}:used={usedComponents}");
+                $":buf={VertexBufferSlotBase + binding}:guest={resource.Descriptor.Format}:used={usedComponents}" +
+                $":sel={resource.Descriptor.DestinationSelectXYZW:X3}");
         }
 
         layoutReport = report?.ToString();
@@ -1635,7 +1636,8 @@ internal sealed partial class MetalRenderHost
         try
         {
             var loosenEqual = MetalV2Diagnostics.LoosenDepthEqual || MetalV2Diagnostics.LoosensEqualFor(entry.VertexHash);
-            var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreDepthTest
+            var depthCompare = entry.HasDepth && state.DepthTestEnabled && !MetalV2Diagnostics.IgnoreDepthTest &&
+                !MetalV2Diagnostics.PassesDepthFor(entry.VertexHash)
                 ? MetalV2Formats.CompareFunction(
                     loosenEqual && state.DepthCompare == GpuCompareOp.Equal ? MetalV2Diagnostics.LoosenEqualTo : state.DepthCompare)
                 : MetalV2Formats.CompareFunction(GpuCompareOp.Always);
@@ -1643,7 +1645,8 @@ internal sealed partial class MetalRenderHost
             MetalNative.SendVoidBool(
                 descriptor,
                 MetalNative.Selector("setDepthWriteEnabled:"),
-                entry.HasDepth && state.DepthWriteEnabled);
+                entry.HasDepth && (state.DepthWriteEnabled ||
+                    (loosenEqual && state.DepthCompare == GpuCompareOp.Equal && MetalV2Diagnostics.LoosenEqualWrites)));
             if (MetalV2Diagnostics.LogsStencilFor(entry.VertexHash))
             {
                 Console.Error.WriteLine(
@@ -1738,6 +1741,7 @@ internal sealed partial class MetalRenderHost
         Mix(state.DepthWriteEnabled ? 1UL : 0UL);
         Mix((ulong)state.DepthCompare);
         Mix(MetalV2Diagnostics.LoosensEqualFor(entry.VertexHash) ? 1UL : 0UL);
+        Mix(MetalV2Diagnostics.PassesDepthFor(entry.VertexHash) ? 1UL : 0UL);
         Mix(stencilEnabled ? 1UL : 0UL);
         if (stencilEnabled && entry.StaticParameters is { } parameters)
         {

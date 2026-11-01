@@ -40,6 +40,7 @@ public static class SettingsSplitMigration
         nameof(PerGameSettings.VSync),
         nameof(PerGameSettings.HdrMode),
         nameof(PerGameSettings.GuestDisplayResolution),
+        nameof(PerGameSettings.GpuReadbacks),
         nameof(PerGameSettings.OverlayEnabled),
         nameof(PerGameSettings.OverlayCorner),
         nameof(PerGameSettings.OverlayMode),
@@ -126,6 +127,7 @@ public static class SettingsSplitMigration
         legacy.HdrMode = ApplicationSettings.NormalizeChoice(legacy.HdrMode, "Auto", "On", "Off");
         legacy.GuestDisplayResolution = ApplicationSettings.NormalizeChoice(
             legacy.GuestDisplayResolution, "1080p", "720p", "1440p", "2160p");
+        legacy.GpuReadbacks = ApplicationSettings.NormalizeChoice(legacy.GpuReadbacks, "Full", "Off");
         legacy.BinkPlaybackMode = ApplicationSettings.NormalizeChoice(legacy.BinkPlaybackMode, "Guest", "Host", "Skip");
         legacy.OverlayCorner = ApplicationSettings.NormalizeChoice(
             legacy.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
@@ -165,6 +167,7 @@ public static class SettingsSplitMigration
         game.VSync = Fill(game.VSync, carried.VSync, ref changed);
         game.HdrMode = Fill(game.HdrMode, carried.HdrMode, ref changed);
         game.GuestDisplayResolution = Fill(game.GuestDisplayResolution, carried.GuestDisplayResolution, ref changed);
+        game.GpuReadbacks = Fill(game.GpuReadbacks, carried.GpuReadbacks, ref changed);
         game.OverlayEnabled = Fill(game.OverlayEnabled, carried.OverlayEnabled, ref changed);
         game.OverlayCorner = Fill(game.OverlayCorner, carried.OverlayCorner, ref changed);
         game.OverlayMode = Fill(game.OverlayMode, carried.OverlayMode, ref changed);

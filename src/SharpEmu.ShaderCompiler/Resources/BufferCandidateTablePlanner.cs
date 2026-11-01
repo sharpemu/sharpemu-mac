@@ -188,19 +188,25 @@ internal static class BufferCandidateTablePlanner
 
     // A canonical unsigned induction: the value is a phi with a constant initial and an
     // add-recurrence, and a branch guarded by an unsigned comparison against the phi
-    // lives at the loop header or one of its predecessors.
-    private static bool TryProveInductionBound(
+    // lives at the loop header or one of its predecessors. With exitGuards, a header whose
+    // branch leaves the loop when the comparison fails (a top-tested loop: s_cmp_lt_u32 then
+    // s_cbranch_scc0 past the latch) bounds it as well.
+    internal static bool TryProveInductionBound(
         ShaderResourcePlan plan,
         ScalarValue index,
         out ScalarValue initial,
         out uint step,
         out ScalarValue? limit,
-        out bool inclusive)
+        out bool inclusive,
+        bool exitGuards = false) =>
+        TryProveInductionBound(plan, index, out initial, out step, out limit, out inclusive, out _, exitGuards, signedGuards: false);
+
+    // The counter's start and step alone, for a loop whose bound the branch conditions do not tie to this phi (they were
+    // recorded against the counter's earlier version in a nested loop).
+    internal static bool TryProveInductionStep(ScalarValue index, out ScalarValue initial, out uint step)
     {
         initial = null!;
         step = 0;
-        limit = null;
-        inclusive = false;
         if (index.Kind != ScalarValueKind.Phi)
         {
             return false;
@@ -210,13 +216,66 @@ internal static class BufferCandidateTablePlanner
         var initialCount = 0;
         foreach (var operand in index.Operands)
         {
+            if (operand is { Kind: ScalarValueKind.Operation, Operation: ScalarOperation.IAdd32 } &&
+                (ReferenceEquals(operand.Operands[0], index) || ForwardsIndex(operand.Operands[0], index)) && operand.Operands[1].IsConstant)
+            {
+                step = operand.Operands[1].ConstantU32;
+            }
+            else if (!ReferenceEquals(operand, index))
+            {
+                found = operand;
+                initialCount++;
+            }
+        }
+
+        if (step == 0 || initialCount != 1 || found is null)
+        {
+            return false;
+        }
+
+        initial = found;
+        return true;
+    }
+
+    // With signedGuards a signed comparison bounds the counter as well (s_cmp_lt_i32 against an int count, a C for
+    // loop); signedLimit then tells the caller to order the counter and the bound as signed values, which a bound
+    // below zero (a loop that never runs) needs.
+    internal static bool TryProveInductionBound(
+        ShaderResourcePlan plan,
+        ScalarValue index,
+        out ScalarValue initial,
+        out uint step,
+        out ScalarValue? limit,
+        out bool inclusive,
+        out bool signedLimit,
+        bool exitGuards,
+        bool signedGuards)
+    {
+        initial = null!;
+        step = 0;
+        limit = null;
+        inclusive = false;
+        signedLimit = false;
+        if (index.Kind != ScalarValueKind.Phi)
+        {
+            return false;
+        }
+
+        // An inner loop carries the counter through a phi that only merges it with itself, and the increment at the
+        // outer latch adds to that phi: it is the counter.
+        bool IsIndex(ScalarValue value) => ReferenceEquals(value, index) || ForwardsIndex(value, index);
+
+        ScalarValue? found = null;
+        var initialCount = 0;
+        foreach (var operand in index.Operands)
+        {
             if (operand.Kind == ScalarValueKind.Operation && operand.Operation == ScalarOperation.IAdd32)
             {
-                if (ReferenceEquals(operand.Operands[0], index) && operand.Operands[1].IsConstant)
+                if (IsIndex(operand.Operands[0]) && operand.Operands[1].IsConstant)
                 {
                     step = operand.Operands[1].ConstantU32;
                 }
-                else if (ReferenceEquals(operand.Operands[1], index) && operand.Operands[0].IsConstant)
+                else if (IsIndex(operand.Operands[1]) && operand.Operands[0].IsConstant)
                 {
                     step = operand.Operands[0].ConstantU32;
                 }
@@ -244,6 +303,23 @@ internal static class BufferCandidateTablePlanner
         foreach (var pair in plan.Graph.BranchConditions)
         {
             var condition = pair.Value;
+            var exitGuard = false;
+            if (exitGuards && condition is { Kind: ScalarValueKind.Operation, Operation: ScalarOperation.LogicalNot })
+            {
+                // s_cselect_b64 vcc, exec, 0 then s_cbranch_vccz: the loop stays only while the comparison holds.
+                var stays = condition.Operands[0];
+                if (stays is { Kind: ScalarValueKind.Select } && stays.Operands[2] is { IsConstant: true, ConstantU64: 0 })
+                {
+                    stays = stays.Operands[0];
+                }
+
+                if (stays.Kind == ScalarValueKind.Operation)
+                {
+                    condition = stays;
+                    exitGuard = true;
+                }
+            }
+
             if (condition.Kind != ScalarValueKind.Operation)
             {
                 continue;
@@ -251,21 +327,32 @@ internal static class BufferCandidateTablePlanner
 
             ScalarValue? bound;
             bool boundInclusive;
+            var boundSigned = condition.Operation is ScalarOperation.SLessThan32 or ScalarOperation.SLessThanEqual32 or
+                ScalarOperation.SGreaterThan32 or ScalarOperation.SGreaterThanEqual32;
+            if (boundSigned && !signedGuards)
+            {
+                continue;
+            }
+
             switch (condition.Operation)
             {
-                case ScalarOperation.ULessThan32 when MatchesIndex(plan, condition.Operands[0], index, step):
+                case ScalarOperation.ULessThan32 or ScalarOperation.SLessThan32
+                    when MatchesIndex(plan, condition.Operands[0], index, step):
                     bound = condition.Operands[1];
                     boundInclusive = false;
                     break;
-                case ScalarOperation.ULessThanEqual32 when MatchesIndex(plan, condition.Operands[0], index, step):
+                case ScalarOperation.ULessThanEqual32 or ScalarOperation.SLessThanEqual32
+                    when MatchesIndex(plan, condition.Operands[0], index, step):
                     bound = condition.Operands[1];
                     boundInclusive = true;
                     break;
-                case ScalarOperation.UGreaterThan32 when MatchesIndex(plan, condition.Operands[1], index, step):
+                case ScalarOperation.UGreaterThan32 or ScalarOperation.SGreaterThan32
+                    when MatchesIndex(plan, condition.Operands[1], index, step):
                     bound = condition.Operands[0];
                     boundInclusive = false;
                     break;
-                case ScalarOperation.UGreaterThanEqual32 when MatchesIndex(plan, condition.Operands[1], index, step):
+                case ScalarOperation.UGreaterThanEqual32 or ScalarOperation.SGreaterThanEqual32
+                    when MatchesIndex(plan, condition.Operands[1], index, step):
                     bound = condition.Operands[0];
                     boundInclusive = true;
                     break;
@@ -285,46 +372,145 @@ internal static class BufferCandidateTablePlanner
             }
 
             // The guard must live at the loop header that owns the phi or one of the
-            // blocks feeding it, so it really controls the recurrence.
+            // blocks feeding it, so it really controls the recurrence. An exit guard runs
+            // before every iteration: at the header or a block every iteration passes
+            // through straight after it (a header that first tests exec).
             var header = index.PhiBlock;
-            if (block != header && !flow.Predecessors[header].Contains(block))
+            if (exitGuard ? !RunsEveryIteration(flow, block, header) || !BranchLeavesLoop(flow, block, header)
+                : block != header && !flow.Predecessors[header].Contains(block))
             {
                 continue;
             }
 
-            if (limit is not null && !plan.Graph.Equivalent(limit, bound))
+            if (limit is not null && (!plan.Graph.Equivalent(limit, bound) || signedLimit != boundSigned))
             {
                 return false;
             }
 
             limit = bound;
             inclusive = boundInclusive;
+            signedLimit = boundSigned;
             guardBlock = block;
         }
 
         return limit is not null && guardBlock is not null;
     }
 
+    // The block is the header, or reached from it through loop blocks that each have one
+    // successor inside the loop, so an iteration that stays in the loop runs it.
+    private static bool RunsEveryIteration(Ir.IrControlFlowGraph flow, int block, int header)
+    {
+        var latch = -1;
+        foreach (var predecessor in flow.Predecessors[header])
+        {
+            latch = Math.Max(latch, predecessor >= header ? predecessor : -1);
+        }
+
+        var current = header;
+        while (current != block)
+        {
+            var next = -1;
+            foreach (var successor in flow.Successors[current])
+            {
+                if (successor < header || successor > latch)
+                {
+                    continue;
+                }
+
+                if (next >= 0)
+                {
+                    return false;
+                }
+
+                next = successor;
+            }
+
+            if (next <= current)
+            {
+                return false;
+            }
+
+            current = next;
+        }
+
+        return true;
+    }
+
+    // The block's taken branch leaves the loop the header heads (past its last latch) and its
+    // fall-through stays in it, so the loop runs only while the branch is not taken.
+    private static bool BranchLeavesLoop(Ir.IrControlFlowGraph flow, int block, int header)
+    {
+        var latch = -1;
+        foreach (var predecessor in flow.Predecessors[header])
+        {
+            latch = Math.Max(latch, predecessor >= header ? predecessor : -1);
+        }
+
+        var successors = flow.Successors[block];
+        if (latch < 0 || successors.Count != 2 ||
+            !flow.BlockByStartPc.TryGetValue(flow.Blocks[block].EndPc, out var fallThrough))
+        {
+            return false;
+        }
+
+        var taken = successors[0] == fallThrough ? successors[1] : successors[1] == fallThrough ? successors[0] : -1;
+        return taken >= 0 && (taken > latch || taken < header) && fallThrough >= header && fallThrough <= latch;
+    }
+
     // The guard compares either the induction value itself or its next value; both bound
     // the same executed set, so a one-step add of the phi is accepted.
+    // Whether a phi only passes the counter on: every operand, through the phis between them, is the counter itself or
+    // one of those phis - an inner loop's copy of the outer loop's counter, which the increment at the outer latch reads.
+    internal static bool ForwardsIndex(ScalarValue value, ScalarValue index)
+    {
+        if (value.Kind != ScalarValueKind.Phi || ReferenceEquals(value, index))
+        {
+            return false;
+        }
+
+        var visited = new HashSet<ScalarValue> { value };
+        var pending = new Stack<ScalarValue>(value.Operands);
+        while (pending.TryPop(out var operand))
+        {
+            if (ReferenceEquals(operand, index) || !visited.Add(operand))
+            {
+                continue;
+            }
+
+            if (operand.Kind != ScalarValueKind.Phi || visited.Count > 64)
+            {
+                return false;
+            }
+
+            foreach (var inner in operand.Operands)
+            {
+                pending.Push(inner);
+            }
+        }
+
+        return true;
+    }
+
     private static bool MatchesIndex(ShaderResourcePlan plan, ScalarValue operand, ScalarValue index, uint step)
     {
-        if (plan.Graph.Equivalent(operand, index))
+        if (plan.Graph.Equivalent(operand, index) || ForwardsIndex(operand, index))
         {
             return true;
         }
+
+        bool IsIndex(ScalarValue value) => plan.Graph.Equivalent(value, index) || ForwardsIndex(value, index);
 
         if (operand.Kind != ScalarValueKind.Operation || operand.Operation != ScalarOperation.IAdd32)
         {
             return false;
         }
 
-        if (plan.Graph.Equivalent(operand.Operands[0], index) && operand.Operands[1].IsConstant)
+        if (IsIndex(operand.Operands[0]) && operand.Operands[1].IsConstant)
         {
             return operand.Operands[1].ConstantU32 == step;
         }
 
-        if (plan.Graph.Equivalent(operand.Operands[1], index) && operand.Operands[0].IsConstant)
+        if (IsIndex(operand.Operands[1]) && operand.Operands[0].IsConstant)
         {
             return operand.Operands[0].ConstantU32 == step;
         }

@@ -18,6 +18,8 @@ using Avalonia.Threading;
 using Avalonia.VisualTree;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Runtime;
+using SharpEmu.GnmMode;
+using SharpEmu.GnmMode.Libraries.Np;
 using SharpEmu.HLE.FileSystem;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Pad;
@@ -121,6 +123,11 @@ public partial class MainWindow : Window
     [
         LocalizedChoice.FromKey("Auto", "Options.Hdr.Auto"),
         LocalizedChoice.FromKey("On", "Common.On"),
+        LocalizedChoice.FromKey("Off", "Common.Off"),
+    ];
+    private readonly LocalizedChoice[] _gpuReadbackChoices =
+    [
+        LocalizedChoice.FromKey("Full", "Options.GpuReadbacks.Full"),
         LocalizedChoice.FromKey("Off", "Common.Off"),
     ];
     private readonly LocalizedChoice[] _binkPlaybackChoices =
@@ -233,7 +240,8 @@ public partial class MainWindow : Window
         string? TitleId,
         string ConsoleLanguage,
         EffectiveLaunchSettings Settings,
-        IReadOnlyDictionary<string, string?> Environment);
+        IReadOnlyDictionary<string, string?> Environment,
+        GnmLoadExecRequest? LoadExec = null);
 
     public MainWindow()
     {
@@ -428,6 +436,17 @@ public partial class MainWindow : Window
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
         OpenLogsFolderButton.Click += (_, _) => OpenLogsFolder();
+        GnmTrophyKeyBox.TextChanged += (_, _) =>
+        {
+            var valid = GnmTrophyPackageReader.TryNormalizeKey(GnmTrophyKeyBox.Text, out var key);
+            GnmTrophyKeyError.IsVisible = !valid;
+            if (valid)
+            {
+                _settings.GnmTrophyKey = key;
+                GnmTrophyPackageReader.Configure(key);
+                LoadTrophyTestCatalog();
+            }
+        };
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
@@ -718,6 +737,7 @@ public partial class MainWindow : Window
         OptionsGraphicsNav,
         OptionsEnvironmentNav,
         OptionsLauncherNav,
+        OptionsGnmModeNav,
         OptionsAboutNav,
     ];
 
@@ -728,6 +748,7 @@ public partial class MainWindow : Window
         OptionsGraphicsPanel,
         OptionsEnvironmentPanel,
         OptionsLauncherPanel,
+        OptionsGnmModePanel,
         OptionsAboutPanel,
     ];
 
@@ -1276,6 +1297,7 @@ public partial class MainWindow : Window
             OptionsAboutNav,
             OptionsAboutNavLabel,
             localization.Get("Options.About"));
+        SetOptionsNavigationLabel(OptionsGnmModeNav, OptionsGnmModeNavLabel, "GnmMode");
     }
 
     private static void SetOptionsNavigationLabel(Button button, TextBlock label, string value)
@@ -1412,6 +1434,7 @@ public partial class MainWindow : Window
         RunShutdownStep("Discord Rich Presence", () => _discord?.Dispose());
         RunShutdownStep("console window", () => _consoleWindow?.Close());
         RunShutdownStep("emulator process", () => _emulator?.Dispose());
+        RunShutdownStep("executable session", DisposeLoadExecSession);
         RunShutdownStep("console mirror", () => _consoleMirror?.Dispose());
         RunShutdownStep("pending console output", FlushAllPendingConsoleLines);
         RunShutdownStep("file log", DropFileLog);
@@ -1549,6 +1572,7 @@ public partial class MainWindow : Window
         RefreshChoices(_windowModeChoices);
         RefreshChoices(_scalingModeChoices);
         RefreshChoices(_hdrModeChoices);
+        RefreshChoices(_gpuReadbackChoices);
         RefreshChoices(_binkPlaybackChoices);
         RefreshChoices(_overlayModeChoices);
         RefreshChoices(_overlayCornerChoices);
@@ -1584,6 +1608,8 @@ public partial class MainWindow : Window
         PortableDataToggle.IsEnabled = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent() ||
             SharpEmu.Logging.SharpEmuPaths.CanWriteExecutableDirectory();
         PortableDataToggle.IsChecked = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent();
+        GnmTrophyPackageReader.Configure(_settings.GnmTrophyKey);
+        GnmTrophyKeyBox.Text = _settings.GnmTrophyKey;
         UpdateLogFilePathText();
         _settingsSaveTimer.Stop();
     }
@@ -2088,8 +2114,12 @@ public partial class MainWindow : Window
     }
 
     private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths) =>
-        GameCatalog.ScanFolders(folders, excludedPaths, ArchiveMetadataPath).Select(game => new GameEntry(game.Name, game.TitleId,
-            game.Version, game.Path, game.SizeBytes, game.CoverPath, game.BackgroundPath)).ToList();
+        GameCatalog.ScanFolders(folders, excludedPaths, ArchiveMetadataPath, CompatibilityInfo).Select(game => new GameEntry(game.Name,
+            game.TitleId, game.Version, game.Path, game.SizeBytes, game.CoverPath, game.BackgroundPath, game.CompatibilityMode)).ToList();
+
+    // A PS4 executable without param.json runs in the compatibility mode, its metadata read from its param.sfo.
+    private static (string? Title, string? TitleId, string? Version)? CompatibilityInfo(string executablePath) =>
+        GnmRuntime.UsesCompatibilityMode(executablePath) ? GnmRuntime.ReadApplicationInfo(executablePath) : null;
 
     // An archive's metadata is read from its cache folder, which stands in for the game folder.
     private static string? ArchiveMetadataPath(string archivePath)
@@ -2859,6 +2889,8 @@ public partial class MainWindow : Window
             ? _allGames.FirstOrDefault(game =>
                 game.Path.Equals(ebootPath, GameLibraryPath.Comparison))?.TitleId
             : titleId;
+        // Compatibility-mode (GNM) executables carry their title id outside param.json.
+        resolvedTitleId ??= GnmRuntime.ReadApplicationInfo(ebootPath).TitleId;
         var configuration = LaunchConfiguration.Load(ebootPath, resolvedTitleId).WithOneOff(oneOffVariables);
         var effective = configuration.Settings;
         _launchOneOffCount = oneOffVariables?.Count ?? 0;
@@ -2893,11 +2925,23 @@ public partial class MainWindow : Window
             _runningGameTitleId,
             _settings.ConsoleLanguage,
             effective,
-            configuration.BuildEnvironment(OperatingSystem.IsMacOS()));
+            BuildLaunchEnvironment(configuration));
 
         StartPendingSession();
     }
 
+    // The GNM trophy key is a launcher setting rather than a game's; a custom variable that
+    // names it still wins.
+    private IReadOnlyDictionary<string, string?> BuildLaunchEnvironment(LaunchConfiguration configuration)
+    {
+        var environment = new Dictionary<string, string?>(
+            configuration.BuildEnvironment(OperatingSystem.IsMacOS()),
+            StringComparer.OrdinalIgnoreCase);
+        environment.TryAdd(
+            GnmTrophyPackageReader.KeyEnvironmentName,
+            string.IsNullOrEmpty(_settings.GnmTrophyKey) ? null : _settings.GnmTrophyKey);
+        return environment;
+    }
 
     private void StopEmulator()
     {
@@ -2929,12 +2973,15 @@ public partial class MainWindow : Window
 
     private void OnEmulatorExited(int exitCode)
     {
+        if (TryRestartGnmSession(exitCode))
+            return;
         FlushPendingConsoleLines();
         FlushAllPendingConsoleLines();
         _isRunning = false;
         _isStopping = false;
         _emulator?.Dispose();
         _emulator = null;
+        DisposeLoadExecSession();
         _pendingLaunch = null;
         UpdateEmbeddedConsoleVisibility();
 
@@ -2995,6 +3042,12 @@ public partial class MainWindow : Window
         try
         {
             var arguments = BuildEmulatorArguments(launch);
+            if (GnmRuntime.UsesCompatibilityMode(launch.EbootPath))
+            {
+                _loadExecSession = GnmLoadExecSession.Create(launch.EbootPath, launch.LoadExec);
+                arguments.Add(GnmLoadExecSession.ArgumentPrefix + _loadExecSession.FilePath);
+            }
+            _activeLaunch = launch;
             _emulator = process;
             _pendingLaunch = null;
             _runningEbootPath = launch.EbootPath;

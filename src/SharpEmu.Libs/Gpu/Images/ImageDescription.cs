@@ -66,6 +66,11 @@ public struct MipLevelLayout
     public ulong Size;
     public uint Pitch;
     public uint Height;
+
+    // A mip-tail level's byte offset inside its tail block, where the block's swizzle puts its first texel; Offset
+    // is the block's. A one-level image at the block plus this offset addresses the same texels (the swizzle is
+    // XOR-linear and the tail slots are aligned to their level), which is how a title writes the tail levels one by one.
+    public ulong TailOffset;
 }
 
 // The levels of an image's mip chain. Descriptions are copied by value - several times a draw,
@@ -234,13 +239,18 @@ public struct ImageDescription
             return -1;
         }
 
+        // A mip-tail level starts where the tail block's swizzle puts its first texel: Ghost of Tsushima's reflection
+        // probe faces take their 16x16 to 2x2 levels from one-level images at +0x800, +0x600, +0x500 and +0x400 of
+        // each face's tail block. Matched only at the block's start, those were aliases of the cube, and every use of
+        // one reloaded the whole cube from guest memory over the levels the GPU had written.
         var addressDelta = Data.Address - container.Data.Address;
-        if (addressDelta < layout.Offset || (addressDelta - layout.Offset) % sliceStride != 0)
+        var levelOffset = layout.Offset + layout.TailOffset;
+        if (addressDelta < levelOffset || (addressDelta - levelOffset) % sliceStride != 0)
         {
             return -1;
         }
 
-        var layer = (addressDelta - layout.Offset) / sliceStride;
+        var layer = (addressDelta - levelOffset) / sliceStride;
         if (layer > int.MaxValue || layer >= container.Resources.Layers || Resources.Layers > container.Resources.Layers - layer)
         {
             return -1;

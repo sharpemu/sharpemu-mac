@@ -7221,6 +7221,9 @@ public static partial class KernelMemoryCompatExports
         return false;
     }
 
+    public static bool TryReadGuestStructure(CpuContext ctx, ulong address, Span<byte> destination) =>
+        ctx.Memory.TryRead(address, destination) || TryReadShaderGuestMemory(address, destination);
+
     internal static bool TryReadShaderGuestMemory(
         ulong address,
         Span<byte> destination)

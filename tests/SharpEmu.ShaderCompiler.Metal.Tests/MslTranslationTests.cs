@@ -1307,6 +1307,38 @@ public sealed class MslTranslationTests
     }
 
     [Theory]
+    [InlineData(15, false)]
+    [InlineData(16, true)]
+    public void AProgramWithManyDecodedFormatLoadsCallsTheDecoder(int loads, bool called)
+    {
+        // Format 14 (8_8 unorm) is not whole dwords, so each load takes the general decoder.
+        var instructions = new List<Gen5ShaderInstruction>();
+        for (var load = 0; load < loads; load++)
+        {
+            instructions.Add(new Gen5ShaderInstruction(
+                (uint)(load * 8),
+                Gen5ShaderEncoding.Mubuf,
+                "BufferLoadFormatXy",
+                [0, 0],
+                [Gen5Operand.Vector(0), Gen5Operand.Scalar(8), Gen5Operand.Source(128, null)],
+                [Gen5Operand.Vector((uint)(4 + (load * 2)))],
+                new Gen5BufferMemoryControl(2, 0, (uint)(4 + (load * 2)), 8, load * 4, IndexEnabled: false,
+                    OffsetEnabled: false, Glc: false, Slc: false)));
+        }
+
+        instructions.Add(new Gen5ShaderInstruction((uint)(loads * 8), Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null));
+        var scalars = new uint[12];
+        scalars[8] = 0x2000;
+        scalars[10] = 256;
+        scalars[11] = 14u << 12;
+        var shader = CompileMaterialized(new Gen5ShaderProgram(0, [.. instructions]), scalars);
+
+        Assert.Equal(called, shader.Source.Contains("sharpemu_format_load_decoded(b0, ", StringComparison.Ordinal));
+        Assert.Equal(called, shader.Source.Contains("static uint4 sharpemu_format_load_decoded(", StringComparison.Ordinal));
+        Assert.Equal(!called, shader.Source.Contains("sharpemu_format_layout(t", StringComparison.Ordinal));
+    }
+
+    [Theory]
     [InlineData("TBufferLoadFormatX", 1u, 22u)]
     [InlineData("TBufferLoadFormatXy", 2u, 64u)]
     [InlineData("TBufferLoadFormatXyzw", 4u, 77u)]

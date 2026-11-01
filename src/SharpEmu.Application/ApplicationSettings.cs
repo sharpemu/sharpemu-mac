@@ -43,6 +43,8 @@ public sealed class ApplicationSettings
 
     public bool TrophySound { get; set; } = true;
 
+    public string GnmTrophyKey { get; set; } = string.Empty;
+
     public string LibraryLayout { get; set; } = "Carousel";
 
     /// <summary>Cover size in the grid view, as a multiple of the size that fits the window.</summary>
@@ -131,6 +133,8 @@ public sealed class ApplicationSettings
         settings.GameFolders = FilterNullOrEmpty(settings.GameFolders);
         settings.ExcludedGames = FilterNullOrEmpty(settings.ExcludedGames);
         settings.Language ??= "en";
+        settings.GnmTrophyKey = TryNormalizeTrophyKey(settings.GnmTrophyKey, out var trophyKey)
+            ? trophyKey : string.Empty;
         settings.DiscordClientId ??= "1525606762248540221";
         settings.LibraryLayout = NormalizeChoice(settings.LibraryLayout, "Carousel", "Grid");
         settings.TitleMusicVolume = double.IsFinite(settings.TitleMusicVolume)
@@ -193,6 +197,14 @@ public sealed class ApplicationSettings
         }
 
         return source.Where(entry => !string.IsNullOrEmpty(entry)).ToList();
+    }
+
+    // The rule GnmTrophyPackageReader.TryNormalizeKey applies: empty, or 32 hexadecimal digits.
+    // Kept here so the settings assembly does not depend on the GnmMode runtime.
+    private static bool TryNormalizeTrophyKey(string? key, out string normalized)
+    {
+        normalized = key?.Trim().ToUpperInvariant() ?? string.Empty;
+        return normalized.Length == 0 || normalized.Length == 32 && normalized.All(char.IsAsciiHexDigit);
     }
 
     internal static string NormalizeChoice(string? value, string fallback, params string[] choices) =>

@@ -14,6 +14,8 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 
 public readonly record struct ComputeImageClear(BufferDescriptorWords Descriptor, uint PackedClear, ulong Size);
 
+// The resolving half of a dispatch: what it runs and which host consumers may take it in place
+// of running it. RenderRecorder.Compute records it through the host.
 public sealed partial class RenderExecutor
 {
     private const uint DispatchInitiatorUseThreadDimensions = 1u << 5;
@@ -49,16 +51,34 @@ public sealed partial class RenderExecutor
         _ = _pipelines.TryCreateComputePipeline(computeProgram.Input, computeProgram.Program, out _);
     }
 
+    // True when this executor records its own commands at once (no deferring sink between them):
+    // the host is then prepared here, before the program resolves, as it was before the split.
+    private bool RecordsDirectly => _recorder is RenderRecorder;
+
     public void Dispatch(ulong submitId, RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
-        if (!_host.IsRecording)
+        var compute = banks.Shader.Compute;
+        var record = _pool.RentDispatch();
+        record.Debug = new DebugInformation(RecordedOperation.DispatchDirect, submitId, groupsX, groupsY, groupsZ, dispatchInitiator, compute.Address);
+        record.Skipped = true;
+        record.SubmitId = submitId;
+        record.ShaderAddress = compute.Address;
+        record.PacketIndirectArgumentsAddress = indirectArgumentsAddress;
+        var direct = RecordsDirectly;
+        if (direct)
         {
-            throw _host.Fatal("A dispatch has no recording command buffer.");
+            // Pending host operations run, and the debug label is set, before the program resolves.
+            if (!_host.IsRecording)
+            {
+                _pool.Return(record);
+                throw _host.Fatal("A dispatch has no recording command buffer.");
+            }
+
+            _host.RunPendingOperations();
+            _host.SetDebugInformation(RecordedOperation.DispatchDirect, submitId, groupsX, groupsY, groupsZ, dispatchInitiator, compute.Address);
+            record.HostPrepared = true;
         }
 
-        _host.RunPendingOperations();
-        var compute = banks.Shader.Compute;
-        _host.SetDebugInformation(RecordedOperation.DispatchDirect, submitId, groupsX, groupsY, groupsZ, dispatchInitiator, compute.Address);
         if (compute.Address == 0)
         {
             if (RenderTrace.Enabled && RenderTrace.NullComputeShader())
@@ -66,6 +86,7 @@ public sealed partial class RenderExecutor
                 RenderTrace.Write($"Ignoring a dispatch with no compute shader: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8}");
             }
 
+            Record(record);
             return;
         }
 
@@ -77,35 +98,61 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
-        if ((indirectArgumentsAddress == 0 || useThreadDimensions) && (groupsX == 0 || groupsY == 0 || groupsZ == 0))
+        if ((indirectArgumentsAddress == 0 || useThreadDimensions) && IsEmptyDispatch(compute, useThreadDimensions, groupsX, groupsY, groupsZ))
         {
             if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
             {
                 RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
             }
 
-            TraceFrameDispatch("zero-sized", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
+            Interlocked.Increment(ref ZeroGroupSkips);
+            TraceFrameDispatch(_host, "zero-sized", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
+            Record(record);
             return;
         }
 
         // A dispatch that suspended on its pipeline runs again from its packet; what it prepared
         // then is taken back while it still holds (ComputeProgramRetry), so the retry neither
-        // prepares the program again nor re-runs the consumers below, which declined it then.
-        var retry = _host.SupportsPipelineSuspend
-            ? TakeSuspendedDispatch(submitId, compute.Address, indirectArgumentsAddress)
+        // prepares the program again nor re-runs the consumers, which declined it then. Only a
+        // dispatch recorded at once can suspend: the recorder must answer before the next packet.
+        var suspendable = direct && _host.SupportsPipelineSuspend;
+        var retry = suspendable
+            ? _suspensions.Take(submitId, compute.Address, indirectArgumentsAddress)
             : null;
-        var computeProgram = retry is null
-            ? _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ)
-            : _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ, retry);
+        ComputeProgram computeProgram;
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawProgramResolution))
+        {
+            computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirectArgumentsAddress != 0, retry);
+        }
+
         var retried = retry?.Reused == true;
         if (retried)
         {
             _computeRetriesReused++;
         }
 
+        if (suspendable)
+        {
+            record.Retry = retry;
+            record.Suspensions = _suspensions;
+        }
+
+        if (computeProgram.ImageCopy is not null)
+        {
+            record.Program = computeProgram;
+            record.Skipped = false;
+            record.GroupsX = groupsX;
+            record.GroupsY = groupsY;
+            record.GroupsZ = groupsZ;
+            record.IndirectArgumentsAddress = indirectArgumentsAddress;
+            Record(record);
+            return;
+        }
+
         if (computeProgram.Consumed)
         {
-            TraceFrameDispatch("consumed", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
+            TraceFrameDispatch(_host, "consumed", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
+            Record(record);
             return;
         }
 
@@ -116,7 +163,8 @@ public sealed partial class RenderExecutor
                 RenderTrace.Write($"Skipping a dispatch without a program: shader=0x{compute.Address:X16} groups={groupsX}x{groupsY}x{groupsZ}");
             }
 
-            TraceFrameDispatch("no-program", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
+            TraceFrameDispatch(_host, "no-program", compute.Address, 0, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
+            Record(record);
             return;
         }
 
@@ -137,44 +185,22 @@ public sealed partial class RenderExecutor
                 $"buffers={program.Buffers.Length} images={program.Images.Length} samplers={program.SamplerCount}");
         }
 
-        if (!retried && indirectArgumentsAddress == 0 &&
-            (ulong)groupsX * groupsY * groupsZ >= MetadataClearMinimumGroups &&
-            TryConsumeMetadataClear(input))
+        // The host consumers the recorder offers the dispatch to before running it, in this order:
+        // a metadata clear, a constant fill, a bounded fill, a bounded copy and an image clear.
+        // A retried dispatch was declined by all of them when it suspended.
+        record.Retried = retried;
+        if (!retried && indirectArgumentsAddress == 0)
         {
-            TraceFrameDispatch("metadata-clear", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
-            _host.ResetBindings();
-            return;
-        }
+            if ((ulong)groupsX * groupsY * groupsZ >= MetadataClearMinimumGroups)
+            {
+                DecodeMetadataClear(input, record);
+            }
 
-        if (!retried && indirectArgumentsAddress == 0 && TryConsumeConstantFill(input, groupsX, groupsY, groupsZ))
-        {
-            TraceFrameDispatch("constant-fill", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
-            _host.ResetBindings();
-            return;
+            record.ConstantFill = DecodeConstantFill(input, groupsX, groupsY, groupsZ);
+            record.BoundedFill = DecodeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator);
+            record.BoundedCopy = DecodeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator);
+            record.ImageClear = TryDecodeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator);
         }
-
-        if (!retried && indirectArgumentsAddress == 0 && TryConsumeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator))
-        {
-            TraceFrameDispatch("bounded-fill", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
-            _host.ResetBindings();
-            return;
-        }
-
-        if (!retried && indirectArgumentsAddress == 0 && TryConsumeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator))
-        {
-            TraceFrameDispatch("bounded-copy", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
-            _host.ResetBindings();
-            return;
-        }
-
-        if (!retried && indirectArgumentsAddress == 0 && TryConsumeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator))
-        {
-            TraceFrameDispatch("image-clear", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
-            _host.ResetBindings();
-            return;
-        }
-
-        NoteHtileStores(input);
 
         if (useThreadDimensions)
         {
@@ -197,211 +223,30 @@ public sealed partial class RenderExecutor
 
         if (SkipWhileLinkedModuleCompiles(input, computeProgram.Program, program))
         {
-            _host.ResetBindings();
+            TraceFrameDispatch(_host, "linked-compile", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
+            Record(record);
             return;
         }
 
-        if (!_host.SupportsPipelineSuspend)
+        var hasStorageWrites = HasBufferWrites(input.Stage);
+        foreach (var image in program.Images)
         {
-            // The dispatch will wait for its pipeline below; its program's compile is waited
-            // for here instead, before the preparation opens.
-            _host.AwaitProgramsBeforePreparation(computeProgram.Program, default);
+            hasStorageWrites |= image.Written && image.Class == ImageResourceClass.Storage;
         }
 
-        ReleaseFragmentWrites();
-        _host.EndRendering("dispatch");
-        if (program.UsesDeviceAddresses)
-        {
-            _host.BeforeDeviceAddressPreparation([input.Stage]);
-        }
-
-        using (_host.BeginPreparation())
-        {
-            // The host may compile this program off the command-stream thread and report that
-            // the pipeline is not ready yet. The dispatch waits for it rather than being
-            // dropped: a guest that does not replay a one-shot dispatch deadlocks, because
-            // the dispatch can feed a label a later packet waits on. Asking again keeps the
-            // wait outside the pipeline cache's lock, so other queues can create their own
-            // pipelines while this program compiles.
-            PipelineHandle pipeline;
-            if (_host.SupportsPipelineSuspend)
-            {
-                // The packet suspends and runs again when the compile finishes, so the
-                // command stream can serve its other queues in the meantime. Nothing
-                // before this point has touched the host, so leaving now is clean.
-                if (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
-                {
-                    KeepSuspendedDispatch(submitId, compute.Address, indirectArgumentsAddress, retry);
-                    _host.NotePipelineNotReady();
-                    TraceFrameDispatch("suspended", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
-                    return;
-                }
-            }
-            else
-            {
-                while (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
-                {
-                    using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputePipelineWait);
-                    var completion = _pipelines.GetComputePipelineCompletion(computeProgram.Program);
-                    if (completion is null)
-                    {
-                        Thread.Sleep(1);
-                    }
-                    else
-                    {
-                        completion.GetAwaiter().GetResult();
-                    }
-                }
-            }
-
-            var bindings = PrepareBindings(input.Stage);
-            if (program.UsesDeviceAddresses)
-            {
-                _host.PrepareDeviceAddresses();
-            }
-
-            _host.BindResources(bindings);
-            Span<IPreparedBindings> stages = [bindings];
-            _host.CommitBindings(GpuBindPoint.Compute, in pipeline, stages);
-            var hasStorageWrites = HasBufferWrites(input.Stage);
-            foreach (var image in program.Images)
-            {
-                hasStorageWrites |= image.Written && image.Class == ImageResourceClass.Storage;
-            }
-
-            if (hasStorageWrites)
-            {
-                // Every earlier read of the written resources completes before this dispatch writes.
-                _host.ShaderWriteHazardBarrier();
-            }
-
-            _host.BindPipeline(GpuBindPoint.Compute, in pipeline);
-            // The shader's local workgroup axes may have been remapped at compile time
-            // (see Gen5WorkgroupAxisOrder.Compute) so the largest NUM_THREAD
-            // axis lands on a physical axis Vulkan actually allows it on. The dispatch group
-            // counts must be permuted the same way, or vkCmdDispatch would hand group counts
-            // for the wrong physical axis to the pipeline it built with the remapped sizes.
-            Span<int> axisOrder = stackalloc int[3];
-            Gen5WorkgroupAxisOrder.ComputeInto(input.ThreadsX, input.ThreadsY, input.ThreadsZ, axisOrder);
-            Span<uint> logicalGroups = [groupsX, groupsY, groupsZ];
-            Span<uint> physicalGroups = stackalloc uint[3];
-            for (var logical = 0; logical < 3; logical++)
-            {
-                physicalGroups[axisOrder[logical]] = logicalGroups[logical];
-            }
-
-            TraceFrameDispatch(hasStorageWrites ? "dispatched-writes" : "dispatched", compute.Address, program.Hash, groupsX, groupsY, groupsZ, indirectArgumentsAddress);
-            TraceRangeWriters(input.Stage, program.Hash, groupsX, groupsY, groupsZ);
-            var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
-            if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
-            {
-                _host.Dispatch(physicalGroups[0], physicalGroups[1], physicalGroups[2]);
-            }
-            _host.EndComputeImageSnapshot(imageSnapshot, bindings);
-            _host.ShaderAccessBarrier();
-        }
-
-        _host.ResetBindings();
-    }
-
-    // SHARPEMU_TRACE_WRITERS=<lo>-<hi> (hex): every dispatch with a written buffer binding over the
-    // range, and every dispatch that stores through device addresses (whose targets are not
-    // known here), so the shader that writes a value can be named.
-    private static readonly (ulong Low, ulong High) TracedWriterRange = ParseTracedWriterRange(
-        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_WRITERS"));
-
-    private static (ulong, ulong) ParseTracedWriterRange(string? text)
-    {
-        var parts = (text ?? string.Empty).Split('-');
-        return parts.Length == 2 &&
-            ulong.TryParse(parts[0].Replace("0x", string.Empty), System.Globalization.NumberStyles.HexNumber, null, out var low) &&
-            ulong.TryParse(parts[1].Replace("0x", string.Empty), System.Globalization.NumberStyles.HexNumber, null, out var high)
-            ? (low, high)
-            : (0, 0);
-    }
-
-    private int _tracedWriters;
-
-    private void TraceRangeWriters(ShaderStageResources stage, ulong hash, uint groupsX, uint groupsY, uint groupsZ)
-    {
-        if (TracedWriterRange.High == 0 || stage.Program is not { } program || _tracedWriters > 4000)
-            return;
-
-        var hits = new System.Text.StringBuilder();
-        var descriptors = stage.Resources.Buffers;
-        for (var i = 0; i < program.Buffers.Length && i < descriptors.Length; i++)
-        {
-            if (!program.Buffers[i].Written || descriptors[i].Length < 4)
-                continue;
-            var descriptor = BufferDescriptorWords.From(descriptors[i]);
-            if (descriptor.Footprint() is not { } footprint || descriptor.Address == 0)
-                continue;
-            if (descriptor.Address < TracedWriterRange.High && TracedWriterRange.Low < descriptor.Address + footprint)
-                hits.Append($" buf{i}=0x{descriptor.Address:X}+0x{footprint:X}");
-        }
-
-        if (hits.Length == 0 && !program.WritesDeviceAddresses)
-            return;
-
-        _tracedWriters++;
-        Console.Error.WriteLine(
-            $"[GPU][WRITERS] hash=0x{hash:X16} groups={groupsX}x{groupsY}x{groupsZ} device_stores={program.WritesDeviceAddresses}{hits}");
-    }
-
-    // Under a dump-triggered frame, what became of each dispatch: a pass that never ran leaves
-    // no snapshot behind, so the list of dispositions is the only record of it.
-    private void TraceFrameDispatch(string disposition, ulong shader, ulong hash, uint groupsX, uint groupsY, uint groupsZ, ulong indirect)
-    {
-        if (_host.TraceFrameActive)
-        {
-            Console.Error.WriteLine(
-                $"[FRAME-DISPATCH] {disposition} hash=0x{hash:X16} shader=0x{shader:X} groups={groupsX}x{groupsY}x{groupsZ} indirect=0x{indirect:X}");
-        }
-    }
-
-    // The dispatches suspended on their pipeline, by submission: a submission runs its packets
-    // in order, so the next dispatch it reaches is the one that suspended. The address and the
-    // indirect arguments make sure of it; the retry itself checks everything else it read.
-    private readonly Dictionary<ulong, (ulong Address, ulong IndirectArguments, ComputeProgramRetry Retry)> _suspendedDispatches = [];
-    private ComputeProgramRetry? _spareRetry;
-    private long _computeRetriesReused;
-
-    /// <summary>Suspended dispatches that ran again on the program they prepared before, for tests.</summary>
-    internal long ComputeRetriesReused => _computeRetriesReused;
-
-    // The retry of this dispatch, or an empty one that logs what the preparation reads. The
-    // empty one is reused by every dispatch that does not suspend; one that does keeps it.
-    private ComputeProgramRetry TakeSuspendedDispatch(ulong submitId, ulong address, ulong indirectArguments)
-    {
-        if (_suspendedDispatches.Remove(submitId, out var suspended) &&
-            suspended.Address == address && suspended.IndirectArguments == indirectArguments)
-        {
-            return suspended.Retry;
-        }
-
-        var retry = _spareRetry ??= new ComputeProgramRetry();
-        retry.Reset();
-        return retry;
-    }
-
-    private void KeepSuspendedDispatch(ulong submitId, ulong address, ulong indirectArguments, ComputeProgramRetry? retry)
-    {
-        if (retry is null)
-        {
-            return;
-        }
-
-        if (_suspendedDispatches.Count >= 64)
-        {
-            // Submissions that never came back (a queue torn down mid-wait) are not kept for ever.
-            _suspendedDispatches.Clear();
-        }
-
-        _suspendedDispatches[submitId] = (address, indirectArguments, retry);
-        if (ReferenceEquals(retry, _spareRetry))
-        {
-            _spareRetry = null;
-        }
+        record.Skipped = false;
+        record.Program = computeProgram;
+        record.GroupsX = groupsX;
+        record.GroupsY = groupsY;
+        record.GroupsZ = groupsZ;
+        record.IndirectArgumentsAddress = indirectArgumentsAddress;
+        record.HasStorageWrites = hasStorageWrites;
+        var resources = input.Stage.Resources;
+        Diagnostics.DispatchRunTally.NoteResolved(computeProgram.Program.Id, resources.Images, resources.Samplers, program.Bindings?.UsesTableBlock == true,
+            program.Bindings?.Find(ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare) is not null,
+            record.MetadataClearCount != 0 || record.ConstantFill is not null || record.BoundedFill is not null || record.BoundedCopy is not null || record.ImageClear is not null,
+            computeProgram.KnownWrite is not null);
+        Record(record);
     }
 
     // A program linked with the callees of its hit-group tables can take the driver minutes to compile, and the game
@@ -420,7 +265,28 @@ public sealed partial class RenderExecutor
         return true;
     }
 
+    // The dispatches suspended on their pipeline (RenderRecorder.RecordDispatch keeps them).
+    private readonly ComputeDispatchSuspensions _suspensions = new();
+    private long _computeRetriesReused;
+
+    /// <summary>Suspended dispatches that ran again on the program they prepared before, for tests.</summary>
+    internal long ComputeRetriesReused => _computeRetriesReused;
+
     // The dispatch counts threads; the host counts groups of the shader's thread size.
+    public static long ZeroGroupSkips;
+
+    private static bool IsEmptyDispatch(ComputeStageRegisters compute, bool useThreadDimensions, uint groupsX, uint groupsY, uint groupsZ)
+    {
+        if (useThreadDimensions)
+        {
+            groupsX = GroupsFromThreads(groupsX, compute.ThreadsX);
+            groupsY = GroupsFromThreads(groupsY, compute.ThreadsY);
+            groupsZ = GroupsFromThreads(groupsZ, compute.ThreadsZ);
+        }
+
+        return groupsX == 0 || groupsY == 0 || groupsZ == 0;
+    }
+
     public static uint GroupsFromThreads(uint threads, uint groupSize)
     {
         if (threads == 0)
@@ -430,6 +296,21 @@ public sealed partial class RenderExecutor
 
         var size = Math.Max(groupSize, 1u);
         return (threads + size - 1) / size;
+    }
+
+    // SHARPEMU_SKIP_CS and the live skip list: what the program contributes, by its absence.
+    internal static bool SkipsComputeProgram(ulong hash) =>
+        SkippedComputePrograms.Contains(hash) || LiveSkips.Contains(hash);
+
+    // Under a dump-triggered frame, what became of each dispatch: a pass that never ran leaves
+    // no snapshot behind, so the list of dispositions is the only record of it.
+    internal static void TraceFrameDispatch(IRenderHost host, string disposition, ulong shader, ulong hash, uint groupsX, uint groupsY, uint groupsZ, ulong indirect)
+    {
+        if (host.TraceFrameActive)
+        {
+            Console.Error.WriteLine(
+                $"[FRAME-DISPATCH] {disposition} hash=0x{hash:X16} shader=0x{shader:X} groups={groupsX}x{groupsY}x{groupsZ} indirect=0x{indirect:X}");
+        }
     }
 
     private BufferDescriptorWords DecodeBufferDescriptor(ResourceSnapshot resources, int index)
@@ -449,13 +330,17 @@ public sealed partial class RenderExecutor
     // transient surface's HTILE was registered, and taken for a clear it never ran.
     private const ulong MetadataClearMinimumGroups = 2;
 
-    // Each program and surface it was taken to clear, reported once.
-    private readonly HashSet<(ulong Hash, ulong Address)> _loggedMetadataClears = new();
-
     // SHARPEMU_TRACE_HTILE=1 reports every metadata clear and HTILE store, not the first of each.
     public static readonly bool TraceHtile = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_HTILE") == "1";
 
-    private bool TryConsumeMetadataClear(ComputeInputInfo input)
+    // The buffers a metadata clear would overwrite, for the recorder to check against the host's
+    // registered metadata (RenderRecorder.TryClearMetadata). A metadata clear is buffer stores and
+    // nothing else: a dispatch that also reads or stores images, or writes through device
+    // addresses, does real work beside the metadata - UE5's Nanite depth export writes the depth
+    // surface and the HTILE that describes it in one dispatch - and dropping it loses that work and
+    // leaves the surface marked cleared, so the next pass clears it again (Black Myth: Wukong's
+    // characters and army failed every depth-equal base pass draw).
+    private void DecodeMetadataClear(ComputeInputInfo input, ResolvedDispatch record)
     {
         var program = input.Stage.Program!;
         var resources = input.Stage.Resources;
@@ -464,122 +349,30 @@ public sealed partial class RenderExecutor
             throw _host.Fatal($"The compute buffer count does not match the program: descriptors={resources.Buffers.Length} program={program.Buffers.Length}.");
         }
 
-        for (var i = 0; i < program.Buffers.Length; i++)
-        {
-            var resource = program.Buffers[i];
-            var descriptor = DecodeBufferDescriptor(resources, i);
-            // Metadata that is also read is not a proven overwrite; the dispatch runs as written.
-            if (_host.IsMetadata(descriptor.Address) && (!resource.Written || resource.Read))
-            {
-                return false;
-            }
-        }
-
-        // A metadata clear is buffer stores and nothing else. A dispatch that also reads or
-        // stores images, or writes through device addresses, does real work beside the
-        // metadata - UE5's Nanite depth export writes the depth surface and the HTILE that
-        // describes it in one dispatch - and dropping it loses that work and leaves the
-        // surface marked cleared, so the next pass clears it again (Black Myth: Wukong's
-        // characters and army failed every depth-equal base pass draw).
         if (program.HasBitwiseExclusiveOr || program.Images.Length != 0 || program.SamplerCount != 0 ||
-            program.WritesDeviceAddresses)
-        {
-            return false;
-        }
-
-        // Every buffer it writes has to be a whole metadata surface: a store anywhere else is
-        // not a clear, and neither is a small buffer that only starts where a surface's
-        // metadata was registered.
-        for (var i = 0; i < program.Buffers.Length; i++)
-        {
-            if (!program.Buffers[i].Written)
-            {
-                continue;
-            }
-
-            var written = DecodeBufferDescriptor(resources, i);
-            var bytes = written.Stride == 0 ? written.RecordCount : (ulong)written.RecordCount * written.Stride;
-            if (!_host.CoversMetadata(written.Address, bytes))
-            {
-                return false;
-            }
-        }
-
-        for (var i = 0; i < program.Buffers.Length; i++)
-        {
-            if (!program.Buffers[i].Written)
-            {
-                continue;
-            }
-
-            var descriptor = DecodeBufferDescriptor(resources, i);
-            if (_host.ClearMetadata(descriptor.Address))
-            {
-                if (_loggedMetadataClears.Add((program.Hash, descriptor.Address)) || TraceHtile)
-                {
-                    Console.Error.WriteLine(
-                        $"[GPU][INFO] A compute dispatch is taken as a metadata clear: hash=0x{program.Hash:X16} " +
-                        $"metadata=0x{descriptor.Address:X16} records={descriptor.RecordCount} stride={descriptor.Stride} " +
-                        $"constant=0x{program.ConstantStoreValue ?? 0:X8}.");
-                }
-
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // A dispatch that runs and stores into registered HTILE leaves it holding what it wrote,
-    // so a cleared mark from before (a memset taken for a clear, or a surface's first
-    // registration) no longer stands: UE5's Nanite depth export writes the material depth and
-    // the HTILE that describes it, and the mark loaded that depth as zero, so every Nanite
-    // material draw failed its depth-equal test (Black Myth: Wukong's tree trunks).
-    private void NoteHtileStores(ComputeInputInfo input)
-    {
-        var program = input.Stage.Program!;
-        var resources = input.Stage.Resources;
-        if (resources.Buffers.Length != program.Buffers.Length)
+            program.WritesDeviceAddresses || program.Buffers.Length == 0)
         {
             return;
         }
 
-        // A fill of one constant whose ZMask (bits 0-3) is zero stores clear codes, not data:
-        // the memset before UE5's export, when it covers only part of the surface or the
-        // surface is not registered yet. It unmakes no tracked clear, and a surface registered
-        // over it later starts cleared whatever was stored there before.
-        var clearCodes = program.ConstantStoreValue is { } fill && (fill & 0xF) == 0;
+        var probes = record.MetadataClearBuffer;
+        if (probes.Length < program.Buffers.Length)
+        {
+            probes = record.MetadataClearBuffer = new MetadataClearProbe[Math.Max(program.Buffers.Length, 4)];
+        }
+
+        var anyWritten = false;
         for (var i = 0; i < program.Buffers.Length; i++)
         {
-            if (!program.Buffers[i].Written)
-            {
-                continue;
-            }
-
+            var resource = program.Buffers[i];
             var descriptor = DecodeBufferDescriptor(resources, i);
-            if (clearCodes)
-            {
-                _host.NoteHtileCleared(descriptor.Address);
-                continue;
-            }
-
-            var dropped = _host.NoteHtileWritten(descriptor.Address);
-            if (TraceHtile && dropped)
-            {
-                Console.Error.WriteLine($"[GPU][HTILE] store hash=0x{program.Hash:X16} buffer=0x{descriptor.Address:X16} dropped_clear={dropped}");
-            }
-
-            if (dropped && _loggedHtileStores.Add((program.Hash, descriptor.Address)))
-            {
-                Console.Error.WriteLine(
-                    $"[GPU][INFO] A compute dispatch stores into HTILE, so its depth surface no longer loads as a clear: " +
-                    $"hash=0x{program.Hash:X16} htile=0x{descriptor.Address:X16} images={program.Images.Length}.");
-            }
+            var bytes = descriptor.Stride == 0 ? descriptor.RecordCount : (ulong)descriptor.RecordCount * descriptor.Stride;
+            probes[i] = new MetadataClearProbe(descriptor.Address, bytes, descriptor.RecordCount, descriptor.Stride, resource.Written, resource.Read);
+            anyWritten |= resource.Written;
         }
-    }
 
-    // Each program and HTILE surface reported by the above, once.
-    private readonly HashSet<(ulong Hash, ulong Address)> _loggedHtileStores = new();
+        record.MetadataClearCount = anyWritten ? program.Buffers.Length : 0;
+    }
 
     // Recognizes a dispatch that fills one formatted buffer with a single value over every record.
     public ComputeImageClear? TryDecodeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator) =>
@@ -734,14 +527,15 @@ public sealed partial class RenderExecutor
         return new ComputeImageClear(descriptor, clear, size);
     }
 
-    // A constant fill that covers a whole image or DCC metadata becomes a clear. Anything
-    // else, including a fill of plain buffer memory, runs as the guest wrote it.
-    private bool TryConsumeConstantFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ)
+
+    // A constant fill that covers a whole image or DCC metadata becomes a clear (RenderRecorder.TryConsume).
+    // Anything else, including a fill of plain buffer memory, runs as the guest wrote it.
+    private ConstantFillCandidate? DecodeConstantFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ)
     {
         var program = input.Stage.Program!;
         if (program.ConstantFill is not { } fill || program.UserDataBase != 0)
         {
-            return false;
+            return null;
         }
 
         var userData = input.Stage.Resources.UserData;
@@ -749,48 +543,40 @@ public sealed partial class RenderExecutor
             input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 || groupsY != 1 || groupsZ != 1 ||
             fill.DestinationScalarResource + 4 > userData.Length || fill.SourceScalarResource + 4 > userData.Length)
         {
-            return false;
+            return null;
         }
 
-        var destination = BufferDescriptorWords.From(userData.AsSpan((int)fill.DestinationScalarResource, 4).ToArray());
-        var source = BufferDescriptorWords.From(userData.AsSpan((int)fill.SourceScalarResource, 4).ToArray());
+        var destination = BufferDescriptorWords.From(userData.AsSpan((int)fill.DestinationScalarResource, 4));
+        var source = BufferDescriptorWords.From(userData.AsSpan((int)fill.SourceScalarResource, 4));
         Span<byte> valueBytes = stackalloc byte[sizeof(uint)];
         if (destination.Format != Format32UInt || destination.Stride != sizeof(uint) || destination.SwizzleEnabled || destination.AddThreadId ||
             (ulong)groupsX * input.ThreadsX != destination.RecordCount || source.RecordCount == 0 ||
             !_host.TryReadGuest(source.Address, valueBytes))
         {
-            return false;
+            return null;
         }
 
         var value = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(valueBytes);
-        var size = (ulong)destination.RecordCount * sizeof(uint);
-        var consumed = _host.TryClearImageFromBuffer(destination.Address, size, value) ||
-                       _host.TryAbsorbDccFill(destination.Address, size, value);
-        if (RenderTrace.Enabled && RenderTrace.MetadataClear())
-        {
-            RenderTrace.Write($"Constant fill: shader=0x{program.Hash:X16} address=0x{destination.Address:X16} size=0x{size:X} value=0x{value:X8} consumed={consumed}");
-        }
-
-        return consumed;
+        return new ConstantFillCandidate(destination.Address, (ulong)destination.RecordCount * sizeof(uint), value);
     }
 
     private const uint Format32SInt = 21;
     private const uint Format32Float = 22;
     private const ulong DescriptorAddressMask = 0x0000_FFFF_FFFF_FFFFul;
 
-    private bool TryConsumeBoundedFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    private KernelFillCandidate? DecodeBoundedFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
     {
         var program = input.Stage.Program!;
         if (program.BoundedFill is not { } fill)
         {
-            return false;
+            return null;
         }
 
         if (program.UserDataBase != 0 || fill.GroupScalarRegister != (uint)input.WorkgroupRegister || !input.GroupIdX || input.GroupIdY || input.GroupIdZ ||
             input.ThreadIdCount < 1 || input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 ||
             groupsX == 0 || groupsY != 1 || groupsZ != 1)
         {
-            return RefuseBoundedFill(program,
+            return Refuse<KernelFillCandidate>(program,
                 $"shape group=s{fill.GroupScalarRegister}/s{input.WorkgroupRegister} ids={input.GroupIdX}{input.GroupIdY}{input.GroupIdZ} tid={input.ThreadIdCount} " +
                 $"local={input.ThreadsX}x{input.ThreadsY}x{input.ThreadsZ} dispatch={groupsX}x{groupsY}x{groupsZ} base={program.UserDataBase}");
         }
@@ -801,7 +587,7 @@ public sealed partial class RenderExecutor
         {
             if (!TryResolveFillWord(fill.Destination[word], userData, out destinationWords[word]))
             {
-                return RefuseBoundedFill(program, $"destination word {word} unreadable");
+                return Refuse<KernelFillCandidate>(program, $"destination word {word} unreadable");
             }
         }
 
@@ -811,7 +597,7 @@ public sealed partial class RenderExecutor
         if (!TryResolveFillWord(fill.Count, userData, out var count) ||
             (fill.Start is { } startWord && !TryResolveFillWord(startWord, userData, out start)))
         {
-            return RefuseBoundedFill(program, "range unreadable");
+            return Refuse<KernelFillCandidate>(program, "range unreadable");
         }
 
         if (fill.ConstantValue is { } constant)
@@ -820,14 +606,13 @@ public sealed partial class RenderExecutor
         }
         else if (fill.Value is not { } valueWord || !TryResolveFillWord(valueWord, userData, out value))
         {
-            return RefuseBoundedFill(program, "value unreadable");
+            return Refuse<KernelFillCandidate>(program, "value unreadable");
         }
 
         // A pattern of differing words (an RGBA16F clear colour is two) can only be an image
         // clear; DCC metadata takes one repeated word.
-        Span<uint> patternWords = stackalloc uint[8];
-        var patternLength = 1;
-        var uniform = true;
+        var candidate = new KernelFillCandidate { Value = value, PatternLength = 1, Uniform = true };
+        Span<uint> patternWords = candidate.Pattern;
         patternWords[0] = value;
         if (fill.Pattern is { } pattern)
         {
@@ -835,27 +620,27 @@ public sealed partial class RenderExecutor
             if (length > patternWords.Length || (fill.PatternLength is { } lengthWord &&
                 (!TryResolveFillWord(lengthWord, userData, out length) || length == 0 || length > pattern.Length)))
             {
-                return RefuseBoundedFill(program, "pattern length");
+                return Refuse<KernelFillCandidate>(program, "pattern length");
             }
 
             for (var word = 1; word < length; word++)
             {
                 if (!TryResolveFillWord(pattern[word], userData, out patternWords[word]))
                 {
-                    return RefuseBoundedFill(program, $"pattern word {word} unreadable");
+                    return Refuse<KernelFillCandidate>(program, $"pattern word {word} unreadable");
                 }
 
-                uniform &= patternWords[word] == value;
+                candidate.Uniform &= patternWords[word] == value;
             }
 
-            patternLength = (int)length;
+            candidate.PatternLength = (int)length;
         }
 
         if (destination.Stride != sizeof(uint) || destination.SwizzleEnabled || destination.AddThreadId || destination.OutOfBounds != 0 ||
             destination.Type != 0 || (destination.Address & 3) != 0 ||
             (fill.Formatted && destination.Format is not (Format32UInt or Format32SInt or Format32Float)))
         {
-            return RefuseBoundedFill(program,
+            return Refuse<KernelFillCandidate>(program,
                 $"descriptor stride={destination.Stride} swizzle={destination.SwizzleEnabled} tid={destination.AddThreadId} oob={destination.OutOfBounds} " +
                 $"type={destination.Type} format={destination.Format} address=0x{destination.Address:X}");
         }
@@ -864,40 +649,33 @@ public sealed partial class RenderExecutor
         var written = Math.Min(count, threads);
         if (threads > uint.MaxValue || (ulong)start + written > uint.MaxValue)
         {
-            return RefuseBoundedFill(program, $"overflow threads={threads} start={start} count={count}");
+            return Refuse<KernelFillCandidate>(program, $"overflow threads={threads} start={start} count={count}");
         }
 
         var end = Math.Min((ulong)start + written, destination.RecordCount);
         if (end <= start)
         {
-            return false;
+            return null;
         }
 
-        var address = destination.Address + (ulong)start * sizeof(uint);
-        var size = (end - start) * sizeof(uint);
         // A fill that is not DCC metadata may be a whole image the host can clear instead. The
         // pattern repeats from the thread index, so it starts at the first byte only from zero.
-        if (!uniform && start != 0)
+        if (!candidate.Uniform && start != 0)
         {
-            return RefuseBoundedFill(program, $"pattern length={patternLength} varies from start={start}");
+            return Refuse<KernelFillCandidate>(program, $"pattern length={candidate.PatternLength} varies from start={start}");
         }
 
-        var consumed = (uniform && _host.TryFillDccMetadata(address, size, value)) ||
-                       _host.TryClearImageFromKernelFill(address, size, patternWords[..patternLength]);
-        if (RenderTrace.Enabled && RenderTrace.MetadataClear())
-        {
-            RenderTrace.Write($"Bounded fill: shader=0x{program.Hash:X16} address=0x{address:X16} size=0x{size:X} value=0x{value:X8} consumed={consumed}");
-        }
-
-        return consumed;
+        candidate.Address = destination.Address + (ulong)start * sizeof(uint);
+        candidate.Size = (end - start) * sizeof(uint);
+        return candidate;
     }
 
-    private bool TryConsumeBoundedCopy(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    private BoundedCopyCandidate? DecodeBoundedCopy(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
     {
         var program = input.Stage.Program!;
         if (program.BoundedCopy is not { } copy || !BoundedCopyEnabled)
         {
-            return false;
+            return null;
         }
 
         if (program.UserDataBase != 0 || copy.GroupScalarRegister != (uint)input.WorkgroupRegister || !input.GroupIdX || input.GroupIdY || input.GroupIdZ ||
@@ -905,7 +683,7 @@ public sealed partial class RenderExecutor
             groupsX == 0 || groupsY != 1 || groupsZ != 1)
         {
             _host.NoteKernelFillFallback("copy-shape");
-            return RefuseBoundedFill(program, $"copy shape dispatch={groupsX}x{groupsY}x{groupsZ} local={input.ThreadsX}x{input.ThreadsY}x{input.ThreadsZ}");
+            return Refuse<BoundedCopyCandidate>(program, $"copy shape dispatch={groupsX}x{groupsY}x{groupsZ} local={input.ThreadsX}x{input.ThreadsY}x{input.ThreadsZ}");
         }
 
         var userData = input.Stage.Resources.UserData;
@@ -917,14 +695,14 @@ public sealed partial class RenderExecutor
                 !TryResolveFillWord(copy.Destination[word], userData, out destinationWords[word]))
             {
                 _host.NoteKernelFillFallback("copy-unreadable");
-                return RefuseBoundedFill(program, $"copy descriptor word {word} unreadable");
+                return Refuse<BoundedCopyCandidate>(program, $"copy descriptor word {word} unreadable");
             }
         }
 
         if (!TryResolveFillWord(copy.Count, userData, out var count) || !TryResolveFillWord(copy.Modulus, userData, out var modulus))
         {
             _host.NoteKernelFillFallback("copy-unreadable");
-            return RefuseBoundedFill(program, "copy range unreadable");
+            return Refuse<BoundedCopyCandidate>(program, "copy range unreadable");
         }
 
         // A masked index repeats with the period mask + 1 only when the mask is a run of low bits.
@@ -934,7 +712,7 @@ public sealed partial class RenderExecutor
         if (period == 0)
         {
             _host.NoteKernelFillFallback(copy.MaskIndex ? "copy-mask" : "copy-descriptor");
-            return RefuseBoundedFill(program, $"copy index {(copy.MaskIndex ? "mask" : "modulus")}=0x{modulus:X}");
+            return Refuse<BoundedCopyCandidate>(program, $"copy index {(copy.MaskIndex ? "mask" : "modulus")}=0x{modulus:X}");
         }
 
         var source = BufferDescriptorWords.From(sourceWords);
@@ -948,24 +726,18 @@ public sealed partial class RenderExecutor
             sourceLength > source.RecordCount)
         {
             _host.NoteKernelFillFallback("copy-descriptor");
-            return RefuseBoundedFill(program,
+            return Refuse<BoundedCopyCandidate>(program,
                 $"copy src=0x{source.Address:X}/{source.Format}/{source.Stride}/{source.OutOfBounds} dst=0x{destination.Address:X}/{destination.Format}/{destination.Stride}/{destination.OutOfBounds} " +
                 $"period={period} records={source.RecordCount}");
         }
 
         if (words == 0)
         {
-            return false;
+            return null;
         }
 
-        var consumed = _host.TryCopyWordsOnHost(destination.Address, source.Address, sourceLength, words);
-        if (RenderTrace.Enabled)
-        {
-            RenderTrace.Write(
-                $"Bounded copy: shader=0x{program.Hash:X16} src=0x{source.Address:X16} dst=0x{destination.Address:X16} words={words} period={period} consumed={consumed}");
-        }
-
-        return consumed || RefuseBoundedFill(program, $"copy refused by the host dst=0x{destination.Address:X} words={words} modulus={modulus}");
+        // The modulus the host repeats the source by is its length in words.
+        return new BoundedCopyCandidate(destination.Address, source.Address, sourceLength, words);
     }
 
     private static readonly bool BoundedCopyEnabled = Environment.GetEnvironmentVariable("SHARPEMU_HOST_BOUNDED_COPY") != "0";
@@ -974,10 +746,11 @@ public sealed partial class RenderExecutor
         descriptor.Stride == sizeof(uint) && !descriptor.SwizzleEnabled && !descriptor.AddThreadId && descriptor.OutOfBounds == 0 &&
         descriptor.Type == 0 && (descriptor.Address & 3) == 0 && descriptor.Format is Format32UInt or Format32SInt or Format32Float;
 
-    private static bool RefuseBoundedFill(ShaderProgramInfo program, string reason)
+    private static T? Refuse<T>(ShaderProgramInfo program, string reason)
+        where T : struct
     {
         Diagnostics.DccWriterTrace.Refuse(program.Hash, reason);
-        return false;
+        return null;
     }
 
     private bool TryResolveFillWord(Pipelines.FillWord word, ReadOnlySpan<uint> userData, out uint value)
@@ -1051,40 +824,6 @@ public sealed partial class RenderExecutor
         }
 
         value = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
-        return true;
-    }
-
-    private bool TryConsumeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
-    {
-        if (TryDecodeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator) is not { } clear)
-        {
-            return false;
-        }
-
-        var address = clear.Descriptor.Address;
-        var hash = input.Stage.Program!.Hash;
-        if (!_host.TryClearImageFromBuffer(address, clear.Size, clear.PackedClear))
-        {
-            // A metadata fill may run before its target is bound; the store keeps it pending. The fill
-            // itself then runs on the host when the range is known DCC metadata: run as a dispatch it
-            // leaves the metadata GPU-written, and every later bind of the surface waits for the GPU to
-            // read it back (Astro Bot fills several surfaces this way each frame).
-            var registered = _host.TryAbsorbDccFill(address, clear.Size, clear.PackedClear);
-            var filledOnHost = !registered && _host.TryFillDccMetadata(address, clear.Size, clear.PackedClear);
-            if (RenderTrace.Enabled && RenderTrace.MetadataClear())
-            {
-                RenderTrace.Write(
-                    $"{(registered ? "Tracked" : filledOnHost ? "Filled on the host" : "Deferred")} a metadata clear: shader=0x{hash:X16} address=0x{address:X16} size=0x{clear.Size:X16} value=0x{clear.PackedClear:X8}");
-            }
-
-            return registered || filledOnHost;
-        }
-
-        if (RenderTrace.Enabled && RenderTrace.ImageClear())
-        {
-            RenderTrace.Write($"Consumed a compute image clear: shader=0x{hash:X16} address=0x{address:X16} size=0x{clear.Size:X16} value=0x{clear.PackedClear:X8}");
-        }
-
         return true;
     }
 }

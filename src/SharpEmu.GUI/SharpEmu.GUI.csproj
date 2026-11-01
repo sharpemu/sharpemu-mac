@@ -20,6 +20,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
          session controls only. -->
     <ProjectReference Include="..\SharpEmu.LibAtrac9\SharpEmu.LibAtrac9.csproj" />
     <ProjectReference Include="..\SharpEmu.Core\SharpEmu.Core.csproj" />
+    <ProjectReference Include="..\SharpEmu.GnmMode\SharpEmu.GnmMode.csproj" />
     <ProjectReference Include="..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
   </ItemGroup>

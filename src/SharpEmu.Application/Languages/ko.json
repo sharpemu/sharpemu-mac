@@ -17,79 +17,55 @@
   "Options.OverlayCorner.TopRight": "오른쪽 위",
   "Options.OverlayCorner.BottomRight": "오른쪽 아래",
   "Options.OverlayCorner.BottomLeft": "왼쪽 아래",
-
   "Page.Library": "라이브러리",
   "Page.Options": "옵션",
   "Page.Trophies": "트로피",
   "Page.GameCount.One": "게임 1개",
   "Page.GameCount.Other": "게임 {0}개",
-
   "Library.SearchWatermark": "라이브러리 검색…",
-
   "LibraryMenu.Library": "라이브러리",
-
   "LibraryMenu.View": "보기",
-
   "LibraryMenu.Row": "행",
-
   "LibraryMenu.Grid": "그리드",
-
   "LibraryMenu.Sound": "사운드",
-
   "LibraryMenu.Volume": "볼륨",
-
   "LibraryMenu.AddGames": "게임 추가",
-
   "LibraryMenu.AddFolder": "폴더 추가…",
-
   "Hero.GameSettings": "게임 설정",
-
-
   "Hero.Console": "콘솔",
-
   "Hint.LibraryMenu": "라이브러리 메뉴",
-
   "Library.SearchClear": "검색 지우기",
-
   "Library.TileSize": "타일 크기",
-
   "Options.TitleMusicVolume.Desc": "라이브러리에서 게임 타이틀 음악이 재생되는 음량입니다.",
   "Library.AddFolder": "폴더 추가",
   "Library.OpenFile": "파일 열기…",
-
   "Library.Context.Launch": "실행",
   "Library.Context.OpenFolder": "게임 폴더 열기",
   "Library.Context.CopyPath": "경로 복사",
   "Library.Context.CopyTitleId": "게임 ID 복사",
   "Library.Context.Remove": "라이브러리에서 제거",
-
   "Library.Empty.Title": "라이브러리가 비어 있습니다",
   "Library.Empty.Hint": "시작하려면 게임이 포함된 폴더를 추가하세요.",
   "Library.Empty.SearchTitle": "검색 결과와 일치하는 게임이 없습니다",
   "Library.Empty.SearchHint": "라이브러리에 '{0}'와(과) 일치하는 항목이 없습니다.",
   "Library.Empty.AddFolder": "＋ 게임 폴더 추가",
-
   "Library.Loading": "라이브러리 불러오는 중…",
   "Library.ScanningFolder": "폴더 검색 중…",
   "Library.Stat.Version": "버전",
   "Library.Stat.Installed": "설치됨",
   "Library.Stat.TitleId": "타이틀 ID",
+  "Library.Stat.CompatibilityMode": "호환 모드",
   "Common.Back": "뒤로",
-
   "Library.Music.Volume": "게임 음악 볼륨",
   "Library.Music.Mute": "게임 음악 음소거",
   "Library.Music.Unmute": "게임 음악 음소거 해제",
-
   "Options.General": "일반",
   "Options.Logging": "로깅",
   "Options.Section.Emulation": "에뮬레이션",
   "Options.Section.Logging": "로깅",
   "Options.Section.Launcher": "런처",
-
-
   "Options.Strict.Label": "엄격한 동적 라이브러리 해석",
   "Options.Strict.Desc": "가져온 심볼을 해석할 수 없는 경우 실행을 중단합니다.",
-
   "Options.LogLevel.Label": "로그 수준",
   "Options.LogLevel.Desc": "에뮬레이터 콘솔에 표시할 메시지의 세부 정보 수준입니다.",
   "Options.LogLevel.Trace": "트레이스",
@@ -98,31 +74,24 @@
   "Options.LogLevel.Warning": "경고",
   "Options.LogLevel.Error": "오류",
   "Options.LogLevel.Critical": "치명적 오류",
-
   "Options.TraceImports.Label": "가져오기 트레이스 한도",
   "Options.TraceImports.Desc": "각 모듈의 처음 N개 가져오기를 트레이스합니다 (0 = 비활성화).",
-
   "Options.CrashDump.Label": "크래시 덤프",
   "Options.CrashDump.Desc": "실행 로그 옆에 크래시 덤프를 저장합니다(Windows x64 전용). 덤프는 크기가 클 수 있으며 개인 데이터를 포함할 수 있습니다.",
   "Options.LogToFile.Label": "파일로 저장",
   "Options.LogToFile.Desc": "에뮬레이터 출력을 로그 파일에 복사합니다.",
-
   "Options.LogsFolder.Label": "로그 폴더",
   "Options.LogsFolder.Desc": "모든 로그, 추적 및 덤프: {0} ({1})",
   "Options.LogsFolder.Open": "열기",
   "Options.LogFilePath.Label": "로그 파일 경로",
   "Options.LogFilePath.Default": "사용자 지정 경로 없음 — 로그는 에뮬레이터 옆의 user/logs 폴더에 저장됩니다.",
   "Options.LogFilePath.Select": "선택…",
-
   "Options.OverrideLogFile.Label": "로그 파일 덮어쓰기",
   "Options.OverrideLogFile.Desc": "게임 ID와 타임스탬프를 추가하는 대신 정확히 이 경로를 사용합니다.",
-
   "Options.TitleMusic.Label": "게임 음악",
   "Options.TitleMusic.Desc": "라이브러리에서 선택한 게임의 미리보기 음악을 반복 재생합니다.",
-
   "Options.Discord.Label": "디스코드 상태 표시",
   "Options.Discord.Desc": "디스코드 프로필에 현재 실행 중인 게임을 표시합니다.",
-
   "Options.Language.Label": "에뮬레이터 언어",
   "Options.Language.Desc": "런처 전체에 사용되는 언어입니다. 변경 사항은 즉시 적용됩니다.",
   "Options.Theme.Label": "테마",
@@ -145,10 +114,8 @@
   "Options.Theme.Glass.Desc": "게임 아트 위 컨트롤의 불투명한 정도입니다. 낮을수록 아트가 더 비쳐 보입니다.",
   "Options.Theme.Contrast.Label": "대비",
   "Options.Theme.Contrast.Desc": "표면 간, 그리고 기본 텍스트와 보조 텍스트 간의 구분입니다.",
-
   "Common.On": "켬",
   "Common.Off": "끔",
-
   "Console.Title": "콘솔",
   "Console.SearchWatermark": "검색…",
   "Console.AutoScroll": "자동 스크롤",
@@ -156,7 +123,6 @@
   "Console.Copy": "복사",
   "Console.Clear": "지우기",
   "Console.WindowTitle": "SharpEmu 콘솔",
-
   "Launch.NoGameSelected": "선택된 게임 없음",
   "Launch.NoGameHint": "라이브러리에서 게임을 선택하거나 eboot.bin 파일을 직접 여세요.",
   "Launch.Idle": "대기 중",
@@ -181,14 +147,12 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "에뮬레이터를 시작할 수 없습니다: {0}",
   "Launch.ProcessExited": "프로세스가 코드 {0} ({1})(으)로 종료되었습니다.",
-
   "Exit.Ok": "확인",
   "Exit.InvalidArguments": "잘못된 인수",
   "Exit.EbootNotFound": "eboot을 찾을 수 없음",
   "Exit.RuntimeException": "런타임 예외",
   "Exit.EmulationError": "에뮬레이션 오류",
   "Exit.Unknown": "알 수 없음",
-
   "Status.EmulatorLocating": "에뮬레이터: 위치 검색 중…",
   "Status.EmulatorPath": "에뮬레이터: {0}",
   "Status.EmulatorNotFound": "에뮬레이터: SharpEmu 실행 파일을 찾을 수 없습니다 — 먼저 SharpEmu.CLI를 컴파일하세요.",
@@ -201,20 +165,16 @@
   "Status.Running": "{0} 실행 중",
   "Status.Stopping": "중지 중…",
   "Status.Idle": "대기 중",
-
   "Clipboard.Path": "경로",
   "Clipboard.TitleId": "게임 ID",
-
   "Discord.Playing": "{0} 플레이 중",
   "Discord.Browsing": "라이브러리 둘러보는 중",
-
   "Dialog.ChooseGameFolder": "게임이 포함된 폴더 선택",
   "Dialog.OpenExecutable": "실행할 파일 열기",
   "Dialog.PsExecutables": "PlayStation 실행 파일",
   "Dialog.SaveLogFile": "로그 파일 저장 위치 선택",
   "Dialog.PlainTextFiles": "일반 텍스트 파일",
   "Dialog.LogFiles": "로그 파일",
-
   "Library.Context.GameSettings": "게임 설정…",
   "Options.Env.Tab": "환경",
   "Options.Section.Environment": "환경 변수",
@@ -262,7 +222,6 @@
   "Updater.Status.ChecksumFailed": "다운로드한 업데이트가 SHA-256 검증에 실패했습니다.",
   "Updater.Status.Unsupported": "자동 업데이트에는 Windows, Linux 또는 macOS x64 빌드가 필요합니다.",
   "Options.Graphics": "그래픽",
-
   "Options.Console.Language.Label": "콘솔 언어",
   "Options.Console.Language.Desc": "게임에 보고할 시스템 언어입니다.",
   "Options.Section.General.Desc": "에뮬레이션의 기본 동작입니다.",
@@ -297,9 +256,12 @@
   "Options.Hdr.Label": "HDR 출력",
   "Options.Hdr.Desc": "선택한 디스플레이와 그래픽 백엔드가 지원하는 경우 HDR을 사용합니다. 자동 모드는 SDR로 대체됩니다.",
   "Options.Hdr.Auto": "자동",
+  "Options.GpuReadbacks.Label": "GPU 리드백",
+  "Options.GpuReadbacks.Desc": "전체: 명령 프로세서가 GPU가 기록한 값을 기다립니다. 가장 정확하지만 끊김이 생길 수 있습니다.\n끔: 메모리에 이미 있는 값이 조건을 만족하면 기다리지 않고 계속합니다. 더 부드럽지만 일부 게임에서 그래픽 오류가 나타날 수 있습니다.\n다음 게임 실행부터 적용됩니다.",
+  "Options.GpuReadbacks.Full": "전체",
   "Options.Env.BinkPlayback.Label": "Bink 비디오 재생",
   "Options.Env.BinkPlayback.Desc": "Host는 FFmpeg 브리지를 통해 Bink 비디오를 재생하지만 일부 게임에서 문제가 발생할 수 있습니다.\nGuest는 게임 엔진 자체 디코더를 사용합니다.\nSkip은 Bink 비디오를 건너뛰어 개발을 더 쉽게 할 수 있습니다.",
-  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
+  "Options.Env.BinkPlayback.Host": "호스트 (FFmpeg)",
   "Options.Env.BinkPlayback.Guest": "Guest",
   "Options.Env.BinkPlayback.Skip": "건너뛰기",
   "Options.Env.Group.Trophies": "트로피",
@@ -307,10 +269,14 @@
   "Options.Env.TrophyTest.Desc": "게임과 트로피를 고른 다음 잠금 해제 알림을 표시합니다. 실제로 획득되지는 않습니다.",
   "Options.Env.TrophyTest.Show": "알림 표시",
   "Options.Env.TrophySound.Label": "트로피 소리",
-  "Options.Env.TrophySound.Desc": "트로피를 획득하면 짧은 알림음을 재생합니다."
-,
+  "Options.Env.TrophySound.Desc": "트로피를 획득하면 짧은 알림음을 재생합니다.",
+  "Options.GnmMode.TrophyKey.Label": "트로피 키",
+  "Options.GnmMode.TrophyKey.Desc": "암호화된 트로피 이름과 설명에 사용하는 PS4 트로피 키입니다. GnmMode 트로피 목록과 획득 알림에 사용됩니다. 로컬에 저장되며, 변경 후에는 실행 중인 게임을 다시 시작해야 합니다.",
+  "Options.GnmMode.TrophyKey.Placeholder": "16진수 문자 32개",
+  "Options.GnmMode.TrophyKey.Invalid": "16진수 문자(0–9, A–F)를 정확히 32개 입력하거나, 키를 삭제하려면 입력란을 비우세요. 입력값이 유효해질 때까지 이전의 유효한 키가 유지됩니다.",
   "Trophies.Title": "트로피",
   "Trophies.None": "이 게임에는 트로피가 없습니다.",
+  "Trophies.GnmMode.KeyHint": "PS4 트로피를 불러오려면 트로피 키가 필요할 수 있습니다. {0} → GnmMode → {1}에서 입력하세요.",
   "Trophies.Loading": "트로피 불러오는 중…",
   "Trophies.Hidden": "숨겨진 트로피",
   "Trophies.HiddenDescription": "클릭하여 이 트로피를 표시합니다.",

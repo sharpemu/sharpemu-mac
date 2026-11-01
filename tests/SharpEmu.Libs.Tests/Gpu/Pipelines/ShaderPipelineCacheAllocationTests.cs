@@ -49,7 +49,8 @@ public sealed class ShaderPipelineCacheAllocationTests(ITestOutputHelper output)
         output.WriteLine($"pixel_active={pixelActive} per draw (bytes): {string.Join(' ', perDraw)}");
         // GraphicsPrograms, VertexInputInfo and, with a pixel stage, PixelInputInfo: about 130 bytes each, and 32 more for each
         // input's stage, whose shader-call fields (ShaderStageResources.CallArguments and the rest) stay null for a draw.
-        Assert.True(perDraw[^1] <= (pixelActive ? 576 : 416), $"bytes={perDraw[^1]}");
+        // The upstream merge (tessellation, frontend and kept-pipeline fields) grew these to 520 and 880 bytes.
+        Assert.True(perDraw[^1] <= (pixelActive ? 880 : 520), $"bytes={perDraw[^1]}");
         var first = cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,
             banks.Context, mappings, pixelActive, depthBound: false, depthAspectBound: false);
         var second = cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,

@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 
@@ -11,6 +12,7 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 // Everything a host pipeline creation reads for one graphics pipeline.
 public sealed class GraphicsPipelineDescription
 {
+    public TessellationPipelineStages? Tessellation { get; init; }
     public required PipelineRenderingState Rendering { get; init; }
     public required PipelineVertexInputState VertexInput { get; init; }
     public required VertexInputInfo VertexInfo { get; init; }
@@ -30,6 +32,23 @@ public sealed class GraphicsPipelineDescription
     // its [[color(n)]] writes), zero for the identity. A host that keeps a draw inside a pass
     // whose attachments are a superset of its own draws through such a remap. Part of the key.
     public uint ColorRemap { get; init; }
+}
+
+public sealed record TessellationPipelineStages(ShaderProgram Control, ShaderProgram Evaluation, uint InputControlPoints);
+// Why a dispatch the CPU evaluated still runs on the GPU instead of landing as a store of the stream.
+public enum KernelWriteRefusal
+{
+    None,
+    Unsupported,
+    Sparse,
+    Thread,
+    CrossQueue,
+    Publication,
+    PendingRange,
+    PendingWrite,
+    Image,
+    Metadata,
+    Count,
 }
 
 public sealed class ComputePipelineDescription
@@ -80,6 +99,7 @@ public interface IShaderPipelineHost
     // The directory of the linked programs' pipeline caches, where the program cache keeps each runtime-record caller's
     // callees (ShaderCallUnionStore); null keeps none.
     string? LinkedProgramCacheDirectory => null;
+    bool TableBlocks => false;
 
     bool GraphicsSubgroupOperationsEnabled { get; }
 
@@ -102,6 +122,12 @@ public interface IShaderPipelineHost
 
     bool PerVertexPixelInputsSupported => true;
     bool ClipDistanceEnabled => false;
+    bool ShaderDrawParametersSupported => false;
+
+    // True when the host runs a merged local/hull + domain draw with tessellation stages (upstream's native path,
+    // ShaderPipelineCache.ResolveGraphicsProgramsCore); a host that emulates tessellation (Metal) resolves such a
+    // draw through GetTessellationPrograms and answers false.
+    bool TessellationStagesSupported => true;
 
     bool MeshShadersSupported => false;
 
@@ -159,6 +185,17 @@ public interface IShaderPipelineHost
     // host that returns a delegate lets a shader whose data-only table words the GPU writes
     // be re-planned to load them on the device (DeviceDataLoads); null keeps them flattened.
     Func<ulong, bool>? DataWritePending => null;
+    bool TryCopyImage(in ImageRequest source, in ImageRequest destination) => false;
+
+    uint[] NormalizeImageDescriptor(IShaderFrontend frontend, ReadOnlySpan<uint> words,
+        ShaderStage stage, ulong shaderHash, string source) => frontend.NormalizeImageForResolution(words, stage, shaderHash, source, true);
+    // A resident read that refuses instead of waiting for pending command-thread work.
+    bool TryPeekResidentGuestBytes(ulong address, Span<byte> destination) => false;
+
+    bool CpuWriteNeedsGpuData(ulong address, ulong size) => false;
+
+    // Queues the words as a store at the current stream position when no earlier work may still touch the range.
+    KernelWriteRefusal TryPostKernelWrite(ulong address, ReadOnlySpan<uint> words) => KernelWriteRefusal.Unsupported;
 
     // Creates the host module of one compiled permutation and returns its handle.
     ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId);

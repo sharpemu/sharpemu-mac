@@ -2,24 +2,24 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
-using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Gpu.Pipelines;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
 public sealed partial class RenderExecutor
 {
-    private static readonly bool DropMixedSampleDepth =
+    internal static readonly bool DropMixedSampleDepth =
         Environment.GetEnvironmentVariable("SHARPEMU_MIXED_SAMPLES") == "drop-depth";
-    private static int _mixedSampleDepthWarned;
 
     // Every draw resolves its targets against layer zero of the view range.
     private const uint DrawLayerOffset = 0;
+    private static int _targetVersions;
 
-    // Finds the color and depth targets; false when the draw has nothing to render into.
-    private bool TryResolveDrawTargets(RegisterBanks banks, in DrawCall draw, ref DrawState state)
+    private bool TryResolveDrawTargets(RegisterBanks banks, in DrawCall draw, ref DrawState state, ResolvedDraw record)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawTargetResolution);
         if (Diagnostics.DccWriterTrace.Enabled)
@@ -29,48 +29,31 @@ public sealed partial class RenderExecutor
         }
 
         var context = banks.Context;
-        if (TryResolveMultisampleColor(context))
+        if (TryResolveMultisampleColor(context, record))
         {
             TraceDrawDisposition(banks, in draw, "multisample-color-resolve");
             return false;
         }
 
-        for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+        var layout = ResolveTargetLayout(banks);
+        for (var index = 0; index < layout.ColorCount; index++)
         {
-            if (slot != 0 && (context.RenderTargetMaskForSlot(slot) == 0 || context.ColorTargets[slot].BaseAddress == 0))
-            {
-                continue;
-            }
-
-            if (ColorTargetResolver.Resolve(context, slot, DrawLayerOffset, ignoreTargetMask: false, out var resolvedSlot) is not { } resolution)
-            {
-                continue;
-            }
-
-            var request = resolution.Request;
-            if (MeshDrawTrace.Active) MeshDrawTrace.Write("color-request", $"slot={slot} address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View}");
-            var image = _host.FindImage(ref request, exactFormat: false);
-            _host.BindRenderTarget(image);
-            state.Colors[(int)state.ColorCount++] = new ColorTargetState(in resolution, resolvedSlot, image);
+            ref readonly var resolution = ref layout.Colors[index];
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("color-request", $"slot={layout.ColorSlots[index]} address=0x{resolution.Request.Description.Data.Address:X16} size=0x{resolution.Request.Description.Data.Size:X} view={resolution.Request.View}");
+            state.Colors[(int)state.ColorCount++] = new ColorTargetState(in resolution, layout.ColorSlots[index], ResourceSlotIdentifier.Invalid);
         }
 
-        if (DepthTargetResolver.Resolve(context, _host.FormatSupport, HostFatal) is { } depthTarget)
+        if (layout.Depth is { } depthTarget)
         {
-            var request = depthTarget.Target.Request;
-            if (MeshDrawTrace.Active) MeshDrawTrace.Write("depth-request", $"address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View}");
-            var image = _host.FindImage(ref request, exactFormat: false);
-            _host.BindRenderTarget(image);
-            state.Depth = new DepthAttachmentState(in depthTarget, image);
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("depth-request", $"address=0x{depthTarget.Target.Request.Description.Data.Address:X16} size=0x{depthTarget.Target.Request.Description.Data.Size:X} view={depthTarget.Target.Request.View}");
+            state.Depth = new DepthAttachmentState(in depthTarget, ResourceSlotIdentifier.Invalid);
+            state.DepthResolved = true;
         }
 
-        state.PixelActive = HasActivePixelShader(banks);
+        state.PixelActive = layout.PixelActive;
         if (state.ColorCount == 0 && !state.Depth.HasTarget && !state.PixelActive &&
             VertexStageWritesMemory(banks, ref state))
         {
-            // No attachment and no pixel stage, but the vertex (or emulated geometry) stage
-            // still stores to memory: a GPU-culling or stream-out pass whose only output is
-            // the buffer a later indirect draw reads. Rasterization has nothing to write, so
-            // the draw runs for its stores alone.
             TraceDrawDisposition(banks, in draw, "vertex-stores-only");
             return true;
         }
@@ -101,9 +84,53 @@ public sealed partial class RenderExecutor
         return true;
     }
 
-    // Whether the bound vertex (or emulated geometry) stage stores to a buffer or a
-    // storage image, which is the only observable effect a draw without attachments
-    // and without a pixel stage can have.
+    internal bool DrawHasTargets(RegisterBanks banks)
+    {
+        if (ConsumesColorMetadataOperation(banks.Context))
+        {
+            return false;
+        }
+
+        var layout = ResolveTargetLayout(banks);
+        return layout.ColorCount != 0 || layout.Depth is not null;
+    }
+
+    private DrawResolution ResolveTargetLayout(RegisterBanks banks)
+    {
+        var resolution = _drawResolution;
+        var contextStamp = banks.Stamp(RegisterStamp.ColorTargets, RegisterStamp.DepthTargets, RegisterStamp.ShaderInterface);
+        var programsStamp = banks.Stamp(RegisterStamp.ShaderPrograms);
+        if (resolution.TargetContextStamp == contextStamp && resolution.TargetProgramsStamp == programsStamp)
+        {
+            return resolution;
+        }
+
+        var context = banks.Context;
+        resolution.ColorCount = 0;
+        for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+        {
+            if (slot != 0 && (context.RenderTargetMaskForSlot(slot) == 0 || context.ColorTargets[slot].BaseAddress == 0))
+            {
+                continue;
+            }
+
+            if (ColorTargetResolver.Resolve(context, slot, DrawLayerOffset, ignoreTargetMask: false, out var resolvedSlot) is not { } color)
+            {
+                continue;
+            }
+
+            resolution.Colors[resolution.ColorCount] = color;
+            resolution.ColorSlots[resolution.ColorCount++] = resolvedSlot;
+        }
+
+        resolution.Depth = DepthTargetResolver.Resolve(context, _host.FormatSupport, HostFatal);
+        resolution.PixelActive = HasActivePixelShader(banks);
+        resolution.TargetContextStamp = contextStamp;
+        resolution.TargetProgramsStamp = programsStamp;
+        resolution.TargetVersion = (uint)Interlocked.Increment(ref _targetVersions);
+        return resolution;
+    }
+
     private bool VertexStageWritesMemory(RegisterBanks banks, ref DrawState state)
     {
         if (banks.Shader.Vertex.ExportAddress == 0)
@@ -130,15 +157,21 @@ public sealed partial class RenderExecutor
         }
 
         state.PixelActive = true;
+        state.Programs = null!;
         ResolveShaderPrograms(banks, ref state);
         var writes = state.Programs.Available && DrawWritesMemory(state.Programs.PixelInput.Stage);
         state.PixelActive = writes;
+        // The programs were resolved with the pixel stage on; a draw that does not store resolves them again.
+        if (!writes)
+        {
+            state.Programs = null!;
+        }
+
         _pixelStoreDecisions[address] = writes;
         return writes;
     }
 
-    // Color control mode 3 resolves slot 0 into slot 1 instead of drawing; true consumes the draw.
-    private bool TryResolveMultisampleColor(ContextRegisters context)
+    private static bool TryResolveMultisampleColor(ContextRegisters context, ResolvedDraw record)
     {
         if (context.ColorControl.Mode != ColorModeResolve)
         {
@@ -157,20 +190,13 @@ public sealed partial class RenderExecutor
             return false;
         }
 
-        if (from.Resolution.BaseAddress == to.Resolution.BaseAddress &&
-            from.Resolution.BaseMipLevel == to.Resolution.BaseMipLevel &&
-            from.Resolution.BaseArrayLayer == to.Resolution.BaseArrayLayer)
-        {
-            return true;
-        }
-
-        _host.MarkGpuWritten(to.Image);
-        _host.ResolveImage(from.Image, from.Resolution.BaseMipLevel, from.Resolution.BaseArrayLayer, to.Image, to.Resolution.BaseMipLevel, to.Resolution.BaseArrayLayer);
+        record.Kind = ResolvedDrawKind.MultisampleResolve;
+        record.ResolveSource = from;
+        record.ResolveDestination = to;
         return true;
     }
 
-    // DB_RENDER_OVERRIDE can turn a draw packet into a depth/stencil read-to-write copy.
-    private bool TryDepthStencilCopy(ContextRegisters context)
+    private bool TryResolveDepthStencilCopy(ContextRegisters context, ResolvedDraw record)
     {
         if (context.ColorControl.Mode != 0)
         {
@@ -202,44 +228,25 @@ public sealed partial class RenderExecutor
             ?? throw _host.Fatal("A depth/stencil copy has no readable depth target.");
         var write = ImageRequestBuilders.DepthTargetCopy(in words, _host.FormatSupport, writeBuffer: true)
             ?? throw _host.Fatal("A depth/stencil copy has no writable depth target.");
-        var readRequest = read.Request;
-        var writeRequest = write.Request;
-        var source = _host.FindImage(ref readRequest, exactFormat: true);
-        var destination = _host.FindImage(ref writeRequest, exactFormat: true);
-        _host.BindRenderTarget(source);
-        _host.BindRenderTarget(destination);
-        if (source == destination || read.Format != write.Format)
-        {
-            throw _host.Fatal(
-                $"A depth/stencil copy must use distinct images with the same format: source={source.Index} destination={destination.Index} readFormat={(int)read.Format} writeFormat={(int)write.Format}.");
-        }
-
-        var range = new SubresourceRange(
-            readRequest.View.BaseLevel,
-            readRequest.View.LevelCount,
-            readRequest.View.BaseLayer,
-            readRequest.View.LayerCount);
-        var extent = new GpuExtent3D(write.Width, write.Height, 1);
-        var aspects = (depthCopy ? GpuImageAspect.DepthBit : 0) | (stencilCopy ? GpuImageAspect.StencilBit : 0);
-        _host.MarkGpuWritten(destination);
-        _host.CopyDepthStencilImage(source, destination, in range, in extent, aspects);
+        record.Kind = ResolvedDrawKind.DepthStencilCopy;
+        record.CopyRead = read.Request;
+        record.CopyWrite = write.Request;
+        record.CopyReadFormat = read.Format;
+        record.CopyWriteFormat = write.Format;
+        record.CopyExtent = new GpuExtent3D(write.Width, write.Height, 1);
+        record.CopyAspects = (depthCopy ? GpuImageAspect.DepthBit : 0) | (stencilCopy ? GpuImageAspect.StencilBit : 0);
         return true;
     }
 
-    private ColorTargetState? ResolveMultisampleSlot(ContextRegisters context, uint slot)
+    private static ColorTargetState? ResolveMultisampleSlot(ContextRegisters context, uint slot)
     {
         if (ColorTargetResolver.Resolve(context, slot, DrawLayerOffset, ignoreTargetMask: true, out var resolvedSlot) is not { } resolution)
         {
             return null;
         }
 
-        var request = resolution.Request;
-        var image = _host.FindImage(ref request, exactFormat: true);
-        _host.BindRenderTarget(image);
-        return image.IsValid ? new ColorTargetState(in resolution, resolvedSlot, image) : null;
+        return new ColorTargetState(in resolution, resolvedSlot, ResourceSlotIdentifier.Invalid);
     }
-
-    private static bool IsSupportedSampleCount(uint samples) => samples is 1 or 2 or 4 or 8;
 
     // A depth pass can leave a color target bound that it never writes (target mask 0, or a
     // slot the pixel program does not export). Hardware bounds such a draw only by the
@@ -249,7 +256,7 @@ public sealed partial class RenderExecutor
     // locations stay dense and aligned with the remaining attachments.
     // The provider also asks for the drop when it leaves a single target for dual-source
     // alpha blending (ShaderPipelineCache.LeavesSingleDualSourceTarget).
-    private static void DropUnwrittenColorTargets(ContextRegisters context, ref DrawState state, ShaderProgramInfo? pixelProgram)
+    internal static void DropUnwrittenColorTargets(ContextRegisters context, ref DrawState state, ShaderProgramInfo? pixelProgram)
     {
         if (!state.Depth.HasTarget && !state.Programs.DropUnwrittenColorTargets)
         {
@@ -272,6 +279,28 @@ public sealed partial class RenderExecutor
         state.ColorCount = kept;
     }
 
+    internal static uint WrittenColorTargets(ContextRegisters context, in DrawState state, ShaderProgramInfo? pixelProgram)
+    {
+        var all = (1u << (int)state.ColorCount) - 1;
+        if (!state.Depth.HasTarget && !state.Programs.DropUnwrittenColorTargets)
+        {
+            return all;
+        }
+
+        var exportMasks = pixelProgram?.PixelColorExportMasks ?? 0u;
+        var written = 0u;
+        for (var i = 0; i < state.ColorCount; i++)
+        {
+            ref readonly var target = ref state.Colors[i];
+            if (!IsUnwrittenColorTarget(context, target.Slot, target.Resolution.ExportMapping, exportMasks))
+            {
+                written |= 1u << i;
+            }
+        }
+
+        return written;
+    }
+
     // The export that reaches the slot is the one routed to it, not the export of the same
     // number: exports are compacted onto the slots CB_SHADER_MASK enables.
     internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks)
@@ -283,157 +312,5 @@ public sealed partial class RenderExecutor
 
         var export = PixelExportRouting.ExportForSlot(context.ShaderInterface, slot);
         return export < 0 || ((pixelColorExportMasks >> (export * 4)) & 0xFu) == 0;
-    }
-
-    // Acquires every attachment through the host and assembles the rendering scope.
-    private RenderingState AcquireAttachments(ContextRegisters context, ref DrawState state)
-    {
-        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawAttachmentPreparation);
-        var rendering = new RenderingState
-        {
-            Width = uint.MaxValue,
-            Height = uint.MaxValue,
-            Layers = uint.MaxValue,
-            ColorAttachmentCount = state.ColorCount,
-        };
-        var attachmentSamples = 0u;
-        for (var i = 0; i < state.ColorCount; i++)
-        {
-            ref var target = ref state.Colors[i];
-            if (!target.Image.IsValid)
-            {
-                throw _host.Fatal($"A color target has no image: slot={target.Slot} address=0x{target.Resolution.BaseAddress:X16}.");
-            }
-
-            var acquired = _host.AcquireColorAttachment(in target);
-            target.Image = acquired.Image;
-            target.View = acquired.View;
-            var samples = target.Resolution.Samples;
-            if (acquired.Samples != samples || acquired.View.Handle == 0)
-            {
-                throw _host.Fatal($"The color attachment does not match its target: slot={target.Slot} imageSamples={acquired.Samples} targetSamples={samples} view=0x{acquired.View.Handle:X}.");
-            }
-
-            if (attachmentSamples == 0)
-            {
-                attachmentSamples = samples;
-            }
-            else if (attachmentSamples != samples)
-            {
-                throw _host.Fatal($"Mixed color attachment sample counts are not supported: first={attachmentSamples} next={samples}.");
-            }
-
-            var view = target.Resolution.Request.View;
-            rendering.Width = Math.Min(rendering.Width, target.Resolution.Extent.Width);
-            rendering.Height = Math.Min(rendering.Height, target.Resolution.Extent.Height);
-            rendering.Layers = Math.Min(rendering.Layers, view.LayerCount);
-            var clear = acquired.MetadataClear ? acquired.MetadataClearValue : target.Resolution.ColorClearValue;
-            rendering.ColorAttachments[i] = new RenderingAttachment(
-                acquired.View,
-                acquired.Layout,
-                view.Format,
-                clear.Uint32_0,
-                clear.Uint32_1,
-                clear.Uint32_2,
-                clear.Uint32_3,
-                acquired.MetadataClear,
-                HasDepth: false,
-                DepthClear: false,
-                HasStencil: false,
-                StencilClear: false);
-        }
-
-        if (state.Depth.HasTarget)
-        {
-            ref var depth = ref state.Depth;
-            var target = depth.Target.Target;
-            var acquired = _host.AcquireDepthAttachment(in depth);
-            depth.View = acquired.View;
-            depth.MetadataClear = acquired.MetadataClear;
-            if (acquired.View.Handle == 0 || acquired.Samples != target.Samples)
-            {
-                throw _host.Fatal($"The depth attachment does not match its target: imageSamples={acquired.Samples} targetSamples={target.Samples} view=0x{acquired.View.Handle:X}.");
-            }
-
-            if (attachmentSamples == 0)
-            {
-                attachmentSamples = target.Samples;
-            }
-            else if (attachmentSamples != target.Samples)
-            {
-                if (!DropMixedSampleDepth)
-                {
-                    throw _host.Fatal($"Mixed color and depth sample counts are not supported: color={attachmentSamples} depth={target.Samples}.");
-                }
-
-                // SHARPEMU_MIXED_SAMPLES=drop-depth (experimental): a pass that tests 1-sample color
-                // against multisampled depth (Ghost of Tsushima's checkerboard) is drawn without its
-                // depth attachment, depth and stencil tests off, instead of stopping the GPU.
-                if (Interlocked.Exchange(ref _mixedSampleDepthWarned, 1) == 0)
-                {
-                    Console.Error.WriteLine(
-                        $"[GPU][WARN] A pass mixing color and depth sample counts is drawn without its depth: color={attachmentSamples} depth={target.Samples}.");
-                }
-
-                state.Depth = default;
-                goto DepthDone;
-            }
-
-            var loadState = depth.LoadState;
-            var layout = _host.SamplesDepthAttachment(in depth)
-                ? loadState.AttachmentLayout(target.Format)
-                : DepthStencilState.WritableAttachmentLayout(target.Format);
-            _host.TransitionDepthAttachment(in depth, layout, loadState.AttachmentWriteAspects(target.Format));
-            var view = target.Request.View;
-            rendering.Width = Math.Min(rendering.Width, target.Width);
-            rendering.Height = Math.Min(rendering.Height, target.Height);
-            rendering.Layers = Math.Min(rendering.Layers, view.LayerCount);
-            var aspects = ViewFormatRules.DepthAspects(target.Format);
-            rendering.DepthStencilAttachment = new RenderingAttachment(
-                acquired.View,
-                layout,
-                target.Format,
-                BitConverter.SingleToUInt32Bits(depth.Target.State.DepthClearValue),
-                depth.Target.State.StencilClearValue,
-                0,
-                0,
-                IsClear: false,
-                HasDepth: (aspects & GpuImageAspect.DepthBit) != 0,
-                DepthClear: depth.LoadClear,
-                HasStencil: (aspects & GpuImageAspect.StencilBit) != 0,
-                StencilClear: depth.Target.State.StencilClearEnabled);
-        }
-
-    DepthDone:
-        if (state.ColorCount == 0 && !state.Depth.HasTarget)
-        {
-            rendering.Width = _host.Limits.MaxFramebufferWidth;
-            rendering.Height = _host.Limits.MaxFramebufferHeight;
-            if (state.PixelActive)
-            {
-                // Rasterization with no attachment: the scissor bounds the pixels the program runs on.
-                var scissor = ResolveScissor(context.ScreenViewport, context.ScanMode, rendering.Width, rendering.Height);
-                rendering.Width = (uint)Math.Max(1, scissor.Left + Math.Max(0, scissor.Right - scissor.Left));
-                rendering.Height = (uint)Math.Max(1, scissor.Top + Math.Max(0, scissor.Bottom - scissor.Top));
-                rendering.RasterizesWithoutAttachments = true;
-            }
-        }
-        else if (!IsSupportedSampleCount(attachmentSamples))
-        {
-            throw _host.Fatal($"The render state has no valid attachments: samples={attachmentSamples} colors={state.ColorCount} depth={state.Depth.HasTarget}.");
-        }
-
-        if (rendering.Layers == uint.MaxValue)
-        {
-            rendering.Layers = 1;
-        }
-
-        if (rendering.Width == 0 || rendering.Height == 0 || rendering.Layers == 0 || rendering.Width == uint.MaxValue || rendering.Height == uint.MaxValue)
-        {
-            throw _host.Fatal($"The rendering area is invalid: width={rendering.Width} height={rendering.Height} layers={rendering.Layers}.");
-        }
-
-        rendering.Samples = attachmentSamples == 0 ? 1 : attachmentSamples;
-        return rendering;
     }
 }

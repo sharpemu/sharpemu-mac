@@ -39,6 +39,7 @@ public partial class MainWindow
         GameWindowModeBox.ItemsSource = _windowModeChoices;
         GameScalingModeBox.ItemsSource = _scalingModeChoices;
         GameHdrModeBox.ItemsSource = _hdrModeChoices;
+        GameGpuReadbacksBox.ItemsSource = _gpuReadbackChoices;
         GameOverlayModeBox.ItemsSource = _overlayModeChoices;
         GameOverlayCornerBox.ItemsSource = _overlayCornerChoices;
         GameBinkPlaybackBox.ItemsSource = _binkPlaybackChoices;
@@ -100,6 +101,7 @@ public partial class MainWindow
         GameScalingModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameVSyncToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameHdrModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameGpuReadbacksBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameOverlayEnabledToggle.IsCheckedChanged += (_, _) =>
         {
             UpdateGameOverlayRows();
@@ -251,6 +253,10 @@ public partial class MainWindow
                 _hdrModeChoices,
                 effective.HdrMode,
                 "Auto");
+            GameGpuReadbacksBox.SelectedItem = FindChoice(
+                _gpuReadbackChoices,
+                effective.GpuReadbacks,
+                "Full");
             GameBinkPlaybackBox.SelectedItem = FindChoice(_binkPlaybackChoices, effective.BinkPlaybackMode, "Guest");
 
             _gameHostDisplays = HostDisplayOptions.BuildDisplays(
@@ -379,6 +385,7 @@ public partial class MainWindow
             ScalingMode = Pick(current.ScalingMode, baseline.ScalingMode, stored.ScalingMode),
             VSync = Pick(current.VSync, baseline.VSync, stored.VSync),
             HdrMode = Pick(current.HdrMode, baseline.HdrMode, stored.HdrMode),
+            GpuReadbacks = Pick(current.GpuReadbacks, baseline.GpuReadbacks, stored.GpuReadbacks),
             GuestDisplayResolution = Pick(current.GuestDisplayResolution, baseline.GuestDisplayResolution, stored.GuestDisplayResolution),
             OverlayEnabled = Pick(current.OverlayEnabled, baseline.OverlayEnabled, stored.OverlayEnabled),
             OverlayMode = Pick(current.OverlayMode, baseline.OverlayMode, stored.OverlayMode),
@@ -441,6 +448,7 @@ public partial class MainWindow
             VSync = GameVSyncToggle.IsChecked == true,
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
             GuestDisplayResolution = SelectedComboText(GameGuestResolutionBox, "1080p"),
+            GpuReadbacks = SelectedComboText(GameGpuReadbacksBox, "Full"),
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
             OverlayMode = SelectedComboText(GameOverlayModeBox, "Full"),
             OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),

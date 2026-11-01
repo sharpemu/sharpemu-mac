@@ -6,6 +6,10 @@ using System.Linq;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
+// Converts a frontend's descriptor to the common buffer layout without changing guest memory.
+public delegate uint[] BufferDescriptorNormalizer(ReadOnlySpan<uint> words);
+public delegate uint[] ImageDescriptorNormalizer(ReadOnlySpan<uint> words, ShaderStage stage, ulong shaderHash, string source);
+
 // An image access whose descriptor comes from a material-table key: the emitter reads
 // the key and selects the heap candidate at run time.
 public sealed record IndirectImageAccess(int MemoryIndex, ScalarValue Key, uint HeapSource)
@@ -25,6 +29,9 @@ public sealed class ShaderResourcePlan
     }
 
     public ScalarValueGraph Graph { get; }
+    public BufferDescriptorNormalizer? NormalizeBufferDescriptor { get; private init; }
+    public ImageDescriptorNormalizer? NormalizeImageDescriptor { get; private init; }
+    public Func<long>? ImageNormalizationVersion { get; private init; }
     public ShaderStage Stage { get; }
     public ulong Hash { get; }
 
@@ -54,6 +61,26 @@ public sealed class ShaderResourcePlan
     private CompiledResourceTransaction? _compiledTableTransaction;
     internal ResourceMaterializer.SpecializationGuard? SpecializationGuard;
     private int _compiledEvaluatorState;
+
+    private sealed record ProgramBox(MaterializationProgram? Program, string Ineligibility);
+
+    private ProgramBox? _materializationProgram;
+
+    internal MaterializationProgram? MaterializationProgram =>
+        (Volatile.Read(ref _materializationProgram) ?? InitializeMaterializationProgram()).Program;
+
+    internal string MaterializationProgramIneligibility =>
+        (Volatile.Read(ref _materializationProgram) ?? InitializeMaterializationProgram()).Ineligibility;
+
+    private ProgramBox InitializeMaterializationProgram()
+    {
+        var program = Resources.MaterializationProgram.Build(this, out var reason);
+        var built = new ProgramBox(program, reason);
+        return Interlocked.CompareExchange(ref _materializationProgram, built, null) ?? built;
+    }
+
+    internal object?[]? SpecializationMemos;
+    internal int NextSpecializationMemo;
 
     internal CompiledResourceEvaluator? CompiledEvaluator
     {
@@ -138,13 +165,20 @@ public sealed class ShaderResourcePlan
 
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
-        ulong excludedUserDataRegisters = 0, bool callRecords = false, bool callMarks = false)
+        ulong excludedUserDataRegisters = 0, bool callRecords = false, bool callMarks = false, int dynamicUserData = -1,
+        BufferDescriptorNormalizer? normalizeBufferDescriptor = null,
+        ImageDescriptorNormalizer? normalizeImageDescriptor = null, Func<long>? imageNormalizationVersion = null)
     {
         // Mesh system inputs are not uniform user data, even when a GS pointer occupies s0:s1.
         // A caller whose user data starts below its system scalars names them itself.
         var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize,
-            excludedUserDataRegisters: excludedUserDataRegisters | (stage == ShaderStage.Mesh ? 0xFCUL : 0));
-        var plan = new ShaderResourcePlan(graph, stage, hash);
+            excludedUserDataRegisters: excludedUserDataRegisters | (stage == ShaderStage.Mesh ? 0xFCUL : 0), dynamicUserData: dynamicUserData);
+        var plan = new ShaderResourcePlan(graph, stage, hash)
+        {
+            NormalizeBufferDescriptor = normalizeBufferDescriptor,
+            NormalizeImageDescriptor = normalizeImageDescriptor,
+            ImageNormalizationVersion = imageNormalizationVersion,
+        };
         var reads = ResourceTableReadPlanner.Plan(graph, stage, hash);
         var memo = new Dictionary<ScalarValue, ScalarValue>();
         ScalarValue Rewrite(ScalarValue value) => graph.Substitute(value, reads.Replacements, memo);
@@ -234,6 +268,8 @@ public sealed class ShaderResourcePlan
             {
                 foreach (var candidate in directCandidates)
                     plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)candidate.Source], cleanSlots);
+                if (indirect.DirectLimitSource is { } limitSource)
+                    plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)limitSource], cleanSlots);
             }
             else if (indirect.Dense)
             {
@@ -251,6 +287,7 @@ public sealed class ShaderResourcePlan
         plan.CleanFlatSlots = cleanSlots;
         plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);
         plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan);
+        (plan.DeviceDescriptorTables, plan.UnplannedDeviceDescriptorWrites) = DeviceAddressRangePlanner.PlanDescriptorTables(plan);
         plan.CallRecordCallees = CallRecordPlanner.Plan(plan);
 
         // Each written handle owns three flattened slots after the table reads: base
@@ -300,6 +337,13 @@ public sealed class ShaderResourcePlan
         {
             Push(range.BaseLow);
             Push(range.BaseHigh);
+        }
+
+        foreach (var table in DeviceDescriptorTables)
+        {
+            Push(table.TableLow);
+            Push(table.TableHigh);
+            Push(table.Limit);
         }
 
         foreach (var branch in ResourceBranches) Push(branch.Condition);
@@ -356,6 +400,11 @@ public sealed class ShaderResourcePlan
 
     // Planned after tracking; optional, and never a reason for the plan to fail.
     public IReadOnlyList<DeviceAddressRangePlan> DeviceAddressRanges { get; private set; } = [];
+
+    // Stores through V#s a counted loop selects from a table (DeviceAddressRangePlanner.PlanDescriptorTables),
+    // bounded for each draw; and whether some other device-loaded-descriptor store was left unplanned.
+    public IReadOnlyList<DeviceDescriptorTablePlan> DeviceDescriptorTables { get; private set; } = [];
+    public bool UnplannedDeviceDescriptorWrites { get; private set; }
 
     public IReadOnlyDictionary<uint, uint> WrittenRangeSlotByHandle { get; private set; } = new Dictionary<uint, uint>();
 

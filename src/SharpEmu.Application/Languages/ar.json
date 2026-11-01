@@ -17,79 +17,55 @@
   "Options.OverlayCorner.TopRight": "أعلى اليمين",
   "Options.OverlayCorner.BottomRight": "أسفل اليمين",
   "Options.OverlayCorner.BottomLeft": "أسفل اليسار",
-
   "Page.Library": "المكتبة",
   "Page.Options": "الخيارات",
   "Page.Trophies": "الجوائز",
   "Page.GameCount.One": "لعبة واحدة",
   "Page.GameCount.Other": "{0} لعبة",
-
   "Library.SearchWatermark": "ابحث في المكتبة...",
-
   "LibraryMenu.Library": "المكتبة",
-
   "LibraryMenu.View": "العرض",
-
   "LibraryMenu.Row": "صف",
-
   "LibraryMenu.Grid": "شبكة",
-
   "LibraryMenu.Sound": "الصوت",
-
   "LibraryMenu.Volume": "مستوى الصوت",
-
   "LibraryMenu.AddGames": "إضافة ألعاب",
-
   "LibraryMenu.AddFolder": "إضافة مجلد…",
-
   "Hero.GameSettings": "إعدادات اللعبة",
-
-
   "Hero.Console": "وحدة التحكم",
-
   "Hint.LibraryMenu": "قائمة المكتبة",
-
   "Library.SearchClear": "مسح البحث",
-
   "Library.TileSize": "حجم المربعات",
-
   "Options.TitleMusicVolume.Desc": "مدى ارتفاع موسيقى عنوان اللعبة في المكتبة.",
   "Library.AddFolder": "إضافة مجلد",
   "Library.OpenFile": "فتح ملف...",
-
   "Library.Context.Launch": "تشغيل",
   "Library.Context.OpenFolder": "فتح مجلد اللعبة",
   "Library.Context.CopyPath": "نسخ المسار",
   "Library.Context.CopyTitleId": "نسخ معرف العنوان",
   "Library.Context.Remove": "إزالة من المكتبة",
-
   "Library.Empty.Title": "مكتبتك فارغة",
   "Library.Empty.Hint": "أضف مجلداً يحتوي على ألعابك للبدء.",
   "Library.Empty.SearchTitle": "لا توجد ألعاب تطابق بحثك",
   "Library.Empty.SearchHint": "لا شيء في المكتبة يطابق “{0}”.",
   "Library.Empty.AddFolder": "＋ إضافة مجلد ألعاب",
-
   "Library.Loading": "جارٍ تحميل المكتبة...",
   "Library.ScanningFolder": "جارٍ فحص المجلد…",
   "Library.Stat.Version": "الإصدار",
   "Library.Stat.Installed": "المثبت",
   "Library.Stat.TitleId": "معرّف اللعبة",
+  "Library.Stat.CompatibilityMode": "وضع التوافق",
   "Common.Back": "رجوع",
-
   "Library.Music.Volume": "مستوى صوت موسيقى اللعبة",
   "Library.Music.Mute": "كتم موسيقى اللعبة",
   "Library.Music.Unmute": "إلغاء كتم موسيقى اللعبة",
-
   "Options.General": "عام",
   "Options.Logging": "التسجيل",
   "Options.Section.Emulation": "المحاكاة",
   "Options.Section.Logging": "التسجيل",
   "Options.Section.Launcher": "المُشغِّل",
-
-
   "Options.Strict.Label": "ربط صارم للمكتبات الديناميكية (dynlib)",
   "Options.Strict.Desc": "إفشال التشغيل عندما يتعذر التعرف على رمز مستورد.",
-
   "Options.LogLevel.Label": "مستوى التسجيل",
   "Options.LogLevel.Desc": "مدى تفصيل مخرجات نافذة سجلات المحاكي.",
   "Options.LogLevel.Trace": "تتبع",
@@ -98,31 +74,24 @@
   "Options.LogLevel.Warning": "تحذير",
   "Options.LogLevel.Error": "خطأ",
   "Options.LogLevel.Critical": "حرج",
-
   "Options.TraceImports.Label": "حد تتبع الاستيراد",
   "Options.TraceImports.Desc": "تتبع أول N استيراد لكل وحدة (0 = إيقاف).",
-
   "Options.CrashDump.Label": "تفريغات الأعطال",
   "Options.CrashDump.Desc": "احفظ تفريغات الأعطال بجانب سجل التشغيل (Windows x64 فقط). قد تكون التفريغات كبيرة وتحتوي على بيانات خاصة.",
   "Options.LogToFile.Label": "التسجيل في ملف",
   "Options.LogToFile.Desc": "نسخ مخرجات المحاكي إلى ملف سجل.",
-
   "Options.LogsFolder.Label": "مجلد السجلات",
   "Options.LogsFolder.Desc": "كل السجلات والتتبعات والتفريغات: {0} ({1})",
   "Options.LogsFolder.Open": "فتح",
   "Options.LogFilePath.Label": "مسار ملف السجل",
   "Options.LogFilePath.Default": "لا يوجد مسار مخصص — تُحفظ السجلات في user/logs بجوار المحاكي.",
   "Options.LogFilePath.Select": "تحديد...",
-
   "Options.OverrideLogFile.Label": "الكتابة فوق ملف السجل",
   "Options.OverrideLogFile.Desc": "استخدام مسار الملف الدقيق بدلاً من إلحاق معرف العنوان والطابع الزمني.",
-
   "Options.TitleMusic.Label": "موسيقى اللعبة",
   "Options.TitleMusic.Desc": "تكرار موسيقى المعاينة للعبة المحددة في المكتبة.",
-
   "Options.Discord.Label": "حالة دسكورد",
   "Options.Discord.Desc": "إظهار اللعبة قيد التشغيل في ملفك الشخصي على دسكورد.",
-
   "Options.Language.Label": "لغة المحاكي",
   "Options.Language.Desc": "اللغة المستخدمة في جميع أنحاء المشغل. تُطبق فوراً.",
   "Options.Theme.Label": "السمة",
@@ -145,10 +114,8 @@
   "Options.Theme.Glass.Desc": "مدى صلابة عناصر التحكم فوق صورة اللعبة. القيمة الأقل تُظهر المزيد من الصورة.",
   "Options.Theme.Contrast.Label": "التباين",
   "Options.Theme.Contrast.Desc": "الفصل بين الأسطح وبين النص الأساسي والثانوي.",
-
   "Common.On": "تشغيل",
   "Common.Off": "إيقاف",
-
   "Console.Title": "نافذة السجلات",
   "Console.SearchWatermark": "بحث...",
   "Console.AutoScroll": "تمرير تلقائي",
@@ -156,7 +123,6 @@
   "Console.Copy": "نسخ",
   "Console.Clear": "مسح",
   "Console.WindowTitle": "نافذة سجلات SharpEmu",
-
   "Launch.NoGameSelected": "لم تُحدد أي لعبة",
   "Launch.NoGameHint": "اختر لعبة من المكتبة، أو افتح ملف eboot.bin مباشرة.",
   "Launch.Idle": "خامل",
@@ -181,14 +147,12 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "فشل بدء تشغيل المحاكي: {0}",
   "Launch.ProcessExited": "انتهت العملية برمز {0} ({1}).",
-
   "Exit.Ok": "موافق",
   "Exit.InvalidArguments": "معطيات غير صالحة",
   "Exit.EbootNotFound": "لم يُعثر على eboot",
   "Exit.RuntimeException": "استثناء وقت التشغيل",
   "Exit.EmulationError": "خطأ في المحاكاة",
   "Exit.Unknown": "غير معروف",
-
   "Status.EmulatorLocating": "المحاكي: جارٍ تحديد الموقع...",
   "Status.EmulatorPath": "المحاكي: {0}",
   "Status.EmulatorNotFound": "المحاكي: لم يُعثر على الملف التنفيذي SharpEmu — ابنِ SharpEmu.CLI أولاً.",
@@ -201,20 +165,16 @@
   "Status.Running": "جارٍ تشغيل {0}",
   "Status.Stopping": "جارٍ الإيقاف...",
   "Status.Idle": "خامل",
-
   "Clipboard.Path": "المسار",
   "Clipboard.TitleId": "معرف العنوان",
-
   "Discord.Playing": "يلعب {0}",
   "Discord.Browsing": "يتصفح المكتبة",
-
   "Dialog.ChooseGameFolder": "اختر مجلداً يحتوي على ألعاب",
   "Dialog.OpenExecutable": "افتح ملفاً تنفيذياً لتشغيله",
   "Dialog.PsExecutables": "ملفات PS التنفيذية",
   "Dialog.SaveLogFile": "حدد مكان حفظ ملف السجل",
   "Dialog.PlainTextFiles": "ملفات نصية عادية",
   "Dialog.LogFiles": "ملفات السجل",
-
   "Library.Context.GameSettings": "إعدادات اللعبة…",
   "Options.Env.Tab": "البيئة",
   "Options.Section.Environment": "متغيرات البيئة",
@@ -262,7 +222,6 @@
   "Updater.Status.ChecksumFailed": "فشل التحديث المنزَّل في اجتياز تحقق SHA-256.",
   "Updater.Status.Unsupported": "يتطلب التحديث التلقائي إصدار x64 لنظام Windows أو Linux أو macOS.",
   "Options.Graphics": "الرسومات",
-
   "Options.Console.Language.Label": "لغة وحدة التحكم",
   "Options.Console.Language.Desc": "لغة النظام التي يتم إبلاغ الألعاب بها.",
   "Options.Section.General.Desc": "السلوك الأساسي للمحاكاة.",
@@ -297,6 +256,9 @@
   "Options.Hdr.Label": "إخراج HDR",
   "Options.Hdr.Desc": "استخدام HDR عندما تدعمه الشاشة المحددة وواجهة الرسومات. يعود الوضع التلقائي إلى SDR.",
   "Options.Hdr.Auto": "تلقائي",
+  "Options.GpuReadbacks.Label": "القراءة العكسية من GPU",
+  "Options.GpuReadbacks.Desc": "كاملة: ينتظر معالج الأوامر القيم التي تكتبها GPU. هذا هو الإعداد الأدق، لكنه قد يسبب تقطعًا.\nإيقاف: تستمر عمليات الانتظار بالقيمة الموجودة في الذاكرة إذا كانت تحقق الشرط. أكثر سلاسة، لكن قد تظهر أخطاء رسومية في بعض الألعاب.\nيُطبَّق عند تشغيل اللعبة في المرة القادمة.",
+  "Options.GpuReadbacks.Full": "كاملة",
   "Options.Env.BinkPlayback.Label": "تشغيل فيديو Bink",
   "Options.Env.BinkPlayback.Desc": "يقوم Host بتشغيل فيديوهات Bink عبر جسر FFmpeg، لكن قد تظهر مشكلات في بعض الألعاب.\nيستخدم Guest وحدة فك الترميز الخاصة بمحرك اللعبة.\nيتخطى Skip فيديوهات Bink، مما قد يجعل التطوير أسهل.",
   "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
@@ -307,10 +269,14 @@
   "Options.Env.TrophyTest.Desc": "اختر لعبة وجائزة، ثم اعرض إشعار فتحها. لن يتم فتح أي شيء.",
   "Options.Env.TrophyTest.Show": "عرض الإشعار",
   "Options.Env.TrophySound.Label": "صوت الجوائز",
-  "Options.Env.TrophySound.Desc": "يشغّل نغمة قصيرة عند فتح جائزة."
-,
+  "Options.Env.TrophySound.Desc": "يشغّل نغمة قصيرة عند فتح جائزة.",
+  "Options.GnmMode.TrophyKey.Label": "مفتاح الجوائز",
+  "Options.GnmMode.TrophyKey.Desc": "مفتاح جوائز PS4 لأسماء الجوائز وأوصافها المشفّرة. تستخدمه قوائم الجوائز وإشعارات فتحها في GnmMode. يُحفظ محليًا؛ أعد تشغيل اللعبة إذا كانت قيد التشغيل بعد تغييره.",
+  "Options.GnmMode.TrophyKey.Placeholder": "32 محرفًا بالنظام الست عشري",
+  "Options.GnmMode.TrophyKey.Invalid": "أدخل 32 محرفًا بالضبط بالنظام الست عشري (0–9، A–F)، أو أفرغ الحقل لإزالة المفتاح. يُحتفظ بالمفتاح الصحيح السابق حتى يصبح الإدخال صحيحًا.",
   "Trophies.Title": "الجوائز",
   "Trophies.None": "لا توجد جوائز لهذه اللعبة.",
+  "Trophies.GnmMode.KeyHint": "قد يتطلب تحميل جوائز PS4 مفتاح جوائز. أدخله ضمن {0} ← GnmMode ← {1}.",
   "Trophies.Loading": "جارٍ تحميل الجوائز…",
   "Trophies.Hidden": "جائزة مخفية",
   "Trophies.HiddenDescription": "انقر لكشف هذه الجائزة.",

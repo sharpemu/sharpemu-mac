@@ -17,71 +17,50 @@
   "Options.OverlayCorner.TopRight": "En haut à droite",
   "Options.OverlayCorner.BottomRight": "En bas à droite",
   "Options.OverlayCorner.BottomLeft": "En bas à gauche",
-
   "Page.Library": "Bibliothèque",
   "Page.Options": "Options",
   "Page.Trophies": "Trophées",
   "Page.GameCount.One": "1 jeu",
   "Page.GameCount.Other": "{0} jeux",
-
   "Library.SearchWatermark": "Rechercher dans la bibliothèque…",
-
   "LibraryMenu.Library": "Bibliothèque",
-
   "LibraryMenu.View": "Affichage",
-
   "LibraryMenu.Row": "Rangée",
-
   "LibraryMenu.Grid": "Grille",
-
   "LibraryMenu.Sound": "Son",
-
   "LibraryMenu.Volume": "Volume",
-
   "LibraryMenu.AddGames": "Ajouter des jeux",
-
   "LibraryMenu.AddFolder": "Ajouter un dossier…",
-
   "Hero.GameSettings": "Paramètres du jeu",
-
-
   "Hero.Console": "Console",
-
   "Hint.LibraryMenu": "Menu de la bibliothèque",
-
   "Library.SearchClear": "Effacer la recherche",
-
   "Library.TileSize": "Taille des vignettes",
-
   "Options.TitleMusicVolume.Desc": "Volume de la musique de titre d'un jeu dans la bibliothèque.",
   "Library.AddFolder": "Ajouter un dossier",
   "Library.OpenFile": "Ouvrir un fichier…",
   "Library.View.Grid": "Vue empilée",
   "Library.View.Carousel": "Vue en rangée",
-
   "Library.Context.Launch": "Lancer",
   "Library.Context.OpenFolder": "Ouvrir le dossier du jeu",
   "Library.Context.CopyPath": "Copier le chemin",
   "Library.Context.CopyTitleId": "Copier l’identifiant du jeu",
   "Library.Context.Remove": "Retirer de la bibliothèque",
-
   "Library.Empty.Title": "Votre bibliothèque est vide",
   "Library.Empty.Hint": "Ajoutez un dossier contenant vos jeux pour commencer.",
   "Library.Empty.SearchTitle": "Aucun jeu ne correspond à votre recherche",
   "Library.Empty.SearchHint": "Aucun élément de la bibliothèque ne correspond à « {0} ».",
   "Library.Empty.AddFolder": "＋ Ajouter un dossier de jeux",
-
   "Library.Loading": "Chargement de la bibliothèque…",
   "Library.ScanningFolder": "Analyse du dossier…",
   "Library.Stat.Version": "Version",
   "Library.Stat.Installed": "Installé",
   "Library.Stat.TitleId": "ID du titre",
+  "Library.Stat.CompatibilityMode": "Mode de compatibilité",
   "Common.Back": "Retour",
-
   "Library.Music.Volume": "Volume de la musique du jeu",
   "Library.Music.Mute": "Couper la musique du jeu",
   "Library.Music.Unmute": "Rétablir la musique du jeu",
-
   "Options.General": "Général",
   "Options.Logging": "Journalisation",
   "Options.Env.Tab": "Environnement",
@@ -100,11 +79,8 @@
   "Options.Section.Emulation": "ÉMULATION",
   "Options.Section.Logging": "JOURNALISATION",
   "Options.Section.Launcher": "LANCEUR",
-
-
   "Options.Strict.Label": "Résolution stricte des bibliothèques dynamiques",
   "Options.Strict.Desc": "Interrompre le lancement lorsqu’un symbole importé ne peut pas être résolu.",
-
   "Options.LogLevel.Label": "Niveau de journalisation",
   "Options.LogLevel.Desc": "Niveau de détail des messages affichés dans la console de l’émulateur.",
   "Options.LogLevel.Trace": "Traçage",
@@ -113,31 +89,24 @@
   "Options.LogLevel.Warning": "Avertissements",
   "Options.LogLevel.Error": "Erreurs",
   "Options.LogLevel.Critical": "Erreurs critiques",
-
   "Options.TraceImports.Label": "Limite de traçage des imports",
   "Options.TraceImports.Desc": "Tracer les N premiers imports de chaque module (0 = désactivé).",
-
   "Options.CrashDump.Label": "Fichiers de vidage après plantage",
   "Options.CrashDump.Desc": "Enregistrer les fichiers de vidage à côté du journal d’exécution (Windows x64 uniquement). Ces fichiers peuvent être volumineux et contenir des données privées.",
   "Options.LogToFile.Label": "Enregistrer dans un fichier",
   "Options.LogToFile.Desc": "Copier la sortie de l’émulateur dans un fichier journal.",
-
   "Options.LogsFolder.Label": "Dossier des journaux",
   "Options.LogsFolder.Desc": "Tous les journaux, traces et dumps : {0} ({1})",
   "Options.LogsFolder.Open": "Ouvrir",
   "Options.LogFilePath.Label": "Chemin du fichier journal",
   "Options.LogFilePath.Default": "Aucun chemin personnalisé — les journaux sont enregistrés dans user/logs à côté de l’émulateur.",
   "Options.LogFilePath.Select": "Sélectionner…",
-
   "Options.OverrideLogFile.Label": "Remplacer le fichier journal",
   "Options.OverrideLogFile.Desc": "Utiliser exactement ce chemin au lieu d’ajouter l’identifiant du jeu et l’horodatage.",
-
   "Options.TitleMusic.Label": "Musique du jeu",
   "Options.TitleMusic.Desc": "Lire en boucle la musique d’aperçu du jeu sélectionné dans la bibliothèque.",
-
   "Options.Discord.Label": "Présence Discord",
   "Options.Discord.Desc": "Afficher le jeu en cours d’exécution sur votre profil Discord.",
-
   "Options.Language.Label": "Langue de l’émulateur",
   "Options.Language.Desc": "Langue utilisée dans l’ensemble du lanceur. Le changement est immédiat.",
   "Options.Theme.Label": "Thème",
@@ -160,10 +129,8 @@
   "Options.Theme.Glass.Desc": "Opacité des contrôles au-dessus de l’illustration du jeu. Plus bas laisse davantage transparaître l’image.",
   "Options.Theme.Contrast.Label": "Contraste",
   "Options.Theme.Contrast.Desc": "Écart entre les surfaces et entre le texte principal et secondaire.",
-
   "Common.On": "Activé",
   "Common.Off": "Désactivé",
-
   "Console.Title": "CONSOLE",
   "Console.SearchWatermark": "Rechercher…",
   "Console.AutoScroll": "Défilement automatique",
@@ -171,7 +138,6 @@
   "Console.Copy": "Copier",
   "Console.Clear": "Effacer",
   "Console.WindowTitle": "Console SharpEmu",
-
   "Launch.NoGameSelected": "Aucun jeu sélectionné",
   "Launch.NoGameHint": "Choisissez un jeu dans la bibliothèque ou ouvrez directement un fichier eboot.bin.",
   "Launch.Idle": "Inactif",
@@ -196,14 +162,12 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "Impossible de démarrer l’émulateur : {0}",
   "Launch.ProcessExited": "Le processus s’est terminé avec le code {0} ({1}).",
-
   "Exit.Ok": "OK",
   "Exit.InvalidArguments": "arguments non valides",
   "Exit.EbootNotFound": "eboot introuvable",
   "Exit.RuntimeException": "exception d’exécution",
   "Exit.EmulationError": "erreur d’émulation",
   "Exit.Unknown": "inconnu",
-
   "Status.EmulatorLocating": "Émulateur : recherche en cours…",
   "Status.EmulatorPath": "Émulateur : {0}",
   "Status.EmulatorNotFound": "Émulateur : l’exécutable SharpEmu est introuvable — compilez d’abord SharpEmu.CLI.",
@@ -216,20 +180,16 @@
   "Status.Running": "Exécution de {0}",
   "Status.Stopping": "Arrêt en cours…",
   "Status.Idle": "Inactif",
-
   "Clipboard.Path": "Chemin",
   "Clipboard.TitleId": "Identifiant du jeu",
-
   "Discord.Playing": "Joue à {0}",
   "Discord.Browsing": "Parcourt la bibliothèque",
-
   "Dialog.ChooseGameFolder": "Choisir un dossier contenant des jeux",
   "Dialog.OpenExecutable": "Ouvrir un exécutable à lancer",
   "Dialog.PsExecutables": "Exécutables PlayStation",
   "Dialog.SaveLogFile": "Choisir l’emplacement du fichier journal",
   "Dialog.PlainTextFiles": "Fichiers texte brut",
   "Dialog.LogFiles": "Fichiers journaux",
-
   "Options.About": "À propos",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Code source, issues et développement du projet.",
@@ -237,7 +197,6 @@
   "About.Discord.Desc": "Rejoignez la communauté, obtenez de l’aide et suivez le développement.",
   "About.GithubButton": "Contribuer sur GitHub !",
   "About.DiscordButton": "Rejoignez notre Discord !",
-
   "Library.Context.GameSettings": "Paramètres du jeu…",
   "Options.Env.WritableApp0.Desc": "Autoriser les jeux à créer et écrire des fichiers dans leur dossier d’installation.\nNécessaire pour les dumps non empaquetés qui écrivent leurs sauvegardes ou leur configuration sous /app0.",
   "Options.Env.LogIo.Desc": "Journaliser l’ouverture et la lecture des fichiers ainsi que la résolution des chemins dans la console.\nÀ utiliser quand un jeu ne trouve pas ses fichiers de données au démarrage.",
@@ -265,7 +224,6 @@
   "Updater.Status.ChecksumFailed": "La mise à jour téléchargée a échoué à la vérification SHA-256.",
   "Updater.Status.Unsupported": "La mise à jour automatique nécessite un build x64 pour Windows, Linux ou macOS.",
   "Options.Graphics": "Graphismes",
-
   "Options.Console.Language.Label": "Langue de la console",
   "Options.Console.Language.Desc": "Langue système signalée aux jeux.",
   "Options.Section.General.Desc": "Comportement de base de l'émulation.",
@@ -300,6 +258,9 @@
   "Options.Hdr.Label": "Sortie HDR",
   "Options.Hdr.Desc": "Utiliser le HDR lorsque l’écran sélectionné et le backend graphique le prennent en charge. Le mode automatique revient au SDR.",
   "Options.Hdr.Auto": "Automatique",
+  "Options.GpuReadbacks.Label": "Relecture GPU",
+  "Options.GpuReadbacks.Desc": "Complète : le processeur de commandes attend les valeurs écrites par le GPU. Plus précis, mais peut provoquer des saccades.\nDésactivé : les attentes continuent avec la valeur déjà en mémoire si elle remplit la condition. Plus fluide, mais certains jeux peuvent afficher des erreurs graphiques.\nS'applique au prochain lancement du jeu.",
+  "Options.GpuReadbacks.Full": "Complète",
   "Options.Env.BinkPlayback.Label": "Lecture vidéo Bink",
   "Options.Env.BinkPlayback.Desc": "Hôte lit les vidéos Bink via le pont FFmpeg, mais certains jeux peuvent rencontrer des problèmes.\nInvité utilise le décodeur propre au moteur du jeu.\nIgnorer permet de passer les vidéos Bink, ce qui peut faciliter le développement.",
   "Options.Env.BinkPlayback.Host": "Hôte (FFmpeg)",
@@ -308,6 +269,7 @@
   "Library.Context.Trophies": "Trophées…",
   "Trophies.Title": "Trophées",
   "Trophies.None": "Ce jeu n’a pas de trophées.",
+  "Trophies.GnmMode.KeyHint": "Une clé des trophées peut être nécessaire pour charger les trophées PS4. Saisissez-la dans {0} → GnmMode → {1}.",
   "Trophies.Loading": "Chargement des trophées…",
   "Trophies.Hidden": "Trophée caché",
   "Trophies.HiddenDescription": "Cliquez pour révéler ce trophée.",
@@ -327,6 +289,10 @@
   "Options.Env.TrophyTest.Show": "Afficher la notification",
   "Options.Env.TrophySound.Label": "Son des trophées",
   "Options.Env.TrophySound.Desc": "Joue un court carillon quand un trophée est débloqué.",
+  "Options.GnmMode.TrophyKey.Label": "Clé des trophées",
+  "Options.GnmMode.TrophyKey.Desc": "Clé des trophées PS4 pour les noms et descriptions de trophées chiffrés. Utilisée par les listes de trophées et les notifications de déblocage de GnmMode. Enregistrée localement ; redémarrez le jeu en cours après toute modification.",
+  "Options.GnmMode.TrophyKey.Placeholder": "32 caractères hexadécimaux",
+  "Options.GnmMode.TrophyKey.Invalid": "Saisissez exactement 32 caractères hexadécimaux (0–9, A–F), ou videz le champ pour supprimer la clé. La clé valide précédente est conservée tant que la saisie n’est pas valide.",
   "Trophies.Completed": "complété",
   "Trophies.EarnedTotal": "obtenus",
   "Trophies.HubSummary": "{0} trophées obtenus sur {1}, dans {2} jeux",

@@ -132,9 +132,11 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
-    private static IGuestBackedSpace? ResolveBackingSpace(CpuContext ctx)
+    private static IGuestBackedSpace? ResolveBackingSpace(CpuContext ctx) => ResolveBackingSpace(ctx.Memory);
+
+    private static IGuestBackedSpace? ResolveBackingSpace(ICpuMemory memory)
     {
-        if (!KernelVirtualRangeAllocator.TryResolveAddressSpace(ctx.Memory, out var addressSpace) ||
+        if (!KernelVirtualRangeAllocator.TryResolveAddressSpace(memory, out var addressSpace) ||
             addressSpace is not IGuestBackedSpace space)
             return null;
         if (_backingOwner is not null && !ReferenceEquals(_backingOwner, space))
@@ -530,6 +532,27 @@ public static partial class KernelMemoryCompatExports
             () => ReserveBackingRangeCore(ctx, pointer, length, flags, alignment),
             () => (flags & OrbisKernelMapFixed) == 0 ||
                 (ctx.TryReadUInt64(pointer, out var requested) && IsUntouchedByGpu(requested, length)));
+
+    internal static bool TryReserveDriverMemory(ICpuMemory memory, ulong length, ulong alignment, out ulong address)
+    {
+        var reserved = 0UL;
+        var result = RunMappingTransaction(() =>
+        {
+            if (!IsValidMapRange(length, alignment))
+                return MemoryInvalidArgument;
+            lock (_memoryGate)
+            {
+                var space = ResolveBackingSpace(memory);
+                if (space is null || !TrySelectBackingAddress(space, 0, length,
+                        alignment == 0 ? OrbisPageSize : alignment, 0, out reserved, reuseReservation: false))
+                    return MemoryNoSpace;
+                ReplaceMappedRegionRangeLocked(new MappedRegion(reserved, length, 0, false, false, 0, IsReserved: true));
+                return 0;
+            }
+        }, static () => true);
+        address = result == 0 ? reserved : 0;
+        return result == 0;
+    }
 
     // A batch wraps its entries in one transaction, so the entries must not hand off again.
     [ThreadStatic]

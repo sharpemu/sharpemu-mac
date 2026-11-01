@@ -68,6 +68,8 @@ public sealed record LaunchConfiguration(EffectiveLaunchSettings Settings, IRead
             }
         }
         values["SHARPEMU_DISPLAY_RESOLUTION"] = Settings.GuestDisplayResolution;
+        values["SHARPEMU_GPU_READBACKS"] =
+            string.Equals(Settings.GpuReadbacks, "Off", StringComparison.OrdinalIgnoreCase) ? "off" : "full";
         values["SHARPEMU_BINK_MODE"] = Settings.BinkPlaybackMode.ToLowerInvariant() switch
         {
             "guest" => "guest", "skip" => "skip", _ => "native",

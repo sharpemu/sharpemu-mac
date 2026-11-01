@@ -513,7 +513,7 @@ public static class AudioOutExports
     [SysAbiExport(
         Nid = "QOQtbeDqsT4",
         ExportName = "sceAudioOutOutput",
-        Target = Generation.Gen5,
+        Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAudioOut")]
     public static int AudioOutOutput(CpuContext ctx)
     {

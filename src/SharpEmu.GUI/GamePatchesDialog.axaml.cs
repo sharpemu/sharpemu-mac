@@ -125,7 +125,8 @@ public partial class GamePatchesDialog : SheetView
         HintText.Text = Localization.Instance.Get("Library.Patches.Downloading");
         try
         {
-            var count = await GamePatchDownloader.DownloadAsync(titleId, _game.Version, _repository.DirectoryPath, _downloadCancellation.Token);
+            var count = await GamePatchDownloader.DownloadAsync(titleId, _game.Version, _repository.DirectoryPath,
+                _downloadCancellation.Token, compatibilityMode: _game.CompatibilityMode);
             if (_closed) return;
             StatusText.Text = string.Empty;
             if (count > 0)

@@ -9,6 +9,11 @@ public static partial class Gen5MslTranslator
 {
     private sealed partial class CompilationContext
     {
+        // SHARPEMU_DIAG_RCP_ZERO_HASH=<hex> (diagnostic): that program's v_rcp_f32 of zero returns zero instead of +inf.
+        private static readonly ulong DiagRcpZeroHash = ulong.TryParse(
+            (Environment.GetEnvironmentVariable("SHARPEMU_DIAG_RCP_ZERO_HASH") ?? string.Empty).Replace("0x", string.Empty),
+            System.Globalization.NumberStyles.HexNumber, null, out var diagRcpZeroHash) ? diagRcpZeroHash : 0;
+
         private const string TauLiteral = "6.2831853071795862f";
 
         // ---- vector ALU ----
@@ -312,9 +317,9 @@ public static partial class Gen5MslTranslator
                     $"rsqrt({F16(instruction, 0)})"),
                 // F32 denormal inputs reach rcp/rsq/sqrt/log/exp as a signed zero, as
                 // on the guest; the IEEE-flag reciprocal keeps the unflushed input.
-                "VRcpF32" => FloatResult(
-                    instruction,
-                    _options.FastReciprocals
+                "VRcpF32" => FloatResult(instruction, _request.Hash == DiagRcpZeroHash
+                    ? $"(sharpemu_flush_f32_denorm({F(instruction, 0)}) == 0.0f ? 0.0f : 1.0f / sharpemu_flush_f32_denorm({F(instruction, 0)}))"
+                    : _options.FastReciprocals
                         ? $"fast::divide(1.0f, sharpemu_flush_f32_denorm({F(instruction, 0)}))"
                         : $"(1.0f / sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
                 "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),

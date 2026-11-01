@@ -225,6 +225,29 @@ public sealed partial class GuestImageCacheTests
         harness.Acquire(ref color);
         Assert.True(harness.Images.IsMetadata(metadataAddress));
         Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 0));
+    }
+
+    [Fact]
+    public void ClearStateChanges_AreSeenOnlyForTheirAddress()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var cleared = address + 0x1000;
+        var untouched = address + 0x2000;
+        harness.Images.RegisterHtileMetadataForTest(cleared);
+        harness.Images.RegisterHtileMetadataForTest(untouched);
+        var generation = harness.Images.MetadataGeneration;
+        Assert.True(harness.Images.MetadataUnchangedSinceForTest(generation, cleared));
+
+        Assert.True(harness.Images.ClearMetadata(cleared));
+        Assert.False(harness.Images.MetadataUnchangedSinceForTest(generation, cleared));
+        Assert.True(harness.Images.MetadataUnchangedSinceForTest(generation, untouched));
+
+        generation = harness.Images.MetadataGeneration;
+        Assert.True(harness.Images.SetMetadataSlice(untouched, 0, true));
+        Assert.False(harness.Images.MetadataUnchangedSinceForTest(generation, untouched));
+        Assert.True(harness.Images.MetadataUnchangedSinceForTest(generation, cleared));
         harness.Shutdown();
     }
 

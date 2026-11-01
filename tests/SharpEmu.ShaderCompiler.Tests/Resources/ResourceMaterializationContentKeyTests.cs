@@ -165,6 +165,8 @@ public sealed class ResourceMaterializationContentKeyTests
         }
         Assert.True(cache.ColdBypasses > 0);
 
+        // The fast-path check re-reads through the counting readers below and would skew the budget.
+        using var suspended = MaterializationProgramCheck.Suspend();
         var readsPerWalk = 0;
         bool CountRead(ulong address, out uint word)
         {

@@ -17,79 +17,55 @@
   "Options.OverlayCorner.TopRight": "Øverst til højre",
   "Options.OverlayCorner.BottomRight": "Nederst til højre",
   "Options.OverlayCorner.BottomLeft": "Nederst til venstre",
-
   "Page.Library": "Bibliotek",
   "Page.Options": "Indstillinger",
   "Page.Trophies": "Trofæer",
   "Page.GameCount.One": "1 spil",
   "Page.GameCount.Other": "{0} spil",
-
   "Library.SearchWatermark": "Søg i biblioteket…",
-
   "LibraryMenu.Library": "Bibliotek",
-
   "LibraryMenu.View": "Visning",
-
   "LibraryMenu.Row": "Række",
-
   "LibraryMenu.Grid": "Gitter",
-
   "LibraryMenu.Sound": "Lyd",
-
   "LibraryMenu.Volume": "Lydstyrke",
-
   "LibraryMenu.AddGames": "Tilføj spil",
-
   "LibraryMenu.AddFolder": "Tilføj mappe…",
-
   "Hero.GameSettings": "Spilindstillinger",
-
-
   "Hero.Console": "Konsol",
-
   "Hint.LibraryMenu": "Biblioteksmenu",
-
   "Library.SearchClear": "Ryd søgning",
-
   "Library.TileSize": "Flisestørrelse",
-
   "Options.TitleMusicVolume.Desc": "Hvor højt et spils titelmusik spiller i biblioteket.",
   "Library.AddFolder": "Tilføj mappe",
   "Library.OpenFile": "Åbn fil…",
-
   "Library.Context.Launch": "Start",
   "Library.Context.OpenFolder": "Åbn spilmappe",
   "Library.Context.CopyPath": "Kopiér sti",
   "Library.Context.CopyTitleId": "Kopiér titel-ID",
   "Library.Context.Remove": "Fjern fra bibliotek",
-
   "Library.Empty.Title": "Dit bibliotek er tomt",
   "Library.Empty.Hint": "Tilføj en mappe med dine spil for at komme i gang.",
   "Library.Empty.SearchTitle": "Ingen spil matcher din søgning",
   "Library.Empty.SearchHint": "Intet i biblioteket matcher “{0}”.",
   "Library.Empty.AddFolder": "＋ Tilføj spilmappe",
-
   "Library.Loading": "Indlæser bibliotek…",
   "Library.ScanningFolder": "Scanner mappen…",
   "Library.Stat.Version": "Version",
   "Library.Stat.Installed": "Installeret",
   "Library.Stat.TitleId": "Titel-id",
+  "Library.Stat.CompatibilityMode": "Kompatibilitetstilstand",
   "Common.Back": "Tilbage",
-
   "Library.Music.Volume": "Lydstyrke for spilmusik",
   "Library.Music.Mute": "Slå spilmusik fra",
   "Library.Music.Unmute": "Slå spilmusik til",
-
   "Options.General": "Generelt",
   "Options.Logging": "Logging",
   "Options.Section.Emulation": "EMULERING",
   "Options.Section.Logging": "LOGGING",
   "Options.Section.Launcher": "LAUNCHER",
-
-
   "Options.Strict.Label": "Streng dynlib-opløsning",
   "Options.Strict.Desc": "Afbryd opstarten, når et importeret symbol ikke kan findes.",
-
   "Options.LogLevel.Label": "Logniveau",
   "Options.LogLevel.Desc": "Detaljeringsgrad for emulatorens konsoloutput.",
   "Options.LogLevel.Trace": "Trace",
@@ -98,31 +74,24 @@
   "Options.LogLevel.Warning": "Advarsel",
   "Options.LogLevel.Error": "Fejl",
   "Options.LogLevel.Critical": "Kritisk",
-
   "Options.TraceImports.Label": "Grænse for import-trace",
   "Options.TraceImports.Desc": "Spor de første N imports pr. modul (0 = fra).",
-
   "Options.CrashDump.Label": "Nedbrudsdumps",
   "Options.CrashDump.Desc": "Gem nedbrudsdumps ved siden af kørselsloggen (kun Windows x64). Filerne kan være store og indeholde private data.",
   "Options.LogToFile.Label": "Log til fil",
   "Options.LogToFile.Desc": "Spejl emulatorens output til en logfil.",
-
   "Options.LogsFolder.Label": "Logmappe",
   "Options.LogsFolder.Desc": "Alle logfiler, sporinger og dumps: {0} ({1})",
   "Options.LogsFolder.Open": "Åbn",
   "Options.LogFilePath.Label": "Sti til logfil",
   "Options.LogFilePath.Default": "Ingen brugerdefineret sti — logs gemmes i user/logs ved siden af emulatoren.",
   "Options.LogFilePath.Select": "Vælg…",
-
   "Options.OverrideLogFile.Label": "Tilsidesæt logfil",
   "Options.OverrideLogFile.Desc": "Brug den præcise filsti i stedet for at tilføje titel-ID og tidsstempel.",
-
   "Options.TitleMusic.Label": "Titelmusik",
   "Options.TitleMusic.Desc": "Gentag det valgte spils forhåndsvisningsmusik i biblioteket.",
-
   "Options.Discord.Label": "Discord-tilstedeværelse",
   "Options.Discord.Desc": "Vis det kørende spil på din Discord-profil.",
-
   "Options.Language.Label": "Emulatorsprog",
   "Options.Language.Desc": "Sprog der bruges i hele launcheren. Anvendes med det samme.",
   "Options.Theme.Label": "Tema",
@@ -145,10 +114,8 @@
   "Options.Theme.Glass.Desc": "Hvor dækkende knapperne over spilbilledet er. Lavere viser mere af billedet.",
   "Options.Theme.Contrast.Label": "Kontrast",
   "Options.Theme.Contrast.Desc": "Adskillelse mellem flader og mellem primær og sekundær tekst.",
-
   "Common.On": "Til",
   "Common.Off": "Fra",
-
   "Console.Title": "KONSOL",
   "Console.SearchWatermark": "Søg...",
   "Console.AutoScroll": "Auto-scroll",
@@ -156,7 +123,6 @@
   "Console.Copy": "Kopiér",
   "Console.Clear": "Ryd",
   "Console.WindowTitle": "SharpEmu-konsol",
-
   "Launch.NoGameSelected": "Intet spil valgt",
   "Launch.NoGameHint": "Vælg et spil fra biblioteket, eller åbn en eboot.bin direkte.",
   "Launch.Idle": "Inaktiv",
@@ -181,14 +147,12 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "Kunne ikke starte emulatoren: {0}",
   "Launch.ProcessExited": "Processen afsluttede med kode {0} ({1}).",
-
   "Exit.Ok": "OK",
   "Exit.InvalidArguments": "ugyldige argumenter",
   "Exit.EbootNotFound": "eboot ikke fundet",
   "Exit.RuntimeException": "runtime-fejl",
   "Exit.EmulationError": "emuleringsfejl",
   "Exit.Unknown": "ukendt",
-
   "Status.EmulatorLocating": "Emulator: lokaliserer…",
   "Status.EmulatorPath": "Emulator: {0}",
   "Status.EmulatorNotFound": "Emulator: SharpEmu-programmet blev ikke fundet — byg SharpEmu.CLI først.",
@@ -201,20 +165,16 @@
   "Status.Running": "Kører {0}",
   "Status.Stopping": "Stopper…",
   "Status.Idle": "Inaktiv",
-
   "Clipboard.Path": "Sti",
   "Clipboard.TitleId": "Titel-ID",
-
   "Discord.Playing": "Spiller {0}",
   "Discord.Browsing": "Gennemser biblioteket",
-
   "Dialog.ChooseGameFolder": "Vælg en mappe der indeholder spil",
   "Dialog.OpenExecutable": "Åbn et program der skal startes",
   "Dialog.PsExecutables": "PS-programmer",
   "Dialog.SaveLogFile": "Vælg hvor logfilen skal gemmes",
   "Dialog.PlainTextFiles": "Almindelige tekstfiler",
   "Dialog.LogFiles": "Logfiler",
-
   "Library.Context.GameSettings": "Spilindstillinger…",
   "Options.Env.Tab": "Miljø",
   "Options.Section.Environment": "MILJØVARIABLER",
@@ -262,7 +222,6 @@
   "Updater.Status.ChecksumFailed": "Den downloadede opdatering bestod ikke SHA-256-verifikationen.",
   "Updater.Status.Unsupported": "Automatisk opdatering kræver et x64-build til Windows, Linux eller macOS.",
   "Options.Graphics": "Grafik",
-
   "Options.Console.Language.Label": "Konsolsprog",
   "Options.Console.Language.Desc": "Systemsprog der rapporteres til spil.",
   "Options.Section.General.Desc": "Grundlæggende emuleringsadfærd.",
@@ -297,9 +256,12 @@
   "Options.Hdr.Label": "HDR-output",
   "Options.Hdr.Desc": "Brug HDR, når den valgte skærm og grafik-backend understøtter det. Automatisk falder tilbage til SDR.",
   "Options.Hdr.Auto": "Automatisk",
+  "Options.GpuReadbacks.Label": "GPU-tilbagelæsning",
+  "Options.GpuReadbacks.Desc": "Fuld: kommandoprocessoren venter på de værdier, som GPU'en skriver. Mest nøjagtig, men kan give hakken.\nFra: ventninger fortsætter med den værdi, der allerede ligger i hukommelsen, hvis den opfylder betingelsen. Mere flydende, men nogle spil kan vise grafiske fejl.\nTræder i kraft næste gang spillet startes.",
+  "Options.GpuReadbacks.Full": "Fuld",
   "Options.Env.BinkPlayback.Label": "Bink-videoafspilning",
   "Options.Env.BinkPlayback.Desc": "Host afspiller Bink-videoer via FFmpeg-broen, men nogle spil kan opleve problemer.\nGuest bruger spilmotorens egen dekoder.\nSkip springer Bink-videoer over, hvilket kan gøre udviklingen nemmere.",
-  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
+  "Options.Env.BinkPlayback.Host": "Vært (FFmpeg)",
   "Options.Env.BinkPlayback.Guest": "Gæst",
   "Options.Env.BinkPlayback.Skip": "Spring over",
   "Options.Env.Group.Trophies": "Trofæer",
@@ -307,10 +269,14 @@
   "Options.Env.TrophyTest.Desc": "Vælg et spil og et trofæ, og vis derefter oplåsningsnotifikationen. Intet bliver låst op.",
   "Options.Env.TrophyTest.Show": "Vis notifikation",
   "Options.Env.TrophySound.Label": "Trofæ-lyd",
-  "Options.Env.TrophySound.Desc": "Afspiller en kort lyd, når et trofæ låses op."
-,
+  "Options.Env.TrophySound.Desc": "Afspiller en kort lyd, når et trofæ låses op.",
+  "Options.GnmMode.TrophyKey.Label": "Trofænøgle",
+  "Options.GnmMode.TrophyKey.Desc": "PS4-trofænøgle til krypterede trofænavne og beskrivelser. Bruges af trofælister og oplåsningsnotifikationer i GnmMode. Gemmes lokalt; genstart et kørende spil efter ændring.",
+  "Options.GnmMode.TrophyKey.Placeholder": "32 hexadecimale tegn",
+  "Options.GnmMode.TrophyKey.Invalid": "Indtast præcis 32 hexadecimale tegn (0–9, A–F), eller ryd feltet for at fjerne nøglen. Den tidligere gyldige nøgle beholdes, indtil indtastningen er gyldig.",
   "Trophies.Title": "Trofæer",
   "Trophies.None": "Dette spil har ingen trofæer.",
+  "Trophies.GnmMode.KeyHint": "Der kan være brug for en trofænøgle til at indlæse PS4-trofæer. Indtast den under {0} → GnmMode → {1}.",
   "Trophies.Loading": "Indlæser trofæer…",
   "Trophies.Hidden": "Skjult trofæ",
   "Trophies.HiddenDescription": "Klik for at afsløre dette trofæ.",

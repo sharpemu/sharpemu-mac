@@ -60,15 +60,20 @@ public sealed class ExtractedPackageContractTests
     [InlineData("src/SharpEmu.Libs/SharpEmu.Libs.csproj")]
     public void SharedAssemblyFriendsAreLimitedToExistingCoreAndTests(string project)
     {
+        // Libs also befriends upstream's GNM mode and the Vulkan backend, which reach
+        // into its GPU internals since the upstream merge.
+        string[] allowed = project.Contains("HLE", StringComparison.Ordinal)
+            ? ["SharpEmu.Core", "SharpEmu.Libs.Tests"]
+            : ["SharpEmu.Core", "SharpEmu.Libs.Tests", "SharpEmu.GnmMode", "SharpEmu.Gpu.Vulkan"];
         foreach (var friend in XDocument.Load(RepoPath(project)).Descendants("InternalsVisibleTo"))
-            Assert.Contains(friend.Attribute("Include")!.Value, new[] { "SharpEmu.Core", "SharpEmu.Libs.Tests" });
+            Assert.Contains(friend.Attribute("Include")!.Value, allowed);
 
         // Check compiled assembly metadata as well: a handwritten assembly
         // attribute must not evade the project-file rule.
         var assembly = project.Contains("HLE", StringComparison.Ordinal)
             ? typeof(HostBackingObject).Assembly : typeof(AgcExports).Assembly;
         foreach (var friend in assembly.GetCustomAttributes<InternalsVisibleToAttribute>())
-            Assert.Contains(friend.AssemblyName, new[] { "SharpEmu.Core", "SharpEmu.Libs.Tests" });
+            Assert.Contains(friend.AssemblyName, allowed);
     }
 
     [Theory]

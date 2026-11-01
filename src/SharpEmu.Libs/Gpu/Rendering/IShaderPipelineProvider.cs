@@ -24,6 +24,19 @@ public readonly record struct VertexPositionStream(ulong Address, uint Stride, u
 
 public sealed class GraphicsPrograms
 {
+    // A natively tessellated draw's configuration and hull program (hosts with SupportsTessellation).
+    public TessellationDrawPrograms? Tessellation { get; init; }
+
+    public GraphicsPrograms()
+    {
+    }
+
+    public GraphicsPrograms(VertexInputInfo vertexInput, PixelInputInfo pixelInput)
+    {
+        _vertexInput = vertexInput;
+        _pixelInput = pixelInput;
+    }
+
     public ShaderProgram Vertex { get; init; }
     public ShaderProgram Pixel { get; init; }
     // A default is made on first read: an initializer made one for every draw only for the
@@ -53,8 +66,70 @@ public sealed class GraphicsPrograms
 // that runs before it (ShaderPipelineCache.GetTessellationPrograms).
 public sealed record TessellationPrograms(GraphicsPrograms Graphics, ComputeProgram Hull);
 
+public sealed record TessellationDrawPrograms(SharpEmu.ShaderCompiler.Gen5TessellationInfo Configuration,
+    SharpEmu.ShaderCompiler.Gen5TessellationHullInfo HullConfiguration, ComputeProgram Hull);
+// Learns when a known write of one producer is read.
+internal interface IKnownWriteDemand
+{
+    void NoteRead();
+}
+
+public sealed class KnownGpuWrite(ulong address, uint[] buffer, int count, bool pooled = false)
+{
+    private readonly object _gate = new();
+    private bool _released;
+    private int _read;
+
+    internal IKnownWriteDemand? Demand { get; init; }
+
+    public ulong Address { get; } = address;
+
+    internal void NoteRead()
+    {
+        if (Demand is { } demand && Interlocked.Exchange(ref _read, 1) == 0)
+        {
+            demand.NoteRead();
+        }
+    }
+
+    public int ByteCount => count * sizeof(uint);
+
+    public ReadOnlySpan<uint> Words => buffer.AsSpan(0, count);
+
+    public bool TryCopyWords(int offsetBytes, Span<byte> destination)
+    {
+        lock (_gate)
+        {
+            if (_released)
+            {
+                return false;
+            }
+
+            System.Runtime.InteropServices.MemoryMarshal.AsBytes(buffer.AsSpan(0, count)).Slice(offsetBytes, destination.Length).CopyTo(destination);
+            return true;
+        }
+    }
+
+    public void Release()
+    {
+        lock (_gate)
+        {
+            if (pooled && !_released)
+            {
+                _released = true;
+                System.Buffers.ArrayPool<uint>.Shared.Return(buffer);
+            }
+        }
+    }
+}
+
+public sealed record FrontendImageCopy(ImageRequest Source, ImageRequest Destination, Func<ComputeProgram> Fallback);
+
 public sealed class ComputeProgram
 {
+    public FrontendImageCopy? ImageCopy { get; init; }
+    public KnownGpuWrite? KnownWrite { get; init; }
+
     public ShaderProgram Program { get; init; }
     // Made on first read, like GraphicsPrograms' inputs.
     public ComputeInputInfo Input { get => _input ??= new(); init => _input = value; }
@@ -88,39 +163,22 @@ public interface IShaderPipelineProvider
 
     void DumpRejectedGraphics(RegisterBanks banks, bool autoDraw) { }
 
+    // The programs of a draw. triangleList: VGT_PRIMITIVE_TYPE is a triangle list; only then can a
+    // passthrough primitive shader run as a mesh function that hands its pixel program the three
+    // vertex values a host without per-vertex pixel inputs cannot give it. startInstanceUserData:
+    // the vertex user data register that carries the draw's first instance, or -1.
     GraphicsPrograms GetGraphicsPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
-        ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        bool pixelActive,
-        bool depthBound,
-        bool depthAspectBound,
-        bool stencilAspectBound = false);
-
-    // The same, knowing whether the draw's primitives are a triangle list: only then can a
-    // passthrough primitive shader run as a mesh function that hands its pixel program the
-    // three vertex values a host without per-vertex pixel inputs cannot give it.
-    GraphicsPrograms GetGraphicsPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
         bool depthAspectBound,
         bool stencilAspectBound,
-        bool triangleList) =>
-        GetGraphicsPrograms(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
-            depthAspectBound, stencilAspectBound);
+        bool triangleList,
+        int startInstanceUserData);
 
     GraphicsPrograms GetMeshGraphicsPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         UserConfigRegisters userConfig,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
@@ -163,16 +221,14 @@ public interface IShaderPipelineProvider
     // The programs of a tessellated draw run without a tessellator, or null when the provider cannot
     // build them (the executor then skips the draw, as before).
     TessellationPrograms? GetTessellationPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
         bool depthAspectBound,
         bool stencilAspectBound,
-        uint controlPoints) => null;
+        uint controlPoints,
+        bool quad) => null;
 
     // The dispatch dimensions are groups, or threads when the initiator counts threads.
     ComputeProgram GetComputeProgram(
@@ -205,6 +261,20 @@ public interface IShaderPipelineProvider
         uint dimensionX,
         uint dimensionY,
         uint dimensionZ) => new() { Available = false };
+
+    ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
+        GetComputeProgram(banks.Shader.Compute, banks.Context.ShaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+
+    // An indirect dispatch reads its dimensions on the GPU, so the provider cannot know its result.
+    ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+
+    // Both: a dispatch that may suspend on its pipeline keeps its prepared program in retry.
+    ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect,
+        Pipelines.ComputeProgramRetry? retry) =>
+        retry is null
+            ? GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect)
+            : GetComputeProgram(banks.Shader.Compute, banks.Context.ShaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry);
 
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 

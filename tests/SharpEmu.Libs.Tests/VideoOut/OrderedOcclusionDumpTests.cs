@@ -76,6 +76,25 @@ public sealed class OrderedOcclusionDumpTests
     }
 
     [Fact]
+    public void AdoptedWorkerQueriesCountInTheGroupCurrentAtTheJoin()
+    {
+        using var queries = new VulkanOcclusionQueries(null!, default);
+        queries.Adopt(new VulkanOcclusionQueries.Block(default), 3);
+        Assert.False(queries.HasUnsubmitted);
+
+        queries.Reset(3);
+        var block = new VulkanOcclusionQueries.Block(default) { Count = 2 };
+        queries.Adopt(block, 3);
+
+        Assert.True(queries.HasUnsubmitted);
+        Assert.All(block.Queues.Take(2), queue => Assert.Equal(3, queue));
+        var group = typeof(VulkanOcclusionQueries).GetMethod("GroupOf", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(queries, [3])!;
+        Assert.Same(group, block.Groups[0]);
+        Assert.Equal(2L, group.GetType().GetField("Recorded")!.GetValue(group));
+        Assert.False(queries.Dump(3, _ => { }));
+    }
+
+    [Fact]
     public void PublicationRetainsEarlierUnsubmittedDependency()
     {
         var device = new FakeTickDevice();

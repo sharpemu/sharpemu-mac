@@ -378,13 +378,15 @@ internal static class Descriptors
     /// </summary>
     public static uint[] Sampler(uint clampX = 2, uint clampY = 2, uint clampZ = 2, CompareFunc depthCompare = CompareFunc.Never,
         uint magFilter = 0, uint minFilter = 0, uint mipFilter = 0, float minLod = 0, float maxLod = 15, float lodBias = 0,
-        uint borderColorType = 0, uint maxAniso = 0, bool forceUnnormalized = false, uint zFilter = 0)
+        uint borderColorType = 0, uint maxAniso = 0, bool forceUnnormalized = false, uint zFilter = 0, bool forceDegamma = false,
+        uint filterMode = 0)
     {
         static uint Fixed(float value, int bits) => (uint)Math.Clamp((int)MathF.Round(value * 256f), 0, (1 << bits) - 1);
         var bias = (uint)((int)MathF.Round(lodBias * 256f) & 0x3FFF);
         return
         [
-            clampX | (clampY << 3) | (clampZ << 6) | (maxAniso << 9) | ((uint)depthCompare << 12) | (forceUnnormalized ? 1u << 15 : 0u),
+            clampX | (clampY << 3) | (clampZ << 6) | (maxAniso << 9) | ((uint)depthCompare << 12) | (forceUnnormalized ? 1u << 15 : 0u) |
+                (forceDegamma ? 1u << 20 : 0u) | (filterMode << 29),
             Fixed(minLod, 12) | (Fixed(maxLod, 12) << 12),
             bias | (magFilter << 20) | (minFilter << 22) | (zFilter << 24) | (mipFilter << 26),
             borderColorType << 30,

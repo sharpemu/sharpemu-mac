@@ -21,7 +21,8 @@ The GUI exposes these variables on its **Game options** page:
 `SHARPEMU_LOG_NP`, `SHARPEMU_PROFILE_PERFORMANCE`, `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE`,
 `SHARPEMU_RENDERDOC`, `SHARPEMU_SKIP_RT`, `SHARPEMU_VK_DISABLE_IMPLICITS`, `SHARPEMU_STRICT_COMPUTE`, `SHARPEMU_VK_VALIDATION`, `SHARPEMU_WRITABLE_APP0`.
 
-The list contains 260 variables. The source was examined on 2026-09-19, branch `dev`.
+The initial inventory contained 260 variables, examined on 2026-09-19, branch `dev`.
+The GnmMode section was updated from source on 2026-10-26.
 The descriptions come from the code that reads each variable. The emulator was not started for this list.
 
 On macOS the Vulkan, RenderDoc and Windows-only entries in this list do not
@@ -86,6 +87,7 @@ result filters, mutex warning sampling, and diagnostic selection.
 | --- | --- |
 | Behavior switches | 19 |
 | GPU and Vulkan | 59 |
+| GnmMode | 4 (plus 2 shared switches listed below; trophy key also exposed in GUI) |
 | Audio and video | 6 |
 | Input | 5 |
 | Memory and CPU | 20 |
@@ -123,6 +125,46 @@ These variables change how the emulator operates.
 | `SHARPEMU_STRICT_RWLOCK_WRITER_PREFERENCE` | `1` | Set to `1` to make a guest thread take a free pthread rwlock as the exclusive writer. By default, the thread gets a compatibility writer record and the lock has no writer thread. | `KernelPthreadExtendedCompatExports.cs` |
 | `SHARPEMU_TEMP0_DIR` | path | Set the host directory for the guest `temp0` mount. The default is `user/temp/<app name>/temp0` next to the executable. When unset, the kernel code sets this variable to the default path. | `AppContentExports.cs`, `KernelMemoryCompatExports.cs` |
 | `SHARPEMU_TRACE_TITLE_SHADER_STATE` | `1` | The SPIR-V translator changes the pixel shader at address 0x0000000500781200 for diagnosis. The first float output then shows the execution state, the wave mask state, and the export state as colors. Default is off. | `Gen5SpirvTranslator.cs` |
+
+## GnmMode (PS4 / GCN)
+
+The environment variables documented in the other sections still apply to
+GnmMode's shared CPU, memory, audio, savedata and GPU paths, with the same
+defaults and platform/backend restrictions. This section adds GnmMode-specific
+controls and highlights shared switches that also produce GNM diagnostics.
+
+These switches apply to the PS4 GnmMode path. Detailed GNM logging is off by
+default. Set the logging variables to exactly `1` before starting the game;
+unset them or use `0` for normal play. Restart the game after changing them.
+The two GNM log switches are independent: enable both for a full GNM trace.
+
+| Variable | Value / default | Function | Code that reads it |
+| --- | --- | --- | --- |
+| `SHARPEMU_LOG_GNM` | `1`; default off | Enables GPU target and shadow addresses, vertex-fetch linking and decode diagnostics, tessellation linking, scatter-copy details, packet traces, shader-bind memory probes, and sampled submit/flip timing. Strings and diagnostic-only counters are skipped when off. | `GnmDiagnostics.cs`; GnmMode GPU, shader, GNM driver and VideoOut code |
+| `SHARPEMU_LOG_GNM_IMAGES` | `1`; default off | Enables successful GCN T# to AGC descriptor conversions, raw before/after descriptor words, extended conversion warnings, and thin-1D texture readback diagnostics. Successful conversion traces and warnings have separate limits of 192 distinct shader/descriptor layouts per process; address-only variations are omitted. With this switch off, conversion failures still produce short, deduplicated warnings. | `GnmDiagnostics.cs`, `GcnImageDescriptor.cs`, `GcnSampledImageDetiler.cs` |
+| `SHARPEMU_GNM_TESSELLATION` | `0` disables; default on | Enables translation of GCN tessellation stages. Only `0` disables it; leave unset for normal rendering. Disabling it can remove tessellated geometry. | `GnmCommandPackets.cs` |
+| `SHARPEMU_GNM_TROPHY_KEY` (exposed in GUI) | 32 hexadecimal characters; unset by default | PS4 retail trophy key used with `sce_sys/npbind.dat` to decrypt ESFM metadata inside `sce_sys/trophy/trophy00.trp`. Configure it under Options → GnmMode → Trophy key. The launcher saves it in local GUI settings and passes it to the game process through this variable. Restart a running game after changing it. Trophy progress uses the existing trophy store and notifications. No key is bundled. | `GnmTrophyPackageReader.cs`, `GnmTrophyExports.cs` |
+| `SHARPEMU_LOG_AJM` (shared) | `1`; default off | Also enables `[GNMMODE][AJM]` audio job and codec diagnostics. Independent of the GNM log switches. See also Log channels below. | `GnmAjmExports.cs` |
+| `SHARPEMU_PROFILE_PERFORMANCE` (shared, exposed in GUI) | `1`; default off | Also enables `[PERF][GNM_IMAGES]` summaries every 5 seconds while there is image activity: normalization time, detile cache hits, hash cost, CPU/GPU detiles, GPU reuse, abandoned work, and invalidations. It also enables shared performance reports. | `GnmImageProfile.cs` |
+
+The first successful PS4 savedata `Mount` or `Mount2` logs its ABI translation
+once per process. Later successful mounts stay quiet, including with GNM logging
+enabled; mount failures remain visible. Startup title/module and patch messages,
+warnings and errors do not require a GNM log switch. Existing warning sampling
+and limits still apply.
+
+```powershell
+$env:SHARPEMU_LOG_GNM = '1'
+$env:SHARPEMU_LOG_GNM_IMAGES = '1'
+```
+
+For normal play, remove these entries from the GUI's additional environment
+variables, or remove them from the launching shell:
+
+```powershell
+Remove-Item Env:SHARPEMU_LOG_GNM -ErrorAction SilentlyContinue
+Remove-Item Env:SHARPEMU_LOG_GNM_IMAGES -ErrorAction SilentlyContinue
+```
 
 ## GPU and Vulkan
 
@@ -227,6 +269,7 @@ These variables apply to guest memory and guest code execution.
 | `SHARPEMU_DISABLE_NATIVE_GUEST_WORKERS` | `1` | Stops the use of native worker threads for guest thread execution on Windows. The default uses the native workers. | `DirectExecutionBackend.NativeWorker.cs` |
 | `SHARPEMU_DISABLE_POSIX_SIGNALS` | `1` | Does not install the POSIX signal handlers on Linux and macOS. The emulator then cannot recover guest faults. | `DirectExecutionBackend.PosixSignals.cs` |
 | `SHARPEMU_DISABLE_RAW_HANDLER` | `1` | Does not install the raw vectored exception handler on Windows. On POSIX hosts it stops the raw sentinel recovery. The default keeps the two functions on. | `DirectExecutionBackend.Exceptions.cs`, `DirectExecutionBackend.PosixSignals.cs` |
+| `SHARPEMU_HOST_WORKER_PRIORITY` | `0` | `0` leaves the emulator's render, resolve, GPU priority and staging copy worker threads at normal priority without an affinity mask. The default raises them above normal priority and keeps them off the render core when the render core reservation is active, so spinning guest threads do not delay them. | `HostLaneReservation.cs` |
 | `SHARPEMU_IGNORE_INT41` | `0` or `false` | The fault handler skips guest `int 0x41` instructions and continues at the next instruction by default. Set `0` or `false` to stop this recovery. The emulator shows a warning for the first 16 traps and then for each 65536th trap. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Exceptions.cs` |
 | `SHARPEMU_IGNORE_STACK_CHK` | `1` | Recovers from a guest stack-protector failure call (NID `Ou3iL1abvng`) when a UD2 instruction follows the call. The emulator sets the return address to the function epilogue 20 bytes before. It does this only when the code bytes match the known pattern. | `DirectExecutionBackend.Imports.cs` |
 | `SHARPEMU_LAZY_RESERVE_PRIME_MB` | number | Sets the number of megabytes that the emulator commits at the start of each reserve-only memory region. The default is 64 and the maximum is 4096. The value 0 turns the initial commit off. | `PhysicalVirtualMemory.cs` |
@@ -439,6 +482,12 @@ prefetch waits and validation, synchronous resolution, and shared-gate waits.
 They also measure program decoding, planning, layout/request construction,
 translation, and compute pipeline waiting. Detail scopes require an active
 render profile scope on the calling thread.
+
+Resolve workers keep phase counters per thread and aggregate them at reporting
+time. `[PERF][SUBMIT_SITE]` and `[PERF][PROMOTION_SITE]` sample one call stack
+per 64 calls. Their `n` values are estimates; `sample_every` records the sampling
+interval. Profiling still adds work, so compare gameplay FPS with the same
+profiling settings on both machines, and confirm results with profiling off.
 
 `[PERF][COMPUTE_COMPILE]` reports cumulative asynchronous compile start delay,
 compiler-slot wait, pipeline-cache load, driver compilation, and result

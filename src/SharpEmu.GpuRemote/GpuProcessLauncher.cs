@@ -25,7 +25,7 @@ namespace SharpEmu.GpuRemote;
 /// stdout and stderr (the guest-memory backing descriptors of the emulator must not leak into
 /// the child), every signal starts at its default disposition and unblocked, and the child
 /// stays in this process group so the GUI's Stop, which signals the group, takes it down too.
-/// The environment is passed through unchanged.</para>
+/// The environment is passed through, plus a gen0 budget for the host's GC (EnvironmentBlock).</para>
 /// </remarks>
 internal static unsafe class GpuProcessLauncher
 {
@@ -94,12 +94,27 @@ internal static unsafe class GpuProcessLauncher
         }
     }
 
+    // The GPU host allocates some 140-450 MB a second (Ghost of Tsushima's world), so with the
+    // runtime's default gen0 budget it collected gen0 ~20 times a second and its threads stood in
+    // GC pauses ~9% of the time; a 64 MB budget measured 4-6% and +5% frame rate. 256 MB was slower
+    // (each collection scans more). A gen0 size the user set (DOTNET_GCgen0size, 0 = the runtime's
+    // own) is kept. The runtimeconfig knob System.GC.Gen0Size is not read by the GC.
+    private const string Gen0SizeVariable = "DOTNET_GCgen0size";
+    private const string HostGen0Size = "0x4000000";
+
     private static List<string> EnvironmentBlock()
     {
         var block = new List<string>();
+        var gen0Set = false;
         foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
         {
             block.Add($"{entry.Key}={entry.Value}");
+            gen0Set |= string.Equals(entry.Key as string, Gen0SizeVariable, StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (!gen0Set)
+        {
+            block.Add($"{Gen0SizeVariable}={HostGen0Size}");
         }
 
         return block;

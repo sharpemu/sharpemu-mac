@@ -9,6 +9,21 @@ public sealed partial class ResourceTracker
 {
     private const uint DenseIndirectImageShift = 5;
     private const uint MaxDenseIndirectImageEntries = 4096;
+    private const uint MaxRecordStride = 0x10000;
+
+    // An offset as the value it adds a constant to, and that constant (zero when it adds none).
+    private static (ScalarValue Core, uint Constant) SplitAddedConstant(ScalarValue offset)
+    {
+        if (offset.Kind == ScalarValueKind.Operation && offset.Operation == ScalarOperation.IAdd32 && offset.Operands.Length == 2)
+        {
+            if (offset.Operands[1].IsConstant)
+                return (offset.Operands[0], offset.Operands[1].ConstantU32);
+            if (offset.Operands[0].IsConstant)
+                return (offset.Operands[1], offset.Operands[0].ConstantU32);
+        }
+
+        return (offset, 0);
+    }
 
     // An image descriptor read from a table at a key-scaled offset: S_LOAD_DWORDX8 from an
     // address pair, or S_BUFFER_LOAD_DWORDX8 through a V# that describes the table. The host
@@ -52,6 +67,7 @@ public sealed partial class ResourceTracker
 
             var offset = read.Operands[1];
             uint extra = 0;
+            long? signedExtra = null;
             if (based is null)
             {
                 based = offset;
@@ -78,13 +94,22 @@ public sealed partial class ResourceTracker
                 }
 
                 if (!_graph.Equivalent(inner, based))
-                    return false;
+                {
+                    // Two loads of one descriptor at offsets with the same scaled key and their own constants:
+                    // Ghost of Tsushima's tiled resolve jobs take a record's sampler and the first half of its
+                    // texture in one 8-dword load at key*536+0x80, and the second half at key*536+0xA0.
+                    var (basedCore, basedConstant) = SplitAddedConstant(based);
+                    if (!_graph.Equivalent(inner, basedCore))
+                        return false;
+                    signedExtra = (long)extra - basedConstant;
+                }
             }
 
             var componentOffset = checked((uint)dword * sizeof(uint));
-            if ((ulong)extra + memory.Offset < componentOffset)
+            var immediateWide = (signedExtra ?? extra) + memory.Offset - componentOffset;
+            if (immediateWide < 0 || immediateWide > uint.MaxValue)
                 return false;
-            var immediate = extra + memory.Offset - componentOffset;
+            var immediate = (uint)immediateWide;
             if (dword == 0)
                 tableImmediate = immediate;
             else if (immediate != tableImmediate)
@@ -124,12 +149,32 @@ public sealed partial class ResourceTracker
             }
         }
 
-        if (scaled.Kind != ScalarValueKind.Operation || scaled.Operation != ScalarOperation.ShiftLeft32 ||
-            scaled.Operands.Length != 2 || !scaled.Operands[1].IsConstant ||
-            scaled.Operands[1].ConstantU32 != DenseIndirectImageShift)
+        // The key times the entry size: a descriptor table's 32 bytes (key << 5), or, through a V#, the size of
+        // the records that each hold the descriptor at the same offset.
+        if (scaled.Kind != ScalarValueKind.Operation || scaled.Operands.Length != 2)
             return false;
+        uint recordStride;
+        ScalarValue key;
+        if (scaled.Operation == ScalarOperation.ShiftLeft32 && scaled.Operands[1].IsConstant &&
+            scaled.Operands[1].ConstantU32 == DenseIndirectImageShift)
+        {
+            recordStride = 1u << (int)DenseIndirectImageShift;
+            key = scaled.Operands[0];
+        }
+        else if (bufferHeap && scaled.Operation == ScalarOperation.IMul32 &&
+            (scaled.Operands[0].IsConstant || scaled.Operands[1].IsConstant))
+        {
+            var constantFirst = scaled.Operands[0].IsConstant;
+            recordStride = scaled.Operands[constantFirst ? 0 : 1].ConstantU32;
+            key = scaled.Operands[constantFirst ? 1 : 0];
+            if (recordStride < 32 || recordStride > MaxRecordStride || recordStride % sizeof(uint) != 0)
+                return false;
+        }
+        else
+        {
+            return false;
+        }
 
-        var key = scaled.Operands[0];
         // A V#-described table needs no proven key bound: the scalar buffer load is range checked
         // against the V#'s size, so the host enumerates exactly the entries it reaches and a key
         // past them reads the null descriptor the hardware returns.
@@ -145,8 +190,11 @@ public sealed partial class ResourceTracker
             }
         }
 
+        // The value graph merges a register's live ranges at joins, so a descriptor dword whose register a
+        // waterfall loop reuses as a lane mask on another path seems to feed that mask; the walk of the
+        // register along the control flow settles whether anything but an image reads what was loaded.
         foreach (var read in reads)
-            if (!UsesOnly(read, [handle]))
+            if (!UsesOnly(read, [handle]) && !HasOnlyImageConsumers(_plan.Memory[read.MemoryIndex], handle))
                 return false;
 
         uint heapSourceIndex;
@@ -170,6 +218,7 @@ public sealed partial class ResourceTracker
                 KeyBound = bound,
                 WaveIndexed = waveIndexed,
                 Bindless = bufferHeap,
+                RecordStride = recordStride,
             },
         };
 

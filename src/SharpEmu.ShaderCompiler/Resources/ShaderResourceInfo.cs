@@ -13,6 +13,7 @@ public enum ShaderStage : byte
     Pixel,
     Compute,
     Mesh,
+    TessellationEvaluation,
 }
 
 public enum ImageNumericClass : byte
@@ -125,6 +126,17 @@ public sealed class SamplerResource
 
     public uint BorderColorType { get; set; }
 
+    // The paired S#'s FORCE_DEGAMMA (word 0, bit 20): the hardware converts the filtered colour from sRGB to linear,
+    // whatever the texture's format, so the emitter decodes what the host sampled.
+    public bool ForceDegamma { get; set; }
+
+    // The paired S#'s FILTER_MODE (word 0, bits 30:29: 1 minimum, 2 maximum) when it filters linearly: the hardware
+    // returns the per-component minimum or maximum of the texels its filter weighs, which no host sampler does.
+    public uint Reduction { get; set; }
+
+    // Set when that sampler's mip filter is linear: the reduction spans the two levels a trilinear filter reads.
+    public bool ReductionAcrossLevels { get; set; }
+
     public SamplerResource Clone() => (SamplerResource)MemberwiseClone();
 }
 
@@ -185,7 +197,7 @@ public sealed class BufferCandidateTableInfo
 public sealed class ShaderResourceInfo
 {
     public const int MaxBuffers = 32;
-    public const int MaxIndirectImageCandidates = 64;
+    public const int MaxIndirectImageCandidates = 256;
     public const int NoScalarRegister = -1;
 
     public List<BufferResource> Buffers { get; set; } = [];
@@ -268,15 +280,32 @@ public sealed record IndirectImageSelector(
     // instead of a bounded set of bound candidates.
     public bool Bindless { get; init; }
 
+    // The bytes from one entry's descriptor to the next: 32 for a table of descriptors, the record size for
+    // a V# table of records that each hold one (Ghost of Tsushima's 340-byte materials, its 384-byte lights).
+    public uint RecordStride { get; init; } = 32;
+
     // The key is selected by a value the whole wave shares (a loop counter), not by a lane's value. Such an image
     // used to read as a null image, so a table the host cannot read stays null instead of failing the program.
     public bool SharedSelector { get; init; }
 
     // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
     public uint MaterialImmediate { get; init; }
+
+    // Direct candidates a counted loop selects: the source of the loop's bound, which candidates whose counter
+    // value the loop never reaches are compared against, so their records are not read.
+    public uint? DirectLimitSource { get; init; }
+    public bool DirectLimitInclusive { get; init; }
+
+    // The loop compares its counter with the bound as signed values (s_cmp_lt_i32): a negative bound reaches none.
+    public bool DirectLimitSigned { get; init; }
+
+    // The direct candidates are every value a lane-read selector may take below its guard, not records the guest
+    // is known to hold: one the host cannot read (past the end of the table) is null rather than a failure.
+    public bool DirectRecordsMayEnd { get; init; }
 }
 
-public sealed record DirectImageCandidate(uint Offset, uint Source);
+// Counter is the loop counter value that reads the candidate, when a counted loop selects it.
+public sealed record DirectImageCandidate(uint Offset, uint Source, uint? Counter = null);
 
 // A wave-uniform descriptor selector. The guest derives each descriptor key from
 // a set bit in one scalar mask, through a compact global index table. Keeping this

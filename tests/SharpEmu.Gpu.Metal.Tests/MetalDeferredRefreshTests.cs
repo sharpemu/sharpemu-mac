@@ -241,7 +241,7 @@ public sealed unsafe class MetalDeferredRefreshTests(ITestOutputHelper output)
             var state = new RenderingState { Width = Width, Height = Height, Layers = 1, ColorAttachmentCount = 1, Samples = 1 };
             var one = BitConverter.SingleToUInt32Bits(1f);
             state.ColorAttachments[0] = new RenderingAttachment(
-                view, GpuImageLayout.ColorAttachmentOptimal, GpuFormat.R8G8B8A8Unorm,
+                view, GpuFormat.R8G8B8A8Unorm,
                 clear ? one : 0, 0, 0, clear ? one : 0, clear, false, false, false, false);
             return state;
         }

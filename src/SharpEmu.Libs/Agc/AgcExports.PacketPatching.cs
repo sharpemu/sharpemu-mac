@@ -711,11 +711,20 @@ public static partial class AgcExports
         CpuContext ctx,
         ulong commandAddress,
         out uint op,
-        out uint register)
+        out uint register) =>
+        TryGetPacketIdentity(ctx, commandAddress, out op, out register, out _);
+
+    private static bool TryGetPacketIdentity(
+        CpuContext ctx,
+        ulong commandAddress,
+        out uint op,
+        out uint register,
+        out uint header)
     {
         op = 0;
         register = 0;
-        if (commandAddress == 0 || !TryReadUInt32(ctx, commandAddress, out var header))
+        header = 0;
+        if (commandAddress == 0 || !TryReadUInt32(ctx, commandAddress, out header))
         {
             return false;
         }

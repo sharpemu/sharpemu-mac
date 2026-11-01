@@ -30,6 +30,7 @@ public static partial class RegisterWriteTable
     {
         banks.PrepareContextWrite();
         var consumed = WritePacket(banks, in packet, offset, values, Context, ContextIndirect, "context", emptyIsHandled: true);
+        banks.MarkWritten(RegisterStamps.ContextBitsFor(offset, consumed));
         if (Rendering.RenderTrace.Enabled)
         {
             for (var index = 0; index < values.Length && index < consumed; index++)
@@ -47,7 +48,8 @@ public static partial class RegisterWriteTable
         uint consumed;
         if (ScalarReuseEnabled && TryReuseScalarPacket(banks, offset, values))
         {
-            // The packet still consumes its marker, even when its stored state is unchanged.
+            // The packet still consumes its marker, even when its stored state is unchanged; the
+            // stamps stay, since no stored word changed.
             banks.UserDataMarker = UserScalarKind.Unknown;
             consumed = (uint)values.Length;
         }
@@ -55,6 +57,7 @@ public static partial class RegisterWriteTable
         {
             banks.PrepareShaderWrite(offset, (uint)values.Length);
             consumed = WritePacket(banks, in packet, offset, values, Shader, ShaderIndirect, "shader", emptyIsHandled: false);
+            banks.MarkWritten(RegisterStamps.ShaderBitsFor(offset, consumed));
         }
         if (Rendering.RenderTrace.Enabled)
         {
@@ -67,7 +70,9 @@ public static partial class RegisterWriteTable
     public static uint WriteUserConfigPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
     {
         banks.PrepareUserConfigWrite();
-        return WritePacket(banks, in packet, offset, values, UserConfig, UserConfigIndirect, "user-config", emptyIsHandled: true);
+        var consumed = WritePacket(banks, in packet, offset, values, UserConfig, UserConfigIndirect, "user-config", emptyIsHandled: true);
+        banks.MarkWritten(RegisterStamps.UserConfigBits);
+        return consumed;
     }
 
     public static void WriteContextEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress)
@@ -83,6 +88,7 @@ public static partial class RegisterWriteTable
             WriteEntry(banks, offset, value, ContextIndirect, "context", tableAddress);
         }
 
+        banks.MarkWritten(RegisterStamps.ContextBitsFor(offset, 1));
         if (Rendering.RenderTrace.Enabled)
         {
             TraceDepthStateWrite(offset, value, tableAddress, "table");
@@ -106,6 +112,7 @@ public static partial class RegisterWriteTable
     {
         banks.PrepareShaderWrite(offset, 1);
         WriteEntry(banks, offset, value, ShaderIndirect, "shader", tableAddress);
+        banks.MarkWritten(RegisterStamps.ShaderBitsFor(offset, 1));
         if (Rendering.RenderTrace.Enabled)
             TracePixelRegisterWrite(banks, offset, value, tableAddress, "table");
     }
@@ -135,6 +142,7 @@ public static partial class RegisterWriteTable
         }
 
         UserConfigIndirect[offset]!(banks, offset, value);
+        banks.MarkWritten(RegisterStamps.UserConfigBits);
     }
 
     private static uint WritePacket(

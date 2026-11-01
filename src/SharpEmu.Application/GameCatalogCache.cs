@@ -38,6 +38,7 @@ public static class GameCatalogCache
         public long SizeBytes { get; set; }
         public string? CoverPath { get; set; }
         public string? BackgroundPath { get; set; }
+        public bool CompatibilityMode { get; set; }
     }
 
     private sealed class CacheDocument
@@ -89,7 +90,8 @@ public static class GameCatalogCache
                     cached.Path,
                     cached.SizeBytes,
                     Existing(cached.CoverPath),
-                    Existing(cached.BackgroundPath)));
+                    Existing(cached.BackgroundPath),
+                    cached.CompatibilityMode));
             }
         }
         catch (Exception exception)
@@ -156,6 +158,7 @@ public static class GameCatalogCache
                     SizeBytes = game.SizeBytes,
                     CoverPath = game.CoverPath,
                     BackgroundPath = game.BackgroundPath,
+                    CompatibilityMode = game.CompatibilityMode,
                 });
             }
 

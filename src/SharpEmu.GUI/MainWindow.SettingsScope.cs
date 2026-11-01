@@ -65,6 +65,8 @@ public partial class MainWindow
         Add(GameVSyncRow, e => e.VSync, e => OnOff(e.VSync), e => GameVSyncToggle.IsChecked = e.VSync);
         Add(GameHdrModeRow, e => e.HdrMode, e => Choice(_hdrModeChoices, e.HdrMode, "Auto"),
             e => GameHdrModeBox.SelectedItem = FindChoice(_hdrModeChoices, e.HdrMode, "Auto"));
+        Add(GameGpuReadbacksRow, e => e.GpuReadbacks, e => Choice(_gpuReadbackChoices, e.GpuReadbacks, "Full"),
+            e => GameGpuReadbacksBox.SelectedItem = FindChoice(_gpuReadbackChoices, e.GpuReadbacks, "Full"));
         Add(GameOverlayEnabledRow, e => e.OverlayEnabled, e => OnOff(e.OverlayEnabled),
             e => GameOverlayEnabledToggle.IsChecked = e.OverlayEnabled);
         Add(GameOverlayModeRow, e => e.OverlayMode, e => Choice(_overlayModeChoices, e.OverlayMode, "TitleBar"),

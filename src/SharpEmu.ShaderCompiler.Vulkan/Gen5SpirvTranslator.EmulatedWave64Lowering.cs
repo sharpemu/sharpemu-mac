@@ -29,6 +29,7 @@ public static partial class Gen5SpirvTranslator
             // barrier, which other waves (possibly in other blocks) would never reach.
             private readonly uint _waveCount;
             private readonly bool _multiWave;
+            private readonly bool _cooperative;
             private readonly uint _waveStride;
             private uint _rendezvousEpoch;
             private uint _rendezvousArrivals;
@@ -48,7 +49,8 @@ public static partial class Gen5SpirvTranslator
                 _context = context;
                 var threads = (ulong)context._localSizeX * context._localSizeY * context._localSizeZ;
                 _waveCount = (uint)Math.Max((threads + GuestWaveLaneCount - 1) / GuestWaveLaneCount, 1);
-                _multiWave = _waveCount > 1;
+                _cooperative = context._request.CooperativeWave64Workgroup;
+                _multiWave = _waveCount > 1 && !_cooperative;
                 _waveStride = _multiWave ? ExchangeDwordCount + 1 : ExchangeDwordCount;
                 _canBePartial = context._stage == Gen5SpirvStage.Compute && GroupCanBePartial(context, threads);
             }
@@ -76,7 +78,7 @@ public static partial class Gen5SpirvTranslator
             private bool UsesExchange => _context.UsesSubgroupOperations();
 
             public uint ReserveLdsDwords(uint guestDwordCount) =>
-                UsesExchange && guestDwordCount < LdsDwordCount
+                UsesExchange && !_cooperative && guestDwordCount < LdsDwordCount
                     ? guestDwordCount + ExchangeTotalDwords
                     : guestDwordCount;
 
@@ -88,7 +90,7 @@ public static partial class Gen5SpirvTranslator
                     return;
                 }
 
-                if (context._lds != 0 && context._stage != Gen5SpirvStage.Mesh)
+                if (context._lds != 0 && context._stage != Gen5SpirvStage.Mesh && !_cooperative)
                 {
                     // Metal exposes 32 KiB of threadgroup memory on the Apple
                     // GPUs we target. Reuse the tail of guest LDS so the
@@ -101,7 +103,10 @@ public static partial class Gen5SpirvTranslator
                     return;
                 }
 
-                var exchangeArrayType = context._module.TypeArray(context._uintType, ExchangeTotalDwords);
+                // Tessellation shader data can have the same length but needs ArrayStride; workgroup arrays must not inherit it.
+                var exchangeArrayType = _cooperative
+                    ? context._module.TypeArrayDistinct(context._uintType, ExchangeTotalDwords)
+                    : context._module.TypeArray(context._uintType, ExchangeTotalDwords);
                 _exchangeElementPointer = context._module.TypePointer(SpirvStorageClass.Workgroup, context._uintType);
                 _exchange = context._module.AddGlobalVariable(
                     context._module.TypePointer(SpirvStorageClass.Workgroup, exchangeArrayType),
@@ -109,6 +114,10 @@ public static partial class Gen5SpirvTranslator
                 _exchangeOffset = 0;
                 context._module.AddName(_exchange, "wave64Exchange");
                 context._interfaces.Add(_exchange);
+                if (_cooperative)
+                {
+                    context.DeclareCooperativeWaveScratch();
+                }
             }
 
             public void DeclareFunctionResources()
@@ -387,6 +396,9 @@ public static partial class Gen5SpirvTranslator
                     lowerValue);
             }
 
+            // The element pointer type of the workgroup array holding the exchange areas.
+            internal uint ExchangeElementPointer => _exchangeElementPointer;
+
             public uint BroadcastLane(uint value, uint lane) =>
                 ExchangeValue(
                     _context._module.AddInstruction(
@@ -506,7 +518,7 @@ public static partial class Gen5SpirvTranslator
             private uint WaveExchangeBase()
             {
                 var context = _context;
-                if (!_multiWave)
+                if (!_multiWave && !_cooperative)
                 {
                     return context.UInt(_exchangeOffset);
                 }

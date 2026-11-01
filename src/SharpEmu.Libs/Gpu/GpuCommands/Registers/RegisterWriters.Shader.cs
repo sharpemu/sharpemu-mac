@@ -77,10 +77,12 @@ internal static partial class RegisterWriters
         direct[SpiGraphicsShaderControlHs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrLoHs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrHiHs] = ForwardShaderPacket;
+        // Unlike program addresses, these registers contain byte-address
+        // bits 0..31 and 32..47, consumed directly by merged LS/HS s0:s1.
         indirect[SpiShaderUserDataAddrLoHs] = static (banks, _, value) =>
-            banks.Shader.Vertex.HullUserDataAddress = (banks.Shader.Vertex.HullUserDataAddress & 0xFFFFFFFF00000000UL) | value;
+            banks.Shader.Vertex.HullUserDataAddress = (banks.Shader.Vertex.HullUserDataAddress & 0xFFFF_0000_0000ul) | value;
         indirect[SpiShaderUserDataAddrHiHs] = static (banks, _, value) =>
-            banks.Shader.Vertex.HullUserDataAddress = (banks.Shader.Vertex.HullUserDataAddress & uint.MaxValue) | ((ulong)value << 32);
+            banks.Shader.Vertex.HullUserDataAddress = (banks.Shader.Vertex.HullUserDataAddress & uint.MaxValue) | ((ulong)(value & 0xFFFFu) << 32);
 
         indirect[SpiShaderUserDataAddrLoPs] = static (banks, _, value) => banks.Shader.Pixel.UserDataAddress = (banks.Shader.Pixel.UserDataAddress & 0xFFFF_FFFF_0000_0000ul) | value;
         indirect[SpiShaderUserDataAddrHiPs] = static (banks, _, value) => banks.Shader.Pixel.UserDataAddress = (banks.Shader.Pixel.UserDataAddress & uint.MaxValue) | ((ulong)value << 32);
@@ -133,10 +135,7 @@ internal static partial class RegisterWriters
             throw banks.Fatal($"The user scalar packet is outside the stage window: offset=0x{offset:X4} count={values.Length} capacity={capacity} header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
         }
 
-        for (var index = 0u; index < values.Length; index++)
-        {
-            target.Set(slot + index, values[(int)index], banks.UserDataMarker);
-        }
+        target.SetRange(slot, values, banks.UserDataMarker);
 
         banks.UserDataMarker = UserScalarKind.Unknown;
         return (uint)values.Length;

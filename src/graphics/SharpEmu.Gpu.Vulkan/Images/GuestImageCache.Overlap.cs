@@ -318,16 +318,9 @@ public sealed partial class GuestImageCache
         return true;
     }
 
-    private ResourceSlotIdentifier ResolveDepthOverlap(in ImageDescription requested, ImageRole role, ResourceSlotIdentifier cachedImageIdentifier)
+    private static bool DepthOverlapRecreates(in ImageDescription requested, ImageRole role, CachedImage cached)
     {
-        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageOverlap);
-        var cached = _slots[cachedImageIdentifier];
-        ref var cachedInfo = ref cached.Description;
-        if (!cachedInfo.IsDepth && !requested.IsDepth)
-        {
-            return ResourceSlotIdentifier.Invalid;
-        }
-
+        ref readonly var cachedInfo = ref cached.Description;
         var stencilMatch = requested.HasStencil == cachedInfo.HasStencil;
         var bppMatch = requested.BytesPerBlock == cachedInfo.BytesPerBlock;
         var rawD16Texture =
@@ -337,22 +330,6 @@ public sealed partial class GuestImageCache
             requested.Data == cachedInfo.Data && SameExtent(requested.Extent, cachedInfo.Extent) && requested.Resources == cachedInfo.Resources &&
             requested.Type == cachedInfo.Type && requested.Pitch == cachedInfo.Pitch && requested.TileMode == cachedInfo.TileMode &&
             !requested.HasStencil && !cachedInfo.HasStencil && !requested.HasMetadata && !cachedInfo.HasMetadata;
-        // HTile belongs to the attachment view; it does not change the shared depth slice stride.
-        var separateDepthMetadata = role == ImageRole.DepthTarget && requested.Metadata.Kind == MetadataKind.Htile &&
-            requested.Metadata.Compression == DisplayCompression.Uncompressed && !requested.Metadata.StencilCompressed;
-        var retainCachedLayout =
-            requested.Samples == 1 && cachedInfo.Samples == 1 && cached.Backing.Samples == 1 &&
-            requested.BytesPerBlock == cachedInfo.BytesPerBlock && requested.Data.Address == cachedInfo.Data.Address &&
-            requested.Data.Size < cachedInfo.Data.Size && SameExtent(requested.Extent, cachedInfo.Extent) &&
-            requested.Resources.Levels == 1 && cachedInfo.Resources.Levels == 1 &&
-            requested.Resources.Layers != 0 && cachedInfo.Resources.Layers != 0 &&
-            requested.Resources.Layers < cachedInfo.Resources.Layers &&
-            requested.Type == cachedInfo.Type && requested.Pitch == cachedInfo.Pitch && requested.TileMode == cachedInfo.TileMode &&
-            requested.MipLayout[0].Offset == 0 && cachedInfo.MipLayout[0].Offset == 0 &&
-            requested.MipLayout[0].Size == requested.Data.Size && cachedInfo.MipLayout[0].Size == cachedInfo.Data.Size &&
-            requested.Data.Size % requested.Resources.Layers == 0 && cachedInfo.Data.Size % cachedInfo.Resources.Layers == 0 &&
-            requested.Data.Size / requested.Resources.Layers == cachedInfo.Data.Size / cachedInfo.Resources.Layers &&
-            !requested.HasStencil && !cachedInfo.HasStencil && (!requested.HasMetadata || separateDepthMetadata) && !cachedInfo.HasMetadata;
         var recreate = cachedInfo.Resources < requested.Resources;
         switch (role)
         {
@@ -376,11 +353,40 @@ public sealed partial class GuestImageCache
                 break;
         }
 
-        if (!recreate)
+        return recreate;
+    }
+
+    private ResourceSlotIdentifier ResolveDepthOverlap(in ImageDescription requested, ImageRole role, ResourceSlotIdentifier cachedImageIdentifier)
+    {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageOverlap);
+        var cached = _slots[cachedImageIdentifier];
+        ref var cachedInfo = ref cached.Description;
+        if (!cachedInfo.IsDepth && !requested.IsDepth)
+        {
+            return ResourceSlotIdentifier.Invalid;
+        }
+
+        if (!DepthOverlapRecreates(requested, role, cached))
         {
             return cachedImageIdentifier;
         }
 
+        // HTile belongs to the attachment view; it does not change the shared depth slice stride.
+        var separateDepthMetadata = role == ImageRole.DepthTarget && requested.Metadata.Kind == MetadataKind.Htile &&
+            requested.Metadata.Compression == DisplayCompression.Uncompressed && !requested.Metadata.StencilCompressed;
+        var retainCachedLayout =
+            requested.Samples == 1 && cachedInfo.Samples == 1 && cached.Backing.Samples == 1 &&
+            requested.BytesPerBlock == cachedInfo.BytesPerBlock && requested.Data.Address == cachedInfo.Data.Address &&
+            requested.Data.Size < cachedInfo.Data.Size && SameExtent(requested.Extent, cachedInfo.Extent) &&
+            requested.Resources.Levels == 1 && cachedInfo.Resources.Levels == 1 &&
+            requested.Resources.Layers != 0 && cachedInfo.Resources.Layers != 0 &&
+            requested.Resources.Layers < cachedInfo.Resources.Layers &&
+            requested.Type == cachedInfo.Type && requested.Pitch == cachedInfo.Pitch && requested.TileMode == cachedInfo.TileMode &&
+            requested.MipLayout[0].Offset == 0 && cachedInfo.MipLayout[0].Offset == 0 &&
+            requested.MipLayout[0].Size == requested.Data.Size && cachedInfo.MipLayout[0].Size == cachedInfo.Data.Size &&
+            requested.Data.Size % requested.Resources.Layers == 0 && cachedInfo.Data.Size % cachedInfo.Resources.Layers == 0 &&
+            requested.Data.Size / requested.Resources.Layers == cachedInfo.Data.Size / cachedInfo.Resources.Layers &&
+            !requested.HasStencil && !cachedInfo.HasStencil && (!requested.HasMetadata || separateDepthMetadata) && !cachedInfo.HasMetadata;
         RefreshFromGuest(cachedImageIdentifier, RefreshRequest(cached));
         var replacementInfo = requested;
         if (retainCachedLayout)
@@ -488,7 +494,7 @@ public sealed partial class GuestImageCache
             {
                 if (safeToDelete)
                 {
-                    ReleaseImage(cachedImageIdentifier);
+                    ParkOrReleaseImage(cachedImageIdentifier);
                 }
 
                 return new OverlapResolution(mergedImageIdentifier);
@@ -562,7 +568,7 @@ public sealed partial class GuestImageCache
 
         if (requested.Data.Address >= cachedInfo.Data.Address && safeToDelete)
         {
-            ReleaseImage(cachedImageIdentifier);
+            ParkOrReleaseImage(cachedImageIdentifier);
         }
 
         return new OverlapResolution(mergedImageIdentifier);

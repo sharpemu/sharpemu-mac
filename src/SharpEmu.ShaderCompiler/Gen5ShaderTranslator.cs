@@ -23,6 +23,9 @@ public static partial class Gen5ShaderTranslator
     private const uint MaximumDeclaredShaderSizeBytes = 1024 * 1024;
     private const uint NullScalarRegister = 125;
     private static readonly ConditionalWeakTable<object, FusedProgramRegistry> _fusedProgramsByMemory = new();
+    private static long _fusedProgramRegistrations;
+
+    public static long FusedProgramRegistrations => Interlocked.Read(ref _fusedProgramRegistrations);
 
     private sealed class FusedProgramRegistry
     {
@@ -129,6 +132,7 @@ public static partial class Gen5ShaderTranslator
             continuationAddress,
             continuationHeaderAddress));
         FusedProgramObserver?.Invoke(entryAddress, entryHeaderAddress, continuationAddress, continuationHeaderAddress);
+        Interlocked.Increment(ref _fusedProgramRegistrations);
     }
 
     public static bool UnregisterFusedProgram(CpuContext ctx, ulong entryAddress)
@@ -336,6 +340,18 @@ public static partial class Gen5ShaderTranslator
             Control = null,
         });
 
+        // Fused hull bindings can own a copy of a shared LS entry. Its header
+        // still names the original code, where PC-relative constants reside.
+        if (ctx.TryReadUInt64(parts.EntryHeaderAddress + 0x10, out var originalEntry) &&
+            originalEntry != 0 && originalEntry != entryAddress)
+        {
+            for (var index = 0; index < instructions.Count; index++)
+                instructions[index] = instructions[index] with
+                {
+                    AddressOffset = unchecked(originalEntry - entryAddress + instructions[index].ProgramOffset),
+                };
+        }
+
         foreach (var instruction in continuationProgram.Instructions)
         {
             var rebasedPc = (ulong)continuationPc + instruction.Pc;
@@ -351,7 +367,7 @@ public static partial class Gen5ShaderTranslator
                 : instruction with { Pc = (uint)rebasedPc, AddressOffset = unchecked(continuationDistance + instruction.ProgramOffset) });
         }
 
-        program = new Gen5ShaderProgram(entryAddress, instructions) { IsFusedProgram = true };
+        program = new Gen5ShaderProgram(entryAddress, instructions) { IsFusedProgram = true, FusedContinuationPc = continuationPc };
         error = string.Empty;
         return true;
     }
@@ -1926,6 +1942,22 @@ public static partial class Gen5ShaderTranslator
             out error);
     }
 
+    public static bool TryCreateDataShareInstruction(
+        uint pc,
+        uint word,
+        uint extra,
+        out Gen5ShaderInstruction instruction)
+    {
+        instruction = default!;
+        if (!DecodeDs(word, out var name, out _, out _))
+        {
+            return false;
+        }
+
+        instruction = CreateInstruction(pc, Gen5ShaderEncoding.Ds, name, [word, extra]);
+        return true;
+    }
+
     private static bool DecodeBuffer(
         uint word,
         string prefix,
@@ -1995,7 +2027,39 @@ public static partial class Gen5ShaderTranslator
         // GFX10 MUBUF: OFFSET [11:0], OP [24:18] with op[7] in bit 25 (BUFInstructions.td
         // MUBUF_Real_gfx10). Bit 0 is offset[0]; only MIMG takes opcode bit 7 from bit 0.
         var opcode = (word >> 18) & 0xFF;
-        name = opcode switch
+        name = MubufOpcodeName(opcode);
+        sizeDwords = (extra >> 24) == 0xFF ? 3u : 2u;
+        error = string.Empty;
+
+        // TFE (extra bit 23) appends a status VGPR after a load's data; LDS (word bit 16)
+        // returns a load's data to LDS instead (RDNA2 ISA 8.1.9: only
+        // BUFFER_LOAD_{UBYTE,SBYTE,USHORT,SSHORT,DWORD,FORMAT_X}, and never with TFE). TFE
+        // on a store or an atomic has no status to write and LLVM rejects it; both are
+        // refused rather than guessed at.
+        var tfe = ((extra >> 23) & 1) != 0;
+        var lds = ((word >> 16) & 1) != 0;
+        var isLoad = name.StartsWith("BufferLoad", StringComparison.Ordinal);
+        if (lds && (tfe || name is not ("BufferLoadUbyte" or "BufferLoadSbyte" or "BufferLoadUshort" or
+            "BufferLoadSshort" or "BufferLoadDword" or "BufferLoadFormatX")))
+        {
+            name = string.Empty;
+            error = $"unsupported-mubuf-lds op=0x{opcode:X2} word=0x{word:X8} extra=0x{extra:X8}";
+            return false;
+        }
+
+        if (tfe && !isLoad)
+        {
+            name = string.Empty;
+            error = $"unsupported-mubuf-tfe op=0x{opcode:X2} word=0x{word:X8} extra=0x{extra:X8}";
+            return false;
+        }
+
+        return true;
+    }
+
+    public static string MubufOpcodeName(uint opcode)
+    {
+        return opcode switch
         {
             0x00 => "BufferLoadFormatX",
             0x01 => "BufferLoadFormatXy",
@@ -2092,33 +2156,6 @@ public static partial class Gen5ShaderTranslator
             0x87 => "BufferStoreFormatD16Xyzw",
             _ => $"MubufRaw{opcode:X2}",
         };
-        sizeDwords = (extra >> 24) == 0xFF ? 3u : 2u;
-        error = string.Empty;
-
-        // TFE (extra bit 23) appends a status VGPR after a load's data; LDS (word bit 16)
-        // returns a load's data to LDS instead (RDNA2 ISA 8.1.9: only
-        // BUFFER_LOAD_{UBYTE,SBYTE,USHORT,SSHORT,DWORD,FORMAT_X}, and never with TFE). TFE
-        // on a store or an atomic has no status to write and LLVM rejects it; both are
-        // refused rather than guessed at.
-        var tfe = ((extra >> 23) & 1) != 0;
-        var lds = ((word >> 16) & 1) != 0;
-        var isLoad = name.StartsWith("BufferLoad", StringComparison.Ordinal);
-        if (lds && (tfe || name is not ("BufferLoadUbyte" or "BufferLoadSbyte" or "BufferLoadUshort" or
-            "BufferLoadSshort" or "BufferLoadDword" or "BufferLoadFormatX")))
-        {
-            name = string.Empty;
-            error = $"unsupported-mubuf-lds op=0x{opcode:X2} word=0x{word:X8} extra=0x{extra:X8}";
-            return false;
-        }
-
-        if (tfe && !isLoad)
-        {
-            name = string.Empty;
-            error = $"unsupported-mubuf-tfe op=0x{opcode:X2} word=0x{word:X8} extra=0x{extra:X8}";
-            return false;
-        }
-
-        return true;
     }
 
     private static bool DecodeFlat(
@@ -2289,6 +2326,9 @@ public static partial class Gen5ShaderTranslator
         // zeroes that dword before every TFE/LWE instruction for the same reason.
         return FinishDecode(name, $"unknown-mimg op=0x{opcode:X2}", out error);
     }
+
+    // The MIMG name of a full (8-bit) opcode, or empty; shared with the other shader frontends.
+    public static string MimgOpcodeName(uint opcode) => Gen5ImageOpcodes.NameOf(opcode) ?? string.Empty;
 
     private static bool DecodeVintrp(uint word, out string name, out uint sizeDwords, out string error)
     {

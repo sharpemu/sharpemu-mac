@@ -181,6 +181,110 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void KnownGpuContentsReachGuestMemoryAndEndGpuOwnershipOfTheirBytes()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address, Pattern(0x8000, 3));
+        harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(address + 0x100, 0x40, isWritten: true);
+            _ = harness.Cache.ObtainBuffer(address + 0x4000, 0x40, isWritten: true);
+            Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x100, 0x40));
+
+            harness.Cache.NoteKnownGpuContents(address + 0x100, [0x11111111, 0x22222222, 0x33333333]);
+
+            // The written words are the CPU's now; the rest of the declared range and other ranges stay with the GPU.
+            Assert.False(harness.Cache.HasGpuDirtyBytes(address + 0x100, 12));
+            Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x10C, 4));
+            Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x4000, 0x40));
+            Assert.True(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+            Assert.True(harness.Cache.HasGpuDirtyPages(address + 0x4000, 0x1000));
+        });
+
+        var bytes = harness.Read(address + 0x100, 12);
+        Assert.Equal(0x11111111u, BitConverter.ToUInt32(bytes, 0));
+        Assert.Equal(0x33333333u, BitConverter.ToUInt32(bytes, 8));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void KnownGpuContentsCoveringEveryGpuByteOfAPageEndItsGpuOwnership()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(address + 0x100, 8, isWritten: true);
+            Assert.True(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+
+            harness.Cache.NoteKnownGpuContents(address + 0x100, [0xAAAAAAAA, 0xBBBBBBBB]);
+
+            Assert.False(harness.Cache.HasGpuDirtyBytes(address + 0x100, 8));
+            Assert.False(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void AStoreOverEveryGpuByteOfItsPage_LandsOnBothCopiesAndEndsGpuOwnership()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address, Pattern(0x2000, 5));
+        var stored = Pattern(0x40, 9);
+        var owner = harness.Worker.Run(() =>
+        {
+            var (buffer, _) = harness.Cache.ObtainBuffer(address + 0x100, 0x40, isWritten: true);
+            buffer.Fill(buffer.Offset(address + 0x100), 0x40, 0x77777777);
+            Assert.True(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+
+            Assert.True(harness.Cache.TryWriteOverGpuBytes(address + 0x100, stored));
+
+            Assert.False(harness.Cache.HasGpuDirtyBytes(address + 0x100, 0x40));
+            Assert.False(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+            harness.Scheduler.Finish();
+            return buffer;
+        });
+
+        Assert.Equal(stored, harness.Read(address + 0x100, 0x40));
+        Assert.Equal(stored, harness.ReadBack(owner, owner.Offset(address + 0x100), 0x40));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void AStoreOverPartOfTheGpuBytesOfItsPage_LeavesTheOtherBytesWithTheGpu()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address, Pattern(0x2000, 5));
+        var stored = Pattern(0x20, 9);
+        var owner = harness.Worker.Run(() =>
+        {
+            var (buffer, _) = harness.Cache.ObtainBuffer(address + 0x100, 0x40, isWritten: true);
+            buffer.Fill(buffer.Offset(address + 0x100), 0x40, 0x77777777);
+
+            Assert.True(harness.Cache.TryWriteOverGpuBytes(address + 0x100, stored));
+
+            Assert.False(harness.Cache.HasGpuDirtyBytes(address + 0x100, 0x20));
+            Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x120, 0x20));
+            Assert.True(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+            harness.Scheduler.Finish();
+            return buffer;
+        });
+
+        var gpu = harness.ReadBack(owner, owner.Offset(address + 0x100), 0x40);
+        Assert.Equal(stored, gpu[..0x20]);
+        Assert.All(gpu[0x20..], value => Assert.Equal(0x77, value));
+        Assert.Equal(stored, harness.Read(address + 0x100, 0x20));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void OverlappingPreparedBindingsUseTheFinalCacheAllocation()
     {
         if (_vulkan is null) return;
@@ -382,6 +486,88 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void ManagedGuestWrites_MarkTheBufferAfterTheWriteAndKeepItsProtection()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var (buffer, offset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x8000, isWritten: false));
+        harness.Worker.Run(() =>
+        {
+            var (written, writtenOffset) = harness.Cache.ObtainBuffer(address + 0x10000, 0x100, isWritten: true);
+            written.Fill(writtenOffset, 0x100, 0x5A5A5A5A);
+        });
+        GuestGpuMemoryHook.Attach(harness.Gpu);
+        try
+        {
+            Assert.True(harness.Memory.TryWrite(address + 0x40, Pattern(0x20, 6)));
+            Assert.True(harness.Memory.TryCopy(address + 0x1040, address + 0x40, 0x20));
+            Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
+            Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address + 0x1000));
+            Assert.True(harness.Cache.HasCpuDirtyPages(address, 0x2000));
+            var (again, againOffset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x8000, isWritten: false));
+            Assert.Same(buffer, again);
+            Assert.Equal(Pattern(0x20, 6), harness.ReadBack(again, againOffset + 0x40, 0x20));
+            Assert.Equal(Pattern(0x20, 6), harness.ReadBack(again, againOffset + 0x1040, 0x20));
+
+            Assert.True(harness.Memory.TryWrite(address + 0x10010, Pattern(0x10, 7)));
+            Assert.False(harness.Cache.HasGpuDirtyPages(address + 0x10000, 0x1000));
+            var bytes = harness.Read(address + 0x10000, 0x100);
+            Assert.Equal(0x5A5A5A5Au, BitConverter.ToUInt32(bytes, 0));
+            Assert.Equal(Pattern(0x10, 7), bytes[0x10..0x20]);
+            Assert.Equal(0x5A5A5A5Au, BitConverter.ToUInt32(bytes, 0x20));
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void UploadBatch_SharesOneBarrierPairUntilAnUploadRewritesBytesOfTheBatch()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address + 0x40, Pattern(0x100, 1));
+        harness.Write(address + 0x10040, Pattern(0x100, 2));
+        var pairs = harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(address, 0x20000, isWritten: false);
+            harness.Scheduler.Finish();
+            return harness.Cache.UploadBarrierPairs;
+        });
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x40, 8));
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x10040, 8));
+        harness.Write(address + 0x40, Pattern(0x100, 3));
+        harness.Write(address + 0x10040, Pattern(0x100, 4));
+
+        var (buffer, _) = harness.Worker.Run(() =>
+        {
+            harness.Cache.BeginUploadBatch();
+            var obtained = harness.Cache.ObtainBuffer(address + 0x40, 0x4100, isWritten: false);
+            _ = harness.Cache.ObtainBuffer(address + 0x10040, 0x4100, isWritten: false);
+            return obtained;
+        });
+        Assert.Equal(pairs + 1, harness.Worker.Run(() => harness.Cache.UploadBarrierPairs));
+
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x40, 8));
+        harness.Write(address + 0x40, Pattern(0x100, 5));
+        harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(address + 0x40, 0x4100, isWritten: false);
+            harness.Cache.EndUploadBatch();
+        });
+
+        Assert.Equal(pairs + 2, harness.Worker.Run(() => harness.Cache.UploadBarrierPairs));
+        Assert.Equal(Pattern(0x100, 5), harness.ReadBack(buffer, 0x40, 0x100));
+        Assert.Equal(Pattern(0x100, 4), harness.ReadBack(buffer, 0x10040, 0x100));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void ObtainBuffer_CreatesRegistersAndUploadsOnlyCpuDirtyPages()
     {
         if (_vulkan is null) return;
@@ -398,10 +584,11 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(0x40UL, offset);
         Assert.Equal(buffer.CpuAddress, harness.Cache.GetBuffer(harness.Cache.FindBuffer(address, 8)).CpuAddress);
         Assert.Equal(version1, harness.ReadBack(buffer, 0x40, 0x100));
-        Assert.False(harness.Cache.HasCpuDirtyPages(address, 0x4140));
-        Assert.True(harness.Cache.HasCpuDirtyPages(address + 0x6000, 0x1000));
+        Assert.False(harness.Cache.HasCpuDirtyPages(address, 0x8000));
+        Assert.True(harness.Cache.HasCpuDirtyPages(address + 0x8000, 0x1000));
         Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
-        Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address + 0x6000));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address + 0x6000));
+        Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address + 0x8000));
 
         // The BDA table maps every 16 KiB page of the buffer to its device address.
         var slice = harness.ReadBack(harness.Cache.BdaPageTableBuffer, (address >> GuestBufferCache.CachingPageBits) * 8, 24);
@@ -438,6 +625,35 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(Pattern(0x80, 3), buffer.Mapped.Slice((int)offset, 0x80).ToArray());
         Assert.Equal(0, harness.Cache.BufferCount);
         Assert.True(harness.Cache.HasCpuDirtyPages(address, Page));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void ObtainBuffer_RepeatedStreamReadInOneObservationSharesTheCopy()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Pattern(0x400, 3));
+        harness.Cache.ObservationGated = true;
+
+        var first = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x80, isWritten: false));
+        var second = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x80, isWritten: false));
+        Assert.Same(first.Buffer, second.Buffer);
+        Assert.Equal(first.Offset, second.Offset);
+
+        var before = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x100, 0x80, isWritten: false));
+        harness.Cache.NoteObservation();
+        harness.Write(address + 0x100, Pattern(0x80, 4));
+        var observed = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x100, 0x80, isWritten: false));
+        Assert.NotEqual(before.Offset, observed.Offset);
+        Assert.Equal(Pattern(0x80, 4), observed.Buffer.Mapped.Slice((int)observed.Offset, 0x80).ToArray());
+
+        var beforeSubmit = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x200, 0x80, isWritten: false));
+        harness.Worker.Run(() => harness.Scheduler.Finish());
+        var afterSubmit = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x200, 0x80, isWritten: false));
+        Assert.Same(beforeSubmit.Buffer, afterSubmit.Buffer);
+        Assert.NotEqual(beforeSubmit.Offset, afterSubmit.Offset);
         harness.Shutdown();
     }
 
@@ -590,6 +806,59 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void HasGpuDirtyBytes_StaysExactForReadersWhileRangesChange()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x40000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 0x100, isWritten: true);
+            buffer.Fill(offset, 0x100, 1);
+        });
+        using var stop = new ManualResetEventSlim();
+        var wrong = 0;
+        var readers = Enumerable.Range(0, 4).Select(_ => new Thread(() =>
+        {
+            while (!stop.IsSet)
+            {
+                if (!harness.Cache.HasGpuDirtyBytes(address + 0x80, 8) || harness.Cache.HasGpuDirtyBytes(address + 0x30000, 0x1000) ||
+                    harness.Cache.HasGpuDirtyBytes(address + 0x100, 0x100))
+                {
+                    Interlocked.Increment(ref wrong);
+                }
+            }
+        })).ToArray();
+        foreach (var reader in readers)
+        {
+            reader.Start();
+        }
+
+        for (var round = 0; round < 50; round++)
+        {
+            var moving = address + 0x10000 + (ulong)(round % 4) * 0x1000;
+            harness.Worker.Run(() =>
+            {
+                var (buffer, offset) = harness.Cache.ObtainBuffer(moving, 0x40, isWritten: true);
+                buffer.Fill(offset, 0x40, (uint)round);
+            });
+            Assert.True(harness.Cache.HasGpuDirtyBytes(moving, 0x40));
+            Assert.True(harness.Store.DownloadToCpu(moving, 8));
+            Assert.False(harness.Cache.HasGpuDirtyBytes(moving, 0x40));
+        }
+
+        stop.Set();
+        foreach (var reader in readers)
+        {
+            reader.Join();
+        }
+
+        Assert.Equal(0, wrong);
+        Assert.True(harness.Cache.HasGpuDirtyBytes(address, 0x100));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void WriteFault_OnAGpuDirtyPageDownloadsThenReleasesTheWrite()
     {
         if (_vulkan is null) return;
@@ -644,6 +913,50 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         var after = new byte[8];
         Assert.True(harness.Memory.TryReadBacking(gpuWritten + 8, after));
         Assert.Equal(cpuBytes, after);
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void EmulatorWrite_KeepsTheWriteWatchAndTheNextObtainUploadsTheBytes()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var (buffer, _) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x4100, isWritten: false));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
+
+        var written = Pattern(0x40, 5);
+        harness.Write(address + 0x80, written);
+        Assert.True(harness.Store.NoteEmulatorWrite(address + 0x80, 0x40));
+
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
+        Assert.True(harness.Cache.HasCpuDirtyPages(address, Page));
+        var (again, _) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x4100, isWritten: false));
+        Assert.Same(buffer, again);
+        Assert.Equal(written, harness.ReadBack(buffer, 0x80, 0x40));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
+        Assert.False(harness.Store.NoteEmulatorWrite(0x40_0000, 8));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void EmulatorWrite_OverAGpuDirtyPageLeavesItToTheGpu()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 0x40, isWritten: true);
+            buffer.Fill(offset, 0x40, 0xCAFEF00D);
+        });
+
+        Assert.True(harness.Store.NoteEmulatorWrite(address + 8, 8));
+
+        Assert.True(harness.Cache.HasGpuDirtyPages(address, Page));
+        var backing = new byte[4];
+        Assert.True(harness.Memory.TryReadBacking(address + 0x3C, backing));
+        Assert.NotEqual(0xCAFEF00Du, BitConverter.ToUInt32(backing));
         harness.Shutdown();
     }
 
@@ -715,7 +1028,7 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
             Array.Fill(replacement, (byte)0x5A);
             Assert.True(harness.Memory.TryWrite(address, replacement));
             Assert.False(harness.Cache.HasGpuDirtyPages(trackedAddress, 0x8000));
-            Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(trackedAddress));
+            Assert.Equal(gpuWritten ? HostPageProtection.ReadWrite : HostPageProtection.ReadOnly, harness.Protection(trackedAddress));
             Assert.True(harness.Store.DownloadToCpu(trackedAddress, 8));
             Assert.Equal(0x5A5A5A5Au, BitConverter.ToUInt32(harness.Read(trackedAddress, 4)));
             var (reuploaded, offset) = harness.Worker.Run(() =>
@@ -789,6 +1102,68 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
 
         Assert.False(harness.Cache.HasCpuDirtyPages(address, 0x8000));
         Assert.Equal(Pattern(0x10, 5), harness.ReadBack(buffer, 0x4000, 0x10));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DeviceAddressSweep_CountsTheSweptPagesInsideTheHandleWindows()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x40000, ReadWrite);
+        _ = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x40000, isWritten: false));
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x1000, 8));
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x30000, 8));
+        _ = GuestBufferCache.TakeDirtyTrackingReport();
+
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.NoteDeviceAddressWindow(address + 0x20000);
+            harness.Cache.PrepareBda([new GuestSpan(address, 0x40000)]);
+        });
+
+        var report = GuestBufferCache.TakeDirtyTrackingReport();
+        Assert.Matches(@"sweep_pages=[1-9]", report);
+        Assert.Matches(@"swept_pages=[1-9]", report);
+        Assert.Matches(@"pages_in_handle_windows=[1-9]", report);
+        Assert.Contains("stream_shared=", report);
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DeviceAddressSweep_UploadsTheDirtyPagesOfEveryBufferInABlockAndProtectsThem()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x40000, ReadWrite);
+        var (first, firstOffset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x8000, isWritten: false));
+        var (second, secondOffset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x20000, 0x8000, isWritten: false));
+        Assert.NotSame(first, second);
+        harness.Worker.Run(() => harness.Cache.PrepareBda([new GuestSpan(address, 0x40000)]));
+
+        harness.Write(address + 0x1000, Pattern(0x20, 1));
+        Assert.True(harness.Store.NoteEmulatorWrite(address + 0x1000, 0x20));
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x5000, 8));
+        harness.Write(address + 0x5000, Pattern(0x20, 2));
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x21000, 8));
+        harness.Write(address + 0x21000, Pattern(0x20, 3));
+        Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address + 0x5000));
+
+        harness.Worker.Run(() => harness.Cache.PrepareBda([new GuestSpan(address, 0x40000)]));
+
+        Assert.False(harness.Cache.HasCpuDirtyPages(address, 0x8000));
+        Assert.False(harness.Cache.HasCpuDirtyPages(address + 0x20000, 0x8000));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address + 0x1000));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address + 0x5000));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address + 0x21000));
+        Assert.Equal(Pattern(0x20, 1), harness.ReadBack(first, firstOffset + 0x1000, 0x20));
+        Assert.Equal(Pattern(0x20, 2), harness.ReadBack(first, firstOffset + 0x5000, 0x20));
+        Assert.Equal(Pattern(0x20, 3), harness.ReadBack(second, secondOffset + 0x1000, 0x20));
+
+        harness.Write(address + 0x1000, Pattern(0x20, 4));
+        Assert.True(harness.Store.NoteEmulatorWrite(address + 0x1000, 0x20));
+        harness.Worker.Run(() => harness.Cache.PrepareBda([new GuestSpan(address, 0x40000)]));
+        Assert.Equal(Pattern(0x20, 4), harness.ReadBack(first, firstOffset + 0x1000, 0x20));
         harness.Shutdown();
     }
 
@@ -1173,9 +1548,8 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
             var (buffer, _) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x4100, isWritten: false));
             Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
 
-            // A managed write to a watched page: the store marks it dirty before the copy lands.
             Assert.True(harness.Memory.TryWrite(address + 0x40, Pattern(0x10, 2)));
-            Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address));
+            Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
             Assert.True(harness.Cache.HasCpuDirtyPages(address, Page));
             Assert.Equal(Pattern(0x10, 2), harness.Read(address + 0x40, 0x10));
             var (again, _) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x4100, isWritten: false));

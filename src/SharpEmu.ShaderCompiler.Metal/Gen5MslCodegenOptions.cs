@@ -179,6 +179,12 @@ public sealed record Gen5MslCodegenOptions(
     /// SHARPEMU_MSL_PACKED_FORMAT_LOADS=0 restores component loads; partial trailing elements retain the decoder.</summary>
     public bool PackedFormatLoads { get; init; } = true;
 
+    /// <summary>A program with at least this many BUFFER_LOAD_FORMAT_* decodes the formats only known on the device
+    /// through one helper (format_load_prelude.msl) instead of inline at every load, which Metal compiles in seconds
+    /// instead of minutes for a program with hundreds. The whole-dword fast path stays inline. Below it the program is
+    /// emitted as before. SHARPEMU_MSL_DECODED_FORMAT_LOADS=N sets it; 0 never calls the helper.</summary>
+    public int DecodedFormatLoadThreshold { get; init; } = 16;
+
     /// <summary>Experimental guarded forwarding of the last 128-bit LDS write in a
     /// single-wave mesh subgroup. SHARPEMU_MSL_MESH_LDS_FORWARDING=1.</summary>
     public bool MeshLdsForwarding { get; init; }
@@ -231,6 +237,9 @@ public sealed record Gen5MslCodegenOptions(
         UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "1",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
+        DecodedFormatLoadThreshold = int.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_DECODED_FORMAT_LOADS"), out var decodedLoads)
+                ? Math.Max(decodedLoads, 0) : 16,
         MeshLdsForwarding = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_FORWARDING") == "1",
         ScalarConstantBuffers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS") != "0",
         MeshHotLds = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_HOT_LDS") == "1",

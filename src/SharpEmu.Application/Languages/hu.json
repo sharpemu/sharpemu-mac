@@ -17,69 +17,48 @@
   "Options.OverlayCorner.TopRight": "Jobb felső",
   "Options.OverlayCorner.BottomRight": "Jobb alsó",
   "Options.OverlayCorner.BottomLeft": "Bal alsó",
-
   "Page.Library": "Könyvtár",
   "Page.Options": "Beállítások",
   "Page.Trophies": "Trófeák",
   "Page.GameCount.One": "1 játék",
   "Page.GameCount.Other": "{0} játékok",
-
   "Library.SearchWatermark": "Keresés a könyvtárban",
-
   "LibraryMenu.Library": "Könyvtár",
-
   "LibraryMenu.View": "Nézet",
-
   "LibraryMenu.Row": "Sor",
-
   "LibraryMenu.Grid": "Rács",
-
   "LibraryMenu.Sound": "Hang",
-
   "LibraryMenu.Volume": "Hangerő",
-
   "LibraryMenu.AddGames": "Játékok hozzáadása",
-
   "LibraryMenu.AddFolder": "Mappa hozzáadása…",
-
   "Hero.GameSettings": "Játékbeállítások",
-
-
   "Hero.Console": "Konzol",
-
   "Hint.LibraryMenu": "Könyvtár menü",
-
   "Library.SearchClear": "Keresés törlése",
-
   "Library.TileSize": "Csempeméret",
-
   "Options.TitleMusicVolume.Desc": "Milyen hangosan szól egy játék címzenéje a könyvtárban.",
   "Library.AddFolder": "Mappa hozzáadása",
   "Library.OpenFile": "Fájl megnyitása…",
-
   "Library.Context.Launch": "Inditás",
   "Library.Context.OpenFolder": "Játékmappa megnyitása",
   "Library.Context.CopyPath": "Elérési út másolása",
   "Library.Context.CopyTitleId": "Cím ID másolása",
   "Library.Context.Remove": "Eltávolítás a Könyvtárból",
-
   "Library.Empty.Title": "A könyvtárad üres",
   "Library.Empty.Hint": "Add meg a játékaidat tartalmazó mappát a kezdáshez.",
   "Library.Empty.SearchTitle": "Nincs találat a elemre",
   "Library.Empty.SearchHint": "A könyvtárban nincs olyan elem, amely egyezne a „{0}” kifejezéssel.",
   "Library.Empty.AddFolder": "＋ Játékmappa hozzáadása",
-
   "Library.Loading": "Könyvtár betöltése",
   "Library.ScanningFolder": "Mappa átvizsgálása…",
   "Library.Stat.Version": "Verzió",
   "Library.Stat.Installed": "Telepítve",
   "Library.Stat.TitleId": "Címazonosító",
+  "Library.Stat.CompatibilityMode": "Kompatibilitási mód",
   "Common.Back": "Vissza",
-
   "Library.Music.Volume": "Játékzene hangereje",
   "Library.Music.Mute": "Játékzene némítása",
   "Library.Music.Unmute": "Játékzene visszakapcsolása",
-
   "Options.General": "Általános",
   "Options.Logging": "Logolás",
   "Options.Env.Tab": "Környezet",
@@ -98,11 +77,8 @@
   "Options.Section.Emulation": "EMULÁCIÓ",
   "Options.Section.Logging": "LOGOLÁS",
   "Options.Section.Launcher": "INDITÓ",
-
-
   "Options.Strict.Label": "Szigorú dynlib felbontás",
   "Options.Strict.Desc": "Indítás megszakítása, ha egy importált szimbólum nem oldható fel.",
-
   "Options.LogLevel.Label": "Naplózási szint",
   "Options.LogLevel.Desc": "Az emulátor konzol kimenetének részletessége.",
   "Options.LogLevel.Trace": "Trace",
@@ -111,31 +87,24 @@
   "Options.LogLevel.Warning": "Figyelmeztetés",
   "Options.LogLevel.Error": "Hiba",
   "Options.LogLevel.Critical": "Kritikus",
-
   "Options.TraceImports.Label": "Importnyomkövetési korlát",
   "Options.TraceImports.Desc": "Az első N darab import nyomon követése modulonként (0 = ki).",
-
   "Options.CrashDump.Label": "Összeomlási memóriaképek",
   "Options.CrashDump.Desc": "Az összeomlási memóriaképeket a futási napló mellé menti (csak Windows x64). A fájlok nagyok lehetnek, és személyes adatokat tartalmazhatnak.",
   "Options.LogToFile.Label": "Naplozás fájlba",
   "Options.LogToFile.Desc": "Az emulátor kimenetének tükrözése egy log fájlba.",
-
   "Options.LogsFolder.Label": "Naplómappa",
   "Options.LogsFolder.Desc": "Minden napló, nyomkövetés és dump: {0} ({1})",
   "Options.LogsFolder.Open": "Megnyitás",
   "Options.LogFilePath.Label": "Naplófájl elérési útja",
   "Options.LogFilePath.Default": "Nincs egyéni út — a logok az emulátor melletti user/logs mappába kerülnek.",
   "Options.LogFilePath.Select": "Kiválasztás…",
-
   "Options.OverrideLogFile.Label": "Naplófájl felülírása",
   "Options.OverrideLogFile.Desc": "A pontos fájlútvonal használata a cím ID és időbélyeg hozzáfűzése helyett.",
-
   "Options.TitleMusic.Label": "Címzene",
   "Options.TitleMusic.Desc": "A kiválasztott játék előnézeti zenéjének ismétlése a könyvtárban.",
-
   "Options.Discord.Label": "Discord jelenlét",
   "Options.Discord.Desc": "A futó játék megjelenítése a Discord profilodon.",
-
   "Options.Language.Label": "Emulátor nyelve",
   "Options.Language.Desc": "Az indítóban használt nyelv. Azonnal érvénybe lép.",
   "Options.Theme.Label": "Téma",
@@ -158,10 +127,8 @@
   "Options.Theme.Glass.Desc": "Mennyire tömörek a játékkép fölötti vezérlők. Alacsonyabb értéknél több látszik a képből.",
   "Options.Theme.Contrast.Label": "Kontraszt",
   "Options.Theme.Contrast.Desc": "A felületek, valamint az elsődleges és másodlagos szöveg elkülönülése.",
-
   "Common.On": "Be",
   "Common.Off": "Ki",
-
   "Console.Title": "KONZOL",
   "Console.SearchWatermark": "Keresés...",
   "Console.AutoScroll": "Automatikus görgetés",
@@ -169,7 +136,6 @@
   "Console.Copy": "Másolás",
   "Console.Clear": "Törlés",
   "Console.WindowTitle": "SharpEmu Konzol",
-
   "Launch.NoGameSelected": "Nincs játék kiválasztva",
   "Launch.NoGameHint": "Válassz egy játékot a könyvtárból, vagy nyiss meg közvetlenül egy eboot.bin fájlt.",
   "Launch.Idle": "Tétlen",
@@ -194,14 +160,12 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "Nem sikerült elindítani az emulátort: {0}",
   "Launch.ProcessExited": "A folyamat kilépett a következő kóddal: {0} ({1}).",
-
   "Exit.Ok": "OK",
   "Exit.InvalidArguments": "nemérvényes argumentumok",
   "Exit.EbootNotFound": "eboot nem található",
   "Exit.RuntimeException": "futásidejű kivétel",
   "Exit.EmulationError": "emulációs hiba",
   "Exit.Unknown": "ismeretlen",
-
   "Status.EmulatorLocating": "Emulátor: keresés…",
   "Status.EmulatorPath": "Emulátor: {0}",
   "Status.EmulatorNotFound": "Emulátor: a SharpEmu futtatható fájl nem található — előbb építsd fel a SharpEmu.CLI-t.",
@@ -214,28 +178,23 @@
   "Status.Running": "Fut {0}",
   "Status.Stopping": "Leállítás…",
   "Status.Idle": "Nyugodt",
-
   "Clipboard.Path": "Út",
   "Clipboard.TitleId": "Cím ID",
-
   "Discord.Playing": "Játékban {0}",
   "Discord.Browsing": "Böngéssz a könyvtárban",
-
   "Dialog.ChooseGameFolder": "Válassz egy mappát ami a játékaidat tartalmazza",
   "Dialog.OpenExecutable": "Futtatható fájl megnyitása az indításhoz",
   "Dialog.PsExecutables": "PS futtatható fájlok",
   "Dialog.SaveLogFile": "Válaszd ki, hogy hova szeretnéd menteni a napló fájlokat",
   "Dialog.PlainTextFiles": "Egyszerű szöveges fájlok",
   "Dialog.LogFiles": "Naplózási fájlok",
-
-  "Options.About" : "Erről",
+  "Options.About": "Erről",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Forrás kód, hibajelentések és a projekt fejlesztése.",
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Csatlakozz a közösséghe, kérj segítéget és kövesd nyomon a fejlesztést.",
   "About.GithubButton": "Járulj hozzá GitHubon!",
   "About.DiscordButton": "Csatlakozz a Discordunkhoz!",
-
   "Library.Context.GameSettings": "Játékbeállítások…",
   "Options.Env.WritableApp0.Desc": "Engedélyezi, hogy a játékok fájlokat hozzanak létre és írjanak a telepítési mappájukban.\nA kicsomagolt dumpokhoz szükséges, amelyek a mentéseiket vagy beállításaikat az /app0 alá írják.",
   "Options.Env.LogIo.Desc": "A fájlmegnyitások, olvasások és útvonal-feloldások naplózása a konzolra.\nAkkor használd, ha egy játék indításkor nem találja az adatfájljait.",
@@ -263,7 +222,6 @@
   "Updater.Status.ChecksumFailed": "A letöltött frissítés nem ment át az SHA-256-ellenőrzésen.",
   "Updater.Status.Unsupported": "Az automatikus frissítéshez Windows, Linux vagy macOS x64 build szükséges.",
   "Options.Graphics": "Grafika",
-
   "Options.Console.Language.Label": "Konzol nyelve",
   "Options.Console.Language.Desc": "A játékoknak jelentett rendszer nyelve.",
   "Options.Section.General.Desc": "Az emuláció alapvető viselkedése.",
@@ -298,9 +256,12 @@
   "Options.Hdr.Label": "HDR-kimenet",
   "Options.Hdr.Desc": "HDR használata, ha a kiválasztott kijelző és grafikus backend támogatja. Az automatikus mód SDR-re vált vissza.",
   "Options.Hdr.Auto": "Automatikus",
+  "Options.GpuReadbacks.Label": "GPU-visszaolvasás",
+  "Options.GpuReadbacks.Desc": "Teljes: a parancsfeldolgozó megvárja a GPU által írt értékeket. Ez a legpontosabb beállítás, de akadozást okozhat.\nKi: a várakozások a memóriában már meglévő értékkel folytatódnak, ha az teljesíti a feltételt. Gördülékenyebb, de egyes játékokban grafikai hibák jelenhetnek meg.\nA játék következő indításától érvényes.",
+  "Options.GpuReadbacks.Full": "Teljes",
   "Options.Env.BinkPlayback.Label": "Bink videólejátszás",
   "Options.Env.BinkPlayback.Desc": "A Host az FFmpeg hídon keresztül játssza le a Bink videókat, de egyes játékoknál problémák jelentkezhetnek.\nA Guest a játékmotor saját dekóderét használja.\nA Skip kihagyja a Bink videókat, ami megkönnyítheti a fejlesztést.",
-  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
+  "Options.Env.BinkPlayback.Host": "Gazda (FFmpeg)",
   "Options.Env.BinkPlayback.Guest": "Guest",
   "Options.Env.BinkPlayback.Skip": "Kihagyás",
   "Options.Env.Group.Trophies": "Trófeák",
@@ -308,10 +269,14 @@
   "Options.Env.TrophyTest.Desc": "Válassz egy játékot és egy trófeát, majd mutasd meg a feloldási értesítést. Semmi sem oldódik fel.",
   "Options.Env.TrophyTest.Show": "Értesítés megjelenítése",
   "Options.Env.TrophySound.Label": "Trófeahang",
-  "Options.Env.TrophySound.Desc": "Rövid hangjelzést játszik le, amikor egy trófea feloldódik."
-,
+  "Options.Env.TrophySound.Desc": "Rövid hangjelzést játszik le, amikor egy trófea feloldódik.",
+  "Options.GnmMode.TrophyKey.Label": "Trófeakulcs",
+  "Options.GnmMode.TrophyKey.Desc": "PS4-trófeakulcs a titkosított trófeanevekhez és leírásokhoz. A GnmMode trófealistái és feloldási értesítései használják. Helyben kerül mentésre; módosítás után indítsd újra a futó játékot.",
+  "Options.GnmMode.TrophyKey.Placeholder": "32 hexadecimális karakter",
+  "Options.GnmMode.TrophyKey.Invalid": "Adj meg pontosan 32 hexadecimális karaktert (0–9, A–F), vagy ürítsd ki a mezőt a kulcs eltávolításához. Az előző érvényes kulcs megmarad, amíg a bevitt érték nem érvényes.",
   "Trophies.Title": "Trófeák",
   "Trophies.None": "Ennek a játéknak nincsenek trófeái.",
+  "Trophies.GnmMode.KeyHint": "A PS4-trófeák betöltéséhez trófeakulcsra lehet szükség. Add meg itt: {0} → GnmMode → {1}.",
   "Trophies.Loading": "Trófeák betöltése…",
   "Trophies.Hidden": "Rejtett trófea",
   "Trophies.HiddenDescription": "Kattints a trófea megjelenítéséhez.",

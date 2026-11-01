@@ -235,9 +235,33 @@ public sealed class DeviceAddressRangePlannerTests
         var range = Assert.Single(plan.DeviceAddressRanges);
         Assert.False(range.Bounded);
         Assert.True(range.Plannable);
+        Assert.Equal(DeviceAddressUnboundedReason.VectorOffset, range.UnboundedReason);
         var evaluated = Assert.Single(DeviceAddressRangePlanner.Evaluate(plan, Inputs([0x1000, 0])));
         Assert.True(evaluated.Planned);
         Assert.Equal(DeviceAddressRangePlanner.MaxRangeBytes, evaluated.Size);
+    }
+
+    [Fact]
+    public void Evaluations_AreTalliedByWhyTheirRangeIsUnbounded()
+    {
+        var bounded = Extract(Program(
+            Vop1(0, "VMovB32", 0, Operand(0)),
+            GlobalAccess(4, "GlobalLoadDword", 0, offset: 8),
+            EndProgram(12)));
+        var unbounded = Extract(Program(
+            GlobalAccess(0, "GlobalLoadDword", 0, offset: 8, vectorAddress: 0),
+            EndProgram(8)));
+        Assert.Equal(DeviceAddressUnboundedReason.None, Assert.Single(bounded.DeviceAddressRanges).UnboundedReason);
+        _ = DeviceAddressRangePlanner.TakeUnboundedReport();
+
+        _ = DeviceAddressRangePlanner.Evaluate(bounded, Inputs([0x1000, 0]));
+        _ = DeviceAddressRangePlanner.Evaluate(unbounded, Inputs([0x1000, 0]));
+        _ = DeviceAddressRangePlanner.Evaluate(unbounded, Inputs([0x1000, 0]));
+
+        var report = DeviceAddressRangePlanner.TakeUnboundedReport();
+        Assert.Matches(@"bounded=[1-9]", report);
+        Assert.Matches(@"VectorOffset=([2-9]|\d\d)", report);
+        Assert.Contains("LoadedOffset=", report);
     }
 
     [Fact]

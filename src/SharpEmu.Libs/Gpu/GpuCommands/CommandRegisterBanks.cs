@@ -14,7 +14,7 @@ public enum ContextStateOperation : uint
 // Shader compilation reads raw words until its typed register connection is complete.
 public sealed class CommandRegisterBanks
 {
-    public DenseShaderRegisterMap Shader { get; } = new();
+    public ShaderRegisterMirror Shader { get; } = new();
 
     // The user-config words this queue wrote, keyed by offset from 0xC000; a register-space
     // WAIT_REG_MEM polls them.

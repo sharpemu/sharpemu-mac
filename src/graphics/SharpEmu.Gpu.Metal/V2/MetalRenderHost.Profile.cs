@@ -60,6 +60,12 @@ internal sealed partial class MetalRenderHost
         {
             PassProfileNoteWork(split ? $"{entry.Profile} {shape}" : entry.Profile, kind);
         }
+
+        if (TraceDrawsMatch is not null && kind.StartsWith("draw", StringComparison.Ordinal))
+        {
+            TraceDraw(entry, kind, shape);
+        }
+
         if (DumpTargetsEnabled && kind.StartsWith("draw", StringComparison.Ordinal))
         {
             NoteDrawState(kind, shape);
@@ -123,6 +129,68 @@ internal sealed partial class MetalRenderHost
             Form.Threads => $"threadgroup={_threads.Width}x{_threads.Height}x{_threads.Depth}",
             _ => _text ?? string.Empty,
         };
+    }
+
+    // SHARPEMU_METAL_V2_TRACE_DRAWS=<text>[,<text>...]: one line per draw whose pipeline profile contains one of the
+    // texts, every frame: which draws a game issues, with how many instances, as it changes from frame to frame.
+    private static readonly string[]? TraceDrawsMatch =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TRACE_DRAWS") is { Length: > 0 } traced
+            ? traced.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : null;
+
+    private void TraceDraw(MetalPipelineEntry entry, string kind, WorkShape shape)
+    {
+        if (entry.Profile is not { } profile || !TraceDrawsMatch!.Any(text => profile.Contains(text, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        DrainTracedIndirect();
+        if (kind.Contains("indirect", StringComparison.Ordinal) && _tracedIndirectArguments != 0)
+        {
+            _tracedIndirectPending.Enqueue((_tracedIndirectArguments, _submissionSerial, Interlocked.Read(ref _flips)));
+        }
+
+        ref readonly var state = ref _dynamicState;
+        Console.Error.WriteLine(string.Format(CultureInfo.InvariantCulture,
+            "[METAL-V2][DRAW-TRACE] flip={0} {1} {2} {3}{10} vp={4}x{5} targets={6} cmp={7} test={11} dwrite={12} hasDepth={13} vb1@{8:X}{9}",
+            Interlocked.Read(ref _flips), profile, kind, shape, state.ViewportWidth, Math.Abs(state.ViewportHeight),
+            _renderingState.ColorAttachmentCount, state.DepthCompare, _vertexBufferCount > 1 ? _vertexOffsets[1] : 0,
+            entry.VertexLayout is { Length: > 0 } layout ? " layout=" + layout : string.Empty,
+            kind.Contains("indirect", StringComparison.Ordinal) ? $"@{_tracedIndirectArguments:X}={TracedIndirectWords()}" : string.Empty,
+            state.DepthTestEnabled, state.DepthWriteEnabled, entry.HasDepth));
+    }
+
+    // The guest address of the last indirect draw's arguments, for the draw trace.
+    private ulong _tracedIndirectArguments;
+
+    // Traced indirect draws whose command buffer has not completed: once it has, the arguments are
+    // read again (DRAW-TRACE-DONE), so a count the GPU wrote after recording shows up.
+    private readonly Queue<(ulong Address, ulong Serial, long Flip)> _tracedIndirectPending = new();
+
+    private void DrainTracedIndirect()
+    {
+        var completed = CompletedSerial;
+        var bytes = new byte[20];
+        while (_tracedIndirectPending.TryPeek(out var pending) && pending.Serial <= completed)
+        {
+            _tracedIndirectPending.Dequeue();
+            var words = TryReadGuest(pending.Address, bytes)
+                ? string.Join(",", Enumerable.Range(0, 5).Select(index => BitConverter.ToUInt32(bytes, index * 4)))
+                : "?";
+            Console.Error.WriteLine(string.Format(CultureInfo.InvariantCulture,
+                "[METAL-V2][DRAW-TRACE-DONE] flip={0} serial={1} completed={2} indirect@{3:X}={4}",
+                pending.Flip, pending.Serial, completed, pending.Address, words));
+        }
+    }
+
+    // The arguments as guest memory holds them when the draw is recorded.
+    private string TracedIndirectWords()
+    {
+        var bytes = new byte[20];
+        return _tracedIndirectArguments != 0 && TryReadGuest(_tracedIndirectArguments, bytes)
+            ? string.Join(",", Enumerable.Range(0, 5).Select(index => BitConverter.ToUInt32(bytes, index * 4)))
+            : "?";
     }
 
     private string _lastWorkKind = string.Empty;

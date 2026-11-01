@@ -17,79 +17,55 @@
   "Options.OverlayCorner.TopRight": "右上",
   "Options.OverlayCorner.BottomRight": "右下",
   "Options.OverlayCorner.BottomLeft": "左下",
-
   "Page.Library": "ライブラリ",
   "Page.Options": "オプション",
   "Page.Trophies": "トロフィー",
   "Page.GameCount.One": "ゲーム 1本",
   "Page.GameCount.Other": "ゲーム {0}本",
-
   "Library.SearchWatermark": "ライブラリを検索…",
-
   "LibraryMenu.Library": "ライブラリ",
-
   "LibraryMenu.View": "表示",
-
   "LibraryMenu.Row": "列",
-
   "LibraryMenu.Grid": "グリッド",
-
   "LibraryMenu.Sound": "サウンド",
-
   "LibraryMenu.Volume": "音量",
-
   "LibraryMenu.AddGames": "ゲームを追加",
-
   "LibraryMenu.AddFolder": "フォルダーを追加…",
-
   "Hero.GameSettings": "ゲーム設定",
-
-
   "Hero.Console": "コンソール",
-
   "Hint.LibraryMenu": "ライブラリメニュー",
-
   "Library.SearchClear": "検索をクリア",
-
   "Library.TileSize": "タイルのサイズ",
-
   "Options.TitleMusicVolume.Desc": "ライブラリで再生されるゲームのタイトル音楽の音量です。",
   "Library.AddFolder": "フォルダーを追加",
   "Library.OpenFile": "ファイルを開く…",
-
   "Library.Context.Launch": "起動",
   "Library.Context.OpenFolder": "ゲームフォルダーを開く",
   "Library.Context.CopyPath": "パスをコピー",
   "Library.Context.CopyTitleId": "ゲームIDをコピー",
   "Library.Context.Remove": "ライブラリから削除",
-
   "Library.Empty.Title": "ライブラリが空です",
   "Library.Empty.Hint": "開始するには、ゲームが含まれるフォルダーを追加してください。",
   "Library.Empty.SearchTitle": "検索条件に一致するゲームが見つかりません",
   "Library.Empty.SearchHint": "ライブラリに「{0}」と一致する項目はありません。",
   "Library.Empty.AddFolder": "＋ ゲームフォルダーを追加",
-
   "Library.Loading": "ライブラリを読み込み中…",
   "Library.ScanningFolder": "フォルダーをスキャン中…",
   "Library.Stat.Version": "バージョン",
   "Library.Stat.Installed": "インストール済み",
   "Library.Stat.TitleId": "タイトルID",
+  "Library.Stat.CompatibilityMode": "互換モード",
   "Common.Back": "戻る",
-
   "Library.Music.Volume": "ゲーム音楽の音量",
   "Library.Music.Mute": "ゲーム音楽をミュート",
   "Library.Music.Unmute": "ゲーム音楽のミュートを解除",
-
   "Options.General": "一般",
   "Options.Logging": "ロギング",
   "Options.Section.Emulation": "エミュレーション",
   "Options.Section.Logging": "ロギング",
   "Options.Section.Launcher": "ランチャー",
-
-
   "Options.Strict.Label": "厳格な動的ライブラリ解決",
   "Options.Strict.Desc": "インポートされたシンボルが解決できない場合、起動を中断します。",
-
   "Options.LogLevel.Label": "ログレベル",
   "Options.LogLevel.Desc": "エミュレータコンソールに表示されるメッセージの詳細度。",
   "Options.LogLevel.Trace": "トレース",
@@ -98,31 +74,24 @@
   "Options.LogLevel.Warning": "警告",
   "Options.LogLevel.Error": "エラー",
   "Options.LogLevel.Critical": "致命的なエラー",
-
   "Options.TraceImports.Label": "インポートトレース制限",
   "Options.TraceImports.Desc": "各モジュールの最初のN個のインポートをトレースします（0 = 無効）。",
-
   "Options.CrashDump.Label": "クラッシュダンプ",
   "Options.CrashDump.Desc": "実行ログと同じ場所にクラッシュダンプを保存します（Windows x64 のみ）。ダンプは大きくなることがあり、個人情報を含む場合があります。",
   "Options.LogToFile.Label": "ファイルに保存",
   "Options.LogToFile.Desc": "エミュレータの出力をログファイルにコピーします。",
-
   "Options.LogsFolder.Label": "ログフォルダー",
   "Options.LogsFolder.Desc": "すべてのログ、トレース、ダンプ: {0} ({1})",
   "Options.LogsFolder.Open": "開く",
   "Options.LogFilePath.Label": "ログファイルのパス",
   "Options.LogFilePath.Default": "カスタムパスなし — ログはエミュレータと同じ場所の user/logs フォルダーに保存されます。",
   "Options.LogFilePath.Select": "選択…",
-
   "Options.OverrideLogFile.Label": "ログファイルを上書き",
   "Options.OverrideLogFile.Desc": "ゲームIDやタイムスタンプを追加せず、指定されたパスをそのまま使用します。",
-
   "Options.TitleMusic.Label": "ゲーム内音楽",
   "Options.TitleMusic.Desc": "ライブラリで選択したゲームのプレビュー音楽をループ再生します。",
-
   "Options.Discord.Label": "Discordステータス表示",
   "Options.Discord.Desc": "現在プレイ中のゲームをDiscordのプロフィールに表示します。",
-
   "Options.Language.Label": "エミュレータの言語",
   "Options.Language.Desc": "ランチャー全体で使用される言語。変更はすぐに適用されます。",
   "Options.Theme.Label": "テーマ",
@@ -145,10 +114,8 @@
   "Options.Theme.Glass.Desc": "ゲームアートの上に重なる操作部の濃さ。低いほどアートが透けて見えます。",
   "Options.Theme.Contrast.Label": "コントラスト",
   "Options.Theme.Contrast.Desc": "面どうし、および主要テキストと補助テキストの差。",
-
   "Common.On": "オン",
   "Common.Off": "オフ",
-
   "Console.Title": "コンソール",
   "Console.SearchWatermark": "検索…",
   "Console.AutoScroll": "自動スクロール",
@@ -156,7 +123,6 @@
   "Console.Copy": "コピー",
   "Console.Clear": "消去",
   "Console.WindowTitle": "SharpEmu コンソール",
-
   "Launch.NoGameSelected": "ゲームが選択されていません",
   "Launch.NoGameHint": "ライブラリからゲームを選択するか、eboot.bin ファイルを直接開いてください。",
   "Launch.Idle": "待機中",
@@ -181,14 +147,12 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "エミュレータを起動できませんでした: {0}",
   "Launch.ProcessExited": "プロセスがコード {0} ({1}) で終了しました。",
-
   "Exit.Ok": "OK",
   "Exit.InvalidArguments": "無効な引数",
   "Exit.EbootNotFound": "eboot が見つかりません",
   "Exit.RuntimeException": "ランタイム例外",
   "Exit.EmulationError": "エミュレーションエラー",
   "Exit.Unknown": "不明",
-
   "Status.EmulatorLocating": "エミュレータ: 位置を検索中…",
   "Status.EmulatorPath": "エミュレータ: {0}",
   "Status.EmulatorNotFound": "エミュレータ: SharpEmuの実行ファイルが見つかりません — 先に SharpEmu.CLI をビルドしてください。",
@@ -201,20 +165,16 @@
   "Status.Running": "{0} を実行中",
   "Status.Stopping": "停止中…",
   "Status.Idle": "待機中",
-
   "Clipboard.Path": "パス",
   "Clipboard.TitleId": "ゲームID",
-
   "Discord.Playing": "{0} をプレイ中",
   "Discord.Browsing": "ライブラリを閲覧中",
-
   "Dialog.ChooseGameFolder": "ゲームが含まれるフォルダーを選択",
   "Dialog.OpenExecutable": "起動する実行ファイルを開く",
   "Dialog.PsExecutables": "PlayStation 実行ファイル",
   "Dialog.SaveLogFile": "ログファイルの保存先を選択",
   "Dialog.PlainTextFiles": "プレーンテキストファイル",
   "Dialog.LogFiles": "ログファイル",
-
   "Library.Context.GameSettings": "ゲーム設定…",
   "Options.Env.Tab": "環境",
   "Options.Section.Environment": "環境変数",
@@ -262,7 +222,6 @@
   "Updater.Status.ChecksumFailed": "ダウンロードしたアップデートはSHA-256検証に失敗しました。",
   "Updater.Status.Unsupported": "自動アップデートにはWindows、Linux、またはmacOSのx64ビルドが必要です。",
   "Options.Graphics": "グラフィックス",
-
   "Options.Console.Language.Label": "コンソールの言語",
   "Options.Console.Language.Desc": "ゲームに通知するシステム言語。",
   "Options.Section.General.Desc": "エミュレーションの基本的な動作。",
@@ -297,9 +256,12 @@
   "Options.Hdr.Label": "HDR出力",
   "Options.Hdr.Desc": "選択したディスプレイとグラフィックスバックエンドが対応している場合にHDRを使用します。自動ではSDRにフォールバックします。",
   "Options.Hdr.Auto": "自動",
+  "Options.GpuReadbacks.Label": "GPUリードバック",
+  "Options.GpuReadbacks.Desc": "フル：コマンドプロセッサーはGPUが書き込んだ値を待ちます。最も正確ですが、カクつきが発生することがあります。\nオフ：メモリ上の現在の値が条件を満たしていれば、待たずに続行します。より滑らかになりますが、一部のゲームで描画の不具合が出ることがあります。\n次回のゲーム起動時から適用されます。",
+  "Options.GpuReadbacks.Full": "フル",
   "Options.Env.BinkPlayback.Label": "Bink 動画再生",
   "Options.Env.BinkPlayback.Desc": "Host は FFmpeg ブリッジ経由で Bink 動画を再生しますが、一部のゲームで問題が発生する場合があります。\nGuest はゲームエンジン独自のデコーダーを使用します。\nSkip は Bink 動画をスキップし、開発を容易にする場合があります。",
-  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
+  "Options.Env.BinkPlayback.Host": "ホスト（FFmpeg）",
   "Options.Env.BinkPlayback.Guest": "Guest",
   "Options.Env.BinkPlayback.Skip": "スキップ",
   "Options.Env.Group.Trophies": "トロフィー",
@@ -307,10 +269,14 @@
   "Options.Env.TrophyTest.Desc": "ゲームとトロフィーを選び、解除通知を表示します。実際には獲得されません。",
   "Options.Env.TrophyTest.Show": "通知を表示",
   "Options.Env.TrophySound.Label": "トロフィー音",
-  "Options.Env.TrophySound.Desc": "トロフィーを獲得したときに短い効果音を再生します。"
-,
+  "Options.Env.TrophySound.Desc": "トロフィーを獲得したときに短い効果音を再生します。",
+  "Options.GnmMode.TrophyKey.Label": "トロフィーキー",
+  "Options.GnmMode.TrophyKey.Desc": "暗号化されたトロフィー名と説明に使用するPS4トロフィーキーです。GnmModeのトロフィー一覧と獲得通知に使用されます。ローカルに保存されます。変更後は実行中のゲームを再起動してください。",
+  "Options.GnmMode.TrophyKey.Placeholder": "32桁の16進数",
+  "Options.GnmMode.TrophyKey.Invalid": "16進数（0–9、A–F）を正確に32桁入力してください。キーを削除するには欄を空にしてください。入力が有効になるまで、以前の有効なキーが保持されます。",
   "Trophies.Title": "トロフィー",
   "Trophies.None": "このゲームにはトロフィーがありません。",
+  "Trophies.GnmMode.KeyHint": "PS4のトロフィーを読み込むにはトロフィーキーが必要な場合があります。{0} → GnmMode → {1}で入力してください。",
   "Trophies.Loading": "トロフィーを読み込み中…",
   "Trophies.Hidden": "隠しトロフィー",
   "Trophies.HiddenDescription": "クリックしてこのトロフィーを表示します。",

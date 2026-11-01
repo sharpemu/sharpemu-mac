@@ -1,72 +1,51 @@
 {
   "_languageName": "Azərbaycanca",
   "Options.Env.SkipRt.Desc": "Şüa izləmədən istifadə edən hesablama kölgələndiricilərini keç. Susmaya görə söndürülüb.\nBu, bəzi effektləri aradan qaldıra və ya təsvirin yanlış görünməsinə səbəb ola bilər. Dəyişiklikdən sonra oyunu yenidən başladın.",
-
   "Page.Library": "Kitabxana",
   "Page.Options": "Parametrlər",
   "Page.Trophies": "Kuboklar",
   "Page.GameCount.One": "1 oyun",
   "Page.GameCount.Other": "{0} oyun",
-
   "Library.SearchWatermark": "Kitabxanada axtar…",
-
   "LibraryMenu.Library": "Kitabxana",
-
   "LibraryMenu.View": "Görünüş",
-
   "LibraryMenu.Row": "Sıra",
-
   "LibraryMenu.Grid": "Şəbəkə",
-
   "LibraryMenu.Sound": "Səs",
-
   "LibraryMenu.Volume": "Səs səviyyəsi",
-
   "LibraryMenu.AddGames": "Oyun əlavə et",
-
   "LibraryMenu.AddFolder": "Qovluq əlavə et…",
-
   "Hero.GameSettings": "Oyun ayarları",
-
-
   "Hero.Console": "Konsol",
-
   "Hint.LibraryMenu": "Kitabxana menyusu",
-
   "Library.SearchClear": "Axtarışı təmizlə",
-
   "Library.TileSize": "Kafel ölçüsü",
-
   "Options.TitleMusicVolume.Desc": "Oyunun başlıq musiqisinin kitabxanada nə qədər yüksək səslənməsi.",
   "Library.AddFolder": "Qovluq əlavə et",
   "Library.OpenFile": "Fayl aç…",
   "Library.View.Grid": "Üst-üstə görünüş",
   "Library.View.Carousel": "Sıra görünüşü",
-
   "Library.Context.Launch": "İşə sal",
   "Library.Context.OpenFolder": "Oyunun qovluğunu aç",
   "Library.Context.CopyPath": "Yolu kopyala",
   "Library.Context.CopyTitleId": "Oyunun ID-sini kopyala",
   "Library.Context.GameSettings": "Oyunun parametrləri…",
   "Library.Context.Remove": "Kitabxanadan çıxar",
-
   "Library.Empty.Title": "Kitabxananız boşdur",
   "Library.Empty.Hint": "Başlamaq üçün oyunlarınızın olduğu qovluğu əlavə edin.",
   "Library.Empty.SearchTitle": "Axtarışınıza uyğun oyun tapılmadı",
   "Library.Empty.SearchHint": "Kitabxanada “{0}” axtarışına uyğun heç nə yoxdur.",
   "Library.Empty.AddFolder": "＋ Oyun qovluğu əlavə et",
-
   "Library.Loading": "Kitabxana yüklənir…",
   "Library.ScanningFolder": "Qovluq skan edilir…",
   "Library.Stat.Version": "Versiya",
   "Library.Stat.Installed": "Quraşdırılıb",
   "Library.Stat.TitleId": "Oyunun ID-si",
+  "Library.Stat.CompatibilityMode": "Uyğunluq rejimi",
   "Common.Back": "Geri qayıt",
-
   "Library.Music.Volume": "Oyun musiqisinin səs səviyyəsi",
   "Library.Music.Mute": "Oyun musiqisini susdur",
   "Library.Music.Unmute": "Oyun musiqisinin səsini aç",
-
   "Options.General": "Ümumi",
   "Options.Logging": "Jurnala yazma",
   "Options.Env.Tab": "Mühit",
@@ -99,10 +78,8 @@
   "Options.Section.About.Desc": "Quruluş məlumatı, yenilənmələr və icma keçidləri.",
   "Options.Section.Display": "Ekran",
   "Options.Graphics": "Qrafika",
-
   "Options.Console.Language.Label": "Konsol dili",
   "Options.Console.Language.Desc": "Oyunlara bildirilən sistem dili.",
-
   "Options.RenderResolution.Label": "Daxili təsvir ölçüsü",
   "Options.RenderResolution.Desc": "Ekrandan kənar təsvir hədəflərini ilkin ölçüdən aşağı ölçüdə yaradıb göstərərkən böyüdün. Aşağı dəyərlər təsvir keyfiyyətini azaldaraq GPU yükünü yüngülləşdirir; növbəti işə salınmada qüvvəyə minir.",
   "Options.RenderResolution.Native": "100% (ilkin)",
@@ -129,6 +106,9 @@
   "Options.Hdr.Label": "HDR çıxışı",
   "Options.Hdr.Desc": "Seçilmiş ekran və qrafik alt sistem dəstəklədikdə HDR istifadə edin. Avtomatik rejimdə dəstək yoxdursa, SDR istifadə olunur.",
   "Options.Hdr.Auto": "Avtomatik",
+  "Options.GpuReadbacks.Label": "GPU geri oxuma",
+  "Options.GpuReadbacks.Desc": "Tam: əmr prosessoru GPU-nun yazdığı dəyərləri gözləyir. Ən dəqiq ayardır, lakin donmalara səbəb ola bilər.\nDeaktiv: yaddaşdakı mövcud dəyər şərti ödəyirsə, gözləmədən davam edilir. Daha axıcıdır, lakin bəzi oyunlarda qrafik xətaları görünə bilər.\nOyunun növbəti açılışında tətbiq olunur.",
+  "Options.GpuReadbacks.Full": "Tam",
   "Options.Env.BinkPlayback.Label": "Bink video oynadılması",
   "Options.Env.BinkPlayback.Desc": "Host Bink videolarını FFmpeg körpüsü vasitəsilə oynadır, lakin bəzi oyunlarda problemlər yarana bilər.\nGuest oyunun öz dekoderindən istifadə edir.\nSkip Bink videolarını ötürür və bu, inkişaf prosesini asanlaşdıra bilər.",
   "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
@@ -140,11 +120,12 @@
   "Options.Env.TrophyTest.Show": "Bildirişi göstər",
   "Options.Env.TrophySound.Label": "Kubok səsi",
   "Options.Env.TrophySound.Desc": "Kubok açılanda qısa bir səs çalınır.",
-
-
+  "Options.GnmMode.TrophyKey.Label": "Kubok açarı",
+  "Options.GnmMode.TrophyKey.Desc": "Şifrələnmiş kubok adları və təsvirləri üçün PS4 kubok açarı. GnmMode kubok siyahılarında və kubok açılma bildirişlərində istifadə olunur. Yerli olaraq saxlanılır; dəyişdirdikdən sonra işləyən oyunu yenidən başladın.",
+  "Options.GnmMode.TrophyKey.Placeholder": "32 onaltılıq simvol",
+  "Options.GnmMode.TrophyKey.Invalid": "Dəqiq 32 onaltılıq simvol (0–9, A–F) daxil edin və ya açarı silmək üçün sahəni boşaldın. Daxil edilən dəyər etibarlı olana qədər əvvəlki etibarlı açar saxlanılır.",
   "Options.Strict.Label": "Dinamik kitabxana simvollarının ciddi yoxlanması",
   "Options.Strict.Desc": "İdxal olunan simvol tapılmadıqda işə salınmanı dayandırın.",
-
   "Options.LogLevel.Label": "Jurnal səviyyəsi",
   "Options.LogLevel.Desc": "Emulyatorun konsol çıxışının təfərrüat səviyyəsi.",
   "Options.LogLevel.Trace": "İzləmə",
@@ -153,29 +134,22 @@
   "Options.LogLevel.Warning": "Xəbərdarlıq",
   "Options.LogLevel.Error": "Xəta",
   "Options.LogLevel.Critical": "Kritik",
-
   "Options.TraceImports.Label": "İdxalların izlənmə həddi",
   "Options.TraceImports.Desc": "Hər modulun ilk N idxalını izləyin (0 = sönülü).",
-
   "Options.LogToFile.Label": "Jurnalı fayla yaz",
   "Options.LogToFile.Desc": "Emulyatorun çıxışını jurnal faylına da yazın.",
-
   "Options.LogsFolder.Label": "Jurnallar qovluğu",
   "Options.LogsFolder.Desc": "Bütün jurnallar, izləmələr və dampalar: {0} ({1})",
   "Options.LogsFolder.Open": "Aç",
   "Options.LogFilePath.Label": "Jurnal faylının yolu",
   "Options.LogFilePath.Default": "Fərdi yol yoxdur. Jurnallar emulyatorun yanındakı user/logs qovluğuna yazılır.",
   "Options.LogFilePath.Select": "Seç…",
-
   "Options.OverrideLogFile.Label": "Jurnal faylının yolunu olduğu kimi istifadə et",
   "Options.OverrideLogFile.Desc": "Oyunun ID-sini və vaxt nişanını əlavə etmək əvəzinə fayl yolunu olduğu kimi istifadə edin.",
-
   "Options.TitleMusic.Label": "Oyun musiqisi",
   "Options.TitleMusic.Desc": "Kitabxanada seçilmiş oyunun önbaxış musiqisini təkrar səsləndirin.",
-
   "Options.Discord.Label": "Discord vəziyyəti",
   "Options.Discord.Desc": "İşləyən oyunu Discord profilinizdə göstərin.",
-
   "Options.Language.Label": "Emulyatorun dili",
   "Options.Language.Desc": "Başladıcı daxilində istifadə olunan dil. Dərhal tətbiq olunur.",
   "Options.Theme.Label": "Mövzu",
@@ -198,7 +172,6 @@
   "Options.Theme.Glass.Desc": "Oyun şəkli üzərindəki idarəetmə elementlərinin nə qədər tutqun olduğu. Aşağı dəyər şəkli daha çox göstərir.",
   "Options.Theme.Contrast.Label": "Kontrast",
   "Options.Theme.Contrast.Desc": "Səthlər arasında, əsas və ikinci dərəcəli mətn arasında fərq.",
-
   "Common.On": "Aktiv",
   "Common.Off": "Deaktiv",
   "Common.Save": "Yadda saxla",
@@ -207,8 +180,6 @@
   "Setting.Group.EnvironmentVariables": "Mühit dəyişənləri",
   "Setting.CustomEnv.Count": "{0} təyin edilib",
   "Common.Cancel": "Ləğv et",
-
-
   "Console.Title": "Konsol",
   "Console.SearchWatermark": "Axtar...",
   "Console.AutoScroll": "Avtomatik sürüşdürmə",
@@ -216,7 +187,6 @@
   "Console.Copy": "Kopyala",
   "Console.Clear": "Təmizlə",
   "Console.WindowTitle": "SharpEmu konsolu",
-
   "Launch.NoGameSelected": "Oyun seçilməyib",
   "Launch.NoGameHint": "Kitabxanadan oyun seçin və ya birbaşa eboot.bin faylını açın.",
   "Launch.Idle": "Gözləmədə",
@@ -237,7 +207,6 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "Emulyatoru işə salmaq mümkün olmadı: {0}",
   "Launch.ProcessExited": "Proses {0} kodu ilə bağlandı ({1}).",
-
   "Exit.Ok": "Uğurlu",
   "Exit.InvalidArguments": "yanlış arqumentlər",
   "Exit.EbootNotFound": "eboot tapılmadı",
@@ -260,10 +229,8 @@
   "Options.OverlayCorner.TopRight": "Yuxarı sağ",
   "Options.OverlayCorner.BottomRight": "Aşağı sağ",
   "Options.OverlayCorner.BottomLeft": "Aşağı sol",
-
   "Exit.EmulationError": "emulyasiya xətası",
   "Exit.Unknown": "naməlum",
-
   "Status.EmulatorLocating": "Emulyator: axtarılır…",
   "Status.EmulatorPath": "Emulyator: {0}",
   "Status.EmulatorNotFound": "Emulyator: SharpEmu icra faylı tapılmadı. Əvvəlcə SharpEmu.CLI layihəsini yığın.",
@@ -276,21 +243,17 @@
   "Status.Running": "İşləyir: {0}",
   "Status.Stopping": "Dayandırılır…",
   "Status.Idle": "Gözləmədə",
-
   "Clipboard.Path": "Yol",
   "Clipboard.TitleId": "Oyunun ID-si",
-
   "Discord.Playing": "{0} oynayır",
   "Discord.Browsing": "Kitabxanaya baxır",
-
   "Dialog.ChooseGameFolder": "Oyunların olduğu qovluğu seç",
   "Dialog.OpenExecutable": "İşə salmaq üçün icra faylını aç",
   "Dialog.PsExecutables": "PS icra faylları",
   "Dialog.SaveLogFile": "Jurnal faylının saxlanacağı yeri seç",
   "Dialog.PlainTextFiles": "Sadə mətn faylları",
   "Dialog.LogFiles": "Jurnal faylları",
-
-  "Options.About" : "Haqqında",
+  "Options.About": "Haqqında",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Mənbə kodu, problemlər və layihənin inkişafı.",
   "About.Github.LatestCommitLabel": "Son kod dəyişikliyi",
@@ -299,7 +262,6 @@
   "About.Discord.Desc": "İcmaya qoşulun, dəstək alın və layihənin inkişafını izləyin.",
   "About.GithubButton": "GitHub-da töhfə ver!",
   "About.DiscordButton": "Discord icmamıza qoşul!",
-
   "Updater.Auto.Label": "Başlanğıcda yeniləmələri yoxla",
   "Updater.Auto.Desc": "Başlanğıcı ləngitmədən GitHub-da yoxlayır.",
   "Updater.Label": "Yeniləmələr",
@@ -314,10 +276,10 @@
   "Updater.Status.Timeout": "Yeniləmələrin yoxlanması üçün ayrılmış 10 saniyə bitdi.",
   "Updater.Status.Failed": "Yeniləmələri yoxlamaq mümkün olmadı.",
   "Updater.Status.ChecksumFailed": "Endirilmiş yeniləmə SHA-256 yoxlamasından keçmədi.",
-  "Updater.Status.Unsupported": "Avtomatik yeniləmə üçün Windows, Linux və ya macOS x64 yığımı tələb olunur."
-,
+  "Updater.Status.Unsupported": "Avtomatik yeniləmə üçün Windows, Linux və ya macOS x64 yığımı tələb olunur.",
   "Trophies.Title": "Kuboklar",
   "Trophies.None": "Bu oyunda kubok yoxdur.",
+  "Trophies.GnmMode.KeyHint": "PS4 kuboklarını yükləmək üçün kubok açarı lazım ola bilər. Açarı {0} → GnmMode → {1} bölməsində daxil edə bilərsiniz.",
   "Trophies.Loading": "Kuboklar yüklənir…",
   "Trophies.Hidden": "Gizli kubok",
   "Trophies.HiddenDescription": "Bu kuboku göstərmək üçün klikləyin.",

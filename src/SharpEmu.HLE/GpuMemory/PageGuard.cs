@@ -19,6 +19,7 @@ public sealed class PageGuard : IDisposable
     private const ulong BlockBytes = TrackerLayout.BlockBytes;
     private const ulong SpaceBytes = TrackerLayout.SpaceBytes;
     private const int PagesPerBlock = TrackerLayout.PagesPerBlock;
+    private const int MergeGapPages = 64;
     private static long _nextWriteRestorationVersion;
 
     private struct PageCounts
@@ -129,6 +130,7 @@ public sealed class PageGuard : IDisposable
     public PageGuard(IGuestAddressSpace addressSpace)
     {
         GpuMemoryAccessProfile.Initialize();
+        ProtectionCauseCounts.Initialize();
         if (addressSpace.ProtectionPageSize != PageBytes)
         {
             OnFatal($"The host page size is not supported: 0x{addressSpace.ProtectionPageSize:X8}.");
@@ -179,13 +181,16 @@ public sealed class PageGuard : IDisposable
         }
     }
 
-    public void AddWatch(ulong address, ulong size, bool blockReads)
+    public void AddWatch(ulong address, ulong size, bool blockReads) =>
+        AddWatch(address, size, blockReads, DefaultCause(true, blockReads));
+
+    public void AddWatch(ulong address, ulong size, bool blockReads, ProtectionCause cause)
     {
         SplitCrossingStats.Count(SplitCrossing.WatchAdd);
         _batchSpace?.BeginProtectionBatch();
         try
         {
-            UpdatePages(address, size, true, blockReads);
+            UpdatePages(address, size, true, blockReads, cause);
         }
         finally
         {
@@ -193,13 +198,16 @@ public sealed class PageGuard : IDisposable
         }
     }
 
-    public void RemoveWatch(ulong address, ulong size, bool blockReads)
+    public void RemoveWatch(ulong address, ulong size, bool blockReads) =>
+        RemoveWatch(address, size, blockReads, DefaultCause(false, blockReads));
+
+    public void RemoveWatch(ulong address, ulong size, bool blockReads, ProtectionCause cause)
     {
         SplitCrossingStats.Count(SplitCrossing.WatchRemove);
         _batchSpace?.BeginProtectionBatch();
         try
         {
-            UpdatePages(address, size, false, blockReads);
+            UpdatePages(address, size, false, blockReads, cause);
         }
         finally
         {
@@ -207,13 +215,16 @@ public sealed class PageGuard : IDisposable
         }
     }
 
-    public void AddWatchMask(ulong blockBase, in PageMask pages, bool blockReads)
+    public void AddWatchMask(ulong blockBase, in PageMask pages, bool blockReads) =>
+        AddWatchMask(blockBase, pages, blockReads, DefaultCause(true, blockReads));
+
+    public void AddWatchMask(ulong blockBase, in PageMask pages, bool blockReads, ProtectionCause cause)
     {
         SplitCrossingStats.Count(SplitCrossing.WatchAdd);
         _batchSpace?.BeginProtectionBatch();
         try
         {
-            UpdateMask(blockBase, pages, true, blockReads);
+            UpdateMask(blockBase, pages, true, blockReads, cause);
         }
         finally
         {
@@ -221,19 +232,30 @@ public sealed class PageGuard : IDisposable
         }
     }
 
-    public void RemoveWatchMask(ulong blockBase, in PageMask pages, bool blockReads)
+    public void RemoveWatchMask(ulong blockBase, in PageMask pages, bool blockReads) =>
+        RemoveWatchMask(blockBase, pages, blockReads, DefaultCause(false, blockReads));
+
+    public void RemoveWatchMask(ulong blockBase, in PageMask pages, bool blockReads, ProtectionCause cause)
     {
         SplitCrossingStats.Count(SplitCrossing.WatchRemove);
         _batchSpace?.BeginProtectionBatch();
         try
         {
-            UpdateMask(blockBase, pages, false, blockReads);
+            UpdateMask(blockBase, pages, false, blockReads, cause);
         }
         finally
         {
             _batchSpace?.EndProtectionBatch();
         }
     }
+
+    private static ProtectionCause DefaultCause(bool track, bool blockReads) => (track, blockReads) switch
+    {
+        (true, true) => ProtectionCause.GpuWriteBlock,
+        (false, true) => ProtectionCause.GpuReadRelease,
+        (true, false) => ProtectionCause.UploadReprotect,
+        _ => ProtectionCause.CpuWriteRelease,
+    };
 
     // Watcher state only; the guest's own permissions are the ledger's.
     public bool Allows(ulong address, FaultKind kind)
@@ -352,8 +374,9 @@ public sealed class PageGuard : IDisposable
 
     // Pages a thread runs on as its stack keep the guest's own access (CpuStackRanges).
     private void ApplyAccess(ulong address, ulong size, GuestPageProtection allowedAccess,
-        GuestPageProtection guestAccess, bool ordinaryEnrollment)
+        GuestPageProtection guestAccess, bool ordinaryEnrollment, ProtectionCause cause)
     {
+        ProtectionCauseCounts.Record(cause, size);
         var stacks = Stacks.Snapshot;
         var cursor = address;
         var end = address + size;
@@ -400,22 +423,39 @@ public sealed class PageGuard : IDisposable
         }
     }
 
+    // Neighbouring pages mostly share a ledger record: look up again only where its answer stops holding.
+    // A ledger change waits for the block lock and then derives its pages again (Reapply).
+    private struct GuestProtectionCursor
+    {
+        private ulong _validUntil;
+        private GuestPageProtection _protection;
+
+        public GuestPageProtection At(GuestPermissionLedger ledger, ulong address)
+        {
+            if (address >= _validUntil)
+            {
+                _protection = ledger.Lookup(address, out _validUntil);
+            }
+
+            return _protection;
+        }
+    }
+
     private void ApplyDerived(ulong begin, ulong end, PageBlock block)
     {
+        var guest = default(GuestProtectionCursor);
         var runStart = begin;
         var runAllowedAccess = GuestPageProtection.None;
         var runGuestAccess = GuestPageProtection.None;
-        var guestAccess = GuestPageProtection.None;
-        var guestValidEnd = 0UL;
         for (var address = begin; address < end; address += PageBytes)
         {
-            // Neighbouring pages mostly share a ledger record: look up again only where its answer stops holding.
-            if (address >= guestValidEnd)
-                guestAccess = Permissions.Lookup(address, out guestValidEnd);
-            var allowedAccess = Derive(guestAccess, block.Pages[(int)(address % BlockBytes / PageBytes)].GetAllowedAccess());
+            var guestAccess = guest.At(Permissions, address);
+            var watchers = block.Pages[(int)(address % BlockBytes / PageBytes)].GetAllowedAccess();
+            var allowedAccess = Derive(guestAccess, watchers);
             if (address != begin && (allowedAccess != runAllowedAccess || guestAccess != runGuestAccess))
             {
-                ApplyAccess(runStart, address - runStart, runAllowedAccess, runGuestAccess, ordinaryEnrollment: true);
+                ApplyAccess(runStart, address - runStart, runAllowedAccess, runGuestAccess, ordinaryEnrollment: true,
+                    ProtectionCause.MappingReapply);
                 runStart = address;
             }
 
@@ -423,64 +463,96 @@ public sealed class PageGuard : IDisposable
             runGuestAccess = guestAccess;
         }
 
-        ApplyAccess(runStart, end - runStart, runAllowedAccess, runGuestAccess, ordinaryEnrollment: true);
+        ApplyAccess(runStart, end - runStart, runAllowedAccess, runGuestAccess, ordinaryEnrollment: true,
+            ProtectionCause.MappingReapply);
     }
 
-    private void UpdateBlock(PageBlock block, ulong blockBase, int first, int last, bool track, bool isRead, bool masked, in PageMask mask)
+    private struct BlockUpdate(ulong blockBase, bool track, bool isRead, ProtectionCause cause)
+    {
+        public readonly ulong BlockBase = blockBase;
+        public readonly bool Track = track;
+        public readonly bool IsRead = isRead;
+        public readonly ProtectionCause Cause = cause;
+        public GuestProtectionCursor Guest;
+        public long RestorationVersion;
+        public bool Pending;
+        public int PendingBegin;
+        public int PendingEnd;
+        public int UniformEnd;
+        public GuestPageProtection PendingAccess;
+        // The guest's own access over the pending run: the split's derived protection takes it
+        // with the run, so a run never spans two ledger answers.
+        public GuestPageProtection PendingGuest;
+        public long WriteWatchDelta;
+        public int PeakWriteWatches;
+    }
+
+    private void UpdateBlock(PageBlock block, ulong blockBase, int first, int last, bool track, bool isRead, bool masked, in PageMask mask, ProtectionCause cause)
     {
         using var _ = new BlockLock(block);
-        var pages = block.Pages;
         // Allocate before adding protection, never while resolving a fault.
         if (track) block.WriteRestorations ??= new long[PagesPerBlock];
-        var restorationVersion = 0L;
-        // Neighbouring pages mostly share a ledger record: look up again only where its answer stops holding.
-        // A ledger change waits for this block lock and then derives its pages again (Reapply).
-        var guest = Permissions.Lookup(blockBase + (ulong)first * PageBytes, out var guestValidEnd);
-        var runGuestAccess = guest;
-        var allowedAccess = Derive(guest, pages[first].GetAllowedAccess());
-        var rangeBegin = 0;
-        var rangeBytes = 0UL;
-        var potentialRangeBytes = 0UL;
-        var writeWatchDelta = 0L;
-        var peakWriteWatches = 0;
-
-        void ReleasePending()
+        var update = new BlockUpdate(blockBase, track, isRead, cause);
+        if (masked)
         {
-            if (rangeBytes != 0)
+            foreach (var (start, end) in mask)
             {
-                ApplyAccess(blockBase + (ulong)rangeBegin * PageBytes, rangeBytes, allowedAccess, runGuestAccess,
-                    ordinaryEnrollment: false);
-                rangeBytes = 0;
-                potentialRangeBytes = 0;
+                UpdateRun(block, ref update, start, end);
             }
         }
-
-        for (var pageIndex = first; pageIndex < last; pageIndex++)
+        else
         {
-            var address = blockBase + (ulong)pageIndex * PageBytes;
-            var update = !masked || mask.Get(pageIndex);
+            UpdateRun(block, ref update, first, last);
+        }
 
-            if (address >= guestValidEnd)
-                guest = Permissions.Lookup(address, out guestValidEnd);
+        ReleasePending(ref update);
+        if (update.WriteWatchDelta != 0)
+        {
+            Interlocked.Add(ref _liveWriteWatches, update.WriteWatchDelta);
+        }
+
+        for (var peak = Volatile.Read(ref _peakPageWriteWatches);
+             update.PeakWriteWatches > peak;
+             peak = Volatile.Read(ref _peakPageWriteWatches))
+        {
+            if (Interlocked.CompareExchange(ref _peakPageWriteWatches, update.PeakWriteWatches, peak) == peak)
+            {
+                break;
+            }
+        }
+    }
+
+    private void UpdateRun(PageBlock block, ref BlockUpdate update, int start, int end)
+    {
+        var pages = block.Pages;
+        if (update.Pending && update.UniformEnd < start && !ExtendAcrossGap(pages, ref update, start))
+        {
+            ReleasePending(ref update);
+        }
+
+        for (var pageIndex = start; pageIndex < end; pageIndex++)
+        {
+            var address = update.BlockBase + (ulong)pageIndex * PageBytes;
+            var guest = update.Guest.At(Permissions, address);
             var oldAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
             var wasWatched = pages[pageIndex].WriteWatchCount != 0 || pages[pageIndex].ReadWatchCount != 0;
-            var newCount = pages[pageIndex].ChangeWatchCount(update ? (track ? 1 : -1) : 0, isRead, address, WriteWatchLimit);
+            var newCount = pages[pageIndex].ChangeWatchCount(update.Track ? 1 : -1, update.IsRead, address, WriteWatchLimit);
             // Before the page's protection is applied below: the split's page summary must show a
             // watch before the watch can let a GPU cache rely on it.
-            if (update && _watchObserver is { } observer &&
+            if (_watchObserver is { } observer &&
                 wasWatched != (pages[pageIndex].WriteWatchCount != 0 || pages[pageIndex].ReadWatchCount != 0))
             {
                 observer.OnPageWatchChanged(address, !wasWatched);
             }
 
-            if (update && !isRead)
+            if (!update.IsRead)
             {
-                writeWatchDelta += track ? 1 : -1;
-                if (track) peakWriteWatches = Math.Max(peakWriteWatches, newCount);
+                update.WriteWatchDelta += update.Track ? 1 : -1;
+                if (update.Track) update.PeakWriteWatches = Math.Max(update.PeakWriteWatches, newCount);
             }
 
             var newAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
-            if (update && block.WriteRestorations is { } restorations)
+            if (block.WriteRestorations is { } restorations)
             {
                 if ((newAllowedAccess & GuestPageProtection.Write) == 0)
                 {
@@ -488,62 +560,82 @@ public sealed class PageGuard : IDisposable
                 }
                 else if ((oldAllowedAccess & GuestPageProtection.Write) == 0)
                 {
-                    if (restorationVersion == 0)
-                        restorationVersion = Interlocked.Increment(ref _nextWriteRestorationVersion);
-                    restorations[pageIndex] = restorationVersion;
+                    if (update.RestorationVersion == 0)
+                        update.RestorationVersion = Interlocked.Increment(ref _nextWriteRestorationVersion);
+                    restorations[pageIndex] = update.RestorationVersion;
                 }
             }
-            if (update && GuestGpuMemoryHook.Traces(address, PageBytes))
+            if (GuestGpuMemoryHook.Traces(address, PageBytes))
                 GuestGpuMemoryHook.Trace(address, PageBytes,
-                    $"watch track={track} block_reads={isRead} guest={guest} read_watch={pages[pageIndex].ReadWatchCount} write_watch={pages[pageIndex].WriteWatchCount} old={oldAllowedAccess} new={newAllowedAccess}");
+                    $"watch track={update.Track} block_reads={update.IsRead} guest={guest} read_watch={pages[pageIndex].ReadWatchCount} write_watch={pages[pageIndex].WriteWatchCount} old={oldAllowedAccess} new={newAllowedAccess}");
 
-            if (newAllowedAccess != allowedAccess || guest != runGuestAccess)
+            if (update.Pending)
             {
-                ReleasePending();
-                allowedAccess = newAllowedAccess;
-                runGuestAccess = guest;
-            }
-            else if (rangeBytes != 0)
-            {
-                potentialRangeBytes += PageBytes;
-            }
-
-            if (!update)
-            {
-                continue;
-            }
-
-            var watcherEdge = (track && newCount == 1) || (!track && newCount == 0);
-            if (watcherEdge && oldAllowedAccess != newAllowedAccess)
-            {
-                if (rangeBytes == 0)
+                if (newAllowedAccess == update.PendingAccess && guest == update.PendingGuest)
                 {
-                    rangeBegin = pageIndex;
-                    potentialRangeBytes = PageBytes;
+                    update.UniformEnd = pageIndex + 1;
+                    if (newAllowedAccess != oldAllowedAccess)
+                    {
+                        update.PendingEnd = pageIndex + 1;
+                    }
+
+                    continue;
                 }
 
-                rangeBytes = potentialRangeBytes;
+                ReleasePending(ref update);
             }
-        }
 
-        ReleasePending();
-        if (writeWatchDelta != 0)
-        {
-            Interlocked.Add(ref _liveWriteWatches, writeWatchDelta);
-        }
-
-        for (var peak = Volatile.Read(ref _peakPageWriteWatches);
-             peakWriteWatches > peak;
-             peak = Volatile.Read(ref _peakPageWriteWatches))
-        {
-            if (Interlocked.CompareExchange(ref _peakPageWriteWatches, peakWriteWatches, peak) == peak)
+            if (newAllowedAccess != oldAllowedAccess)
             {
-                break;
+                update.Pending = true;
+                update.PendingBegin = pageIndex;
+                update.PendingEnd = pageIndex + 1;
+                update.UniformEnd = pageIndex + 1;
+                update.PendingAccess = newAllowedAccess;
+                update.PendingGuest = guest;
             }
         }
     }
 
-    private void UpdatePages(ulong address, ulong size, bool track, bool isRead)
+    private bool ExtendAcrossGap(PageCounts[] pages, ref BlockUpdate update, int start)
+    {
+        if (start - update.UniformEnd > MergeGapPages)
+        {
+            return false;
+        }
+
+        for (var pageIndex = update.UniformEnd; pageIndex < start; pageIndex++)
+        {
+            var address = update.BlockBase + (ulong)pageIndex * PageBytes;
+            var guest = update.Guest.At(Permissions, address);
+            if (guest != update.PendingGuest || Derive(guest, pages[pageIndex].GetAllowedAccess()) != update.PendingAccess)
+            {
+                return false;
+            }
+        }
+
+        update.UniformEnd = start;
+        return true;
+    }
+
+    private void ReleasePending(ref BlockUpdate update)
+    {
+        if (!update.Pending)
+        {
+            return;
+        }
+
+        update.Pending = false;
+        ApplyAccess(
+            update.BlockBase + (ulong)update.PendingBegin * PageBytes,
+            (ulong)(update.PendingEnd - update.PendingBegin) * PageBytes,
+            update.PendingAccess,
+            update.PendingGuest,
+            ordinaryEnrollment: false,
+            update.Cause);
+    }
+
+    private void UpdatePages(ulong address, ulong size, bool track, bool isRead, ProtectionCause cause)
     {
         var begin = GetPageStart(address);
         var end = GetPageRangeEnd(address, size);
@@ -560,12 +652,12 @@ public sealed class PageGuard : IDisposable
 
             var first = (int)((chunkBegin - blockBase) / PageBytes);
             var last = (int)((chunkEnd - blockBase) / PageBytes);
-            UpdateBlock(block, blockBase, first, last, track, isRead, false, default);
+            UpdateBlock(block, blockBase, first, last, track, isRead, false, default, cause);
             chunkBegin = chunkEnd;
         }
     }
 
-    private void UpdateMask(ulong blockBase, in PageMask pages, bool track, bool isRead)
+    private void UpdateMask(ulong blockBase, in PageMask pages, bool track, bool isRead, ProtectionCause cause)
     {
         if (blockBase % BlockBytes != 0 || blockBase >= SpaceBytes)
         {
@@ -583,7 +675,7 @@ public sealed class PageGuard : IDisposable
 
         if (firstEnd == last)
         {
-            UpdatePages(blockBase + (ulong)first * PageBytes, (ulong)(last - first) * PageBytes, track, isRead);
+            UpdatePages(blockBase + (ulong)first * PageBytes, (ulong)(last - first) * PageBytes, track, isRead, cause);
             return;
         }
 
@@ -594,7 +686,7 @@ public sealed class PageGuard : IDisposable
             return;
         }
 
-        UpdateBlock(block, blockBase, first, last, track, isRead, true, pages);
+        UpdateBlock(block, blockBase, first, last, track, isRead, true, pages, cause);
     }
 
     private static ulong GetPageStart(ulong address) => address & ~(PageBytes - 1);

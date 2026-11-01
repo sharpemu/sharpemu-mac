@@ -10,6 +10,22 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 
 public sealed class TileGeometryTests
 {
+    [Theory]
+    [InlineData(4u, 0u, 16u)]
+    [InlineData(0u, 4u, 32u)]
+    [InlineData(5u, 3u, 27u)]
+    [InlineData(7u, 7u, 63u)]
+    public void GcnThinBlockOffsetsFollowTheEightByEightMicrotile(uint x, uint y, uint element)
+    {
+        for (var bytes = 1u; bytes <= 16; bytes *= 2)
+        {
+            Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.GcnThin1D, bytes, out var layout));
+            Assert.Equal(64u * bytes, layout.BlockSize);
+            Assert.True(TileGeometry.TryGetBlockOffset(layout, x, y, 0, out var offset));
+            Assert.Equal(element * bytes, offset);
+        }
+    }
+
     [Fact]
     public void RenderTargetTextures_SelectGen5AddressEquations()
     {

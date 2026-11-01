@@ -16,48 +16,30 @@
   "Options.OverlayCorner.TopRight": "Top right",
   "Options.OverlayCorner.BottomRight": "Bottom right",
   "Options.OverlayCorner.BottomLeft": "Bottom left",
-
   "Page.Library": "Library",
   "Page.Options": "Options",
   "Page.Trophies": "Trophies",
   "Page.GameCount.One": "1 game",
   "Page.GameCount.Other": "{0} games",
-
   "Library.SearchWatermark": "Search library…",
-
   "LibraryMenu.Library": "Library",
-
   "LibraryMenu.View": "View",
-
   "LibraryMenu.Row": "Row",
-
   "LibraryMenu.Grid": "Grid",
-
   "LibraryMenu.Sound": "Sound",
-
   "LibraryMenu.Volume": "Volume",
-
   "LibraryMenu.AddGames": "Add games",
-
   "LibraryMenu.AddFolder": "Add folder…",
-
   "Hero.GameSettings": "Game settings",
-
-
   "Hero.Console": "Console",
-
   "Hint.LibraryMenu": "Library menu",
-
   "Library.SearchClear": "Clear search",
-
   "Library.TileSize": "Tile size",
-
   "Options.TitleMusicVolume.Desc": "How loud a game's title music plays in the library.",
   "Library.AddFolder": "Add folder",
   "Library.OpenFile": "Open file…",
   "Library.View.Grid": "Stacked view",
   "Library.View.Carousel": "Row view",
-
   "Library.Context.Launch": "Launch",
   "Library.Context.OpenFolder": "Open game folder",
   "Library.Context.CopyPath": "Copy path",
@@ -65,7 +47,6 @@
   "Library.Context.GameSettings": "Game settings…",
   "Library.Context.Remove": "Remove from library",
   "Library.Context.PackZar": "Pack as .zar…",
-
   "Library.Pack.Title": "Pack as .zar",
   "Library.Pack.Heading": "Packing {0}",
   "Library.Pack.Explanation": "This stores the whole game folder in a single compressed .zar file. SharpEmu runs the game straight from it without unpacking, so it usually takes less disk space and plays the same. The game folder is kept; once the archive is written and checked, you can choose to delete it.",
@@ -83,24 +64,21 @@
   "Library.Pack.DoneDeleted": "Done. The archive is ready and the game folder was deleted.",
   "Library.Pack.DeleteSkipped": "Done. The game folder is kept because the archive could not be confirmed to hold all of it.",
   "Library.Pack.DeleteFailed": "The archive is ready, but deleting the game folder failed: {0}",
-
   "Library.Empty.Title": "Your library is empty",
   "Library.Empty.Hint": "Add a folder containing your games to get started.",
   "Library.Empty.SearchTitle": "No games match your search",
   "Library.Empty.SearchHint": "Nothing in the library matches “{0}”.",
   "Library.Empty.AddFolder": "＋ Add game folder",
-
   "Library.Loading": "Loading library…",
   "Library.ScanningFolder": "Scanning folder…",
   "Library.Stat.Version": "Version",
   "Library.Stat.Installed": "Installed",
   "Library.Stat.TitleId": "Title ID",
+  "Library.Stat.CompatibilityMode": "Compatibility Mode",
   "Common.Back": "Back",
-
   "Library.Music.Volume": "Title music volume",
   "Library.Music.Mute": "Mute title music",
   "Library.Music.Unmute": "Unmute title music",
-
   "Options.General": "General",
   "Options.Logging": "Logging",
   "Options.Env.Tab": "Environment",
@@ -132,10 +110,8 @@
   "Options.Section.About.Desc": "Build information, updates and community links.",
   "Options.Section.Display": "DISPLAY",
   "Options.Graphics": "Graphics",
-
   "Options.Console.Language.Label": "Console language",
   "Options.Console.Language.Desc": "System language reported to games.",
-
   "Options.WindowMode.Label": "Window mode",
   "Options.WindowMode.Desc": "Regular window, desktop borderless, or exclusive fullscreen.",
   "Options.WindowMode.Windowed": "Windowed",
@@ -159,16 +135,16 @@
   "Options.Hdr.Label": "HDR output",
   "Options.Hdr.Desc": "Use HDR when the selected display and graphics backend support it. Auto falls back to SDR.",
   "Options.Hdr.Auto": "Auto",
+  "Options.GpuReadbacks.Label": "GPU readbacks",
+  "Options.GpuReadbacks.Desc": "Full: the command processor waits for values written by the GPU. Most accurate, but it can cause stutter.\nOff: waits continue with the value already in memory when it meets the condition. Smoother, but some games can show graphics errors.\nApplies from the next game launch.",
+  "Options.GpuReadbacks.Full": "Full",
   "Options.Env.BinkPlayback.Label": "Bink video playback",
   "Options.Env.BinkPlayback.Desc": "Host plays Bink videos through the FFmpeg bridge, but some games may have issues.\nGuest uses the game engine's own decoder.\nSkip skips Bink videos, which can make development easier.",
   "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
   "Options.Env.BinkPlayback.Guest": "Guest",
   "Options.Env.BinkPlayback.Skip": "Skip",
-
-
   "Options.Strict.Label": "Strict dynlib resolution",
   "Options.Strict.Desc": "Fail the launch when an imported symbol cannot be resolved.",
-
   "Options.LogLevel.Label": "Log level",
   "Options.LogLevel.Desc": "Verbosity of the emulator console output.",
   "Options.LogLevel.Trace": "Trace",
@@ -177,31 +153,24 @@
   "Options.LogLevel.Warning": "Warning",
   "Options.LogLevel.Error": "Error",
   "Options.LogLevel.Critical": "Critical",
-
   "Options.TraceImports.Label": "Import trace limit",
   "Options.TraceImports.Desc": "Trace the first N imports per module (0 = off).",
-
   "Options.CrashDump.Label": "Crash dumps",
   "Options.CrashDump.Desc": "Save crash dumps beside the run log (Windows x64 only). Dumps can be large and contain private data.",
   "Options.LogToFile.Label": "Log to file",
   "Options.LogToFile.Desc": "Mirror emulator output to a log file.",
-
   "Options.LogFilePath.Label": "Log file path",
   "Options.LogsFolder.Label": "Logs folder",
   "Options.LogsFolder.Desc": "Every log, trace and dump: {0} ({1})",
   "Options.LogsFolder.Open": "Open",
   "Options.LogFilePath.Default": "No custom path — logs go to the logs folder.",
   "Options.LogFilePath.Select": "Select…",
-
   "Options.OverrideLogFile.Label": "Override log file",
   "Options.OverrideLogFile.Desc": "Use the exact file path instead of appending title ID and timestamp.",
-
   "Options.TitleMusic.Label": "Title music",
   "Options.TitleMusic.Desc": "Loop the selected game's preview music in the library.",
-
   "Options.Discord.Label": "Discord presence",
   "Options.Discord.Desc": "Show the running game on your Discord profile.",
-
   "Options.Language.Label": "Emulator language",
   "Options.Language.Desc": "Language used throughout the launcher. Applies immediately.",
   "Options.Theme.Label": "Theme",
@@ -224,7 +193,6 @@
   "Options.Theme.Glass.Desc": "How solid the controls over game art are. Lower lets more of the art show through.",
   "Options.Theme.Contrast.Label": "Contrast",
   "Options.Theme.Contrast.Desc": "Separation between surfaces and between primary and secondary text.",
-
   "Common.On": "On",
   "Common.Off": "Off",
   "Common.Save": "Save",
@@ -233,8 +201,6 @@
   "Setting.Group.EnvironmentVariables": "Environment variables",
   "Setting.CustomEnv.Count": "{0} set",
   "Common.Cancel": "Cancel",
-
-
   "Console.Title": "CONSOLE",
   "Console.SearchWatermark": "Search...",
   "Console.AutoScroll": "Auto-scroll",
@@ -242,7 +208,6 @@
   "Console.Copy": "Copy",
   "Console.Clear": "Clear",
   "Console.WindowTitle": "SharpEmu Console",
-
   "Launch.NoGameSelected": "No game selected",
   "Launch.NoGameHint": "Pick a game from the library, or open an eboot.bin directly.",
   "Launch.Idle": "Idle",
@@ -267,14 +232,12 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "Failed to start the emulator: {0}",
   "Launch.ProcessExited": "Process exited with code {0} ({1}).",
-
   "Exit.Ok": "OK",
   "Exit.InvalidArguments": "invalid arguments",
   "Exit.EbootNotFound": "eboot not found",
   "Exit.RuntimeException": "runtime exception",
   "Exit.EmulationError": "emulation error",
   "Exit.Unknown": "unknown",
-
   "Status.EmulatorLocating": "Emulator: locating…",
   "Status.EmulatorPath": "Emulator: {0}",
   "Status.EmulatorNotFound": "Emulator: SharpEmu executable not found — build SharpEmu.CLI first.",
@@ -288,13 +251,10 @@
   "Status.Running": "Running {0}",
   "Status.Stopping": "Stopping…",
   "Status.Idle": "Idle",
-
   "Clipboard.Path": "Path",
   "Clipboard.TitleId": "Title ID",
-
   "Discord.Playing": "Playing {0}",
   "Discord.Browsing": "Browsing the library",
-
   "Dialog.ChooseGameFolder": "Choose a folder containing games",
   "Dialog.OpenExecutable": "Open an executable to launch",
   "Dialog.PsExecutables": "PS executables",
@@ -303,8 +263,7 @@
   "Dialog.LogFiles": "Log Files",
   "Dialog.SaveZar": "Save the game archive",
   "Dialog.ZarFiles": "Game archives",
-
-  "Options.About" : "About",
+  "Options.About": "About",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Source code, issues and project development.",
   "About.Github.LatestCommitLabel": "Latest Commit",
@@ -313,7 +272,6 @@
   "About.Discord.Desc": "Join the community, get support and follow development.",
   "About.GithubButton": "Contribute in GitHub!",
   "About.DiscordButton": "Join our Discord!",
-
   "Updater.Auto.Label": "Check for updates on startup",
   "Updater.Auto.Desc": "Checks GitHub without delaying startup.",
   "Updater.Label": "Updates",
@@ -333,6 +291,7 @@
   "Library.Context.Trophies": "Trophies…",
   "Trophies.Title": "Trophies",
   "Trophies.None": "This game has no trophies.",
+  "Trophies.GnmMode.KeyHint": "PS4 trophies may require a trophy key to load. Enter it under {0} → GnmMode → {1}.",
   "Trophies.HubEmpty.Title": "No trophies yet",
   "Trophies.HubEmpty.Hint": "Trophies you earn in your games will show up here.",
   "Hint.Launch": "Launch",
@@ -364,6 +323,10 @@
   "Options.Env.TrophyTest.Show": "Show notification",
   "Options.Env.TrophySound.Label": "Trophy sound",
   "Options.Env.TrophySound.Desc": "Play a short chime when a trophy is unlocked.",
+  "Options.GnmMode.TrophyKey.Label": "Trophy key",
+  "Options.GnmMode.TrophyKey.Desc": "PS4 trophy key for encrypted trophy names and descriptions. Used by GnmMode trophy lists and unlock notifications. Saved locally; restart a running game after changing it.",
+  "Options.GnmMode.TrophyKey.Placeholder": "32 hexadecimal characters",
+  "Options.GnmMode.TrophyKey.Invalid": "Enter exactly 32 hexadecimal characters (0–9, A–F), or clear the field to remove the key. The previous valid key is kept until the entry is valid.",
   "Trophies.Completed": "complete",
   "Trophies.EarnedTotal": "earned",
   "Trophies.HubSummary": "{0} of {1} trophies earned across {2} games",
@@ -468,7 +431,6 @@
   "Setting.ShaderCacheFolder.Cleared": "[GUI][INFO] Compiled shader files cleared.",
   "Setting.ShaderCacheFolder.ClearFailed": "[GUI][WARN] Could not clear the compiled shader files: {0}",
   "Setting.ShaderCacheFolder.Running": "[GUI][WARN] Close the running game before clearing compiled shader files.",
-
   "Setting.Env.ProfilePerformance.Label": "Performance profiling",
   "Setting.Env.ProfilePerformanceFrameTrace.Label": "Frame pacing trace",
   "Setting.Env.StrictCompute.Label": "Strict shader checks",

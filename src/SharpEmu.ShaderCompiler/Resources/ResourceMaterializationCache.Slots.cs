@@ -40,7 +40,7 @@ public sealed partial class ResourceMaterializationCache
         {
             var count = plan.TableReads.Count;
             if (count == 0 || plan.IndirectImages.Count != 0 || plan.BufferCandidateTables.Count != 0 ||
-                plan.RequiresSpecializationMemory)
+                plan.DeviceDescriptorTables.Count != 0 || plan.RequiresSpecializationMemory)
                 return null;
 
             var kinds = new ScalarValueKind[count];
@@ -499,7 +499,8 @@ public sealed partial class ResourceMaterializationCache
                     range >= 0 && entry.WordTableOnly[model.Offsets[slot] / sizeof(uint)]);
             }
 
-            refreshed = recorder.Build(plan, inputs, snapshot, entry.Specialization, rebase.MemoryBases, entry.UsedUserData, like: entry);
+            refreshed = recorder.Build(plan, inputs, snapshot, entry.Specialization, rebase.MemoryBases, entry.UsedUserData, like: entry,
+                normalization: entry.Normalization);
         }
         finally
         {

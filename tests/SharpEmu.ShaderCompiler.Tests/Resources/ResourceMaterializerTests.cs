@@ -208,16 +208,48 @@ public sealed class ResourceMaterializerTests
         return instructions;
     }
 
-    private static IEnumerable<Gen5ShaderInstruction> SamplerWords(ref uint pc, uint register, uint dword0)
+    private static IEnumerable<Gen5ShaderInstruction> SamplerWords(ref uint pc, uint register, uint dword0, uint dword2 = 0)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         for (uint dword = 0; dword < 4; dword++)
         {
-            instructions.Add(MoveScalar(pc, register + dword, dword == 0 ? dword0 : 0));
+            instructions.Add(MoveScalar(pc, register + dword, dword == 0 ? dword0 : dword == 2 ? dword2 : 0));
             pc += 8;
         }
 
         return instructions;
+    }
+
+    [Fact]
+    public void MaterialKeysTheCleanReaderRefusesAreReadThroughTheSynchronizedReader()
+    {
+        var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false));
+        uint[] userData = [0x1000, 224 << 16, 2, 0, 0x10000, 16 << 16, 4, 0, 7];
+        var memory = new TestWordMemory { Words = new uint[0x11000 / 4] };
+        for (var index = 0; index < 2; index++)
+        {
+            memory.At(0x1000 + (ulong)index * 224 + 4) = (uint)index;
+            var descriptor = ResourceTrackerTests.ImageDescriptor();
+            descriptor[0] += (uint)index;
+            ResourceTrackerTests.WriteImage(memory, 0x10000 + (ulong)index * 32, descriptor);
+        }
+
+        var synchronizedReads = 0;
+        var inputs = Inputs(
+            userData,
+            readMemory: (ulong address, out uint word) => { synchronizedReads++; return memory.Read(address, out word); },
+            readCleanMemory: (ulong address, out uint word) =>
+            {
+                word = 0;
+                return address >= 0x1000 + 224 && address < 0x1000 + 2 * 224 ? false : memory.Read(address, out word);
+            });
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failure));
+        Assert.Equal(ResourceMaterializationFailure.None, failure);
+        Assert.Equal(2, snapshot.Images.Length);
+        Assert.NotEqual(0, synchronizedReads);
     }
 
     [Fact]
@@ -300,6 +332,89 @@ public sealed class ResourceMaterializerTests
         Assert.Same(priorSpecialization, specialization);
         Assert.Equal([0xFEEDBEEFu], snapshot.UserData);
         Assert.Equal(7u, specialization.Buffers[0].PackedStride);
+    }
+
+    // A sampler's FORCE_DEGAMMA (word 0, bit 20) specializes the program, per sampler: one texture sampled through a
+    // FORCE_DEGAMMA sampler and an ordinary one keeps its format and decodes in the first only.
+    [Fact]
+    public void ForceDegammaSampler_SpecializesThatSamplerOnly()
+    {
+        const uint Format8x4Unorm = 56;
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, 16, 0x1000, Format8x4Unorm));
+        instructions.AddRange(SamplerWords(ref pc, 32, 0x00100892));
+        instructions.AddRange(SamplerWords(ref pc, 36, 0x00000892));
+        instructions.Add(Image(pc, "ImageSample", 16, 32));
+        instructions.Add(Image(pc + 8, "ImageSample", 16, 36));
+        instructions.Add(EndProgram(pc + 16));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        Assert.Equal(Format8x4Unorm, GuestImageFormat.FormatOf(Assert.Single(snapshot.Images)));
+        Assert.Equal([true, false], specialization.Samplers.Select(sampler => sampler.ForceDegamma).ToArray());
+        var applied = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal([true, false], applied.Info.Samplers.Select(sampler => sampler.ForceDegamma).ToArray());
+    }
+
+    // A sampler's FILTER_MODE (word 0, bits 30:29) specializes the program when it filters linearly: a point filter reads one
+    // texel, which a minimum or a maximum leaves alone. A linear mip filter (word 2, bits 27:26) reduces across two levels.
+    [Fact]
+    public void ReductionSampler_SpecializesALinearFilterOnly()
+    {
+        const uint Format8x4Unorm = 56;
+        const uint Bilinear = (1u << 20) | (1u << 22);
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, 16, 0x1000, Format8x4Unorm));
+        instructions.AddRange(SamplerWords(ref pc, 32, 0x20000092, Bilinear | (1u << 26)));
+        instructions.AddRange(SamplerWords(ref pc, 36, 0x40000092, Bilinear | (2u << 26)));
+        instructions.AddRange(SamplerWords(ref pc, 40, 0x20000092));
+        instructions.Add(Image(pc, "ImageSample", 16, 32));
+        instructions.Add(Image(pc + 8, "ImageSample", 16, 36));
+        instructions.Add(Image(pc + 16, "ImageSample", 16, 40));
+        instructions.Add(EndProgram(pc + 24));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        Assert.Equal([1u, 2u, 0u], specialization.Samplers.Select(sampler => sampler.Reduction).ToArray());
+        Assert.Equal([false, true, false], specialization.Samplers.Select(sampler => sampler.ReductionAcrossLevels).ToArray());
+        var applied = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal([1u, 2u, 0u], applied.Info.Samplers.Select(sampler => sampler.Reduction).ToArray());
+        Assert.Equal([false, true, false], applied.Info.Samplers.Select(sampler => sampler.ReductionAcrossLevels).ToArray());
+    }
+
+    // A compare sample of a depth-equivalent format gets a host depth binding only for a single-level image. A mipmapped one
+    // (Ghost of Tsushima's R32F depth pyramid, MAX_MIP 8) was written as colour, so the shader compares on its colour view with
+    // the S# function (LESS here) and the host keeps a plain sampler.
+    [Theory]
+    [InlineData(0u, -1)]
+    [InlineData(8u, 1)]
+    public void ACompareSampleOfAMipmappedDepthFormatComparesInTheShader(uint maxMip, int expectedFunction)
+    {
+        uint[] words = [0x1000, Format32Float << 20, 3 | (3 << 14), 0xFAC | (maxMip << 16) | (ImageType2D << 28), 0, maxMip << 4, 0, 0];
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        for (uint dword = 0; dword < 8; dword++, pc += 8)
+        {
+            instructions.Add(MoveScalar(pc, 16 + dword, words[dword]));
+        }
+
+        instructions.AddRange(SamplerWords(ref pc, 32, 1u << 12));
+        instructions.Add(Image(pc, "ImageSampleC", 16, 32));
+        instructions.Add(EndProgram(pc + 8));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        Assert.Equal(expectedFunction, Assert.Single(specialization.Images).EmulatedCompareFunction);
+        var applied = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal(expectedFunction < 0, Assert.Single(applied.Info.Images).DepthCompare);
     }
 
     [Fact]
