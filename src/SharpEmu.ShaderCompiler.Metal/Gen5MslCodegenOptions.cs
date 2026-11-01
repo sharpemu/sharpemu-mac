@@ -193,6 +193,11 @@ public sealed record Gen5MslCodegenOptions(
     /// in mesh shaders without device-memory writes. SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS=0 disables this.</summary>
     public bool ScalarConstantBuffers { get; init; } = true;
 
+    /// <summary>With <see cref="ScalarConstantBuffers"/>, also give a compute program's scalar-only
+    /// read-only bindings the constant address space (Gen5MslTranslator.ScalarConstants.cs).
+    /// SHARPEMU_MSL_SCALAR_CONSTANT_COMPUTE=0 leaves them in the device one.</summary>
+    public bool ScalarConstantComputeBuffers { get; init; } = true;
+
     /// <summary>Read a raw buffer dword (sharpemu_load_dword and the runs sharpemu_load_dwords makes)
     /// at an index clamped into the binding and select zero for one past the end, instead of
     /// branching around the load. Every dword is what the checked form reads; only the branch
@@ -264,6 +269,7 @@ public sealed record Gen5MslCodegenOptions(
                 ? Math.Max(decodedLoads, 0) : 16,
         MeshLdsForwarding = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_FORWARDING") == "1",
         ScalarConstantBuffers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS") != "0",
+        ScalarConstantComputeBuffers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_COMPUTE") != "0",
         MeshHotLds = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_HOT_LDS") == "1",
         BranchlessDwordLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_BRANCHLESS_LOADS") != "0",
         StaticScratchSlots = Environment.GetEnvironmentVariable("SHARPEMU_MSL_STATIC_SCRATCH") != "0",
