@@ -3,6 +3,8 @@
 
 using Avalonia;
 using Avalonia.Media;
+using Avalonia.Platform;
+using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.GUI;
 
@@ -40,6 +42,19 @@ public static class GuiLauncher
             // window's font, so the bundled Inter is made the app-wide default.
             .With(new FontManagerOptions { DefaultFamilyName = "fonts:Inter#Inter" })
             .LogToTrace();
+
+    public static void ConfigureSplashFont()
+    {
+        try
+        {
+            using var font = new StandardAssetLoader().Open(new Uri("avares://Avalonia.Fonts.Inter/Assets/Inter-Regular.ttf"));
+            HostVideoHost.ConfigureSplashFont(font);
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or ArgumentException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] The splash font cannot be loaded: {exception.Message}");
+        }
+    }
 
     private static void WriteCrashLog(Exception ex)
     {
