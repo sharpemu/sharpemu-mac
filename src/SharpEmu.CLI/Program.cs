@@ -309,10 +309,8 @@ internal static partial class Program
             return 3;
         }
 
-#if SHARPEMU_GPU_VULKAN
-        // Only the Vulkan presenter draws the shader warm-up splash.
-        GuiLauncher.ConfigureSplashFont();
-#endif
+        // The presenter draws its shader warm-up splash with the bundled Inter face.
+        SharpEmu.GUI.GuiLauncher.ConfigureSplashFont();
 
         Log.Info(BuildInfo.Banner);
         Log.Info(HostSystemInfo.Summary);

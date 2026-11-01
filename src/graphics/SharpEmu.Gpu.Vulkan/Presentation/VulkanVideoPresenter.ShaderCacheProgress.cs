@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 
+using SharpEmu.Gpu.ShaderProgress;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Gpu.Vulkan.Presentation;
@@ -22,8 +23,17 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _shaderCacheSplashWidth;
         private uint _shaderCacheSplashHeight;
 
+        // SHARPEMU_PREWARM_PROGRESS=0 turns the overlay off, as it does on Metal.
+        private static readonly bool ShaderCacheProgressEnabled =
+            !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_PREWARM_PROGRESS"), "0", StringComparison.Ordinal);
+
         private void ShowShaderCacheProgress(Func<ShaderCacheProgressView> progress)
         {
+            if (!ShaderCacheProgressEnabled)
+            {
+                return;
+            }
+
             Volatile.Write(ref _shaderCacheProgress, progress);
             WakeRenderThread();
         }

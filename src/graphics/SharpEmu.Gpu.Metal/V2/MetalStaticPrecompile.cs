@@ -199,7 +199,7 @@ internal static class MetalStaticPrecompile
         var remaining = Math.Max(0, Volatile.Read(ref _plan).Count - Math.Max(0, Volatile.Read(ref _next)));
         if (!_finished.IsSet)
         {
-            MetalShaderPrewarm.Gate.SetTotal(remaining);
+            MetalShaderPrewarm.Gate.SetTotal(remaining, MetalWarmupPhase.Static);
             MetalShaderPrewarm.Gate.SetRunning(true);
             Precompile.BeginPhase("static", remaining);
             _phase = true;

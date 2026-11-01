@@ -1,254 +1,202 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Diagnostics;
 using System.Globalization;
-using System.Runtime.InteropServices;
+using SharpEmu.Gpu.ShaderProgress;
+using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
-// The shader prewarm progress bar: while the prewarm holds the guest and no guest
-// frame has been presented, a small CPU-drawn panel (bar, caption, hint) is shown
-// over the splash. It is drawn with CoreGraphics into a BGRA texture sized to the
-// drawable, redrawn only when the count changes, and it costs one volatile read per
-// present once the prewarm is over. SHARPEMU_PREWARM_PROGRESS=0 turns it off.
+// The shader warm-up progress: while the prewarm holds the guest and no guest frame has been
+// presented, the title's splash image (black when it has none) is shown with the panel the
+// Vulkan presenter draws over its splash (SharpEmu.Gpu.ShaderProgress). The splash is
+// composed on the CPU at its own size, uploaded to a texture of its own and presented in
+// place of the host frame; it is redrawn ten times a second while the prewarm runs, and
+// released, with the presenter back on its ordinary frames, once the prewarm is over.
+// SHARPEMU_PREWARM_PROGRESS=0 turns it off.
 internal static partial class MetalV2Presenter
 {
+    private const double WarmupRefreshMilliseconds = 100;
+
     private static readonly bool PrewarmProgressEnabled =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_PREWARM_PROGRESS"), "0", StringComparison.Ordinal);
 
-    private static nint _prewarmTexture;
-    private static uint _prewarmWidth;
-    private static uint _prewarmHeight;
-    private static int _prewarmDrawnProgress = -1;
-    private static int _prewarmDrawnTotal = -1;
-    private static byte[]? _prewarmPixels;
+    private static uint _requestedWidth;
+    private static uint _requestedHeight;
+    private static nint _warmupTexture;
+    private static uint _warmupWidth;
+    private static uint _warmupHeight;
+    private static byte[]? _warmupBackground;
+    private static byte[]? _warmupPixels;
+    private static long _warmupLastDraw;
 
-    // Runs on the window thread, inside the present encoder, after the splash is drawn.
-    private static void EncodePrewarmProgress(nint encoder)
+    /// <summary>
+    /// Window thread, before the present encoder: the texture to present while the warm-up
+    /// progress shows, or false when it does not (the ordinary frame is then presented).
+    /// </summary>
+    private static bool PrepareWarmupSplash(out nint texture, out uint width, out uint height)
     {
-        if (!PrewarmProgressEnabled || _splashHidden)
-        {
-            return;
-        }
-
+        texture = 0;
+        width = height = 0;
         var gate = MetalShaderPrewarm.Gate;
-        var total = gate.Total;
-        if (total <= 0 || !gate.IsRunning)
+        if (!PrewarmProgressEnabled || _splashHidden || gate.Total <= 0 || !gate.IsRunning)
         {
-            ReleasePrewarmTexture();
-            return;
+            ReleaseWarmupSplash();
+            return false;
         }
 
-        // Laid out against a 16:9 area, so an ultrawide or portrait window keeps the
-        // panel's proportions instead of stretching it.
-        var referenceWidth = Math.Min(_drawableWidth, _drawableHeight * 16.0 / 9.0);
-        var width = (uint)Math.Max(240, Math.Round(referenceWidth * 0.46));
-        var height = (uint)Math.Round(width * 0.22);
-        if (width > _drawableWidth || height > _drawableHeight)
-        {
-            return;
-        }
-
-        var progress = Math.Min(gate.Progress, total);
-        if (_prewarmTexture == 0 || width != _prewarmWidth || height != _prewarmHeight)
-        {
-            ReleasePrewarmTexture();
-            var descriptor = MetalNative.SendTextureDescriptor(
-                MetalNative.Class("MTLTextureDescriptor"),
-                MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
-                (nuint)PixelFormatBgra8Unorm,
-                width,
-                height,
-                mipmapped: false);
-            _prewarmTexture = MetalNative.Send(
-                _device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
-            if (_prewarmTexture == 0)
-            {
-                return;
-            }
-
-            _prewarmWidth = width;
-            _prewarmHeight = height;
-        }
-
-        if (progress != _prewarmDrawnProgress || total != _prewarmDrawnTotal)
-        {
-            if (!DrawPrewarmPanel(width, height, progress, total))
-            {
-                return;
-            }
-
-            _prewarmDrawnProgress = progress;
-            _prewarmDrawnTotal = total;
-        }
-
-        if (_layerHdrActive)
-        {
-            EncodeHdrPresentState(encoder, _hdrPresentPipeline, false, _edrCurrentHeadroom);
-        }
-        else
-        {
-            MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), _presentPipeline);
-        }
-
-        MetalNative.SendVoidViewport(
-            encoder,
-            MetalNative.Selector("setViewport:"),
-            new MtlViewport
-            {
-                OriginX = Math.Floor((_drawableWidth - width) * 0.5),
-                OriginY = Math.Floor(_drawableHeight * 0.68 - height * 0.5),
-                Width = width,
-                Height = height,
-                ZNear = 0,
-                ZFar = 1,
-            });
-        MetalNative.SendSetAtIndex(
-            encoder, MetalNative.Selector("setFragmentTexture:atIndex:"), _prewarmTexture, 0);
-        MetalNative.SendSetAtIndex(
-            encoder, MetalNative.Selector("setFragmentSamplerState:atIndex:"), _presentSampler, 0);
-        MetalNative.SendDrawPrimitives(
-            encoder, MetalNative.Selector("drawPrimitives:vertexStart:vertexCount:"), Mtl.PrimitiveTriangle, 0, 3);
-    }
-
-    private static void ReleasePrewarmTexture()
-    {
-        if (_prewarmTexture != 0)
-        {
-            MetalNative.SendVoid(_prewarmTexture, MetalNative.Selector("release"));
-            _prewarmTexture = 0;
-            _prewarmPixels = null;
-            _prewarmDrawnProgress = -1;
-            _prewarmDrawnTotal = -1;
-        }
-    }
-
-    private static unsafe bool DrawPrewarmPanel(uint width, uint height, int progress, int total)
-    {
-        var pixels = _prewarmPixels;
-        if (pixels is null || pixels.Length != checked((int)(width * height * 4)))
-        {
-            pixels = _prewarmPixels = new byte[checked((int)(width * height * 4))];
-        }
-
-        var space = CgNative.CGColorSpaceCreateDeviceRGB();
-        if (space == 0)
+        if (_warmupBackground is null && !LoadWarmupBackground())
         {
             return false;
         }
 
-        try
+        if (_warmupTexture == 0 || _warmupWidth != _warmupBackgroundWidth || _warmupHeight != _warmupBackgroundHeight)
         {
-            fixed (byte* data = pixels)
+            ReleaseWarmupTexture();
+            var descriptor = MetalNative.SendTextureDescriptor(
+                MetalNative.Class("MTLTextureDescriptor"),
+                MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
+                (nuint)PixelFormatBgra8Unorm,
+                _warmupBackgroundWidth,
+                _warmupBackgroundHeight,
+                mipmapped: false);
+            _warmupTexture = MetalNative.Send(
+                _device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
+            if (_warmupTexture == 0)
             {
-                // BGRA, premultiplied first, little-endian: the layout of the texture.
-                var context = CgNative.CGBitmapContextCreate(
-                    (nint)data, width, height, 8, width * 4, space, 8194);
-                if (context == 0)
-                {
-                    return false;
-                }
-
-                try
-                {
-                    var unit = width / 800.0;
-                    CgNative.CGContextSetRGBFillColor(context, 0.05, 0.05, 0.06, 1);
-                    CgNative.CGContextFillRect(context, new CgRect(0, 0, width, height));
-
-                    var margin = 40 * unit;
-                    var barHeight = Math.Max(4, 14 * unit);
-                    var barWidth = width - 2 * margin;
-                    var barY = height - 34 * unit - barHeight;
-                    CgNative.CGContextSetRGBFillColor(context, 0.18, 0.18, 0.20, 1);
-                    CgNative.CGContextFillRect(context, new CgRect(margin, barY, barWidth, barHeight));
-                    CgNative.CGContextSetRGBFillColor(context, 0.30, 0.62, 1.0, 1);
-                    CgNative.CGContextFillRect(
-                        context, new CgRect(margin, barY, barWidth * progress / total, barHeight));
-
-                    var caption = string.Create(
-                        CultureInfo.InvariantCulture, $"Preparing shaders… {progress} / {total}");
-                    DrawCenteredText(context, caption, 26 * unit, width, barY - 12 * unit - 26 * unit * 0.75, 0.93);
-                    DrawCenteredText(
-                        context,
-                        "Depending on your hardware this may take a few minutes",
-                        17 * unit,
-                        width,
-                        18 * unit,
-                        0.55);
-                }
-                finally
-                {
-                    CgNative.CGContextRelease(context);
-                }
-
-                MetalNative.SendReplaceRegion(
-                    _prewarmTexture,
-                    MetalNative.Selector("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"),
-                    new MtlRegion { Width = width, Height = height, Depth = 1 },
-                    0,
-                    (nint)data,
-                    width * 4);
+                return false;
             }
-        }
-        finally
-        {
-            CgNative.CGColorSpaceRelease(space);
+
+            _warmupWidth = _warmupBackgroundWidth;
+            _warmupHeight = _warmupBackgroundHeight;
+            _warmupLastDraw = 0;
         }
 
+        if (_warmupLastDraw == 0 ||
+            Stopwatch.GetElapsedTime(_warmupLastDraw).TotalMilliseconds >= WarmupRefreshMilliseconds)
+        {
+            DrawWarmupSplash(gate);
+        }
+
+        texture = _warmupTexture;
+        width = _warmupWidth;
+        height = _warmupHeight;
         return true;
     }
 
-    private static unsafe void DrawCenteredText(
-        nint context, string text, double size, uint width, double baseline, double gray)
+    private static uint _warmupBackgroundWidth;
+    private static uint _warmupBackgroundHeight;
+
+    // The splash image as the Vulkan presenter loads it, else a black frame of the size the
+    // guest's video out asked for.
+    private static bool LoadWarmupBackground()
     {
-        // MacRoman encodes the ellipsis as 0xC9.
-        var bytes = new byte[text.Length];
-        for (var i = 0; i < text.Length; i++)
+        if (PngSplashLoader.TryLoad(out var pixels, out var width, out var height) &&
+            pixels.Length == checked((int)(width * height * 4)))
         {
-            bytes[i] = text[i] == '…' ? (byte)0xC9 : (byte)text[i];
+            _warmupBackground = pixels;
+            _warmupBackgroundWidth = width;
+            _warmupBackgroundHeight = height;
+            return true;
         }
 
-        fixed (byte* name = "Helvetica\0"u8)
-        fixed (byte* chars = bytes)
+        width = _requestedWidth != 0 ? _requestedWidth : 1920;
+        height = _requestedHeight != 0 ? _requestedHeight : 1080;
+        var black = new byte[checked((int)(width * height * 4))];
+        for (var offset = 3; offset < black.Length; offset += 4)
         {
-            CgNative.CGContextSelectFont(context, name, size, 1);
-            CgNative.CGContextSetTextDrawingMode(context, 3); // invisible: measure only
-            CgNative.CGContextSetTextPosition(context, 0, 0);
-            CgNative.CGContextShowText(context, chars, (nuint)bytes.Length);
-            var advance = CgNative.CGContextGetTextPosition(context).X;
-            CgNative.CGContextSetTextDrawingMode(context, 0);
-            CgNative.CGContextSetRGBFillColor(context, gray, gray, gray, 1);
-            CgNative.CGContextShowTextAtPoint(
-                context, (width - advance) * 0.5, baseline, chars, (nuint)bytes.Length);
+            black[offset] = 255;
+        }
+
+        _warmupBackground = black;
+        _warmupBackgroundWidth = width;
+        _warmupBackgroundHeight = height;
+        return true;
+    }
+
+    private static unsafe void DrawWarmupSplash(MetalShaderPrewarmGate gate)
+    {
+        var background = _warmupBackground!;
+        var pixels = _warmupPixels is { } existing && existing.Length == background.Length
+            ? existing
+            : _warmupPixels = new byte[background.Length];
+        background.CopyTo(pixels, 0);
+        ShaderCacheProgressOverlay.Draw(pixels, (int)_warmupWidth, (int)_warmupHeight, MetalWarmupView.Build(gate));
+        fixed (byte* data = pixels)
+        {
+            MetalNative.SendReplaceRegion(
+                _warmupTexture,
+                MetalNative.Selector("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"),
+                new MtlRegion { Width = _warmupWidth, Height = _warmupHeight, Depth = 1 },
+                0,
+                (nint)data,
+                _warmupWidth * 4);
+        }
+
+        _warmupLastDraw = Stopwatch.GetTimestamp();
+    }
+
+    private static void ReleaseWarmupTexture()
+    {
+        if (_warmupTexture != 0)
+        {
+            MetalNative.SendVoid(_warmupTexture, MetalNative.Selector("release"));
+            _warmupTexture = 0;
         }
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private readonly record struct CgRect(double X, double Y, double Width, double Height);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct CgPoint
+    private static void ReleaseWarmupSplash()
     {
-        public double X;
-        public double Y;
+        ReleaseWarmupTexture();
+        _warmupBackground = null;
+        _warmupPixels = null;
     }
+}
 
-    private static unsafe class CgNative
+/// <summary>
+/// The warm-up counts the Metal prewarm keeps, as the panel the Vulkan presenter shows: the
+/// recorded compute and graphics programs the guest is held for, then the library list and
+/// the static plan as a row of their own while those phases run.
+/// </summary>
+internal static class MetalWarmupView
+{
+    public static ShaderCacheProgressView Build(MetalShaderPrewarmGate gate)
     {
-        private const string Lib = "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics";
+        var rows = new List<ShaderCacheProgressRow>(3)
+        {
+            new("Compute pipelines", gate.ComputeDone, gate.ComputeTotal),
+            new("Graphics pipelines", gate.GraphicsDone, gate.GraphicsTotal),
+        };
+        var phase = gate.Phase;
+        var failed = MetalShaderPrewarm.FailedPrograms;
+        var done = gate.Banked + gate.Progress;
+        if (phase == MetalWarmupPhase.Programs)
+        {
+            done = gate.ComputeDone + gate.GraphicsDone;
+        }
+        else
+        {
+            rows.Add(new ShaderCacheProgressRow(
+                phase == MetalWarmupPhase.Libraries ? "Shader libraries" : "Programs from the game's files",
+                gate.Progress, gate.Total));
+            failed += MetalLibraryPrewarm.Failed;
+            if (phase == MetalWarmupPhase.Static)
+            {
+                failed += MetalStaticPrecompile.Counters.Failed;
+            }
+        }
 
-        [DllImport(Lib)] public static extern nint CGColorSpaceCreateDeviceRGB();
-        [DllImport(Lib)] public static extern void CGColorSpaceRelease(nint space);
-        [DllImport(Lib)] public static extern nint CGBitmapContextCreate(
-            nint data, nuint width, nuint height, nuint bitsPerComponent, nuint bytesPerRow, nint space, uint bitmapInfo);
-        [DllImport(Lib)] public static extern void CGContextRelease(nint context);
-        [DllImport(Lib)] public static extern void CGContextSetRGBFillColor(nint context, double r, double g, double b, double a);
-        [DllImport(Lib)] public static extern void CGContextFillRect(nint context, CgRect rect);
-        [DllImport(Lib)] public static extern void CGContextSelectFont(nint context, byte* name, double size, int encoding);
-        [DllImport(Lib)] public static extern void CGContextSetTextDrawingMode(nint context, int mode);
-        [DllImport(Lib)] public static extern void CGContextSetTextPosition(nint context, double x, double y);
-        [DllImport(Lib)] public static extern CgPoint CGContextGetTextPosition(nint context);
-        [DllImport(Lib)] public static extern void CGContextShowText(nint context, byte* text, nuint length);
-        [DllImport(Lib)] public static extern void CGContextShowTextAtPoint(nint context, double x, double y, byte* text, nuint length);
+        var seconds = gate.WarmupStarted == 0 ? 0 : Stopwatch.GetElapsedTime(gate.WarmupStarted).TotalSeconds;
+        return new ShaderCacheProgressView(
+            "Warming up shaders",
+            "Rebuilding pipelines recorded in earlier sessions",
+            rows,
+            [
+                $"Warmed {Math.Max(0, done - failed)} / Failed {failed}",
+                string.Create(CultureInfo.InvariantCulture,
+                    $"{MetalShaderPrewarm.WorkerCount} workers / {seconds:F0} seconds"),
+            ],
+            seconds);
     }
 }

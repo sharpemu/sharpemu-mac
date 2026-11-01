@@ -110,6 +110,9 @@ internal static class MetalLibraryPrewarm
     private static int _misses;
     private static int _held;
 
+    /// <summary>Libraries that failed to compile this start, for the warm-up panel.</summary>
+    public static int Failed => Volatile.Read(ref _failed);
+
     /// <summary>The prewarmed libraries held for a module that has not asked for them yet.</summary>
     public static int HeldLibraries => Volatile.Read(ref _held);
 

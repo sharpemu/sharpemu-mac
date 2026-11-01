@@ -1,0 +1,27 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!--
+  The shader warm-up progress panel both graphics backends draw over the splash:
+  the progress model (rows, footer) and the Skia layout that paints it into a BGRA
+  pixel buffer. It has no Vulkan or Metal reference, only the splash font that
+  SharpEmu.Libs carries.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
+    <PackageReference Include="SkiaSharp" />
+  </ItemGroup>
+  <ItemGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux')) Or ('$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('Linux')))">
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
+  </ItemGroup>
+
+</Project>

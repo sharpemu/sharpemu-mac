@@ -273,6 +273,8 @@ internal static partial class MetalV2Presenter
 
             EnsureDeviceLocked();
             _windowStarted = true;
+            _requestedWidth = width;
+            _requestedHeight = height;
             // Before the prewarm, whose libraries it may already hold.
             MetalBinaryArchive.Start(_device);
             MetalShaderPrewarm.Start(_device);
@@ -709,6 +711,18 @@ internal static partial class MetalV2Presenter
                 var width = presented != 0 ? presentedWidth : _hostFrameWidth;
                 var height = presented != 0 ? presentedHeight : _hostFrameHeight;
                 var movie = SelectHostMovieFallback(ref texture, ref width, ref height);
+                if (presented == 0 && !movie && PrepareWarmupSplash(out var warmupTexture, out var warmupWidth, out var warmupHeight))
+                {
+                    texture = warmupTexture;
+                    width = warmupWidth;
+                    height = warmupHeight;
+                }
+                else if (presented != 0 || movie)
+                {
+                    // A guest or movie frame ends the splash even before warm-up reports done.
+                    ReleaseWarmupSplash();
+                }
+
                 var stamp = new MetalPresentationStamp(
                     presentedSequence, _hostFrameSequence, movie ? _movieFallbackSerial : 0,
                     texture, _drawableWidth, _drawableHeight, _layerHdrActive,
@@ -752,11 +766,6 @@ internal static partial class MetalV2Presenter
                 if (texture != 0 && width != 0 && height != 0)
                 {
                     EncodePresent(encoder, texture, width, height, !movie && presented != 0 && presentedHdr);
-                }
-
-                if (presented == 0 && !movie)
-                {
-                    EncodePrewarmProgress(encoder);
                 }
 
                 EncodePerfOverlay(encoder, window.ContentsScale);

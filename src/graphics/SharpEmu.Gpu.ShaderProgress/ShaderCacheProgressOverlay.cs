@@ -4,18 +4,18 @@
 using SharpEmu.Libs.VideoOut;
 using SkiaSharp;
 
-namespace SharpEmu.Gpu.Vulkan.Presentation;
+namespace SharpEmu.Gpu.ShaderProgress;
 
-internal readonly record struct ShaderCacheProgressRow(string Label, long Completed, long Total, bool ShowCounts = true);
+public readonly record struct ShaderCacheProgressRow(string Label, long Completed, long Total, bool ShowCounts = true);
 
-internal sealed record ShaderCacheProgressView(
+public sealed record ShaderCacheProgressView(
     string Title,
     string Subtitle,
     IReadOnlyList<ShaderCacheProgressRow> Rows,
     IReadOnlyList<string> Footer,
     double Seconds);
 
-internal static class ShaderCacheProgressOverlay
+public static class ShaderCacheProgressOverlay
 {
     private static readonly byte[] FooterShades = [200, 160];
     private static readonly Lazy<SKTypeface> Typeface = new(CreateTypeface);
@@ -30,7 +30,7 @@ internal static class ShaderCacheProgressOverlay
         return SKTypeface.FromFamilyName(null);
     }
 
-    internal static unsafe void Draw(Span<byte> pixels, int width, int height, ShaderCacheProgressView view)
+    public static unsafe void Draw(Span<byte> pixels, int width, int height, ShaderCacheProgressView view)
     {
         if (width <= 0 || height <= 0 || pixels.Length != checked(width * height * 4))
             throw new ArgumentException("The splash pixel buffer must match its dimensions.", nameof(pixels));
