@@ -306,6 +306,7 @@ public static partial class Gen5SpirvTranslator
             var body = _module.AllocateId();
             Store(_meshBarrierWaiting, _module.ConstantBool(false));
             _module.AddStatement(SpirvOp.Branch, _meshBarrierLoop.Header);
+            _module.DeclareLoopHeader(_meshBarrierLoop.Header);
             _module.AddLabel(_meshBarrierLoop.Header);
             _module.AddStatement(SpirvOp.LoopMerge, _meshBarrierLoop.Merge, _meshBarrierLoop.Continue, 0);
             _module.AddStatement(SpirvOp.Branch, body);

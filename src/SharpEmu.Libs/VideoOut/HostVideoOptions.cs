@@ -193,6 +193,19 @@ public static class HostVideoHost
         _autoHdrAllowed = autoHdrAllowed;
     }
 
+    private static byte[]? _splashFont;
+
+    /// <summary>The font the Vulkan presenter draws its shader warm-up splash with.</summary>
+    public static void ConfigureSplashFont(Stream font)
+    {
+        ArgumentNullException.ThrowIfNull(font);
+        using var copy = new MemoryStream();
+        font.CopyTo(copy);
+        Volatile.Write(ref _splashFont, copy.ToArray());
+    }
+
+    internal static byte[]? SplashFont => Volatile.Read(ref _splashFont);
+
     internal static bool AutoHdrAllowed => Volatile.Read(ref _autoHdrAllowed);
 
     // Public for the two-process split's GPU process, which answers the guest process's question with it.

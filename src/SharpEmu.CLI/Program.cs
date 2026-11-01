@@ -60,10 +60,14 @@ internal static partial class Program
         ConfigureManagedPluginResolution();
         // Apply the game file before composition or static backend settings read the environment.
         // Keep the result for RunEmulator so settings and relative paths are resolved once.
-        if (args.Length > 0 && args[0] != SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
+        if (args.Length > 0 &&
+            args[0] != SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument &&
+            args[0] != Updater.ApplyArgument)
         {
-            if (TryParseArguments(NormalizeInternalArguments(args, out _), out var path, out var runtime,
-                    out var video, out var level, out var logFile))
+            var launchArgs = NormalizeInternalArguments(args, out _)
+                .Where(argument => !argument.StartsWith(GnmLoadExecSession.ArgumentPrefix, StringComparison.Ordinal))
+                .ToArray();
+            if (TryParseArguments(launchArgs, out var path, out var runtime, out var video, out var level, out var logFile))
             {
                 _preparedLaunch = new(path, runtime, video, level, logFile);
             }
@@ -304,6 +308,11 @@ internal static partial class Program
             Console.Error.WriteLine("[LOADER][ERROR] Video options cannot change while a presenter is active.");
             return 3;
         }
+
+#if SHARPEMU_GPU_VULKAN
+        // Only the Vulkan presenter draws the shader warm-up splash.
+        GuiLauncher.ConfigureSplashFont();
+#endif
 
         Log.Info(BuildInfo.Banner);
         Log.Info(HostSystemInfo.Summary);

@@ -49,6 +49,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
     <!-- Image and pipeline cache keys hash guest surface descriptions. -->
     <PackageReference Include="System.IO.Hashing" />
+    <!-- Draws the shader warm-up splash text. -->
+    <PackageReference Include="SkiaSharp" />
+  </ItemGroup>
+  <ItemGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux')) Or ('$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('Linux')))">
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
   </ItemGroup>
 
 </Project>
