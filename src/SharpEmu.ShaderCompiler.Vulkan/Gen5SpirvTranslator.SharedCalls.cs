@@ -766,6 +766,7 @@ public static partial class Gen5SpirvTranslator
                     // The block lengths main keeps are values of main.
                     InitializeStorageBlockLengths();
                     InitializeDeviceAddressFallback();
+                    CaptureBufferTableValues();
                     if (!TryEmitStructuredRange(blocks, first, last, -1, out error))
                     {
                         return false;

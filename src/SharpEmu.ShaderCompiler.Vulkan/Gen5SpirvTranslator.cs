@@ -8555,7 +8555,7 @@ public static partial class Gen5SpirvTranslator
         }
 
         private uint ApplyGuestBufferByteBias(int binding, uint byteAddress) =>
-            IAdd(byteAddress, Load(_uintType, RuntimeBufferBiasPointer(binding)));
+            IAdd(byteAddress, CapturedBufferValue(_bufferBiasValues, binding) ?? Load(_uintType, RuntimeBufferBiasPointer(binding)));
 
         private void StoreBufferWord(int binding, uint dwordAddress, uint value)
         {

@@ -44,6 +44,7 @@ public enum SpirvOp : ushort
     Load = 61,
     Store = 62,
     AccessChain = 65,
+    PtrAccessChain = 67,
     ArrayLength = 68,
     Decorate = 71,
     VectorExtractDynamic = 77,
@@ -515,6 +516,11 @@ public sealed partial class SpirvModuleBuilder
             return;
         }
 
+        if (decoration == SpirvDecoration.BuiltIn && operands is [(uint)SpirvBuiltIn.HelperInvocation])
+        {
+            _changingInputs.Add(target);
+        }
+
         var values = new uint[2 + operands.Length];
         values[0] = target;
         values[1] = (uint)decoration;
@@ -712,6 +718,11 @@ public sealed partial class SpirvModuleBuilder
         var id = AllocateId();
         Emit(_typesConstantsGlobals, SpirvOp.TypePointer, id, (uint)storageClass, type);
         _pointerTypes.Add(key, id);
+        if (IntegerWidth(type) != 0 || _floatTypes.ContainsValue(type) || _boolType == type)
+        {
+            _scalarPointerTypes.Add(id);
+        }
+
         return id;
     }
 
@@ -859,6 +870,10 @@ public sealed partial class SpirvModuleBuilder
         {
             _localVariables.Add(id);
         }
+        else if (storageClass == SpirvStorageClass.Input)
+        {
+            _inputVariables.Add(id);
+        }
 
         return id;
     }
@@ -874,6 +889,8 @@ public sealed partial class SpirvModuleBuilder
     {
         Emit(_functions, SpirvOp.Function, returnType, id, functionControl, functionType);
         ResetBlockState();
+        CurrentFunction = id;
+        _entryLabelPending = true;
         return id;
     }
 
@@ -883,6 +900,15 @@ public sealed partial class SpirvModuleBuilder
     public uint AddLabel(uint? id = null)
     {
         var result = id ?? AllocateId();
+        if (_entryLabelPending)
+        {
+            _entryLabelPending = false;
+            _entryLabelOffset = _functions.Count;
+            _entryValues.Clear();
+            _entryOperations.Clear();
+            _entryIds.Clear();
+        }
+
         Emit(_functions, SpirvOp.Label, result);
         ResetBlockState();
         return result;
@@ -1056,6 +1082,7 @@ public sealed partial class SpirvModuleBuilder
     {
         Emit(_functions, SpirvOp.FunctionEnd);
         ResetBlockState();
+        CurrentFunction = 0;
     }
 
     public byte[] Build()

@@ -373,6 +373,7 @@ public static partial class Gen5SpirvTranslator
                 _module.AddCapability(SpirvCapability.PhysicalStorageBufferAddresses);
                 _module.SetPhysicalStorageBuffer64MemoryModel();
                 _physicalUintPointer = _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _uintType);
+                _module.AddDecoration(_physicalUintPointer, SpirvDecoration.ArrayStride, sizeof(uint));
             }
             if (request.TessellationHull is not null)
             {
@@ -667,12 +668,14 @@ public static partial class Gen5SpirvTranslator
                     Store(RuntimeBufferBiasPointer((int)buffer), LoadTableWord(UInt(record + 3)));
                 }
             }
+
+            CaptureBufferTableValues();
         }
 
         private uint PhysicalWordPointer(uint baseAddress, uint dwordIndex)
         {
-            var pointer = _module.AddInstruction(SpirvOp.ConvertUToPtr, _physicalUintPointer,
-                IAdd64(baseAddress, Widen(ShiftLeftLogical(dwordIndex, UInt(2)))));
+            var basePointer = _module.AddInstruction(SpirvOp.ConvertUToPtr, _physicalUintPointer, baseAddress);
+            var pointer = _module.AddInstruction(SpirvOp.PtrAccessChain, _physicalUintPointer, basePointer, Widen(dwordIndex));
             _physicalPointers.Add(pointer);
             return pointer;
         }
@@ -686,9 +689,41 @@ public static partial class Gen5SpirvTranslator
             _module.AddInstruction(SpirvOp.AccessChain, _privateUintPointer, _tableBufferLengths, UInt((uint)binding));
 
         private uint TableBufferWordPointer(int binding, uint dwordAddress) =>
-            PhysicalWordPointer(Load(_ulongType, TableBufferBasePointer(binding)), dwordAddress);
+            PhysicalWordPointer(CapturedBufferValue(_bufferBaseValues, binding) ?? Load(_ulongType, TableBufferBasePointer(binding)), dwordAddress);
 
-        private uint TableBufferLength(int binding) => Load(_uintType, TableBufferLengthPointer(binding));
+        private uint TableBufferLength(int binding) =>
+            CapturedBufferValue(_bufferLengthValues, binding) ?? Load(_uintType, TableBufferLengthPointer(binding));
+
+        private readonly Dictionary<int, uint> _bufferBaseValues = [];
+        private readonly Dictionary<int, uint> _bufferLengthValues = [];
+        private readonly Dictionary<int, uint> _bufferBiasValues = [];
+        private uint _bufferValuesFunction;
+
+        private void CaptureBufferTableValues()
+        {
+            _bufferBaseValues.Clear();
+            _bufferLengthValues.Clear();
+            _bufferBiasValues.Clear();
+            _bufferValuesFunction = _module.CurrentFunction;
+            var count = _request.Resources.Info.Buffers.Count;
+            for (var buffer = 0; buffer < count; buffer++)
+            {
+                if (_runtimeBufferBiases != 0)
+                {
+                    _bufferBiasValues[buffer] = Load(_uintType, RuntimeBufferBiasPointer(buffer));
+                }
+
+                if (_tableBufferBases != 0)
+                {
+                    _bufferBaseValues[buffer] = Load(_ulongType, TableBufferBasePointer(buffer));
+                    _bufferLengthValues[buffer] = Load(_uintType, TableBufferLengthPointer(buffer));
+                }
+            }
+        }
+
+        private uint? CapturedBufferValue(Dictionary<int, uint> values, int binding) =>
+            _bufferValuesFunction != 0 && _module.CurrentFunction == _bufferValuesFunction &&
+            values.TryGetValue(binding, out var value) ? value : null;
 
         private uint LoadShaderDataDword(uint dwordIndex)
         {
@@ -1349,10 +1384,10 @@ public static partial class Gen5SpirvTranslator
                         var bindingIndex = (int)entry.Resource;
                         // A scalar load ignores the two low bits of the base and of the offset alike.
                         var byteAddress = BitwiseAnd(
-                            IAdd(dynamicOffset, UInt(unchecked((uint)control.ImmediateOffsetBytes + (uint)component * sizeof(uint)))),
+                            IAdd(dynamicOffset, UInt(unchecked((uint)control.ImmediateOffsetBytes))),
                             UInt(~3u));
                         byteAddress = ApplyGuestBufferByteBias(bindingIndex, byteAddress);
-                        value = LoadBufferWord(bindingIndex, ShiftRightLogical(byteAddress, UInt(2)));
+                        value = LoadBufferWord(bindingIndex, IAdd(ShiftRightLogical(byteAddress, UInt(2)), UInt((uint)component)));
                     }
                     else
                     {

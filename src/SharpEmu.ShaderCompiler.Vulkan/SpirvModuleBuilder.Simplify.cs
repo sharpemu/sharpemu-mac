@@ -17,6 +17,16 @@ public sealed partial class SpirvModuleBuilder
     private readonly Dictionary<InstructionKey, uint> _blockValues = [];
     private readonly HashSet<uint> _localVariables = [];
     private readonly HashSet<uint> _escapedVariables = [];
+    private readonly Dictionary<uint, uint> _elementBases = [];
+    private readonly HashSet<uint> _scalarPointerTypes = [];
+    private readonly HashSet<uint> _inputVariables = [];
+    private readonly HashSet<uint> _changingInputs = [];
+    private readonly Dictionary<uint, uint> _entryValues = [];
+    private readonly Dictionary<InstructionKey, uint> _entryOperations = [];
+    private readonly HashSet<uint> _entryIds = [];
+    private readonly Dictionary<int, List<uint>> _entryPrologues = [];
+    private bool _entryLabelPending;
+    private int _entryLabelOffset = -1;
     private readonly Dictionary<uint, uint> _variableValues = [];
     private readonly Dictionary<uint, int> _pendingStores = [];
     private readonly HashSet<int> _removedInstructions = [];
@@ -60,11 +70,18 @@ public sealed partial class SpirvModuleBuilder
         public override int GetHashCode() => _hash;
     }
 
+    public uint CurrentFunction { get; private set; }
+
     public uint AddInstruction(SpirvOp opcode, uint resultType, params uint[] operands)
     {
         if (opcode == SpirvOp.Load)
         {
             return AddLoad(resultType, operands);
+        }
+
+        if (opcode == SpirvOp.AccessChain && TryAddElementPointer(resultType, operands, out var element))
+        {
+            return element;
         }
 
         NoteVariableUses(operands);
@@ -83,6 +100,11 @@ public sealed partial class SpirvModuleBuilder
             }
 
             return effect;
+        }
+
+        if (CanHoistToEntry(opcode, operands))
+        {
+            return EntryOperation(opcode, resultType, operands);
         }
 
         var lookup = new InstructionKey(opcode, resultType, operands);
@@ -119,10 +141,45 @@ public sealed partial class SpirvModuleBuilder
         }
     }
 
+    private bool TryAddElementPointer(uint resultType, uint[] operands, out uint element)
+    {
+        element = 0;
+        if (operands.Length < 2 || !IsTrackedVariable(operands[0]) || !_scalarPointerTypes.Contains(resultType))
+        {
+            return false;
+        }
+
+        for (var index = 1; index < operands.Length; index++)
+        {
+            if (!IsIntegerConstant(operands[index], out _))
+            {
+                return false;
+            }
+        }
+
+        var lookup = new InstructionKey(SpirvOp.AccessChain, resultType, operands);
+        if (!_blockValues.TryGetValue(lookup, out element))
+        {
+            element = EmitResult(_functions, SpirvOp.AccessChain, resultType, operands);
+            var key = new InstructionKey(SpirvOp.AccessChain, resultType, operands.ToArray());
+            _blockValues[key] = element;
+            _definitions[element] = new Definition(SpirvOp.AccessChain, resultType, key.Operands);
+        }
+
+        _elementBases[element] = operands[0];
+        return true;
+    }
+
     private uint AddLoad(uint resultType, uint[] operands)
     {
         var pointer = operands[0];
-        if (operands.Length != 1 || !IsTrackedVariable(pointer))
+        if (operands.Length == 1 && _inputVariables.Contains(pointer) && !_changingInputs.Contains(pointer) &&
+            IsEntryAvailable())
+        {
+            return EntryLoad(resultType, pointer);
+        }
+
+        if (operands.Length != 1 || !IsTrackedPointer(pointer))
         {
             return EmitResult(_functions, SpirvOp.Load, resultType, operands);
         }
@@ -134,6 +191,11 @@ public sealed partial class SpirvModuleBuilder
 
         var result = EmitResult(_functions, SpirvOp.Load, resultType, operands);
         _pendingStores.Remove(pointer);
+        if (_localVariables.Contains(pointer))
+        {
+            ForgetElements(pointer, keepValues: true);
+        }
+
         _variableValues[pointer] = result;
         return result;
     }
@@ -141,16 +203,27 @@ public sealed partial class SpirvModuleBuilder
     private void AddStore(uint[] operands)
     {
         var pointer = operands[0];
-        if (operands.Length != 2 || !IsTrackedVariable(pointer))
+        if (operands.Length != 2 || !IsTrackedPointer(pointer))
         {
             if (_localVariables.Contains(pointer))
             {
                 _variableValues.Remove(pointer);
                 _pendingStores.Remove(pointer);
+                ForgetElements(pointer, keepValues: false);
             }
 
             Emit(_functions, SpirvOp.Store, operands);
             return;
+        }
+
+        if (_elementBases.TryGetValue(pointer, out var elementBase))
+        {
+            _variableValues.Remove(elementBase);
+            _pendingStores.Remove(elementBase);
+        }
+        else
+        {
+            ForgetElements(pointer, keepValues: false);
         }
 
         var value = operands[1];
@@ -169,17 +242,129 @@ public sealed partial class SpirvModuleBuilder
         _variableValues[pointer] = value;
     }
 
+    private uint EntryLoad(uint resultType, uint pointer)
+    {
+        if (_entryValues.TryGetValue(pointer, out var known) && TypeOf(known) == resultType)
+        {
+            return known;
+        }
+
+        var result = AppendToEntry(SpirvOp.Load, resultType, [pointer]);
+        _entryValues[pointer] = result;
+        return result;
+    }
+
+    private bool IsEntryAvailable() => CurrentFunction != 0 && !_entryLabelPending && _entryLabelOffset >= 0;
+
+    private bool CanHoistToEntry(SpirvOp opcode, uint[] operands)
+    {
+        if (!IsEntryAvailable() || opcode is SpirvOp.ExtInst or SpirvOp.CompositeExtract or SpirvOp.CompositeInsert or
+                SpirvOp.VectorShuffle or SpirvOp.AccessChain or SpirvOp.PtrAccessChain or SpirvOp.ArrayLength or
+                SpirvOp.ConvertUToPtr or SpirvOp.UDiv or SpirvOp.SDiv or SpirvOp.UMod or SpirvOp.SRem or SpirvOp.SMod)
+        {
+            return false;
+        }
+
+        var usesEntryValue = false;
+        foreach (var operand in operands)
+        {
+            if (_entryIds.Contains(operand))
+            {
+                usesEntryValue = true;
+            }
+            else if (!_scalarConstantValues.ContainsKey(operand) && !_wideConstantValues.ContainsKey(operand) &&
+                !_floatConstantBits.ContainsKey(operand))
+            {
+                return false;
+            }
+        }
+
+        return usesEntryValue;
+    }
+
+    private uint EntryOperation(SpirvOp opcode, uint resultType, uint[] operands)
+    {
+        if (_entryOperations.TryGetValue(new InstructionKey(opcode, resultType, operands), out var known))
+        {
+            return known;
+        }
+
+        var stored = operands.ToArray();
+        var result = AppendToEntry(opcode, resultType, stored);
+        _entryOperations[new InstructionKey(opcode, resultType, stored)] = result;
+        _definitions[result] = new Definition(opcode, resultType, stored);
+        return result;
+    }
+
+    private uint AppendToEntry(SpirvOp opcode, uint resultType, uint[] operands)
+    {
+        if (!_entryPrologues.TryGetValue(_entryLabelOffset, out var prologue))
+        {
+            prologue = [];
+            _entryPrologues.Add(_entryLabelOffset, prologue);
+        }
+
+        var result = AllocateId();
+        prologue.Add(((uint)(operands.Length + 3) << 16) | (uint)opcode);
+        prologue.Add(resultType);
+        prologue.Add(result);
+        prologue.AddRange(operands);
+        NoteResultType(result, resultType);
+        _entryIds.Add(result);
+        return result;
+    }
+
     private bool IsTrackedVariable(uint pointer) =>
         _localVariables.Contains(pointer) && !_escapedVariables.Contains(pointer);
+
+    private bool IsTrackedPointer(uint pointer) =>
+        IsTrackedVariable(pointer) || (_elementBases.TryGetValue(pointer, out var variable) && IsTrackedVariable(variable));
 
     private void NoteVariableUses(uint[] operands)
     {
         foreach (var operand in operands)
         {
-            if (_localVariables.Contains(operand) && _escapedVariables.Add(operand))
+            if (_localVariables.Contains(operand))
             {
-                _variableValues.Remove(operand);
-                _pendingStores.Remove(operand);
+                EscapeVariable(operand);
+            }
+            else if (_elementBases.TryGetValue(operand, out var variable))
+            {
+                EscapeVariable(variable);
+            }
+        }
+    }
+
+    private void EscapeVariable(uint variable)
+    {
+        if (_escapedVariables.Add(variable))
+        {
+            _variableValues.Remove(variable);
+            _pendingStores.Remove(variable);
+            ForgetElements(variable, keepValues: false);
+        }
+    }
+
+    private void ForgetElements(uint variable, bool keepValues)
+    {
+        foreach (var (element, _) in _pendingStores)
+        {
+            if (_elementBases.TryGetValue(element, out var owner) && owner == variable)
+            {
+                _pendingStores.Remove(element);
+            }
+        }
+
+        if (keepValues)
+        {
+            return;
+        }
+
+        foreach (var (element, _) in _variableValues)
+        {
+            if (_elementBases.TryGetValue(element, out var owner) && owner == variable)
+            {
+                _variableValues.Remove(element);
             }
         }
     }
@@ -235,7 +420,7 @@ public sealed partial class SpirvModuleBuilder
     private static bool IsValueOperation(SpirvOp opcode, uint[] operands) => opcode switch
     {
         SpirvOp.ExtInst => operands.Length >= 2 && operands[1] is not (GlslModf or GlslFrexp),
-        SpirvOp.AccessChain or SpirvOp.ArrayLength or SpirvOp.VectorExtractDynamic or SpirvOp.VectorInsertDynamic or
+        SpirvOp.AccessChain or SpirvOp.PtrAccessChain or SpirvOp.ArrayLength or SpirvOp.VectorExtractDynamic or SpirvOp.VectorInsertDynamic or
             SpirvOp.VectorShuffle or SpirvOp.CompositeConstruct or SpirvOp.CompositeExtract or SpirvOp.CompositeInsert or
             SpirvOp.CopyObject or SpirvOp.ConvertFToU or SpirvOp.ConvertFToS or SpirvOp.ConvertSToF or SpirvOp.ConvertUToF or
             SpirvOp.ConvertUToPtr or SpirvOp.UConvert or SpirvOp.SConvert or SpirvOp.FConvert or SpirvOp.Bitcast or
@@ -599,7 +784,7 @@ public sealed partial class SpirvModuleBuilder
         var opcode = (SpirvOp)(words[offset] & 0xFFFF);
         if (opcode == SpirvOp.Load)
         {
-            return wordCount == 4 && _localVariables.Contains(words[offset + 3]);
+            return wordCount == 4 && (_localVariables.Contains(words[offset + 3]) || _elementBases.ContainsKey(words[offset + 3]));
         }
 
         if (wordCount < 3)
@@ -688,6 +873,7 @@ public sealed partial class SpirvModuleBuilder
         }
 
         var compacted = new List<uint>(words.Count);
+        List<uint>? prologue = null;
         for (var index = 0; index < starts.Count; index++)
         {
             if (removed[index])
@@ -697,9 +883,20 @@ public sealed partial class SpirvModuleBuilder
 
             var offset = starts[index];
             var wordCount = (int)(words[offset] >> 16);
+            if (prologue is not null && (SpirvOp)(words[offset] & 0xFFFF) != SpirvOp.Variable)
+            {
+                compacted.AddRange(prologue);
+                prologue = null;
+            }
+
             for (var word = 0; word < wordCount; word++)
             {
                 compacted.Add(words[offset + word]);
+            }
+
+            if (_entryPrologues.TryGetValue(offset, out var entry))
+            {
+                prologue = entry;
             }
         }
 
