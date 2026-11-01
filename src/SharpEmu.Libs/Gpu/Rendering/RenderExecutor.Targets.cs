@@ -153,6 +153,13 @@ public sealed partial class RenderExecutor
         if (_pixelStoreDecisions.TryGetValue(address, out var known))
         {
             state.PixelActive = known;
+            // Programs the vertex-store check resolved with the pixel stage off have no pixel
+            // program; a draw whose pixel stage turns on resolves them again.
+            if (known)
+            {
+                state.Programs = null!;
+            }
+
             return known;
         }
 
