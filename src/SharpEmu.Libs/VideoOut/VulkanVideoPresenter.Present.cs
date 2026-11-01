@@ -104,12 +104,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     GuestDrawKind.None,
                     IsSplash: true)
                 : new Presentation(
-                    null,
+                    CreateBlackFrame(width, height),
                     width,
                     height,
-                    0,
+                    1,
                     GuestDrawKind.None,
-                    IsSplash: false);
+                    IsSplash: true);
             StartPresenterLocked();
         }
     }
