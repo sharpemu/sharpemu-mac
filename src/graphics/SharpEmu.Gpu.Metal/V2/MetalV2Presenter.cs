@@ -717,6 +717,11 @@ internal static partial class MetalV2Presenter
                     width = warmupWidth;
                     height = warmupHeight;
                 }
+                else if (presented != 0 || movie)
+                {
+                    // A guest or movie frame ends the splash even before warm-up reports done.
+                    ReleaseWarmupSplash();
+                }
 
                 var stamp = new MetalPresentationStamp(
                     presentedSequence, _hostFrameSequence, movie ? _movieFallbackSerial : 0,
