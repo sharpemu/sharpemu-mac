@@ -14,7 +14,7 @@ public sealed class Gen5MslBridgedWavesTests
 {
     private const uint Threads = 128;
 
-    private static Gen5MslShader Compile(string name, uint lane)
+    private static Gen5MslShader Compile(string name, uint lane, Gen5MslCodegenOptions? options = null)
     {
         var words = new uint[]
         {
@@ -27,7 +27,7 @@ public sealed class Gen5MslBridgedWavesTests
         var fixture = new Gen5ComputeFixture(name, words, StoreScalarResourceBase: 8, StoreBackingBytes: (int)Threads * 4);
         Gen5ComputeFixtures.DecodeOrThrow(fixture);
         var request = Gen5ComputeFixtures.CreateComputeRequest(fixture, waveLaneCount: 64, localSizeX: Threads);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options), error);
         return shader;
     }
 
@@ -56,10 +56,17 @@ public sealed class Gen5MslBridgedWavesTests
         }
     }
 
+    /// <summary>Every multi-wave group is bridged by default (GTA V's BVH-build radix sort needs
+    /// whole waves without reading an upper lane by number); SHARPEMU_MSL_MULTIWAVE64=0 narrows
+    /// the bridge to programs that do.</summary>
     [Fact]
-    public void AProgramThatReadsOnlyTheLowerHalfKeepsOneSimdgroupAWave()
+    public void AProgramThatReadsOnlyTheLowerHalfKeepsOneSimdgroupAWaveWhenOnlyUpperLaneReadersBridge()
     {
-        var shader = Compile("bridged-waves-lane5", 5);
-        Assert.DoesNotContain("sharpemu_wave_pair", shader.Source, StringComparison.Ordinal);
+        var upperLaneOnly = Gen5MslCodegenOptions.FromEnvironment with { MultiWaveCompute64 = false };
+        Assert.DoesNotContain("sharpemu_wave_pair", Compile("bridged-waves-lane5", 5, upperLaneOnly).Source,
+            StringComparison.Ordinal);
+        Assert.Contains("sharpemu_wave_pair", Compile("bridged-waves-lane63", 63, upperLaneOnly).Source,
+            StringComparison.Ordinal);
+        Assert.Contains("sharpemu_wave_pair", Compile("bridged-waves-lane5", 5).Source, StringComparison.Ordinal);
     }
 }

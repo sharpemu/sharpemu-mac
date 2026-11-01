@@ -144,6 +144,29 @@ public sealed class SignedLoopImageTests
         Assert.Equal(ResourceMaterializationFailure.IncompatibleImageCandidates, failure);
     }
 
+    // What the renderer asks for (ShaderProgramCache): the flat record reads as null and the volumes keep theirs, so
+    // the program runs instead of being rejected (Demon's Souls' volume-record vertex program 0x536AAA4B8B5F3E90).
+    [Fact]
+    public void OctaveImage_AFlatRecordAmongVolumesReadsAsNullWhenAsked()
+    {
+        var plan = Extract(OctaveLoop());
+        var (userData, read) = Octaves(3, 3, secondType: 9);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = userData,
+            ReadMemory = read,
+            ReadCleanMemory = read,
+            NullsOffClassLoopRecords = true,
+        };
+
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failure), $"{failure}");
+        Assert.Contains(snapshot.Images, image => image.SequenceEqual(Octave(0)));
+        Assert.Contains(snapshot.Images, image => image.SequenceEqual(Octave(2)));
+        Assert.DoesNotContain(snapshot.Images, image => image.SequenceEqual(Octave(1, 9)));
+    }
+
     [Fact]
     public void OctaveImage_Compiles()
     {

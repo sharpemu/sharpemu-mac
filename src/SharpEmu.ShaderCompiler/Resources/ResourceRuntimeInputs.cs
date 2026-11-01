@@ -37,6 +37,11 @@ public sealed class ResourceRuntimeInputs
     // (DeviceDataLoads); null leaves every data word flattened.
     public Func<ulong, bool>? DataWritePending { get; init; }
 
+    // A counted loop's record whose texture is of another class than the table binds reads as null instead of
+    // failing the program (ResourceMaterializer, IndirectImageTable.LoopSelected). The renderer sets it; a bare
+    // materialization reports the table as incompatible.
+    public bool NullsOffClassLoopRecords { get; init; }
+
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
         UserData = UserData,
@@ -50,6 +55,7 @@ public sealed class ResourceRuntimeInputs
         CompareResidentMemory = CompareResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
         DataWritePending = DataWritePending,
+        NullsOffClassLoopRecords = NullsOffClassLoopRecords,
     };
 
     // The inputs of a linked plan whose call entries read their arguments from user data
@@ -89,6 +95,7 @@ public sealed class ResourceRuntimeInputs
             CompareResidentMemory = CompareResidentMemory,
             ReadsClean = ReadsClean,
             DataWritePending = DataWritePending,
+            NullsOffClassLoopRecords = NullsOffClassLoopRecords,
         };
     }
 }

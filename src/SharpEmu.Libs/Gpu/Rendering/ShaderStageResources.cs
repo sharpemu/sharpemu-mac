@@ -180,7 +180,13 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
     }
 }
 
-public readonly record struct DispatchThreadLimits(uint X, uint Y, uint Z);
+public readonly record struct DispatchThreadLimits(uint X, uint Y, uint Z)
+{
+    // A thread-unit indirect dispatch the GPU resolves (IRenderHost.TryDispatchThreadsIndirect)
+    // has no counts on the CPU: zero on every axis, which a dispatch with counts the CPU read
+    // never reaches the host with (RenderExecutor skips it). The GPU writes the real limits.
+    public bool FromIndirectArguments => X == 0 && Y == 0 && Z == 0;
+}
 
 public readonly record struct MeshDrawParameters(
     uint VertexCount,

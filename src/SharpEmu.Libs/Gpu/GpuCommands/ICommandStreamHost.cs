@@ -419,6 +419,10 @@ public interface ICommandStreamHost
     // GPU, so the interpreter need not wait for the GPU to read them back first.
     bool ResolvesIndirectDispatchOnGpu => false;
 
+    // The same for an indirect dispatch in thread units, whose conversion to groups the host
+    // then also does on the GPU (IRenderHost.TryDispatchThreadsIndirect).
+    bool ResolvesThreadIndirectDispatchOnGpu => false;
+
     // True when an indexed indirect draw may be handed over with its arguments still in
     // guest memory (DrawIndexedArguments.IndirectArgumentsAddress).
     bool ResolvesIndirectDrawOnGpu => false;

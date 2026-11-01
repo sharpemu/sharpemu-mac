@@ -72,16 +72,18 @@ public sealed class LoadExecArgumentsTests
     }
 
     [Fact]
-    public void DefaultEntryKeepsTheExistingCompatibilityArguments()
+    public void DefaultEntryPassesEveryConfiguredArgument()
     {
         var previous = Environment.GetEnvironmentVariable("SHARPEMU_GUEST_ARGS");
         try
         {
-            Environment.SetEnvironmentVariable("SHARPEMU_GUEST_ARGS", "first second ignored");
+            GuestArguments.Reset();
+            Environment.SetEnvironmentVariable("SHARPEMU_GUEST_ARGS", "first second third");
             var context = Initialize(null);
             Assert.True(context.TryReadUInt64(context[CpuRegister.Rdi], out var count));
-            Assert.Equal(3UL, count);
-            Assert.Equal(1, HleDataSymbols.ProcessArgumentCount);
+            Assert.Equal(4UL, count);
+            Assert.Equal(4, HleDataSymbols.ProcessArgumentCount);
+            Assert.Equal(context[CpuRegister.Rdi] + 8, HleDataSymbols.ProcessArgumentVectorAddress);
         }
         finally
         {

@@ -582,6 +582,9 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     internal Action<VertexStageRegisters>? BeforeGraphicsResolve { get; set; }
     public GraphicsPrograms Graphics { get; set; } = RenderExecutorFixtures.Programs();
 
+    // What a resolution with the pixel stage off returns, when it differs from Graphics.
+    public GraphicsPrograms? GraphicsWithoutPixel { get; set; }
+
     // Stands in for a backend with mesh pipelines (Metal); Vulkan leaves it false.
     public bool SupportsPrimitiveShaderMeshPipelines { get; set; }
 
@@ -640,7 +643,7 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         BeforeGraphicsResolve?.Invoke(banks.Shader.Vertex);
         Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
         ExportMappings.Add(targetExportMapping.ToArray());
-        return Graphics;
+        return !pixelActive && GraphicsWithoutPixel is { } withoutPixel ? withoutPixel : Graphics;
     }
 
     public PipelineHandle CreateGraphicsPipeline(

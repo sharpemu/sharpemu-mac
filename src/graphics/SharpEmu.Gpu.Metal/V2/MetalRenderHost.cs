@@ -889,6 +889,9 @@ internal sealed partial class MetalRenderHost :
         {
             _gpuBusySeconds += gpuEnd - gpuStart;
             _gpuBusySamples++;
+            // The window title's GPU percentage: the overlay unions these intervals, so buffers
+            // that overlapped are not counted twice (the sum above does count them twice).
+            SharpEmu.Libs.VideoOut.PerfOverlay.RecordGpuBusy(gpuStart, gpuEnd);
         }
 
         OcclusionAuditResolve(serial, true);
@@ -2922,6 +2925,7 @@ internal sealed partial class MetalRenderHost :
         _completions.Dispose();
         DisposeNativeOcclusion();
         DisposeLabelScatter();
+        DisposeThreadDispatch();
         DisposeFillWords();
         DisposeOcclusionAudit();
         DisposeWriteFences();

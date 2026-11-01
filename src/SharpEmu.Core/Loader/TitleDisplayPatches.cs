@@ -10,8 +10,9 @@ namespace SharpEmu.Core.Loader;
 /// Per-title display-size patches, chosen by <see cref="EnvironmentVariable"/>:
 /// <list type="bullet">
 /// <item>unset or <c>1</c>: rewrite every compiled 3840x2160 size to the display while the
-/// title stays in its 4K mode. The fastest, but Demon's Souls' UI keeps its 4K layout on the
-/// shrunken canvas, so the HUD comes out 2x (1080p) or 3x (720p) and its item cells break.</item>
+/// title stays in its 4K mode. The fastest. The UI lays itself out on the shrunken canvas, and
+/// for Demon's Souls <see cref="ImageScaleSitesFor"/> keeps the images it sizes from their 4K
+/// textures in proportion to it.</item>
 /// <item><c>mode</c>: run the title in its own HD display mode, held there
 /// (<see cref="DisplayModeProfile"/>), the PS5's own path for a 1080p television: the output,
 /// the display buffers and the UI stay 1920x1080 and the presenter scales that to the window;
@@ -173,6 +174,50 @@ internal static class TitleDisplayPatches
     // sizes a render target from it (0x953F37) only under a flag the configs leave clear.
     private static readonly byte[] Nop3 = [0x0F, 0x1F, 0x00];
 
+    // Demon's Souls sizes a UI image from its texture: the texture's width and height divided by
+    // the canvas height over the height the UI is authored at (0xEA5FD0: [ui+8] / [ui]), so one
+    // texel stays one canvas pixel, on the understanding that the UI's textures are made for the
+    // canvas. They are the 4K ones whatever the canvas, so on the 1920x1080 canvas the all-sites
+    // rewrite makes, the header emblem, the list diamonds and the highlight bars come out twice
+    // their size while the text and layout, scaled by the canvas, do not. The three callers that
+    // divide a texture size by that ratio (0xF380B9, 0xF33BE0 and 0x1675F50) call a stand-in
+    // placed in the int3 padding after it instead, which divides 2160, the canvas the
+    // textures are made for, by the authored height and joins it at 0xEA5FD5. Its other caller,
+    // pixel snapping (0xEC855A / 0xEC857A), keeps the canvas.
+    private const ulong ImageScaleRatio = 0xEA5FD0;
+    private const ulong ImageScaleStandIn = 0xEA5FE1;
+
+    private static readonly CodeSite[] DemonsSoulsImageScaleSites =
+    [
+        // mov eax, 0x45070000 (2160.0f); vmovd xmm0, eax; jmp 0xEA5FD5 (mov eax, [rdi]; ...)
+        new(ImageScaleStandIn,
+            [0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC],
+            [0xB8, 0x00, 0x00, 0x07, 0x45, 0xC5, 0xF9, 0x6E, 0xC0, 0xEB, 0xE9]),
+        RedirectedCall(0xF380B9),
+        RedirectedCall(0xF33BE0),
+        RedirectedCall(0x1675F50),
+    ];
+
+    private static CodeSite RedirectedCall(ulong offset) =>
+        new(offset, CallRel32(offset, ImageScaleRatio), CallRel32(offset, ImageScaleStandIn));
+
+    private static byte[] CallRel32(ulong offset, ulong target)
+    {
+        var bytes = new byte[5];
+        bytes[0] = 0xE8;
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(1), checked((int)((long)target - (long)(offset + 5))));
+        return bytes;
+    }
+
+    /// <summary>The code patches that keep a title's texture-sized UI images in proportion to the
+    /// canvas the all-sites rewrite shrinks; null for a title without them.</summary>
+    internal static IReadOnlyList<CodeSite>? ImageScaleSitesFor(string? titleId) =>
+        titleId switch
+        {
+            "PPSA01342" => DemonsSoulsImageScaleSites,
+            _ => null,
+        };
+
     private static readonly DisplayModeProfile DemonsSoulsModes = new(
         [0xA63E41, 0xBC8056, 0xEB436C],
         OldDefaultMode: 3,
@@ -228,7 +273,7 @@ internal static class TitleDisplayPatches
         ArgumentNullException.ThrowIfNull(memory);
         ArgumentNullException.ThrowIfNull(programHeaders);
         var strategy = SelectedStrategy;
-        if (strategy == Strategy.Off || width == 0 || height == 0)
+        if (strategy == Strategy.Off || !EngineResolution.IsEnabled || width == 0 || height == 0)
         {
             return false;
         }
@@ -243,6 +288,10 @@ internal static class TitleDisplayPatches
         {
             var sites = SitesFor(titleId);
             patches = sites is null ? null : BuildPatches(sites, width, height);
+            if (patches is { Count: > 0 } && ImageScaleSitesFor(titleId) is { } imageSites)
+            {
+                patches.AddRange(imageSites.Select(site => CreatePatch(site.Offset, site.Old, site.New)));
+            }
         }
 
         if (patches is null || patches.Count == 0)
@@ -252,7 +301,7 @@ internal static class TitleDisplayPatches
 
         // A build other than the one the sites were taken from keeps every byte: verify all
         // of them before the patcher (which verifies again) writes any.
-        var current = new byte[8];
+        var current = new byte[patches.Max(patch => patch.New.Length)];
         foreach (var patch in patches)
         {
             var span = current.AsSpan(0, patch.New.Length);
@@ -266,12 +315,26 @@ internal static class TitleDisplayPatches
         }
 
         GuestBytePatcher.Apply(memory, programHeaders, imageBase, patches);
+        if (strategy == Strategy.DisplayMode)
+        {
+            var profile = DisplayModeFor(titleId)!;
+            EngineResolution.Report(
+                "Bluepoint",
+                $"display mode {profile.ModeFor(width, height)}",
+                profile.HdWidth,
+                profile.HdHeight,
+                $"scene {Math.Min(width, profile.HdWidth)}x{Math.Min(height, profile.HdHeight)}");
+        }
+        else
+        {
+            EngineResolution.Report("Bluepoint", "compiled display sizes", width, height, $"{patches.Count} sites");
+        }
+
         Console.Error.WriteLine(strategy == Strategy.DisplayMode
             ? $"[LOADER][INFO] {titleId}: starts in its display mode {DisplayModeFor(titleId)!.ModeFor(width, height)} " +
               $"for a {width}x{height} display ({patches.Count} sites, {EnvironmentVariable}=mode)."
             : $"[LOADER][INFO] {titleId}: compiled display sizes rewritten to {width}x{height} at {patches.Count} sites " +
-              $"(the title's UI keeps its 4K layout and comes out oversized; {EnvironmentVariable}=mode runs its HD " +
-              $"mode, =0 keeps its own sizes).");
+              $"({EnvironmentVariable}=mode runs its HD mode, =0 keeps its own sizes).");
         return true;
     }
 

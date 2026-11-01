@@ -278,6 +278,16 @@ internal sealed partial class RenderRecorder
             {
                 // SHARPEMU_SKIP_CS: what the program contributes, by its absence.
             }
+            else if (record.ThreadsOnGpu)
+            {
+                if (!TryDispatchThreadsIndirect(input, record.IndirectArgumentsAddress))
+                {
+                    throw _host.Fatal(
+                        $"A thread-unit indirect dispatch could not read its counts on the GPU: arguments=0x{record.IndirectArgumentsAddress:X16} shader=0x{shader:X16}.");
+                }
+
+                dispatched = true;
+            }
             else if (record.IndirectArgumentsAddress == 0 || !TryDispatchIndirect(input, record.IndirectArgumentsAddress))
             {
                 _host.Dispatch(groupsX, groupsY, groupsZ);
@@ -642,6 +652,14 @@ internal sealed partial class RenderRecorder
             if (descriptor.Address < TracedWriterRange.High && TracedWriterRange.Low < descriptor.Address + footprint)
                 hits.Append($" {prefix}{i}=0x{descriptor.Address:X}+0x{footprint:X}");
         }
+    }
+
+    // Thread counts the GPU converts to group counts with the shader's local size, in the same axis order.
+    private bool TryDispatchThreadsIndirect(ComputeInputInfo input, ulong argumentsAddress)
+    {
+        Span<int> axisOrder = stackalloc int[3];
+        GroupAxisOrder(input, axisOrder);
+        return _host.TryDispatchThreadsIndirect(argumentsAddress, input.ThreadsX, input.ThreadsY, input.ThreadsZ, axisOrder);
     }
 
     // The indirect form hands the host the group axis order so it can permute the counts it reads.

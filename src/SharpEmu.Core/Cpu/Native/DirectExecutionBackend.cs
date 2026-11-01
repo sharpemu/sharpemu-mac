@@ -5815,6 +5815,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 			_activeGuestExceptionDeliveries.Clear();
 		}
 
+		// A host thread's pthread_self stub answers with the handle it was registered under above.
+		GuestFastPath.ForgetPublishedSelves();
+
 		foreach (var runner in continuationRunners)
 		{
 			runner.Dispose();

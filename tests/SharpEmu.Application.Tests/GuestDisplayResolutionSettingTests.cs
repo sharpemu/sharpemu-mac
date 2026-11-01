@@ -8,18 +8,26 @@ namespace SharpEmu.Application.Tests;
 public sealed class GuestDisplayResolutionSettingTests
 {
     [Fact]
-    public void MissingAndUnknownValuesAre1080p()
+    public void MissingAndUnknownValuesFollowTheResolution()
     {
-        Assert.Equal("1080p", EffectiveLaunchSettings.Resolve(new PerGameSettings()).GuestDisplayResolution);
+        Assert.Equal("Auto", EffectiveLaunchSettings.Resolve(new PerGameSettings()).GuestDisplayResolution);
         Assert.Null(SettingsSplitMigration.CarriedValues("{}").GuestDisplayResolution);
         Assert.Null(SettingsSplitMigration.CarriedValues("""{"GuestDisplayResolution":"banana"}""").GuestDisplayResolution);
+    }
+
+    /// <summary>Every save of the old global file wrote "1080p" though no control set it; carrying
+    /// it would pin every game to 1080p whatever resolution the user picks.</summary>
+    [Fact]
+    public void TheOldAlwaysWritten1080pIsNotCarried()
+    {
+        Assert.Null(SettingsSplitMigration.CarriedValues("""{"GuestDisplayResolution":"1080p"}""").GuestDisplayResolution);
     }
 
     [Theory]
     [InlineData("720P", "720p")]
     [InlineData("1440p", "1440p")]
     [InlineData("2160p", "2160p")]
-    public void OtherResolutionsStaySelectable(string saved, string expected)
+    public void APinnedResolutionStaysSelectable(string saved, string expected)
     {
         var json = "{\"GuestDisplayResolution\":\"" + saved + "\"}";
         Assert.Equal(expected, SettingsSplitMigration.CarriedValues(json).GuestDisplayResolution);

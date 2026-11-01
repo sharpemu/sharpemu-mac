@@ -167,7 +167,20 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
             Arrayed = type == GuestImageType.Color2DArray,
             NumericClass = nativeClear ? TextureNumericClass.Float : TextureNumericClass.Uint,
         };
-        var description = ImageRequestBuilders.Texture(words, shape).Request.Description;
+        // FakeCpuMemory registers the Metal backend in other tests, which turns this
+        // process-wide mode off (MetalGpuBackend.ConfigureSharedGpuCode).
+        var previous = ImageRequestBuilders.NativeColorClearMetadata;
+        ImageRequestBuilders.NativeColorClearMetadata = true;
+        ImageDescription description;
+        try
+        {
+            description = ImageRequestBuilders.Texture(words, shape).Request.Description;
+        }
+        finally
+        {
+            ImageRequestBuilders.NativeColorClearMetadata = previous;
+        }
+
         Assert.Equal(MetadataKind.Dcc, description.Metadata.Kind);
         Assert.Equal(metadata, description.Metadata.Range.Address);
         Assert.Equal(nativeClear, description.Metadata.NativeColorClear);

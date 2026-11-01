@@ -97,7 +97,7 @@ public sealed class PerGameSettingsTests
             ScalingMode = "fit",
             VSync = true,
             HdrMode = "auto",
-            GuestDisplayResolution = "1080P",
+            GuestDisplayResolution = "auto",
             OverlayEnabled = true,
             OverlayCorner = "topright",
             OverlayMode = "full",
@@ -157,7 +157,7 @@ public sealed class PerGameSettingsTests
         Assert.Equal("Windowed", defaults.WindowMode);
         Assert.Equal("1920x1080", defaults.Resolution);
         Assert.True(defaults.VSync);
-        Assert.Equal("1080p", defaults.GuestDisplayResolution);
+        Assert.Equal("Auto", defaults.GuestDisplayResolution);
         Assert.Equal("Guest", defaults.BinkPlaybackMode);
 
         var effective = EffectiveLaunchSettings.Resolve(new PerGameSettings

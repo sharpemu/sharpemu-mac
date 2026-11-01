@@ -468,19 +468,15 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         IReadOnlyList<string>? processArguments = null)
     {
         var imageName = string.IsNullOrWhiteSpace(processImageName) ? "eboot.bin" : processImageName;
+        // A relaunch (loadExec) passes its own argv (an empty one is argv[0] alone); otherwise argv[0]
+        // is the image name and the rest come from --guest-args / SHARPEMU_GUEST_ARGS and engine
+        // adapter defaults.
         var arguments = processArguments is { Count: > 0 }
             ? new List<string>(processArguments)
-            : new List<string>(3) { imageName };
-        var configuredArguments = Environment.GetEnvironmentVariable("SHARPEMU_GUEST_ARGS");
-        if (processArguments is null && !string.IsNullOrWhiteSpace(configuredArguments))
+            : new List<string> { imageName };
+        if (processArguments is null)
         {
-            // The PS5 entry-parameter ABI exposes three inline argv pointers.
-            // Two compatibility arguments are therefore safe without changing
-            // the fixed 0x20-byte structure expected by existing titles.
-            var compatibilityArguments = configuredArguments.Split(
-                (char[]?)null,
-                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            arguments.AddRange(compatibilityArguments.Take(2));
+            arguments.AddRange(SharpEmu.HLE.GuestArguments.Effective);
         }
 
         var cursor = context[CpuRegister.Rsp];
@@ -497,32 +493,31 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             argumentAddresses[index] = cursor;
         }
 
-        var entryParamsSize = processArguments is null ? 0x20UL : Math.Max(0x20UL, (ulong)(arguments.Count + 2) * 8);
+        // The entry parameters: argc (32 bits, then padding), argv[] inline and NULL-terminated,
+        // then an empty environment. The libc start code reads argc at +0 and argv at +8. At
+        // least 0x20 bytes, the block every title has seen with up to two arguments.
+        var entryParamsSize = Math.Max(0x20UL, (ulong)(8 + 8 * (arguments.Count + 1) + 8));
         var entryParamsAddress = AlignDown(cursor - entryParamsSize, 16);
         if (!TryWriteUInt32(context, entryParamsAddress + 0x00, (uint)arguments.Count) ||
-            !TryWriteUInt32(context, entryParamsAddress + 0x04, 0) ||
-            !context.TryWriteUInt64(entryParamsAddress + 0x08, argumentAddresses[0]) ||
-            !context.TryWriteUInt64(
-                entryParamsAddress + 0x10,
-                argumentAddresses.Length > 1 ? argumentAddresses[1] : 0) ||
-            !context.TryWriteUInt64(
-                entryParamsAddress + 0x18,
-                argumentAddresses.Length > 2 ? argumentAddresses[2] : 0))
+            !TryWriteUInt32(context, entryParamsAddress + 0x04, 0))
         {
             return false;
         }
 
-        if (processArguments is not null)
+        for (var slot = 0UL; 8 + slot * 8 < entryParamsSize; slot++)
         {
-            for (var index = 0; index <= argumentAddresses.Length; index++)
-                if (!context.TryWriteUInt64(entryParamsAddress + 8 + (ulong)index * 8,
-                        index < argumentAddresses.Length ? argumentAddresses[index] : 0))
-                    return false;
+            var value = slot < (ulong)argumentAddresses.Length ? argumentAddresses[slot] : 0;
+            if (!context.TryWriteUInt64(entryParamsAddress + 8 + slot * 8, value))
+            {
+                return false;
+            }
         }
 
+        // getargc/getargv report the argv the entry parameters carry.
+        SharpEmu.HLE.HleDataSymbols.ConfigureProcessArguments(arguments.Count, entryParamsAddress + 8);
         if (arguments.Count > 1)
         {
-            Log.Debug($"Guest arguments: {string.Join(' ', arguments.Skip(1))}");
+            Log.Info($"Guest arguments: {string.Join(' ', arguments.Skip(1))}");
         }
 
         var entryStackPointer = entryParamsAddress - sizeof(ulong);
@@ -538,8 +533,6 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         context[CpuRegister.Rcx] = 0;
         context[CpuRegister.R8] = 0;
         context[CpuRegister.R9] = 0;
-        if (processArguments is not null)
-            HleDataSymbols.ConfigureProcessArguments(arguments.Count, entryParamsAddress + 8);
         return true;
     }
 

@@ -213,6 +213,23 @@ public static unsafe class GuestFastPath
         }
     }
 
+    /// <summary>
+    /// Clears every host thread's published self handle, for a scheduler that forgot the threads
+    /// it knew. A host thread's next pthread_self then takes the managed path and registers again;
+    /// otherwise the stub keeps answering with a handle the scheduler cannot deliver an exception to
+    /// (Superliminal's GC waits forever on its main thread after the loader's next session).
+    /// </summary>
+    public static void ForgetPublishedSelves()
+    {
+        lock (BlocksGate)
+        {
+            foreach (var block in Blocks)
+            {
+                Volatile.Write(ref *(ulong*)(block + BlockSelfHandleOffset), 0);
+            }
+        }
+    }
+
     /// <summary>Fast-path hit counts summed over every host thread, for diagnostics.</summary>
     public static (long SelfHits, long GetspecificHits, int Blocks) SnapshotCounters()
     {

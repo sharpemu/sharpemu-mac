@@ -32,16 +32,12 @@ public sealed class Gen5MslBvhIntersectTests(ITestOutputHelper output)
     private const uint SpecialBox16 = 6;
     private const uint Swizzled = 7;
     private const uint Ties = 8;           // two units
-    private const uint SharedRow = 10;     // type 6: the +x row of boxes
-    private const uint SharedOuter = 11;   // type 6 whose child 1 is SharedInner, itself type 6
-    private const uint SharedInner = 12;
-    private const uint SharedHand = 13;    // type 6: the implicit-pointer hand vector
     private const uint Straddling = 255;   // a box32 node across the 16 KB page boundary
     private const uint LastNode = 511;
 
     private const uint TypeBox16 = 4;
     private const uint TypeBox32 = 5;
-    private const uint TypeShared = 6;
+    private const uint TypeNull = 6;
 
     private readonly record struct Ray(ulong Pointer, float Extent, float[] Origin, float[] Direction)
     {
@@ -233,7 +229,7 @@ public sealed class Gen5MslBvhIntersectTests(ITestOutputHelper output)
         {
             AlongX(Pointer(Triangles, 2)),
             AlongX(Pointer(Triangles, 3)),
-            AlongX(Pointer(LastNode + 1, TypeShared)),
+            AlongX(Pointer(LastNode + 1, TypeNull)),
             AlongX(Pointer(Triangles, 7)),
             AlongX(Pointer(LastNode + 1, TypeBox16)),
             AlongX(Pointer(LastNode, TypeBox32)),
@@ -325,136 +321,32 @@ public sealed class Gen5MslBvhIntersectTests(ITestOutputHelper output)
         }
     }
 
-    // ---- the PS5 type-6 shared-exponent box node ----
+    // ---- type 6, the base PS5's null node ----
 
-    // Bounds decoded from the fixed-point grid: magnitude bit 16 weighs 2^(exponent - 127),
-    // and the bits renormalization shifts in are filled when the bound rounds outward.
+    // The PSR library's qbvh::NODE_NULL: its traversal pushes ENCODED_DEV_NULL (node 3, inside
+    // the BVH header, type 6) for a culled instance and as the third child of a two-child
+    // node, and drops it on the all-ones return. Whatever bytes a type-6 pointer names, a box
+    // node's or the header's, are not read as children.
     [Theory]
-    [InlineData(0x10000u, 127u, true, 0x3F80_0000u)]   // 1.0 as a minimum: exact
-    [InlineData(0x10000u, 127u, false, 0x3F80_007Fu)]  // 1.0 as a maximum: filled upward
-    [InlineData(0x30000u, 127u, true, 0xBF80_007Fu)]   // -1.0 as a minimum: filled downward
-    [InlineData(0x30000u, 127u, false, 0xBF80_0000u)]  // -1.0 as a maximum: exact
-    [InlineData(0x00001u, 127u, true, 0x3780_0000u)]   // 2^-16, renormalized
-    [InlineData(0x00000u, 127u, true, 0x0000_0000u)]   // +0 as a minimum: +0
-    [InlineData(0x20000u, 127u, false, 0x8000_0000u)]  // -0 as a maximum: -0
-    [InlineData(0x00000u, 127u, false, 0x377F_FFFFu)]  // +0 as a maximum: just under one step
-    [InlineData(0x00001u, 10u, true, 0x0002_0000u)]    // exponent too small: denormal
-    [InlineData(0x00000u, 10u, false, 0x007F_FFFFu)]
-    [InlineData(0x10000u, 255u, false, 0x7F80_0000u)]  // exponent 255 is not filled
-    [InlineData(0x1FFFFu, 130u, false, 0x417F_FFFFu)]
-    [InlineData(0x1FFFFu, 130u, true, 0x417F_FF80u)]
-    public void SharedExponentBoundsDecodeOutward(uint field, uint exponent, bool minimum, uint bits) =>
-        Assert.Equal(bits, Gen5BvhReference.SharedExponentBound(field, exponent, minimum));
-
-    // Base 0x100, children of types 5, 2 and 4, then an empty type-6 child: the pointers
-    // follow from the running base (two, four and one units); the empty one is invalid.
-    [Fact]
-    public void SharedExponentChildPointersAreImplicit()
-    {
-        var (children, bounds) = Gen5BvhReference.DecodeSharedExponentBox(HandSharedNode());
-        uint[] pointers = [(0x100u << 3) | 5, (0x102u << 3) | 2, (0x106u << 3) | 4, Invalid];
-        Assert.Equal(pointers, children);
-        Assert.Equal(1f, bounds[0]);
-        Assert.Equal(0x3FFF_FFFFu, Bits(bounds[3]));
-
-        var rays = new[]
-        {
-            new Ray(Pointer(SharedHand, TypeShared), 100f, [0f, 1.5f, 1.5f], [1f, 0f, 0f]),
-            new Ray(Pointer(SharedHand, TypeShared), 100f, [0f, 1.5f, 1.5f], [-1f, 0f, 0f]),
-        };
-        var results = Run(BuildGuest(), new Variant(false, false, Descriptor(sort: true)), rays);
-        if (results is null) return;
-        Assert.Equal(pointers, results[0]);
-        Assert.Equal([Invalid, Invalid, Invalid, Invalid], results[1]);
-    }
-
-    // The +x row of the float32 tests on a shared grid, child 3 empty: the same order.
-    [Theory]
-    [InlineData(true)]
     [InlineData(false)]
-    public void SharedExponentChildrenComeBackSortedLikeTheOtherBoxes(bool sort)
+    [InlineData(true)]
+    public void TheNullNodeReturnsAllOnesWhateverItPointsAt(bool bvh64)
     {
-        var results = Run(BuildGuest(), new Variant(true, false, Descriptor(sort: sort)), [AlongX(Pointer(SharedRow, TypeShared))]);
-        if (results is null) return;
-        uint[] pointers = [(0x40u << 3) | 5, (0x42u << 3) | 4, (0x43u << 3) | 6, Invalid];
-        Assert.Equal(sort ? [pointers[2], pointers[0], pointers[1], Invalid] : pointers, results[0]);
-    }
-
-    // A type-6 node whose child is a type-6 node: the returned pointer is walked again.
-    [Fact]
-    public void ASharedExponentChildOfASharedExponentNodeIsTraversed()
-    {
-        var outer = (uint)Pointer(SharedOuter, TypeShared);
-        var inner = (uint)Pointer(SharedInner, TypeShared);
+        const uint encodedDevNull = (3u << 3) | TypeNull;
+        Assert.Equal(encodedDevNull, (uint)Pointer(Triangles, TypeNull));
         var rays = new[]
         {
-            new Ray(outer, 100f, [0f, 0.5f, 0.5f], [1f, 0f, 0f]),
-            new Ray(inner, 100f, [0f, 0.5f, 0.5f], [1f, 0f, 0f]),
-            new Ray(outer, 100f, [0.5f, 0.5f, -4f], [0f, 0f, 1f]),
+            AlongX(encodedDevNull),
+            AlongX(Pointer(Box32, TypeNull)),
+            AlongX(Pointer(Box16, TypeNull)),
+            AlongX(Pointer(Ties, TypeNull)),
+            new Ray(Pointer(Box32, TypeNull), 100f, [0.5f, 0.5f, 2f], [0f, 0f, -1f]),
         };
-        var results = Run(BuildGuest(), new Variant(true, false, Descriptor(sort: true)), rays);
+        var results = Run(BuildGuest(), new Variant(bvh64, false, Descriptor(sort: true)), rays);
         if (results is null) return;
-        Assert.Equal([inner, Invalid, Invalid, Invalid], results[0]);
-        Assert.Equal([(0x81u << 3) | 0, (0x80u << 3) | 1, Invalid, Invalid], results[1]);
-        Assert.Equal([(0x0Au << 3) | 3, inner, (0x0Eu << 3) | 4, Invalid], results[2]);
-    }
 
-    // Random type-6 nodes against random rays: boxes quantized outward onto grids of
-    // ordinary exponents (negative bounds included), and nodes of raw random bits with
-    // denormal, huge and 255 exponents; random child types and empty children, sorting on
-    // and off.
-    [Theory]
-    [InlineData(false, false, 11)]
-    [InlineData(true, false, 12)]
-    [InlineData(false, true, 13)]
-    [InlineData(true, true, 14)]
-    public void RandomSharedExponentNodesMatchTheReference(bool bvh64, bool a16, int seed)
-    {
-        var random = new Random(seed);
-        var guest = BuildGuest();
-        const uint first = 128;
-        const uint count = 64;
-        uint[] special = [0, 1, 3, 10, 17, 18, 120, 140, 200, 254, 255];
-        var pointers = new List<ulong>();
-        for (var index = first; index < first + count; index++)
-        {
-            var types = Enumerable.Range(0, 4).Select(_ => (uint)random.Next(8)).ToArray();
-            var fields = Enumerable.Range(0, 4).Select(_ => (uint)random.Next(4)).ToArray();
-            var childBase = (uint)random.Next(0x2000_0000);
-            uint[] exponents;
-            uint[] bounds;
-            if (random.Next(3) != 0)
-            {
-                exponents = [(uint)random.Next(126, 133), (uint)random.Next(126, 133), (uint)random.Next(126, 133)];
-                bounds = [.. Enumerable.Range(0, 4).SelectMany(_ => QuantizeBox(RandomBox(random), exponents))];
-            }
-            else
-            {
-                exponents = [.. Enumerable.Range(0, 3).Select(_ => special[random.Next(special.Length)])];
-                bounds = [.. Enumerable.Range(0, 24).Select(_ => (uint)random.Next(0x40000))];
-            }
-
-            WriteShared(guest, index, childBase, types, fields, exponents, bounds);
-            pointers.Add(Pointer(index, TypeShared));
-        }
-
-        for (var round = 0; round < 6; round++)
-        {
-            var rays = new List<Ray>();
-            for (var lane = 0; lane < Lanes; lane++)
-            {
-                var direction = RandomPoint(random, 1f);
-                for (var axis = 0; axis < 3; axis++)
-                    if (random.Next(6) == 0) direction[axis] = random.Next(2) == 0 ? 0f : -0f;
-                // Origins off zero: Apple GPUs flush binary32 denormals in arithmetic, so a
-                // denormal bound (exponents below 16) taken from an origin of zero would reach
-                // the slab products as zero on the device and as itself in the reference.
-                rays.Add(new Ray(pointers[random.Next(pointers.Count)], random.Next(4) == 0 ? 3f : 100f, RandomPoint(random, 8f), direction));
-            }
-
-            var descriptor = Descriptor(sort: random.Next(2) == 0, grow: (uint)random.Next(4) * 3);
-            if (Run(guest, new Variant(bvh64, a16, descriptor), rays) is null) return;
-        }
+        foreach (var result in results)
+            Assert.Equal([Invalid, Invalid, Invalid, Invalid], result);
     }
 
     // ---- guest BVH ----
@@ -510,93 +402,7 @@ public sealed class Gen5MslBvhIntersectTests(ITestOutputHelper output)
         WriteTriangles(guest, Triangles, quad, 0xA5A5_0009);
         // Triangle 0: I <- third vertex (2), J <- first (0); triangle 1: I <- 3, J <- second (1).
         WriteTriangles(guest, Swizzled, quad, (2u | (0u << 2)) | ((3u | (1u << 2)) << 8));
-
-        // Type 6: the row on a 2^-13 grid (exponent 130) from base 0x40, child 3 empty.
-        uint[] grid = [130, 130, 130];
-        WriteShared(guest, SharedRow, 0x40, [5, 4, 6, 1], [0, 0, 0, 3], grid, [.. row.SelectMany(box => QuantizeBox(box, grid))]);
-        // Outer, from base 0x0A: child 0 (type 3, two units) below z = 0, child 1 the inner
-        // node at 0x0C = SharedInner (type 6, two units), child 2 (type 4, at 0x0E) the
-        // column above the unit square, child 3 empty. Inner, from base 0x80: triangle
-        // nodes at x in [2, 3] and [1, 2], children 2 and 3 empty.
-        WriteShared(guest, SharedOuter, 0x0A, [3, 6, 4, 0], [0, 0, 0, 3], grid,
-        [
-            .. QuantizeBox([0f, 0f, -3f, 1f, 1f, -2f], grid),
-            .. QuantizeBox([0f, 0f, 0f, 4f, 1f, 1f], grid),
-            .. QuantizeBox([0f, 0f, 1f, 1f, 1f, 3f], grid),
-            .. QuantizeBox([0f, 0f, 0f, 0f, 0f, 0f], grid),
-        ]);
-        WriteShared(guest, SharedInner, 0x80, [1, 0, 0, 0], [0, 0, 3, 3], grid,
-        [
-            .. QuantizeBox([2f, 0f, 0f, 3f, 1f, 1f], grid),
-            .. QuantizeBox([1f, 0f, 0f, 2f, 1f, 1f], grid),
-            .. new uint[12],
-        ]);
-        var hand = HandSharedNode();
-        for (var word = 0; word < 16; word++)
-            BinaryPrimitives.WriteUInt32LittleEndian(guest.AsSpan((int)SharedHand * 64 + word * 4), hand[word]);
         return guest;
-    }
-
-    // Base 0x100, children of types 5, 2, 4 and an empty 6; children 0-2 span [1, 2) on every
-    // axis at exponent 127 (1.0 = 0x10000, 0x1FFFF just under 2.0).
-    private static uint[] HandSharedNode()
-    {
-        var bounds = new uint[24];
-        for (var slot = 0; slot < 18; slot++)
-            bounds[slot] = slot % 6 < 3 ? 0x10000u : 0x1FFFFu;
-        return EncodeShared(0x100, [5, 2, 4, 6], [0, 1, 2, 3], [127, 127, 127], bounds);
-    }
-
-    // Bit `first` onward of the node as one little-endian 512-bit stream.
-    private static void PutBits(uint[] node, int first, int count, uint value)
-    {
-        for (var bit = 0; bit < count; bit++)
-        {
-            var position = first + bit;
-            var mask = 1u << (position % 32);
-            node[position / 32] = ((value >> bit) & 1) != 0 ? node[position / 32] | mask : node[position / 32] & ~mask;
-        }
-    }
-
-    // Base [28:0], child types at 29 + 3c, child fields at 41 + 2c (3: empty), exponents x,
-    // y, z at 56, 64, 72, the 18-bit bounds at 80 + 18 (6c + k).
-    private static uint[] EncodeShared(uint childBase, uint[] types, uint[] fields, uint[] exponents, uint[] bounds)
-    {
-        var node = new uint[16];
-        PutBits(node, 0, 29, childBase);
-        for (var child = 0; child < 4; child++)
-        {
-            PutBits(node, 29 + 3 * child, 3, types[child]);
-            PutBits(node, 41 + 2 * child, 2, fields[child]);
-        }
-
-        for (var axis = 0; axis < 3; axis++)
-            PutBits(node, 56 + 8 * axis, 8, exponents[axis]);
-        for (var slot = 0; slot < 24; slot++)
-            PutBits(node, 80 + 18 * slot, 18, bounds[slot]);
-        return node;
-    }
-
-    private static void WriteShared(byte[] guest, uint index, uint childBase, uint[] types, uint[] fields, uint[] exponents, uint[] bounds)
-    {
-        var node = EncodeShared(childBase, types, fields, exponents, bounds);
-        for (var word = 0; word < 16; word++)
-            BinaryPrimitives.WriteUInt32LittleEndian(guest.AsSpan((int)index * 64 + word * 4), node[word]);
-    }
-
-    // A box's min.xyz and max.xyz as 18-bit sign-magnitude steps of 2^(exponent - 143) on
-    // each axis, rounded outward as a builder would store them.
-    private static uint[] QuantizeBox(float[] box, uint[] exponents)
-    {
-        var fields = new uint[6];
-        for (var component = 0; component < 6; component++)
-        {
-            var scaled = box[component] / Math.ScaleB(1.0, (int)exponents[component % 3] - 143);
-            var steps = (long)(component < 3 ? Math.Floor(scaled) : Math.Ceiling(scaled));
-            fields[component] = (steps < 0 ? 1u << 17 : 0u) | (uint)Math.Min(Math.Abs(steps), 0x1FFFF);
-        }
-
-        return fields;
     }
 
     private static void WriteBox32(byte[] guest, uint index, uint[] children, float[][] boxes)
@@ -750,7 +556,7 @@ public sealed class Gen5MslBvhIntersectTests(ITestOutputHelper output)
             actual[lane] = new uint[4];
             for (var component = 0; component < 4; component++)
                 actual[lane][component] = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(OutputOffset + lane * LaneBytes + component * 4));
-            var box = (rays[lane].Pointer & 7) is TypeBox16 or TypeBox32 or TypeShared;
+            var box = (rays[lane].Pointer & 7) is TypeBox16 or TypeBox32;
             for (var component = 0; component < 4; component++)
             {
                 var same = actual[lane][component] == expected[lane][component] ||

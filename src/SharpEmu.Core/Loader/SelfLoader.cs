@@ -334,9 +334,6 @@ public sealed class SelfLoader : ISelfLoader
             effectiveImportStubs,
             runtimeSymbols);
         _ = GuestSyscallPatcher.Patch(virtualMemory, programHeaders, imageBase, effectiveImportStubs, _moduleManager);
-        var finalizedImportStubs = effectiveImportStubs.Count == 0
-            ? EmptyImportStubs
-            : effectiveImportStubs;
         var finalizedRuntimeSymbols = runtimeSymbols.Count == 0
             ? EmptyRuntimeSymbols
             : runtimeSymbols;
@@ -358,7 +355,14 @@ public sealed class SelfLoader : ISelfLoader
         {
             GuestBytePatcher.ApplyFromEnvironment(virtualMemory, programHeaders, imageBase);
             ApplyTitleDisplayPatch(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId);
+            EngineResolution.ApplyMainExecutable(virtualMemory, programHeaders, imageBase);
+            ApplyDemonsSoulsIdleNap(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId, effectiveImportStubs);
         }
+
+        // After the patches above, which may add import stubs.
+        var finalizedImportStubs = effectiveImportStubs.Count == 0
+            ? EmptyImportStubs
+            : effectiveImportStubs;
 
         // Before the red-zone pass: it only rewrites immediates in place, and the red-zone pass moves
         // instructions into trampolines and rewrites vector stores, which would hide its signatures.
@@ -450,19 +454,39 @@ public sealed class SelfLoader : ISelfLoader
             }
         }
 
+        (string? Title, string? TitleId, string? Version) applicationInfo = default;
         if (foundPath == null)
         {
             Console.WriteLine("[LOADER] param.json not found (no root path / unknown layout).");
-            return default;
+        }
+        else
+        {
+            applicationInfo = Ps5ParamJsonReader.TryReadPs5Param(fs, foundPath);
+            flexibleMemorySize = Ps5ParamJsonReader.TryReadFlexibleMemorySize(fs, foundPath);
+            Console.WriteLine($"[LOADER] Loading param.json at {foundPath}");
         }
 
-        var applicationInfo = Ps5ParamJsonReader.TryReadPs5Param(fs, foundPath);
-        flexibleMemorySize = Ps5ParamJsonReader.TryReadFlexibleMemorySize(fs, foundPath);
-        Console.WriteLine($"[LOADER] Loading param.json at {foundPath}");
-        Console.WriteLine(
-            $"[LOADER] Title: {applicationInfo.Title ?? "(unknown)"}, " +
-            $"TitleId: {applicationInfo.TitleId ?? "(unknown)"}, " +
-            $"Version: {applicationInfo.Version ?? "(unknown)"}");
+        // A dump without a title id in param.json (Poppy Playtime Chapter 1 has no param.json
+        // at all) still names its content in contentids.json; without it the title shared
+        // the UNKNOWN pipeline cache, save data and settings with every other such dump.
+        var contentIdsPath = string.IsNullOrEmpty(mountRoot) ? "contentids.json" : $"{mountRoot}/contentids.json";
+        if (string.IsNullOrWhiteSpace(applicationInfo.TitleId) &&
+            fs.Exists(contentIdsPath) &&
+            fs.TryReadAllBytes(contentIdsPath, out var contentIds) &&
+            Ps5ParamJsonReader.TryReadContentIdsTitleId(contentIds) is { } contentTitleId)
+        {
+            applicationInfo.TitleId = contentTitleId;
+            Console.WriteLine($"[LOADER] Title id {contentTitleId} from {contentIdsPath}");
+        }
+
+        if (foundPath != null || applicationInfo.TitleId != null)
+        {
+            Console.WriteLine(
+                $"[LOADER] Title: {applicationInfo.Title ?? "(unknown)"}, " +
+                $"TitleId: {applicationInfo.TitleId ?? "(unknown)"}, " +
+                $"Version: {applicationInfo.Version ?? "(unknown)"}");
+        }
+
         return applicationInfo;
     }
 
@@ -680,6 +704,34 @@ public sealed class SelfLoader : ISelfLoader
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             Console.Error.WriteLine($"[LOADER][WARN] spin-nap patch failed: {exception.Message}");
+        }
+    }
+
+    /// <summary>Lets Demon's Souls' idle job workers sleep instead of spinning; see
+    /// <see cref="DemonsSoulsIdleNapPatch"/>. The nap's import stub joins the image's own.</summary>
+    private static void ApplyDemonsSoulsIdleNap(
+        IVirtualMemory virtualMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        string? titleId,
+        Dictionary<ulong, string> importStubs)
+    {
+        try
+        {
+            DemonsSoulsIdleNapPatch.Apply(virtualMemory, programHeaders, imageBase, titleId, nid =>
+            {
+                foreach (var (address, stubNid) in CreateImportStubMapping(virtualMemory, [nid]))
+                {
+                    importStubs[address] = stubNid;
+                    return address;
+                }
+
+                return 0;
+            });
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] idle job-worker nap patch failed: {exception.Message}");
         }
     }
 

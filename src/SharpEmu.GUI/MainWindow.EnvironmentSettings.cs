@@ -19,6 +19,7 @@ public partial class MainWindow
 {
     private readonly LocalizedChoice[] _guestResolutionChoices =
     [
+        LocalizedChoice.FromKey("Auto", "Options.Hdr.Auto"),
         LocalizedChoice.Literal("720p", "1280 x 720 (720p)"),
         LocalizedChoice.Literal("1080p", "1920 x 1080 (1080p)"),
         LocalizedChoice.Literal("1440p", "2560 x 1440 (1440p)"),

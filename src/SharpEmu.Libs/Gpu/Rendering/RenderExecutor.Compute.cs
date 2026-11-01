@@ -98,7 +98,13 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
-        if ((indirectArgumentsAddress == 0 || useThreadDimensions) && IsEmptyDispatch(compute, useThreadDimensions, groupsX, groupsY, groupsZ))
+        // Thread counts left in guest memory (GpuCommandInterpreter.DispatchIndirectAt): the
+        // GPU converts them, so the dispatch comes with no counts at all. Counts the CPU read
+        // are converted here, and a zero axis among them skips the dispatch.
+        var threadsOnGpu = useThreadDimensions && indirectArgumentsAddress != 0 &&
+            groupsX == 0 && groupsY == 0 && groupsZ == 0 && _host.DispatchesThreadsIndirectOnGpu;
+        if ((indirectArgumentsAddress == 0 || useThreadDimensions) && !threadsOnGpu &&
+            IsEmptyDispatch(compute, useThreadDimensions, groupsX, groupsY, groupsZ))
         {
             if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
             {
@@ -202,7 +208,7 @@ public sealed partial class RenderExecutor
             record.ImageClear = TryDecodeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator);
         }
 
-        if (useThreadDimensions)
+        if (useThreadDimensions && !threadsOnGpu)
         {
             // The indirect buffer carries thread counts in this mode, while Vulkan indirect
             // dispatch consumes workgroup counts. Use the CPU-resolved counts after conversion.
@@ -240,6 +246,7 @@ public sealed partial class RenderExecutor
         record.GroupsY = groupsY;
         record.GroupsZ = groupsZ;
         record.IndirectArgumentsAddress = indirectArgumentsAddress;
+        record.ThreadsOnGpu = threadsOnGpu;
         record.HasStorageWrites = hasStorageWrites;
         var resources = input.Stage.Resources;
         Diagnostics.DispatchRunTally.NoteResolved(computeProgram.Program.Id, resources.Images, resources.Samplers, program.Bindings?.UsesTableBlock == true,

@@ -288,6 +288,15 @@ public sealed class ShaderResourcePlan
         plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);
         plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan);
         (plan.DeviceDescriptorTables, plan.UnplannedDeviceDescriptorWrites) = DeviceAddressRangePlanner.PlanDescriptorTables(plan);
+        // The tracker counts every FLAT store as a guest-memory store; one the planner found
+        // outside guest memory (an LDS stack a ray traversal keeps through an aperture address)
+        // writes none, and alone it must not make the host treat the program as writing anywhere.
+        if (plan.Info.WritesDeviceAddresses &&
+            plan.Memory.Entries.All(static memory => !memory.DeviceWrite || memory.OutsideGuestMemory))
+        {
+            plan.Info.WritesDeviceAddresses = false;
+        }
+
         plan.CallRecordCallees = CallRecordPlanner.Plan(plan);
 
         // Each written handle owns three flattened slots after the table reads: base

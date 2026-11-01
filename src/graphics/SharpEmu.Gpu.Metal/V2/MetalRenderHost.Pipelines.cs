@@ -120,7 +120,7 @@ internal sealed partial class MetalRenderHost
 
         // The pixel function with its colour outputs moved (ColorRemap -> library and function),
         // built the first time a subset join needs that remap of this program.
-        public Dictionary<(uint Remap, bool LodStatistics), (nint Library, nint Function)>? RemappedFunctions;
+        public Dictionary<(uint Remap, bool LodStatistics), (nint Library, nint Function, UInt128 ArchiveKey)>? RemappedFunctions;
 
         // The binary archive keys of the library and of the rectangle-list library (zero
         // with no archive): the pipeline made from them stores them under these.
@@ -529,6 +529,11 @@ internal sealed partial class MetalRenderHost
                 if (library == 0)
                 {
                     error = MetalNative.DescribeError(compileError);
+                }
+                else if (askArchive && archiveKey != default && MetalBinaryArchive.For(device) is { } owner)
+                {
+                    // Stored by the pipeline made from it, or else later (MetalUnstoredLibraries).
+                    MetalUnstoredLibraries.Note(owner, device, archiveKey, source, usesPerVertexInputs);
                 }
 
                 return library;
@@ -965,14 +970,23 @@ internal sealed partial class MetalRenderHost
                     MetalV2Formats.TopologyClass(parameters.Topology));
             }
 
+            // The library the fragment function comes from: a remapped pixel function is another
+            // library, and storing the pipeline's under the module's key would hand the module
+            // the remapped outputs at the next start.
+            var pixelLibraryKey = pixelModule?.ArchiveKey ?? default;
             if (pixelModule is not null)
             {
-                MetalNative.SendVoid(
-                    descriptor,
-                    MetalNative.Selector("setFragmentFunction:"),
-                    description.ColorRemap != 0
-                        ? RequireRemappedPixelFunction(pixelModule, description.ColorRemap, description.LodStatistics)
-                        : PixelFunctionOf(pixelModule, description.LodStatistics));
+                nint pixelFunction;
+                if (description.ColorRemap != 0)
+                {
+                    (pixelFunction, pixelLibraryKey) = RequireRemappedPixelFunction(pixelModule, description.ColorRemap, description.LodStatistics);
+                }
+                else
+                {
+                    pixelFunction = PixelFunctionOf(pixelModule, description.LodStatistics);
+                }
+
+                MetalNative.SendVoid(descriptor, MetalNative.Selector("setFragmentFunction:"), pixelFunction);
             }
 
             if (parameters.AlphaToCoverageEnable && !MetalV2Diagnostics.IgnoreAlphaToCoverage)
@@ -1114,8 +1128,9 @@ internal sealed partial class MetalRenderHost
                     descriptor,
                     mesh is null ? MetalBinaryArchive.PipelineKind.Render : MetalBinaryArchive.PipelineKind.Mesh,
                     vertexArchiveKey,
-                    pixelArchiveKey,
-                    missed);
+                    pixelLibraryKey,
+                    missed,
+                    pixelArchiveKey);
             }
 
             if (state == 0)
@@ -1853,7 +1868,11 @@ internal sealed partial class MetalRenderHost
             return TryReadResidentGuestBytesConcurrent(address, destination, assumptions);
         }
 
-        if (_imageCache.HasGpuModifiedImageBytes(address, (ulong)destination.Length))
+        // The GPU may still own bytes a recorded write covers: refused, as the interface asks, so
+        // the materializer reads them through TryReadGuestWord, which waits for the write.
+        var size = (ulong)destination.Length;
+        if (_imageCache.HasGpuModifiedImageBytes(address, size) ||
+            (_gpuWrites.MayCover(address, size) && _gpuWrites.PendingSerial(address, size, CompletedSerial) != 0))
         {
             return false;
         }
@@ -1898,7 +1917,8 @@ internal sealed partial class MetalRenderHost
         $" rescmp_released={Interlocked.Exchange(ref _residentCompareReleased, 0)}";
 
     // TryReadResidentGuestBytes for each range, compared where it lies. The same refusals apply
-    // (a GPU-modified image over a byte, a pending command-processor write), tested once for each
+    // (a GPU-modified image over a byte, a recorded GPU write still pending, a pending command-processor
+    // write), tested once for each
     // run of nearby ranges rather than for each range, and a refusal answers false for the
     // caller to read the ranges itself. So do the cases this does not model: possibly overlapping
     // label bytes (reading them retires entries), a released single-copy chunk (reading restores it),
@@ -1966,6 +1986,7 @@ internal sealed partial class MetalRenderHost
                 _residentCompareLabelSafe++;
             }
             if (_imageCache.HasGpuModifiedImageBytes(low, size) ||
+                (_gpuWrites.MayCover(low, size) && _gpuWrites.PendingSerial(low, size, CompletedSerial) != 0) ||
                 (_cpOverlay.Count != 0 &&
                  _cpOverlay.Coverage(low, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None))
             {

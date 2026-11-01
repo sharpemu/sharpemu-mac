@@ -1979,6 +1979,7 @@ public sealed partial class ResourceMaterializationCache
                 DataWritePending = inputs.DataWritePending,
                 ComputeState = inputs.ComputeState,
                 TablePhase = NoteTablePhase,
+                NullsOffClassLoopRecords = inputs.NullsOffClassLoopRecords,
             };
             // Keep the caller's outputs intact if the required recorded rewalk fails.
             var walkedSnapshot = snapshot;
@@ -2018,6 +2019,7 @@ public sealed partial class ResourceMaterializationCache
                     DataWritePending = inputs.DataWritePending,
                     ComputeState = inputs.ComputeState,
                     TablePhase = recorder.TablePhase,
+                    NullsOffClassLoopRecords = inputs.NullsOffClassLoopRecords,
                 };
             }
 
@@ -3397,9 +3399,12 @@ public sealed partial class ResourceMaterializationCache
             };
         }
 
+        private readonly HashSet<(ulong Address, int Words, bool Clean, bool Table)> _residentRuns = new();
+
         public void Reset()
         {
             _reads.Clear();
+            _residentRuns.Clear();
             // Retain ordinary descriptor walks without keeping unusually large
             // tables alive for the lifetime of the renderer. Ghost of Tsushima's GPU-driven
             // draws walk 8-22 thousand words each: dropping those at 16 Ki made every such
@@ -3504,6 +3509,13 @@ public sealed partial class ResourceMaterializationCache
             var wordCount = destination.Length / sizeof(uint);
             if (wordCount >= 8)
             {
+                // A run read again whole with the same flags adds only words the entry keeps once
+                // (Build drops a repeated address): a bindless heap is read once per image that
+                // indexes it, and recording every copy multiplied the reads to sort and fold.
+                var block = (address, wordCount, clean, _inTable);
+                if (_residentRuns.Contains(block))
+                    return true;
+                _residentRuns.Add(block);
                 var first = _reads.Count;
                 System.Runtime.InteropServices.CollectionsMarshal.SetCount(_reads, checked(first + wordCount));
                 var recorded = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_reads).Slice(first, wordCount);
@@ -3630,7 +3642,12 @@ public sealed partial class ResourceMaterializationCache
             }
 
             if (TryMergeRuns(reads))
+            {
+                ResourceMaterializationProfile.CountRead(ResourceMaterializationProfile.ReadCounter.MergedReadLists);
                 return;
+            }
+
+            ResourceMaterializationProfile.CountRead(ResourceMaterializationProfile.ReadCounter.SortedReadLists);
 
             var indexBits = 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)Math.Max(count - 1, 1));
             ulong highest = 0;

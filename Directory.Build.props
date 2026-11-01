@@ -78,7 +78,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <!-- Build provenance surfaced by SharpEmu.Logging.BuildInfo as a banner at the
        top of the log. Populated from GitHub Actions environment variables when
-       building in CI; empty locally. -->
+       building in CI. A local build takes its commit from git, so the window title
+       always names the commit it was built from. -->
   <ItemGroup>
     <AssemblyMetadata Include="SharpEmu.BuildConfiguration" Value="$(Configuration)" />
     <AssemblyMetadata Include="SharpEmu.RepositorySlug" Value="$(SharpEmuRepositorySlug)" />
@@ -90,4 +91,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <AssemblyMetadata Condition="'$(GITHUB_SERVER_URL)' != ''" Include="SharpEmu.BuildServerUrl" Value="$(GITHUB_SERVER_URL)" />
     <AssemblyMetadata Condition="'$(GITHUB_RUN_ID)' != ''" Include="SharpEmu.BuildRunId" Value="$(GITHUB_RUN_ID)" />
   </ItemGroup>
+
+  <Target Name="SharpEmuLocalBuildSha" BeforeTargets="GetAssemblyAttributes" Condition="'$(GITHUB_SHA)' == ''">
+    <Exec Command="git rev-parse HEAD" WorkingDirectory="$(MSBuildThisFileDirectory)" ConsoleToMSBuild="true"
+          StandardOutputImportance="low" IgnoreExitCode="true" ContinueOnError="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="SharpEmuLocalBuildSha" />
+      <Output TaskParameter="ExitCode" PropertyName="SharpEmuLocalBuildShaExitCode" />
+    </Exec>
+    <ItemGroup Condition="'$(SharpEmuLocalBuildShaExitCode)' == '0' And '$(SharpEmuLocalBuildSha)' != ''">
+      <AssemblyMetadata Include="SharpEmu.BuildSha" Value="$(SharpEmuLocalBuildSha)" />
+    </ItemGroup>
+  </Target>
 </Project>

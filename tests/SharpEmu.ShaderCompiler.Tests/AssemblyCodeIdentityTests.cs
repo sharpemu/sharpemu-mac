@@ -88,4 +88,66 @@ public sealed class AssemblyCodeIdentityTests
 
         Assert.NotEqual(original, Identity(image));
     }
+
+    [Fact]
+    public void AMovedMethodBodyKeepsTheIdentity()
+    {
+        // ReadyToRun moves the bodies (each target's image lists other RVAs for them): point
+        // a method at another body of the same bytes, as a relayout would.
+        var image = TranslatorImage();
+        var original = Identity(image);
+        using (var pe = new PEReader(new MemoryStream(image)))
+        {
+            var reader = pe.GetMetadataReader();
+            var bodies = new Dictionary<string, int>(StringComparer.Ordinal);
+            var moved = false;
+            for (var row = 1; row <= reader.GetTableRowCount(TableIndex.MethodDef) && !moved; row++)
+            {
+                var rva = reader.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(row)).RelativeVirtualAddress;
+                if (rva == 0)
+                {
+                    continue;
+                }
+
+                var body = pe.GetSectionData(rva).GetContent(0, pe.GetMethodBody(rva).Size);
+                var text = Convert.ToHexString(body.AsSpan());
+                if (!bodies.TryGetValue(text, out var other))
+                {
+                    bodies[text] = rva;
+                    continue;
+                }
+
+                var column = pe.PEHeaders.MetadataStartOffset + reader.GetTableMetadataOffset(TableIndex.MethodDef) +
+                    (row - 1) * reader.GetTableRowSize(TableIndex.MethodDef);
+                Assert.Equal(rva, BitConverter.ToInt32(image, column));
+                BitConverter.TryWriteBytes(image.AsSpan(column, sizeof(int)), other);
+                moved = true;
+            }
+
+            Assert.True(moved);
+        }
+
+        Assert.Equal(original, Identity(image));
+    }
+
+    [Fact]
+    public void AChangedEmbeddedResourceChangesTheIdentity()
+    {
+        // The MSL translator's templates are resources of its assembly.
+        var image = File.ReadAllBytes(typeof(SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator).Assembly.Location);
+        var original = Identity(image);
+        using (var pe = new PEReader(new MemoryStream(image)))
+        {
+            var reader = pe.GetMetadataReader();
+            var resources = pe.PEHeaders.CorHeader!.ResourcesDirectory;
+            var resource = reader.GetManifestResource(reader.ManifestResources.First());
+            var rva = resources.RelativeVirtualAddress + (int)resource.Offset;
+            var section = pe.PEHeaders.SectionHeaders.First(header =>
+                rva >= header.VirtualAddress && rva < header.VirtualAddress + header.VirtualSize);
+            // The first byte of the resource, past its length.
+            image[rva - section.VirtualAddress + section.PointerToRawData + sizeof(int)] ^= 0x20;
+        }
+
+        Assert.NotEqual(original, Identity(image));
+    }
 }

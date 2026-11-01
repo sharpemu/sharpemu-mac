@@ -251,6 +251,10 @@ internal static partial class MetalV2Presenter
         {
             VideoOutBackendServices.SetSelectedGpuName(name);
         }
+
+        // The window title's VRAM figure: the whole device allocation, read once per refresh.
+        PerfOverlay.SetGpuAllocatedBytesProvider(static () =>
+            _device == 0 ? 0UL : MetalV2Native.SendValue64(_device, SelCurrentAllocatedSize));
     }
 
     public static void EnsureStarted(uint width, uint height)
@@ -345,6 +349,23 @@ internal static partial class MetalV2Presenter
     /// only the worker may touch the cache, so the caller waits for it here.
     /// </summary>
     public static void StopWorker()
+    {
+        try
+        {
+            StopWorkerAndWait();
+        }
+        finally
+        {
+            // The title's binary archive writes its last segment here, while the session is
+            // closing, rather than at process exit: the split's GPU host is terminated a few
+            // seconds after the guest asks it to exit, and an archive left to ProcessExit lost
+            // that race in most sessions (Demon's Souls' every one), dropping the pipelines
+            // added since the last flush.
+            MetalBinaryArchive.Stop();
+        }
+    }
+
+    private static void StopWorkerAndWait()
     {
         Thread? worker;
         SharpEmu.HLE.Host.HostQosThread? workerQos;
@@ -1276,6 +1297,7 @@ internal static partial class MetalV2Presenter
         {
             // The presenter owns one retain per queued or presented frame.
             MetalNative.Send(texture, MetalNative.Selector("retain"));
+            PerfOverlay.SetRenderResolution(width, height);
             lock (_frameGate)
             {
                 _pendingFrames.Enqueue(new PendingFrame(texture, width, height, requestId, serial, isHdr));

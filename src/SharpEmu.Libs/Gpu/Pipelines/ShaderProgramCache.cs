@@ -346,6 +346,11 @@ internal sealed class ShaderProgramCache
 
     // Read once: the draw path asked the environment on every draw and dispatch
     // (~4 % of the Demon's Souls render thread) for a debug dump that is almost never on.
+    // A counted loop's record whose texture is of another class than its table's reads as null: the program is not
+    // rejected (a strict rejection stops the GPU host). SHARPEMU_LOOP_IMAGE_OFF_CLASS_NULL=0 rejects it again.
+    private static readonly bool NullsOffClassLoopRecords =
+        Environment.GetEnvironmentVariable("SHARPEMU_LOOP_IMAGE_OFF_CLASS_NULL") != "0";
+
     private readonly bool _spirvDumpEnabled = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV"), "1", StringComparison.Ordinal);
 
     private readonly GuestWordReader _readGuestWord;
@@ -768,6 +773,7 @@ internal sealed class ShaderProgramCache
             ReadResidentMemory = _prefetchResidentGuestBytes,
             CompareResidentMemory = _compareResidentGuestBytes,
             DataWritePending = _dataWritePending,
+            NullsOffClassLoopRecords = NullsOffClassLoopRecords,
         };
         _materializingHash = source.Hash;
         inputs.UserData = source.UserData;

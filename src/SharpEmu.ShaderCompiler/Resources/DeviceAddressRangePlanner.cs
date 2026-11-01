@@ -765,6 +765,7 @@ public static class DeviceAddressRangePlanner
                 if (memory.AddressSpace != FlatAddressSpace.Global ||
                     ExcludesGlobalAddress(plan, memory.Pc, handle.Operands[1]))
                 {
+                    memory.OutsideGuestMemory = true;
                     continue;
                 }
             }
@@ -854,6 +855,9 @@ public static class DeviceAddressRangePlanner
     private static (uint Low, uint High) UnsignedRange(ShaderResourcePlan plan, ScalarValue value, ScalarValue? active,
         HashSet<ScalarValue> visiting)
     {
+        // A register set before a loop and read inside it is a phi of itself; its range is
+        // the value it enters with.
+        value = plan.Graph.ResolveInvariantPhi(value) ?? value;
         if (value.Kind == ScalarValueKind.Constant && value.Type == ScalarValueType.U32)
             return (value.ConstantU32, value.ConstantU32);
         if (value.Kind == ScalarValueKind.MemoryAperture)

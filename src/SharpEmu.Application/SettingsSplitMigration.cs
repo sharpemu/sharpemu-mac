@@ -126,7 +126,10 @@ public static class SettingsSplitMigration
         legacy.ScalingMode = ApplicationSettings.NormalizeChoice(legacy.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         legacy.HdrMode = ApplicationSettings.NormalizeChoice(legacy.HdrMode, "Auto", "On", "Off");
         legacy.GuestDisplayResolution = ApplicationSettings.NormalizeChoice(
-            legacy.GuestDisplayResolution, "1080p", "720p", "1440p", "2160p");
+            legacy.GuestDisplayResolution, "Auto", "720p", "1080p", "1440p", "2160p");
+        // The old file wrote "1080p" on every save although nothing let a user choose it;
+        // carrying it would pin every game to 1080p whatever Resolution says.
+        if (legacy.GuestDisplayResolution == "1080p") legacy.GuestDisplayResolution = null;
         legacy.GpuReadbacks = ApplicationSettings.NormalizeChoice(legacy.GpuReadbacks, "Full", "Off");
         legacy.BinkPlaybackMode = ApplicationSettings.NormalizeChoice(legacy.BinkPlaybackMode, "Guest", "Host", "Skip");
         legacy.OverlayCorner = ApplicationSettings.NormalizeChoice(

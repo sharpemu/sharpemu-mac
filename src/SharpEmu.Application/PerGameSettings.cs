@@ -359,8 +359,9 @@ public sealed record EffectiveLaunchSettings(
         VSync: true,
         HdrMode: "Auto",
         // What the guest is told the display is, which is what decides how much pixel work a
-        // title does. Not the window size: see GuestDisplayResolution.
-        GuestDisplayResolution: "1080p",
+        // title does. Not the window size: see GuestDisplayResolution. "Auto" is the console
+        // output mode that fits Resolution; 720p, 1080p, 1440p or 2160p pin one.
+        GuestDisplayResolution: "Auto",
         GpuReadbacks: "Full",
         OverlayEnabled: true,
         OverlayCorner: "TopRight",

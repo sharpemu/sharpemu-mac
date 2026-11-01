@@ -128,6 +128,7 @@ public static partial class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
+        NoteDisplayQueried();
         Span<byte> status = stackalloc byte[VideoOutOutputStatusWithVrrSize];
         status.Clear();
         WriteOutputStatus(status[..VideoOutOutputStatusSize], HostVideoHost.CurrentOptions.GuestResolutionClass,
@@ -205,6 +206,7 @@ public static partial class VideoOutExports
             refreshRate = port.RefreshRate;
         }
 
+        NoteDisplayQueried();
         Span<byte> status = stackalloc byte[VideoOutResolutionStatusSize];
         status.Clear();
         BinaryPrimitives.WriteUInt32LittleEndian(status[0x00..], width);

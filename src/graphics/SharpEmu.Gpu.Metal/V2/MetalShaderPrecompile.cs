@@ -13,7 +13,14 @@ internal enum MetalPrecompileMode
     /// <summary>Holds the guest for its first frame's programs only; the rest compile behind it.</summary>
     Off,
 
-    /// <summary>Holds the guest until every recorded compute, graphics program and listed library is compiled.</summary>
+    /// <summary>
+    /// The default: holds the guest, with the progress on the splash, until every recorded
+    /// compute, graphics program and listed library is compiled; the static precompile of
+    /// programs not drawn yet runs behind the game.
+    /// </summary>
+    Recorded,
+
+    /// <summary>As <see cref="Recorded"/>, and the static precompile of every file is compiled too.</summary>
     Hold,
 
     /// <summary>As <see cref="Hold"/>, then closes the session instead of letting the guest go.</summary>
@@ -21,14 +28,21 @@ internal enum MetalPrecompileMode
 }
 
 /// <summary>
-/// The hold-until-done and precompile-only modes of the shader prewarm
-/// (SHARPEMU_SHADER_PREWARM_HOLD=complete, SHARPEMU_SHADER_PRECOMPILE_ONLY=1; the CLI's
-/// --shader-prewarm-hold and --precompile-only set them). The guest is held at its first
-/// splash hide, GPU submission or flip while the compute prewarm, the graphics prewarm and
-/// then the MSL library list compile to completion; in precompile-only mode the session
-/// then closes. Everything is compiled and released, not kept: what makes the next start
-/// fast is macOS's per-app Metal shader cache, which the compiles fill, and holding every
-/// library would cost about 48 KB each (MetalRenderHost.ShaderCache). The log reports the
+/// The hold modes of the shader prewarm. By default (<see cref="MetalPrecompileMode.Recorded"/>)
+/// the guest is held at its first splash hide, GPU submission or flip while what past
+/// sessions recorded compiles to completion: the compute prewarm, the graphics prewarm and
+/// then the MSL library list, the screen before the game starts. Only the first frame's
+/// programs held it before, a few or none for most titles (The Oregon Trail: 8 computes,
+/// released after 0.1 s), and the rest compiled on up to six threads beside the game.
+/// SHARPEMU_SHADER_PREWARM_HOLD=first goes back to that. The hold-until-done and
+/// precompile-only modes (SHARPEMU_SHADER_PREWARM_HOLD=complete,
+/// SHARPEMU_SHADER_PRECOMPILE_ONLY=1; the CLI's --shader-prewarm-hold and --precompile-only
+/// set them) also hold for the static precompile of every file; in precompile-only mode
+/// the session then closes. Those two compile and release everything, not keep it: what
+/// makes the next start fast is macOS's per-app Metal shader cache and the title's binary
+/// archive, which the compiles fill, and holding every library would cost about 48 KB each
+/// (MetalRenderHost.ShaderCache). The default keeps the listed libraries for the modules
+/// that ask for them, as the background prewarm did. The log reports the
 /// phases, progress every five seconds, and the footprint the precompile reached.
 /// </summary>
 internal sealed class MetalShaderPrecompile(
@@ -39,6 +53,7 @@ internal sealed class MetalShaderPrecompile(
     internal const string PrecompileOnlyVariable = "SHARPEMU_SHADER_PRECOMPILE_ONLY";
     internal const string HoldVariable = "SHARPEMU_SHADER_PREWARM_HOLD";
     internal const string HoldCompleteValue = "complete";
+    internal const string HoldFirstValue = "first";
 
     private static readonly TimeSpan ReportInterval = TimeSpan.FromSeconds(5);
 
@@ -65,8 +80,11 @@ internal sealed class MetalShaderPrecompile(
 
     public MetalPrecompileMode Mode => mode;
 
-    /// <summary>Whether the guest is held until everything is compiled.</summary>
+    /// <summary>Whether the guest is held until everything recorded is compiled.</summary>
     public bool HoldsUntilComplete => mode != MetalPrecompileMode.Off;
+
+    /// <summary>Whether the guest is held for the static precompile of every file too.</summary>
+    public bool HoldsForStatic => mode is MetalPrecompileMode.Hold or MetalPrecompileMode.Exit;
 
     /// <summary>Whether <see cref="Complete"/> ran.</summary>
     public bool Completed => Volatile.Read(ref _completed) != 0;
@@ -79,7 +97,9 @@ internal sealed class MetalShaderPrecompile(
             ? MetalPrecompileMode.Exit
             : string.Equals(hold, HoldCompleteValue, StringComparison.OrdinalIgnoreCase)
                 ? MetalPrecompileMode.Hold
-                : MetalPrecompileMode.Off;
+                : string.Equals(hold, HoldFirstValue, StringComparison.OrdinalIgnoreCase)
+                    ? MetalPrecompileMode.Off
+                    : MetalPrecompileMode.Recorded;
 
     /// <summary>A phase starts: the recorded programs, then the library list.</summary>
     public void BeginPhase(string phase, int total)
@@ -153,7 +173,7 @@ internal sealed class MetalShaderPrecompile(
 
         Console.Error.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"[LOADER][INFO] Shader precompile done: mode={(mode == MetalPrecompileMode.Exit ? "precompile-only" : "hold")} " +
+            $"[LOADER][INFO] Shader precompile done: mode={mode switch { MetalPrecompileMode.Exit => "precompile-only", MetalPrecompileMode.Hold => "hold", _ => "recorded" }} " +
             $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} footprint_start_mb={Mb(startFootprint)} " +
             $"footprint_peak_mb={Mb(PeakFootprint)} footprint_end_mb={Mb(current)} " +
             $"process_peak_mb={Mb(lifetimePeak)} {detail}"));

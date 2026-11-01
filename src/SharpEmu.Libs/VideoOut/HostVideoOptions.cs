@@ -26,15 +26,16 @@ public enum HostHdrMode
 }
 
 /// <summary>
-/// The display resolution the guest is told it is driving. Separate from
-/// <see cref="HostVideoOptions.Width"/>, which is the host window: a title asks the system
-/// what the television is and sizes its render targets from the answer, so this is the
-/// number that decides how much pixel work it does, whatever size the window ends up.
+/// The display resolution the guest is told it is driving. A title asks the system what the
+/// television is and sizes its render targets from the answer, so this is the number that
+/// decides how much pixel work it does. <see cref="Auto"/>, the default, is the output
+/// resolution the user picked (<see cref="HostVideoOptions.Width"/> x
+/// <see cref="HostVideoOptions.Height"/>, <c>--resolution</c>); the others pin a size whatever
+/// that resolution is.
 /// </summary>
 public enum GuestDisplayResolution
 {
-    /// <summary>1920x1080. The default: a 4K report costs up to four times the pixel work
-    /// for a panel the host is almost certainly not driving.</summary>
+    /// <summary>1920x1080.</summary>
     Hd,
 
     /// <summary>2560x1440.</summary>
@@ -47,6 +48,11 @@ public enum GuestDisplayResolution
     /// TitleDisplayPatches) a way to cut their pixel work below 1080p. A title that registers
     /// its own fixed-size buffers keeps them, and the presenter scales them as a PS5 does.</summary>
     Hd720,
+
+    /// <summary>The largest console output mode that fits the chosen output resolution; see
+    /// <see cref="HostVideoOptions.EffectiveDisplayResolution"/>. Last so the values the
+    /// split GPU process receives keep their meaning.</summary>
+    Auto,
 }
 
 public enum PerformanceOverlayCorner
@@ -84,9 +90,10 @@ public sealed record HostVideoOptions
 
     public HostHdrMode HdrMode { get; init; } = HostHdrMode.Auto;
 
-    /// <summary>What the guest is told the display is. See
-    /// <see cref="GuestDisplayResolution"/> for why this is not the window size.</summary>
-    public GuestDisplayResolution DisplayResolution { get; init; } = GuestDisplayResolution.Hd;
+    /// <summary>What the guest is told the display is; <see cref="GuestDisplayResolution.Auto"/>
+    /// follows <see cref="Width"/> x <see cref="Height"/>. See
+    /// <see cref="EffectiveDisplayResolution"/>.</summary>
+    public GuestDisplayResolution DisplayResolution { get; init; } = GuestDisplayResolution.Auto;
 
     public bool OverlayEnabled { get; init; } = true;
     public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.TopRight;
@@ -97,9 +104,26 @@ public sealed record HostVideoOptions
     // --hdr=on presents HDR.
     internal static bool AutoHdrAllowed => HostVideoHost.AutoHdrAllowed;
 
+    /// <summary>The console output mode the guest is told it drives: <see cref="DisplayResolution"/>
+    /// when one is pinned, otherwise the largest of 2160p, 1440p, 1080p and 720p that fits
+    /// inside the chosen output resolution in both dimensions (720p below that, the console's
+    /// smallest mode). A PS5 only drives these modes, and titles size their render targets
+    /// from the mode, so a 1920x1200 or 2560x1600 output gets 1080p or 1440p and the presenter
+    /// scales it to the window.</summary>
+    public GuestDisplayResolution EffectiveDisplayResolution =>
+        DisplayResolution != GuestDisplayResolution.Auto && Enum.IsDefined(DisplayResolution)
+            ? DisplayResolution
+            : Width >= 3840 && Height >= 2160
+                ? GuestDisplayResolution.Uhd
+                : Width >= 2560 && Height >= 1440
+                    ? GuestDisplayResolution.Qhd
+                    : Width >= 1920 && Height >= 1080
+                        ? GuestDisplayResolution.Hd
+                        : GuestDisplayResolution.Hd720;
+
     /// <summary>The display size every guest query reports, from
-    /// <see cref="DisplayResolution"/>. One place, so the answers cannot disagree.</summary>
-    public (uint Width, uint Height) GuestDisplaySize => DisplayResolution switch
+    /// <see cref="EffectiveDisplayResolution"/>. One place, so the answers cannot disagree.</summary>
+    public (uint Width, uint Height) GuestDisplaySize => EffectiveDisplayResolution switch
     {
         GuestDisplayResolution.Uhd => (3840u, 2160u),
         GuestDisplayResolution.Qhd => (2560u, 1440u),
@@ -110,7 +134,7 @@ public sealed record HostVideoOptions
     /// <summary>The resolution class sceVideoOutGetOutputStatus reports: 2 is the 4K class,
     /// 1 everything below it.</summary>
     public int GuestResolutionClass =>
-        DisplayResolution == GuestDisplayResolution.Uhd ? 2 : 1;
+        EffectiveDisplayResolution == GuestDisplayResolution.Uhd ? 2 : 1;
 
     public bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr) =>
         CanUseHdr(displayHdrEnabled, surfaceSupportsHdr, AutoHdrAllowed);
@@ -127,7 +151,7 @@ public sealed record HostVideoOptions
         HdrMode = Enum.IsDefined(HdrMode) ? HdrMode : HostHdrMode.Auto,
         DisplayResolution = Enum.IsDefined(DisplayResolution)
             ? DisplayResolution
-            : GuestDisplayResolution.Hd,
+            : GuestDisplayResolution.Auto,
         OverlayCorner = Enum.IsDefined(OverlayCorner) ? OverlayCorner : PerformanceOverlayCorner.TopRight,
         OverlayMode = Enum.IsDefined(OverlayMode) ? OverlayMode : PerformanceOverlayMode.Full,
     };

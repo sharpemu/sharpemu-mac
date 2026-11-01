@@ -182,6 +182,10 @@ internal sealed class ResolvedDispatch
     public uint GroupsZ;
     public ulong IndirectArgumentsAddress;
 
+    // Thread counts left in guest memory that the GPU converts to group counts
+    // (IRenderHost.TryDispatchThreadsIndirect); the group counts are then zero.
+    public bool ThreadsOnGpu;
+
     // The indirect arguments address the packet carried, before thread dimensions cleared it:
     // a suspended dispatch is matched to its retry by it.
     public ulong PacketIndirectArgumentsAddress;
@@ -222,6 +226,7 @@ internal sealed class ResolvedDispatch
         GroupsY = 0;
         GroupsZ = 0;
         IndirectArgumentsAddress = 0;
+        ThreadsOnGpu = false;
         PacketIndirectArgumentsAddress = 0;
         HostPrepared = false;
         Retry = null;

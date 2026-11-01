@@ -478,6 +478,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                     }
                 }
                 else if (entry.Name.Equals("eboot.bin", StringComparison.OrdinalIgnoreCase) ||
+                    // The title id of a dump whose param.json has none (SelfLoader).
+                    entry.Name.Equals("contentids.json", StringComparison.OrdinalIgnoreCase) ||
                     Path.GetExtension(entry.Name).Equals(".prx", StringComparison.OrdinalIgnoreCase) ||
                     Path.GetExtension(entry.Name).Equals(".sprx", StringComparison.OrdinalIgnoreCase))
                 {

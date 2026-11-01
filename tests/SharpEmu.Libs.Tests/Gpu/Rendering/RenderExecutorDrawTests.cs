@@ -1269,6 +1269,30 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
+    public void PixelStoresOnlyDraw_ResolvesItsPixelProgramWhenTheDecisionIsRemembered()
+    {
+        // The prefetch cannot know that the pixel stage turns on for its stores: its inputs differ by design.
+        _executor.Prefetch = null;
+        var pixelStage = Stage(Program(ShaderStageKind.Pixel, writesDeviceAddresses: true));
+        _pipelines.Graphics = Programs(pixelStage: pixelStage);
+        // The vertex-store check resolves the programs with the pixel stage off: no pixel program.
+        _pipelines.GraphicsWithoutPixel = new GraphicsPrograms(Programs().VertexInput, new PixelInputInfo())
+        {
+            Vertex = new ShaderProgram(0x11),
+        };
+
+        for (var draw = 0; draw < 2; draw++)
+        {
+            var banks = Banks();
+            banks.Context.RenderTargetMask = 0;
+            _host.Calls.Clear();
+            _executor.DrawAuto(1, banks, Auto(3));
+
+            Assert.Contains(_host.Calls, c => c.StartsWith("prepare_bindings Pixel", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
     public void PixelShaderWithDepthSideEffects_KeepsADrawWithoutColorOutput()
     {
         var banks = Banks();

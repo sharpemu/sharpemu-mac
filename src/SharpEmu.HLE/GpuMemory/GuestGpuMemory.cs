@@ -328,6 +328,20 @@ public sealed class GuestGpuMemory : IDisposable
         return snapshot.Contains(address, size);
     }
 
+    // The first registered part of [address, address + size), clipped to the range.
+    public bool TryGetFirstRegistered(ulong address, ulong size, out ulong start, out ulong end)
+    {
+        if (!new GuestSpan(address, size).IsValid)
+        {
+            start = 0;
+            end = 0;
+            return false;
+        }
+
+        var snapshot = Volatile.Read(ref _spanSnapshot) ?? throw new ObjectDisposedException(nameof(GuestGpuMemory));
+        return snapshot.TryGetFirstOverlap(address, address + size, out start, out end);
+    }
+
     // The registered span that holds the address.
     public bool TryGetSpan(ulong address, out ulong start, out ulong end)
     {
