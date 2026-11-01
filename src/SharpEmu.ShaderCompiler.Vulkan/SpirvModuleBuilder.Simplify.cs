@@ -5,6 +5,7 @@ namespace SharpEmu.ShaderCompiler.Vulkan;
 
 public sealed partial class SpirvModuleBuilder
 {
+    private const int MaxWordSplitDepth = 6;
     private const uint GlslModf = 35;
     private const uint GlslFrexp = 51;
 
@@ -203,6 +204,9 @@ public sealed partial class SpirvModuleBuilder
 
     private uint IntegerWidth(uint type) => _integerTypeInfo.TryGetValue(type, out var info) ? info.Width : 0;
 
+    private bool IsUnsignedInteger(uint type, uint width) =>
+        _integerTypeInfo.TryGetValue(type, out var info) && info.Width == width && !info.Signed;
+
     private bool IsFloat32Type(uint type) => _floatTypes.TryGetValue(32, out var floatType) && floatType == type;
 
     private bool Defines(uint id, SpirvOp opcode, out Definition definition) =>
@@ -285,6 +289,12 @@ public sealed partial class SpirvModuleBuilder
                 return TrySimplifyBitcast(resultType, operands[0], out result);
             case SpirvOp.UConvert when operands.Length == 1:
                 return TrySimplifyUConvert(resultType, operands[0], out result);
+            case SpirvOp.ShiftRightLogical when operands.Length == 2 && IsUnsignedInteger(resultType, 64) &&
+                IsIntegerConstant(operands[1], out var amount) && amount == 32 &&
+                _integerTypes.TryGetValue((32, false), out var word) &&
+                TrySplitHighWord(operands[0], word, 0, out var high):
+                result = AddInstruction(SpirvOp.UConvert, resultType, high);
+                return true;
         }
 
         return TrySimplifyIntegerIdentity(opcode, resultType, operands, out result);
@@ -422,6 +432,14 @@ public sealed partial class SpirvModuleBuilder
             return true;
         }
 
+        if (IntegerWidth(TypeOf(tested)) == 64 && _integerTypes.TryGetValue((32, false), out var word) &&
+            TrySplitHighWord(tested, word, 0, out var high) && IsIntegerConstant(high, out var highValue) &&
+            highValue == 0 && TrySplitLowWord(tested, word, 0, out var low))
+        {
+            result = AddInstruction(notEqual ? SpirvOp.INotEqual : SpirvOp.IEqual, resultType, low, Constant(word, 0));
+            return true;
+        }
+
         return false;
     }
 
@@ -494,7 +512,86 @@ public sealed partial class SpirvModuleBuilder
             return true;
         }
 
+        if (width == 32 && sourceWidth == 64 && TrySplitLowWord(value, resultType, 0, out var low))
+        {
+            result = low;
+            return true;
+        }
+
         return false;
+    }
+
+    private bool TrySplitLowWord(uint value, uint wordType, int depth, out uint low)
+    {
+        low = 0;
+        if (depth > MaxWordSplitDepth)
+        {
+            return false;
+        }
+
+        if (IsIntegerConstant(value, out var constant))
+        {
+            low = Constant(wordType, (uint)constant);
+            return true;
+        }
+
+        if (!_definitions.TryGetValue(value, out var definition))
+        {
+            return false;
+        }
+
+        switch (definition.Opcode)
+        {
+            case SpirvOp.UConvert when HasType(definition.Operands[0], wordType):
+                low = definition.Operands[0];
+                return true;
+            case SpirvOp.ShiftLeftLogical when IsIntegerConstant(definition.Operands[1], out var shift) && shift is >= 32 and < 64:
+                low = Constant(wordType, 0);
+                return true;
+            case SpirvOp.BitwiseOr or SpirvOp.BitwiseAnd or SpirvOp.BitwiseXor
+                when TrySplitLowWord(definition.Operands[0], wordType, depth + 1, out var left) &&
+                    TrySplitLowWord(definition.Operands[1], wordType, depth + 1, out var right):
+                low = AddInstruction(definition.Opcode, wordType, left, right);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private bool TrySplitHighWord(uint value, uint wordType, int depth, out uint high)
+    {
+        high = 0;
+        if (depth > MaxWordSplitDepth)
+        {
+            return false;
+        }
+
+        if (IsIntegerConstant(value, out var constant))
+        {
+            high = Constant(wordType, (uint)(constant >> 32));
+            return true;
+        }
+
+        if (!_definitions.TryGetValue(value, out var definition))
+        {
+            return false;
+        }
+
+        switch (definition.Opcode)
+        {
+            case SpirvOp.UConvert when IntegerWidth(TypeOf(definition.Operands[0])) == 32:
+                high = Constant(wordType, 0);
+                return true;
+            case SpirvOp.ShiftLeftLogical when IsIntegerConstant(definition.Operands[1], out var shift) && shift == 32:
+                return TrySplitLowWord(definition.Operands[0], wordType, depth + 1, out high);
+            case SpirvOp.BitwiseOr or SpirvOp.BitwiseAnd or SpirvOp.BitwiseXor
+                when TrySplitHighWord(definition.Operands[0], wordType, depth + 1, out var left) &&
+                    TrySplitHighWord(definition.Operands[1], wordType, depth + 1, out var right):
+                high = AddInstruction(definition.Opcode, wordType, left, right);
+                return true;
+            default:
+                return false;
+        }
     }
 
     private bool IsRemovableDefinition(List<uint> words, int offset, int wordCount)
