@@ -1217,7 +1217,7 @@ internal sealed partial class MetalRenderHost :
             var found = 0;
             for (var back = 1; back <= _recentWriters.Length && found < 3; back++)
             {
-                var w = _recentWriters[(_recentWriterNext - back + _recentWriters.Length * 2) % _recentWriters.Length];
+                var w = _recentWriters[(_recentWriterNext - back + _recentWriters.Length) % _recentWriters.Length];
                 if (w.Desc is null || w.Start > _lastReadAddress || w.End <= _lastReadAddress) continue;
                 line.Append($"serial={w.Serial}:{w.Desc}; ");
                 found++;
@@ -1368,7 +1368,8 @@ internal sealed partial class MetalRenderHost :
         var serial = SubmissionSerial;
         if (WaitBacklog)
         {
-            _recentWriters[_recentWriterNext++ % _recentWriters.Length] = (address, address + size, serial, $"{origin} {LastWorkDescription}");
+            _recentWriters[_recentWriterNext] = (address, address + size, serial, $"{origin} {LastWorkDescription}");
+            _recentWriterNext = (_recentWriterNext + 1) % _recentWriters.Length;
         }
 
         var sequence = _gpuWrites.Note(address, size, serial, origin);
@@ -1389,6 +1390,7 @@ internal sealed partial class MetalRenderHost :
     // Best effort: the newest noted writes (WAIT_BACKLOG only), searched for one covering a slow read's address.
     // A wait can be for a write this ring no longer holds or never saw by address, which prints as writers=[].
     private readonly (ulong Start, ulong End, ulong Serial, string Desc)[] _recentWriters = new (ulong, ulong, ulong, string)[WaitBacklog ? 1 << 19 : 0];
+    // The next slot to write, always within the ring.
     private int _recentWriterNext;
 
     private readonly Dictionary<string, int> _waitOrigins = new(StringComparer.Ordinal);
