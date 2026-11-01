@@ -182,6 +182,8 @@ public static partial class Gen5MslTranslator
             }
 
             _structureEmitted = new bool[count];
+            _regionCopyDepth = 0;
+            _copiedRegionChars = 0;
             _regionDepth = 0;
             _structureFailed = false;
             _structuredUsesSteps = false;
@@ -289,7 +291,7 @@ public static partial class Gen5MslTranslator
 
                 var atHeader = first && allowLoopHeader;
                 first = false;
-                if (!atHeader && _structureEmitted[node] && IsDuplicableTail(node, follow))
+                if (!atHeader && IsEmitted(node) && IsDuplicableTail(node, follow))
                 {
                     // Each copy is a scope of its own, so the block's temporaries do not
                     // collide with another copy's.
@@ -301,6 +303,21 @@ public static partial class Gen5MslTranslator
                     AppendIndented(text, "}", indent);
                     node = _blockTerminators[node].TrueTarget;
                     continue;
+                }
+
+                if (!atHeader && IsEmitted(node) && TryCopyRegion(node, follow))
+                {
+                    // The blocks from here to the region's end are written out again in this arm.
+                    // Nothing counts as emitted while they are, so every one of them is emitted afresh.
+                    _regionCopyDepth++;
+                    try
+                    {
+                        return EmitRegionCore(text, node, follow, indent, allowLoopHeader: false);
+                    }
+                    finally
+                    {
+                        _regionCopyDepth--;
+                    }
                 }
 
                 if (!atHeader && !TryEnterBlock(text, node, indent))
@@ -358,7 +375,7 @@ public static partial class Gen5MslTranslator
                     join = bodyJoin;
                 }
 
-                if (join < 0 || join == follow || _structureEmitted[join] ||
+                if (join < 0 || join == follow || IsEmitted(join) ||
                     EnclosesLoopBoundary(join))
                 {
                     join = follow;
@@ -554,7 +571,7 @@ public static partial class Gen5MslTranslator
                 }
             }
 
-            if (_structureEmitted[node])
+            if (IsEmitted(node))
             {
                 FailStructure($"edge back into an emitted region: block {node}");
                 return false;
@@ -667,16 +684,116 @@ public static partial class Gen5MslTranslator
         private bool IsDuplicableTail(int node, int follow)
         {
             if (!_relaxedStructure || node < 0 || _loopsByHeader.ContainsKey(node) ||
-                EnclosesLoopBoundary(node) || _blockText[node].Length > MaxDuplicatedLatchChars ||
+                EnclosesLoopBoundary(node) ||
                 _meshBarrierBlocks is { } barrierBlocks && barrierBlocks[node])
             {
                 return false;
             }
 
             var terminator = _blockTerminators[node];
-            return (terminator.Kind == TerminatorKind.Jump || terminator.TrueTarget == terminator.FalseTarget) &&
-                terminator.TrueTarget == follow;
+            if (terminator.Kind != TerminatorKind.Jump && terminator.TrueTarget != terminator.FalseTarget)
+            {
+                return false;
+            }
+
+            if (terminator.TrueTarget == follow)
+            {
+                return _blockText[node].Length <= MaxDuplicatedLatchChars;
+            }
+
+            // A block that ends the program (the export-and-S_ENDPGM tail a pixel shader reaches from
+            // several early-out branches) has no join to wait for, so each arrival may carry its own
+            // copy and return. Without that the program has two exits no region can nest around, and
+            // the whole shader runs from the dispatcher.
+            return ExitTailDuplication && terminator.TrueTarget == ExitTarget &&
+                _stage is Gen5MslStage.Pixel or Gen5MslStage.Vertex &&
+                _blockText[node].Length <= MaxDuplicatedExitChars;
         }
+
+        /// <summary>Whether a block has already been written into the body. While a region is being
+        /// copied (<see cref="TryCopyRegion"/>) nothing counts as written.</summary>
+        private bool IsEmitted(int node) => _regionCopyDepth == 0 && _structureEmitted[node];
+
+        private int _regionCopyDepth;
+
+        // The text written so far by region copies, against MaxCopiedRegionChars.
+        private int _copiedRegionChars;
+
+        // SHARPEMU_MSL_REGION_COPY=0 sends a program with a shared tail that is more than one block back to
+        // the dispatcher again.
+        private static readonly bool RegionCopy =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGION_COPY") != "0";
+
+        /// <summary>The most block text one shader's region copies may add together.</summary>
+        private const int MaxCopiedRegionChars = 32768;
+
+        /// <summary>The most block text, and blocks, one copied region may hold.</summary>
+        private const int MaxCopiedRegionRegionChars = 12288;
+
+        private const int MaxCopiedRegionBlocks = 12;
+
+        /// <summary>Whether the blocks that start at <paramref name="start"/> may be written out a second
+        /// time: the retry only, in a vertex or pixel program, where the early-out branches of EXEC-skip
+        /// code leave several arms running into the same small acyclic tail that ends the program. No
+        /// join exists for the arms (the program's exit is all they share), so the tail is copied to each
+        /// instead of failing the shader back to the dispatcher. The walk stops where the
+        /// emitter itself would stop (the region's end, an open loop's boundary, the program's end) and
+        /// refuses a loop, a barrier, or a tail past the size budget; a copy is correct because every
+        /// block is emitted in its own scope and the copy runs the same blocks the original did.</summary>
+        private bool TryCopyRegion(int start, int follow)
+        {
+            if (!RegionCopy || !_relaxedStructure || _regionCopyDepth != 0 ||
+                _stage is not (Gen5MslStage.Pixel or Gen5MslStage.Vertex) || start < 0)
+            {
+                return false;
+            }
+
+            var seen = new HashSet<int>();
+            var pending = new Stack<int>();
+            pending.Push(start);
+            var chars = 0;
+            while (pending.Count != 0)
+            {
+                var node = pending.Pop();
+                if (node < 0 || node == follow || EnclosesLoopBoundary(node) || !seen.Add(node))
+                {
+                    continue;
+                }
+
+                if (_loopsByHeader.ContainsKey(node) || seen.Count > MaxCopiedRegionBlocks ||
+                    _blockText[node].Contains("barrier", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                chars += _blockText[node].Length;
+                if (chars > MaxCopiedRegionRegionChars)
+                {
+                    return false;
+                }
+
+                foreach (var successor in _successors[node])
+                {
+                    pending.Push(successor);
+                }
+            }
+
+            if (_copiedRegionChars + chars > MaxCopiedRegionChars)
+            {
+                return false;
+            }
+
+            _copiedRegionChars += chars;
+            return true;
+        }
+
+        // SHARPEMU_MSL_EXIT_TAIL_DUP=0 sends a program with several S_ENDPGM tails to the dispatcher again.
+        private static readonly bool ExitTailDuplication =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXIT_TAIL_DUP") != "0";
+
+        /// <summary>The most block text an exit tail may carry and still be copied to every
+        /// branch that ends the program through it.</summary>
+        private const int MaxDuplicatedExitChars = 6144;
 
         /// <summary>The blocks of the innermost open loop's body that <paramref name="start"/>
         /// reaches without leaving the iteration: the walk stops at the header, at a
