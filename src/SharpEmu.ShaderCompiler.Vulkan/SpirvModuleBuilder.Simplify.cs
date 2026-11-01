@@ -206,4 +206,137 @@ public sealed partial class SpirvModuleBuilder
             SpirvOp.BitCount => true,
         _ => false,
     };
+
+    private bool IsRemovableDefinition(List<uint> words, int offset, int wordCount)
+    {
+        var opcode = (SpirvOp)(words[offset] & 0xFFFF);
+        if (opcode == SpirvOp.Load)
+        {
+            return wordCount == 4 && _localVariables.Contains(words[offset + 3]);
+        }
+
+        if (wordCount < 3)
+        {
+            return false;
+        }
+
+        if (opcode == SpirvOp.ExtInst)
+        {
+            return wordCount >= 5 && words[offset + 4] is not (GlslModf or GlslFrexp);
+        }
+
+        return IsValueOperation(opcode, []);
+    }
+
+    private List<uint> CompactFunctions(HashSet<uint> removedIds)
+    {
+        var words = _functions;
+        var starts = new List<int>();
+        for (var offset = 0; offset < words.Count; offset += (int)(words[offset] >> 16))
+        {
+            starts.Add(offset);
+        }
+
+        var removed = new bool[starts.Count];
+        var uses = new Dictionary<uint, int>();
+        var definers = new Dictionary<uint, int>();
+        for (var index = 0; index < starts.Count; index++)
+        {
+            var offset = starts[index];
+            var wordCount = (int)(words[offset] >> 16);
+            var first = 1;
+            if (IsRemovableDefinition(words, offset, wordCount))
+            {
+                definers[words[offset + 2]] = index;
+                first = 3;
+            }
+
+            for (var word = first; word < wordCount; word++)
+            {
+                var id = words[offset + word];
+                uses[id] = uses.GetValueOrDefault(id) + 1;
+            }
+        }
+
+        var pending = new Stack<int>();
+        foreach (var (id, index) in definers)
+        {
+            if (uses.GetValueOrDefault(id) == 0)
+            {
+                pending.Push(index);
+            }
+        }
+
+        while (pending.TryPop(out var index))
+        {
+            if (removed[index])
+            {
+                continue;
+            }
+
+            removed[index] = true;
+            var offset = starts[index];
+            var wordCount = (int)(words[offset] >> 16);
+            removedIds.Add(words[offset + 2]);
+            for (var word = 3; word < wordCount; word++)
+            {
+                var id = words[offset + word];
+                if (!uses.TryGetValue(id, out var count))
+                {
+                    continue;
+                }
+
+                uses[id] = --count;
+                if (count == 0 && definers.TryGetValue(id, out var definer) && !removed[definer])
+                {
+                    pending.Push(definer);
+                }
+            }
+        }
+
+        var compacted = new List<uint>(words.Count);
+        for (var index = 0; index < starts.Count; index++)
+        {
+            if (removed[index])
+            {
+                continue;
+            }
+
+            var offset = starts[index];
+            var wordCount = (int)(words[offset] >> 16);
+            for (var word = 0; word < wordCount; word++)
+            {
+                compacted.Add(words[offset + word]);
+            }
+        }
+
+        return compacted;
+    }
+
+    private static List<uint> WithoutTargets(List<uint> section, HashSet<uint> removedIds)
+    {
+        if (removedIds.Count == 0)
+        {
+            return section;
+        }
+
+        var filtered = new List<uint>(section.Count);
+        for (var offset = 0; offset < section.Count;)
+        {
+            var wordCount = (int)(section[offset] >> 16);
+            var opcode = (SpirvOp)(section[offset] & 0xFFFF);
+            var dropped = opcode is SpirvOp.Name or SpirvOp.Decorate && removedIds.Contains(section[offset + 1]);
+            if (!dropped)
+            {
+                for (var word = 0; word < wordCount; word++)
+                {
+                    filtered.Add(section[offset + word]);
+                }
+            }
+
+            offset += wordCount;
+        }
+
+        return filtered;
+    }
 }
