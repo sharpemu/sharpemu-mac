@@ -44,10 +44,11 @@ public sealed class Gen5VertexSystemRegisterTests
     {
         var instructions = Compile(ShaderStage.Vertex, 8, subgroups);
         var register = Register(instructions, "s2");
-        var read = instructions.FindIndex(item => item.Opcode == SpirvOp.Load && item.Operands[2] == register);
         var store = instructions.FindIndex(item => item.Opcode == SpirvOp.Store && item.Operands[0] == register);
-        Assert.True(store >= 0 && store < read, "The vertex count must be initialized before its first read.");
+        Assert.True(store >= 0);
         var value = instructions[store].Operands[1];
+        var read = instructions.FindIndex(item => item.Opcode == SpirvOp.BitFieldUExtract && item.Operands[2] == value);
+        Assert.True(store >= 0 && store < read, "The vertex count must be initialized before its first read.");
         var packed = Assert.Single(instructions, item => item.Opcode == SpirvOp.Constant && item.Operands[1] == value).Operands[2];
         Assert.Equal(32u << 12, packed);
         Assert.Equal(0u, (packed >> 22) & 0x1ff);
@@ -91,8 +92,10 @@ public sealed class Gen5VertexSystemRegisterTests
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         var instructions = Decode(shader.Spirv);
         var register = Register(instructions, "s2");
-        var read = instructions.FindIndex(item => item.Opcode == SpirvOp.Load && item.Operands[2] == register);
-        var store = instructions.FindIndex(item => item.Opcode == SpirvOp.Store && item.Operands[0] == register);
+        var store = instructions.FindLastIndex(item => item.Opcode == SpirvOp.Store && item.Operands[0] == register);
+        Assert.True(store >= 0);
+        var value = instructions[store].Operands[1];
+        var read = instructions.FindIndex(item => item.Opcode == SpirvOp.BitFieldUExtract && item.Operands[2] == value);
         Assert.True(store >= 0 && store < read, "The thread group counts must be initialized before their first read.");
     }
 

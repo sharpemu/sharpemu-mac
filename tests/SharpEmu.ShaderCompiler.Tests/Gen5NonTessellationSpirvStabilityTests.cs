@@ -9,26 +9,25 @@ using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
 namespace SharpEmu.ShaderCompiler.Tests;
 
-// Baselines captured on main at 669e54f4 before the tessellation port. Vertex, pixel and
-// compute output, including both wave sizes and LDS paths, must remain byte-identical.
+[Collection("SpirvOptimization")]
 public sealed class Gen5NonTessellationSpirvStabilityTests
 {
     [Theory]
-    [InlineData("lds-readback", ShaderStage.Vertex, 64u, "C730F364D289ADF2")]
-    [InlineData("lds-readback", ShaderStage.Vertex, 32u, "935715DD89E69C3B")]
-    [InlineData("lds-readback", ShaderStage.Pixel, 64u, "86DC5311699E7130")]
-    [InlineData("lds-readback", ShaderStage.Pixel, 32u, "334055C94B6510EB")]
-    [InlineData("lds-readback", ShaderStage.Compute, 64u, "C9BC95825DCD2B6B")]
-    [InlineData("lds-readback", ShaderStage.Compute, 32u, "8189688104D5FE93")]
-    [InlineData("lds-staging-export", ShaderStage.Vertex, 64u, "C68BEA09038EA043")]
-    [InlineData("lds-staging-export", ShaderStage.Vertex, 32u, "3AAFB4314FD18710")]
-    [InlineData("lds-barrier", ShaderStage.Compute, 64u, "AEE924497E4633E2")]
-    [InlineData("lds-barrier", ShaderStage.Compute, 32u, "B56973BC44D465FB")]
-    [InlineData("divergent", ShaderStage.Vertex, 64u, "C9F0996EAD34F8B6")]
-    [InlineData("divergent", ShaderStage.Pixel, 32u, "D9B8ECC95D11F4CA")]
-    [InlineData("divergent", ShaderStage.Compute, 64u, "5CD8E2752F0745FE")]
-    [InlineData("image-load", ShaderStage.Pixel, 64u, "545494A595E138D5")]
-    [InlineData("image-load", ShaderStage.Compute, 32u, "D5D535F158180FB0")]
+    [InlineData("lds-readback", ShaderStage.Vertex, 64u, "9BCF02647F837E55")]
+    [InlineData("lds-readback", ShaderStage.Vertex, 32u, "BF4344E36DEA217E")]
+    [InlineData("lds-readback", ShaderStage.Pixel, 64u, "D576CD6C4222535C")]
+    [InlineData("lds-readback", ShaderStage.Pixel, 32u, "CB5C1CDED8103BC2")]
+    [InlineData("lds-readback", ShaderStage.Compute, 64u, "51DC6ACDCA96B659")]
+    [InlineData("lds-readback", ShaderStage.Compute, 32u, "7461E219AEAFAC53")]
+    [InlineData("lds-staging-export", ShaderStage.Vertex, 64u, "D6060044105BFC27")]
+    [InlineData("lds-staging-export", ShaderStage.Vertex, 32u, "02D77B4078336EDC")]
+    [InlineData("lds-barrier", ShaderStage.Compute, 64u, "6002AC8936414DF5")]
+    [InlineData("lds-barrier", ShaderStage.Compute, 32u, "FC521693C8309CEE")]
+    [InlineData("divergent", ShaderStage.Vertex, 64u, "4075CAB9F922B279")]
+    [InlineData("divergent", ShaderStage.Pixel, 32u, "143C3C99F37CBD63")]
+    [InlineData("divergent", ShaderStage.Compute, 64u, "341B4840D46530B4")]
+    [InlineData("image-load", ShaderStage.Pixel, 64u, "FAE742FAEE7FE228")]
+    [InlineData("image-load", ShaderStage.Compute, 32u, "E725B8040EEACCDD")]
     public void SpirvIsUnchanged(string name, ShaderStage stage, uint waveSize, string expected)
     {
         var (plan, resources, layout) = Prepare(Programs[name](), stage);

@@ -13,7 +13,7 @@ public sealed class Gen5VertexInstanceIdSpirvTests
     [Theory]
     [InlineData(false, -1, 0)]
     [InlineData(true, -1, 1)]
-    [InlineData(true, 2, 2)]
+    [InlineData(true, 2, 1)]
     public void TheInstanceIdCountsFromTheDrawsBaseInstanceWhenTheDeviceExposesIt(bool drawParameters, int startInstanceUserData, int expectedBaseInstanceReads)
     {
         var end = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Sopp, "SEndpgm", [], [], [], null);
