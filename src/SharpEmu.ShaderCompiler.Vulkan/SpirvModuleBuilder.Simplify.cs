@@ -86,6 +86,8 @@ public sealed partial class SpirvModuleBuilder
         public override int GetHashCode() => _hash;
     }
 
+    public static bool KeepsUnreadVariables { get; set; }
+
     public uint CurrentFunction { get; private set; }
 
     public bool InheritBlockState { get; init; } = true;
@@ -1192,7 +1194,7 @@ public sealed partial class SpirvModuleBuilder
             }
         }
 
-        var unread = new HashSet<uint>(_localVariables.Where(variable => !read.Contains(variable)));
+        var unread = KeepsUnreadVariables ? [] : new HashSet<uint>(_localVariables.Where(variable => !read.Contains(variable)));
         unreadPointers = new HashSet<uint>(unread);
         foreach (var (chain, variable) in chainBases)
         {
