@@ -12,6 +12,7 @@ public sealed partial class SpirvModuleBuilder
     private readonly Dictionary<uint, (uint Width, bool Signed)> _integerTypeInfo = [];
     private readonly Dictionary<uint, ulong> _wideConstantValues = [];
     private readonly Dictionary<uint, uint> _floatConstantBits = [];
+    private readonly Dictionary<uint, Definition> _definitions = [];
     private readonly Dictionary<InstructionKey, uint> _blockValues = [];
     private readonly HashSet<uint> _localVariables = [];
     private readonly HashSet<uint> _escapedVariables = [];
@@ -20,6 +21,8 @@ public sealed partial class SpirvModuleBuilder
     private readonly HashSet<int> _removedInstructions = [];
     private readonly HashSet<(uint Target, SpirvDecoration Decoration)> _plainDecorations = [];
     private readonly HashSet<uint> _namedTargets = [];
+
+    private readonly record struct Definition(SpirvOp Opcode, uint Type, uint[] Operands);
 
     private readonly struct InstructionKey : IEquatable<InstructionKey>
     {
@@ -64,7 +67,8 @@ public sealed partial class SpirvModuleBuilder
         }
 
         NoteVariableUses(operands);
-        if (TryFold(opcode, resultType, operands, out var folded))
+        if (TryFold(opcode, resultType, operands, out var folded) ||
+            TrySimplify(opcode, resultType, operands, out folded))
         {
             return folded;
         }
@@ -87,7 +91,9 @@ public sealed partial class SpirvModuleBuilder
         }
 
         var result = EmitResult(_functions, opcode, resultType, operands);
-        _blockValues[new InstructionKey(opcode, resultType, operands.ToArray())] = result;
+        var key = new InstructionKey(opcode, resultType, operands.ToArray());
+        _blockValues[key] = result;
+        _definitions[result] = new Definition(opcode, resultType, key.Operands);
         return result;
     }
 
@@ -193,9 +199,34 @@ public sealed partial class SpirvModuleBuilder
 
     private uint TypeOf(uint id) => _resultTypes.GetValueOrDefault(id);
 
+    private bool HasType(uint id, uint type) => _resultTypes.TryGetValue(id, out var actual) && actual == type;
+
     private uint IntegerWidth(uint type) => _integerTypeInfo.TryGetValue(type, out var info) ? info.Width : 0;
 
     private bool IsFloat32Type(uint type) => _floatTypes.TryGetValue(32, out var floatType) && floatType == type;
+
+    private bool Defines(uint id, SpirvOp opcode, out Definition definition) =>
+        _definitions.TryGetValue(id, out definition) && definition.Opcode == opcode;
+
+    private bool IsIntegerConstant(uint id, out ulong value)
+    {
+        if (_wideConstantValues.TryGetValue(id, out value))
+        {
+            return true;
+        }
+
+        if (_scalarConstantValues.TryGetValue(id, out var narrow) && IntegerWidth(TypeOf(id)) == 32)
+        {
+            value = narrow;
+            return true;
+        }
+
+        value = 0;
+        return false;
+    }
+
+    private uint IntegerConstant(uint type, ulong value) =>
+        IntegerWidth(type) == 64 ? Constant64(type, value) : Constant(type, (uint)value);
 
     private static bool IsValueOperation(SpirvOp opcode, uint[] operands) => opcode switch
     {
@@ -221,6 +252,174 @@ public sealed partial class SpirvModuleBuilder
             SpirvOp.BitCount => true,
         _ => false,
     };
+
+    private bool TrySimplify(SpirvOp opcode, uint resultType, uint[] operands, out uint result)
+    {
+        result = 0;
+        switch (opcode)
+        {
+            case SpirvOp.Select when operands.Length == 3:
+                if (operands[1] == operands[2])
+                {
+                    result = operands[1];
+                    return true;
+                }
+
+                if (IsBoolType(resultType) && IsBoolScalarConstant(operands[1], out var whenTrue) &&
+                    IsBoolScalarConstant(operands[2], out var whenFalse) && whenTrue != whenFalse)
+                {
+                    result = whenTrue ? operands[0] : AddInstruction(SpirvOp.LogicalNot, resultType, operands[0]);
+                    return true;
+                }
+
+                return false;
+            case SpirvOp.LogicalNot when operands.Length == 1 && Defines(operands[0], SpirvOp.LogicalNot, out var negated):
+                result = negated.Operands[0];
+                return true;
+            case SpirvOp.LogicalAnd or SpirvOp.LogicalOr when operands.Length == 2 && operands[0] == operands[1]:
+                result = operands[0];
+                return true;
+            case SpirvOp.IEqual or SpirvOp.INotEqual when operands.Length == 2:
+                return TrySimplifyZeroTest(opcode == SpirvOp.INotEqual, resultType, operands, out result);
+        }
+
+        return TrySimplifyIntegerIdentity(opcode, resultType, operands, out result);
+    }
+
+    private bool TrySimplifyIntegerIdentity(SpirvOp opcode, uint resultType, uint[] operands, out uint result)
+    {
+        result = 0;
+        var width = IntegerWidth(resultType);
+        if (operands.Length != 2 || width is not (32 or 64))
+        {
+            return false;
+        }
+
+        var allOnes = width == 64 ? ulong.MaxValue : uint.MaxValue;
+        var leftConstant = IsIntegerConstant(operands[0], out var left);
+        var rightConstant = IsIntegerConstant(operands[1], out var right);
+        if (width == 64 && leftConstant && rightConstant && TryFoldWide(opcode, left, right, out var folded))
+        {
+            result = Constant64(resultType, folded);
+            return true;
+        }
+
+        uint Keep(uint id) => HasType(id, resultType) ? id : 0;
+
+        switch (opcode)
+        {
+            case SpirvOp.IAdd or SpirvOp.BitwiseOr or SpirvOp.BitwiseXor:
+                if (rightConstant && right == 0)
+                {
+                    result = Keep(operands[0]);
+                }
+                else if (leftConstant && left == 0)
+                {
+                    result = Keep(operands[1]);
+                }
+                else if (opcode == SpirvOp.BitwiseOr && operands[0] == operands[1])
+                {
+                    result = Keep(operands[0]);
+                }
+
+                break;
+            case SpirvOp.ISub or SpirvOp.ShiftLeftLogical or SpirvOp.ShiftRightLogical or SpirvOp.ShiftRightArithmetic:
+                if (rightConstant && right == 0)
+                {
+                    result = Keep(operands[0]);
+                }
+
+                break;
+            case SpirvOp.IMul:
+                if (rightConstant && right == 1)
+                {
+                    result = Keep(operands[0]);
+                }
+                else if (leftConstant && left == 1)
+                {
+                    result = Keep(operands[1]);
+                }
+
+                break;
+            case SpirvOp.BitwiseAnd:
+                if ((rightConstant && right == 0) || (leftConstant && left == 0))
+                {
+                    result = IntegerConstant(resultType, 0);
+                }
+                else if (rightConstant && right == allOnes)
+                {
+                    result = Keep(operands[0]);
+                }
+                else if (leftConstant && left == allOnes)
+                {
+                    result = Keep(operands[1]);
+                }
+                else if (operands[0] == operands[1])
+                {
+                    result = Keep(operands[0]);
+                }
+                else if (Defines(operands[0], SpirvOp.BitwiseAnd, out var leftAnd) && leftAnd.Operands.Contains(operands[1]))
+                {
+                    result = Keep(operands[0]);
+                }
+                else if (Defines(operands[1], SpirvOp.BitwiseAnd, out var rightAnd) && rightAnd.Operands.Contains(operands[0]))
+                {
+                    result = Keep(operands[1]);
+                }
+
+                break;
+        }
+
+        return result != 0;
+    }
+
+    private static bool TryFoldWide(SpirvOp opcode, ulong left, ulong right, out ulong result)
+    {
+        switch (opcode)
+        {
+            case SpirvOp.IAdd: result = left + right; return true;
+            case SpirvOp.ISub: result = left - right; return true;
+            case SpirvOp.IMul: result = left * right; return true;
+            case SpirvOp.BitwiseAnd: result = left & right; return true;
+            case SpirvOp.BitwiseOr: result = left | right; return true;
+            case SpirvOp.BitwiseXor: result = left ^ right; return true;
+            case SpirvOp.ShiftLeftLogical when right < 64: result = left << (int)right; return true;
+            case SpirvOp.ShiftRightLogical when right < 64: result = left >> (int)right; return true;
+            default: result = 0; return false;
+        }
+    }
+
+    private bool TrySimplifyZeroTest(bool notEqual, uint resultType, uint[] operands, out uint result)
+    {
+        result = 0;
+        uint tested;
+        if (IsIntegerConstant(operands[1], out var right) && right == 0)
+        {
+            tested = operands[0];
+        }
+        else if (IsIntegerConstant(operands[0], out var left) && left == 0)
+        {
+            tested = operands[1];
+        }
+        else
+        {
+            return false;
+        }
+
+        if (Defines(tested, SpirvOp.Select, out var selection) &&
+            IsIntegerConstant(selection.Operands[1], out var whenTrue) &&
+            IsIntegerConstant(selection.Operands[2], out var whenFalse) &&
+            (whenTrue == 0) != (whenFalse == 0))
+        {
+            var condition = selection.Operands[0];
+            result = notEqual == (whenTrue != 0)
+                ? condition
+                : AddInstruction(SpirvOp.LogicalNot, resultType, condition);
+            return true;
+        }
+
+        return false;
+    }
 
     private bool IsRemovableDefinition(List<uint> words, int offset, int wordCount)
     {
