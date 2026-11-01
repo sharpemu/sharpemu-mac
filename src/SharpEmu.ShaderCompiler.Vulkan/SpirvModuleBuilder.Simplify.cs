@@ -9,6 +9,8 @@ public sealed partial class SpirvModuleBuilder
     private readonly Dictionary<uint, (uint Width, bool Signed)> _integerTypeInfo = [];
     private readonly Dictionary<uint, ulong> _wideConstantValues = [];
     private readonly Dictionary<uint, uint> _floatConstantBits = [];
+    private readonly HashSet<(uint Target, SpirvDecoration Decoration)> _plainDecorations = [];
+    private readonly HashSet<uint> _namedTargets = [];
 
     private void NoteResultType(uint id, uint type) => _resultTypes[id] = type;
 

@@ -500,11 +500,21 @@ public sealed partial class SpirvModuleBuilder
         Emit(_executionModes, SpirvOp.ExecutionMode, values);
     }
 
-    public void AddName(uint target, string name) =>
-        EmitWithString(_debug, SpirvOp.Name, [target], name);
+    public void AddName(uint target, string name)
+    {
+        if (_namedTargets.Add(target))
+        {
+            EmitWithString(_debug, SpirvOp.Name, [target], name);
+        }
+    }
 
     public void AddDecoration(uint target, SpirvDecoration decoration, params uint[] operands)
     {
+        if (operands.Length == 0 && !_plainDecorations.Add((target, decoration)))
+        {
+            return;
+        }
+
         var values = new uint[2 + operands.Length];
         values[0] = target;
         values[1] = (uint)decoration;
