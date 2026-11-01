@@ -26,6 +26,18 @@ public static partial class Gen5MslTranslator
                 Gen5ScalarMemoryControl { Glc: true } or Gen5ScalarMemoryControl { Dlc: true }))
                 return false;
 
+            // A compute shader is held to stricter rules than a graphics one: its waves can hand
+            // each other data through device memory within the dispatch, so a store through a
+            // buffer, global or flat address refuses it. Image stores are let through: a scalar
+            // load does not read a texel back. A compute shader that drops its scalar cache
+            // (S_DCACHE_INV, S_GL1_INV) expects to see memory change under it, from this dispatch
+            // or another one, so it is refused whether or not it writes.
+            if (_stage == Gen5MslStage.Compute &&
+                (_request.Program.Instructions.Any(instruction => instruction.Opcode is "SDcacheInv" or "SGl1Inv") ||
+                 _request.Memory.Entries.Any(entry => entry.Access is MemoryAccess.Write or MemoryAccess.Atomic &&
+                     entry.Kind is not (MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.Image))))
+                return false;
+
             // A store through another descriptor, a flat address or an image can alias
             // this binding, but a scalar load without GLC/DLC does not see such a store on the
             // guest either. ScalarConstantBuffersBesideWrites off refuses the entire shader when
