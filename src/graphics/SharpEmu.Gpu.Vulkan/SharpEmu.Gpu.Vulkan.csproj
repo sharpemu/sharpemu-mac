@@ -35,6 +35,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
     <ProjectReference Include="..\..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
     <ProjectReference Include="..\..\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
+    <!-- The shader warm-up progress panel drawn over the splash. -->
+    <ProjectReference Include="..\SharpEmu.Gpu.ShaderProgress\SharpEmu.Gpu.ShaderProgress.csproj" />
     <!-- The presenter drives the SDL window and creates its surface from it. -->
     <ProjectReference Include="..\..\adapters\SharpEmu.Adapters.Sdl\SharpEmu.Adapters.Sdl.csproj" />
   </ItemGroup>
@@ -49,11 +51,5 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
     <!-- Image and pipeline cache keys hash guest surface descriptions. -->
     <PackageReference Include="System.IO.Hashing" />
-    <!-- Draws the shader warm-up splash text. -->
-    <PackageReference Include="SkiaSharp" />
   </ItemGroup>
-  <ItemGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux')) Or ('$(RuntimeIdentifier)' == '' And $([MSBuild]::IsOSPlatform('Linux')))">
-    <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
-  </ItemGroup>
-
 </Project>

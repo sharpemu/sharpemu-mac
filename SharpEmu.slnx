@@ -28,6 +28,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </Folder>
   <Folder Name="/src/graphics/">
     <Project Path="src/graphics/SharpEmu.Gpu.Metal/SharpEmu.Gpu.Metal.csproj" />
+    <Project Path="src/graphics/SharpEmu.Gpu.ShaderProgress/SharpEmu.Gpu.ShaderProgress.csproj" />
     <Project Path="src/graphics/SharpEmu.Gpu.Vulkan/SharpEmu.Gpu.Vulkan.csproj" />
   </Folder>
   <Folder Name="/src/adapters/">

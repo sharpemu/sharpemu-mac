@@ -25,6 +25,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
     <ProjectReference Include="..\..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
     <ProjectReference Include="..\..\SharpEmu.ShaderCompiler.Metal\SharpEmu.ShaderCompiler.Metal.csproj" />
+    <!-- The shader warm-up progress panel drawn over the splash. -->
+    <ProjectReference Include="..\SharpEmu.Gpu.ShaderProgress\SharpEmu.Gpu.ShaderProgress.csproj" />
     <!-- The AppKit window the presenter drives, and the GameController pad it
          attaches to the session. -->
     <ProjectReference Include="..\..\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />

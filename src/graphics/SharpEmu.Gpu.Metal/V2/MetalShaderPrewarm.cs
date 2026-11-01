@@ -24,6 +24,13 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// keeps presenting the splash and the progress meanwhile. SHARPEMU_SHADER_PREWARM_WAIT=0 opts out.
 /// The v2 twin of the Vulkan presenter's WaitForShaderPrewarm.
 /// </summary>
+internal enum MetalWarmupPhase
+{
+    Programs,
+    Libraries,
+    Static,
+}
+
 internal sealed class MetalShaderPrewarmGate(bool disabled)
 {
     private readonly object _sync = new();
@@ -35,10 +42,34 @@ internal sealed class MetalShaderPrewarmGate(bool disabled)
     private int _holdReported;
     private int _progress;
     private int _total;
+    private int _banked;
+    private int _computeDone;
+    private int _computeTotal;
+    private int _graphicsDone;
+    private int _graphicsTotal;
+    private int _phase;
+    private long _warmupStarted;
 
     public int Progress => Volatile.Read(ref _progress);
 
     public int Total => Volatile.Read(ref _total);
+
+    /// <summary>What the held total counts now: the recorded programs, the library list, the static plan.</summary>
+    public MetalWarmupPhase Phase => (MetalWarmupPhase)Volatile.Read(ref _phase);
+
+    /// <summary>Units finished in the phases before the current one, for the progress panel's "Warmed" figure.</summary>
+    public int Banked => Volatile.Read(ref _banked);
+
+    public int ComputeDone => Volatile.Read(ref _computeDone);
+
+    public int ComputeTotal => Volatile.Read(ref _computeTotal);
+
+    public int GraphicsDone => Volatile.Read(ref _graphicsDone);
+
+    public int GraphicsTotal => Volatile.Read(ref _graphicsTotal);
+
+    /// <summary>Stopwatch timestamp of the first time the prewarm held the guest; zero before.</summary>
+    public long WarmupStarted => Volatile.Read(ref _warmupStarted);
 
     /// <summary>Whether the prewarm is compiling and holding the guest right now.</summary>
     public bool IsRunning
@@ -69,6 +100,11 @@ internal sealed class MetalShaderPrewarmGate(bool disabled)
             _decided = true;
             _running = running;
             _released = !running;
+            if (running && _warmupStarted == 0)
+            {
+                Volatile.Write(ref _warmupStarted, Stopwatch.GetTimestamp());
+            }
+
             Monitor.PulseAll(_sync);
         }
     }
@@ -84,10 +120,29 @@ internal sealed class MetalShaderPrewarmGate(bool disabled)
         }
     }
 
-    public void SetTotal(int total)
+    public void SetTotal(int total, MetalWarmupPhase phase = MetalWarmupPhase.Programs)
     {
+        Interlocked.Add(ref _banked, Volatile.Read(ref _progress));
+        Volatile.Write(ref _phase, (int)phase);
         Volatile.Write(ref _total, total);
         Volatile.Write(ref _progress, 0);
+    }
+
+    /// <summary>The compute and graphics programs the guest is held for, split for the progress panel.</summary>
+    public void SetPrograms(int computes, int graphics)
+    {
+        Volatile.Write(ref _computeTotal, computes);
+        Volatile.Write(ref _graphicsTotal, graphics);
+    }
+
+    public int AdvanceCompute()
+    {
+        return Interlocked.Increment(ref _computeDone);
+    }
+
+    public int AdvanceGraphics()
+    {
+        return Interlocked.Increment(ref _graphicsDone);
     }
 
     public int Advance() => Interlocked.Increment(ref _progress);
@@ -215,6 +270,9 @@ internal static class MetalShaderPrewarm
     /// 16.8 s with five, 18.6-26.5 s with four and 44 s with two, and eight or more were
     /// slower again (ShaderCompileBench, machine otherwise idle).
     /// </summary>
+    /// <summary>Programs that failed to compile this start, for the warm-up panel.</summary>
+    internal static int FailedPrograms => Volatile.Read(ref _failed) + Volatile.Read(ref _graphicsFailed);
+
     internal static int WorkerCount { get; } = Math.Clamp(Environment.ProcessorCount * 3 / 5, 1, 6);
 
     /// <summary>The list the shader cache records into; null while prewarm is off.</summary>
@@ -329,6 +387,7 @@ internal static class MetalShaderPrewarm
         var remaining = workerCount;
         var done = 0;
         Gate.SetTotal(held);
+        Gate.SetPrograms(heldComputes, heldGraphics);
         if (Precompile.HoldsUntilComplete)
         {
             Precompile.BeginPhase("programs", total);
@@ -380,6 +439,18 @@ internal static class MetalShaderPrewarm
 
                         PrewarmComputePipeline(item.Compute!, item.Code!, compiler, device);
                         _completed.Enqueue(ShaderPrewarmList.Identity(item.Compute!));
+                    }
+
+                    if (item.Held)
+                    {
+                        if (item.Graphics is not null)
+                        {
+                            Gate.AdvanceGraphics();
+                        }
+                        else
+                        {
+                            Gate.AdvanceCompute();
+                        }
                     }
 
                     if (item.Held && Precompile.HoldsUntilComplete)
@@ -567,7 +638,7 @@ internal static class MetalShaderPrewarm
             return;
         }
 
-        Gate.SetTotal(sources);
+        Gate.SetTotal(sources, MetalWarmupPhase.Libraries);
         Gate.SetRunning(true);
         Precompile.BeginPhase("libraries", sources);
         MetalLibraryPrewarm.Precompile(() =>

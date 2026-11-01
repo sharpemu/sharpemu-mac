@@ -195,7 +195,7 @@ public static class HostVideoHost
 
     private static byte[]? _splashFont;
 
-    /// <summary>The font the Vulkan presenter draws its shader warm-up splash with.</summary>
+    /// <summary>The font the graphics backends draw their shader warm-up splash with.</summary>
     public static void ConfigureSplashFont(Stream font)
     {
         ArgumentNullException.ThrowIfNull(font);
@@ -204,7 +204,7 @@ public static class HostVideoHost
         Volatile.Write(ref _splashFont, copy.ToArray());
     }
 
-    internal static byte[]? SplashFont => Volatile.Read(ref _splashFont);
+    public static byte[]? SplashFont => Volatile.Read(ref _splashFont);
 
     internal static bool AutoHdrAllowed => Volatile.Read(ref _autoHdrAllowed);
 

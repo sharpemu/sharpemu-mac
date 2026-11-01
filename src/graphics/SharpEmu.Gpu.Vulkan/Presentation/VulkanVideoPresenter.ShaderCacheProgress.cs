@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 
+using SharpEmu.Gpu.ShaderProgress;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Gpu.Vulkan.Presentation;
