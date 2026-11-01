@@ -630,6 +630,7 @@ internal sealed partial class MetalRenderHost :
         _flushCauses[(int)why]++;
         _landDeferredLabels = true;
         EndEncoders(cause);
+        EncodePendingOcclusionReductions();
         MaterializePendingClears();
         _stagedStorageCopies?.EndSubmission();
         // Compared here as well as when a command buffer opens: a run that ends between
@@ -751,6 +752,7 @@ internal sealed partial class MetalRenderHost :
     private readonly nint[] _inFlightBuffers = new nint[MaxInFlightSubmissions];
     private readonly ulong[] _inFlightSerials = new ulong[MaxInFlightSubmissions];
     private readonly double[] _inFlightCommitTimes = new double[MaxInFlightSubmissions];
+    private readonly string?[] _inFlightDescs = new string?[MaxInFlightSubmissions];
     private int _inFlightHead;
     private int _inFlightCount;
     private long _unsampledSubmissions;
@@ -788,6 +790,11 @@ internal sealed partial class MetalRenderHost :
         _inFlightBuffers[slot] = buffer;
         _inFlightSerials[slot] = serial;
         _inFlightCommitTimes[slot] = _previousCommitTime;
+        if (WaitBacklog)
+        {
+            _inFlightDescs[slot] = $"{_flushCauses[(int)MetalFlushCause.Stream]}/{LastWorkDescription}";
+        }
+
         _inFlightCount++;
     }
 
@@ -1186,6 +1193,39 @@ internal sealed partial class MetalRenderHost :
         }
 
         line.Append($" last={LastWorkDescription}");
+        if (WaitBacklog && waited != 0)
+        {
+            // Every submission still held up to the waited one, oldest first: when it committed
+            // and ran, relative to the waited buffer's commit, and the last work recorded into it.
+            line.Append(" backlog=[");
+            for (var index = 0; index < _inFlightCount; index++)
+            {
+                var slot = (_inFlightHead + index) % MaxInFlightSubmissions;
+                if (_inFlightSerials[slot] > serial) break;
+                var buffer = _inFlightBuffers[slot];
+                var start = MetalNative.SendDouble(buffer, SelGpuStartTime);
+                var end = MetalNative.SendDouble(buffer, SelGpuEndTime);
+                line.Append($"{_inFlightSerials[slot]}@c{(_inFlightCommitTimes[slot] - commitTime) * 1000.0:F0}:s{(start - commitTime) * 1000.0:F0}-e{(end - commitTime) * 1000.0:F0}({(end - start) * 1000.0:F1}ms {_inFlightDescs[slot]}) ");
+            }
+
+            line.Append(']');
+        }
+
+        if (WaitBacklog && reason == MetalWaitReason.ReadRange)
+        {
+            line.Append($" reader=0x{SharpEmu.ShaderCompiler.Resources.MaterializingShader.Hash:X16} writers=[");
+            var found = 0;
+            for (var back = 1; back <= _recentWriters.Length && found < 3; back++)
+            {
+                var w = _recentWriters[(_recentWriterNext - back + _recentWriters.Length) % _recentWriters.Length];
+                if (w.Desc is null || w.Start > _lastReadAddress || w.End <= _lastReadAddress) continue;
+                line.Append($"serial={w.Serial}:{w.Desc}; ");
+                found++;
+            }
+
+            line.Append(']');
+        }
+
         if (MetalV2Diagnostics.WaitTrace)
         {
             line.Append($" reader=0x{SharpEmu.ShaderCompiler.Resources.MaterializingShader.Hash:X16}");
@@ -1326,6 +1366,12 @@ internal sealed partial class MetalRenderHost :
 
         using var rangesScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.WriteNoteRanges);
         var serial = SubmissionSerial;
+        if (WaitBacklog)
+        {
+            _recentWriters[_recentWriterNext] = (address, address + size, serial, $"{origin} {LastWorkDescription}");
+            _recentWriterNext = (_recentWriterNext + 1) % _recentWriters.Length;
+        }
+
         var sequence = _gpuWrites.Note(address, size, serial, origin);
         NotePendingCopyDestination(address, size, origin, serial, sequence);
         NoteFencedWrite(address, size);
@@ -1336,6 +1382,16 @@ internal sealed partial class MetalRenderHost :
     // resources were being read (0: a command-processor read), printed with each PERF window.
     private static readonly bool WaitOrigins =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_ORIGINS") == "1";
+
+    // SHARPEMU_METAL_V2_WAIT_BACKLOG=1 (diagnostic) lists, on each SLOW-WAIT, the submissions queued ahead of the waited one.
+    private static readonly bool WaitBacklog =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WAIT_BACKLOG") == "1";
+
+    // Best effort: the newest noted writes (WAIT_BACKLOG only), searched for one covering a slow read's address.
+    // A wait can be for a write this ring no longer holds or never saw by address, which prints as writers=[].
+    private readonly (ulong Start, ulong End, ulong Serial, string Desc)[] _recentWriters = new (ulong, ulong, ulong, string)[WaitBacklog ? 1 << 19 : 0];
+    // The next slot to write, always within the ring.
+    private int _recentWriterNext;
 
     private readonly Dictionary<string, int> _waitOrigins = new(StringComparer.Ordinal);
     private ulong _unboundedProducer;

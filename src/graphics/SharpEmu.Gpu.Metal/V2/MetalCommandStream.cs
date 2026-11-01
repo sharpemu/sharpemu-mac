@@ -1640,6 +1640,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     {
         using var encodeScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandLabelEncode);
+        // An occlusion dump's copy reads the prefix sum of the passes before it.
+        EncodePendingOcclusionReductions();
         if (TryEncodeLabelScatter(commandBuffer, copies))
         {
             return;

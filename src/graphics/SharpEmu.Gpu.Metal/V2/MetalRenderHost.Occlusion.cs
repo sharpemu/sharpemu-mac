@@ -21,6 +21,13 @@ internal sealed partial class MetalRenderHost
     internal bool DeferOcclusionDumps { get; set; } =
         SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_DEFER_OCCLUSION_DUMPS");
 
+    // SHARPEMU_METAL_V2_DEFER_OCCLUSION_REDUCTIONS=0 encodes each pass's prefix sum in an encoder of its own again.
+    // By default a pass that ends only queues its prefix sum; they are encoded together, in pass order, in
+    // one compute encoder just before the next label copies land or the command buffer commits (the only
+    // places that read what they produce), instead of an encoder between every two passes.
+    internal bool DeferOcclusionReductions { get; set; } =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_V2_DEFER_OCCLUSION_REDUCTIONS");
+
     private static ulong DumpRangeBytes(uint instanceMask, uint strideBytes)
     {
         var mask = instanceMask & 0xFF_FFFFu;
@@ -54,6 +61,7 @@ internal sealed partial class MetalRenderHost
     }
 
     private readonly List<OcclusionBatch> _oqBatches = [];
+    private readonly List<(OcclusionBatch Batch, uint Length)> _oqPendingReductions = [];
     private OcclusionBatch? _oqOpen;
     private int _oqQueue;
     private nint _oqBank, _oqPipeline;
@@ -205,9 +213,25 @@ internal sealed partial class MetalRenderHost
             return;
         }
         var length = (uint)Math.Min(batch.Slot + 1, OcclusionIntervalCapacity);
+        if (DeferOcclusionReductions)
+        {
+            // Encoded in pass order by EncodePendingOcclusionReductions, before anything reads its result.
+            _oqPendingReductions.Add((batch, length));
+            NoteRecordedWork();
+            return;
+        }
+
         var encoder = RetainEncoder(MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder));
         if (encoder == 0) throw Fatal("Could not encode the occlusion prefix sum.");
         WaitForPreviousEncoder(encoder, render: false);
+        EncodeOcclusionReduction(encoder, batch, length);
+        EndAndReleaseEncoder(encoder, render: false);
+        _encodersInBuffer++;
+        NoteRecordedWork();
+    }
+
+    private unsafe void EncodeOcclusionReduction(nint encoder, OcclusionBatch batch, uint length)
+    {
         MetalNative.SendVoid(encoder, SelOcclusionPipeline, _oqPipeline);
         MetalNative.SendSetBuffer(encoder, SelOcclusionBuffer, batch.Counts, 0, 0);
         MetalNative.SendSetBuffer(encoder, SelOcclusionBuffer, batch.Results, 0, 1);
@@ -215,9 +239,22 @@ internal sealed partial class MetalRenderHost
         MetalNative.SendSetBytes(encoder, SelOcclusionBytes, (nint)(&length), sizeof(uint), 3);
         MetalNative.SendDispatch(encoder, SelOcclusionDispatch,
             new MtlSize { Width = 1, Height = 1, Depth = 1 }, new MtlSize { Width = 1, Height = 1, Depth = 1 });
+        _oqReductions++;
+    }
+
+    // Called with no encoder open, before label copies are encoded and before the command buffer commits: the
+    // prefix sums of every pass that ended since, in pass order (each queue's running count is carried from one
+    // to the next), in one compute encoder.
+    private void EncodePendingOcclusionReductions()
+    {
+        if (_oqPendingReductions.Count == 0) return;
+        var encoder = RetainEncoder(MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder));
+        if (encoder == 0) throw Fatal("Could not encode the occlusion prefix sums.");
+        WaitForPreviousEncoder(encoder, render: false);
+        foreach (var (batch, length) in _oqPendingReductions) EncodeOcclusionReduction(encoder, batch, length);
+        _oqPendingReductions.Clear();
         EndAndReleaseEncoder(encoder, render: false);
         _encodersInBuffer++;
-        _oqReductions++;
         NoteRecordedWork();
     }
 
@@ -371,6 +408,7 @@ internal sealed partial class MetalRenderHost
             MetalNative.SendVoid(batch.Results, SelRelease);
         }
         _oqBatches.Clear();
+        _oqPendingReductions.Clear();
         if (_oqBank != 0) MetalNative.SendVoid(_oqBank, SelRelease);
         if (_oqPipeline != 0) MetalNative.SendVoid(_oqPipeline, SelRelease);
         _oqBank = _oqPipeline = 0;
