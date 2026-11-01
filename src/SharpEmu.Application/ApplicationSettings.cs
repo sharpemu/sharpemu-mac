@@ -2,10 +2,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Application;
 
+/// <summary>
+/// Launcher and machine-wide settings. Anything that changes how a game runs or is shown lives
+/// in <see cref="PerGameSettings"/>; <see cref="SettingsSplitMigration"/> moves it out of
+/// files written before the split.
+/// </summary>
 public sealed class ApplicationSettings
 {
     private static readonly JsonSerializerOptions SerializerOptions = new()
@@ -18,21 +24,13 @@ public sealed class ApplicationSettings
     /// <summary>Eboot paths hidden from the library via "Remove from library".</summary>
     public List<string> ExcludedGames { get; set; } = new();
 
-    public string LogLevel { get; set; } = "Info";
-
-    public int ImportTraceLimit { get; set; }
-
-    public bool StrictDynlibResolution { get; set; }
-
     /// <summary>
-    /// Mirror emulator output to user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log, if <see cref="LogFilePath"/> is null.
+    /// Where a game that logs to file (<see cref="PerGameSettings.LogToFile"/>) writes; null
+    /// mirrors output to user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log.
     /// </summary>
-    public bool LogToFile { get; set; }
-
-    /// <summary>If <see cref="LogToFile"/> is true it logs to this file path.</summary>
     public string? LogFilePath { get; set; }
 
-    /// <summary> 
+    /// <summary>
     /// If <see cref="OverrideLogFile"/> is false it appends &lt;titleId&gt;-&lt;timestamp&gt; to the filename specified by 
     /// <see cref="LogFilePath"/>. Otherwise it uses the exact filename from <see cref="LogFilePath"/>
     /// </summary>
@@ -49,6 +47,9 @@ public sealed class ApplicationSettings
 
     public string LibraryLayout { get; set; } = "Carousel";
 
+    /// <summary>Cover size in the grid view, as a multiple of the size that fits the window.</summary>
+    public double LibraryTileScale { get; set; } = 1.0;
+
     public double EmbeddedConsoleHeight { get; set; } = 240;
     public double ConsoleWindowWidth { get; set; } = 980;
     public double ConsoleWindowHeight { get; set; } = 620;
@@ -61,49 +62,29 @@ public sealed class ApplicationSettings
     /// <summary>UI language, matching a file code under Languages/ (e.g. "en", "tr").</summary>
     public string Language { get; set; } = "en";
 
-    public string ConsoleType { get; set; } = "PS5";
+    /// <summary>Launcher colour theme: a LauncherThemes palette id (Graphite, Oled for Onyx, Midnight, ...) or Custom.</summary>
+    public string LauncherTheme { get; set; } = "Graphite";
 
+    /// <summary>Custom theme background, #RRGGBB.</summary>
+    public string CustomThemeBackground { get; set; } = "#121212";
+
+    /// <summary>Custom theme accent, #RRGGBB.</summary>
+    public string CustomThemeAccent { get; set; } = "#2E7CF6";
+
+    /// <summary>Opacity of the glass controls over key art, 30-100 percent.</summary>
+    public int GlassOpacity { get; set; } = 75;
+
+    /// <summary>Theme contrast from -50 (softer) to +50 (stronger); 0 is the theme as designed.</summary>
+    public int ThemeContrast { get; set; }
+
+    // The console's system language, machine-wide as on the console itself; trophy lists
+    // shown outside any game follow it too.
     public string ConsoleLanguage { get; set; } = "EnglishUS";
-
-    /// <summary>Default text-entry profile exposed to games.</summary>
-    public string DefaultProfile { get; set; } = "Sharp";
 
     /// <summary>Publish launcher/game status to Discord Rich Presence.</summary>
     public bool DiscordRichPresence { get; set; } = true;
 
     public bool CheckForUpdatesOnStartup { get; set; } = true;
-
-    public string WindowMode { get; set; } = "Windowed";
-
-    public string Resolution { get; set; } = "1920x1080";
-
-    public int DisplayIndex { get; set; }
-
-    public int RefreshRate { get; set; }
-
-    public string ScalingMode { get; set; } = "Fit";
-
-    public bool VSync { get; set; } = true;
-
-    public string HdrMode { get; set; } = "Auto";
-
-    // What the guest is told the display is, which is what decides how much pixel work a
-    // title does. Not the window size: see GuestDisplayResolution.
-    public string GuestDisplayResolution { get; set; } = "1080p";
-
-    public string GpuReadbacks { get; set; } = "Full";
-
-    public bool OverlayEnabled { get; set; } = true;
-    public string OverlayCorner { get; set; } = "TopRight";
-    public string OverlayMode { get; set; } = "TitleBar";
-
-    /// <summary>Names of SHARPEMU_* switches set to "1" in the emulator's environment at launch.</summary>
-    public List<string> EnvironmentToggles { get; set; } = ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"];
-
-    public string BinkPlaybackMode { get; set; } = "Guest";
-
-    /// <summary>Internal render resolution scale (1.0 = native, 0.5 = half).</summary>
-    public double RenderResolutionScale { get; set; } = 1.0;
 
     /// <summary>
     /// Discord application ID used for Rich Presence; the default is the
@@ -111,6 +92,11 @@ public sealed class ApplicationSettings
     /// "Playing …" (register at discord.com/developers/applications).
     /// </summary>
     public string DiscordClientId { get; set; } = "1525606762248540221";
+
+    // Keys this build does not know survive a save: a newer build's settings, and the game
+    // settings of a pre-split file whose migration has not completed yet.
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? AdditionalProperties { get; set; }
 
     // The emulator is portable and keeps its data next to the executable;
     // the GUI follows the same convention. Inside a macOS .app bundle that
@@ -146,29 +132,17 @@ public sealed class ApplicationSettings
 
         settings.GameFolders = FilterNullOrEmpty(settings.GameFolders);
         settings.ExcludedGames = FilterNullOrEmpty(settings.ExcludedGames);
-        settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles ?? ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"]);
-        settings.LogLevel ??= "Info";
         settings.Language ??= "en";
         settings.GnmTrophyKey = TryNormalizeTrophyKey(settings.GnmTrophyKey, out var trophyKey)
             ? trophyKey : string.Empty;
-        var legacyProfile = settings.EnvironmentToggles
-            .Select(entry => entry.Split('=', 2, StringSplitOptions.TrimEntries))
-            .FirstOrDefault(parts =>
-                parts.Length == 2 &&
-                string.Equals(parts[0], "SHARPEMU_DEFAULT_PROFILE", StringComparison.OrdinalIgnoreCase));
-        settings.EnvironmentToggles.RemoveAll(entry =>
-            string.Equals(
-                entry.Split('=', 2, StringSplitOptions.TrimEntries)[0],
-                "SHARPEMU_DEFAULT_PROFILE",
-                StringComparison.OrdinalIgnoreCase));
-        settings.DefaultProfile = NormalizeDefaultProfile(
-            legacyProfile is { Length: 2 } ? legacyProfile[1] : settings.DefaultProfile);
         settings.DiscordClientId ??= "1525606762248540221";
         settings.LibraryLayout = NormalizeChoice(settings.LibraryLayout, "Carousel", "Grid");
         settings.TitleMusicVolume = double.IsFinite(settings.TitleMusicVolume)
             ? Math.Clamp(settings.TitleMusicVolume, 0.0, 1.0)
             : 1.0;
-        settings.ConsoleType = NormalizeChoice(settings.ConsoleType, "PS5");
+        settings.LibraryTileScale = double.IsFinite(settings.LibraryTileScale)
+            ? Math.Clamp(settings.LibraryTileScale, 0.75, 1.6)
+            : 1.0;
         settings.ConsoleLanguage = NormalizeChoice(
             settings.ConsoleLanguage,
             "EnglishUS",
@@ -202,18 +176,6 @@ public sealed class ApplicationSettings
             "Vietnamese",
             "Indonesian",
             "Ukrainian");
-        settings.WindowMode = NormalizeChoice(settings.WindowMode, "Windowed", "Borderless", "Exclusive");
-        settings.Resolution = NormalizeResolution(settings.Resolution);
-        settings.ScalingMode = NormalizeChoice(settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
-        settings.HdrMode = NormalizeChoice(settings.HdrMode, "Auto", "On", "Off");
-        settings.GuestDisplayResolution = NormalizeChoice(
-            settings.GuestDisplayResolution, "1080p", "720p", "1440p", "2160p");
-        settings.GpuReadbacks = NormalizeChoice(settings.GpuReadbacks, "Full", "Off");
-        settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Guest", "Host", "Skip");
-        settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
-        settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "TitleBar", "Full", "Minimal");
-        settings.DisplayIndex = Math.Max(0, settings.DisplayIndex);
-        settings.RefreshRate = Math.Clamp(settings.RefreshRate, 0, 1000);
         settings.EmbeddedConsoleHeight = NormalizeConsoleSize(settings.EmbeddedConsoleHeight, 240, 120);
         settings.ConsoleWindowWidth = NormalizeConsoleSize(settings.ConsoleWindowWidth, 980, 520);
         settings.ConsoleWindowHeight = NormalizeConsoleSize(settings.ConsoleWindowHeight, 620, 320);
@@ -245,28 +207,12 @@ public sealed class ApplicationSettings
         return normalized.Length == 0 || normalized.Length == 32 && normalized.All(char.IsAsciiHexDigit);
     }
 
-    private static string NormalizeChoice(string? value, string fallback, params string[] choices) =>
+    internal static string NormalizeChoice(string? value, string fallback, params string[] choices) =>
         choices.Prepend(fallback).FirstOrDefault(
             choice => string.Equals(choice, value, StringComparison.OrdinalIgnoreCase)) ?? fallback;
 
     private static double NormalizeConsoleSize(double value, double fallback, double minimum) =>
         double.IsFinite(value) && value >= minimum ? Math.Min(value, 16384) : fallback;
-
-    private static string NormalizeResolution(string? value)
-    {
-        if (!DisplayResolution.TryParse(value, out var width, out var height))
-        {
-            return "1920x1080";
-        }
-
-        return $"{width}x{height}";
-    }
-
-    public static string NormalizeDefaultProfile(string? value)
-    {
-        var trimmed = value?.Trim();
-        return string.IsNullOrEmpty(trimmed) ? "Sharp" : trimmed;
-    }
 
     public void Save()
     {

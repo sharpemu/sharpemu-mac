@@ -56,14 +56,18 @@ Wildcard samples use [PdhGetFormattedCounterArray](https://learn.microsoft.com/e
 
 ## macOS
 
-The Metal backend does not draw the on-screen panels, so the display works in
-**Title bar** mode only. Full and Minimal show nothing. A borderless or
-full-screen window has no title bar and shows nothing either. The display is
-on by default, in Title bar mode, with the top-right corner saved. F1 and
-`SHARPEMU_OVERLAY=0` work as described above. F2 changes the saved corner only
-for the on-screen panel, so it has no visible effect.
+The display is on by default, in Full mode, in the top-right corner. Title bar mode
+needs a window with a title bar; a borderless or full-screen window shows nothing in
+that mode. F1, F2 and `SHARPEMU_OVERLAY=0` work as described above.
 
 GPU usage on macOS is the utilization of the whole GPU, read from the
 `Device Utilization %` statistic of the `IOAccelerator` service. macOS has no
 per-process GPU engine counters, so the value includes other applications. It
 shows **N/A** when the statistic cannot be read.
+
+The Metal presenter draws Full and Minimal panels in the final present pass, at the
+window's logical scale and selected corner. It refreshes the panel every 100 ms
+even when the guest image is unchanged. FPS averages the last four statistics
+windows so slow guest frame rates do not alternate between a positive value and
+zero every second; four empty windows still report a stall. Title bar mode keeps
+using the window title.

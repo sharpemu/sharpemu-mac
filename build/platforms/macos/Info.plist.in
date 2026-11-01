@@ -12,7 +12,7 @@ Keys deliberately absent:
   slice over a translated one, and Apple documents that an Intel-only binary
   linked against the macOS 11+ SDK will not run on Apple silicon at all when
   this key is set. Setting it to false is not a documented no-op, so the key is
-  omitted rather than set either way. SharpEmu must run translated.
+  omitted rather than set either way. The x64 emulator must run translated.
 
   CFBundleIconName — that key names an asset-catalog entry (Assets.car).
   SharpEmu ships a loose .icns, which is CFBundleIconFile's job.
@@ -64,14 +64,15 @@ Keys deliberately absent:
 	<key>GCSupportsGameMode</key>
 	<true/>
 
-	<!-- The CPU backend executes guest x86-64 instructions natively, so the
-	     host process must itself be x86-64: on Apple silicon the bundle runs
-	     under Rosetta 2. The binary is x86_64-only, which makes this key
-	     informational rather than load-bearing, but it documents the intent
-	     and keeps the choice explicit if a universal slice is ever added. -->
+	<!-- The architecture of the main executable: arm64 for the native GUI
+	     host (the default), x86_64 when the x64 SharpEmu is the main executable.
+	     The CPU backend executes guest x86-64 instructions natively, so the
+	     emulator process the GUI starts is always x86-64 and runs under
+	     Rosetta 2. Each executable is single-architecture, which makes this key
+	     informational rather than load-bearing, but it keeps the choice explicit. -->
 	<key>LSArchitecturePriority</key>
 	<array>
-		<string>x86_64</string>
+		<string>@SHARPEMU_MAIN_ARCH@</string>
 	</array>
 
 	<!-- Without this the window is rendered at 1x and scaled up, which on a

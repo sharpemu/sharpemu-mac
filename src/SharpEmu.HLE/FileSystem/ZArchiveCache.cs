@@ -25,9 +25,9 @@ public static class ZArchiveCache
         "sce_sys/npbind.dat",
     ];
 
-    // Fallback for portable layouts; system installs pass the user data root
-    // explicitly (SharpEmu.HLE cannot see SharpEmu.Libs).
-    private static string DefaultCacheParent => Path.Combine(AppContext.BaseDirectory, "user", "zar-cache");
+    // GUI metadata reads, CLI title lookup and the runtime mount must agree, including
+    // inside a signed .app and when SHARPEMU_DATA_ROOT selects an isolated data root.
+    private static string DefaultCacheParent => SharpEmu.Logging.SharpEmuPaths.UserPath("zar-cache");
 
     // The cache folder an archive uses, without creating or checking it.
     public static string GetCacheRoot(string archivePath, string? cacheParent = null) =>

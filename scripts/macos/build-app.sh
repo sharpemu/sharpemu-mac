@@ -4,7 +4,9 @@
 #
 # Builds SharpEmu.app: a directory-based, self-contained osx-x64 bundle, signed
 # (ad hoc unless an identity is supplied), verified, and zipped for
-# distribution.
+# distribution. The launcher and the split's GPU host run natively: both are
+# osx-arm64 and share one runtime in Contents/MacOS/arm64/, and the bundle's
+# main executable is an arm64 apphost that starts the GUI from there.
 #
 # Why osx-x64 on a machine that may be Apple silicon: the CPU backend executes
 # guest PS5 x86-64 instructions natively, so the host process has to be
@@ -27,6 +29,8 @@
 #   SHARPEMU_MAC_KEEP_UNIVERSAL   pass "1" to keep arm64 slices in fat dylibs
 #   SHARPEMU_MAC_R2R              "true" (default) publishes ReadyToRun; "false" to bisect
 #   SHARPEMU_MAC_GPU_HOST         "1" (default) bundles the split's arm64 GPU host; "0" leaves it out
+#   SHARPEMU_MAC_NATIVE_GUI       "1" (default) makes the arm64 GUI host the main executable;
+#                                 "0" keeps the x64 SharpEmu as the main executable
 #   SHARPEMU_MAC_DMG              pass "1" to also produce a .dmg
 #   SHARPEMU_OUTPUT_DIR           where SharpEmu.app is written
 #                                 (default artifacts/macos)
@@ -52,6 +56,7 @@ output_dir="${SHARPEMU_OUTPUT_DIR:-${repo_root}/artifacts/macos}"
 
 rid="osx-x64"
 executable_name="SharpEmu"
+gui_executable_name="SharpEmuGUI"
 icon_source="${repo_root}/assets/images/SharpEmu.icns"
 icon_file="SharpEmu.icns"
 app_dir="${output_dir}/SharpEmu.app"
@@ -114,23 +119,29 @@ if [ ! -x "${publish_dir}/${executable_name}" ]; then
     exit 1
 fi
 
-# The two-process split's GPU host (SHARPEMU_GPU_PROCESS=1) is a second, native
-# osx-arm64 executable with its own self-contained runtime. It lands in
-# Contents/MacOS/gpuhost/, the first place GpuProcessHost.FindExecutable looks.
-gpu_host_dir="gpuhost"
-gpu_host_publish_dir="${output_dir}/publish-osx-arm64-gpuhost"
+# The native arm64 payload: the split's GPU host (SHARPEMU_GPU_PROCESS) and the
+# GUI host, published into one directory so they share a single self-contained
+# arm64 runtime. It lands in Contents/MacOS/arm64/, the first place
+# GpuProcessHost.FindExecutable looks, and next to which the GUI finds the x64
+# emulator ("..").
+arm64_dir="arm64"
+arm64_publish_dir="${output_dir}/publish-osx-arm64"
 bundle_gpu_host="${SHARPEMU_MAC_GPU_HOST:-1}"
-if [ "${bundle_gpu_host}" = "1" ]; then
-    rm -rf "${gpu_host_publish_dir}"
-    MSBUILDDISABLENODEREUSE=1 dotnet publish "${repo_root}/src/SharpEmu.GpuHost/SharpEmu.GpuHost.csproj" \
+native_gui="${SHARPEMU_MAC_NATIVE_GUI:-1}"
+arm64_projects=()
+[ "${bundle_gpu_host}" = "1" ] && arm64_projects+=(SharpEmu.GpuHost)
+[ "${native_gui}" = "1" ] && arm64_projects+=(SharpEmu.GuiHost)
+rm -rf "${arm64_publish_dir}"
+for project in ${arm64_projects[@]+"${arm64_projects[@]}"}; do
+    MSBUILDDISABLENODEREUSE=1 dotnet publish "${repo_root}/src/${project}/${project}.csproj" \
         -c Release -r osx-arm64 --self-contained true -p:PublishSingleFile=false \
-        -p:PublishReadyToRun="${SHARPEMU_MAC_R2R:-true}" -p:PublishDir="${gpu_host_publish_dir}/" \
+        -p:PublishReadyToRun="${SHARPEMU_MAC_R2R:-true}" -p:PublishDir="${arm64_publish_dir}/" \
         -m:"${build_workers}" -nr:false -p:UseSharedCompilation=false -p:SharpEmuBuildProfile=macos-bundle
-    if [ ! -x "${gpu_host_publish_dir}/SharpEmu.GpuHost" ]; then
-        echo "build-app.sh: expected ${gpu_host_publish_dir}/SharpEmu.GpuHost to exist after publish." >&2
+    if [ ! -x "${arm64_publish_dir}/${project}" ]; then
+        echo "build-app.sh: expected ${arm64_publish_dir}/${project} to exist after publish." >&2
         exit 1
     fi
-fi
+done
 
 # --------------------------------------------------------------- assemble ----
 
@@ -142,8 +153,36 @@ fi
 # lookups work with no @rpath edits and no code change.
 mkdir -p "${app_dir}/Contents/MacOS" "${app_dir}/Contents/Resources"
 ditto "${publish_dir}" "${app_dir}/Contents/MacOS"
-if [ "${bundle_gpu_host}" = "1" ]; then
-    ditto "${gpu_host_publish_dir}" "${app_dir}/Contents/MacOS/${gpu_host_dir}"
+if [ "${#arm64_projects[@]}" -gt 0 ]; then
+    ditto "${arm64_publish_dir}" "${app_dir}/Contents/MacOS/${arm64_dir}"
+fi
+
+# The bundle's main executable is the GUI host's apphost, moved up into
+# Contents/MacOS (CFBundleExecutable cannot name a subdirectory) and pointed at
+# arm64/SharpEmu.GuiHost.dll: an apphost resolves its embedded app path relative
+# to its own directory and loads the runtime from beside the app, so it starts
+# natively on the arm64 runtime while the x64 payload around it stays untouched.
+main_executable="${executable_name}"
+main_arch="x86_64"
+if [ "${native_gui}" = "1" ]; then
+    main_executable="${gui_executable_name}"
+    main_arch="arm64"
+    python3 -I - "${app_dir}/Contents/MacOS/${arm64_dir}/SharpEmu.GuiHost" \
+        "${app_dir}/Contents/MacOS/${main_executable}" "${arm64_dir}/SharpEmu.GuiHost.dll" <<'PY'
+import os, sys
+source, target, app_path = sys.argv[1:]
+image = bytearray(open(source, "rb").read())
+name = b"SharpEmu.GuiHost.dll\0"
+at = image.find(name)
+if at < 0 or image.find(name, at + 1) >= 0:
+    sys.exit("build-app.sh: the GUI host apphost has no unique embedded app path")
+# The apphost reserves 1024 bytes for the path, NUL included.
+image[at:at + 1024] = bytes(1024)
+encoded = app_path.encode() + b"\0"
+image[at:at + len(encoded)] = encoded
+open(target, "wb").write(image)
+os.chmod(target, 0o755)
+PY
 fi
 python3 "${script_dir}/build-metadata.py" embed \
     --repo "${repo_root}" --snapshot "${source_snapshot}" --sdk "${sdk_version}" \
@@ -153,7 +192,8 @@ cp "${icon_source}" "${app_dir}/Contents/Resources/${icon_file}"
 
 sed \
     -e "s|@SHARPEMU_BUNDLE_ID@|${bundle_id}|g" \
-    -e "s|@SHARPEMU_EXECUTABLE@|${executable_name}|g" \
+    -e "s|@SHARPEMU_EXECUTABLE@|${main_executable}|g" \
+    -e "s|@SHARPEMU_MAIN_ARCH@|${main_arch}|g" \
     -e "s|@SHARPEMU_ICON_FILE@|${icon_file}|g" \
     -e "s|@SHARPEMU_SHORT_VERSION@|${version}|g" \
     -e "s|@SHARPEMU_BUNDLE_VERSION@|${bundle_version}|g" \
@@ -186,7 +226,7 @@ if [ "${SHARPEMU_MAC_KEEP_UNIVERSAL:-0}" != "1" ]; then
             *) continue ;;
         esac
         case "${binary}" in
-            "${app_dir}/Contents/MacOS/${gpu_host_dir}"/*) slice=arm64 ;;
+            "${app_dir}/Contents/MacOS/${arm64_dir}"/* | "${app_dir}/Contents/MacOS/${gui_executable_name}") slice=arm64 ;;
             *) slice=x86_64 ;;
         esac
         case " $(lipo -archs "${binary}" 2>/dev/null || true) " in
@@ -205,14 +245,17 @@ fi
 # --------------------------------------------------------------- policy ------
 
 check_args=("${app_dir}")
-gpu_host_check_args=("${app_dir}/Contents/MacOS/${gpu_host_dir}" --arch arm64)
+arm64_check_args=("${app_dir}/Contents/MacOS/${arm64_dir}" --arch arm64)
 if [ "${SHARPEMU_MAC_FORBID_SDL:-1}" = "1" ]; then
     check_args+=(--forbid-sdl)
-    gpu_host_check_args+=(--forbid-sdl)
+    arm64_check_args+=(--forbid-sdl)
 fi
-if [ "${bundle_gpu_host}" = "1" ]; then
-    "${platform_dir}/check-macos-output.sh" "${gpu_host_check_args[@]}"
-    check_args+=(--arch-exclude "Contents/MacOS/${gpu_host_dir}")
+if [ "${#arm64_projects[@]}" -gt 0 ]; then
+    "${platform_dir}/check-macos-output.sh" "${arm64_check_args[@]}"
+    check_args+=(--arch-exclude "Contents/MacOS/${arm64_dir}")
+fi
+if [ "${native_gui}" = "1" ]; then
+    check_args+=(--arch-exclude "Contents/MacOS/${gui_executable_name}")
 fi
 "${platform_dir}/check-macos-output.sh" "${check_args[@]}"
 

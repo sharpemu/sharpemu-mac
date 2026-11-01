@@ -48,6 +48,7 @@ public static class PerfOverlay
     // other presenters retain submit cadence until they opt into this hook.
     // The host display timer can refresh the same guest frame at 120 Hz.
     private static double _fps;
+    private static FrameRateAverage _fpsAverage = new();
     private static double _presentFps;
     private static double _drawsPerSecond;
     private static double _averageFrameMs;
@@ -226,7 +227,10 @@ public static class PerfOverlay
             _statsWindowStart = now;
             var submissions = Interlocked.Exchange(ref _submittedInWindow, 0);
             var guestPresents = Interlocked.Exchange(ref _guestPresentedInWindow, 0);
-            _fps = (_trackPresentedGuestFrames ? guestPresents : submissions) / seconds;
+            var windowFrames = _trackPresentedGuestFrames ? guestPresents : submissions;
+            // A one-second window holds 0, 1 or 2 frames at the rates a heavy title runs
+            // at, so the published value is averaged over the last few windows.
+            _fps = _fpsAverage.Add(windowFrames, seconds);
             _presentFps = Interlocked.Exchange(ref _presentedInWindow, 0) / seconds;
             _drawsPerSecond = Interlocked.Exchange(ref _drawsInWindow, 0) / seconds;
 
@@ -239,11 +243,11 @@ public static class PerfOverlay
             // (FPS 0 + 8000 MS) even after the stall ended.
             var lastSubmit = Interlocked.Read(ref _lastSubmitTimestamp);
             string msLabel;
-            if (_fps > 0)
+            if (windowFrames > 0)
             {
                 var lastIndex = (_frameHistoryIndex - 1 + FrameHistorySize) % FrameHistorySize;
                 var lastInterval = _frameMilliseconds[lastIndex];
-                _averageFrameMs = lastInterval > 0 ? lastInterval : 1000.0 / _fps;
+                _averageFrameMs = lastInterval > 0 ? lastInterval : seconds * 1000.0 / windowFrames;
                 msLabel = $"{_averageFrameMs:0.0} MS";
             }
             else if (lastSubmit != 0)
@@ -284,7 +288,7 @@ public static class PerfOverlay
                 Environment.ProcessorCount;
             _lastCpuTime = cpuTime;
 
-            var drawsPerFrame = _fps > 0 ? _drawsPerSecond / _fps : 0;
+            var drawsPerFrame = windowFrames > 0 ? _drawsPerSecond * seconds / windowFrames : 0;
             var sessionStart = Interlocked.Read(ref _sessionStartTimestamp);
             var elapsedSeconds = sessionStart == 0
                 ? 0L
@@ -310,6 +314,32 @@ public static class PerfOverlay
             _minimalLine1 = $"FPS {_fps:0.0}  CPU {_cpuPercent:0}%";
             _minimalLine2 = $"GPU {gpuLabel}  TIME {timeLabel}";
             _minimalSummary = $"FPS {_fps:0.0} | CPU {_cpuPercent:0}% | GPU {gpuLabel} | TIME {timeLabel}";
+        }
+    }
+
+    /// <summary>Frames per second over the last few statistics windows.</summary>
+    internal sealed class FrameRateAverage
+    {
+        public const int WindowCount = 4;
+
+        private readonly long[] _frames = new long[WindowCount];
+        private readonly double[] _seconds = new double[WindowCount];
+        private int _next;
+
+        public double Add(long frames, double seconds)
+        {
+            _frames[_next] = frames;
+            _seconds[_next] = seconds;
+            _next = (_next + 1) % WindowCount;
+            long totalFrames = 0;
+            var totalSeconds = 0.0;
+            for (var index = 0; index < WindowCount; index++)
+            {
+                totalFrames += _frames[index];
+                totalSeconds += _seconds[index];
+            }
+
+            return totalSeconds > 0 ? totalFrames / totalSeconds : 0;
         }
     }
 
