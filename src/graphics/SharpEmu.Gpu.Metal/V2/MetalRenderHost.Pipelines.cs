@@ -1868,7 +1868,11 @@ internal sealed partial class MetalRenderHost
             return TryReadResidentGuestBytesConcurrent(address, destination, assumptions);
         }
 
-        if (_imageCache.HasGpuModifiedImageBytes(address, (ulong)destination.Length))
+        // The GPU may still own bytes a recorded write covers: refused, as the interface asks, so
+        // the materializer reads them through TryReadGuestWord, which waits for the write.
+        var size = (ulong)destination.Length;
+        if (_imageCache.HasGpuModifiedImageBytes(address, size) ||
+            (_gpuWrites.MayCover(address, size) && _gpuWrites.PendingSerial(address, size, CompletedSerial) != 0))
         {
             return false;
         }
@@ -1913,7 +1917,8 @@ internal sealed partial class MetalRenderHost
         $" rescmp_released={Interlocked.Exchange(ref _residentCompareReleased, 0)}";
 
     // TryReadResidentGuestBytes for each range, compared where it lies. The same refusals apply
-    // (a GPU-modified image over a byte, a pending command-processor write), tested once for each
+    // (a GPU-modified image over a byte, a recorded GPU write still pending, a pending command-processor
+    // write), tested once for each
     // run of nearby ranges rather than for each range, and a refusal answers false for the
     // caller to read the ranges itself. So do the cases this does not model: possibly overlapping
     // label bytes (reading them retires entries), a released single-copy chunk (reading restores it),
@@ -1981,6 +1986,7 @@ internal sealed partial class MetalRenderHost
                 _residentCompareLabelSafe++;
             }
             if (_imageCache.HasGpuModifiedImageBytes(low, size) ||
+                (_gpuWrites.MayCover(low, size) && _gpuWrites.PendingSerial(low, size, CompletedSerial) != 0) ||
                 (_cpOverlay.Count != 0 &&
                  _cpOverlay.Coverage(low, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None))
             {

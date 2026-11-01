@@ -139,7 +139,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     {
         // A word read the worker would synchronize: GPU-modified images, pending GPU writes, overlays.
         Word,
-        // A read of what the CPU holds now: GPU-modified images and overlays only, as on the worker.
+        // A read of what the CPU holds now, refused where the GPU may still write it, as on the worker.
         Resident,
     }
 
@@ -284,7 +284,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     private bool IsOwnedConcurrent(ConcurrentQuery query, ulong address, ulong size) =>
         PendingCommandWriteHolds(address, size) ||
         _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size) ||
-        (query == ConcurrentQuery.Word && IsGpuWritePendingConcurrent(address, size)) ||
+        IsGpuWritePendingConcurrent(address, size) ||
         (_cpOverlay.Count != 0 &&
             _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None) ||
         (_labelOverlay.Count != 0 &&
