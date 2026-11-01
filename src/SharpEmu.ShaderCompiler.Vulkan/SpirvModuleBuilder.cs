@@ -868,6 +868,7 @@ public sealed partial class SpirvModuleBuilder
     public uint BeginFunction(uint returnType, uint functionType, uint functionControl, uint id)
     {
         Emit(_functions, SpirvOp.Function, returnType, id, functionControl, functionType);
+        ResetBlockState();
         return id;
     }
 
@@ -878,6 +879,7 @@ public sealed partial class SpirvModuleBuilder
     {
         var result = id ?? AllocateId();
         Emit(_functions, SpirvOp.Label, result);
+        ResetBlockState();
         return result;
     }
 
@@ -906,11 +908,6 @@ public sealed partial class SpirvModuleBuilder
 
         return id;
     }
-
-    public uint AddInstruction(SpirvOp opcode, uint resultType, params uint[] operands) =>
-        TryFold(opcode, resultType, operands, out var folded)
-            ? folded
-            : EmitResult(_functions, opcode, resultType, operands);
 
     private bool IsInt32Type(uint type) =>
         (_integerTypes.TryGetValue((32, false), out var unsignedType) && unsignedType == type) ||
@@ -1052,7 +1049,11 @@ public sealed partial class SpirvModuleBuilder
     public void AddStatement(SpirvOp opcode, params uint[] operands) =>
         Emit(_functions, opcode, operands);
 
-    public void EndFunction() => Emit(_functions, SpirvOp.FunctionEnd);
+    public void EndFunction()
+    {
+        Emit(_functions, SpirvOp.FunctionEnd);
+        ResetBlockState();
+    }
 
     public byte[] Build()
     {
