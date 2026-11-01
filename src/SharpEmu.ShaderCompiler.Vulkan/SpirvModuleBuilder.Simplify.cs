@@ -281,6 +281,10 @@ public sealed partial class SpirvModuleBuilder
                 return true;
             case SpirvOp.IEqual or SpirvOp.INotEqual when operands.Length == 2:
                 return TrySimplifyZeroTest(opcode == SpirvOp.INotEqual, resultType, operands, out result);
+            case SpirvOp.Bitcast when operands.Length == 1:
+                return TrySimplifyBitcast(resultType, operands[0], out result);
+            case SpirvOp.UConvert when operands.Length == 1:
+                return TrySimplifyUConvert(resultType, operands[0], out result);
         }
 
         return TrySimplifyIntegerIdentity(opcode, resultType, operands, out result);
@@ -415,6 +419,78 @@ public sealed partial class SpirvModuleBuilder
             result = notEqual == (whenTrue != 0)
                 ? condition
                 : AddInstruction(SpirvOp.LogicalNot, resultType, condition);
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TrySimplifyBitcast(uint resultType, uint value, out uint result)
+    {
+        result = 0;
+        if (HasType(value, resultType))
+        {
+            result = value;
+            return true;
+        }
+
+        var narrowResult = IntegerWidth(resultType) == 32 || IsFloat32Type(resultType);
+        if (narrowResult)
+        {
+            if (IsIntegerConstant(value, out var bits) && IntegerWidth(TypeOf(value)) == 32)
+            {
+                result = Constant(resultType, (uint)bits);
+                return true;
+            }
+
+            if (_floatConstantBits.TryGetValue(value, out var floatBits))
+            {
+                result = Constant(resultType, floatBits);
+                return true;
+            }
+        }
+
+        if (!Defines(value, SpirvOp.Bitcast, out var inner))
+        {
+            return false;
+        }
+
+        var source = inner.Operands[0];
+        if (HasType(source, resultType))
+        {
+            result = source;
+            return true;
+        }
+
+        var sourceType = TypeOf(source);
+        if (narrowResult && (IntegerWidth(sourceType) == 32 || IsFloat32Type(sourceType)))
+        {
+            result = AddInstruction(SpirvOp.Bitcast, resultType, source);
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TrySimplifyUConvert(uint resultType, uint value, out uint result)
+    {
+        result = 0;
+        var width = IntegerWidth(resultType);
+        if (width is not (32 or 64))
+        {
+            return false;
+        }
+
+        if (IsIntegerConstant(value, out var constant))
+        {
+            result = IntegerConstant(resultType, width == 32 ? (uint)constant : constant);
+            return true;
+        }
+
+        var sourceWidth = IntegerWidth(TypeOf(value));
+        if (Defines(value, SpirvOp.UConvert, out var inner) && sourceWidth > width && HasType(inner.Operands[0], resultType))
+        {
+            result = inner.Operands[0];
             return true;
         }
 
