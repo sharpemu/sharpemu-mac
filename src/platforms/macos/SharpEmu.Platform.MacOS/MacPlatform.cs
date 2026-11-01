@@ -32,6 +32,16 @@ public static class MacPlatform
         // the whole run. Best-effort — see MacProcessActivity.
         MacProcessActivity.Begin();
 
+        RegisterLauncher();
+    }
+
+    /// <summary>
+    /// The launcher's share of <see cref="Register"/>: display catalog, menu gamepad and image
+    /// codec, without the latency-critical process activity, which would keep an idle GUI from
+    /// App Nap and the system from idle sleep. Used by the native GUI host.
+    /// </summary>
+    public static void RegisterLauncher()
+    {
         HostDisplayCatalog.RegisterProvider("CoreGraphics", MacDisplayCatalog.TryQuery);
         LauncherGamepad.RegisterProvider(MacLauncherGamepadProvider.Instance);
         HostImageCodec.RegisterProvider("ImageIO", MacImageIOCodec.Instance);

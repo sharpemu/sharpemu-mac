@@ -211,7 +211,7 @@ public sealed class GpuProcessHost : IDisposable
     /// Where the GPU host is looked for: <paramref name="explicitPath"/> or else
     /// <c>SHARPEMU_GPU_HOST_PATH</c> when given (and nowhere else then, so a typo fails instead
     /// of silently running another build); otherwise relative to this process's base directory -
-    /// <c>gpuhost/</c> (an app bundle), <c>../osx-arm64/</c> (an osx-x64 build output next to the
+    /// <c>arm64/</c> (an app bundle, shared with the GUI host), <c>../osx-arm64/</c> (an osx-x64 build output next to the
     /// osx-arm64 one) and <c>osx-arm64/</c> (a RID-less build output, the tests).
     /// </summary>
     public static string? FindExecutable(string? explicitPath = null)
@@ -227,7 +227,7 @@ public sealed class GpuProcessHost : IDisposable
         else
         {
             var baseDirectory = AppContext.BaseDirectory;
-            candidates.Add(Path.Combine(baseDirectory, "gpuhost", ExecutableName));
+            candidates.Add(Path.Combine(baseDirectory, "arm64", ExecutableName));
             candidates.Add(Path.Combine(baseDirectory, "..", "osx-arm64", ExecutableName));
             candidates.Add(Path.Combine(baseDirectory, "osx-arm64", ExecutableName));
         }

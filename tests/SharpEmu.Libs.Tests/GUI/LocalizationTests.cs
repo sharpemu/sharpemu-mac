@@ -65,8 +65,8 @@ public sealed class LocalizationTests : IDisposable
     {
         var localization = new Localization(_languagesDirectory);
         var choice = LocalizedChoice.FromKey(
-            "Native",
-            "Options.CpuEngine.Native");
+            "Fit",
+            "Options.Scaling.Fit");
         var changedProperties = new List<string?>();
         choice.PropertyChanged += (_, args) =>
             changedProperties.Add(args.PropertyName);
@@ -78,9 +78,9 @@ public sealed class LocalizationTests : IDisposable
         localization.Load("ru");
         choice.Refresh(localization);
 
-        Assert.Equal("Native", choice.Value);
+        Assert.Equal("Fit", choice.Value);
         Assert.NotEqual(englishLabel, choice.Label);
-        Assert.Equal(localization.Get("Options.CpuEngine.Native"), choice.Label);
+        Assert.Equal(localization.Get("Options.Scaling.Fit"), choice.Label);
         Assert.Contains(nameof(LocalizedChoice.Label), changedProperties);
     }
 
@@ -129,8 +129,8 @@ public sealed class LocalizationTests : IDisposable
     {
         var localization = new Localization(_languagesDirectory);
         var choice = LocalizedChoice.FromKey(
-            "Native",
-            "Options.CpuEngine.Native");
+            "Fit",
+            "Options.Scaling.Fit");
         localization.Load("en");
         choice.Refresh(localization);
         var comboBox = new ComboBox
@@ -145,7 +145,7 @@ public sealed class LocalizationTests : IDisposable
         choice.Refresh(localization);
 
         Assert.Same(choice, comboBox.SelectionBoxItem);
-        Assert.Equal(localization.Get("Options.CpuEngine.Native"), choice.Label);
+        Assert.Equal(localization.Get("Options.Scaling.Fit"), choice.Label);
     }
 
     [Fact]

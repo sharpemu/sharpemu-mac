@@ -141,7 +141,12 @@ public sealed class SplitGpuSession : IDisposable
         SplitGpuSession? session = null;
         try
         {
-            process = GpuProcessHost.Start(new GpuProcessHostOptions { Layout = SplitSharedState.Layout });
+            process = GpuProcessHost.Start(new GpuProcessHostOptions
+            {
+                Layout = SplitSharedState.Layout,
+                ExecutablePath = NamedGpuHost.TryPrepare(
+                    VideoOutExports.ApplicationTitle, VideoOutBackendServices.GetApplicationTitleId()),
+            });
             session = new SplitGpuSession(process.Channel, process.SyncRoot, memory, table, new GuestProcessSide(), process, server);
             session.Begin(serviceName, videoOptions, VideoOutBackendServices.GetApplicationTitleId(), installGlobals: true);
             return session;

@@ -97,7 +97,7 @@ public sealed record HostVideoOptions
 
     public bool OverlayEnabled { get; init; } = true;
     public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.TopRight;
-    public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.TitleBar;
+    public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.Full;
 
     // Whether HdrMode.Auto may turn HDR on: a presenter capability, not an OS property. The
     // Metal presenter registers false: Auto stays on SDR there, and only an explicit
@@ -153,7 +153,7 @@ public sealed record HostVideoOptions
             ? DisplayResolution
             : GuestDisplayResolution.Auto,
         OverlayCorner = Enum.IsDefined(OverlayCorner) ? OverlayCorner : PerformanceOverlayCorner.TopRight,
-        OverlayMode = Enum.IsDefined(OverlayMode) ? OverlayMode : PerformanceOverlayMode.TitleBar,
+        OverlayMode = Enum.IsDefined(OverlayMode) ? OverlayMode : PerformanceOverlayMode.Full,
     };
 }
 

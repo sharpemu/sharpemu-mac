@@ -104,6 +104,33 @@ public static class GameCatalogCache
         return games;
     }
 
+    /// <summary>
+    /// Every settings key in the cache, whatever folders it was written for and whether or not
+    /// the games are still reachable: a library on an unmounted drive still names its games.
+    /// </summary>
+    public static IReadOnlyList<string> CachedSettingsKeys()
+    {
+        try
+        {
+            if (!File.Exists(CachePath))
+            {
+                return [];
+            }
+
+            var document = JsonSerializer.Deserialize<CacheDocument>(
+                File.ReadAllText(CachePath),
+                SerializerOptions);
+            return document?.Games
+                .Where(game => !string.IsNullOrWhiteSpace(game.TitleId) || !string.IsNullOrWhiteSpace(game.Path))
+                .Select(game => PerGameSettings.KeyFor(game.TitleId, game.Path))
+                .ToList() ?? [];
+        }
+        catch (Exception)
+        {
+            return [];
+        }
+    }
+
     public static void Save(IReadOnlyList<string> folders, IReadOnlyList<CatalogGame> games)
     {
         try

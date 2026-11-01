@@ -605,6 +605,7 @@ internal static partial class MetalV2Presenter
         }
         finally
         {
+            ReleasePerfOverlayResources();
             Volatile.Write(ref _hostWindow, null);
             _metalLayer = 0;
             lock (_gate)
@@ -715,7 +716,9 @@ internal static partial class MetalV2Presenter
                 // Keep polling movies, window state and guest flips. The flip pacer is
                 // independent, so reusing a drawable never delays guest flip completion.
                 // Before a guest/movie image exists, the prewarm overlay may animate.
-                if (ReusePresentedFrame && !PresentationCache.NeedsPresent(in stamp, presented == 0 && !movie))
+                // The performance panel refreshes on its own clock, so it also counts as animated.
+                if (ReusePresentedFrame &&
+                    !PresentationCache.NeedsPresent(in stamp, (presented == 0 && !movie) || PerfOverlayNeedsPresent()))
                 {
                     ReportPresentationStatistics(presented: false);
                     // nextDrawable normally paces this loop; skipping it must not spin.
@@ -756,6 +759,7 @@ internal static partial class MetalV2Presenter
                     EncodePrewarmProgress(encoder);
                 }
 
+                EncodePerfOverlay(encoder, window.ContentsScale);
                 MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
                 MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
                 MetalMemoryTelemetry.Commits.Add();

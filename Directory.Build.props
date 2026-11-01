@@ -43,8 +43,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
          rather than in their project files for the same reason as above: PublishDir's RID
          suffix is decided below. SharpEmu.GpuHost is process B, the GPU host, which exists to
          run natively on Apple silicon next to the Rosetta-hosted emulator; the GPU process
-         smoke tool plays process A and so is osx-x64 like SharpEmu.CLI. -->
+         smoke tool plays process A and so is osx-x64 like SharpEmu.CLI. SharpEmu.GuiHost is
+         the bundle's native frontend, which starts the osx-x64 SharpEmu for each game. -->
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.GpuHost'">osx-arm64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.GuiHost'">osx-arm64</RuntimeIdentifier>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.Tools.GpuProcessSmoke'">osx-x64</RuntimeIdentifier>
 
     <BaseIntermediateOutputPath>$(RepoRoot)artifacts/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>

@@ -419,7 +419,9 @@ public static class Updater
 
     private static PlatformInfo CurrentPlatform()
     {
-        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        // The macOS release is one osx-x64 bundle whose launcher (SharpEmu.GuiHost) runs as
+        // arm64, so only the other platforms need the checking process itself to be x64.
+        if (!OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
             throw new PlatformNotSupportedException("SharpEmu releases require an x64 process.");
         }

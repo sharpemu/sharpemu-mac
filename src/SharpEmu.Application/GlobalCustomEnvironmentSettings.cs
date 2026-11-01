@@ -38,21 +38,20 @@ public sealed class GlobalCustomEnvironmentSettings
         }
     }
 
+    /// <summary>Best-effort save retained for existing persistence callers.</summary>
     public static void Save(IEnumerable<string> entries)
     {
-        try
-        {
-            SaveOrThrow(entries);
-        }
-        catch (Exception)
-        {
-        }
+        try { SaveOrThrow(entries); }
+        catch (Exception) { }
     }
 
-    /// <summary>Persists normalized global environment entries, propagating failures to the caller.</summary>
+    /// <summary>Writes the normalized entries; failures reach the caller so the launcher can report them.</summary>
     public static void SaveOrThrow(IEnumerable<string> entries)
     {
-        var settings = new GlobalCustomEnvironmentSettings { EnvironmentVariables = Normalize(entries).ToList() };
+        var settings = new GlobalCustomEnvironmentSettings
+        {
+            EnvironmentVariables = Normalize(entries).ToList(),
+        };
         SettingsFilePersistence.Write(FilePath, JsonSerializer.Serialize(settings, SerializerOptions));
     }
 
