@@ -16,6 +16,8 @@ public sealed partial class SpirvModuleBuilder
     private readonly HashSet<uint> _localVariables = [];
     private readonly HashSet<uint> _escapedVariables = [];
     private readonly Dictionary<uint, uint> _variableValues = [];
+    private readonly Dictionary<uint, int> _pendingStores = [];
+    private readonly HashSet<int> _removedInstructions = [];
     private readonly HashSet<(uint Target, SpirvDecoration Decoration)> _plainDecorations = [];
     private readonly HashSet<uint> _namedTargets = [];
 
@@ -124,6 +126,7 @@ public sealed partial class SpirvModuleBuilder
         }
 
         var result = EmitResult(_functions, SpirvOp.Load, resultType, operands);
+        _pendingStores.Remove(pointer);
         _variableValues[pointer] = result;
         return result;
     }
@@ -136,6 +139,7 @@ public sealed partial class SpirvModuleBuilder
             if (_localVariables.Contains(pointer))
             {
                 _variableValues.Remove(pointer);
+                _pendingStores.Remove(pointer);
             }
 
             Emit(_functions, SpirvOp.Store, operands);
@@ -148,6 +152,12 @@ public sealed partial class SpirvModuleBuilder
             return;
         }
 
+        if (_pendingStores.TryGetValue(pointer, out var previous))
+        {
+            _removedInstructions.Add(previous);
+        }
+
+        _pendingStores[pointer] = _functions.Count;
         Emit(_functions, SpirvOp.Store, operands);
         _variableValues[pointer] = value;
     }
@@ -162,11 +172,16 @@ public sealed partial class SpirvModuleBuilder
             if (_localVariables.Contains(operand) && _escapedVariables.Add(operand))
             {
                 _variableValues.Remove(operand);
+                _pendingStores.Remove(operand);
             }
         }
     }
 
-    private void ResetMemoryState() => _variableValues.Clear();
+    private void ResetMemoryState()
+    {
+        _variableValues.Clear();
+        _pendingStores.Clear();
+    }
 
     private void ResetBlockState()
     {
@@ -243,6 +258,12 @@ public sealed partial class SpirvModuleBuilder
         for (var index = 0; index < starts.Count; index++)
         {
             var offset = starts[index];
+            if (_removedInstructions.Contains(offset))
+            {
+                removed[index] = true;
+                continue;
+            }
+
             var wordCount = (int)(words[offset] >> 16);
             var first = 1;
             if (IsRemovableDefinition(words, offset, wordCount))
