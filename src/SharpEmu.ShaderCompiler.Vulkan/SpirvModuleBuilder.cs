@@ -383,7 +383,7 @@ public enum SpirvImageFormat : uint
     R64ui = 40,
 }
 
-public sealed class SpirvModuleBuilder
+public sealed partial class SpirvModuleBuilder
 {
     private const uint Magic = 0x07230203;
     private const uint Version15 = 0x00010500;
@@ -563,6 +563,7 @@ public sealed class SpirvModuleBuilder
         var id = AllocateId();
         Emit(_typesConstantsGlobals, SpirvOp.TypeInt, id, width, signed ? 1u : 0u);
         _integerTypes.Add(key, id);
+        _integerTypeInfo[id] = (width, signed);
         return id;
     }
 
@@ -739,6 +740,7 @@ public sealed class SpirvModuleBuilder
             id);
         _constants.Add(key, id);
         _scalarConstantValues[id] = value ? 1u : 0u;
+        NoteResultType(id, type);
         return id;
     }
 
@@ -753,9 +755,14 @@ public sealed class SpirvModuleBuilder
         var id = AllocateId();
         Emit(_typesConstantsGlobals, SpirvOp.Constant, type, id, value);
         _constants.Add(key, id);
+        NoteResultType(id, type);
         if (IsInt32Type(type))
         {
             _scalarConstantValues[id] = value;
+        }
+        else if (IsFloat32Type(type))
+        {
+            _floatConstantBits[id] = value;
         }
 
         return id;
@@ -778,6 +785,12 @@ public sealed class SpirvModuleBuilder
             (uint)value,
             (uint)(value >> 32));
         _constants.Add(key, id);
+        NoteResultType(id, type);
+        if (IntegerWidth(type) == 64)
+        {
+            _wideConstantValues[id] = value;
+        }
+
         return id;
     }
 
@@ -792,6 +805,7 @@ public sealed class SpirvModuleBuilder
         operands[1] = id;
         constituents.CopyTo(operands, 2);
         Emit(_typesConstantsGlobals, SpirvOp.ConstantComposite, operands);
+        NoteResultType(id, type);
         return id;
     }
 
@@ -806,6 +820,7 @@ public sealed class SpirvModuleBuilder
         var id = AllocateId();
         Emit(_typesConstantsGlobals, SpirvOp.ConstantNull, type, id);
         _constants.Add(key, id);
+        NoteResultType(id, type);
         return id;
     }
 
@@ -1095,6 +1110,7 @@ public sealed class SpirvModuleBuilder
         values[1] = result;
         operands.CopyTo(values, 2);
         Emit(section, opcode, values);
+        NoteResultType(result, resultType);
         return result;
     }
 
