@@ -1051,6 +1051,9 @@ public sealed partial class SpirvModuleBuilder
                     TrySplitLowWord(definition.Operands[1], wordType, depth + 1, out var right):
                 low = AddInstruction(definition.Opcode, wordType, left, right);
                 return true;
+            case SpirvOp.Not when TrySplitLowWord(definition.Operands[0], wordType, depth + 1, out var inverted):
+                low = AddInstruction(SpirvOp.Not, wordType, inverted);
+                return true;
             case SpirvOp.Select
                 when TrySplitLowWord(definition.Operands[1], wordType, depth + 1, out var whenTrue) &&
                     TrySplitLowWord(definition.Operands[2], wordType, depth + 1, out var whenFalse):
@@ -1102,6 +1105,9 @@ public sealed partial class SpirvModuleBuilder
                     TrySplitHighWord(definition.Operands[1], wordType, depth + 1, out var right):
                 high = AddInstruction(definition.Opcode, wordType, left, right);
                 return true;
+            case SpirvOp.Not when TrySplitHighWord(definition.Operands[0], wordType, depth + 1, out var inverted):
+                high = AddInstruction(SpirvOp.Not, wordType, inverted);
+                return true;
             case SpirvOp.Select
                 when TrySplitHighWord(definition.Operands[1], wordType, depth + 1, out var whenTrue) &&
                     TrySplitHighWord(definition.Operands[2], wordType, depth + 1, out var whenFalse):
@@ -1149,7 +1155,119 @@ public sealed partial class SpirvModuleBuilder
         return IsValueOperation(opcode, []);
     }
 
-    private List<uint> CompactFunctions(HashSet<uint> removedIds)
+    private HashSet<uint> FindUnreadVariables(out HashSet<uint> unreadPointers)
+    {
+        var words = _functions;
+        var chainBases = new Dictionary<uint, uint>();
+        var read = new HashSet<uint>();
+        for (var offset = 0; offset < words.Count; offset += (int)(words[offset] >> 16))
+        {
+            var wordCount = (int)(words[offset] >> 16);
+            var opcode = (SpirvOp)(words[offset] & 0xFFFF);
+            var first = 1;
+            switch (opcode)
+            {
+                case SpirvOp.Variable:
+                    continue;
+                case SpirvOp.Store when wordCount == 3:
+                    first = 2;
+                    break;
+                case SpirvOp.AccessChain when wordCount >= 4 && _localVariables.Contains(words[offset + 3]):
+                    chainBases[words[offset + 2]] = words[offset + 3];
+                    first = 4;
+                    break;
+            }
+
+            for (var word = first; word < wordCount; word++)
+            {
+                var id = words[offset + word];
+                if (_localVariables.Contains(id))
+                {
+                    read.Add(id);
+                }
+                else if (chainBases.TryGetValue(id, out var variable))
+                {
+                    read.Add(variable);
+                }
+            }
+        }
+
+        var unread = new HashSet<uint>(_localVariables.Where(variable => !read.Contains(variable)));
+        unreadPointers = new HashSet<uint>(unread);
+        foreach (var (chain, variable) in chainBases)
+        {
+            if (unread.Contains(variable))
+            {
+                unreadPointers.Add(chain);
+            }
+        }
+
+        return unread;
+    }
+
+    private static List<uint> WithoutVariables(List<uint> section, HashSet<uint> variables)
+    {
+        if (variables.Count == 0)
+        {
+            return section;
+        }
+
+        var filtered = new List<uint>(section.Count);
+        for (var offset = 0; offset < section.Count;)
+        {
+            var wordCount = (int)(section[offset] >> 16);
+            if ((SpirvOp)(section[offset] & 0xFFFF) != SpirvOp.Variable || !variables.Contains(section[offset + 2]))
+            {
+                for (var word = 0; word < wordCount; word++)
+                {
+                    filtered.Add(section[offset + word]);
+                }
+            }
+
+            offset += wordCount;
+        }
+
+        return filtered;
+    }
+
+    private static List<uint> WithoutInterfaces(List<uint> section, HashSet<uint> variables)
+    {
+        if (variables.Count == 0)
+        {
+            return section;
+        }
+
+        var filtered = new List<uint>(section.Count);
+        for (var offset = 0; offset < section.Count;)
+        {
+            var wordCount = (int)(section[offset] >> 16);
+            var nameEnd = offset + 3;
+            while (nameEnd < offset + wordCount && !HasZeroByte(section[nameEnd]))
+            {
+                nameEnd++;
+            }
+
+            var kept = new List<uint>();
+            for (var word = offset + 1; word < offset + wordCount; word++)
+            {
+                if (word <= nameEnd || !variables.Contains(section[word]))
+                {
+                    kept.Add(section[word]);
+                }
+            }
+
+            filtered.Add(((uint)(kept.Count + 1) << 16) | (section[offset] & 0xFFFF));
+            filtered.AddRange(kept);
+            offset += wordCount;
+        }
+
+        return filtered;
+    }
+
+    private static bool HasZeroByte(uint word) =>
+        (word & 0xFF) == 0 || (word & 0xFF00) == 0 || (word & 0xFF0000) == 0 || (word & 0xFF000000) == 0;
+
+    private List<uint> CompactFunctions(HashSet<uint> removedIds, HashSet<uint> unreadPointers)
     {
         var words = _functions;
         var starts = new List<int>();
@@ -1164,13 +1282,16 @@ public sealed partial class SpirvModuleBuilder
         for (var index = 0; index < starts.Count; index++)
         {
             var offset = starts[index];
-            if (_removedInstructions.Contains(offset))
+            var wordCount = (int)(words[offset] >> 16);
+            var opcode = (SpirvOp)(words[offset] & 0xFFFF);
+            if (_removedInstructions.Contains(offset) ||
+                (opcode == SpirvOp.Store && unreadPointers.Contains(words[offset + 1])) ||
+                (opcode == SpirvOp.Variable && unreadPointers.Contains(words[offset + 2])))
             {
                 removed[index] = true;
                 continue;
             }
 
-            var wordCount = (int)(words[offset] >> 16);
             var first = 1;
             if (IsRemovableDefinition(words, offset, wordCount))
             {

@@ -1096,21 +1096,24 @@ public sealed partial class SpirvModuleBuilder
             SetLogicalGlsl450MemoryModel();
         }
 
-        var removedIds = new HashSet<uint>();
-        var functions = CompactFunctions(removedIds);
+        var unreadVariables = FindUnreadVariables(out var unreadPointers);
+        var removedIds = new HashSet<uint>(unreadVariables);
+        var functions = CompactFunctions(removedIds, unreadPointers);
         var debug = WithoutTargets(_debug, removedIds);
         var annotations = WithoutTargets(_annotations, removedIds);
+        var entryPoints = WithoutInterfaces(_entryPoints, unreadVariables);
+        var globals = WithoutVariables(_typesConstantsGlobals, unreadVariables);
         var wordCount =
             5 +
             _capabilities.Count +
             _extensions.Count +
             _imports.Count +
             _memoryModel.Count +
-            _entryPoints.Count +
+            entryPoints.Count +
             _executionModes.Count +
             debug.Count +
             annotations.Count +
-            _typesConstantsGlobals.Count +
+            globals.Count +
             functions.Count;
         var words = new uint[wordCount];
         var offset = 0;
@@ -1123,11 +1126,11 @@ public sealed partial class SpirvModuleBuilder
         WriteSection(_extensions);
         WriteSection(_imports);
         WriteSection(_memoryModel);
-        WriteSection(_entryPoints);
+        WriteSection(entryPoints);
         WriteSection(_executionModes);
         WriteSection(debug);
         WriteSection(annotations);
-        WriteSection(_typesConstantsGlobals);
+        WriteSection(globals);
         WriteSection(functions);
         var bytes = new byte[wordCount * sizeof(uint)];
         Buffer.BlockCopy(words, 0, bytes, 0, bytes.Length);
