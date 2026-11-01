@@ -3,6 +3,7 @@
 
 # Tells the website repo to rebuild when a release is published, so
 # sharpemu.app/downloads lists the new build within a minute.
+# Needs the SITE_DISPATCH_TOKEN repository secret in this repo.
 name: Notify website
 
 on:
@@ -15,11 +16,10 @@ permissions: {}
 
 jobs:
   dispatch:
-    # Upstream only. sharpemu.app/downloads lists upstream releases, so a fork
-    # has nothing to tell it to rebuild. Without the guard the job still ran on
-    # every fork release and silently skipped on the missing secret, which
-    # reads as "the dispatch broke" rather than "this is not our website".
-    if: github.repository == 'sharpemu/sharpemu'
+    # Runs in sharpemu/sharpemu (Windows and Linux builds) and in
+    # sharpemu/sharpemu-mac (macOS builds): sharpemu.app/downloads lists both.
+    # Other forks have nothing to tell the website, so they skip.
+    if: github.repository == 'sharpemu/sharpemu' || github.repository == 'sharpemu/sharpemu-mac'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
