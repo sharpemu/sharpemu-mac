@@ -13,6 +13,9 @@ public sealed partial class SpirvModuleBuilder
     private readonly Dictionary<uint, ulong> _wideConstantValues = [];
     private readonly Dictionary<uint, uint> _floatConstantBits = [];
     private readonly Dictionary<InstructionKey, uint> _blockValues = [];
+    private readonly HashSet<uint> _localVariables = [];
+    private readonly HashSet<uint> _escapedVariables = [];
+    private readonly Dictionary<uint, uint> _variableValues = [];
     private readonly HashSet<(uint Target, SpirvDecoration Decoration)> _plainDecorations = [];
     private readonly HashSet<uint> _namedTargets = [];
 
@@ -53,6 +56,12 @@ public sealed partial class SpirvModuleBuilder
 
     public uint AddInstruction(SpirvOp opcode, uint resultType, params uint[] operands)
     {
+        if (opcode == SpirvOp.Load)
+        {
+            return AddLoad(resultType, operands);
+        }
+
+        NoteVariableUses(operands);
         if (TryFold(opcode, resultType, operands, out var folded))
         {
             return folded;
@@ -60,7 +69,13 @@ public sealed partial class SpirvModuleBuilder
 
         if (!IsValueOperation(opcode, operands))
         {
-            return EmitResult(_functions, opcode, resultType, operands);
+            var effect = EmitResult(_functions, opcode, resultType, operands);
+            if (opcode == SpirvOp.FunctionCall)
+            {
+                ResetMemoryState();
+            }
+
+            return effect;
         }
 
         var lookup = new InstructionKey(opcode, resultType, operands);
@@ -74,9 +89,94 @@ public sealed partial class SpirvModuleBuilder
         return result;
     }
 
-    private void ResetBlockState() => _blockValues.Clear();
+    public void AddStatement(SpirvOp opcode, params uint[] operands)
+    {
+        if (opcode == SpirvOp.Store)
+        {
+            AddStore(operands);
+            return;
+        }
+
+        NoteVariableUses(operands);
+        Emit(_functions, opcode, operands);
+        if (opcode is SpirvOp.Branch or SpirvOp.BranchConditional or SpirvOp.Switch or SpirvOp.Return or
+            SpirvOp.ReturnValue or SpirvOp.Kill or SpirvOp.Unreachable)
+        {
+            ResetBlockState();
+        }
+        else if (opcode == SpirvOp.FunctionCall)
+        {
+            ResetMemoryState();
+        }
+    }
+
+    private uint AddLoad(uint resultType, uint[] operands)
+    {
+        var pointer = operands[0];
+        if (operands.Length != 1 || !IsTrackedVariable(pointer))
+        {
+            return EmitResult(_functions, SpirvOp.Load, resultType, operands);
+        }
+
+        if (_variableValues.TryGetValue(pointer, out var known) && TypeOf(known) == resultType)
+        {
+            return known;
+        }
+
+        var result = EmitResult(_functions, SpirvOp.Load, resultType, operands);
+        _variableValues[pointer] = result;
+        return result;
+    }
+
+    private void AddStore(uint[] operands)
+    {
+        var pointer = operands[0];
+        if (operands.Length != 2 || !IsTrackedVariable(pointer))
+        {
+            if (_localVariables.Contains(pointer))
+            {
+                _variableValues.Remove(pointer);
+            }
+
+            Emit(_functions, SpirvOp.Store, operands);
+            return;
+        }
+
+        var value = operands[1];
+        if (_variableValues.TryGetValue(pointer, out var current) && current == value)
+        {
+            return;
+        }
+
+        Emit(_functions, SpirvOp.Store, operands);
+        _variableValues[pointer] = value;
+    }
+
+    private bool IsTrackedVariable(uint pointer) =>
+        _localVariables.Contains(pointer) && !_escapedVariables.Contains(pointer);
+
+    private void NoteVariableUses(uint[] operands)
+    {
+        foreach (var operand in operands)
+        {
+            if (_localVariables.Contains(operand) && _escapedVariables.Add(operand))
+            {
+                _variableValues.Remove(operand);
+            }
+        }
+    }
+
+    private void ResetMemoryState() => _variableValues.Clear();
+
+    private void ResetBlockState()
+    {
+        ResetMemoryState();
+        _blockValues.Clear();
+    }
 
     private void NoteResultType(uint id, uint type) => _resultTypes[id] = type;
+
+    private uint TypeOf(uint id) => _resultTypes.GetValueOrDefault(id);
 
     private uint IntegerWidth(uint type) => _integerTypeInfo.TryGetValue(type, out var info) ? info.Width : 0;
 

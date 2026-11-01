@@ -855,6 +855,11 @@ public sealed partial class SpirvModuleBuilder
             Emit(_typesConstantsGlobals, SpirvOp.Variable, pointerType, id, (uint)storageClass);
         }
 
+        if (storageClass == SpirvStorageClass.Private)
+        {
+            _localVariables.Add(id);
+        }
+
         return id;
     }
 
@@ -906,6 +911,7 @@ public sealed partial class SpirvModuleBuilder
                 (uint)SpirvStorageClass.Function);
         }
 
+        _localVariables.Add(id);
         return id;
     }
 
@@ -1045,9 +1051,6 @@ public sealed partial class SpirvModuleBuilder
         value = raw != 0;
         return true;
     }
-
-    public void AddStatement(SpirvOp opcode, params uint[] operands) =>
-        Emit(_functions, opcode, operands);
 
     public void EndFunction()
     {
