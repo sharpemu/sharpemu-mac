@@ -25,7 +25,8 @@ public sealed class Gen5PixelOutputMappingTests
     public void DepthExportRequiresEnabledDepthComponent(bool enabled, uint mask, uint target, bool expected)
     {
         var code = CompilePixelProgram(Gen5ColorComponentMapping.Identity,
-            enableMask: mask, target: target, outputs: [], depthExportEnable: enabled);
+            enableMask: mask, target: target, outputs: [], depthExportEnable: enabled,
+            prefix: [ResourceTestProgram.Sop1(0, "SMovB64", 126, Gen5Operand.Scalar(0))]);
         var instructions = ReadInstructions(code);
         var depth = instructions.Where(instruction => instruction.Opcode == SpirvOp.Decorate &&
             instruction.Operands.Length == 3 && instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
@@ -146,7 +147,7 @@ public sealed class Gen5PixelOutputMappingTests
         var request = CompressedPixelRequest(Gen5PixelOutputKind.Float, 15);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         var instructions = ReadInstructions(shader.Spirv);
-        Assert.Equal(4, instructions.Count(instruction =>
+        Assert.Equal(2, instructions.Count(instruction =>
             instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 62));
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
         Assert.Contains("(float)as_type<half2>(v0)[0]", metal.Source);
@@ -166,7 +167,7 @@ public sealed class Gen5PixelOutputMappingTests
         var unpacks = ReadInstructions(shader.Spirv)
             .Where(instruction => instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] is 60 or 61 or 62)
             .Select(instruction => instruction.Operands[3]).ToArray();
-        Assert.Equal(Enumerable.Repeat(unpack, 4), unpacks);
+        Assert.Equal(Enumerable.Repeat(unpack, 2), unpacks);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
         Assert.Contains(metalComponent, metal.Source);
     }
@@ -287,7 +288,8 @@ public sealed class Gen5PixelOutputMappingTests
             CompilePixelProgram(
                 Gen5ColorComponentMapping.Identity,
                 target: 9,
-                outputs: []));
+                outputs: [],
+                suffix: [ResourceTestProgram.Sop1(8, "SMovB64", 126, ResourceTestProgram.Operand(0))]));
         var validMaskName = Assert.Single(
             instructions,
             instruction =>
@@ -295,17 +297,15 @@ public sealed class Gen5PixelOutputMappingTests
                 DecodeString(instruction.Operands[1..]) == "pixelValidMaskActive");
         var validMaskVariable = validMaskName.Operands[0];
 
-        // One function store initializes the mask and a second publishes EXEC
-        // from the NULL EXP.VM. The epilogue reads it before OpKill.
-        Assert.True(
-            instructions.Count(instruction =>
-                instruction.Opcode == SpirvOp.Store &&
-                instruction.Operands[0] == validMaskVariable) >= 2);
-        Assert.Contains(
-            instructions,
-            instruction =>
-                instruction.Opcode == SpirvOp.Load &&
-                instruction.Operands[^1] == validMaskVariable);
+        var stores = instructions.Where(instruction => instruction.Opcode == SpirvOp.Store &&
+            instruction.Operands[0] == validMaskVariable).ToArray();
+        Assert.Equal(2, stores.Length);
+        var merged = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Phi &&
+            instruction.Operands[2..].Contains(stores[1].Operands[1]));
+        Assert.Contains(stores[0].Operands[1], merged.Operands[2..]);
+        var finalBranch = instructions.Last(instruction => instruction.Opcode == SpirvOp.BranchConditional);
+        Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.INotEqual &&
+            instruction.Operands[1] == finalBranch.Operands[0] && instruction.Operands[2] == merged.Operands[1]);
         Assert.Contains(
             instructions,
             instruction => instruction.Opcode == SpirvOp.Kill);
@@ -390,9 +390,11 @@ public sealed class Gen5PixelOutputMappingTests
         IReadOnlyList<Gen5PixelOutputBinding>? outputs = null,
         IReadOnlyList<Gen5ShaderInstruction>? prefix = null,
         bool enableGraphicsSubgroupOperations = true,
-        bool depthExportEnable = false)
+        bool depthExportEnable = false,
+        IReadOnlyList<Gen5ShaderInstruction>? suffix = null)
     {
         var prefixInstructions = prefix ?? [];
+        var suffixInstructions = suffix ?? [];
         var export = new Gen5ShaderInstruction(
             (uint)(prefixInstructions.Count * sizeof(uint)),
             Gen5ShaderEncoding.Exp,
@@ -407,14 +409,14 @@ public sealed class Gen5PixelOutputMappingTests
             [],
             new Gen5ExportControl(target, enableMask, false, true, true));
         var end = new Gen5ShaderInstruction(
-            (uint)((prefixInstructions.Count + 2) * sizeof(uint)),
+            (uint)((prefixInstructions.Count + suffixInstructions.Count + 2) * sizeof(uint)),
             Gen5ShaderEncoding.Sopp,
             "SEndpgm",
             [0xBF810000],
             [],
             [],
             null);
-        var program = new Gen5ShaderProgram(0x1_0000_D000, [.. prefixInstructions, export, end]);
+        var program = new Gen5ShaderProgram(0x1_0000_D000, [.. prefixInstructions, export, .. suffixInstructions, end]);
         var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {

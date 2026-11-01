@@ -445,6 +445,7 @@ public partial class MainWindow : Window
                 _settings.GnmTrophyKey = key;
                 GnmTrophyPackageReader.Configure(key);
                 LoadTrophyTestCatalog();
+                ScheduleSettingsSave();
             }
         };
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();

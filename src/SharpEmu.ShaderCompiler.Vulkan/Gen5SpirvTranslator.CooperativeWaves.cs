@@ -65,6 +65,7 @@ public static partial class Gen5SpirvTranslator
             var continuation = _module.AllocateId();
             var exit = _module.AllocateId();
             _module.AddStatement(SpirvOp.Branch, header);
+            _module.DeclareLoopHeader(header);
             _module.AddLabel(header);
             _module.AddStatement(SpirvOp.LoopMerge, exit, continuation, 0);
             _module.AddStatement(SpirvOp.Branch, condition);

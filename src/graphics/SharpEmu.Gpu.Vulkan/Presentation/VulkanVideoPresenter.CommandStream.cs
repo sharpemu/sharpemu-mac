@@ -1398,7 +1398,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 if (_latestPresentation is not { } latest ||
-                    latest.Sequence == _presentedSequence ||
+                    latest.Sequence == _presentedSequence && !(latest.IsSplash && ShaderCacheSplashNeedsRefresh) ||
                     !IsPresentationReadyLocked(in latest))
                 {
                     if (_latestPresentation is { } rejected &&
@@ -1435,7 +1435,9 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return _pendingVideoPresentations.Count > 0 ||
-                (_latestPresentation is { } latest && latest.Sequence != _presentedSequence && IsPresentationReadyLocked(in latest));
+                (_latestPresentation is { } latest &&
+                 (latest.Sequence != _presentedSequence || latest.IsSplash && ShaderCacheSplashNeedsRefresh) &&
+                 IsPresentationReadyLocked(in latest));
         }
     }
 }

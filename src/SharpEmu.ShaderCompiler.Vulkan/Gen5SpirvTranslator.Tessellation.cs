@@ -53,6 +53,7 @@ public static partial class Gen5SpirvTranslator
             var next = _module.AllocateId();
             var merge = _module.AllocateId();
             _module.AddStatement(SpirvOp.Branch, header);
+            _module.DeclareLoopHeader(header);
             _module.AddLabel(header);
             var index = Load(_uintType, counter);
             var inRange = _module.AddInstruction(SpirvOp.ULessThan, _boolType, index, limit);

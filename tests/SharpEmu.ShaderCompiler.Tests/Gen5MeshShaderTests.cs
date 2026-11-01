@@ -114,7 +114,7 @@ public sealed class Gen5MeshShaderTests
     [InlineData("SNandSaveexecB64")]
     [InlineData("SNorSaveexecB64")]
     [InlineData("SXnorSaveexecB64")]
-    public void Wave32SaveexecUses64BitMask(string opcode)
+    public void Wave32SaveexecClearsTheUpperMaskWords(string opcode)
     {
         foreach (var stage in new[] { ShaderStage.Compute, ShaderStage.Mesh })
         {
@@ -132,31 +132,24 @@ public sealed class Gen5MeshShaderTests
             Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
             var words = new uint[shader.Spirv.Length / sizeof(uint)];
             Buffer.BlockCopy(shader.Spirv, 0, words, 0, shader.Spirv.Length);
-            var integerWidths = new Dictionary<uint, uint>();
-            var valueTypes = new Dictionary<uint, uint>();
-            var masks = new HashSet<uint>();
-            var maskCount = 0;
+            var zeroes = new HashSet<uint>();
+            var stores = new Dictionary<uint, uint>();
             for (var offset = 5; offset < words.Length; offset += (int)(words[offset] >> 16))
             {
                 var operation = (SpirvOp)(words[offset] & 0xffff);
-                if (operation == SpirvOp.TypeInt)
-                    integerWidths[words[offset + 1]] = words[offset + 2];
-                if (operation is SpirvOp.Constant or SpirvOp.Not or SpirvOp.BitwiseAnd or
-                    SpirvOp.BitwiseOr or SpirvOp.BitwiseXor)
-                    valueTypes[words[offset + 2]] = words[offset + 1];
-                if (operation == SpirvOp.Constant && words[offset] >> 16 == 5 &&
-                    words[offset + 3] == uint.MaxValue && words[offset + 4] == 0)
-                    masks.Add(words[offset + 2]);
-                if (operation != SpirvOp.BitwiseAnd || !masks.Contains(words[offset + 4]))
-                    continue;
-
-                var resultType = words[offset + 1];
-                Assert.Equal(64u, integerWidths[resultType]);
-                Assert.Equal(resultType, valueTypes[words[offset + 3]]);
-                Assert.Equal(resultType, valueTypes[words[offset + 4]]);
-                maskCount++;
+                if (operation == SpirvOp.Constant && words[offset] >> 16 == 4 && words[offset + 3] == 0)
+                    zeroes.Add(words[offset + 2]);
+                if (operation == SpirvOp.ConstantNull)
+                    zeroes.Add(words[offset + 2]);
+                if (operation == SpirvOp.Store)
+                    stores[words[offset + 1]] = words[offset + 2];
             }
-            Assert.True(maskCount > 0);
+            var names = new SpirvModuleInspector(shader.Spirv).Names;
+            foreach (var name in new[] { "s5", "s127" })
+            {
+                var register = Assert.Single(names, item => item.Value == name).Key;
+                Assert.Contains(stores[register], zeroes);
+            }
             ValidateWithInstalledSdk(shader.Spirv);
         }
     }
@@ -227,6 +220,7 @@ public sealed class Gen5MeshShaderTests
         var scratchPointers = new HashSet<uint>();
         var scratchVariables = new HashSet<uint>();
         var accessCounts = new Dictionary<uint, int>();
+        var elementBases = new Dictionary<uint, uint>();
         var packedVariables = new HashSet<uint>();
         for (var offset = 5; offset < words.Length; offset += (int)(words[offset] >> 16))
         {
@@ -247,8 +241,13 @@ public sealed class Gen5MeshShaderTests
                 scratchVariables.Add(words[offset + 2]);
             if (opcode == SpirvOp.AccessChain)
             {
-                var variable = words[offset + 3];
-                accessCounts[variable] = accessCounts.GetValueOrDefault(variable) + 1;
+                elementBases[words[offset + 2]] = words[offset + 3];
+            }
+            if (opcode is SpirvOp.Load or SpirvOp.Store)
+            {
+                var pointer = words[offset + (opcode == SpirvOp.Load ? 3 : 1)];
+                if (elementBases.TryGetValue(pointer, out var variable))
+                    accessCounts[variable] = accessCounts.GetValueOrDefault(variable) + 1;
             }
         }
         Assert.Equal(2, packedVariables.Count);

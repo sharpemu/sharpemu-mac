@@ -186,6 +186,37 @@ public sealed class LocalizationTests : IDisposable
         }
     }
 
+    // A catalog switch without strings shows its raw key in Game options.
+    [Fact]
+    public void EmbeddedLanguages_LabelEveryEnvironmentSetting()
+    {
+        var assembly = typeof(Localization).Assembly;
+        var keys = new List<string>();
+        foreach (var setting in EnvironmentSettings.All)
+        {
+            keys.Add($"Setting.{setting.Id}.Label");
+            keys.Add($"Setting.{setting.Id}.Desc");
+            keys.AddRange((setting.Choices ?? [])
+                .Where(choice => choice.Label is null)
+                .Select(choice => $"Setting.{setting.Id}.{choice.Value}"));
+        }
+
+        var resourceNames = assembly.GetManifestResourceNames()
+            .Where(name =>
+                name.StartsWith("Languages.", StringComparison.Ordinal) &&
+                name.EndsWith(".json", StringComparison.Ordinal));
+        foreach (var resourceName in resourceNames)
+        {
+            var language = ReadEmbeddedLanguage(assembly, resourceName);
+            var missing = keys
+                .Where(key => !language.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value))
+                .ToArray();
+            Assert.True(
+                missing.Length == 0,
+                $"{resourceName} has no text for: {string.Join(", ", missing)}");
+        }
+    }
+
     [Fact]
     public void EmbeddedLanguages_ContainEveryPatchKeyAndPreserveFormatArguments()
     {

@@ -101,8 +101,6 @@ public partial class MainWindow
     {
         if (!OperatingSystem.IsMacOS())
         {
-            // The caches under user/pipeline_cache belong to the Metal backend.
-            ShaderCacheFolderRow.IsVisible = false;
             return;
         }
 
@@ -267,6 +265,68 @@ public partial class MainWindow
     /// <summary>Compiled shaders, pipeline archives and prewarm lists, one folder per title.</summary>
     private string EmulatorShaderCacheRoot() => Path.Combine(EmulatorDataRoot(), "user", "pipeline_cache");
 
+    internal const string ShaderAnalysisCacheVariable = "SHARPEMU_SHADER_ANALYSIS_CACHE_PATH";
+
+    /// <summary>
+    /// The pre-data-root Vulkan pipeline cache file (~/Library/Caches on macOS,
+    /// LocalApplicationData elsewhere). A launch imports it when the title's cache is missing,
+    /// so "Clear" removes it too.
+    /// </summary>
+    internal static string? LegacyPipelineCacheFile()
+    {
+        var root = OperatingSystem.IsMacOS()
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Caches")
+            : Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return string.IsNullOrEmpty(root) ? null : Path.Combine(root, "SharpEmu", "vulkan-pipeline-cache.bin");
+    }
+
+    /// <summary>
+    /// The shader compiler's analysis cache: LocalApplicationData/SharpEmu/shader-analysis
+    /// (%LOCALAPPDATA% on Windows, ~/.local/share on Linux and macOS) unless
+    /// SHARPEMU_SHADER_ANALYSIS_CACHE_PATH moves it, or turns it off with "0".
+    /// </summary>
+    internal static string? ShaderAnalysisCacheDirectory(Func<string, string?> variable)
+    {
+        var configured = variable(ShaderAnalysisCacheVariable);
+        if (configured is not null)
+        {
+            return configured == "0" || string.IsNullOrWhiteSpace(configured) ? null : configured;
+        }
+
+        var localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return string.IsNullOrEmpty(localData) ? null : Path.Combine(localData, "SharpEmu", "shader-analysis");
+    }
+
+    // Only the cache's own files go: the directory may be one the user pointed it at.
+    internal static void ClearShaderAnalysisCache(string directory)
+    {
+        if (!Directory.Exists(directory)) return;
+        foreach (var pattern in (string[])["*.graph", "*.graph.*.tmp"])
+        {
+            foreach (var file in Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly))
+            {
+                File.Delete(file);
+            }
+        }
+    }
+
+    // The analysis cache path a launch would see: the global custom variables win over the
+    // launcher's own environment, as they do in LaunchConfiguration.
+    private static string? LaunchVariable(string name)
+    {
+        string? value = null;
+        foreach (var entry in GlobalCustomEnvironmentSettings.Load())
+        {
+            if (CustomEnvironmentVariables.TryParseEntry(entry, out var entryName, out var entryValue) &&
+                string.Equals(entryName, name, StringComparison.Ordinal))
+            {
+                value = entryValue;
+            }
+        }
+
+        return value ?? Environment.GetEnvironmentVariable(name);
+    }
+
     private void OpenFolder(string path)
     {
         try
@@ -308,6 +368,8 @@ public partial class MainWindow
 
         DisarmClearShaderCache();
         var root = EmulatorShaderCacheRoot();
+        var analysis = ShaderAnalysisCacheDirectory(LaunchVariable);
+        var legacy = LegacyPipelineCacheFile();
         _ = Task.Run(() =>
         {
             string message;
@@ -317,6 +379,9 @@ public partial class MainWindow
                 {
                     Directory.Delete(root, recursive: true);
                 }
+
+                if (analysis is not null) ClearShaderAnalysisCache(analysis);
+                if (legacy is not null && File.Exists(legacy)) File.Delete(legacy);
 
                 message = Localization.Instance.Get("Setting.ShaderCacheFolder.Cleared");
             }
