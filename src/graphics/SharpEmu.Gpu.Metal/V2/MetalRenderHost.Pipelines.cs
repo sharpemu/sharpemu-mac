@@ -1119,6 +1119,19 @@ internal sealed partial class MetalRenderHost
             if (missed)
             {
                 state = NewRenderPipelineState(descriptor, mesh is not null, 0, ref error);
+                if (state == 0)
+                {
+                    var meshPipeline = mesh is not null;
+                    state = RetryAfterCompilerServiceFailure(
+                        () =>
+                        {
+                            nint next = 0;
+                            var built = NewRenderPipelineState(descriptor, meshPipeline, 0, ref next);
+                            return (built, next);
+                        },
+                        $"render pipeline vertex=0x{description.VertexStage.Hash:X16}",
+                        ref error);
+                }
             }
 
             Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
@@ -1493,6 +1506,11 @@ internal sealed partial class MetalRenderHost
         using var runtime = MetalCompileScheduler.Shared.Runtime();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var state = NewComputePipelineState(function, archiveKey, ref error);
+        if (state == 0)
+        {
+            state = RecoverComputePipelineState(function, archiveKey, hash, ref error);
+        }
+
         Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         if (state == 0)
         {
@@ -1574,6 +1592,11 @@ internal sealed partial class MetalRenderHost
         using var runtime = MetalCompileScheduler.Shared.Runtime();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var state = NewComputePipelineState(module.Function, module.ArchiveKey, ref error);
+        if (state == 0)
+        {
+            state = RecoverComputePipelineState(module.Function, module.ArchiveKey, description.Stage.Hash, ref error);
+        }
+
         Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
         if (state == 0)
         {
