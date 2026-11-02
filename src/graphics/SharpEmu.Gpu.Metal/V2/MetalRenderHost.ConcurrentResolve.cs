@@ -130,7 +130,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var deferredBarriers = Interlocked.Exchange(ref _deferredBarriers, 0);
         var operandReadsKept = Interlocked.Exchange(ref _operandReadsKept, 0);
         var drained = Interlocked.Exchange(ref _drainedDraws, 0);
-        return $"resolved={resolved} abandoned={abandoned} taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
+        return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
             $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} {own}{TakeDrainCallers()}";
     }
@@ -258,6 +258,55 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         return assumptions;
     }
 
+    // Why the resolve thread abandoned a resolution, by the first thing that owned the word it
+    // read (the order IsOwnedConcurrent tests them in), so the worker's redone resolutions (own,
+    // own_ms) can be laid at a cause's door. A pending GPU write is a recognised copy's when a
+    // copy whose submission has not completed writes the word. Abandons thrown elsewhere (a
+    // fatal condition in the resolution) are not counted here; nothing found means the owner
+    // went away between the two tests.
+    private enum AbandonCause : byte
+    {
+        GpuWrite,
+        CopyDestination,
+        Label,
+        CommandProcessor,
+        Image,
+        Code,
+        Queued,
+        Other,
+    }
+
+    private static readonly string[] AbandonCauseNames = ["gpu_write", "copy_dst", "label", "cp", "image", "code", "queued", "other"];
+
+    private readonly long[] _abandonCauses = new long[AbandonCauseNames.Length];
+
+    private void NoteAbandonCause(ulong address, ulong size)
+    {
+        var completed = SignaledSerial();
+        var cause = PendingCommandWriteHolds(address, size) ? AbandonCause.Queued
+            : _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size) ? AbandonCause.Image
+            : IsGpuWritePendingConcurrent(address, size)
+                ? IsPendingCopyDestinationConcurrent(address, size, completed) ? AbandonCause.CopyDestination : AbandonCause.GpuWrite
+            : _cpOverlay.Count != 0 && _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None
+                ? AbandonCause.CommandProcessor
+            : _labelOverlay.Count != 0 && _labelOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None
+                ? AbandonCause.Label
+            : AbandonCause.Other;
+        Interlocked.Increment(ref _abandonCauses[(int)cause]);
+    }
+
+    internal string TakeAbandonCauses()
+    {
+        var builder = new System.Text.StringBuilder();
+        for (var index = 0; index < _abandonCauses.Length; index++)
+        {
+            builder.Append(index == 0 ? string.Empty : ",").Append(AbandonCauseNames[index]).Append('=')
+                .Append(Interlocked.Exchange(ref _abandonCauses[index], 0));
+        }
+
+        return builder.ToString();
+    }
+
     // On the worker: the answers a resolution relied on still hold.
     internal bool IsConcurrentResolveStillCurrent(object assumptionsObject)
     {
@@ -354,6 +403,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         word = 0;
         if (IsOwnedRecorded(ConcurrentQuery.Word, address, sizeof(uint), assumptions))
         {
+            NoteAbandonCause(address, sizeof(uint));
             throw new GpuFatal.AbandonedWorkException($"The resolution reads GPU-owned memory: address=0x{address:X16}.");
         }
 
@@ -373,6 +423,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     {
         if (IsOwnedRecorded(ConcurrentQuery.Word, address, sizeof(uint), assumptions))
         {
+            NoteAbandonCause(address, sizeof(uint));
             throw new GpuFatal.AbandonedWorkException($"The resolution reads a data word the GPU may write: address=0x{address:X16}.");
         }
 
@@ -385,6 +436,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     {
         if (size != 0 && IsOwnedRecorded(ConcurrentQuery.Word, address, size, assumptions))
         {
+            Interlocked.Increment(ref _abandonCauses[(int)AbandonCause.Code]);
             throw new GpuFatal.AbandonedWorkException($"The resolution reads shader code the GPU may write: address=0x{address:X16}.");
         }
     }

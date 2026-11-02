@@ -86,12 +86,18 @@ internal sealed partial class MetalRenderHost
         var copy = _armedCopy;
         copy.Serial = serial;
         copy.Sequence = sequence;
-        if (_pendingCopies.Count >= MaxPendingCopies)
+        // Changed under the lock, for the resolve thread's abandon attribution; the worker
+        // alone changes the list, so its own reads take no lock.
+        lock (_pendingCopies)
         {
-            _pendingCopies.RemoveAt(0);
+            if (_pendingCopies.Count >= MaxPendingCopies)
+            {
+                _pendingCopies.RemoveAt(0);
+            }
+
+            _pendingCopies.Add(copy);
         }
 
-        _pendingCopies.Add(copy);
         if (_tracedCopies.Count < MaxCopyReadTraces && _tracedCopies.Add((copy.Destination, copy.Words)))
         {
             _copyReadTraces.Enqueue(
@@ -102,11 +108,21 @@ internal sealed partial class MetalRenderHost
 
     private void RetirePendingCopies(ulong completed)
     {
-        if (_pendingCopies.Count != 0)
+        // In place and in order; the lambda over `completed` allocated its closure on every call.
+        var kept = 0;
+        while (kept < _pendingCopies.Count && _pendingCopies[kept].Serial > completed)
         {
-            // In place and in order; the lambda over `completed` allocated its closure on every call.
-            var kept = 0;
-            for (var index = 0; index < _pendingCopies.Count; index++)
+            kept++;
+        }
+
+        if (kept == _pendingCopies.Count)
+        {
+            return;
+        }
+
+        lock (_pendingCopies)
+        {
+            for (var index = kept + 1; index < _pendingCopies.Count; index++)
             {
                 if (_pendingCopies[index].Serial > completed)
                 {
@@ -114,11 +130,28 @@ internal sealed partial class MetalRenderHost
                 }
             }
 
-            if (kept != _pendingCopies.Count)
+            _pendingCopies.RemoveRange(kept, _pendingCopies.Count - kept);
+        }
+    }
+
+    // Off the worker: whether a recognised copy whose submission has not completed writes the
+    // range. Only attributes a resolve-thread abandon (ConcurrentResolve), so a record the worker
+    // has yet to retire is answered by its serial.
+    private bool IsPendingCopyDestinationConcurrent(ulong address, ulong size, ulong completed)
+    {
+        var end = address + size;
+        lock (_pendingCopies)
+        {
+            foreach (var copy in _pendingCopies)
             {
-                _pendingCopies.RemoveRange(kept, _pendingCopies.Count - kept);
+                if (copy.Serial > completed && copy.Destination <= address && end <= copy.DestinationEnd)
+                {
+                    return true;
+                }
             }
         }
+
+        return false;
     }
 
     /// <summary>

@@ -4,6 +4,7 @@
 using System.Collections.Concurrent;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Rendering;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -20,14 +21,29 @@ internal sealed partial class MetalRenderHost
 {
     private long _kernelFills;
     private long _kernelCopies;
-    private readonly ConcurrentDictionary<string, long> _kernelFillFallbacks = new(StringComparer.Ordinal);
+    // Keyed by the kernel the reason is for, so the CHURN line tells fills from copies: the
+    // image cache gives both the same reasons (no-image, shape), and a copy whose source is
+    // shorter than it is offered as a fill pattern. The executor's own refusals name their kind.
+    private readonly ConcurrentDictionary<(KernelKind Kind, string Reason), long> _kernelFillFallbacks = new();
+
+    private enum KernelKind : byte
+    {
+        // Reasons the executor names itself (copy-shape, copy-descriptor, ...).
+        Named,
+        Fill,
+        Copy,
+    }
+
+    private static readonly string[] KernelKindPrefixes = ["", "fill:", "copy:"];
 
     /// <summary>A recognized fill or copy kernel ran as a dispatch, and why.</summary>
-    public void NoteKernelFillFallback(string reason)
+    public void NoteKernelFillFallback(string reason) => NoteKernelFallback(KernelKind.Named, reason);
+
+    private void NoteKernelFallback(KernelKind kind, string reason)
     {
         if (MetalV2Diagnostics.KernelFills)
         {
-            _kernelFillFallbacks.AddOrUpdate(reason, 1, static (_, count) => count + 1);
+            _kernelFillFallbacks.AddOrUpdate((kind, reason), 1, static (_, count) => count + 1);
         }
     }
 
@@ -39,9 +55,25 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
+        if (TryClearImageFromKernelFillCore(address, size, pattern))
+        {
+            return true;
+        }
+
+        // Refused: the fill runs as a dispatch. Whether it would change anything is counted.
+        if (!pattern.IsEmpty && size % sizeof(uint) == 0)
+        {
+            _ = EvaluateKernelFill(address, size / sizeof(uint), pattern);
+        }
+
+        return false;
+    }
+
+    private bool TryClearImageFromKernelFillCore(ulong address, ulong size, ReadOnlySpan<uint> pattern)
+    {
         if (pattern.IsEmpty || pattern.Length * sizeof(uint) > MetalKernelFill.MaxPatternBytes)
         {
-            NoteKernelFillFallback("pattern-size");
+            NoteKernelFallback(KernelKind.Fill, "pattern-size");
             return false;
         }
 
@@ -51,7 +83,7 @@ internal sealed partial class MetalRenderHost
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes[(word * sizeof(uint))..], pattern[word]);
         }
 
-        return TryInterceptKernelFill(address, size, bytes);
+        return TryInterceptKernelFill(KernelKind.Fill, address, size, bytes);
     }
 
     /// <summary>
@@ -69,7 +101,13 @@ internal sealed partial class MetalRenderHost
         }
 
         // Refused: the copy runs as the dispatch it is, and a read of its destination
-        // before that submission completes can be answered from its source.
+        // before that submission completes can be answered from its source. Whether it would
+        // change anything is counted.
+        if (MetalV2Diagnostics.KernelFills)
+        {
+            _ = EvaluateKernelCopy(destination, words, source, sourceWords);
+        }
+
         ArmPendingCopy(destination, source, sourceWords, words);
         return false;
     }
@@ -83,7 +121,7 @@ internal sealed partial class MetalRenderHost
 
         if (words == 0 || sourceWords == 0 || words > ulong.MaxValue / sizeof(uint))
         {
-            NoteKernelFillFallback("size");
+            NoteKernelFallback(KernelKind.Copy, "size");
             return false;
         }
 
@@ -95,7 +133,7 @@ internal sealed partial class MetalRenderHost
 
         if (sourceWords * sizeof(uint) > MetalKernelFill.MaxPatternBytes)
         {
-            NoteKernelFillFallback("pattern-size");
+            NoteKernelFallback(KernelKind.Copy, "pattern-size");
             return false;
         }
 
@@ -106,26 +144,26 @@ internal sealed partial class MetalRenderHost
         if (_gpuWrites.PendingSerial(source, patternSize, CompletedSerial) != 0 ||
             _imageCache.HasGpuModifiedImageBytes(source, patternSize))
         {
-            NoteKernelFillFallback("pattern-pending");
+            NoteKernelFallback(KernelKind.Copy, "pattern-pending");
             return false;
         }
 
         Span<byte> pattern = stackalloc byte[(int)patternSize];
         if (!TryReadGuest(source, pattern))
         {
-            NoteKernelFillFallback("pattern-unreadable");
+            NoteKernelFallback(KernelKind.Copy, "pattern-unreadable");
             return false;
         }
 
-        return TryInterceptKernelFill(destination, size, pattern);
+        return TryInterceptKernelFill(KernelKind.Copy, destination, size, pattern);
     }
 
-    private bool TryInterceptKernelFill(ulong address, ulong size, ReadOnlySpan<byte> pattern)
+    private bool TryInterceptKernelFill(KernelKind kind, ulong address, ulong size, ReadOnlySpan<byte> pattern)
     {
         _ = EnsureCommandBuffer();
         if (!_imageCache.TryClearImageFromKernelFill(address, size, pattern, out var fallback))
         {
-            NoteKernelFillFallback(fallback ?? "other");
+            NoteKernelFallback(kind, fallback ?? "other");
             return false;
         }
 
@@ -143,7 +181,7 @@ internal sealed partial class MetalRenderHost
         if (!_imageCache.TryBeginKernelCopy(
                 destination, source, size, out var sourceImage, out var destinationImage, out var destinationIdentifier, out var fallback))
         {
-            NoteKernelFillFallback(fallback ?? "other");
+            NoteKernelFallback(KernelKind.Copy, fallback ?? "other");
             return false;
         }
 
@@ -163,19 +201,181 @@ internal sealed partial class MetalRenderHost
     }
 
     /// <summary>The kernel-fill fields of the CHURN line; resets them.</summary>
-    private string TakeKernelFillCounters()
+    internal string TakeKernelFillCounters()
     {
         var builder = new System.Text.StringBuilder()
             .Append(" fill_kernels=").Append(Interlocked.Exchange(ref _kernelFills, 0))
             .Append(" copy_kernels=").Append(Interlocked.Exchange(ref _kernelCopies, 0))
             .Append(" fill_fallback=[");
         var first = true;
-        foreach (var reason in _kernelFillFallbacks.Keys.Order(StringComparer.Ordinal))
+        foreach (var key in _kernelFillFallbacks.Keys.OrderBy(static key => key.Kind).ThenBy(static key => key.Reason, StringComparer.Ordinal))
         {
-            if (_kernelFillFallbacks.TryRemove(reason, out var count))
+            if (_kernelFillFallbacks.TryRemove(key, out var count))
             {
-                builder.Append(first ? string.Empty : ",").Append(reason).Append('=').Append(count);
+                builder.Append(first ? string.Empty : ",").Append(KernelKindPrefixes[(int)key.Kind]).Append(key.Reason).Append('=').Append(count);
                 first = false;
+            }
+        }
+
+        return builder.Append(']').Append(TakeHostKernelCopyCounters()).ToString();
+    }
+
+    // Whether a refused kernel's result is already in memory: every destination word holds
+    // what the kernel would store there (phase A of running the kernel on the host). The
+    // answer is taken only where nothing the GPU has yet to do can change either side:
+    //   - the destination is no image's and no surface metadata's (an image may have an
+    //     upload recorded that still reads it, and metadata bytes mean more than memory says);
+    //   - no recorded write that has not completed covers the destination, and no pending
+    //     command-processor or label bytes do (they land before the kernel would run);
+    //   - the source is final, as for copy read-through (IsCopySourceFinal), and no pending
+    //     label bytes cover it. A fill's pattern is its own words.
+    // Then nothing is written, so no shader recorded earlier can read a changed byte. The
+    // destinations are small tables: a wider kernel (Demon's Souls has one of 4 MiB) is
+    // refused before anything is read.
+    private const ulong MaxHostKernelCopyBytes = 64 * 1024;
+
+    private enum KernelCopyOutcome : byte
+    {
+        Identical,
+        Differs,
+        SourcePending,
+        DestinationWrittenPending,
+        DestinationImage,
+        Size,
+        Unreadable,
+    }
+
+    private static readonly string[] KernelCopyOutcomeNames =
+        ["would_elide_identical", "would_write", "src_pending", "dst_written_pending", "dst_image", "size", "unreadable"];
+
+    private readonly long[] _kernelCopyOutcomes = new long[KernelCopyOutcomeNames.Length];
+    private long _kernelCopyFills;
+    private long _kernelCopyChangedBytes;
+    private long _kernelCopyChangedPages;
+    // The words compared, read on the worker only; grown to the largest kernel seen.
+    private uint[] _kernelCopyDestination = [];
+    private uint[] _kernelCopySource = [];
+
+    internal (long Identical, long Differs, long SourcePending, long DestinationWrittenPending, long DestinationImage, long Size,
+        long Unreadable) HostKernelCopyOutcomes =>
+        (Interlocked.Read(ref _kernelCopyOutcomes[0]), Interlocked.Read(ref _kernelCopyOutcomes[1]), Interlocked.Read(ref _kernelCopyOutcomes[2]),
+            Interlocked.Read(ref _kernelCopyOutcomes[3]), Interlocked.Read(ref _kernelCopyOutcomes[4]), Interlocked.Read(ref _kernelCopyOutcomes[5]),
+            Interlocked.Read(ref _kernelCopyOutcomes[6]));
+
+    internal (long Bytes, long Pages) HostKernelCopyChanges =>
+        (Interlocked.Read(ref _kernelCopyChangedBytes), Interlocked.Read(ref _kernelCopyChangedPages));
+
+    private KernelCopyOutcome EvaluateKernelFill(ulong destination, ulong words, ReadOnlySpan<uint> pattern)
+    {
+        Interlocked.Increment(ref _kernelCopyFills);
+        return CountKernelCopyOutcome(EvaluateKernelCopyCore(destination, words, 0, (ulong)pattern.Length, pattern));
+    }
+
+    private KernelCopyOutcome EvaluateKernelCopy(ulong destination, ulong words, ulong source, ulong period) =>
+        CountKernelCopyOutcome(EvaluateKernelCopyCore(destination, words, source, period, default));
+
+    private KernelCopyOutcome CountKernelCopyOutcome(KernelCopyOutcome outcome)
+    {
+        Interlocked.Increment(ref _kernelCopyOutcomes[(int)outcome]);
+        return outcome;
+    }
+
+    // A fill passes its pattern; a copy passes an empty one and reads min(period, words) source words.
+    private KernelCopyOutcome EvaluateKernelCopyCore(ulong destination, ulong words, ulong source, ulong period, ReadOnlySpan<uint> pattern)
+    {
+        var fill = !pattern.IsEmpty;
+        var sourceWords = Math.Min(period, words);
+        if (words == 0 || period == 0 || words > MaxHostKernelCopyBytes / sizeof(uint) ||
+            (destination & 3) != 0 || destination > ulong.MaxValue - words * sizeof(uint) ||
+            (!fill && ((source & 3) != 0 || source > ulong.MaxValue - sourceWords * sizeof(uint))))
+        {
+            return KernelCopyOutcome.Size;
+        }
+
+        var size = words * sizeof(uint);
+        if (_imageCache.MayOwn(destination, size) || _imageCache.OverlapsSurfaceMetadata(destination, size))
+        {
+            return KernelCopyOutcome.DestinationImage;
+        }
+
+        if ((_gpuWrites.MayCover(destination, size) && PendingSerialHinted(destination, size) != 0) ||
+            HasPendingOverlayBytes(destination, size))
+        {
+            return KernelCopyOutcome.DestinationWrittenPending;
+        }
+
+        var sourceSize = sourceWords * sizeof(uint);
+        if (!fill && (!IsCopySourceFinal(source, sourceSize, CompletedSerial) ||
+            (_labelOverlay.Count != 0 && _labelOverlay.Coverage(source, sourceSize, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None)))
+        {
+            return KernelCopyOutcome.SourcePending;
+        }
+
+        if (_kernelCopyDestination.Length < (int)words)
+        {
+            _kernelCopyDestination = new uint[words];
+        }
+
+        var current = _kernelCopyDestination.AsSpan(0, (int)words);
+        ReadOnlySpan<uint> stored = pattern;
+        if (!fill)
+        {
+            if (_kernelCopySource.Length < (int)sourceWords)
+            {
+                _kernelCopySource = new uint[sourceWords];
+            }
+
+            var sourceSpan = _kernelCopySource.AsSpan(0, (int)sourceWords);
+            if (!_memory.TryRead(source, System.Runtime.InteropServices.MemoryMarshal.AsBytes(sourceSpan)))
+            {
+                return KernelCopyOutcome.Unreadable;
+            }
+
+            stored = sourceSpan;
+        }
+
+        if (!_memory.TryRead(destination, System.Runtime.InteropServices.MemoryMarshal.AsBytes(current)))
+        {
+            return KernelCopyOutcome.Unreadable;
+        }
+
+        var first = ModuloCopyCompare.FirstDifference(current, stored, period);
+        if (first < 0)
+        {
+            return KernelCopyOutcome.Identical;
+        }
+
+        // What a host write of the result would cost: the words and the pages it changes.
+        var differing = (long)ModuloCopyCompare.DifferingWords(current[first..], stored, period, (ulong)first);
+        var pages = 0L;
+        foreach (var _ in ModuloCopyCompare.ChangedPages(destination, current, stored, period))
+        {
+            pages++;
+        }
+
+        Interlocked.Add(ref _kernelCopyChangedBytes, differing * sizeof(uint));
+        Interlocked.Add(ref _kernelCopyChangedPages, pages);
+        return KernelCopyOutcome.Differs;
+    }
+
+    // Command-processor or label bytes encoded but not landed over the range.
+    private bool HasPendingOverlayBytes(ulong address, ulong size) =>
+        (_cpOverlay.Count != 0 && OverlayCoverageHinted(address, size) != MetalOverlayCoverage.None) ||
+        (_labelOverlay.Count != 0 &&
+            _labelOverlay.Coverage(address, size, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None);
+
+    /// <summary>The host kernel copy fields of the CHURN line; resets them.</summary>
+    private string TakeHostKernelCopyCounters()
+    {
+        var builder = new System.Text.StringBuilder(" host_kernel_copy=[")
+            .Append("fills=").Append(Interlocked.Exchange(ref _kernelCopyFills, 0));
+        for (var index = 0; index < _kernelCopyOutcomes.Length; index++)
+        {
+            builder.Append(',').Append(KernelCopyOutcomeNames[index]).Append('=').Append(Interlocked.Exchange(ref _kernelCopyOutcomes[index], 0));
+            if (index == (int)KernelCopyOutcome.Differs)
+            {
+                builder.Append(",changed_bytes=").Append(Interlocked.Exchange(ref _kernelCopyChangedBytes, 0))
+                    .Append(",changed_pages=").Append(Interlocked.Exchange(ref _kernelCopyChangedPages, 0));
             }
         }
 
