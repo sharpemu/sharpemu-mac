@@ -48,7 +48,7 @@ without a job take `dlLock` on every pass (CPU0 does this in the default config 
 busy-work hides the emulator's share. Every deliberate busy-wait goes through `spin_cpu` / `spin_until` (`common.h`), which
 count only CPU ticks (a rdtsc gap >= 20 us is the thread being descheduled, not CPU), and each guest prints its totals as
 `@@ gbusy comm=.. idx=.. work_ns=.. pace_ns=..` rows. The harness subtracts them: `emu_cpu_s = task_clock_s - guest_busy_s`
-(total, and per thread: `threads[].guest_busy_s` / `emu_cpu_s`, matched by host thread name + creation order), with
+(total, and per thread: `threads[].guest_busy_s` / `emu_cpu_s`; guest threads are matched to host tids exactly by a start-up handshake: each thread in turn burns 80 ms of CPU between `@@ MARK ident_*` lines while everything else is idle and the harness records which tid's CPU grew; a row that cannot be identified, or whose busy time exceeds its CPU by more than 2%, gets `emu_cpu_s: null` and an `emu_untrusted` reason), with
 `emu_cores`, `emu_cpu_us_per_job` (jobpool) and `emu_cpu_us_per_guard` (scream) next to the raw `cores_busy`.
 
 | Guest | Valid A/B metrics | Not valid |

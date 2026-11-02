@@ -141,7 +141,8 @@ class Run:
         self.sys_start = self.sys_end = None
         self.finished_at = None
         self.idents = {}         # (comm, idx) -> dict(tid, delta_s) from the guests' ident handshake
-        self.ident_open = {}
+        self.ident_base = None
+        self.ident_failed = []
         self.pid = None
 
     # --- perf --------------------------------------------------------------------------------------------
@@ -203,24 +204,24 @@ class Run:
                 self.end_snap_at = time.monotonic()
                 self.perf_disabled_at = self.perf_cmd("disable")
                 self.end_rest = rest
-            elif kind == "ident_start":
-                self.ident_open[(rest.get("comm"), rest.get("idx"))] = (snap_threads(self.pid), rest.get("cpu_ms", 40) / 1000.0)
-            elif kind == "ident_end":
+            elif kind == "ident_begin":
+                self.ident_base = snap_threads(self.pid)
+            elif kind == "ident_end" and self.ident_base is not None:
                 key = (rest.get("comm"), rest.get("idx"))
-                if key in self.ident_open:
-                    s0, burn = self.ident_open.pop(key)
-                    s1 = snap_threads(self.pid)
-                    comm = str(key[0]).replace("_", " ")
-                    best = None
-                    for tid, v in s1.items():
-                        if v["comm"] != comm:
-                            continue
-                        d = (v["run_ns"] - s0.get(tid, {}).get("run_ns", 0)) / 1e9
-                        if best is None or d > best[1]:
-                            best = (tid, d)
-                    # The guest burned `burn` s of CPU between the markers; only the thread that did can have grown by about that much.
-                    if best and best[1] >= 0.6 * burn:
-                        self.idents[key] = dict(tid=best[0], delta_s=round(best[1], 4))
+                burn = rest.get("cpu_ms", 80) / 1000.0
+                s1 = snap_threads(self.pid)
+                comm = str(key[0]).replace("_", " ")
+                known = {v["tid"] for v in self.idents.values()}  # already identified: cannot be this one, whatever they just did
+                deltas = sorted(((v["run_ns"] - self.ident_base.get(tid, {}).get("run_ns", 0)) / 1e9, tid)
+                                for tid, v in s1.items() if v["comm"] == comm and tid not in known)[::-1]
+                # Only this guest thread burned CPU since the previous snapshot (everything else is idle), so it is the biggest grower:
+                # accept it when it grew by at least 60% of the burn and by 2x as much as the runner-up of the same name among the
+                # not yet identified threads.
+                if deltas and deltas[0][0] >= 0.6 * burn and (len(deltas) == 1 or deltas[0][0] >= 2 * deltas[1][0]):
+                    self.idents[key] = dict(tid=deltas[0][1], delta_s=round(deltas[0][0], 4))
+                else:
+                    self.ident_failed.append(f"{comm}#{key[1]}: top deltas {[round(d, 3) for d, _ in deltas[:3]]} for burn {burn}")
+                self.ident_base = s1
             elif kind == "phase_start":
                 self.open_phases[rest.get("name")] = (t, snap_threads(self.pid))
             elif kind == "phase_end":
@@ -592,6 +593,8 @@ def main():
         gbusy = gbusy_rows(run.guest_rows)
         thr, unmatched = diff_threads(run.start[1], run.end[1], wall, gbusy, run.idents)
         metrics["idents"] = len(run.idents)
+        if run.ident_failed:
+            metrics["ident_failures"] = run.ident_failed
         if unmatched:
             metrics["gbusy_unmatched"] = [f"{c}#{i}" for c, i, _ in unmatched]
         # Per-thread emu_cpu_s must add up to the total: threads with a trusted row contribute cpu - busy, the others their cpu.

@@ -243,22 +243,33 @@ void emit_gbusy(const char *guest_name, int idx, u64 work_ticks, u64 pace_ticks)
     EMIT("gbusy comm=%s idx=%d work_ns=%lu pace_ns=%lu", comm, idx, tsc_to_ns(work_ticks), tsc_to_ns(pace_ticks));
 }
 
-static volatile int s_ident_turn;
+static volatile int s_ident_ready, s_ident_go, s_ident_turn, s_ident_done;
 
 void thread_identify(const char *guest_name, int idx)
 {
     char comm[40];
     host_comm(comm, sizeof comm, guest_name);
+    /* Park first so a host thread's own start-up work (JIT, thunks) is over before the harness's baseline snapshot; the print also
+     * warms this thread's first-call path for the import that reports the burn. */
+    EMIT("identpark comm=%s idx=%d", comm, idx);
+    __atomic_fetch_add(&s_ident_ready, 1, __ATOMIC_ACQ_REL);
+    while (!__atomic_load_n(&s_ident_go, __ATOMIC_ACQUIRE)) sceKernelUsleep(20000);
     while (__atomic_load_n(&s_ident_turn, __ATOMIC_ACQUIRE) != idx) sceKernelUsleep(20000);
-    EMIT("MARK ident_start comm=%s idx=%d cpu_ms=%d", comm, idx, IDENT_MS);
-    spin_cpu(ns_to_tsc((u64)IDENT_MS * 1000000ull)); /* CPU time, not wall time: robust against preemption */
-    EMIT("MARK ident_end comm=%s idx=%d", comm, idx);
+    spin_cpu(ns_to_tsc((u64)IDENT_MS * 1000000ull)); /* CPU time, so preemption cannot shorten it; everything else is idle */
+    EMIT("MARK ident_end comm=%s idx=%d cpu_ms=%d", comm, idx, IDENT_MS);
+    for (int i = 0; i < IDENT_MARGIN_MS / 20; i++) sceKernelUsleep(20000); /* idle: the harness takes its snapshot in here */
     __atomic_store_n(&s_ident_turn, idx + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s_ident_done, 1, __ATOMIC_ACQ_REL);
 }
 
 void wait_identified(int n)
 {
-    while (__atomic_load_n(&s_ident_turn, __ATOMIC_ACQUIRE) < n) sceKernelUsleep(20000);
+    while (__atomic_load_n(&s_ident_ready, __ATOMIC_ACQUIRE) < n) sceKernelUsleep(20000);
+    for (int i = 0; i < 15; i++) sceKernelUsleep(20000); /* parked threads' start-up CPU dies down */
+    EMIT("MARK ident_begin n=%d", n);                    /* harness: baseline per-thread CPU */
+    for (int i = 0; i < IDENT_MARGIN_MS / 20; i++) sceKernelUsleep(20000);
+    __atomic_store_n(&s_ident_go, 1, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&s_ident_done, __ATOMIC_ACQUIRE) < n) sceKernelUsleep(20000);
 }
 
 void hist_emit_fields(char *buf, unsigned cap, const char *p, const Hist *h)

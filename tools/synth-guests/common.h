@@ -137,11 +137,13 @@ static inline u64 spin_until(u64 deadline)
  * 15 chars, spaces as '_'; "main" for the entry thread), idx its creation order within that name. */
 void emit_gbusy(const char *guest_name, int idx, u64 work_ticks, u64 pace_ticks);
 /* Exact thread identification for the harness. Host thread names are cut to 15 chars, so same-named guest threads cannot be told
- * apart by name, and their tids are not in spawn order. Each thread calls thread_identify() first thing: in idx order (0, 1, ...) it
- * prints "@@ MARK ident_start comm= idx=", burns IDENT_MS of CPU, prints "@@ MARK ident_end", and passes the turn on; the harness
- * snapshots per-thread CPU at both markers and the thread whose CPU grew is that guest thread's tid. main calls
- * wait_identified(n) once all n threads are spawned (before warmup_and_start). */
-#define IDENT_MS 40
+ * apart by name, and their tids are not in spawn order. Each thread calls thread_identify() first thing and parks; main calls
+ * wait_identified(n) once all n threads are spawned (before warmup_and_start). Then, one thread at a time and with everything else
+ * idle, thread idx burns IDENT_MS of CPU time and prints "@@ MARK ident_end comm= idx=", followed by IDENT_MARGIN_MS of idle time.
+ * The harness snapshots per-thread CPU at "@@ MARK ident_begin" and at every ident_end; the thread of that name whose CPU grew
+ * since the previous snapshot is the guest thread's tid. The idle margins make the harness's snapshot latency irrelevant. */
+#define IDENT_MS 80
+#define IDENT_MARGIN_MS 240
 void thread_identify(const char *guest_name, int idx);
 void wait_identified(int n);
 
