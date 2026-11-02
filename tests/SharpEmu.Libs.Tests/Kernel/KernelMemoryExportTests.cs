@@ -102,6 +102,29 @@ public sealed class KernelMemoryExportTests
     }
 
     [Fact]
+    public void APrtApertureInTheBlockedWindowMovesWithItsTilesButReadsBackAsSet()
+    {
+        using var f = new Fixture();
+        GuestVaHole.RelocatesOverride = true;
+        try
+        {
+            Assert.Equal(0, f.Call(KernelRuntimeCompatExports.KernelSetPrtAperture, 1, 0x20_0000_0000, 0x40000));
+            Assert.Equal(0, f.Call(KernelRuntimeCompatExports.KernelGetPrtAperture, 1, f.Output + 0x10, f.Output + 0x18));
+            Assert.Equal(0x20_0000_0000UL, f.Read(f.Output + 0x10));
+            var relocated = 0x20_0000_0000UL + GuestVaHole.Shift;
+            Assert.True(KernelRuntimeCompatExports.ContainsPrtRange(relocated, 0x1000));
+            Assert.True(KernelRuntimeCompatExports.ContainsPrtRange(0x20_0000_0000, 0x1000));
+            Assert.True(KernelRuntimeCompatExports.OverlapsPrtAperture(relocated + 0x3F000, 0x2000));
+            Assert.False(KernelRuntimeCompatExports.ContainsPrtRange(relocated + 0x40000, 0x1000));
+        }
+        finally
+        {
+            Assert.Equal(0, f.Call(KernelRuntimeCompatExports.KernelSetPrtAperture, 1, 0x20_0000_0000, 0));
+            GuestVaHole.RelocatesOverride = null;
+        }
+    }
+
+    [Fact]
     public void PageTableStatsCountMappedGranules()
     {
         using var f = new Fixture();

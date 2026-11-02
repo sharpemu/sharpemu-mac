@@ -31,9 +31,12 @@ public static partial class KernelMemoryCompatExports
     private static int _staleOwnerWarning;
     private static int _registeredFreeRangeWarning;
 
+    // A texture inside a PRT aperture is read and written where its tiles really are: a GPU address
+    // inside macOS 27's blocked window is translated as the kernel translated the tiles' mappings.
     internal static bool TryReadPrtBacking(IGuestBackedSpace backing, ulong address, Span<byte> destination)
     {
         var size = (ulong)destination.Length;
+        address = GuestVaHole.TranslateRange(address, size);
         lock (_memoryGate)
         {
             if (!ReferenceEquals(backing, _backingOwner) ||
@@ -72,6 +75,7 @@ public static partial class KernelMemoryCompatExports
     internal static bool TryWritePrtBacking(IGuestBackedSpace backing, ulong address, ReadOnlySpan<byte> source)
     {
         var size = (ulong)source.Length;
+        address = GuestVaHole.TranslateRange(address, size);
         lock (_memoryGate)
         {
             if (!ReferenceEquals(backing, _backingOwner) ||
