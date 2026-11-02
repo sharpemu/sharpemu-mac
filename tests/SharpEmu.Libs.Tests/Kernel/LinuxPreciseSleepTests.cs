@@ -15,6 +15,40 @@ namespace SharpEmu.Libs.Tests.Kernel;
 /// </summary>
 public sealed class LinuxPreciseSleepTests
 {
+    /// <summary>Why a Linux-only test cannot run here, or null when it can.</summary>
+    internal static string? LinuxSkipReason()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return "Linux only.";
+        }
+
+        return NativeLibrary.TryLoad("libc", out var libc) && libc != IntPtr.Zero
+            ? null
+            : "libc could not be resolved on this host.";
+    }
+
+    /// <summary>Like <see cref="LinuxSkipReason"/>, plus the precise sleep itself being switched on.</summary>
+    internal static string? PreciseSkipReason() =>
+        LinuxSkipReason() ?? (HostPreciseClock.IsLinuxPrecise
+            ? null
+            : "The Linux precise sleep is off (SHARPEMU_LINUX_PRECISE_SLEEP=0) or unavailable.");
+
+    public sealed class LinuxFactAttribute : FactAttribute
+    {
+        public LinuxFactAttribute() => Skip = LinuxSkipReason();
+    }
+
+    public sealed class LinuxPreciseFactAttribute : FactAttribute
+    {
+        public LinuxPreciseFactAttribute() => Skip = PreciseSkipReason();
+    }
+
+    public sealed class LinuxPreciseTheoryAttribute : TheoryAttribute
+    {
+        public LinuxPreciseTheoryAttribute() => Skip = PreciseSkipReason();
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct Timespec
     {
@@ -31,7 +65,6 @@ public sealed class LinuxPreciseSleepTests
         return ts.Seconds * 1_000_000_000L + ts.Nanoseconds;
     }
 
-    private static bool PreciseOnThisHost => OperatingSystem.IsLinux() && HostPreciseClock.IsLinuxPrecise;
 
     [Fact]
     public void OnlyAnExplicitZeroTurnsTheLinuxPreciseSleepOff()
@@ -43,15 +76,9 @@ public sealed class LinuxPreciseSleepTests
         Assert.True(HostPreciseClock.LinuxPreciseSleepEnabled("1"));
     }
 
-    [Fact]
+    [LinuxFact]
     public void LinuxPreciseSleepIsSelectedOnLinuxUnlessTurnedOff()
     {
-        if (!OperatingSystem.IsLinux())
-        {
-            Assert.False(HostPreciseClock.IsLinuxPrecise);
-            return;
-        }
-
         var off = !HostPreciseClock.LinuxPreciseSleepEnabled(
             Environment.GetEnvironmentVariable("SHARPEMU_LINUX_PRECISE_SLEEP"));
         Assert.Equal(!off, HostPreciseClock.IsLinuxPrecise);
@@ -59,14 +86,9 @@ public sealed class LinuxPreciseSleepTests
         Assert.Equal(off ? "off" : "absolute", HostPreciseClock.LinuxClockMapping);
     }
 
-    [Fact]
+    [LinuxFact]
     public void StopwatchTimestampsAreClockMonotonicNanosecondsOnLinux()
     {
-        if (!OperatingSystem.IsLinux())
-        {
-            return;
-        }
-
         Assert.Equal(1_000_000_000L, Stopwatch.Frequency);
         var before = Stopwatch.GetTimestamp();
         Assert.Equal(0, clock_gettime(1 /* CLOCK_MONOTONIC */, out var ts));
@@ -75,18 +97,13 @@ public sealed class LinuxPreciseSleepTests
         Assert.InRange(monotonic, before - 1000, after + 1000);
     }
 
-    [Theory]
+    [LinuxPreciseTheory]
     [InlineData(1)]
     [InlineData(50)]
     [InlineData(500)]
     [InlineData(2_500)]
     public void SleepMicrosecondsNeverReturnsEarly(long microseconds)
     {
-        if (!PreciseOnThisHost)
-        {
-            return;
-        }
-
         for (var i = 0; i < 20; i++)
         {
             var before = Stopwatch.GetTimestamp();
@@ -96,14 +113,9 @@ public sealed class LinuxPreciseSleepTests
         }
     }
 
-    [Fact]
+    [LinuxPreciseFact]
     public void SleepUntilNeverReturnsBeforeItsDeadlineAndAPastDeadlineReturnsAtOnce()
     {
-        if (!PreciseOnThisHost)
-        {
-            return;
-        }
-
         var deadline = HostPreciseClock.DeadlineAfterMicroseconds(1_500);
         HostTiming.SleepUntil(deadline);
         Assert.True(Stopwatch.GetTimestamp() >= deadline);
@@ -114,14 +126,9 @@ public sealed class LinuxPreciseSleepTests
         Assert.True(HostPreciseClock.TicksToMicroseconds(Stopwatch.GetTimestamp() - start) < 5_000);
     }
 
-    [Fact]
+    [LinuxPreciseFact]
     public void ASubMillisecondSleepLoopMostlyDoesNotBurnCpu()
     {
-        if (!PreciseOnThisHost)
-        {
-            return;
-        }
-
         // Every thread that sleeps gets its own timer slack on its first precise sleep.
         var result = (wallNs: 0L, cpuNs: 0L);
         var worker = new Thread(() =>
@@ -200,15 +207,9 @@ public sealed class LinuxPreciseSleepTests
         Assert.InRange(estimate, 70_000, 100_000);
     }
 
-    [Fact]
+    [LinuxPreciseFact]
     public void AdaptiveEarlyWakeIsTheDefaultUnlessAFixedSpinIsConfigured()
     {
-        if (!OperatingSystem.IsLinux() || !HostPreciseClock.IsLinuxPrecise)
-        {
-            Assert.False(HostPreciseClock.LinuxEarlyWakeAdaptive);
-            return;
-        }
-
         var fixedSpin = Environment.GetEnvironmentVariable("SHARPEMU_LINUX_PRECISE_SPIN_US");
         var fraction = Environment.GetEnvironmentVariable("SHARPEMU_LINUX_PRECISE_SPIN_FRACTION");
         var fixedOn = long.TryParse(fixedSpin, out var us) && us >= 0 && us <= 1000;

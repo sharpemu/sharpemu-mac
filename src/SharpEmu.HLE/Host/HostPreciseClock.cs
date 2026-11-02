@@ -143,8 +143,11 @@ public static unsafe partial class HostPreciseClock
 
             if (LinuxPreciseAvailable)
             {
+                // Not "return": a plain sleep that came back for any reason other than EINTR (which
+                // LinuxSleepAbsolute already retries) must not end the wait early. The loop re-checks the
+                // deadline, so a short return sleeps again instead.
                 LinuxSleepUntil(deadlineTimestamp);
-                return;
+                continue;
             }
 
             CoarseSleepStep(remaining);
@@ -506,10 +509,6 @@ public static unsafe partial class HostPreciseClock
                         if (microseconds > SpinTailMicroseconds)
                         {
                             _fallback.WaitOne((int)Math.Min(int.MaxValue, Math.Max(1, (microseconds - SpinTailMicroseconds) / 1000)));
-                        }
-                        else if (LinuxPreciseAvailable)
-                        {
-                            LinuxSleepUntil(deadlineTimestamp);
                         }
                         else
                         {
