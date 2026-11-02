@@ -218,6 +218,39 @@ internal static class MetalV2Diagnostics
     public static readonly bool KernelFills =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_KERNEL_FILLS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_HOST_KERNEL_COPY: what the host does with a recognised copy or fill
+    // kernel the image paths refuse whose destination already holds its result
+    // (MetalRenderHost.KernelFills). 0 (the default) runs it as the dispatch it is; identical
+    // consumes it and writes nothing; verify runs it and, once it completes, checks that the
+    // destination still holds what was there, reporting each kernel that would have been
+    // consumed wrongly. write (host writes of the changed pages) needs a ledger of the GPU's
+    // reads that does not exist yet, so it runs as 0.
+    public static readonly MetalHostKernelCopyMode HostKernelCopy =
+        ParseHostKernelCopy(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_HOST_KERNEL_COPY"));
+
+    internal static MetalHostKernelCopyMode ParseHostKernelCopy(string? text)
+    {
+        switch (text)
+        {
+            case null or "" or "0":
+                return MetalHostKernelCopyMode.Off;
+            case "identical":
+                return MetalHostKernelCopyMode.Identical;
+            case "verify":
+                return MetalHostKernelCopyMode.Verify;
+            case "write":
+                Console.Error.WriteLine(
+                    "[METAL-V2][WARN] SHARPEMU_METAL_V2_HOST_KERNEL_COPY=write writes kernels' changed pages on the host, which is " +
+                    "not implemented; kernels run as dispatches (0).");
+                return MetalHostKernelCopyMode.Off;
+            default:
+                Console.Error.WriteLine(
+                    $"[METAL-V2][WARN] SHARPEMU_METAL_V2_HOST_KERNEL_COPY={text} is not one of 0, identical or verify; " +
+                    "kernels run as dispatches (0).");
+                return MetalHostKernelCopyMode.Off;
+        }
+    }
+
     // SHARPEMU_METAL_V2_FOLD_CLEARS=0 encodes every clear as its own render pass the
     // moment it is asked for, the way it did before a clear could become the load action
     // of the pass that follows it. A fast-clear that is materialised and then rendered
@@ -429,4 +462,12 @@ internal static class MetalV2Diagnostics
             Console.Error.WriteLine($"[METAL-V2][TRACE] {message}");
         }
     }
+}
+
+/// <summary>SHARPEMU_METAL_V2_HOST_KERNEL_COPY (MetalV2Diagnostics.HostKernelCopy).</summary>
+internal enum MetalHostKernelCopyMode : byte
+{
+    Off,
+    Identical,
+    Verify,
 }

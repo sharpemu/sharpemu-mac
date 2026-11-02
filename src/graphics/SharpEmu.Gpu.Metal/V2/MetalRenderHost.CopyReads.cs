@@ -71,7 +71,11 @@ internal sealed partial class MetalRenderHost
         _copyArmed = true;
     }
 
-    private void DisarmPendingCopy() => _copyArmed = false;
+    private void DisarmPendingCopy()
+    {
+        _copyArmed = false;
+        DisarmKernelCopyCheck();
+    }
 
     // The dispatch's storage binding notes the write into the copy's destination.
     private void NotePendingCopyDestination(ulong address, ulong size, MetalGpuWriteOrigin origin, ulong serial, ulong sequence)
@@ -108,6 +112,7 @@ internal sealed partial class MetalRenderHost
 
     private void RetirePendingCopies(ulong completed)
     {
+        CheckKernelCopies(completed);
         // In place and in order; the lambda over `completed` allocated its closure on every call.
         var kept = 0;
         while (kept < _pendingCopies.Count && _pendingCopies[kept].Serial > completed)

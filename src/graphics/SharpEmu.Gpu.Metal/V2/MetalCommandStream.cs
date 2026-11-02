@@ -1274,6 +1274,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         DrainDraws();
         _ = kind;
+        SupersedeKernelCopyChecks(address, (ulong)source.Length);
         _cpOverlay.Forget(address, (ulong)source.Length);
         _labelOverlay.Forget(address, (ulong)source.Length);
         return _memory.TryWrite(address, source);

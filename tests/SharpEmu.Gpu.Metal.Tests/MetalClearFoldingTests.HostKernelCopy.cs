@@ -45,6 +45,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.HostKernelCopyMode = MetalHostKernelCopyMode.Off;
         WriteKernelSource(rig);
         WriteKernelResult(rig);
 
@@ -55,7 +56,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         Assert.Equal(1, host.PendingCopyCount);
         var churn = host.TakeKernelFillCounters();
         Assert.Contains("copy:no-image=1", churn);
-        Assert.Contains(" host_kernel_copy=[fills=0,would_elide_identical=1,would_write=0,changed_bytes=0,changed_pages=0,", churn);
+        Assert.Contains(" host_kernel_copy=[mode=0,fills=0,identical=0,would_elide_identical=1,would_write=0,changed_bytes=0,changed_pages=0,", churn);
         Assert.Equal((0L, 0L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
     }
 
@@ -103,6 +104,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.HostKernelCopyMode = MetalHostKernelCopyMode.Off;
         for (var word = 0UL; word < KernelWords; word++)
         {
             rig.WriteBacking32(KernelDestination + word * sizeof(uint), word % 2 == 0 ? 0x1u : 0x2u);
