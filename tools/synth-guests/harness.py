@@ -276,10 +276,23 @@ def flatten_guest(rows):
     return tree, flat
 
 
-def diff_threads(s0, s1, wall):
+def gbusy_by_comm(rows):
+    """{host comm: [(idx, busy_s)]} from the guests' "@@ gbusy" rows (work_ns + pace_ns = CPU burned on purpose)."""
+    out = {}
+    for sec, kv in rows:
+        if sec != "gbusy":
+            continue
+        comm = "SharpEmu Emulat" if kv.get("comm") == "main" else str(kv.get("comm", "")).replace("_", " ")
+        out.setdefault(comm, []).append((kv.get("idx", 0), (kv.get("work_ns", 0) + kv.get("pace_ns", 0)) / 1e9))
+    for v in out.values():
+        v.sort()
+    return out
+
+
+def diff_threads(s0, s1, wall, gbusy=None):
     rows = []
     # Host thread names are cut to 15 chars ("SharpEmu-BPE Jo"); number same-named threads by tid (= creation order,
-    # so BPE JobWorkerThread CPU<k> is "#k").
+    # so BPE JobWorkerThread CPU<k> is "#k"), which is also how the guests' gbusy rows are matched to threads.
     seen = {}
     for tid in sorted(s1):
         n = s1[tid]["comm"]
@@ -291,25 +304,37 @@ def diff_threads(s0, s1, wall):
         if b and b["comm"] != v["comm"]:
             b = None
         run = v["run_ns"] - (b["run_ns"] if b else 0)
-        order[v["comm"]] = order.get(v["comm"], -1) + 1
-        rows.append(dict(tid=tid, name=v["comm"] if seen[v["comm"]] == 1 else f"{v['comm']}#{order[v['comm']]}", cpu_s=round(run / 1e9, 4),
-                         cores=round(run / 1e9 / wall, 3) if wall > 0 else None,
-                         vol_ctx=v["vol"] - (b["vol"] if b else 0), nonvol_ctx=v["nonvol"] - (b["nonvol"] if b else 0),
-                         new_in_window=b is None))
+        order[v["comm"]] = k = order.get(v["comm"], -1) + 1
+        row = dict(tid=tid, name=v["comm"] if seen[v["comm"]] == 1 else f"{v['comm']}#{k}", cpu_s=round(run / 1e9, 4),
+                   cores=round(run / 1e9 / wall, 3) if wall > 0 else None,
+                   vol_ctx=v["vol"] - (b["vol"] if b else 0), nonvol_ctx=v["nonvol"] - (b["nonvol"] if b else 0),
+                   new_in_window=b is None)
+        g = (gbusy or {}).get(v["comm"])
+        if g and k < len(g):
+            row["guest_busy_s"] = round(g[k][1], 4)
+            row["emu_cpu_s"] = round(run / 1e9 - g[k][1], 4)
+        rows.append(row)
     rows.sort(key=lambda r: -r["cpu_s"])
     return rows
 
 
+def inner_window(reports, run):
+    """The reports to difference: the first one at or after the start marker and the last one at or before the end marker, so
+    the interval lies entirely inside the measured window (rates are computed over exactly that interval)."""
+    if not reports or run.start is None or run.end is None:
+        return None
+    inside = [r for r in reports if run.start[0] <= r["arrival"] <= run.end[0]]
+    if len(inside) < 2:
+        return None
+    return inside[0], inside[-1]
+
+
 def imports_delta(run):
-    reps = run.imports_reports
-    if not reps or run.start is None or run.end is None:
+    w = inner_window(run.imports_reports, run)
+    if not w:
         return None
-    before = [r for r in reps if r["arrival"] <= run.start[0]]
-    after = [r for r in reps if r["arrival"] <= run.end[0]]
-    if not before or not after or after[-1] is before[-1]:
-        return None
-    a, b = before[-1], after[-1]
-    dt = b["uptime_s"] - a["uptime_s"]
+    a, b = w
+    dt = b["uptime_s"] - a["uptime_s"]  # the emulator's own clock for both reports
     if dt <= 0:
         return None
     per_s = {}
@@ -322,17 +347,17 @@ def imports_delta(run):
 
 
 def gc_delta(run):
-    reps = run.mem_reports
-    if not reps or run.start is None or run.end is None:
+    w = inner_window(run.mem_reports, run)
+    if not w:
         return None
-    before = [r for r in reps if r["arrival"] <= run.start[0]]
-    after = [r for r in reps if r["arrival"] <= run.end[0]]
-    if not before or not after or after[-1] is before[-1]:
+    a, b = w
+    dt = b["arrival"] - a["arrival"]  # [MEM] lines carry only whole-second uptime, so use the lines' arrival times
+    if dt <= 0:
         return None
-    a, b = before[-1], after[-1]
-    return dict(gc0=b["gc0"] - a["gc0"], gc1=b["gc1"] - a["gc1"], gc2=b["gc2"] - a["gc2"],
+    return dict(window_s=round(dt, 2), gc0=b["gc0"] - a["gc0"], gc1=b["gc1"] - a["gc1"], gc2=b["gc2"] - a["gc2"],
                 pause_ms=b["pause_ms"] - a["pause_ms"], alloc_mb=b["alloc_mb"] - a["alloc_mb"],
-                note="1 s sampling: window edges are rounded to the report interval")
+                alloc_mb_per_s=round((b["alloc_mb"] - a["alloc_mb"]) / dt, 2),
+                note="deltas over the first..last 1 s report inside the measured window; alloc_mb has 1 MB resolution")
 
 
 def run_once(args, out_dir, attempt):
@@ -459,6 +484,7 @@ def main():
         pass
 
     tree, flat = flatten_guest(run.guest_rows)
+    run.guest_flat = flat
     metrics["guest_results"] = tree
     metrics["guest_flat"] = flat
 
@@ -481,6 +507,7 @@ def main():
             metrics["perf_window_s"] = round(pw, 4)
             metrics["perf_disable_lag_ms"] = round((run.perf_disabled_at - run.end[0]) * 1000, 1)
             metrics["end_snapshot_lag_ms"] = round((run.end_snap_at - run.end[0]) * 1000, 1)
+            metrics["perf_enable_lag_ms"] = round((run.perf_enabled_at - run.start[0]) * 1000, 1)
         tc = perf.get("task_clock")
         if tc is not None:
             metrics["task_clock_s"] = round(tc / 1000.0, 4)
@@ -500,6 +527,20 @@ def main():
         if run.sys_start is not None and run.sys_end is not None and metrics.get("proc_cpu_s") is not None:
             other = ((run.sys_end - run.sys_start) - metrics["proc_cpu_s"]) / wall
             metrics["host_other_cores"] = round(max(0.0, other), 2)  # CPU used by everything that is not this emulator
+        # emu_cpu: process CPU minus the CPU the guest burns on purpose (job bodies, guarded-call bodies, pacing busy-waits,
+        # accounted by the guests with spin_cpu/spin_until and reported as "@@ gbusy" rows). What is left is the emulator's
+        # cost of serving the guest (plus the guest's own polling code, which is the workload).
+        gb = sum(kv.get("work_ns", 0) + kv.get("pace_ns", 0) for sec, kv in run.guest_rows if sec == "gbusy") / 1e9
+        base = metrics.get("task_clock_s", metrics.get("proc_cpu_s"))
+        metrics["guest_busy_s"] = round(gb, 4)
+        if base is not None:
+            metrics["emu_cpu_s"] = round(base - gb, 4)
+            metrics["emu_cores"] = round((base - gb) / pw, 3)
+            for key, label in (("jobpool.total.jobs", "job"), ("scream.total.guards", "guard")):
+                n = run.guest_flat.get(key) if hasattr(run, "guest_flat") else None
+                if n:
+                    metrics[f"cpu_us_per_{label}"] = round(base * 1e6 / n, 2)
+                    metrics[f"emu_cpu_us_per_{label}"] = round((base - gb) * 1e6 / n, 2)
         for key in ("ctx_switches", "cpu_migrations", "instructions", "cycles", "futex", "sched_yield", "nanosleep", "clock_nanosleep"):
             v = perf.get(key)
             if v is not None:
@@ -507,7 +548,8 @@ def main():
                 metrics[f"{key}_per_s"] = round(v / pw, 1)
         if perf.get("instructions") and perf.get("cycles"):
             metrics["ipc"] = round(perf["instructions"] / perf["cycles"], 3)
-        thr = diff_threads(run.start[1], run.end[1], wall)
+        gbusy = gbusy_by_comm(run.guest_rows)
+        thr = diff_threads(run.start[1], run.end[1], wall, gbusy)
         metrics["threads"] = thr[:40]
         metrics["thread_count"] = len(run.end[1])
         metrics["top_threads"] = [f"{t['name']}[{t['tid']}]={t['cpu_s']:.2f}s" for t in thr[:3]]
@@ -518,6 +560,20 @@ def main():
         for p in run.phases:
             metrics.setdefault("guest_flat", {})[f"phase.{p['name']}.cores_busy"] = p["cores_busy"]
             metrics["guest_flat"][f"phase.{p['name']}.cpu_s"] = p["cpu_s"]
+    reasons = []
+    if not metrics["result_ok"]:
+        reasons.append("run did not finish with Result=ORBIS_GEN2_OK")
+    grace = run.end_rest.get("grace_ms") if run.end else None
+    if grace is not None:
+        metrics["grace_ms"] = grace
+        for key in ("perf_disable_lag_ms", "end_snapshot_lag_ms"):
+            if metrics.get(key) is not None and metrics[key] >= grace:
+                reasons.append(f"{key}={metrics[key]} >= guest grace {grace} ms (counters include the guest shutting down)")
+    if "error" in metrics:
+        reasons.append(metrics["error"])
+    metrics["valid"] = not reasons
+    if reasons:
+        metrics["invalid_reasons"] = reasons
     if args.hle:
         metrics["hle"] = imports_delta(run)
     if args.gc:
@@ -527,10 +583,10 @@ def main():
         json.dump(metrics, f, indent=1, sort_keys=True)
 
     # One-line summary for humans / ab.sh.
-    print(f"[{args.label}] {metrics['guest']} ok={metrics['result_ok']} wall={metrics.get('wall_s')}s "
+    print(f"[{args.label}] {metrics['guest']} ok={metrics['result_ok']} valid={metrics['valid']} emu_cpu_s={metrics.get('emu_cpu_s')} wall={metrics.get('wall_s')}s "
           f"cores={metrics.get('cores_busy')} other={metrics.get('host_other_cores')} ctx/s={metrics.get('ctx_switches_per_s')} futex/s={metrics.get('futex_per_s')} "
           f"yield/s={metrics.get('sched_yield_per_s')} top={metrics.get('top_threads')} dir={out_dir}")
-    return 0 if metrics["result_ok"] else 1
+    return 0 if metrics["result_ok"] and metrics["valid"] else 1
 
 
 if __name__ == "__main__":
