@@ -455,16 +455,18 @@ internal static unsafe class SpinNapRuntime
     /// not needed). Shared state: bumps the generation of the stack address's 64 MiB bucket.</summary>
     internal static void NoteHleEntry(nint guestStackAddress)
     {
+        // The locked probe is off by default: check its table before touching the thread-static or
+        // anything else, so the hot import path pays one null check.
+        var table = _lockedTable;
+        if (table == null)
+        {
+            return;
+        }
+
         var generation = t_hleGeneration;
         if (generation != null)
         {
             (*generation)++;
-            return;
-        }
-
-        var table = _lockedTable;
-        if (table == null)
-        {
             return;
         }
 
