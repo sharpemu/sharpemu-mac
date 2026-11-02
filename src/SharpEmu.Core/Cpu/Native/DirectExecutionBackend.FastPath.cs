@@ -247,6 +247,29 @@ public sealed unsafe partial class DirectExecutionBackend
 	};
 
 	/// <summary>
+	/// Whether an <see cref="GuestFastPathStub.AgcPacket"/> import may get its native stub, by the two switches
+	/// (<c>SHARPEMU_AGC_PACKET_STUBS</c> covers every AGC stub, <c>SHARPEMU_AGC_PATCH_STUBS</c> the
+	/// register-indirect patchers) and, for a patcher, whether its export resolves in
+	/// <paramref name="exports"/> the way the import's slow path looks it up. A patcher stub stands in
+	/// for the export's success path and declines into it for everything else, which only matches the
+	/// import when the export is there: without it the import answers NOT_FOUND and writes nothing.
+	/// </summary>
+	internal static bool IsAgcStubAllowed(string nid, bool packetStubsEnabled, bool patchStubsEnabled, IModuleManager exports)
+	{
+		if (!packetStubsEnabled)
+		{
+			return false;
+		}
+
+		if (SharpEmu.Libs.Agc.AgcExports.TryGetRegIndirectPatchStub(nid, out _))
+		{
+			return patchStubsEnabled && exports.TryGetExport(nid, out _);
+		}
+
+		return SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out _);
+	}
+
+	/// <summary>
 	/// Builds the native stub for <paramref name="nid"/>, falling back to
 	/// <paramref name="fallbackTrampoline"/> (the import's managed gateway
 	/// trampoline) for every case the stub declines.
@@ -291,14 +314,11 @@ public sealed unsafe partial class DirectExecutionBackend
 			// Stores into the command buffer from guest-side code, so the write watch (which
 			// inspects managed writes only) and any mode that has to see every builder call
 			// (import and AGC tracing) rule it out; it needs no per-thread block.
-			if (!AgcPacketStubsEnabled ||
-				!NativeImportThunksEnabled ||
+			if (!NativeImportThunksEnabled ||
 				!_nativeConstantThunksAllowed ||
 				GuestWriteWatch.Armed ||
 				SharpEmu.Libs.Agc.AgcExports.PacketStubsBlockedByTracing ||
-				(SharpEmu.Libs.Agc.AgcExports.TryGetRegIndirectPatchStub(nid, out _)
-					? !AgcPatchStubsEnabled
-					: !(SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out _))))
+				!IsAgcStubAllowed(nid, AgcPacketStubsEnabled, AgcPatchStubsEnabled, _moduleManager))
 			{
 				return false;
 			}

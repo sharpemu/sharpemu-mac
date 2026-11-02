@@ -44,7 +44,7 @@ public sealed unsafe class AgcPacketStubTests
         using var harness = new StubHarness(spec);
         var manager = new ModuleManager();
         manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
-        var random = new System.Random(unchecked(nid.GetHashCode() ^ 0x5A17));
+        var random = new System.Random(unchecked(StableSeed(nid) ^ 0x5A17));
         var interesting = new ulong[]
         {
             0, 1, 2, 3, 7, 0x28, 0x40, 0xA038, 0xFFFF, 0x1_0000, 0xFFFF_FFFC, 0xFFFF_FFFF, 0x1_0000_0000, 0x1_0000_0001, 0x2_6000_0A08,
@@ -142,7 +142,7 @@ public sealed unsafe class AgcPacketStubTests
         using var harness = new StubHarness(kind);
         var manager = new ModuleManager();
         manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
-        var random = new System.Random(unchecked(nid.GetHashCode() ^ 0x77A1));
+        var random = new System.Random(unchecked(StableSeed(nid) ^ 0x77A1));
         var stubRan = 0;
         var declinedWithRoom = 0;
         for (var iteration = 0; iteration < 1500; iteration++)
@@ -293,7 +293,7 @@ public sealed unsafe class AgcPacketStubTests
         using var harness = new StubHarness(spec);
         var manager = new ModuleManager();
         manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
-        var random = new System.Random(unchecked(nid.GetHashCode() ^ 0x9A7C));
+        var random = new System.Random(unchecked(StableSeed(nid) ^ 0x9A7C));
         var managedRegion = (byte*)NativeMemory.AlignedAlloc(PatchRegionBytes, 0x1000);
         var stubRegion = (byte*)NativeMemory.AlignedAlloc(PatchRegionBytes, 0x1000);
         try
@@ -403,6 +403,51 @@ public sealed unsafe class AgcPacketStubTests
             NativeMemory.AlignedFree(managedRegion);
             NativeMemory.AlignedFree(stubRegion);
         }
+    }
+
+    // FNV-1a over the NID: string.GetHashCode is randomized per process, so a failing case would not replay.
+    private static int StableSeed(string nid)
+    {
+        var hash = 2166136261u;
+        foreach (var c in nid)
+        {
+            hash = (hash ^ c) * 16777619u;
+        }
+
+        return unchecked((int)hash);
+    }
+
+    // A patcher stub only matches its import while the export behind the trampoline exists: without
+    // it every declined call would answer NOT_FOUND where the stub patches. So the stub needs the
+    // export, and both switches can turn it off; the builder stubs need neither the export check
+    // nor the patch switch.
+    [Fact]
+    public void APatchStubIsInstalledOnlyWithItsExportAndBothSwitchesOn()
+    {
+        var all = new ModuleManager();
+        all.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        var none = new ModuleManager();
+        foreach (var nid in PatchNids().Select(row => (string)row[0]))
+        {
+            Assert.True(all.TryGetExport(nid, out _), nid);
+            Assert.True(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: true, patchStubsEnabled: true, all), nid);
+            Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: true, patchStubsEnabled: false, all), nid);
+            Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: false, patchStubsEnabled: true, all), nid);
+            Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: true, patchStubsEnabled: true, none), nid);
+
+            // The registry without just this export: the case of a tree that never had it.
+            var allButOne = new ModuleManager();
+            allButOne.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5).Where(export => export.Nid != nid).ToList());
+            Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: true, patchStubsEnabled: true, allButOne), nid);
+        }
+
+        foreach (var nid in Nids().Concat(VariableNids()).Select(row => (string)row[0]))
+        {
+            Assert.True(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: true, patchStubsEnabled: false, none), nid);
+            Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: false, patchStubsEnabled: true, all), nid);
+        }
+
+        Assert.False(DirectExecutionBackend.IsAgcStubAllowed("Ikfdt-rIqCE", packetStubsEnabled: true, patchStubsEnabled: true, all));
     }
 
     [Fact]
