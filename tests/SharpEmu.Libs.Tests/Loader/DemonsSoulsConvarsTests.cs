@@ -196,3 +196,92 @@ public sealed class DemonsSoulsConvarsTests
         }
     }
 }
+
+// The success path end to end: an archive-mounted /app0, the real read and overlay replace, and the
+// streams and sizes the guest's open, stat and positional reads go through.
+[Collection("App0FileOverlay")]
+public sealed class DemonsSoulsConvarsArchiveTests : IDisposable
+{
+    private const string Shipped = "+shaderTypeToLoad=Shipping\r\n+TargetFramesPerSecond=60\r\n";
+    private const string Expected = Shipped + "+doIndexBufferCulling=false\r\n";
+
+    private readonly string _directory = Directory.CreateTempSubdirectory("sharpemu-ds-convars-zar-").FullName;
+    private readonly string _root;
+
+    public DemonsSoulsConvarsArchiveTests()
+    {
+        var archivePath = Path.Combine(_directory, "ds.zar");
+        File.WriteAllBytes(archivePath, SharpEmu.Libs.Tests.FileSystem.ZArchiveTestWriter.Build(
+        [
+            ("eboot.bin", new byte[64]),
+            ("CoreData/EngineSupport/DefaultCmdLineArgs.txt", Encoding.ASCII.GetBytes(Shipped)),
+        ]));
+        _root = Path.Combine(_directory, "cache");
+        Directory.CreateDirectory(_root);
+        App0Archive.Mount(ZArchive.Open(archivePath)!, _root);
+    }
+
+    public void Dispose()
+    {
+        App0FileOverlay.Clear();
+        App0Archive.Unmount();
+        Directory.Delete(_directory, recursive: true);
+    }
+
+    private Outcome ApplyForReal() =>
+        DemonsSoulsConvars.Apply(
+            DemonsSoulsConvars.TitleId,
+            _root,
+            keepCulling: false,
+            path => EngineResolution.TryReadApp0File(path),
+            (path, content) => EngineResolution.TryReplaceApp0File(path, content, "test"));
+
+    [Fact]
+    public void TheArchivedFileIsServedWithTheLineEverywhereTheGuestLooks()
+    {
+        Assert.Equal(Outcome.Injected, ApplyForReal());
+
+        // The guest's open resolves the engine's own spelling; the archive and overlay ignore case.
+        var path = Path.Combine(_root, "CoreData", "EngineSupport", "DefaultCmdLineArgs.txt");
+        var expected = Encoding.ASCII.GetBytes(Expected);
+        Assert.False(File.Exists(path));
+        Assert.True(App0Archive.TryGetEntry(path, out var isDirectory, out var size));
+        Assert.False(isDirectory);
+        Assert.Equal((ulong)expected.Length, size);
+        Assert.True(App0Archive.TryGetEntry(path.ToLowerInvariant(), out _, out size));
+        Assert.Equal((ulong)expected.Length, size);
+
+        using var stream = App0Archive.OpenRead(path)!;
+        Assert.Equal(expected.Length, stream.Length);
+        var whole = new byte[expected.Length + 16];
+        Assert.Equal(expected.Length, stream.ReadAtLeast(whole, whole.Length, throwOnEndOfStream: false));
+        Assert.Equal(expected, whole[..expected.Length]);
+        Assert.Equal(0, stream.Read(whole));
+
+        Assert.Equal(expected.Length, stream.Seek(0, SeekOrigin.End));
+        Assert.Equal(expected.Length - 29, stream.Seek(-29, SeekOrigin.End));
+        var tail = new byte[64];
+        Assert.Equal(29, stream.Read(tail));
+        Assert.Equal("+doIndexBufferCulling=false\r\n", Encoding.ASCII.GetString(tail, 0, 29));
+
+        var line = new byte[64];
+        Assert.Equal(29, stream.ReadAt(line, Shipped.Length));
+        Assert.Equal(tail[..29], line[..29]);
+        Assert.Equal(0, stream.ReadAt(line, expected.Length));
+
+        // The loader's own read path sees the same bytes.
+        Assert.Equal(expected, EngineResolution.TryReadApp0File(path));
+    }
+
+    [Fact]
+    public void ASecondApplyFindsTheLineAndDoesNotAppendAgain()
+    {
+        Assert.Equal(Outcome.Injected, ApplyForReal());
+        Assert.Equal(Outcome.AlreadySet, ApplyForReal());
+
+        var path = DemonsSoulsConvars.HostPath(_root);
+        Assert.Equal(Encoding.ASCII.GetBytes(Expected), EngineResolution.TryReadApp0File(path));
+        Assert.True(App0Archive.TryGetFile(path, out var size));
+        Assert.Equal((ulong)Expected.Length, size);
+    }
+}

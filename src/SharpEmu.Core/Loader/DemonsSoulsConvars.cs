@@ -67,13 +67,14 @@ internal static class DemonsSoulsConvars
     /// <summary>Serves the title's command-line file with the convar turned off; called once at load.</summary>
     public static Outcome Apply(string? titleId)
     {
+        var app0Root = EngineResolution.App0Root;
         var outcome = Apply(
             titleId,
-            EngineResolution.App0Root,
+            app0Root,
             KeepsCulling(Environment.GetEnvironmentVariable(EnvironmentVariable)),
             path => EngineResolution.TryReadApp0File(path),
             (path, content) => EngineResolution.TryReplaceApp0File(path, content, "Demon's Souls " + ConvarCommand));
-        Report(outcome);
+        Report(outcome, outcome == Outcome.Absent && ExistsInApp0(HostPath(app0Root!)));
         return outcome;
     }
 
@@ -132,7 +133,11 @@ internal static class DemonsSoulsConvars
         return [.. original, .. tail];
     }
 
-    private static void Report(Outcome outcome)
+    // A file the read returned nothing for is either missing or over the read's 1 MiB limit.
+    private static bool ExistsInApp0(string hostPath) =>
+        File.Exists(hostPath) || SharpEmu.HLE.FileSystem.App0Archive.TryGetFile(hostPath, out _);
+
+    private static void Report(Outcome outcome, bool presentButUnread = false)
     {
         switch (outcome)
         {
@@ -148,7 +153,9 @@ internal static class DemonsSoulsConvars
                 Console.Error.WriteLine($"[LOADER][INFO] [DS] {ConvarName} left as {ArgsGuestPath} sets it");
                 break;
             case Outcome.Absent:
-                Console.Error.WriteLine($"[LOADER][WARN] [DS] {ConvarName} not injected: {ArgsGuestPath} is missing");
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] [DS] {ConvarName} not injected: {ArgsGuestPath} " +
+                    (presentButUnread ? "is larger than 1 MiB" : "is missing"));
                 break;
             case Outcome.CannotGrow:
                 Console.Error.WriteLine(
