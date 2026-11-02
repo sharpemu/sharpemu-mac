@@ -133,7 +133,7 @@ internal static unsafe class SpinNapRuntime
     private static long _pauseReportTimestamp;
     private static PauseCounters _reportedPauseCounters;
 
-    private readonly record struct PauseCounters(long Entries, long DelayedTicks, long Naps, long UsleepOneCalls);
+    private readonly record struct PauseCounters(long Entries, long DelayedTicks, long Naps, long UsleepOneCalls, long LockedNaps);
 
     /// <summary>What a nap calls and with which argument, plus the A/B period in TSC ticks (0 = off).
     /// <paramref name="Control"/> is the shared native state (see ControlAbEpoch).</summary>
@@ -182,8 +182,9 @@ internal static unsafe class SpinNapRuntime
             : DefaultPauseDelayNanoseconds;
 
     /// <summary><c>SHARPEMU_PAUSE_DELAY_STATS</c>: count probe entries, delayed time, pause-probe naps
-    /// and <c>sceKernelUsleep(1)</c> calls and log them once a second. On whenever a pause delay is
-    /// set; <c>1</c> also counts with no delay (the A/B baseline), <c>0</c> turns counting off.</summary>
+    /// and <c>sceKernelUsleep(1)</c> calls and log them, with the locked-op nap count, once a second.
+    /// On whenever a pause delay is set; <c>1</c> also counts with no delay (the A/B baseline), <c>0</c>
+    /// turns counting off.</summary>
     internal static bool PauseStatsEnabled =>
         Environment.GetEnvironmentVariable(PauseStatsEnvironmentVariable) switch
         {
@@ -403,7 +404,8 @@ internal static unsafe class SpinNapRuntime
             entries,
             delayedTicks,
             Volatile.Read(ref control[ControlPauseNaps]),
-            SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.UsleepOneCalls);
+            SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.UsleepOneCalls,
+            Volatile.Read(ref control[ControlLockedNaps]));
         var previous = _reportedPauseCounters;
         _pauseReportTimestamp = now;
         _reportedPauseCounters = current;
@@ -421,7 +423,9 @@ internal static unsafe class SpinNapRuntime
             FormattableString.Invariant(
                 $"naps_per_s={(current.Naps - previous.Naps) / seconds:F0} usleep1_per_s={(current.UsleepOneCalls - previous.UsleepOneCalls) / seconds:F0} ") +
             FormattableString.Invariant(
-                $"entries={current.Entries} delayed_ms={TicksToNanoseconds(current.DelayedTicks, _pauseTscFrequency) / 1e6:F1} naps={current.Naps} usleep1={current.UsleepOneCalls}"));
+                $"locked_naps_per_s={(current.LockedNaps - previous.LockedNaps) / seconds:F0} ") +
+            FormattableString.Invariant(
+                $"entries={current.Entries} delayed_ms={TicksToNanoseconds(current.DelayedTicks, _pauseTscFrequency) / 1e6:F1} naps={current.Naps} usleep1={current.UsleepOneCalls} locked_naps={current.LockedNaps}"));
     }
 
     /// <summary>Sums the pause-probe counter slots (racy reads of qwords the probes add to; fine for a
