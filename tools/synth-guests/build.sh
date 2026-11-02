@@ -4,7 +4,7 @@
 #
 # Usage: build.sh [-o OUT_DIR] [guest ...] [-- extra clang flags e.g. -DWORKERS=13 -DDURATION_S=20]
 # Builds PS5-style guest ELFs (ET_DYN, OSABI 9 / ABI version 2, imports = NID symbol names) with host clang +
-# ld.lld. With no guest names builds all of them: jobpool scream wakeping sleeplat baseline.
+# ld.lld. With no guest names builds all of them: jobpool scream wakeping sleeplat baseline agcbuild.
 # Output: OUT_DIR/<guest>.bin  (default OUT_DIR=../../artifacts/synth-guests next to this directory's repo root).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -18,7 +18,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 extra=("$@")
-[[ ${#guests[@]} -gt 0 ]] || guests=(jobpool scream wakeping sleeplat baseline)
+[[ ${#guests[@]} -gt 0 ]] || guests=(jobpool scream wakeping sleeplat baseline agcbuild)
 mkdir -p "$out"
 for g in "${guests[@]}"; do
   src="$here/$g.c"
