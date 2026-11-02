@@ -236,6 +236,7 @@ public sealed unsafe class SpinLoopNapPatcherTests
         var (thread, _) = threads.TwoWithDistinctSlots(key => (nint)SpinNapRuntime.LockedSlot(lockedTable, false, key));
         var lockedSlot = (ulong*)SpinNapRuntime.LockedSlot(lockedTable, false, thread.Key);
         var pauseSlot = (ulong*)SpinNapRuntime.PauseSlot(pauseTable, false, thread.Key);
+        ForgetSlotOwner(lockedSlot);
         thread.Run(() =>
         {
             ((delegate* unmanaged<void>)lockedScan.Address)();
@@ -256,6 +257,12 @@ public sealed unsafe class SpinLoopNapPatcherTests
         Assert.Equal(before + 1, *generation);
         Assert.Equal(0UL, lockedSlot[3]); // the thread's own HLE call restarted its window
     }
+
+    // The runtime locked table is shared by the whole process, and a new thread can get the thread
+    // pointer of one that an earlier test ran and joined (macOS reuses them), so its slot can still
+    // hold that thread's streak under the same key. Clearing the key makes the next probe take the
+    // slot as a new owner, as it would for a thread that has never polled.
+    private static void ForgetSlotOwner(ulong* slot) => slot[0] = 0;
 
     // The backend's TLS scan over one executable page, with a stand-in TLS handler on a later page
     // (as TlsLoadPatchBoundaryTests does, through HostMemory so it runs on every host).
@@ -650,6 +657,8 @@ public sealed unsafe class SpinLoopNapPatcherTests
         var slotB = SpinNapRuntime.LockedSlot(table, false, threadB.Key);
         var generationA = (long*)((byte*)slotA + SpinNapRuntime.LockedHleGenerationOffsetForTest);
         var generationB = (long*)(slotB + SpinNapRuntime.LockedHleGenerationOffsetForTest);
+        ForgetSlotOwner(slotA);
+        ForgetSlotOwner((ulong*)slotB);
 
         threadA.Run(() =>
         {
