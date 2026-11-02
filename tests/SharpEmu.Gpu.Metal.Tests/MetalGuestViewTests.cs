@@ -62,7 +62,11 @@ public sealed unsafe class MetalGuestViewTests(ITestOutputHelper output)
         Assert.True(memory.MayUseGuestView(ViewBytes));
         Assert.True(memory.TryResolveGuestView(backing.Base, ViewBytes, out var view), $"Guest-view counters: {memory.GuestViewCounts}");
         Assert.Equal(ViewBytes, view.Size);
-        Assert.Contains(view.Buffer, memory.ResidentBuffers.ToArray());
+        // With the residency set (the default) the view joins the set instead of the per-encoder list.
+        if (memory.ResidencySet == 0)
+        {
+            Assert.Contains(view.Buffer, memory.ResidentBuffers.ToArray());
+        }
 
         var copy = harness.Buffer(ViewBytes);
         var blit = MetalNative.Send(harness.CommandBuffer, SelBlit);

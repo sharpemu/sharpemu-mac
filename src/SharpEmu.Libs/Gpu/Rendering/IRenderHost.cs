@@ -110,6 +110,16 @@ public interface IRenderHost
 
     DrawScopeToken DrawScope => default;
 
+    // The host's DrawScope stays valid across draws whose programs and other context differ, so the
+    // recorder may reuse attachments whenever the target registers are unchanged (RenderExecutor.WideTargetReuse).
+    bool ReusesTargetsAcrossPrograms => false;
+
+    // A draw given the previous draw's attachments (RenderRecorder.TryRestoreAttachments): the host
+    // keeps what its last acquisitions recorded about them, as if this draw had acquired them again.
+    void KeepAttachments()
+    {
+    }
+
     void KeepDepthAttachment(in DepthAttachmentState depth)
     {
     }

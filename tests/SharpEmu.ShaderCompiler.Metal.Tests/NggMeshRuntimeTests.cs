@@ -85,8 +85,27 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
     {
         var request = ScalarConstantRequest(4, 0, coherent, vectorAccess, deviceWrite: deviceWrite);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error,
-            new Gen5MslCodegenOptions { ScalarConstantBuffers = true }), error);
+            new Gen5MslCodegenOptions { ScalarConstantBuffers = true, ScalarConstantBuffersBesideWrites = false }), error);
         Assert.DoesNotContain("constant uint* b0 =", shader.Source, StringComparison.Ordinal);
+    }
+
+    // A shader that writes device memory and invalidates its scalar cache may read its stores back through scalar loads.
+    [Fact]
+    public void ScalarConstantBuffersRefuseWritingShadersThatInvalidateTheScalarCache()
+    {
+        Assert.True(Gen5MslTranslator.TryCompileProgram(ScalarConstantRequest(4, 0, deviceWrite: true, invalidateScalarCache: true),
+            out var shader, out var error, new Gen5MslCodegenOptions()), error);
+        Assert.DoesNotContain("constant uint* b0 =", shader.Source, StringComparison.Ordinal);
+    }
+
+    // A non-coherent scalar load does not see the shader's own vector stores on the guest either, so by
+    // default a device write elsewhere in the shader leaves the scalar-only binding constant.
+    [Fact]
+    public void DefaultScalarConstantBuffersKeepTheConstantPointerBesideDeviceWrites()
+    {
+        Assert.True(Gen5MslTranslator.TryCompileProgram(ScalarConstantRequest(4, 0, deviceWrite: true),
+            out var shader, out var error, new Gen5MslCodegenOptions()), error);
+        Assert.Contains("constant uint* b0 =", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -139,7 +158,7 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         }
     }
 
-    private static ShaderCompileRequest ScalarConstantRequest(uint count, uint offset, bool coherent = false, bool vectorAccess = false, bool separateScalarBinding = false, bool deviceWrite = false)
+    private static ShaderCompileRequest ScalarConstantRequest(uint count, uint offset, bool coherent = false, bool vectorAccess = false, bool separateScalarBinding = false, bool deviceWrite = false, bool invalidateScalarCache = false)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         foreach (var instruction in Gen5NggFixtures.CullingTriangle(bufferFetchPosition: vectorAccess).Instructions)
@@ -159,6 +178,8 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
                     instructions.Add(new(0, Gen5ShaderEncoding.Mubuf, "BufferStoreDword", [0u, 0u],
                         [Gen5Operand.Vector(15), Gen5Operand.Scalar(12), Gen5Operand.Source(128)], [],
                         new Gen5BufferMemoryControl(1, 0, 15, 12, 0, false, false, false, false)));
+                if (invalidateScalarCache)
+                    instructions.Add(new(0, Gen5ShaderEncoding.Smem, "SDcacheInv", [0u, 0u], [], [], null));
             }
             instructions.Add(instruction);
         }

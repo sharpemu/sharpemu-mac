@@ -1792,6 +1792,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return created;
     }
 
+    public bool TryFindGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        GpuPrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        out PipelineHandle handle) =>
+        CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, wait: null, out handle);
+
     // The pipeline of a draw the executor may leave out while it compiles: false while the
     // host is still building it (the build carries on), and nothing is cached until it is
     // handed over, so a later draw asks again and finds it then.
@@ -1823,7 +1839,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram,
-        bool wait,
+        bool? wait,
         out PipelineHandle handle)
     {
         handle = default;
@@ -1864,6 +1880,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 return true;
             }
 
+            // A lookup only (TryFindGraphicsPipeline): nothing is built or started.
+            if (wait is null)
+            {
+                return false;
+            }
+
             if (RenderTrace.Enabled && RenderTrace.Pipeline())
             {
                 RenderTrace.Write(
@@ -1873,7 +1895,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             PipelineHandle created;
-            if (wait)
+            if (wait == true)
             {
                 created = _host.CreateGraphicsPipeline(description);
             }

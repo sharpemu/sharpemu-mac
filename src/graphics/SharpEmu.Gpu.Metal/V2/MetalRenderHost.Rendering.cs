@@ -1189,6 +1189,7 @@ internal sealed partial class MetalRenderHost
 
         NoteRecordedWork();
         _renderingActive = true;
+        _renderPassScope++;
         _renderingState = state;
         ForgetEncoderState();
         if (launch is not null)
@@ -1786,7 +1787,7 @@ internal sealed partial class MetalRenderHost
 
     public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
         if (entry.Mesh is { } mesh)
@@ -1838,7 +1839,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         if (_indexBuffer == 0)
         {
             throw Fatal("An indexed draw has no bound index buffer.");
@@ -1900,7 +1901,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndirect(BufferBinding arguments)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         // The guest's argument layout is (vertexCount, instanceCount, firstVertex,
         // firstInstance), which is exactly MTLDrawPrimitivesIndirectArguments.
         ApplyGraphicsState();
@@ -1965,7 +1966,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         if (_indexBuffer == 0)
         {
             throw Fatal("An indexed indirect draw has no bound index buffer.");
@@ -2038,7 +2039,7 @@ internal sealed partial class MetalRenderHost
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         // A persistent-thread kernel spins on memory other work publishes, which can be what a
         // label copy held for the commit writes: the copy would land only after the kernel had
         // waited out its budget for it (UE5's Nanite culling took twice as long per dispatch).
@@ -2149,7 +2150,7 @@ internal sealed partial class MetalRenderHost
         // The GPU reads the group counts where the dispatch sits in the stream.
         OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint));
         TraceIndirectDispatch(argumentsAddress);
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         var encoder = EnsureComputeEncoder();
         var entry = _pendingComputePipeline ??
             throw Fatal("An indirect dispatch has no bound Metal compute pipeline state.");
@@ -2458,9 +2459,27 @@ internal sealed partial class MetalRenderHost
         OcclusionAuditCountDraw();
         Interlocked.Increment(ref _drawCount);
         NotePassDraw(_boundGraphicsPipeline?.Profile);
-        Interlocked.Add(ref _drawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks);
+        if (startedTicks != 0)
+        {
+            Interlocked.Add(ref _drawTicks, (System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks) * (DrawTimingSampleMask + 1));
+        }
+
         _recordedCommands++;
     }
+
+    // The PERF line's draw_ms times one draw or dispatch in SHARPEMU_METAL_V2_DRAW_TIMING_SAMPLE (a power of
+    // two, 16 unless set; 1 times every one) and scales it: two clock reads around every draw were ~2.5% of
+    // Grand Theft Auto V's GPU worker, which bounds its frame rate.
+    private static readonly long DrawTimingSampleMask = ParseDrawTimingSample() - 1;
+    private long _drawTimingTick;
+
+    private static long ParseDrawTimingSample() =>
+        long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DRAW_TIMING_SAMPLE"), out var every) &&
+        every >= 1 && (every & (every - 1)) == 0 ? every : 16;
+
+    // The start of a timed draw, or 0 for one the sample skips (CountDraw).
+    private long DrawTimingStart() =>
+        (++_drawTimingTick & DrawTimingSampleMask) == 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
     // Shader stores become visible to later work. Inside a render pass a scoped
     // barrier is enough; across encoders Metal's own tracking orders the windows.
@@ -2506,6 +2525,21 @@ internal sealed partial class MetalRenderHost
             RecordMemoryBarrier();
         }
     }
+
+    // While a render pass stays open and nothing an attachment acquisition reads has changed (the image
+    // cache's binding epoch counts every such change, and refreshes still owed hold it off), the recorder
+    // gives the next draw into the same targets the attachments the last one acquired
+    // (RenderRecorder.RepeatsPreviousTargets): GTA V acquired the same colour and depth targets for
+    // nearly every one of its ~4,000 draws a frame. SHARPEMU_METAL_V2_DRAW_SCOPE=0 acquires them each time.
+    private static readonly bool DrawScopeEnabled = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DRAW_SCOPE") != "0";
+    private long _renderPassScope;
+
+    public bool ReusesTargetsAcrossPrograms => DrawScopeEnabled;
+
+    public DrawScopeToken DrawScope =>
+        DrawScopeEnabled && _renderingActive && _renderEncoder != 0 && !_imageCache.HasDeferredRefreshes
+            ? new DrawScopeToken(_renderPassScope, (ulong)_imageCache.Epochs.Binding, _imageCache.ImageSetVersion)
+            : default;
 
     // Once the stream marks a dispatch that may run beside the one before it (DispatchOverlap),
     // compute encoders open concurrent. Every dispatch then leaves a barrier pending, which the

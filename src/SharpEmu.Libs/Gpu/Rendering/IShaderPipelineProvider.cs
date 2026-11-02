@@ -218,6 +218,26 @@ public interface IShaderPipelineProvider
         return true;
     }
 
+    // The pipeline when one is already built for this state, without building or starting anything;
+    // false sends the caller to TryCreateGraphicsPipeline or CreateGraphicsPipeline.
+    bool TryFindGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        GpuPrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        out PipelineHandle handle)
+    {
+        handle = default;
+        return false;
+    }
+
     // The programs of a tessellated draw run without a tessellator, or null when the provider cannot
     // build them (the executor then skips the draw, as before).
     TessellationPrograms? GetTessellationPrograms(

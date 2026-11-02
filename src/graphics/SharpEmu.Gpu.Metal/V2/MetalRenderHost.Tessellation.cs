@@ -140,7 +140,7 @@ internal sealed partial class MetalRenderHost
 
     public unsafe void DrawPatches(uint controlPoints, uint patchCount, uint instanceCount, uint firstInstance)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         if (!_tessellationFactors.IsValid)
         {
             throw Fatal("A patch draw has no tessellation factors prepared.");

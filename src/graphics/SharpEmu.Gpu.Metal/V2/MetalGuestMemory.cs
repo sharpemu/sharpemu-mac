@@ -135,14 +135,15 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     // barriers end the encoder, and the host orders each encoder after the one before it
     // (MetalRenderHost.EncoderOrdering) - Metal does not, for untracked resources.
     // SHARPEMU_METAL_V2_TRACKED=1 restores automatic tracking for comparison.
-    // An MTLResidencySet would keep the windows mapped for the queue without any
-    // per-encoder call — but a set holding the whole 16 GiB backing measured about seventy
-    // milliseconds of scheduling latency on every submission, with the GPU itself idle:
-    // Dreaming Sarah ran at five frames a second with it and at a hundred and twenty
-    // without. SHARPEMU_METAL_V2_RESIDENCY_SET=1 restores the set for comparison (every
-    // window joins it as it is created).
-    private static readonly bool UseResidencySet = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_RESIDENCY_SET"), "1", StringComparison.Ordinal);
+    // An MTLResidencySet keeps the windows mapped for the queue without any per-encoder
+    // call: every window joins it as it is created. A set holding the whole 16 GiB backing
+    // once measured about seventy milliseconds of scheduling latency on every submission
+    // (Dreaming Sarah at five frames a second instead of a hundred and twenty); the windows
+    // alone do not: naming them on every encoder cost Grand Theft Auto V's GPU worker about
+    // 5% of its time per draw, and Black Myth: Wukong 2% of its frame rate, with system wired
+    // memory unchanged. SHARPEMU_METAL_V2_RESIDENCY_SET=0 names them per encoder instead.
+    private static readonly bool UseResidencySet = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_RESIDENCY_SET"), "0", StringComparison.Ordinal);
 
     private static readonly bool StageEverything = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STAGE_ALL"), "1", StringComparison.Ordinal);
