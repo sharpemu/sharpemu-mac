@@ -16,6 +16,7 @@ RUN_HLE=1 adds the emulator's per-import call counts (SHARPEMU_PROFILE_IMPORTS),
 allocation (SHARPEMU_LOG_MEMORY). Both change what is being measured (they add work), so use them for counts, not CPU.
 """
 import argparse
+import ctypes
 import fcntl
 import json
 import os
@@ -170,8 +171,14 @@ class Run:
         cmd = ["perf", "stat", "-p", str(pid), "-x,", "-D", "-1", "--control", f"fd:{ctl_r},{ack_w}", "-o", out_csv]
         for ev in events:
             cmd += ["-e", ev]
-        self.perf = subprocess.Popen(cmd, pass_fds=(ctl_r, ack_w), stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # SIGTERM/SIGINT are blocked across the spawn and the assignment, so a signal cannot land between "perf exists" and "self.perf is
+        # set" (it is delivered at the unblock, with self.perf visible to the teardown).
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, _SIGS)
+        try:
+            self.perf = subprocess.Popen(cmd, pass_fds=(ctl_r, ack_w), stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=_child_setup)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)
         os.close(ctl_r)
         os.close(ack_w)
         self.perf_ctl, self.perf_ack = ctl_w, ack_r
@@ -447,47 +454,87 @@ def gc_delta(run):
                 note="deltas over the first..last 1 s report inside the measured window; alloc_mb has 1 MB resolution")
 
 
-def kill_tree(proc, perf, grace=5.0):
-    """Kill the emulator's whole process group (it was started with start_new_session, so pgid == pid) and perf: SIGTERM, a short grace,
-    then SIGKILL, waiting for both. Safe to call when they already exited."""
-    targets = []
-    if proc is not None:
-        targets.append(("group", proc.pid, proc))
-    if perf is not None:
-        targets.append(("pid", perf.pid, perf))
-
-    def send(kind, pid, sig):
-        try:
-            if kind == "group":
-                os.killpg(pid, sig)
-            else:
-                os.kill(pid, sig)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-    for kind, pid, _ in targets:
-        send(kind, pid, signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    for kind, pid, p in targets:
-        try:
-            p.wait(max(0.1, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            send(kind, pid, signal.SIGKILL)
-            try:
-                p.wait(5)
-            except subprocess.TimeoutExpired:
-                pass
-    # Stragglers in the emulator's group (children of the emulator that outlived it).
-    if proc is not None:
-        send("group", proc.pid, signal.SIGKILL)
+_SIGS = {signal.SIGTERM, signal.SIGINT}
+_teardown = False          # True while run_once's finally is tearing things down: signals only set _pending then
+_pending_signal = None
 
 
 class HarnessInterrupted(BaseException):
-    """Raised by the SIGTERM/SIGINT handlers so the try/finally teardown in run_once runs."""
+    """Raised by the SIGTERM/SIGINT handlers so the try/finally teardown in run_once runs; carries the signal for the exit code."""
+
+    def __init__(self, signum):
+        super().__init__(f"harness interrupted by signal {signum}")
+        self.signum = signum
 
 
-def _raise_interrupted(signum, frame):
-    raise HarnessInterrupted(f"harness interrupted by signal {signum}")
+def _on_signal(signum, frame):
+    global _pending_signal
+    if _teardown:  # a second signal during teardown must not abort the cleanup: remember it, act after the teardown
+        _pending_signal = _pending_signal or signum
+        return
+    raise HarnessInterrupted(signum)
+
+
+def _child_setup():
+    """Runs in the emulator/perf child between fork and exec: unblock the signals the parent blocked around the spawn, and ask the kernel to
+    SIGKILL the child if the harness dies without running its teardown (even on SIGKILL). Compatible with start_new_session (setsid ran first)."""
+    signal.pthread_sigmask(signal.SIG_SETMASK, set())
+    try:
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, int(signal.SIGKILL), 0, 0, 0)  # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+def _wait_noreap(p, timeout):
+    """Wait until child p has exited WITHOUT reaping it, so its pid (= the emulator's process group id) stays reserved while the group is
+    killed. Returns True if it exited within the timeout."""
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            if os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                return True
+        except ChildProcessError:
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.05)
+
+
+def kill_tree(proc, perf, grace=5.0):
+    """Kill the emulator's whole process group (start_new_session, so pgid == pid) and perf: SIGTERM, a grace period, SIGKILL, then reap.
+    Safe on exited processes: the group is only signalled while the emulator has not been reaped (its pid, hence the pgid, is then still
+    reserved, and the final SIGKILL of the group also gets stragglers that outlived the leader), and perf is signalled through Popen, which
+    checks that it has not been reaped."""
+    deadline = time.monotonic() + grace
+    if proc is not None and proc.returncode is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if perf is not None:
+        try:
+            perf.send_signal(signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if proc is not None and proc.returncode is None:
+        _wait_noreap(proc, max(0.1, deadline - time.monotonic()))
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # leader (alive or zombie) still holds the pgid; takes stragglers too
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(10)
+        except subprocess.TimeoutExpired:
+            pass
+    if perf is not None:
+        try:
+            perf.wait(max(0.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            perf.kill()
+            try:
+                perf.wait(5)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 def run_once(args, out_dir, attempt):
@@ -511,8 +558,8 @@ def run_once(args, out_dir, attempt):
     cmd = [args.bin, f"--log-level={args.log_level}", "--no-log-file", os.path.abspath(args.guest)]
     if args.nice:  # optional: lower the emulator's priority so the harness/perf react promptly (both A/B arms alike)
         cmd = ["nice", "-n", str(args.nice)] + cmd
-    proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            start_new_session=True)
+    proc = None
+    completed = False
     # Everything from here to the end is inside try/finally: whatever happens (SIGTERM/SIGINT turned into an exception, a bug in a wait
     # loop), the emulator's process group and perf are killed and reaped before the bench lock can drop with the process.
     def record_pids():  # what the teardown self-test (selftest-teardown.sh) checks against
@@ -523,6 +570,14 @@ def run_once(args, out_dir, attempt):
             pass
 
     try:
+        # Spawn with SIGTERM/SIGINT blocked: a signal cannot land between "the emulator exists" and "proc is assigned" (it is delivered at the
+        # unblock, inside this try, with proc set). The child unblocks the signals itself and gets PR_SET_PDEATHSIG (_child_setup).
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _SIGS)
+        try:
+            proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    start_new_session=True, preexec_fn=_child_setup)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         run.pid = proc.pid
         record_pids()
         csv = os.path.join(out_dir, "perf.csv")
@@ -567,14 +622,25 @@ def run_once(args, out_dir, attempt):
                 run.perf.wait(10)
             except subprocess.TimeoutExpired:
                 run.perf.kill()
+        completed = True
     finally:
-        kill_tree(proc, run.perf)
+        # A signal during the teardown must not abort it (the second SIGTERM that left the emulator alive): from here the handler only
+        # records the signal; it is re-raised after the cleanup if nothing was propagating already.
+        global _teardown, _pending_signal
+        _teardown = True
         try:
-            with open(os.path.join(out_dir, "guest.log"), "w") as f:
-                for _, line in run.lines:
-                    f.write(line + "\n")
-        except OSError:
-            pass
+            kill_tree(proc, run.perf)
+            try:
+                with open(os.path.join(out_dir, "guest.log"), "w") as f:
+                    for _, line in run.lines:
+                        f.write(line + "\n")
+            except OSError:
+                pass
+        finally:
+            _teardown = False
+        pending, _pending_signal = _pending_signal, None
+        if completed and pending:
+            raise HarnessInterrupted(pending)
     return run, rc, timed_out, perf_note, csv
 
 
@@ -633,8 +699,8 @@ def main():
                     help="before launching, wait up to this many seconds for other processes to use < --quiet-cores cores")
     ap.add_argument("--quiet-cores", type=float, default=float(os.environ.get("SYNTH_QUIET_CORES", "0.75")))
     args = ap.parse_args()
-    signal.signal(signal.SIGTERM, _raise_interrupted)  # so run_once's finally tears the emulator and perf down before the lock drops
-    signal.signal(signal.SIGINT, _raise_interrupted)
+    signal.signal(signal.SIGTERM, _on_signal)  # so run_once's finally tears the emulator and perf down before the lock drops
+    signal.signal(signal.SIGINT, _on_signal)
     lock_wait_s, lock_how = acquire_bench_lock()  # held until this process exits (after the emulator is gone)
 
     runs_root = os.environ.get("SYNTH_RUNS", "/home/xnetcat/Projects/sharpemu/ds-cpu/synth-runs")
@@ -816,4 +882,4 @@ if __name__ == "__main__":
         sys.exit(main())
     except HarnessInterrupted as exc:
         print(f"[harness] {exc}; emulator and perf were torn down", file=sys.stderr, flush=True)
-        sys.exit(143)
+        sys.exit(128 + exc.signum)  # 143 for SIGTERM, 130 for SIGINT
