@@ -15,7 +15,10 @@ namespace SharpEmu.HLE.Host;
 /// within a few microseconds and burns no CPU. <see cref="PreciseSignal"/> adds an
 /// interruptible wait (a kqueue <c>EVFILT_USER</c> event with a nanosecond timeout) so
 /// one thread can sleep until the next deadline and still be woken early when an
-/// earlier deadline arrives. Other hosts fall back to a coarse sleep for the bulk of the
+/// earlier deadline arrives. On Linux <see cref="SleepUntil"/> sleeps in
+/// <c>clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)</c> straight to the deadline with the
+/// calling thread's timer slack lowered to 1 ns (<c>SHARPEMU_LINUX_PRECISE_SLEEP=0</c>
+/// restores the coarse path). Other hosts fall back to a coarse sleep for the bulk of the
 /// interval and a yield-spin for the last ~1.2 ms.
 /// </summary>
 public static unsafe partial class HostPreciseClock
@@ -25,8 +28,43 @@ public static unsafe partial class HostPreciseClock
     private static readonly uint MachNumer;
     private static readonly uint MachDenom;
 
+    private const int LinuxClockMonotonic = 1;
+    private const int LinuxTimerAbstime = 1;
+    private const int LinuxPrSetTimerSlack = 29;
+    private const int LinuxEintr = 4;
+    private static readonly bool LinuxAbsoluteMapping;
+    private static readonly bool LinuxPreciseAvailable = InitializeLinux(out LinuxAbsoluteMapping);
+
+    // Wakeup overshoot is absorbed by a short spin (microseconds); 0 = none.
+    private static readonly long LinuxFinalSpinNanoseconds = ReadLinuxSpinNanoseconds();
+
+    [ThreadStatic]
+    private static bool _linuxTimerSlackSet;
+
     /// <summary>True when waits use mach_wait_until (macOS).</summary>
     public static bool IsPrecise => MachAvailable;
+
+    /// <summary>
+    /// True when waits use <c>clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)</c> (Linux, unless
+    /// <c>SHARPEMU_LINUX_PRECISE_SLEEP=0</c>). Always false on macOS, where <see cref="IsPrecise"/> applies.
+    /// </summary>
+    public static bool IsLinuxPrecise => LinuxPreciseAvailable;
+
+    /// <summary>True when a precise wait is available on this host (macOS or Linux).</summary>
+    public static bool HasPreciseSleep => MachAvailable || LinuxPreciseAvailable;
+
+    /// <summary>Whether a <c>SHARPEMU_LINUX_PRECISE_SLEEP</c> value leaves the Linux precise path on (only "0" turns it off).</summary>
+    public static bool LinuxPreciseSleepEnabled(string? environmentValue) =>
+        !string.Equals(environmentValue?.Trim(), "0", StringComparison.Ordinal);
+
+    /// <summary>
+    /// How the Stopwatch deadline maps onto CLOCK_MONOTONIC on Linux: "absolute" when
+    /// Stopwatch ticks are CLOCK_MONOTONIC nanoseconds (the deadline is passed straight to
+    /// clock_nanosleep), "relative" when they are not and the remaining interval is added to
+    /// the current CLOCK_MONOTONIC reading, "off" when the precise path is not in use.
+    /// </summary>
+    public static string LinuxClockMapping =>
+        !LinuxPreciseAvailable ? "off" : LinuxAbsoluteMapping ? "absolute" : "relative";
 
     /// <summary>Microseconds → Stopwatch ticks, saturating.</summary>
     public static long MicrosecondsToTicks(long microseconds)
@@ -82,7 +120,129 @@ public static unsafe partial class HostPreciseClock
                 continue;
             }
 
+            if (LinuxPreciseAvailable)
+            {
+                LinuxSleepUntil(deadlineTimestamp);
+                return;
+            }
+
             CoarseSleepStep(remaining);
+        }
+    }
+
+    private static bool InitializeLinux(out bool absoluteMapping)
+    {
+        absoluteMapping = false;
+        if (!OperatingSystem.IsLinux() ||
+            !LinuxPreciseSleepEnabled(Environment.GetEnvironmentVariable("SHARPEMU_LINUX_PRECISE_SLEEP")))
+        {
+            return false;
+        }
+
+        try
+        {
+            // Stopwatch is CLOCK_MONOTONIC in nanoseconds on Linux; confirm instead of assuming,
+            // since a wrong mapping would turn every guest sleep into a wrong-length one.
+            if (Stopwatch.Frequency == 1_000_000_000L)
+            {
+                var before = Stopwatch.GetTimestamp();
+                if (clock_gettime(LinuxClockMonotonic, out var ts) != 0)
+                {
+                    return false;
+                }
+
+                var after = Stopwatch.GetTimestamp();
+                var monotonic = ts.Seconds * 1_000_000_000L + ts.Nanoseconds;
+                absoluteMapping = monotonic >= before - 1000 && monotonic <= after + 1000;
+            }
+            else if (clock_gettime(LinuxClockMonotonic, out _) != 0)
+            {
+                return false;
+            }
+
+            // Probe the sleep itself: a missing symbol throws here, not in the middle of a guest sleep.
+            var now = LinuxMonotonicNanoseconds();
+            var request = new Timespec { Seconds = now / 1_000_000_000L, Nanoseconds = now % 1_000_000_000L };
+            return clock_nanosleep(LinuxClockMonotonic, LinuxTimerAbstime, ref request, IntPtr.Zero) == 0;
+        }
+        catch (Exception)
+        {
+            absoluteMapping = false;
+            return false;
+        }
+    }
+
+    private static long ReadLinuxSpinNanoseconds()
+    {
+        // Measured on this host's kernel (see the L7 report): with a 1 ns timer slack the wakeup
+        // overshoot is a few tens of microseconds, so a spin that long would cost more CPU than the
+        // lateness it removes. Kept as a knob for hosts where it does not hold.
+        return long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_LINUX_PRECISE_SPIN_US"), out var us) &&
+               us > 0 && us <= 200
+            ? us * 1000
+            : 0;
+    }
+
+    private static long LinuxMonotonicNanoseconds()
+    {
+        _ = clock_gettime(LinuxClockMonotonic, out var ts);
+        return ts.Seconds * 1_000_000_000L + ts.Nanoseconds;
+    }
+
+    private static void SetLinuxTimerSlack()
+    {
+        // Timer slack is per thread (default 50 us) and lets the kernel coalesce a sleeper's wakeup
+        // up to that much late. 1 ns is the smallest value; 0 would mean "reset to the default".
+        _linuxTimerSlackSet = true;
+        try
+        {
+            _ = prctl(LinuxPrSetTimerSlack, 1, 0, 0, 0);
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private static void LinuxSleepUntil(long deadlineTimestamp)
+    {
+        if (!_linuxTimerSlackSet)
+        {
+            SetLinuxTimerSlack();
+        }
+
+        long deadlineNanoseconds;
+        if (LinuxAbsoluteMapping)
+        {
+            deadlineNanoseconds = deadlineTimestamp;
+        }
+        else
+        {
+            var remaining = deadlineTimestamp - Stopwatch.GetTimestamp();
+            if (remaining <= 0)
+            {
+                return;
+            }
+
+            deadlineNanoseconds = LinuxMonotonicNanoseconds() +
+                (long)((decimal)remaining * 1_000_000_000m / Stopwatch.Frequency);
+        }
+
+        var spin = LinuxFinalSpinNanoseconds;
+        var sleepTo = spin > 0 ? deadlineNanoseconds - spin : deadlineNanoseconds;
+        var request = new Timespec { Seconds = sleepTo / 1_000_000_000L, Nanoseconds = sleepTo % 1_000_000_000L };
+        // clock_nanosleep returns the error number itself; EINTR (a signal landed, e.g. the guest
+        // thread's own signal handlers) resumes toward the same absolute deadline.
+        while (clock_nanosleep(LinuxClockMonotonic, LinuxTimerAbstime, ref request, IntPtr.Zero) == LinuxEintr)
+        {
+        }
+
+        if (spin > 0)
+        {
+            var end = LinuxAbsoluteMapping ? deadlineTimestamp : deadlineNanoseconds;
+            while ((LinuxAbsoluteMapping ? Stopwatch.GetTimestamp() : LinuxMonotonicNanoseconds()) < end)
+            {
+                Thread.SpinWait(8);
+            }
         }
     }
 
@@ -238,6 +398,10 @@ public static unsafe partial class HostPreciseClock
                         {
                             _fallback.WaitOne((int)Math.Min(int.MaxValue, Math.Max(1, (microseconds - SpinTailMicroseconds) / 1000)));
                         }
+                        else if (LinuxPreciseAvailable)
+                        {
+                            LinuxSleepUntil(deadlineTimestamp);
+                        }
                         else
                         {
                             CoarseSleepStep(remaining);
@@ -324,6 +488,15 @@ public static unsafe partial class HostPreciseClock
         public long Seconds;
         public long Nanoseconds;
     }
+
+    [DllImport("libc", EntryPoint = "clock_nanosleep")]
+    private static extern int clock_nanosleep(int clockId, int flags, ref Timespec request, IntPtr remain);
+
+    [DllImport("libc", EntryPoint = "clock_gettime")]
+    private static extern int clock_gettime(int clockId, out Timespec time);
+
+    [DllImport("libc", EntryPoint = "prctl")]
+    private static extern int prctl(int option, ulong arg2, ulong arg3, ulong arg4, ulong arg5);
 
     [LibraryImport("libSystem.B.dylib")]
     private static partial int mach_timebase_info(MachTimebase* info);
