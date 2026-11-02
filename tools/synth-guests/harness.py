@@ -16,6 +16,7 @@ RUN_HLE=1 adds the emulator's per-import call counts (SHARPEMU_PROFILE_IMPORTS),
 allocation (SHARPEMU_LOG_MEMORY). Both change what is being measured (they add work), so use them for counts, not CPU.
 """
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -502,6 +503,36 @@ def run_once(args, out_dir, attempt):
     return run, rc, timed_out, perf_note, csv
 
 
+LOCK_PATH = os.environ.get("SYNTH_LOCK_FILE", "/tmp/sharpemu-bench.lock")
+_lock_file = None  # kept open (and locked) for the life of the process
+
+
+def acquire_bench_lock():
+    """Machine-wide run lock: only one bench run (emulator launch to teardown) at a time, whoever calls (ab.sh, run-all.sh,
+    run.sh, other agents' wrappers using `flock /tmp/sharpemu-bench.lock`). Returns (wait_s, how). The lock fd is not inherited by the
+    emulator. If the lock is already held through an inherited fd (the caller ran us under `flock <lockfile> ...`), it is not taken
+    again (that would deadlock)."""
+    global _lock_file
+    try:
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                if os.path.realpath(f"/proc/self/fd/{fd}") == os.path.realpath(LOCK_PATH):
+                    return 0.0, "inherited"
+            except OSError:
+                pass
+    except OSError:
+        pass
+    _lock_file = open(LOCK_PATH, "a")
+    t0 = time.monotonic()
+    try:
+        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"[bench-lock] waiting for {LOCK_PATH} (another bench run is in progress)", flush=True)
+        fcntl.flock(_lock_file, fcntl.LOCK_EX)
+        print(f"[bench-lock] acquired after {time.monotonic() - t0:.1f} s", flush=True)
+    return time.monotonic() - t0, "flock"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("guest")
@@ -520,6 +551,7 @@ def main():
                     help="before launching, wait up to this many seconds for other processes to use < --quiet-cores cores")
     ap.add_argument("--quiet-cores", type=float, default=float(os.environ.get("SYNTH_QUIET_CORES", "0.75")))
     args = ap.parse_args()
+    lock_wait_s, lock_how = acquire_bench_lock()  # held until this process exits (after the emulator is gone)
 
     runs_root = os.environ.get("SYNTH_RUNS", "/home/xnetcat/Projects/sharpemu/ds-cpu/synth-runs")
     gname = os.path.splitext(os.path.basename(args.guest))[0]
@@ -543,7 +575,7 @@ def main():
     perf = read_perf_csv(csv)
     metrics = dict(guest=os.path.basename(args.guest), label=args.label, out_dir=out_dir, emulator=args.bin,
                    env=[kv for kv in args.env], run_hle=args.hle, run_gc=args.gc,
-                   nice=args.nice, host_cpus=os.cpu_count(), startup_retries=startup_retries, exit_code=rc, timed_out=timed_out)
+                   nice=args.nice, lock_wait_s=round(lock_wait_s, 2), lock=lock_how, host_cpus=os.cpu_count(), startup_retries=startup_retries, exit_code=rc, timed_out=timed_out)
     metrics["result_ok"] = ("Result=ORBIS_GEN2_OK" in text) and ("@@ DONE" in text) and rc == 0
     if quiet_before is not None:
         metrics["other_cores_before_launch"] = round(quiet_before, 2)
