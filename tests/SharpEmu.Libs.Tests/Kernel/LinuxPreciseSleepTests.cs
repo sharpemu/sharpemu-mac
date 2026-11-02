@@ -142,8 +142,79 @@ public sealed class LinuxPreciseSleepTests
         worker.Join();
 
         Assert.True(result.wallNs >= 200 * 500_000L, $"wall {result.wallNs} ns");
-        // The coarse path spins (about 140% of wall); a real sleep is a few percent.
-        Assert.True(result.cpuNs < result.wallNs / 4, $"cpu {result.cpuNs} ns over wall {result.wallNs} ns");
+        // The coarse path spins (about 140% of wall). A real sleep is a few percent; the adaptive early
+        // wake spins its last ~100 us, so allow up to half.
+        Assert.True(result.cpuNs < result.wallNs / 2, $"cpu {result.cpuNs} ns over wall {result.wallNs} ns");
+    }
+
+    [Fact]
+    public void EarlyWakeEstimateStepsUpFastDownSlowlyAndStaysClamped()
+    {
+        const long seed = 50_000;
+        Assert.Equal(seed + 8_000, HostPreciseClock.UpdateEarlyWake(seed, 150_000));
+        Assert.Equal(seed + 3_000, HostPreciseClock.UpdateEarlyWake(seed, seed + 3_000));
+        Assert.Equal(seed - 1_500, HostPreciseClock.UpdateEarlyWake(seed, 10_000));
+        Assert.Equal(seed - 500, HostPreciseClock.UpdateEarlyWake(seed, seed - 500));
+        Assert.Equal(10_000, HostPreciseClock.UpdateEarlyWake(10_000, 0));
+        Assert.Equal(200_000, HostPreciseClock.UpdateEarlyWake(200_000, 100_000_000));
+        var estimate = seed;
+        for (var i = 0; i < 100; i++)
+        {
+            estimate = HostPreciseClock.UpdateEarlyWake(estimate, 1_000_000_000);
+        }
+
+        Assert.Equal(200_000, estimate);
+        for (var i = 0; i < 400; i++)
+        {
+            estimate = HostPreciseClock.UpdateEarlyWake(estimate, 0);
+        }
+
+        Assert.Equal(10_000, estimate);
+    }
+
+    [Fact]
+    public void EarlyWakeMarginIsTheEstimateCappedToAFractionOfTheSleep()
+    {
+        // Plenty of room: the estimate wins.
+        Assert.Equal(60_000, HostPreciseClock.EarlyWakeMargin(60_000, 1_000_000, 0.25));
+        // Not enough room: a quarter of the sleep.
+        Assert.Equal(25_000, HostPreciseClock.EarlyWakeMargin(200_000, 100_000, 0.25));
+        // Very short sleeps keep the 10 us floor (when the estimate allows it).
+        Assert.Equal(10_000, HostPreciseClock.EarlyWakeMargin(200_000, 20_000, 0.25));
+        Assert.Equal(10_000, HostPreciseClock.EarlyWakeMargin(10_000, 20_000, 0.25));
+        // A bigger fraction allows more spin.
+        Assert.Equal(100_000, HostPreciseClock.EarlyWakeMargin(200_000, 200_000, 0.5));
+    }
+
+    [Fact]
+    public void EarlyWakeEstimateSettlesNearTheHighQuantileOfTheWakeLateness()
+    {
+        // Lateness uniform over 0..100 us: the estimate should sit well above the median (50 us).
+        var random = new System.Random(1234);
+        var estimate = 50_000L;
+        for (var i = 0; i < 20_000; i++)
+        {
+            estimate = HostPreciseClock.UpdateEarlyWake(estimate, random.Next(0, 100_001));
+        }
+
+        Assert.InRange(estimate, 70_000, 100_000);
+    }
+
+    [Fact]
+    public void AdaptiveEarlyWakeIsTheDefaultUnlessAFixedSpinIsConfigured()
+    {
+        if (!OperatingSystem.IsLinux() || !HostPreciseClock.IsLinuxPrecise)
+        {
+            Assert.False(HostPreciseClock.LinuxEarlyWakeAdaptive);
+            return;
+        }
+
+        var fixedSpin = Environment.GetEnvironmentVariable("SHARPEMU_LINUX_PRECISE_SPIN_US");
+        var fraction = Environment.GetEnvironmentVariable("SHARPEMU_LINUX_PRECISE_SPIN_FRACTION");
+        var fixedOn = long.TryParse(fixedSpin, out var us) && us >= 0 && us <= 1000;
+        var fractionOff = double.TryParse(fraction, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var f) && f == 0;
+        Assert.Equal(!fixedOn && !fractionOff, HostPreciseClock.LinuxEarlyWakeAdaptive);
     }
 
     [Fact]

@@ -35,11 +35,32 @@ public static unsafe partial class HostPreciseClock
     private static readonly bool LinuxAbsoluteMapping;
     private static readonly bool LinuxPreciseAvailable = InitializeLinux(out LinuxAbsoluteMapping);
 
-    // Wakeup overshoot is absorbed by a short spin (microseconds); 0 = none.
-    private static readonly long LinuxFinalSpinNanoseconds = ReadLinuxSpinNanoseconds();
+    // SHARPEMU_LINUX_PRECISE_SPIN_US set (0..1000): a fixed early-wake margin of that many microseconds
+    // (0 = a plain sleep to the deadline, no early wake) and no adaptation. Unset: adaptive early wake.
+    private static readonly long LinuxFixedSpinNanoseconds = ReadLinuxFixedSpinNanoseconds();
+
+    // SHARPEMU_LINUX_PRECISE_SPIN_FRACTION (0..1, default 0.25): the most of a sleep that may be spent
+    // spinning at its end. 0 = a plain sleep to the deadline with no early wake.
+    private static readonly double LinuxSpinFraction = ReadLinuxSpinFraction();
+
+    private const long EarlyWakeSeedNanoseconds = 50_000;
+    private const long EarlyWakeMinNanoseconds = 10_000;
+    private const long EarlyWakeMaxNanoseconds = 200_000;
+
+    /// <summary>
+    /// True when the per-thread adaptive early wake is in use (no fixed SHARPEMU_LINUX_PRECISE_SPIN_US and
+    /// SHARPEMU_LINUX_PRECISE_SPIN_FRACTION above 0).
+    /// </summary>
+    public static bool LinuxEarlyWakeAdaptive =>
+        LinuxPreciseAvailable && LinuxFixedSpinNanoseconds < 0 && LinuxSpinFraction > 0;
 
     [ThreadStatic]
     private static bool _linuxTimerSlackSet;
+
+    // Per thread estimates of how late clock_nanosleep wakes, one per sleep length class (0 = not seeded
+    // yet): the kernel's idle states are deeper, and so slower to leave, the longer the sleep.
+    [ThreadStatic]
+    private static long[]? _earlyWakeNanoseconds;
 
     /// <summary>True when waits use mach_wait_until (macOS).</summary>
     public static bool IsPrecise => MachAvailable;
@@ -172,15 +193,43 @@ public static unsafe partial class HostPreciseClock
         }
     }
 
-    private static long ReadLinuxSpinNanoseconds()
+    private static double ReadLinuxSpinFraction() =>
+        double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_LINUX_PRECISE_SPIN_FRACTION"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var f) &&
+        f >= 0 && f <= 1
+            ? f
+            : 0.25;
+
+    /// <summary>
+    /// How early to wake for a sleep with <paramref name="leftNanoseconds"/> to go: the thread's wake
+    /// lateness estimate, but never more than <paramref name="fraction"/> of the sleep (and never less
+    /// than 10 us, so a very short sleep may still spin). That bounds the spin to about a fraction of
+    /// each sleep; where the wake latency fits in that budget the deadline is hit almost exactly.
+    /// </summary>
+    internal static long EarlyWakeMargin(long estimateNanoseconds, long leftNanoseconds, double fraction) =>
+        Math.Min(estimateNanoseconds, Math.Max(EarlyWakeMinNanoseconds, (long)(leftNanoseconds * fraction)));
+
+    private static long ReadLinuxFixedSpinNanoseconds()
     {
-        // Measured on this host's kernel (see the L7 report): with a 1 ns timer slack the wakeup
-        // overshoot is a few tens of microseconds, so a spin that long would cost more CPU than the
-        // lateness it removes. Kept as a knob for hosts where it does not hold.
         return long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_LINUX_PRECISE_SPIN_US"), out var us) &&
-               us > 0 && us <= 200
+               us >= 0 && us <= 1000
             ? us * 1000
-            : 0;
+            : -1;
+    }
+
+    /// <summary>
+    /// Folds one observed wake lateness into the early-wake estimate. This tracks a high quantile (about
+    /// the 85th percentile) rather than the mean: a wake later than the estimate steps it up by up to
+    /// 8 us (that wake missed the deadline), an earlier one steps it down by up to 1.5 us, so one stalled
+    /// wake cannot drag the estimate up and spin every following sleep. Clamped to [10, 200] us.
+    /// </summary>
+    internal static long UpdateEarlyWake(long estimateNanoseconds, long observedOvershootNanoseconds)
+    {
+        var observed = Math.Max(0, observedOvershootNanoseconds);
+        var next = observed > estimateNanoseconds
+            ? estimateNanoseconds + Math.Min(8_000, observed - estimateNanoseconds)
+            : estimateNanoseconds - Math.Min(1_500, estimateNanoseconds - observed);
+        return Math.Clamp(next, EarlyWakeMinNanoseconds, EarlyWakeMaxNanoseconds);
     }
 
     private static long LinuxMonotonicNanoseconds()
@@ -203,6 +252,32 @@ public static unsafe partial class HostPreciseClock
         }
     }
 
+    private static long LinuxNowNanoseconds() =>
+        LinuxAbsoluteMapping ? Stopwatch.GetTimestamp() : LinuxMonotonicNanoseconds();
+
+    private static void LinuxSleepAbsolute(long deadlineNanoseconds)
+    {
+        var request = new Timespec
+        {
+            Seconds = deadlineNanoseconds / 1_000_000_000L,
+            Nanoseconds = deadlineNanoseconds % 1_000_000_000L,
+        };
+        // clock_nanosleep returns the error number itself; EINTR (a signal landed, e.g. the guest
+        // thread's own signal handlers) resumes toward the same absolute deadline.
+        while (clock_nanosleep(LinuxClockMonotonic, LinuxTimerAbstime, ref request, IntPtr.Zero) == LinuxEintr)
+        {
+        }
+    }
+
+    private static void LinuxSpinUntil(long deadlineNanoseconds)
+    {
+        // Timestamp checks plus a pause-based spin; never sched_yield.
+        while (LinuxNowNanoseconds() < deadlineNanoseconds)
+        {
+            Thread.SpinWait(8);
+        }
+    }
+
     private static void LinuxSleepUntil(long deadlineTimestamp)
     {
         if (!_linuxTimerSlackSet)
@@ -210,10 +285,10 @@ public static unsafe partial class HostPreciseClock
             SetLinuxTimerSlack();
         }
 
-        long deadlineNanoseconds;
+        long deadline;
         if (LinuxAbsoluteMapping)
         {
-            deadlineNanoseconds = deadlineTimestamp;
+            deadline = deadlineTimestamp;
         }
         else
         {
@@ -223,27 +298,61 @@ public static unsafe partial class HostPreciseClock
                 return;
             }
 
-            deadlineNanoseconds = LinuxMonotonicNanoseconds() +
+            deadline = LinuxMonotonicNanoseconds() +
                 (long)((decimal)remaining * 1_000_000_000m / Stopwatch.Frequency);
         }
 
-        var spin = LinuxFinalSpinNanoseconds;
-        var sleepTo = spin > 0 ? deadlineNanoseconds - spin : deadlineNanoseconds;
-        var request = new Timespec { Seconds = sleepTo / 1_000_000_000L, Nanoseconds = sleepTo % 1_000_000_000L };
-        // clock_nanosleep returns the error number itself; EINTR (a signal landed, e.g. the guest
-        // thread's own signal handlers) resumes toward the same absolute deadline.
-        while (clock_nanosleep(LinuxClockMonotonic, LinuxTimerAbstime, ref request, IntPtr.Zero) == LinuxEintr)
+        var fixedSpin = LinuxFixedSpinNanoseconds;
+        if (fixedSpin >= 0)
         {
+            if (fixedSpin == 0)
+            {
+                LinuxSleepAbsolute(deadline);
+            }
+            else
+            {
+                LinuxSleepAbsolute(deadline - fixedSpin);
+                LinuxSpinUntil(deadline);
+            }
+
+            return;
         }
 
-        if (spin > 0)
+        // Adaptive early wake: a timer wakeup lands late by this thread's recent overshoot, so ask for
+        // it early (capped to a fraction of the sleep) and finish with a short spin.
+        var left = deadline - LinuxNowNanoseconds();
+        if (left <= 0)
         {
-            var end = LinuxAbsoluteMapping ? deadlineTimestamp : deadlineNanoseconds;
-            while ((LinuxAbsoluteMapping ? Stopwatch.GetTimestamp() : LinuxMonotonicNanoseconds()) < end)
-            {
-                Thread.SpinWait(8);
-            }
+            return;
         }
+
+        var fraction = LinuxSpinFraction;
+        if (fraction <= 0)
+        {
+            LinuxSleepAbsolute(deadline);
+            return;
+        }
+
+        if (left < 2 * EarlyWakeMinNanoseconds)
+        {
+            LinuxSpinUntil(deadline);
+            return;
+        }
+
+        var estimates = _earlyWakeNanoseconds ??= [0, 0, 0];
+        var bucket = left < 400_000 ? 0 : left < 2_000_000 ? 1 : 2;
+        var estimate = estimates[bucket];
+        if (estimate == 0)
+        {
+            estimate = EarlyWakeSeedNanoseconds;
+        }
+
+        var target = deadline - EarlyWakeMargin(estimate, left, fraction);
+        LinuxSleepAbsolute(target);
+        // The lateness is observed against the target, so the estimate stays a property of the host
+        // however much margin the cap allowed this time.
+        estimates[bucket] = UpdateEarlyWake(estimate, LinuxNowNanoseconds() - target);
+        LinuxSpinUntil(deadline);
     }
 
     /// <summary>Blocks for <paramref name="microseconds"/>.</summary>
