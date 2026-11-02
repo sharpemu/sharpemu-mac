@@ -52,6 +52,13 @@ public sealed class AgcIndirectPatchTests
         _ => AgcExports.SetUcRegIndirectPatchAddRegisters,
     };
 
+    private static Func<CpuContext, int> SetNumRegisters(string space) => space switch
+    {
+        "cx" => AgcExports.SetCxRegIndirectPatchSetNumRegisters,
+        "sh" => AgcExports.SetShRegIndirectPatchSetNumRegisters,
+        _ => AgcExports.SetUcRegIndirectPatchSetNumRegisters,
+    };
+
     private static Func<CpuContext, int> SetAddress(string space) => space switch
     {
         "cx" => AgcExports.SetCxRegIndirectPatchSetAddress,
@@ -186,7 +193,7 @@ public sealed class AgcIndirectPatchTests
         var ctx = new CpuContext(memory, Generation.Gen5);
         ctx[CpuRegister.Rsi] = 1;
 
-        foreach (var patch in new[] { AddRegisters(space), SetAddress(space) })
+        foreach (var patch in new[] { AddRegisters(space), SetAddress(space), SetNumRegisters(space) })
         {
             ctx[CpuRegister.Rdi] = 0;
             Assert.Equal(
@@ -201,15 +208,16 @@ public sealed class AgcIndirectPatchTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void SetRegisterCount_ReplacesOnlyTheCountField(bool modern)
+    [MemberData(nameof(Layouts))]
+    public void SetRegisterCount_ReplacesOnlyTheCountField(
+        string space,
+        uint opcode,
+        uint register,
+        bool modern)
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
         var ctx = new CpuContext(memory, Generation.Gen5);
-        var header = modern
-            ? Pm4Header(5, ItSetContextRegIndirect)
-            : Pm4Header(4, ItNop, RCxRegsIndirect);
+        var header = modern ? Pm4Header(5, opcode) : Pm4Header(4, opcode, register);
         var countOffset = modern ? 16UL : 4UL;
         WriteUInt32(memory, CommandAddress, header);
         WriteUInt32(memory, CommandAddress + countOffset, modern ? 0xCAFE_3FFFu : 0xFFFF_FFFFu);
@@ -217,12 +225,30 @@ public sealed class AgcIndirectPatchTests
         ctx[CpuRegister.Rdi] = CommandAddress;
         ctx[CpuRegister.Rsi] = 0x21;
 
-        Assert.Equal(
-            (int)OrbisGen2Result.ORBIS_GEN2_OK,
-            AgcExports.SetCxRegIndirectPatchSetNumRegisters(ctx));
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, SetNumRegisters(space)(ctx));
+        Assert.Equal(0UL, ctx[CpuRegister.Rax]);
         Assert.Equal(
             modern ? 0xCAFE_0021u : 0x21u,
             ReadUInt32(memory, CommandAddress + countOffset));
+    }
+
+    // Each space's SetNumRegisters refuses the other spaces' packets, as AddRegisters does.
+    [Theory]
+    [InlineData("cx", ItSetShRegIndirect)]
+    [InlineData("sh", ItSetUconfigRegIndirect)]
+    [InlineData("uc", ItSetContextRegIndirect)]
+    public void SetRegisterCount_RejectsAPacketFromADifferentRegisterSpace(string space, uint opcode)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteUInt32(memory, CommandAddress, Pm4Header(5, opcode));
+        WriteUInt32(memory, CommandAddress + 16, 4u);
+
+        ctx[CpuRegister.Rdi] = CommandAddress;
+        ctx[CpuRegister.Rsi] = 9;
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, SetNumRegisters(space)(ctx));
+        Assert.Equal(4u, ReadUInt32(memory, CommandAddress + 16));
     }
 
     [Fact]

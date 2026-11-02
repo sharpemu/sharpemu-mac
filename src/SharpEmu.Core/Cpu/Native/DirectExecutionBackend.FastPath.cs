@@ -65,6 +65,9 @@ public sealed unsafe partial class DirectExecutionBackend
 	// SHARPEMU_AGC_PACKET_STUBS=0 keeps the sceAgc command builders on the managed exports.
 	private static readonly bool AgcPacketStubsEnabled = SharpEmu.Libs.Agc.AgcExports.PacketStubsEnabled;
 
+	// SHARPEMU_AGC_PATCH_STUBS=0 keeps the register-indirect patchers on the managed exports.
+	private static readonly bool AgcPatchStubsEnabled = SharpEmu.Libs.Agc.AgcExports.PatchStubsEnabled;
+
 	// SHARPEMU_HLE_FAST_CLOCK=0 keeps the clock reads on the managed exports.
 	private static readonly bool ClockStubsEnabled =
 		!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_HLE_FAST_CLOCK"), "0", StringComparison.Ordinal);
@@ -237,10 +240,34 @@ public sealed unsafe partial class DirectExecutionBackend
 		KernelGetProcessTimeNid => GuestFastPathStub.ProcessTimeMicroseconds,
 		_ => IsConstantZeroImport(nid)
 			? GuestFastPathStub.ConstantZero
-			: SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out _)
+			: SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out _) ||
+				SharpEmu.Libs.Agc.AgcExports.TryGetRegIndirectPatchStub(nid, out _)
 					? GuestFastPathStub.AgcPacket
 					: GuestFastPathStub.None,
 	};
+
+	/// <summary>
+	/// Whether an <see cref="GuestFastPathStub.AgcPacket"/> import may get its native stub, by the two switches
+	/// (<c>SHARPEMU_AGC_PACKET_STUBS</c> covers every AGC stub, <c>SHARPEMU_AGC_PATCH_STUBS</c> the
+	/// register-indirect patchers) and, for a patcher, whether its export resolves in
+	/// <paramref name="exports"/> the way the import's slow path looks it up. A patcher stub stands in
+	/// for the export's success path and declines into it for everything else, which only matches the
+	/// import when the export is there: without it the import answers NOT_FOUND and writes nothing.
+	/// </summary>
+	internal static bool IsAgcStubAllowed(string nid, bool packetStubsEnabled, bool patchStubsEnabled, IModuleManager exports)
+	{
+		if (!packetStubsEnabled)
+		{
+			return false;
+		}
+
+		if (SharpEmu.Libs.Agc.AgcExports.TryGetRegIndirectPatchStub(nid, out _))
+		{
+			return patchStubsEnabled && exports.TryGetExport(nid, out _);
+		}
+
+		return SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out _);
+	}
 
 	/// <summary>
 	/// Builds the native stub for <paramref name="nid"/>, falling back to
@@ -287,12 +314,11 @@ public sealed unsafe partial class DirectExecutionBackend
 			// Stores into the command buffer from guest-side code, so the write watch (which
 			// inspects managed writes only) and any mode that has to see every builder call
 			// (import and AGC tracing) rule it out; it needs no per-thread block.
-			if (!AgcPacketStubsEnabled ||
-				!NativeImportThunksEnabled ||
+			if (!NativeImportThunksEnabled ||
 				!_nativeConstantThunksAllowed ||
 				GuestWriteWatch.Armed ||
 				SharpEmu.Libs.Agc.AgcExports.PacketStubsBlockedByTracing ||
-				!(SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out _)))
+				!IsAgcStubAllowed(nid, AgcPacketStubsEnabled, AgcPatchStubsEnabled, _moduleManager))
 			{
 				return false;
 			}
@@ -305,7 +331,9 @@ public sealed unsafe partial class DirectExecutionBackend
 		List<byte> code;
 		if (kind == GuestFastPathStub.AgcPacket)
 		{
-			code = SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out var variableKind)
+			code = SharpEmu.Libs.Agc.AgcExports.TryGetRegIndirectPatchStub(nid, out var patchSpec)
+				? EmitGuestAgcRegIndirectPatchStub(patchSpec, fallbackTrampoline)
+				: SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out var variableKind)
 				? EmitGuestAgcVariablePacketStub(variableKind, fallbackTrampoline)
 				: EmitGuestAgcPacketStub(SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out var packetSpec) ? packetSpec : throw new InvalidOperationException(nid), fallbackTrampoline);
 		}
@@ -939,6 +967,117 @@ public sealed unsafe partial class DirectExecutionBackend
 			}
 		}
 
+		Emit(0xFF, 0x25, 0x00, 0x00, 0x00, 0x00);
+		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
+		return code;
+	}
+
+	/// <summary>
+	/// A register-indirect patcher (sceAgcSet{Cx,Sh,Uc}RegIndirectPatch{SetAddress,SetNumRegisters,AddRegisters})
+	/// as guest-side code, on the same terms as <see cref="EmitGuestAgcPacketStub"/>: with the packet in
+	/// RDI and the argument in RSI it patches a SET_*_REG_INDIRECT packet of its space in place and returns
+	/// 0, and declines (jumps to the import's trampoline with every argument register intact, nothing
+	/// written) for every case in which the export would not just do that:
+	/// <list type="bullet">
+	/// <item>a packet pointer below 0x10000 (null included) or at or above 2^47;</item>
+	/// <item>a packet whose 20 bytes cross a 4 KiB page, so the export's partial-write and
+	/// unreadable-tail answers stay its own: the stub reads and writes only the page it read the
+	/// header from;</item>
+	/// <item>a header that, masked to its length and opcode, is not the space's 5-dword packet (another
+	/// space, another length, the legacy NOP layout, anything else);</item>
+	/// <item>SetAddress with a null address.</item>
+	/// </list>
+	/// A packet pointer in range whose page is not mapped faults here where the export would answer
+	/// MEMORY_FAULT, as the builder stubs fault on such a buffer pointer. Only RAX, R10, R11 and the flags
+	/// change, all caller-saved.
+	/// </summary>
+	internal static List<byte> EmitGuestAgcRegIndirectPatchStub(SharpEmu.Libs.Agc.AgcRegIndirectPatchStubSpec spec, nint fallbackTrampoline)
+	{
+		const byte AddressOffset = 4;
+		const byte CountOffset = 16;
+		const uint PacketBytes = 20;
+		var code = new List<byte>(128);
+		var slowPathFixups = new List<int>();
+		void Emit(params byte[] bytes) => code.AddRange(bytes);
+		void EmitImm32(uint value) => code.AddRange(BitConverter.GetBytes(value));
+		void EmitBranchToSlowPath(byte shortOpcode)
+		{
+			Emit(0x0F, (byte)(shortOpcode + 0x10), 0, 0, 0, 0);
+			slowPathFixups.Add(code.Count - 4);
+		}
+
+		Emit(0x48, 0x81, 0xFF); EmitImm32(0x10000);                   // cmp rdi, 0x10000
+		EmitBranchToSlowPath(0x72);                                     // jb slow: null or a low address
+		Emit(0x48, 0x89, 0xF8);                                         // mov rax, rdi
+		Emit(0x48, 0xC1, 0xE8, 0x2F);                                   // shr rax, 47
+		EmitBranchToSlowPath(0x75);                                     // jnz slow: not a user address
+		Emit(0x89, 0xF8);                                               // mov eax, edi
+		Emit(0x25); EmitImm32(0xFFF);                                   // and eax, 0xFFF
+		Emit(0x3D); EmitImm32(0x1000 - PacketBytes);                    // cmp eax, 0x1000 - 20
+		EmitBranchToSlowPath(0x77);                                     // ja slow: the packet crosses a page
+		if (spec.Kind == SharpEmu.Libs.Agc.AgcRegIndirectPatchStub.SetAddress)
+		{
+			Emit(0x48, 0x85, 0xF6);                                     // test rsi, rsi
+			EmitBranchToSlowPath(0x74);                                 // jz slow: a null address is the export's to refuse
+		}
+
+		Emit(0x8B, 0x07);                                               // mov eax, [rdi]           header
+		Emit(0x25); EmitImm32(SharpEmu.Libs.Agc.AgcExports.RegIndirectPatchHeaderMask); // and eax, length|opcode
+		Emit(0x3D); EmitImm32(spec.Header & SharpEmu.Libs.Agc.AgcExports.RegIndirectPatchHeaderMask); // cmp eax, the space's
+		EmitBranchToSlowPath(0x75);                                     // jne slow: not this space's 5-dword packet
+
+		switch (spec.Kind)
+		{
+			case SharpEmu.Libs.Agc.AgcRegIndirectPatchStub.SetAddress:
+				// [+4] = ([+4] & 3) | (address & ~3), then [+8] = address >> 32.
+				Emit(0x44, 0x8B, 0x57, AddressOffset);                  // mov r10d, [rdi+4]
+				Emit(0x41, 0x83, 0xE2, 0x03);                           // and r10d, 3
+				Emit(0x41, 0x89, 0xF3);                                 // mov r11d, esi
+				Emit(0x41, 0x83, 0xE3, 0xFC);                           // and r11d, 0xFFFFFFFC
+				Emit(0x45, 0x09, 0xDA);                                 // or r10d, r11d
+				Emit(0x44, 0x89, 0x57, AddressOffset);                  // mov [rdi+4], r10d
+				Emit(0x49, 0x89, 0xF3);                                 // mov r11, rsi
+				Emit(0x49, 0xC1, 0xEB, 0x20);                           // shr r11, 32
+				Emit(0x44, 0x89, 0x5F, AddressOffset + 4);              // mov [rdi+8], r11d
+				break;
+
+			case SharpEmu.Libs.Agc.AgcRegIndirectPatchStub.SetNumRegisters:
+				// [+16] = ([+16] & ~mask) | (count & mask).
+				Emit(0x44, 0x8B, 0x57, CountOffset);                    // mov r10d, [rdi+16]
+				Emit(0x41, 0x81, 0xE2); EmitImm32(~SharpEmu.Libs.Agc.AgcExports.RegIndirectPatchCountMask); // and r10d, ~mask
+				Emit(0x41, 0x89, 0xF3);                                 // mov r11d, esi
+				Emit(0x41, 0x81, 0xE3); EmitImm32(SharpEmu.Libs.Agc.AgcExports.RegIndirectPatchCountMask);  // and r11d, mask
+				Emit(0x45, 0x09, 0xDA);                                 // or r10d, r11d
+				Emit(0x44, 0x89, 0x57, CountOffset);                    // mov [rdi+16], r10d
+				break;
+
+			case SharpEmu.Libs.Agc.AgcRegIndirectPatchStub.AddRegisters:
+				// [+16] = ([+16] & ~mask) | (([+16] + count) & mask): the sum wraps inside the field.
+				Emit(0x44, 0x8B, 0x57, CountOffset);                    // mov r10d, [rdi+16]
+				Emit(0x45, 0x8D, 0x1C, 0x32);                           // lea r11d, [r10 + rsi]
+				Emit(0x41, 0x81, 0xE3); EmitImm32(SharpEmu.Libs.Agc.AgcExports.RegIndirectPatchCountMask);  // and r11d, mask
+				Emit(0x41, 0x81, 0xE2); EmitImm32(~SharpEmu.Libs.Agc.AgcExports.RegIndirectPatchCountMask); // and r10d, ~mask
+				Emit(0x45, 0x09, 0xDA);                                 // or r10d, r11d
+				Emit(0x44, 0x89, 0x57, CountOffset);                    // mov [rdi+16], r10d
+				break;
+
+			default:
+				throw new ArgumentOutOfRangeException(nameof(spec), spec.Kind, "Unknown register-indirect patch stub.");
+		}
+
+		Emit(0x31, 0xC0);                                               // xor eax, eax
+		Emit(0xC3);                                                     // ret
+
+		foreach (var fixup in slowPathFixups)
+		{
+			var delta = BitConverter.GetBytes(code.Count - (fixup + 4));
+			for (var i = 0; i < 4; i++)
+			{
+				code[fixup + i] = delta[i];
+			}
+		}
+
+		// jmp qword [rip+0] with the absolute trampoline address after it.
 		Emit(0xFF, 0x25, 0x00, 0x00, 0x00, 0x00);
 		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
 		return code;

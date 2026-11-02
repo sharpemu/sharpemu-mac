@@ -131,6 +131,37 @@ public static partial class AgcExports
     private const string CbSetShRegisterRangeDirectNid = "n2fD4A+pb+g";
     private const string CbSetShRegistersDirectNid = "UZbQjYAwwXM";
 
+    // SHARPEMU_AGC_PATCH_STUBS=0 keeps the sceAgcSet{Cx,Sh,Uc}RegIndirectPatch* patchers on the managed
+    // exports (SHARPEMU_AGC_PACKET_STUBS=0 does too).
+    public static readonly bool PatchStubsEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_AGC_PATCH_STUBS") != "0";
+
+    /// <summary>The header bits the patchers test (length and opcode); the stub masks the header with this.</summary>
+    public const uint RegIndirectPatchHeaderMask = 0x3FFF_FF00u;
+
+    /// <summary>The count field of a SET_*_REG_INDIRECT packet (its fifth dword).</summary>
+    public const uint RegIndirectPatchCountMask = 0x3FFFu;
+
+    // The register-indirect patchers, by NID. Each runs SetIndirectPatchAddress /
+    // SetIndirectPatchRegisterCount / AddIndirectPatchRegisters on the 5-dword packet the
+    // sceAgcDcbSet*RegistersIndirect builders write (AgcPacketStubTests runs each stub against its export).
+    private static readonly Dictionary<string, AgcRegIndirectPatchStubSpec> RegIndirectPatchStubSpecs = new()
+    {
+        ["vcmNN+AAXnY"] = new(AgcRegIndirectPatchStub.SetAddress, Pm4(5, ItSetContextRegIndirect, 0)),       // sceAgcSetCxRegIndirectPatchSetAddress
+        ["Qrj4c+61z4A"] = new(AgcRegIndirectPatchStub.SetAddress, Pm4(5, ItSetShRegIndirect, 0)),            // sceAgcSetShRegIndirectPatchSetAddress
+        ["6lNcCp+fxi4"] = new(AgcRegIndirectPatchStub.SetAddress, Pm4(5, ItSetUconfigRegIndirect, 0)),       // sceAgcSetUcRegIndirectPatchSetAddress
+        ["whb1RL7K4Ss"] = new(AgcRegIndirectPatchStub.SetNumRegisters, Pm4(5, ItSetContextRegIndirect, 0)),  // sceAgcSetCxRegIndirectPatchSetNumRegisters
+        ["nCUgItdN2ms"] = new(AgcRegIndirectPatchStub.SetNumRegisters, Pm4(5, ItSetShRegIndirect, 0)),       // sceAgcSetShRegIndirectPatchSetNumRegisters
+        ["fRG-JOH5+sI"] = new(AgcRegIndirectPatchStub.SetNumRegisters, Pm4(5, ItSetUconfigRegIndirect, 0)),  // sceAgcSetUcRegIndirectPatchSetNumRegisters
+        ["d-6uF9sZDIU"] = new(AgcRegIndirectPatchStub.AddRegisters, Pm4(5, ItSetContextRegIndirect, 0)),     // sceAgcSetCxRegIndirectPatchAddRegisters
+        ["z2duB-hHQSM"] = new(AgcRegIndirectPatchStub.AddRegisters, Pm4(5, ItSetShRegIndirect, 0)),          // sceAgcSetShRegIndirectPatchAddRegisters
+        ["vRoArM9zaIk"] = new(AgcRegIndirectPatchStub.AddRegisters, Pm4(5, ItSetUconfigRegIndirect, 0)),     // sceAgcSetUcRegIndirectPatchAddRegisters
+    };
+
+    /// <summary>The native stub for a register-indirect patcher import, when it has one.</summary>
+    public static bool TryGetRegIndirectPatchStub(string nid, out AgcRegIndirectPatchStubSpec spec) =>
+        RegIndirectPatchStubSpecs.TryGetValue(nid, out spec);
+
     /// <summary>The variable-length packet stub for a builder import, when it has one.</summary>
     public static bool TryGetVariablePacketStub(string nid, out AgcVariablePacketStub kind)
     {
@@ -157,3 +188,25 @@ public enum AgcVariablePacketStub
     /// <summary>sceAgcCbSetShRegistersDirect(cb, (offset, value) pairs, count) for one run of consecutive ascending offsets.</summary>
     ShRegisters,
 }
+
+/// <summary>What a register-indirect patcher does to the packet in RDI, given the argument in RSI.</summary>
+public enum AgcRegIndirectPatchStub : byte
+{
+    /// <summary>Set*RegIndirectPatchSetAddress(packet, registers): address dwords at +4 (low two bits kept) and +8.</summary>
+    SetAddress,
+
+    /// <summary>Set*RegIndirectPatchSetNumRegisters(packet, count): the count field at +16.</summary>
+    SetNumRegisters,
+
+    /// <summary>Set*RegIndirectPatchAddRegisters(packet, count): count added into the field at +16, wrapping inside it.</summary>
+    AddRegisters,
+}
+
+/// <summary>
+/// A register-indirect patcher as native code: it patches a SET_*_REG_INDIRECT packet whose header,
+/// masked with <c>AgcExports.RegIndirectPatchHeaderMask</c>, equals <paramref name="Header"/>'s (length 5
+/// and the space's opcode), and declines (the export runs) for anything else: a null or out-of-range
+/// packet pointer, a packet that crosses a page, the legacy NOP layout, a null address.
+/// </summary>
+/// <param name="Header">The space's SET_*_REG_INDIRECT header as the builder writes it.</param>
+public readonly record struct AgcRegIndirectPatchStubSpec(AgcRegIndirectPatchStub Kind, uint Header);
