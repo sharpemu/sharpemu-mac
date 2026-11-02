@@ -57,7 +57,12 @@ public sealed class SplitGpuSession : IDisposable
     private readonly ISplitGuestSide _guest;
     private readonly IDisposable? _process;
     private readonly IDisposable? _memoryServer;
-    private readonly BlockingCollection<Action> _events = new();
+    // SHARPEMU_GPU_SPLIT_EVENT_SPIN=1 takes the events from a BlockingCollection again, as before.
+    private static readonly bool SpinEvents =
+        Environment.GetEnvironmentVariable("SHARPEMU_GPU_SPLIT_EVENT_SPIN") == "1";
+
+    private readonly SplitEventQueue _events = new();
+    private readonly BlockingCollection<Action>? _spinEvents = SpinEvents ? new() : null;
     private readonly List<SharpEmu.HLE.Host.HostHelperThread> _threads = new();
     private readonly ManualResetEventSlim _ready = new(false);
     private int _readyStatus = GpuSplitStatus.NotReady;
@@ -511,28 +516,51 @@ public sealed class SplitGpuSession : IDisposable
 
     private void Post(Action work)
     {
-        try
+        if (_spinEvents is not null)
         {
-            _events.Add(work);
+            try
+            {
+                _spinEvents.Add(work);
+            }
+            catch (InvalidOperationException)
+            {
+                // Stopping: the guest no longer takes events.
+            }
+
+            return;
         }
-        catch (InvalidOperationException)
-        {
-            // Stopping: the guest no longer takes events.
-        }
+
+        // Stopping: the guest no longer takes events.
+        _ = _events.Post(work);
     }
 
     private void RunEvents()
     {
-        foreach (var work in _events.GetConsumingEnumerable())
+        if (_spinEvents is not null)
         {
-            try
+            foreach (var work in _spinEvents.GetConsumingEnumerable())
             {
-                work();
+                RunEvent(work);
             }
-            catch (Exception exception)
-            {
-                Console.Error.WriteLine($"[GPU-SPLIT][ERROR] An event from the GPU process failed: {exception}");
-            }
+
+            return;
+        }
+
+        while (_events.Take(out var work))
+        {
+            RunEvent(work);
+        }
+    }
+
+    private static void RunEvent(Action work)
+    {
+        try
+        {
+            work();
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[GPU-SPLIT][ERROR] An event from the GPU process failed: {exception}");
         }
     }
 
@@ -759,7 +787,8 @@ public sealed class SplitGpuSession : IDisposable
         }
 
         Writer.Close();
-        _events.CompleteAdding();
+        _events.Complete();
+        _spinEvents?.CompleteAdding();
         _channel.WakeAll();
         // The process's teardown unmaps the region: these threads must be off it first.
         foreach (var thread in _threads)
