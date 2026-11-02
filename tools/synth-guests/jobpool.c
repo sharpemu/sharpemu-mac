@@ -17,7 +17,15 @@
  * condition stays false for a whole frame), then waits for the ready jobs with DS's non-worker WaitForCounter
  * idiom (pause + usleep(1) per 1000 polls) and sleeps out the rest of the frame.
  *
- * Knobs (-D): WORKERS PARKED PRODUCER_HZ JOB_US FRAME_HZ AFFINITY PIN_WORKERS FORK DL_CHECK LIGHT; see README.md.
+ * NAP=1 (default) adds DS's shipped idle nap (src/SharpEmu.Core/Loader/DemonsSoulsIdleNapPatch.cs), same hooks, same arguments:
+ *   T2  after every RunJob: stamp the worker's slot [S+0xF00+8w] with the TSC at job end;
+ *   T1  around ChooseJobToRun (its call in WorkerMain): when no job was found, T3 with r12 = the worker's slot;
+ *   T3  replaces WaitForJobs' TSC read (and is what T1 calls): rdtsc; if now - slot >= threshold, call the private import
+ *       SharpEmuNap(NAP_US) (a host usleep); return the pre-nap TSC either way.
+ * The patch computes threshold = NAP_IDLE_US * sceKernelGetTscFrequency() at load time (the loader reads SHARPEMU_DS_IDLE_NAP_IDLE_US /
+ * SHARPEMU_DS_IDLE_NAP_US, only for the DS title), so here they are -D knobs with the same defaults: -DNAP_IDLE_US= -DNAP_US=.
+ *
+ * Knobs (-D): WORKERS PARKED PRODUCER_HZ JOB_US FRAME_HZ AFFINITY PIN_WORKERS FORK DL_CHECK NAP NAP_IDLE_US NAP_US LIGHT; see README.md.
  */
 #include "common.h"
 
@@ -49,6 +57,15 @@
 #endif
 #ifndef FORK
 #define FORK 0 /* children a job pushes on its own deque (worker-side submit path) */
+#endif
+#ifndef NAP
+#define NAP 1 /* DS's own idle nap (DemonsSoulsIdleNapPatch): on by default in DS; NAP=0 models SHARPEMU_DS_IDLE_NAP=0 */
+#endif
+#ifndef NAP_IDLE_US
+#define NAP_IDLE_US 500 /* SHARPEMU_DS_IDLE_NAP_IDLE_US default: nap once idle this long since the worker's last job */
+#endif
+#ifndef NAP_US
+#define NAP_US 250 /* SHARPEMU_DS_IDLE_NAP_US default: the nap length passed to SharpEmuNap */
 #endif
 #ifndef DL_CHECK
 #define DL_CHECK 1 /* 0 disables the 2 s dlLock/CheckForDeadlock path in WaitForJobs */
@@ -136,11 +153,13 @@ static i64 g_park_gen[PARKED > 0 ? PARKED : 1];
 static volatile int g_go;
 
 typedef struct Wstat {
-    u64 polls, jobs, pred_calls, pauses, dl_checks, forks, stolen;
+    u64 pauses; /* first: the asm and t3_nap find the Wstat from &pauses */
+    u64 polls, jobs, pred_calls, dl_checks, forks, stolen;
+    u64 naps, nap_ticks, nap_max_ticks; /* SharpEmuNap calls, total and longest guest-observed time in them */
     Hist lat;  /* enqueue -> start, ready jobs */
     Hist plat; /* release -> start, parked jobs */
     u64 work_ticks; /* CPU ticks spent in job bodies (spin_cpu), excluding descheduled gaps */
-} Wstat; /* 4 KiB each, so the hot counters of neighbouring workers never share a line */
+} Wstat; /* ~20 KiB each (the histograms), so the hot counters of neighbouring workers never share a line */
 static Wstat g_ws[WORKERS];
 static Wstat g_snap[WORKERS];
 
@@ -241,6 +260,25 @@ HIDDEN void dl_check(Sched *S, int w) /* locked CheckForDeadlock (cheap form): s
 }
 HIDDEN u64 g_two_tscf;
 
+/* ---- DS's idle nap (see the header comment) -------------------------------------------------------------- */
+extern void SharpEmuNap(u32 microseconds) __asm__("SharpEmuNap"); /* private SharpEmu import (IdleNapExports.Nid) */
+static i64 g_nap_thr; /* ticks: NAP_IDLE_US * sceKernelGetTscFrequency(), clamped to int32 like the patch's imm32 */
+
+/* T3: rdtsc; nap when now - slot >= threshold; returns the pre-nap TSC. `pauses` is the calling worker's &Wstat.pauses. */
+HIDDEN u64 t3_nap(u64 slot, u64 *pauses)
+{
+    u64 now = rdtsc();
+    if ((i64)(now - slot) >= g_nap_thr) {
+        Wstat *st = (Wstat *)((char *)pauses - __builtin_offsetof(Wstat, pauses));
+        SharpEmuNap(NAP_US);
+        u64 d = rdtsc() - now;
+        st->naps++;
+        st->nap_ticks += d;
+        if (d > st->nap_max_ticks) st->nap_max_ticks = d;
+    }
+    return now;
+}
+
 /* Job *scan_slots(Group *G, u64 offP, u64 offL, u32 wbit, Sched *S, u32 kind)
  * 0x86ee12..0x86eeb7 (A) / 0x86eecd..0x86ef78 (B): for i in 0..255: if P[i] { lock cmpxchg L[i] 1->2; if pred(job) take it
  * (slot=0, xchg L[i],0) else xchg L[i],1 }. The cmpxchg's backward `jne` closes a 36 B call-free loop. */
@@ -248,6 +286,12 @@ HIDDEN Job *scan_slots(Group *G, u64 offP, u64 offL, u32 wbit, Sched *S, u32 kin
 /* void wait_for_jobs(Sched *S, int w, u64 *pauses) : 0x86eac0..0x86ec64 */
 HIDDEN void wait_for_jobs(Sched *S, int w, u64 *pauses);
 
+#if NAP
+/* T3 replaces WaitForJobs' TSC read exactly as in DS: r12 already holds the worker's slot. */
+#define WFJ_RDTSC "  mov rdi,r12\n  mov rsi,r13\n  call t3_nap\n"
+#else
+#define WFJ_RDTSC "  call rdtsc_call\n"
+#endif
 __asm__(
     ".intel_syntax noprefix\n"
     ".text\n"
@@ -359,7 +403,7 @@ __asm__(
     "  pause\n"                         /* the only pause on the idle path: a call follows within the window */
     "  inc qword ptr [r13]\n"
     "  mov r12,qword ptr [rbx+r14*8+0xf00]\n"
-    "  call rdtsc_call\n"
+    WFJ_RDTSC
     "  sub rax,r12\n"
     "  test rax,rax\n"
     "  jle 1b\n"
@@ -487,8 +531,16 @@ static void *worker_main(void *arg)
         if (S->exit || g_stop) return NULL;
         Job *j = NULL;
         st->polls++;
-        if (!choose(S, w, &j)) continue; /* <- the loop that eats the CPU while a parked job keeps counts > 0 */
+        if (!choose(S, w, &j)) { /* <- the loop that eats the CPU while a parked job keeps counts > 0 */
+#if NAP
+            t3_nap(S->lastJobTsc[w], &st->pauses); /* T1: no job: nap if this worker has been idle >= the threshold */
+#endif
+            continue;
+        }
         run_job(S, w, j);
+#if NAP
+        S->lastJobTsc[w] = rdtsc(); /* T2: stamp the slot with the TSC at job end */
+#endif
     }
 }
 
@@ -533,22 +585,22 @@ static void emit_results(const Wstat *ws, u64 measured_us, u64 frames, const His
 {
     char buf[512];
     static Hist lat, plat; /* static: the entry thread's stack is only a few tens of KB */
-    u64 polls = 0, jobs = 0, pred = 0, pauses = 0, dl = 0, busy = 0, forks = 0, stolen = 0;
+    u64 polls = 0, jobs = 0, pred = 0, pauses = 0, dl = 0, busy = 0, forks = 0, stolen = 0, naps = 0, nap_ticks = 0;
     for (int w = 0; w < WORKERS; w++) {
         const Wstat *s = &ws[w];
         hist_emit_fields(buf, sizeof buf, "lat", &s->lat);
-        EMIT("jobpool.worker w=%d polls=%lu jobs=%lu pred_calls=%lu pauses=%lu dl_checks=%lu work_ns=%lu forks=%lu stolen=%lu %s",
-             w, s->polls, s->jobs, s->pred_calls, s->pauses, s->dl_checks, tsc_to_ns(s->work_ticks), s->forks, s->stolen, buf);
+        EMIT("jobpool.worker w=%d polls=%lu jobs=%lu pred_calls=%lu pauses=%lu dl_checks=%lu work_ns=%lu forks=%lu stolen=%lu naps=%lu nap_ns=%lu nap_max_ns=%lu %s",
+             w, s->polls, s->jobs, s->pred_calls, s->pauses, s->dl_checks, tsc_to_ns(s->work_ticks), s->forks, s->stolen, s->naps, tsc_to_ns(s->nap_ticks), tsc_to_ns(s->nap_max_ticks), buf);
         hist_merge(&lat, &s->lat); hist_merge(&plat, &s->plat);
         polls += s->polls; jobs += s->jobs; pred += s->pred_calls; pauses += s->pauses; dl += s->dl_checks;
-        busy += s->work_ticks; forks += s->forks; stolen += s->stolen;
+        busy += s->work_ticks; forks += s->forks; stolen += s->stolen; naps += s->naps; nap_ticks += s->nap_ticks;
     }
     char b1[256], b2[256], b3[256];
     hist_emit_fields(b1, sizeof b1, "lat", &lat);
     hist_emit_fields(b2, sizeof b2, "parked_lat", &plat);
     hist_emit_fields(b3, sizeof b3, "frame", frame_hist);
-    EMIT("jobpool.total measured_us=%lu polls=%lu jobs=%lu pred_calls=%lu pauses=%lu dl_checks=%lu work_ns=%lu forks=%lu stolen=%lu frames=%lu",
-         measured_us, polls, jobs, pred, pauses, dl, tsc_to_ns(busy), forks, stolen, frames);
+    EMIT("jobpool.total measured_us=%lu polls=%lu jobs=%lu pred_calls=%lu pauses=%lu dl_checks=%lu work_ns=%lu forks=%lu stolen=%lu frames=%lu naps=%lu nap_ns=%lu",
+         measured_us, polls, jobs, pred, pauses, dl, tsc_to_ns(busy), forks, stolen, frames, naps, tsc_to_ns(nap_ticks));
     for (int w = 0; w < WORKERS; w++) emit_gbusy("BPE JobWorkerThread CPU", w, ws[w].work_ticks, 0);
     emit_gbusy(NULL, 0, 0, main_pace_ticks);
     EMIT("jobpool.lat %s", b1);
@@ -560,8 +612,8 @@ int _start(void *args, void *exit_fn)
 {
     (void)args; (void)exit_fn;
     synth_init("jobpool");
-    EMIT("jobpool.cfg workers=%d parked=%d producer_hz=%d job_us=%d frame_hz=%d affinity=0x%x pin=%d fork=%d dl_check=%d group=%d duration_s=%d warmup_s=%d",
-         WORKERS, PARKED, PRODUCER_HZ, JOB_US, FRAME_HZ, (u32)AFFINITY, PIN_WORKERS, FORK, DL_CHECK, GROUP, DURATION_S, WARMUP_S);
+    EMIT("jobpool.cfg workers=%d parked=%d producer_hz=%d job_us=%d frame_hz=%d affinity=0x%x pin=%d fork=%d dl_check=%d nap=%d nap_idle_us=%d nap_us=%d group=%d duration_s=%d warmup_s=%d",
+         WORKERS, PARKED, PRODUCER_HZ, JOB_US, FRAME_HZ, (u32)AFFINITY, PIN_WORKERS, FORK, DL_CHECK, NAP, NAP_IDLE_US, NAP_US, GROUP, DURATION_S, WARMUP_S);
 
     Sched *S = &g_sched;
     S->ngroups = NG;
@@ -581,6 +633,10 @@ int _start(void *args, void *exit_fn)
     wait_identified(WORKERS);
     warmup_and_start();
     g_two_tscf = DL_CHECK ? 2 * g_tsc_hz : ~0ull; /* after the TSC calibration is final */
+    {   /* the patch's threshold: idle_us * the emulator's TSC frequency, clamped to an int32 immediate */
+        u64 t = muldiv_u64(NAP_IDLE_US, sceKernelGetTscFrequency(), 1000000ull);
+        g_nap_thr = t > 0x7fffffffull ? 0x7fffffff : (i64)t;
+    }
     g_go = 1;
 
     const u64 frame_tsc = ns_to_tsc(1000000000ull / FRAME_HZ);
