@@ -357,6 +357,7 @@ public sealed class SelfLoader : ISelfLoader
             ApplyTitleDisplayPatch(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId);
             EngineResolution.ApplyMainExecutable(virtualMemory, programHeaders, imageBase);
             ApplyDemonsSoulsIdleNap(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId, effectiveImportStubs);
+            ApplyDemonsSoulsConvars(applicationInfo.TitleId);
         }
 
         // After the patches above, which may add import stubs.
@@ -732,6 +733,20 @@ public sealed class SelfLoader : ISelfLoader
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             Console.Error.WriteLine($"[LOADER][WARN] idle job-worker nap patch failed: {exception.Message}");
+        }
+    }
+
+    /// <summary>Turns off Demon's Souls' index-buffer culling pass through its command-line file;
+    /// see <see cref="DemonsSoulsConvars"/>.</summary>
+    private static void ApplyDemonsSoulsConvars(string? titleId)
+    {
+        try
+        {
+            DemonsSoulsConvars.Apply(titleId);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] [DS] convar injection failed: {exception.Message}");
         }
     }
 

@@ -8,6 +8,8 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.FileSystem;
 
+// Mounts the process-wide App0Archive and replaces through the overlay: serialised with the other tests that do.
+[Collection("App0FileOverlay")]
 public sealed class App0ArchiveTests : IDisposable
 {
     private readonly string _directory = Directory.CreateTempSubdirectory("sharpemu-app0-").FullName;
