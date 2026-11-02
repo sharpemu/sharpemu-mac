@@ -3,10 +3,12 @@
 
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
+using Iced.Intel;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
 using Xunit;
+using static Iced.Intel.AssemblerRegisters;
 
 namespace SharpEmu.Libs.Tests.Loader;
 
@@ -49,9 +51,33 @@ public sealed unsafe class SpinLoopNapPatcherTests
         "11FFD0490FAE0C244889EC4D89EAEB0B4C891B4C8953084C895310415F415E415D415C415B415A415941585F5E5D5B5A" +
         "59589DC3";
 
-    private static byte[] FixedProbe(long delayTicks, ulong statsAddress) =>
+    // BuildLockedProbe(table 0x600000000000, generations 0x600000100000, threshold 500000, gap 50000,
+    // density 5000, 4 sites, usleep(250) at 0x1122334455667788, control 0x700000001000) as assembled
+    // before per-thread probe state existed (f2d75faa8).
+    private const string LockedProbeBeforePrivateState =
+        "9C50515253555657415041514152415341544155415641574989E349C1EB1A0F3148C1E2204809C24989D24C89D84825" +
+        "FF03000048B900001000006000004C8B0CC148C1E00848BB00000000006000004801C34C8B8424800000004C391B0F85" +
+        "F10000004C89D0482B43104C89531048B950C30000000000004839C80F83D30000004C3B4B280F85C900000048FF4318" +
+        "31C94883F9047323488B44CB404C39C0740F4885C0740548FFC1EBE64C8944CB4048FF84CB80000000EB0448FF43204C" +
+        "89D0482B430848B920A10700000000004839C80F82ED000000488B4B1848BA8813000000000000480FAFCA4839C1725F" +
+        "488B4B20488D0C894801C9483B4B18774E48BE0010000000700000F048FF46084D89D54889E54883E4F04881EC000200" +
+        "00480FAE04244989E44883EC20FCBFFA000000B9FA00000048B88877665544332211FFD0490FAE0C244889EC4D89EA4C" +
+        "895308EB0F4C891B4C8953084C8953104C894B2831C04889431848894320488943404889838000000048894348488983" +
+        "880000004889435048898390000000488943584889839800000048894360488983A000000048894368488983A8000000" +
+        "48894370488983B000000048894378488983B8000000415F415E415D415C415B415A415941585F5E5D5B5A59589DC3";
+
+    private static byte[] FixedProbe(long delayTicks, ulong statsAddress, bool sharedState = true) =>
         SpinNapRuntime.BuildProbeForTest(
-            0x0000600000000000UL, 500_000, 50_000, 0x1122334455667788UL, 250, 0x0000700000001000UL, delayTicks, statsAddress);
+            0x0000600000000000UL, 500_000, 50_000, 0x1122334455667788UL, 250, 0x0000700000001000UL, delayTicks, statsAddress,
+            sharedState);
+
+    private static byte[] FixedLockedProbe(bool sharedState) =>
+        SpinNapRuntime.BuildLockedProbeForTest(
+            0x0000600000000000UL, 0x0000600000100000UL, 500_000, 50_000, 5_000, 4, 0x1122334455667788UL, 250,
+            0x0000700000001000UL, sharedState);
+
+    private static bool Contains(byte[] code, string hex) =>
+        Convert.ToHexString(code).Contains(hex, StringComparison.Ordinal);
 
     private static int CountRdtsc(byte[] code)
     {
@@ -67,19 +93,99 @@ public sealed unsafe class SpinLoopNapPatcherTests
         return count;
     }
 
+    // SHARPEMU_SPIN_NAP_SHARED_STATE=1 restores the old keying: with no pause delay and no counters,
+    // both probes are the old bytes exactly.
     [Fact]
-    public void WithoutAPauseDelayTheProbeIsByteForByteUnchanged()
+    public void SharedStateProbesAreByteForByteTheOldOnes()
     {
-        Assert.Equal(ProbeBeforePauseDelay, Convert.ToHexString(FixedProbe(0, 0)));
+        Assert.Equal(ProbeBeforePauseDelay, Convert.ToHexString(FixedProbe(0, 0, sharedState: true)));
+        Assert.Equal(LockedProbeBeforePrivateState, Convert.ToHexString(FixedLockedProbe(sharedState: true)));
+        Assert.NotEqual(ProbeBeforePauseDelay, Convert.ToHexString(FixedProbe(0, 0, sharedState: false)));
+        Assert.NotEqual(LockedProbeBeforePrivateState, Convert.ToHexString(FixedLockedProbe(sharedState: false)));
     }
 
     [Fact]
-    public void OnlyADelayAddsAnRdtsc()
+    public void SharedStateIsOffByDefault()
     {
-        Assert.Equal(1, CountRdtsc(FixedProbe(0, 0)));
-        Assert.Equal(1, CountRdtsc(FixedProbe(0, 0x0000710000000000UL))); // counters alone: no second clock read
-        Assert.Equal(2, CountRdtsc(FixedProbe(19, 0)));
-        Assert.Equal(2, CountRdtsc(FixedProbe(19, 0x0000710000000000UL)));
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.SharedStateEnvironmentVariable, ""))
+        {
+            Assert.False(SpinNapRuntime.SharedStateEnabled);
+        }
+
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.SharedStateEnvironmentVariable, "1"))
+        {
+            Assert.True(SpinNapRuntime.SharedStateEnabled);
+        }
+    }
+
+    // The private probes key on the host thread pointer with one segment-relative load (absolute
+    // displacement, not RIP-relative) and never read rsp for it; the shared ones do `mov r11, rsp;
+    // shr r11, 26` and no segment load.
+    [Fact]
+    public void PrivateProbesKeyOnTheHostThreadPointer()
+    {
+        var threadKeyLoad =
+            OperatingSystem.IsWindows() ? "654C8B1C2530000000" :      // mov r11, gs:[0x30]
+            OperatingSystem.IsMacOS() ? "654C8B1C2500000000" :        // mov r11, gs:[0]
+            "644C8B1C2500000000";                                     // mov r11, fs:[0]
+        const string rspKey = "4989E349C1EB1A";                       // mov r11, rsp ; shr r11, 26
+        foreach (var probe in new[] { FixedProbe(0, 0, sharedState: false), FixedLockedProbe(sharedState: false) })
+        {
+            Assert.True(Contains(probe, threadKeyLoad));
+            Assert.False(Contains(probe, rspKey));
+        }
+
+        foreach (var probe in new[] { FixedProbe(0, 0, sharedState: true), FixedLockedProbe(sharedState: true) })
+        {
+            Assert.False(Contains(probe, threadKeyLoad));
+            Assert.True(Contains(probe, rspKey));
+        }
+    }
+
+    [Fact]
+    public void TheThreadKeyIsTheHostThreadPointer()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var mine = SpinNapRuntime.CurrentThreadKey();
+        Assert.NotEqual(0UL, mine);
+        Assert.Equal(mine, SpinNapRuntime.CurrentThreadKey());
+        ulong other = 0;
+        RunOnNewThread(() => other = SpinNapRuntime.CurrentThreadKey());
+        Assert.NotEqual(0UL, other);
+        Assert.NotEqual(mine, other);
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+        {
+            Assert.Equal((ulong)pthread_self(), mine);
+        }
+    }
+
+    [DllImport("libc")]
+    private static extern nint pthread_self();
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OnlyADelayAddsAnRdtsc(bool sharedState)
+    {
+        Assert.Equal(1, CountRdtsc(FixedProbe(0, 0, sharedState)));
+        Assert.Equal(1, CountRdtsc(FixedProbe(0, 0x0000710000000000UL, sharedState))); // counters alone: no second clock read
+        Assert.Equal(2, CountRdtsc(FixedProbe(19, 0, sharedState)));
+        Assert.Equal(2, CountRdtsc(FixedProbe(19, 0x0000710000000000UL, sharedState)));
+    }
+
+    // The delay loop's elapsed compare is unsigned (jb), so a TSC that steps back ends the wait
+    // instead of stretching it; the old signed jl is gone.
+    [Fact]
+    public void TheDelayLoopComparesUnsigned()
+    {
+        foreach (var sharedState in new[] { false, true })
+        {
+            var probe = FixedProbe(19, 0, sharedState);
+            Assert.True(Contains(probe, "4883F91372"));  // cmp rcx, 19 ; jb
+            Assert.False(Contains(probe, "4883F9137C")); // cmp rcx, 19 ; jl
+        }
     }
 
     [Theory]
@@ -205,6 +311,237 @@ public sealed unsafe class SpinLoopNapPatcherTests
         Assert.Equal(1, image.Result.PatchedSites);
         Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
         Assert.Equal(4, SpinNapRuntime.ReadPauseStats((byte*)stats).Entries);
+    }
+
+    // A delay longer than the streak gap must not read as a gap on every entry: the gap is measured
+    // from where the entry began, before its delay. With the gap measured after the delay (the old
+    // probe), every entry here restarted the streak and the probe never napped.
+    [Fact]
+    public void ADelayLongerThanTheGapStillNaps()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var tscFrequency = SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency;
+        var probe = SpinNapRuntime.BuildRunnableProbeForTest(
+            tscFrequency, SpinNapRuntime.AllocatePauseTableForTest(sharedState: false), sharedState: false,
+            thresholdTicks: SpinNapRuntime.TicksFor(200, tscFrequency),
+            gapTicks: SpinNapRuntime.TicksFor(20, tscFrequency),
+            delayTicks: SpinNapRuntime.TicksForNanoseconds(50_000, tscFrequency),
+            statsAddress: (ulong)SpinNapRuntime.AllocatePauseStatsForTest());
+        using var code = new ExecutableCode(probe);
+        var napsBefore = SpinNapRuntime.PauseNapCount;
+        var call = (delegate* unmanaged<void>)code.Address;
+        for (var index = 0; index < 40; index++)
+        {
+            call();
+        }
+
+        Assert.True(SpinNapRuntime.PauseNapCount - napsBefore >= 1, "a 50 us delay with a 20 us gap never napped");
+    }
+
+    // Every general register and the arithmetic, sign, overflow and direction flags come back as the
+    // guest left them, on the tracking path and through a nap, for each probe in each keying mode.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ProbesPreserveEveryRegisterAndFlag(bool sharedState)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var tscFrequency = SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency;
+        var probes = new[]
+        {
+            // Naps from the second call on (threshold 0, a gap that never breaks the streak).
+            SpinNapRuntime.BuildRunnableProbeForTest(
+                tscFrequency, SpinNapRuntime.AllocatePauseTableForTest(sharedState), sharedState, 0, int.MaxValue, 0, 0),
+            // The same with a delay and counters.
+            SpinNapRuntime.BuildRunnableProbeForTest(
+                tscFrequency, SpinNapRuntime.AllocatePauseTableForTest(sharedState), sharedState, 0, int.MaxValue,
+                SpinNapRuntime.TicksForNanoseconds(1_000, tscFrequency), (ulong)SpinNapRuntime.AllocatePauseStatsForTest()),
+            // Never naps.
+            SpinNapRuntime.BuildRunnableProbeForTest(
+                tscFrequency, SpinNapRuntime.AllocatePauseTableForTest(sharedState), sharedState, int.MaxValue, int.MaxValue, 0, 0),
+            // Naps on every hit after the first.
+            SpinNapRuntime.BuildNappingLockedProbeForTest(tscFrequency, sharedState),
+        };
+
+        foreach (var probe in probes)
+        {
+            using var code = new ExecutableCode(probe);
+            foreach (var flags in new ulong[] { RegisterHarness.AllTestedFlags, 0 })
+            {
+                for (var call = 0; call < 3; call++)
+                {
+                    var (registers, flagsOut) = RegisterHarness.Call(code.Address, flags);
+                    Assert.Equal(RegisterHarness.Inputs, registers);
+                    Assert.Equal(flags, flagsOut & RegisterHarness.AllTestedFlags);
+                }
+            }
+        }
+    }
+
+    // Two guest threads whose stacks are 16 KiB apart (two fibers from one pool, in the same 64 MiB
+    // bucket) keep separate pause streaks: the second thread's first pause starts its own streak and
+    // leaves the first's alone. With the shared state they are one streak: the second thread joins
+    // the first's, which is the old behaviour the off-switch restores.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TwoThreadsOnNeighbouringStacksKeepIndependentPauseStreaks(bool sharedState)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var tscFrequency = SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency;
+        var table = SpinNapRuntime.AllocatePauseTableForTest(sharedState);
+        using var probe = new ExecutableCode(SpinNapRuntime.BuildRunnableProbeForTest(
+            tscFrequency, table, sharedState, int.MaxValue, int.MaxValue, 0, 0));
+        using var stacks = new TwoStacks();
+        using var threads = new WorkerThreads();
+        var (threadA, threadB) = threads.TwoWithDistinctSlots(key => (nint)SpinNapRuntime.PauseSlot(table, false, key));
+
+        threadA.Run(() => CallOnStack(probe.Address, stacks.TopA));
+        var keyA = sharedState ? stacks.SharedKeyA : threadA.Key;
+        var slotA = (ulong*)SpinNapRuntime.PauseSlot(table, sharedState, keyA);
+        var epochA = slotA[1];
+        Assert.Equal(keyA, slotA[0]);
+        Assert.NotEqual(0UL, epochA);
+
+        threadB.Run(() => CallOnStack(probe.Address, stacks.TopB));
+        var keyB = sharedState ? stacks.SharedKeyB : threadB.Key;
+        var slotB = (ulong*)SpinNapRuntime.PauseSlot(table, sharedState, keyB);
+
+        if (sharedState)
+        {
+            Assert.Equal(keyA, keyB); // one bucket for both stacks
+            Assert.Equal(epochA, slotB[1]); // B joined A's streak
+            Assert.True(slotB[2] > epochA); // and moved its `last`
+            return;
+        }
+
+        Assert.True(slotA != slotB);
+        Assert.Equal(keyB, slotB[0]);
+        Assert.True(slotB[1] > epochA); // B's own streak, started at B's first pause
+        Assert.Equal(keyA, slotA[0]);
+        Assert.Equal(epochA, slotA[1]); // A's streak untouched
+        Assert.Equal(epochA, slotA[2]);
+
+        // The same thread on another stack (a fiber switch) stays in its own streak.
+        threadA.Run(() => CallOnStack(probe.Address, stacks.TopB));
+        Assert.Equal(epochA, slotA[1]);
+        Assert.True(slotA[2] > epochA);
+    }
+
+    // One thread's locked-op nap restarts only its own window. Thread A builds a window through a
+    // probe that never naps; thread B, on a stack 16 KiB away, naps through a probe over the same
+    // table. A's hits survive with private state; with the shared state B's nap clears them.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OneThreadsLockedNapDoesNotResetAnothersWindow(bool sharedState)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var tscFrequency = SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency;
+        var table = SpinNapRuntime.AllocateLockedTableForTest(sharedState);
+        var generations = (long*)NativeMemory.AllocZeroed(1024, sizeof(long));
+        using var tracker = new ExecutableCode(SpinNapRuntime.BuildRunnableLockedProbeForTest(
+            tscFrequency, table, generations, sharedState, int.MaxValue, int.MaxValue, int.MaxValue, 8));
+        using var napper = new ExecutableCode(SpinNapRuntime.BuildRunnableLockedProbeForTest(
+            tscFrequency, table, generations, sharedState, 0, int.MaxValue, int.MaxValue, 8));
+        using var stacks = new TwoStacks();
+        using var threads = new WorkerThreads();
+        var (threadA, threadB) = threads.TwoWithDistinctSlots(key => (nint)SpinNapRuntime.LockedSlot(table, false, key));
+
+        threadA.Run(() =>
+        {
+            for (var hit = 0; hit < 3; hit++)
+            {
+                CallOnStack(tracker.Address, stacks.TopA); // opens the window, then 2 hits
+            }
+        });
+        var slotA = (ulong*)SpinNapRuntime.LockedSlot(table, sharedState, sharedState ? stacks.SharedKeyA : threadA.Key);
+        Assert.Equal(2UL, slotA[3]);
+        var startA = slotA[1];
+
+        var napsBefore = SpinNapRuntime.LockedNapCount;
+        threadB.Run(() =>
+        {
+            CallOnStack(napper.Address, stacks.TopB);
+            CallOnStack(napper.Address, stacks.TopB);
+        });
+        Assert.True(SpinNapRuntime.LockedNapCount - napsBefore >= 1);
+
+        threadA.Run(() => CallOnStack(tracker.Address, stacks.TopA));
+        if (sharedState)
+        {
+            Assert.Equal(1UL, slotA[3]); // B's nap restarted the one shared window
+            Assert.NotEqual(startA, slotA[1]);
+        }
+        else
+        {
+            Assert.Equal(3UL, slotA[3]);
+            Assert.Equal(startA, slotA[1]);
+        }
+    }
+
+    // An HLE call ends the calling thread's locked-op window and nobody else's: NoteHleEntry bumps
+    // the generation in the caller's own slot of the runtime table, which the probe compares.
+    [Fact]
+    public void AnHleCallEndsOnlyTheCallersLockedWindow()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        Assert.NotEmpty(SpinNapRuntime.EnsureLockedProbeBytes(1_000_000_000));
+        if (SpinNapRuntime.RuntimeLockedSharedState)
+            return; // the process built the runtime probe with SHARPEMU_SPIN_NAP_SHARED_STATE=1
+
+        var table = SpinNapRuntime.RuntimeLockedTable;
+        using var tracker = new ExecutableCode(SpinNapRuntime.BuildRunnableLockedProbeForTest(
+            SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency, table, null, sharedState: false,
+            int.MaxValue, int.MaxValue, int.MaxValue, 8));
+        var call = (delegate* unmanaged<void>)tracker.Address;
+        using var threads = new WorkerThreads();
+        var (threadA, threadB) = threads.TwoWithDistinctSlots(key => (nint)SpinNapRuntime.LockedSlot(table, false, key));
+        var slotA = (ulong*)SpinNapRuntime.LockedSlot(table, false, threadA.Key);
+        var slotB = SpinNapRuntime.LockedSlot(table, false, threadB.Key);
+        var generationA = (long*)((byte*)slotA + SpinNapRuntime.LockedHleGenerationOffsetForTest);
+        var generationB = (long*)(slotB + SpinNapRuntime.LockedHleGenerationOffsetForTest);
+
+        threadA.Run(() =>
+        {
+            call();
+            call();
+            call();
+        });
+        Assert.Equal(2UL, slotA[3]);
+        var generationABefore = *generationA;
+        var generationBBefore = *generationB;
+
+        threadB.Run(() =>
+        {
+            for (var index = 0; index < 3; index++)
+            {
+                SpinNapRuntime.NoteHleEntry(0);
+            }
+        });
+        Assert.Equal(3, *generationB - generationBBefore);
+        Assert.Equal(generationABefore, *generationA);
+
+        threadA.Run(() => call());
+        Assert.Equal(3UL, slotA[3]); // B's HLE calls did not touch A's window
+
+        threadA.Run(() =>
+        {
+            SpinNapRuntime.NoteHleEntry(0);
+            call();
+        });
+        Assert.Equal(generationABefore + 1, *generationA);
+        Assert.Equal(0UL, slotA[3]); // A's own HLE call restarted it
     }
 
     [Fact]
@@ -668,6 +1005,274 @@ public sealed unsafe class SpinLoopNapPatcherTests
         using var image = SpinImage.Create(code, readOnlyData: (HoistedTableOffset, table));
         Assert.Equal(0, image.Result.PatchedSites);
         Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+    }
+
+    private static void RunOnNewThread(Action action)
+    {
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        });
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+        {
+            throw new Xunit.Sdk.XunitException($"thread failed: {failure}");
+        }
+    }
+
+    // Threads that stay alive until disposed, so their thread pointers (the private keys) cannot be
+    // reused by a later thread, as a thread library's cache of thread stacks would.
+    private sealed class WorkerThreads : IDisposable
+    {
+        private readonly List<WorkerThread> _threads = [];
+
+        // Two live threads whose private slots differ (a thread pointer hashing onto another live
+        // thread's slot is the rare collision the table tolerates; these tests want two slots).
+        public (WorkerThread A, WorkerThread B) TwoWithDistinctSlots(Func<ulong, nint> slotOf)
+        {
+            var a = Start();
+            for (var attempt = 0; attempt < 16; attempt++)
+            {
+                var b = Start();
+                if (b.Key != a.Key && slotOf(b.Key) != slotOf(a.Key))
+                {
+                    return (a, b);
+                }
+            }
+
+            throw new Xunit.Sdk.XunitException("no two live threads with distinct slots");
+        }
+
+        private WorkerThread Start()
+        {
+            var thread = new WorkerThread();
+            _threads.Add(thread);
+            return thread;
+        }
+
+        public void Dispose()
+        {
+            foreach (var thread in _threads)
+            {
+                thread.Dispose();
+            }
+        }
+    }
+
+    private sealed class WorkerThread : IDisposable
+    {
+        private readonly System.Collections.Concurrent.BlockingCollection<(Action Work, ManualResetEventSlim Done)> _work = new();
+        private readonly Thread _thread;
+        private Exception? _failure;
+
+        public WorkerThread()
+        {
+            _thread = new Thread(() =>
+            {
+                foreach (var (work, done) in _work.GetConsumingEnumerable())
+                {
+                    try
+                    {
+                        work();
+                    }
+                    catch (Exception exception)
+                    {
+                        _failure = exception;
+                    }
+
+                    done.Set();
+                }
+            })
+            { IsBackground = true };
+            _thread.Start();
+            ulong key = 0;
+            Run(() => key = SpinNapRuntime.CurrentThreadKey());
+            Key = key;
+        }
+
+        public ulong Key { get; }
+
+        public void Run(Action work)
+        {
+            using var done = new ManualResetEventSlim();
+            _work.Add((work, done));
+            done.Wait();
+            if (_failure is { } failure)
+            {
+                _failure = null;
+                throw new Xunit.Sdk.XunitException($"worker thread failed: {failure}");
+            }
+        }
+
+        public void Dispose()
+        {
+            _work.CompleteAdding();
+            _thread.Join();
+            _work.Dispose();
+        }
+    }
+
+    // Calls `target` with rsp switched to `stackTop` (16-byte aligned), so a test picks the guest stack
+    // a probe sees: mov rax, rsp ; mov rsp, top ; push rax ; push rax ; call target ; pop rax ; pop rsp.
+    private static void CallOnStack(nint target, ulong stackTop)
+    {
+        var call = (delegate* unmanaged<ulong, nint, void>)CallOnStackCode.Value.Address;
+        call(stackTop, target);
+    }
+
+    private static readonly Lazy<ExecutableCode> CallOnStackCode = new(() =>
+    {
+        var a = new Assembler(64);
+        var top = OperatingSystem.IsWindows() ? rcx : rdi;
+        var target = OperatingSystem.IsWindows() ? rdx : rsi;
+        a.mov(rax, rsp);
+        a.mov(rsp, top);
+        a.push(rax);
+        a.push(rax);
+        a.call(target);
+        a.pop(rax);
+        a.pop(rsp);
+        a.ret();
+        return new ExecutableCode(Assemble(a));
+    });
+
+    private static byte[] Assemble(Assembler a)
+    {
+        using var stream = new MemoryStream();
+        a.Assemble(new StreamCodeWriter(stream), 0);
+        return stream.ToArray();
+    }
+
+    // Two 16-byte aligned stack tops 16 KiB apart (two neighbouring fiber stacks) in one 64 MiB bucket,
+    // each with 256 KiB below it; the probe sees rsp = top - 152 (two pushes, the call, 16 saves).
+    private sealed class TwoStacks : IDisposable
+    {
+        private const int Bytes = 1 << 20;
+        private readonly byte* _block;
+
+        public TwoStacks()
+        {
+            _block = (byte*)NativeMemory.Alloc(Bytes);
+            var top = ((ulong)_block + Bytes - 64) & ~15UL;
+            if ((top - 152) >> SpinNapRuntime.StackKeyShift != (top - 0x4000 - 152) >> SpinNapRuntime.StackKeyShift)
+            {
+                top -= 0x40000; // the 64 MiB boundary sits between the two tops; move both below it
+            }
+
+            TopA = top;
+            TopB = top - 0x4000;
+            Assert.True(TopB - 0x40000 >= (ulong)_block);
+        }
+
+        public ulong TopA { get; }
+
+        public ulong TopB { get; }
+
+        public ulong SharedKeyA => (TopA - 152) >> SpinNapRuntime.StackKeyShift;
+
+        public ulong SharedKeyB => (TopB - 152) >> SpinNapRuntime.StackKeyShift;
+
+        public void Dispose() => NativeMemory.Free(_block);
+    }
+
+    private sealed class ExecutableCode : IDisposable
+    {
+        public ExecutableCode(byte[] code)
+        {
+            Assert.True(code.Length <= 4096);
+            var page = (byte*)HostMemory.Alloc(
+                null, 4096, HostMemory.MEM_COMMIT | HostMemory.MEM_RESERVE, HostMemory.PAGE_EXECUTE_READWRITE);
+            Assert.True(page != null);
+            code.CopyTo(new Span<byte>(page, code.Length));
+            Address = (nint)page;
+        }
+
+        public nint Address { get; }
+
+        public void Dispose() => _ = HostMemory.Free((void*)Address, 0, HostMemory.MEM_RELEASE);
+    }
+
+    // Loads a distinct value into each of the 15 general registers other than rsp and the given flags,
+    // calls the probe, and returns what came back. Block: [0] probe, [1] flags in, [2..17) registers in
+    // (rax rcx rdx rbx rbp rsi rdi r8-r15), [17] flags out, [18..33) registers out.
+    private static class RegisterHarness
+    {
+        // CF PF AF ZF SF DF OF
+        public const ulong AllTestedFlags = 0x0001 | 0x0004 | 0x0010 | 0x0040 | 0x0080 | 0x0400 | 0x0800;
+
+        private static readonly AssemblerRegister64[] Registers =
+            [rax, rcx, rdx, rbx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15];
+
+        public static readonly ulong[] Inputs =
+            [.. Enumerable.Range(0, 15).Select(index => 0xA5A5_0000_0000_0000UL | ((ulong)(index + 1) * 0x0001_0203_0405_0607UL & 0xFFFF_FFFF_FFFF))];
+
+        private static readonly Lazy<ExecutableCode> Code = new(() =>
+        {
+            var a = new Assembler(64);
+            AssemblerRegister64[] saved = [rbx, rbp, r12, r13, r14, r15, rdi, rsi];
+            foreach (var register in saved)
+            {
+                a.push(register);
+            }
+
+            a.mov(rax, OperatingSystem.IsWindows() ? rcx : rdi);
+            a.push(rax);                         // the block, for after the call
+            a.push(__qword_ptr[rax]);            // the probe, called through [rsp]
+            a.push(__qword_ptr[rax + 8]);
+            a.popfq();
+            for (var index = 1; index < Registers.Length; index++)
+            {
+                a.mov(Registers[index], __qword_ptr[rax + 16 + index * 8]);
+            }
+
+            a.mov(rax, __qword_ptr[rax + 16]);
+            a.call(__qword_ptr[rsp]);
+            a.lea(rsp, __[rsp + 8]);             // drop the probe address without touching the flags
+            a.pushfq();
+            a.push(rax);
+            a.mov(rax, __qword_ptr[rsp + 16]);
+            for (var index = 1; index < Registers.Length; index++)
+            {
+                a.mov(__qword_ptr[rax + 144 + index * 8], Registers[index]);
+            }
+
+            a.pop(rcx);
+            a.mov(__qword_ptr[rax + 144], rcx);  // rax out
+            a.pop(rcx);
+            a.mov(__qword_ptr[rax + 136], rcx);  // flags out
+            a.pop(rcx);                          // the block
+            a.cld();
+            for (var index = saved.Length - 1; index >= 0; index--)
+            {
+                a.pop(saved[index]);
+            }
+
+            a.ret();
+            return new ExecutableCode(Assemble(a));
+        });
+
+        public static (ulong[] Registers, ulong Flags) Call(nint probe, ulong flags)
+        {
+            var block = new ulong[33];
+            block[0] = (ulong)probe;
+            block[1] = 0x2 | flags; // bit 1 is always set
+            Inputs.CopyTo(block, 2);
+            fixed (ulong* pointer = block)
+            {
+                ((delegate* unmanaged<ulong*, void>)Code.Value.Address)(pointer);
+            }
+
+            return (block[18..33], block[17]);
+        }
     }
 
     private sealed class EnvironmentVariableScope : IDisposable
