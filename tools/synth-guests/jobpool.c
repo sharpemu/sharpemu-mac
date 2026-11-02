@@ -157,7 +157,7 @@ static inline int job_ready(Job *j) /* 0x86d720 */
     return 1;
 }
 
-NOINLINE u64 rdtsc_call(void) { return rdtsc(); } /* 0x863a20: the call that sits inside WaitForJobs' pause loop */
+HIDDEN NOINLINE u64 rdtsc_call(void) { return rdtsc(); } /* 0x863a20: the call that sits inside WaitForJobs' pause loop */
 
 static void spinlock(volatile u64 *l) /* lock cmpxchg with 10001 x pause then usleep(1) backoff (0x86eb73 idiom) */
 {

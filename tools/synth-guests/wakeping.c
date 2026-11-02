@@ -5,13 +5,13 @@
  *   evf  : sceKernelSetEventFlag(peer, 1) then sceKernelWaitEventFlag(own, 1, AND|CLEAR_ALL, NULL timeout), the
  *          bpe::SyncEvent semantics of p1 section 3 (attr 0x21, bit 1, mode 0x11, no timeout).
  *   cond : scePthreadMutexLock, turn handoff, scePthreadCondSignal(peer), scePthreadCondWait(own) loop.
- * MODE=0 evf only, 1 cond only, 2 both back to back (each DURATION_S/2). PERIOD_US>0 sleeps between round trips
+ * MODE=2 (default) both back to back (each DURATION_S/2), 0 evf only, 1 cond only. PERIOD_US>0 sleeps between round trips
  * (DS does this at <= 100/s, so PERIOD_US=10000 is the "control" rate; 0 = as fast as the emulator can wake).
  */
 #include "common.h"
 
 #ifndef MODE
-#define MODE 0
+#define MODE 2
 #endif
 #ifndef PERIOD_US
 #define PERIOD_US 0
