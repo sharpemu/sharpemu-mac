@@ -264,6 +264,8 @@ public static partial class ImageRequestBuilders
 
         var width = words.Width + 1;
         var height = words.Height + 1;
+        // As for textures: no level past the chain's 1x1 level, but the one rendered to stays.
+        levels = Math.Min(levels, Math.Max(ImageDescription.FullChainLevels(width, height, depth), words.MipLevel + 1));
         var targetFormat = GuestSurfaceFormats.RenderTargetFormat(words.Layout, words.NumberType, words.Order);
         var bytesPerElement = targetFormat.BytesPerElement;
         if (bytesPerElement == 0)
