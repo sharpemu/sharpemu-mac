@@ -319,8 +319,15 @@ internal sealed class ShaderProgramCache
     // SHARPEMU_RESOURCE_CACHE_KEYS=<n> sets the keys per generation (SHARPEMU_RESOURCE_CACHE_MB the bytes).
     private readonly ResourceMaterializationCache? _materializations =
         !MaterializationCacheEnabled ? null
-        : int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_KEYS"), out var keys) && keys > 0 ? new(keys)
-        : new();
+        : int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_KEYS"), out var keys) && keys > 0 ? new(keys, limitChurn: CacheChurnLimited)
+        : new(limitChurn: CacheChurnLimited);
+
+    // The cache's churn limit (ResourceMaterializationCache limitChurn): a key's first sighting is
+    // walked without recording and an entry found stale again and again is bypassed for a while, so
+    // bindings that come out new on every draw (Ghost of Tsushima's GPU-built draw lists) stop paying
+    // for entries no draw uses again. Ghost at the gorge 10.48 -> 10.99 median fps (got-ch-*).
+    // SHARPEMU_RESOURCE_CACHE_CHURN=0 keeps every walk recorded and stored.
+    private static readonly bool CacheChurnLimited = Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE_CHURN") != "0";
     private ulong _nextProgramId;
 
     private static List<uint> StaticState => _threadStaticState ??= new List<uint>(StageStaticKey.MaxWords);

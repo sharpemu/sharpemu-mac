@@ -215,6 +215,13 @@ public interface ICommandStreamHost
     bool CommitPendingOperandWrite(ulong address, ulong size) => false;
 
     /// <summary>
+    /// Whether recorded GPU work still owes these bytes, in which case the caller takes them as zero
+    /// without waiting and the host checks them (<see cref="ConditionalExecuteSpeculation.Verify"/>)
+    /// once that work completes. False means they are not owed that way and are read as usual.
+    /// </summary>
+    bool TryTakeOwedOperandAsZero(ulong address, ulong size) => false;
+
+    /// <summary>
     /// Whether an end-of-pipe GDS store (<see cref="EndOfPipeWriteKind.GdsWrite32"/>) is
     /// copied out of the data share by this host in stream order, after the work before it.
     /// Otherwise the interpreter synchronizes with the GPU and writes the words itself.

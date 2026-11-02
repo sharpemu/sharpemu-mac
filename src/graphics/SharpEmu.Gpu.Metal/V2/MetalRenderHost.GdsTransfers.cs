@@ -28,6 +28,15 @@ internal sealed partial class MetalRenderHost
         }
 
         var gds = _guestMemory.GdsBuffer;
+        if (CopiesShareCompute && (size & 3) == 0 && (offset & 3) == 0 && size / sizeof(uint) is > 0 and <= uint.MaxValue &&
+            ComputeEncoderForTransfer() is var shared and not 0)
+        {
+            _transferCauses[(int)MetalTransferCause.GuestFill]++;
+            EncodeFillWords(shared, gds, offset, size, value);
+            Interlocked.Increment(ref _gpuGdsTransfers);
+            return true;
+        }
+
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestFill);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
@@ -107,6 +116,24 @@ internal sealed partial class MetalRenderHost
 
             OrderAfterDeferredCopies(destination, size);
             (sourceBuffer, sourceOffset, destinationBuffer, destinationOffset) = (gds, source, target.Buffer, target.Offset);
+        }
+
+        var guestAddress = destinationIsGds ? source : destination;
+        if (CopiesShareCompute && WordCopyFits(destinationBuffer, destinationOffset, sourceBuffer, sourceOffset, size) &&
+            !DeferredLabelCopiesTouch(guestAddress, size) &&
+            !(_stagedStorageCopies is { Count: > 0 } staged && staged.HasRecordedStoresOver(guestAddress, size)) &&
+            ComputeEncoderForTransfer() is var shared and not 0)
+        {
+            _transferCauses[(int)MetalTransferCause.GuestCopy]++;
+            EncodeCopyWords(shared, sourceBuffer, sourceOffset, destinationBuffer, destinationOffset, size);
+            if (!destinationIsGds)
+            {
+                _imageCache.InvalidateMemoryFromGpu(destination, size);
+                NoteGuestMemoryWrite(destination, size, MetalGpuWriteOrigin.Copy);
+            }
+
+            Interlocked.Increment(ref _gpuGdsTransfers);
+            return true;
         }
 
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);

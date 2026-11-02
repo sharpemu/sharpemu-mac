@@ -854,7 +854,12 @@ internal sealed partial class MetalRenderHost
             var written = info.Buffers[index].Written;
             FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
             var range = ResolveStorageBuffer(descriptor.Address, size, written);
-            TraceBufferUser(stage, $"storage[{index}]{(written ? " written" : string.Empty)}", descriptor.Address, size);
+            // The text is built only when the trace is on: this runs per storage buffer per draw.
+            if (_traceBufferUserAddress != 0)
+            {
+                TraceBufferUser(stage, $"storage[{index}]{(written ? " written" : string.Empty)}", descriptor.Address, size);
+            }
+
             TraceRecordChain(stage, index, descriptor.Address, size);
             TraceBufferAtCompletion(stage, index, descriptor.Address, size);
             if (written)
@@ -970,7 +975,11 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = ClampMappedSize(range.Base, range.Size);
-            TraceBufferUser(stage, $"device_address h{range.Handle}{(range.Written ? " written" : string.Empty)}", range.Base, size);
+            if (_traceBufferUserAddress != 0)
+            {
+                TraceBufferUser(stage, $"device_address h{range.Handle}{(range.Written ? " written" : string.Empty)}", range.Base, size);
+            }
+
             if (_traceBigDeviceRangeBytes != 0 &&
                 (_traceDeviceRangeOverlap.Size != 0
                     ? range.Base < _traceDeviceRangeOverlap.Base + _traceDeviceRangeOverlap.Size && _traceDeviceRangeOverlap.Base < range.Base + size

@@ -454,6 +454,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // block, so a BC3 surface and the RGBA32Uint view a compute shader writes its blocks
     // through (UE5's virtual texture pool) have the same rows at a quarter of the pitch.
     // Comparing texel pitches skipped every such read, and the pool kept stale tiles.
+    // SHARPEMU_METAL_V2_ALIAS_WRITE_SKIP_LAYOUT (on; =0 off) drops, instead of round-tripping through guest memory, the
+    // contents of an image another one writes over whole through a texel layout they do not fit (see the overlap loop).
+    private static readonly bool AliasWriteSkipLayout =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_WRITE_SKIP_LAYOUT") != "0";
+
+    private long _aliasWritesDiscarded;
+
+    internal long TakeAliasWritesDiscarded() => Interlocked.Exchange(ref _aliasWritesDiscarded, 0);
+
     internal static bool SameTexelLayout(in ImageDescription a, in ImageDescription b) =>
         a.TileMode == b.TileMode && a.BytesPerBlock == b.BytesPerBlock &&
         ((ulong)a.BlockExtent.Width * a.BytesPerBlock == (ulong)b.BlockExtent.Width * b.BytesPerBlock ||
@@ -663,7 +672,30 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     continue;
                 }
 
-                if (takesGpuOwnership)
+                if (takesGpuOwnership && AliasWriteSkipLayout && declined == MetalAliasFallbackReason.RunPastHalf &&
+                    !other.Description.HasStencil && !SameTexelLayout(in image.Description, in other.Description) &&
+                    !(other.IsCpuDirty && (otherStart < other.DirtyStart || otherEnd > other.DirtyEnd)))
+                {
+                    // The same over most of the other image: it keeps GPU ownership of the rest, as a
+                    // hand-over leaves it, but nothing publishes the run - its bytes do not fit this layout - and this
+                    // image does not reload it. Guest memory there is stale until this image's own write is published.
+                    other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite, otherStart, otherEnd);
+                    _aliasWritesDiscarded++;
+                    continue;
+                }
+
+                var discard = takesGpuOwnership && AliasWriteSkipLayout && declined == MetalAliasFallbackReason.RunIsWholeOther &&
+                    !SameTexelLayout(in image.Description, in other.Description);
+                if (discard)
+                {
+                    // A write through a layout the other image's bytes do not fit, over all of
+                    // them: what this image does not overwrite would read as scrambled bytes on the console,
+                    // and the other keeps nothing outside the run, so its contents are dropped instead of
+                    // going out through guest memory and back in. The trailing ownership step below still
+                    // runs for it.
+                    _aliasWritesDiscarded++;
+                }
+                else if (takesGpuOwnership)
                 {
                     // The other image gives up GPU ownership below, and nothing writes back
                     // an image that does not own it: a run published on its own would leave
@@ -686,7 +718,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                         image, other, otherOwedGuestMemory, otherStart, otherEnd);
                 }
 
-                MarkAliasRunDirty(image, dirtyStart, dirtyEnd);
+                if (!discard)
+                {
+                    MarkAliasRunDirty(image, dirtyStart, dirtyEnd);
+                }
+
                 _aliasPublishes++;
             }
 

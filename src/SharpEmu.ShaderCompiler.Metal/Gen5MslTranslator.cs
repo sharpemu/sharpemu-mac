@@ -444,7 +444,8 @@ public static partial class Gen5MslTranslator
             _request.Tessellation is null && ComputeThreads is > 64 and <= 1024 && ComputeThreads % 64 == 0 &&
             (ProgramUsesLds ? _computeLdsDwords : 0u) + (WaveScratchDwords + 1) * (ComputeThreads / 64) <= LdsDwordCount &&
             !ComputeGroupCanBePartial &&
-            (_options.MultiWaveCompute64 || ReadsUpperLaneByNumber);
+            ((_options.MultiWaveCompute64 && (!_options.MultiWaveComputeByNeed || NeedsWholeWaves)) ||
+             ReadsUpperLaneByNumber);
 
         private bool? _readsUpperLaneByNumber;
 
@@ -1729,6 +1730,7 @@ public static partial class Gen5MslTranslator
         {
             _ldsPhase = LdsPhase.None;
             var emitted = TryEmitBlockBodyCore(blocks, blockIndex, out terminator, out error);
+            CloseExecRun();
             // Without a flow analysis the phase rule orders only within a block, so the
             // block hands over with no half's LDS access still in flight.
             if (emitted && _ldsPhase != LdsPhase.None && !(terminator.Kind == TerminatorKind.Jump && terminator.TrueTarget == ExitTarget))
@@ -1845,6 +1847,13 @@ public static partial class Gen5MslTranslator
             {
                 var instruction = instructions[index];
                 var isTerminator = index == block.EndIndex - 1;
+                var inExecRun = IsExecRunInstruction(instruction) &&
+                    !(!isTerminator && CanFuseWave64ReadLanes(instruction, instructions[index + 1]));
+                if (!inExecRun)
+                {
+                    CloseExecRun();
+                }
+
                 // Comments cost nothing in the compiled library and are the only way
                 // to read a dumped MSL body against the guest program it came from.
                 if (Gen5MslDump.Enabled)
@@ -1856,6 +1865,8 @@ public static partial class Gen5MslTranslator
                 {
                     if (pcProbe.Hash == _request.Hash && pcProbe.Pc == instruction.Pc)
                     {
+                        CloseExecRun();
+                        inExecRun = false;
                         Line(PcProbeCode(pcProbe));
                     }
                 }
@@ -1867,6 +1878,8 @@ public static partial class Gen5MslTranslator
                     {
                         if (barriers.Contains(instruction.Pc))
                         {
+                            CloseExecRun();
+                            inExecRun = false;
                             Line(Wave64Barrier);
                         }
                     }
@@ -1885,6 +1898,8 @@ public static partial class Gen5MslTranslator
                         {
                             if (_ldsPhase != LdsPhase.None && _ldsPhase != nextPhase)
                             {
+                                CloseExecRun();
+                                inExecRun = false;
                                 Line(Wave64Barrier);
                             }
 
@@ -1988,6 +2003,11 @@ public static partial class Gen5MslTranslator
                             : [$"pc = ({condition}) ? {target}u : {fallthrough}u;"],
                     };
                     return true;
+                }
+
+                if (inExecRun)
+                {
+                    OpenExecRun();
                 }
 
                 if (!isTerminator && CanFuseWave64ReadLanes(instruction, instructions[index + 1]))

@@ -288,13 +288,14 @@ internal sealed partial class RenderRecorder
 
                 dispatched = true;
             }
-            else if (record.IndirectArgumentsAddress == 0 || !TryDispatchIndirect(input, record.IndirectArgumentsAddress))
-            {
-                _host.Dispatch(groupsX, groupsY, groupsZ);
-                dispatched = true;
-            }
             else
             {
+                _host.NextDispatchMayOverlap = record.MayOverlap;
+                if (record.IndirectArgumentsAddress == 0 || !TryDispatchIndirect(input, record.IndirectArgumentsAddress))
+                {
+                    _host.Dispatch(groupsX, groupsY, groupsZ);
+                }
+
                 dispatched = true;
             }
 

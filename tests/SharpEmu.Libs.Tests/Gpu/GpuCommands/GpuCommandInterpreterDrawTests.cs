@@ -275,6 +275,8 @@ public sealed class GpuCommandInterpreterDrawTests
     public void Dispatches_DirectAndBothIndirectEncodings()
     {
         var runner = new StreamRunner();
+        // The encodings as written: back-to-back dispatches are not marked to overlap here.
+        runner.Interpreter.TrackDispatchOverlap = false;
         runner.Host.WriteWords(Arguments, new uint[] { 4, 5, 6 });
 
         runner.Run(
@@ -288,6 +290,55 @@ public sealed class GpuCommandInterpreterDrawTests
         Assert.Contains("set-base packet is not supported", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetBase, 2, 0, 0)).Message);
     }
 
+    // Two dispatches of a queue with nothing but register writes between them may run side by
+    // side, as on the console; any other packet - here a CS partial flush - orders the next one,
+    // and a new slice of the stream starts ordered.
+    [Fact]
+    public void Dispatches_ReachedThroughRegisterWritesOnly_AreMarkedToOverlap()
+    {
+        var runner = new StreamRunner(queueId: 2);
+        runner.Interpreter.TrackDispatchOverlap = true;
+        var dispatch = StreamRunner.Packet(PacketOpcode.DispatchDirect, 1, 1, 1, 0x41);
+        runner.Run(
+            dispatch,
+            StreamRunner.Packet(PacketOpcode.SetShaderRegister, ShaderRegisterOffset.ComputeUserData0, 7, 8),
+            dispatch,
+            dispatch,
+            StreamRunner.Packet(PacketOpcode.EventWrite, 0x407),
+            dispatch);
+        runner.Run(dispatch);
+
+        Assert.Equal(
+            new[] { "dispatch 0 1 1 1 41", "dispatch 0 1 1 1 80000041", "dispatch 0 1 1 1 80000041", "barrier", "dispatch 0 1 1 1 41", "dispatch 0 1 1 1 41" },
+            runner.Host.Calls.Where(call => call.StartsWith("dispatch", StringComparison.Ordinal) || call == "barrier"));
+    }
+
+    [Fact]
+    public void Dispatches_AreNotMarkedWhenOverlapIsOff()
+    {
+        var runner = new StreamRunner(queueId: 2);
+        runner.Interpreter.TrackDispatchOverlap = false;
+        var dispatch = StreamRunner.Packet(PacketOpcode.DispatchDirect, 1, 1, 1, 0x41);
+        runner.Run(dispatch, dispatch);
+
+        Assert.Equal(new[] { "dispatch 0 1 1 1 41", "dispatch 0 1 1 1 41" }, runner.Host.Calls.Where(call => call.StartsWith("dispatch", StringComparison.Ordinal)));
+    }
+
+    [Theory]
+    [InlineData(PacketOpcode.SetShaderRegister, 0u, true)]
+    [InlineData(PacketOpcode.IndirectBuffer, 0u, true)]
+    [InlineData(PacketOpcode.Nop, PacketCustomCode.PushMarker, true)]
+    [InlineData(PacketOpcode.Nop, PacketCustomCode.WaitMemory32, false)]
+    [InlineData(PacketOpcode.Nop, PacketCustomCode.ReleaseMemory, false)]
+    [InlineData(PacketOpcode.WaitRegisterMemory, 0u, false)]
+    [InlineData(PacketOpcode.ReleaseMemory, 0u, false)]
+    [InlineData(PacketOpcode.AcquireMemory, 0u, false)]
+    [InlineData(PacketOpcode.WriteData, 0u, false)]
+    [InlineData(PacketOpcode.DmaData, 0u, false)]
+    [InlineData(PacketOpcode.EventWrite, 0u, false)]
+    public void DispatchOverlap_KeepsOnlyRegisterWritesAndMarkers(uint opcode, uint customCode, bool keeps) =>
+        Assert.Equal(keeps, DispatchOverlap.Keeps(opcode, PacketHeader.Make(2, opcode, customCode)));
+
     // A host that dispatches indirectly on the GPU gets the arguments address without the
     // counts, so the interpreter never waits for a GPU readback of them. Thread-unit
     // dispatches (initiator bit 5) still read them to convert threads into groups.
@@ -295,6 +346,7 @@ public sealed class GpuCommandInterpreterDrawTests
     public void IndirectDispatches_LeaveWorkgroupCountsOnTheGpuWhenTheHostCan()
     {
         var runner = new StreamRunner();
+        runner.Interpreter.TrackDispatchOverlap = false;
         runner.Host.ResolvesIndirectDispatchOnGpu = true;
         runner.Host.WriteWords(Arguments, new uint[] { 4, 5, 6 });
 

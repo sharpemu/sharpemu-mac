@@ -63,8 +63,16 @@ internal static partial class MetalTilerShaders
     // buffer path's dword-wide kernel does without atomics, so it keeps those.
     public static bool SupportsTextureCopy(uint elementBytes) => elementBytes is 4 or 8 or 16;
 
+    // SHARPEMU_METAL_V2_TEXTURE_TILER_SUBDWORD_TILE (on; =0 off) tiles one and two byte texels out of a texture too, each
+    // thread storing its own element as a uchar or ushort (bytes are separate memory locations in MSL, so neighbours
+    // storing the rest of the dword do not race). Ghost of Tsushima wrote ~180 R8G8 images back a second through a blit
+    // into staging and a retile, each a blit encoder of its own.
+    internal static readonly bool SubDwordTile =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TEXTURE_TILER_SUBDWORD_TILE") != "0";
+
     public static bool SupportsTextureCopy(uint elementBytes, MetalTileDirection direction) =>
-        SupportsTextureCopy(elementBytes) || (direction == MetalTileDirection.Detile && elementBytes is 1 or 2);
+        SupportsTextureCopy(elementBytes) ||
+        ((direction == MetalTileDirection.Detile || SubDwordTile) && elementBytes is 1 or 2);
 
     public const string DepthWriteback = "writeback_depth";
     public const string DepthWritebackArray = "writeback_depth_array";
@@ -702,6 +710,14 @@ internal static partial class MetalTilerShaders
                 source.Append(words > 1 ? "source[at + 1u], " : "0u, ");
                 source.Append(words > 2 ? "source[at + 2u], source[at + 3u]);\n" : "0u, 0u);\n");
                 source.Append("        surface.write(value, texel, subresource.slice, subresource.level);\n");
+            }
+            else if (bytes < 4)
+            {
+                source.Append("        uint4 value = surface.read(texel, subresource.slice, subresource.level);\n");
+                source.Append("        uint at = args.destinationBase + tiled;\n");
+                source.Append(bytes == 2
+                    ? "        ((device ushort*)target)[at >> 1] = ushort(value.x);\n"
+                    : "        ((device uchar*)target)[at] = uchar(value.x);\n");
             }
             else
             {

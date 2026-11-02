@@ -57,6 +57,10 @@ public static partial class AgcExports
             entryHeader = address + headerOffset;
             entries.Entries[key] = new(entryCode, entryHeader, code, header);
             _shaderHeadersByCode[entryCode] = entryHeader;
+            // Registered like any created shader, so the split's GPU process gets it too: the hull kernel of a
+            // tessellated draw is looked up there by this entry (GTA V's palm trunks died on "no registered header").
+            ShaderHeaderObserver?.Invoke(entryCode, entryHeader);
+            Gpu.Pipelines.ShaderHeaderRegistry.NoteRegistration();
             return true;
         }
     }

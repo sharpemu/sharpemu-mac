@@ -117,6 +117,8 @@ internal static unsafe class GpuBench
                 File.WriteAllText(Path.Combine(dump, $"{item.Index}.metal"), item.Source);
             }
 
+            File.WriteAllLines(Path.Combine(dump, "index.txt"), items.Select(item => $"{item.Index} {item.Kind} {item.Hash:X16}"));
+
             if (Arg("dumponly", "0") == "1")
             {
                 return 0;
@@ -1079,7 +1081,24 @@ internal static unsafe class GpuBench
                     BinaryPrimitives.WriteUInt64LittleEndian(at, gpu(_synth.PairLocks));
                     break;
                 case MslArgumentFieldKind.BindlessImageTables:
-                    throw new InvalidOperationException("bindless image tables are not synthesized");
+                    // Every slot points at one table of 2D float entries, variant 0 (with fill=zero
+                    // the table count reads 0, so every key lands on entry 0).
+                    const int bindlessEntries = 256;
+                    var table = _synth.Buffer(bindlessEntries * 16u, false);
+                    var entries = new Span<byte>((void*)MetalNative.Send(table, MetalNative.Selector("contents")), bindlessEntries * 16);
+                    var bindlessId = MetalNative.SendGpuResourceId(_synth.Texture("sampled_float_2d"), MetalNative.Selector("gpuResourceID"));
+                    for (var i = 0; i < bindlessEntries; i++)
+                    {
+                        BinaryPrimitives.WriteUInt64LittleEndian(entries[(i * 16)..], bindlessId);
+                        BinaryPrimitives.WriteUInt64LittleEndian(entries[(i * 16 + 8)..], 0);
+                    }
+
+                    for (var i = 0; i < field.Count; i++)
+                    {
+                        BinaryPrimitives.WriteUInt64LittleEndian(at[(i * 8)..], gpu(table));
+                    }
+
+                    break;
                 default:
                     BinaryPrimitives.WriteUInt32LittleEndian(at, field.Kind switch
                     {
@@ -1218,6 +1237,9 @@ internal static unsafe class GpuBench
         try
         {
             var commands = MetalNative.Send(_queue, MetalNative.Selector("commandBuffer"));
+            // Named after the item, so a Metal System Trace of the bench ties each command buffer (and the
+            // driver's register-spill events, which name only the buffer) to its shader.
+            MetalNative.SendVoid(commands, MetalNative.Selector("setLabel:"), MetalNative.NsString($"{item.Id} {b.Variant.Name}"));
             var resources = _synth.Resources();
             fixed (nint* handles = resources)
             {

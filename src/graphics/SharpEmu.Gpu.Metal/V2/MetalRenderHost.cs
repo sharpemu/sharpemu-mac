@@ -70,6 +70,8 @@ internal sealed partial class MetalRenderHost :
     private static readonly nint SelNewSharedEvent = MetalNative.Selector("newSharedEvent");
     private static readonly nint SelBlitEncoder = MetalNative.Selector("blitCommandEncoder");
     private static readonly nint SelComputeEncoder = MetalNative.Selector("computeCommandEncoder");
+    private static readonly nint SelComputeEncoderWithDispatchType = MetalNative.Selector("computeCommandEncoderWithDispatchType:");
+    private const nint DispatchTypeConcurrent = 1;
     private static readonly nint SelFillBuffer = MetalNative.Selector("fillBuffer:range:value:");
     private static readonly nint SelCopyBuffer =
         MetalNative.Selector("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:");
@@ -1763,6 +1765,13 @@ internal sealed partial class MetalRenderHost :
         // A label held for the commit over the source or the destination lands first, as a boundary used to land it.
         OrderAfterDeferredCopies(source, size);
         OrderAfterDeferredCopies(destination, size);
+        if (TryCopyInComputeEncoder(destination, source, size, in target, in origin))
+        {
+            _imageCache.InvalidateMemoryFromGpu(destination, size);
+            NoteGuestMemoryWrite(destination, size, MetalGpuWriteOrigin.Copy);
+            return;
+        }
+
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
@@ -2255,6 +2264,46 @@ internal sealed partial class MetalRenderHost :
         }
 
         QueueOperandWake(wake);
+        return true;
+    }
+
+    /// <summary>
+    /// A COND_EXEC flag a recorded shader still owes, taken as zero (ConditionalExecuteSpeculation):
+    /// only bytes the GPU writes through a storage binding, not ones a command-processor write, a
+    /// label or an image owns; they are checked when the work that writes them completes.
+    /// </summary>
+    public bool TryTakeOwedOperandAsZero(ulong address, ulong size)
+    {
+        if (OnCommandThread)
+        {
+            var taken = false;
+            RunTagged(() => taken = TryTakeOwedOperandAsZero(address, size));
+            return taken;
+        }
+
+        DrainDraws();
+        if (size is 0 or > sizeof(ulong) || !PollWithoutWaiting ||
+            (_cpOverlay.Count != 0 && OverlayCoverage(address, size) != MetalOverlayCoverage.None) ||
+            (_lazyLabelRanges.Count != 0 && CoversLazyLabel(address, size)) ||
+            (_imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size)))
+        {
+            return false;
+        }
+
+        var serial = _gpuWrites.MayCover(address, size) ? _gpuWrites.PendingSerial(address, size, CompletedSerial) : 0;
+        if (serial == 0)
+        {
+            return false;
+        }
+
+        _completions.Enqueue(serial, () =>
+        {
+            Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+            var value = _memory.TryRead(address, bytes[..(int)size])
+                ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes)
+                : 0u;
+            SharpEmu.Libs.Gpu.GpuCommands.ConditionalExecuteSpeculation.Verify(address, value);
+        });
         return true;
     }
 
@@ -2831,7 +2880,9 @@ internal sealed partial class MetalRenderHost :
             $"labels_deferred={TakeDeferredLabelWrites()} label_lookup=[{TakeDeferredLabelLookupStats()}] clears_folded={foldedClears} " +
             $"clears_encoded={encodedClears} depth_joins={depthJoins} depth_join_sampled={depthJoinsSampled} depth_join_copies={depthJoinsCopies} " +
             $"subset_joins={subsetJoins} subset_join_sampled={subsetJoinsSampled}{TakeSubsetRefusals()} " +
-            $"transfers=[{TakeTransferCauses()}]");
+            $"transfers=[{TakeTransferCauses()}]" +
+            (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +
+            $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()}");
         if (_guard is not null)
         {
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");
@@ -2976,6 +3027,12 @@ internal sealed partial class MetalRenderHost :
         {
             MetalNative.SendVoid(_labelBarrierEvent, SelRelease);
             _labelBarrierEvent = 0;
+        }
+
+        if (_deviceBarrierEvent != 0)
+        {
+            MetalNative.SendVoid(_deviceBarrierEvent, SelRelease);
+            _deviceBarrierEvent = 0;
         }
 
         _completions.Dispose();

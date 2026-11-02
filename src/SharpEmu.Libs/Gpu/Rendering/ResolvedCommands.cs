@@ -78,9 +78,17 @@ internal interface IResolvedCommandSink
     void Record(ResolvedDispatch record);
 }
 
+/// <summary>A tessellated draw's hull kernel, run where its patch draw is recorded when the executor hands its
+/// records to a sink that records them later (the Metal translation): the kernel has to land between the records
+/// before and after the draw, as RenderRecorder.RunTessellationHull does for a direct recorder.</summary>
+internal sealed record TessellationHullLaunch(
+    ComputeProgram Hull, uint MinTessellationLevel, uint MaxTessellationLevel, uint[] Indices, uint ControlPoints,
+    bool Quad, uint PatchCount, uint Instances, uint FirstInstance);
+
 internal sealed class ResolvedDraw
 {
     public long Sequence;
+    public TessellationHullLaunch? TessellationHull;
     public ResolvedDrawKind Kind;
     public bool Announce;
     public DebugInformation Debug;
@@ -122,6 +130,7 @@ internal sealed class ResolvedDraw
 
     public void Reset()
     {
+        TessellationHull = null;
         Sequence = 0;
         Kind = ResolvedDrawKind.Skipped;
         Announce = false;
@@ -186,6 +195,10 @@ internal sealed class ResolvedDispatch
     // (IRenderHost.TryDispatchThreadsIndirect); the group counts are then zero.
     public bool ThreadsOnGpu;
 
+    // The stream put nothing between this dispatch and the one before it that orders them
+    // (RenderExecutor.DispatchMayOverlapBit): the host may run the two side by side.
+    public bool MayOverlap;
+
     // The indirect arguments address the packet carried, before thread dimensions cleared it:
     // a suspended dispatch is matched to its retry by it.
     public ulong PacketIndirectArgumentsAddress;
@@ -227,6 +240,7 @@ internal sealed class ResolvedDispatch
         GroupsZ = 0;
         IndirectArgumentsAddress = 0;
         ThreadsOnGpu = false;
+        MayOverlap = false;
         PacketIndirectArgumentsAddress = 0;
         HostPrepared = false;
         Retry = null;
