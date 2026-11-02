@@ -146,6 +146,17 @@ runs each once with `run.sh`, adds one `RUN_HLE=1 RUN_GC=1` Scream run, and prin
 (cores busy, top 3 threads, ctx/futex/yield per second, key guest counters). `check-shapes.py guest.bin` classifies every
 `pause` / locked op in a guest the way the spin-nap patcher does.
 
+## Run lock, identification log, verification
+
+* `harness.py` (so `run.sh`, `ab.sh`, `run-all.sh`) holds `flock /tmp/sharpemu-bench.lock` (`SYNTH_LOCK_FILE` overrides) from before the
+  emulator launches until it is gone, so bench runs from different callers never overlap; a waiting run prints a line and `metrics.json`
+  has `lock_wait_s`. Running under `flock <lockfile> ./run.sh ...` also works (the inherited lock is recognised).
+* `metrics.json` `ident_log` has one entry per identification turn (burn, snapshot lag, top-3 CPU growers across all host threads with tid
+  and name, accepted/reason); `ident_map` has the accepted tids and `ident_refusals` the count. Guest threads park in a blocking event-flag
+  wait (not a `usleep` poll, which yield-spins on Linux and leaked a parked thread's own CPU into its window).
+* `agcbuild`: a run with `agcbuild.verify bad > 0` is invalid (the guest prints `@@ ERROR agcbuild_verify`, the harness also checks the
+  counter). `-DVERIFY_CORRUPT=1` is a test hook that makes the check expect a wrong value.
+
 ## A/B
 
 ```
