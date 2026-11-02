@@ -745,6 +745,7 @@ public static class RenderPhaseProfile
             $"[PERF][FAST_PATHS] zero_group_skips={Interlocked.Exchange(ref SharpEmu.Libs.Gpu.Rendering.RenderExecutor.ZeroGroupSkips, 0)}"));
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeCpuKernelReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.GpuCommands.GpuCommandInterpreter.TakePredicationReport());
+        Console.Error.WriteLine(SharpEmu.HLE.Host.HostPreciseClock.TakeMachSleepReport());
         ReportResolveWorker(seconds, frames);
         // The graphics backend's own counters (buffer and image caches, barriers, slices, the
         // relay): the shared engine does not reference that package.

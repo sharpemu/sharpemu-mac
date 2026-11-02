@@ -24,6 +24,14 @@ public static unsafe partial class HostPreciseClock
     private static readonly bool MachAvailable = InitializeMach(out MachNumer, out MachDenom);
     private static readonly uint MachNumer;
     private static readonly uint MachDenom;
+    private static readonly MachScale MachTickScale = MachScale.Create(Stopwatch.Frequency, MachNumer, MachDenom);
+
+    // Diagnostics for the mach branch of SleepUntil. A pass that wakes before its deadline
+    // ("early wake") means mach_wait_until returned short, so the loop went round again; a
+    // high passes-per-call ratio would be a spin. Updated across threads, read via TakeMachSleepReport.
+    private static long _machSleepCalls;
+    private static long _machSleepPasses;
+    private static long _machSleepEarlyWakes;
 
     /// <summary>True when waits use mach_wait_until (macOS).</summary>
     public static bool IsPrecise => MachAvailable;
@@ -59,9 +67,15 @@ public static unsafe partial class HostPreciseClock
     /// <summary>Blocks the calling thread until the Stopwatch clock reaches <paramref name="deadlineTimestamp"/>.</summary>
     public static void SleepUntil(long deadlineTimestamp)
     {
+        var waited = false;
         while (true)
         {
             var remaining = deadlineTimestamp - Stopwatch.GetTimestamp();
+            if (waited && remaining > 0)
+            {
+                _ = Interlocked.Increment(ref _machSleepEarlyWakes);
+            }
+
             if (remaining <= 0)
             {
                 return;
@@ -76,8 +90,14 @@ public static unsafe partial class HostPreciseClock
 
             if (MachAvailable)
             {
-                var nanoseconds = (long)((decimal)remaining * 1_000_000_000m / Stopwatch.Frequency);
-                var machTicks = (ulong)((decimal)nanoseconds * MachDenom / MachNumer);
+                if (!waited)
+                {
+                    _ = Interlocked.Increment(ref _machSleepCalls);
+                }
+
+                waited = true;
+                _ = Interlocked.Increment(ref _machSleepPasses);
+                var machTicks = MachTickScale.Convert(remaining);
                 _ = mach_wait_until(mach_absolute_time() + Math.Max(1UL, machTicks));
                 continue;
             }
@@ -85,6 +105,18 @@ public static unsafe partial class HostPreciseClock
             CoarseSleepStep(remaining);
         }
     }
+
+    /// <summary>
+    /// Stopwatch ticks → mach absolute-time ticks via nanoseconds, each step floored. Exactly
+    /// equal to the decimal formulation this replaced for 0 &lt; remaining ≤ 30 s of ticks.
+    /// </summary>
+    internal static ulong StopwatchTicksToMachTicks(long remaining, long frequency, uint numer, uint denom) =>
+        MachScale.Create(frequency, numer, denom).Convert(remaining);
+
+    /// <summary>Cumulative mach-branch SleepUntil counters (calls, passes, early wakes) and resets them.</summary>
+    public static string TakeMachSleepReport() =>
+        FormattableString.Invariant($"[PERF][SLEEP_UNTIL] mach={(MachAvailable ? 1 : 0)} ") +
+        FormattableString.Invariant($"calls={Interlocked.Exchange(ref _machSleepCalls, 0)} passes={Interlocked.Exchange(ref _machSleepPasses, 0)} early_wakes={Interlocked.Exchange(ref _machSleepEarlyWakes, 0)}");
 
     /// <summary>Blocks for <paramref name="microseconds"/>.</summary>
     public static void SleepMicroseconds(long microseconds)
@@ -113,6 +145,65 @@ public static unsafe partial class HostPreciseClock
         else
         {
             Thread.SpinWait(64);
+        }
+    }
+
+    // Two floored rational steps (ticks → ns, ns → mach ticks), each reduced by its gcd once
+    // at init so the common cases (1e9 Hz Stopwatch, 1/1 timebase) skip the 128-bit path.
+    internal readonly struct MachScale
+    {
+        private readonly ulong _nsMul, _nsDiv, _machMul, _machDiv;
+
+        private MachScale(ulong nsMul, ulong nsDiv, ulong machMul, ulong machDiv)
+        {
+            _nsMul = nsMul;
+            _nsDiv = nsDiv;
+            _machMul = machMul;
+            _machDiv = machDiv;
+        }
+
+        public static MachScale Create(long frequency, uint numer, uint denom)
+        {
+            if (frequency <= 0 || numer == 0 || denom == 0)
+            {
+                return default;
+            }
+
+            var nsGcd = Gcd(1_000_000_000UL, (ulong)frequency);
+            var machGcd = Gcd(denom, numer);
+            return new MachScale(1_000_000_000UL / nsGcd, (ulong)frequency / nsGcd, denom / machGcd, numer / machGcd);
+        }
+
+        /// <summary>Remaining Stopwatch ticks → mach ticks (0 for a default scale or a non-positive input).</summary>
+        public ulong Convert(long remaining)
+        {
+            if (remaining <= 0 || _nsDiv == 0)
+            {
+                return 0;
+            }
+
+            return MulDiv(MulDiv((ulong)remaining, _nsMul, _nsDiv), _machMul, _machDiv);
+        }
+
+        private static ulong MulDiv(ulong value, ulong mul, ulong div)
+        {
+            if (mul == div)
+            {
+                return value;
+            }
+
+            var high = Math.BigMul(value, mul, out var low);
+            return high == 0 ? low / div : (ulong)(new UInt128(high, low) / div);
+        }
+
+        private static ulong Gcd(ulong a, ulong b)
+        {
+            while (b != 0)
+            {
+                (a, b) = (b, a % b);
+            }
+
+            return a;
         }
     }
 
