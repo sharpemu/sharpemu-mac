@@ -247,11 +247,11 @@ class Run:
                     reason = f"snapshot lag {lag * 1000:.0f} ms exceeds the idle margin {self.ident_margin_s * 1000:.0f} ms"
                 elif not deltas:
                     reason = "no unidentified host thread of that name"
-                elif deltas[0][0] > burn + (rest["gap_us"] / 1e6 if "gap_us" in rest else 0.2) + 0.05:
+                elif deltas[0][0] > burn + min(rest["gap_us"] / 1e6 if "gap_us" in rest else 0.2, 0.1) + 0.05:
                     # The burner can legitimately show more than its burn: the guest does not count rdtsc gaps >= 20 us, but the kernel may
                     # still bill part of them (interrupts, host work in the thread) as run time; the guest reports those gaps (gap_us).
                     reason = (f"top delta {deltas[0][0]:.3f} s exceeds the burn {burn:.3f} s plus the guest's own excluded gaps "
-                              f"{rest.get('gap_us', 0) / 1e6:.3f} s plus 50 ms (other CPU leaked into the window)")
+                              f"{rest.get('gap_us', 0) / 1e6:.3f} s (capped at 0.1 s) plus 50 ms (other CPU leaked into the window)")
                 elif deltas[0][0] < 0.6 * burn:
                     reason = f"top delta {deltas[0][0]:.3f} s is below 60% of the burn {burn:.3f} s"
                 elif len(deltas) > 1 and deltas[0][0] < 3 * deltas[1][0]:
@@ -447,6 +447,49 @@ def gc_delta(run):
                 note="deltas over the first..last 1 s report inside the measured window; alloc_mb has 1 MB resolution")
 
 
+def kill_tree(proc, perf, grace=5.0):
+    """Kill the emulator's whole process group (it was started with start_new_session, so pgid == pid) and perf: SIGTERM, a short grace,
+    then SIGKILL, waiting for both. Safe to call when they already exited."""
+    targets = []
+    if proc is not None:
+        targets.append(("group", proc.pid, proc))
+    if perf is not None:
+        targets.append(("pid", perf.pid, perf))
+
+    def send(kind, pid, sig):
+        try:
+            if kind == "group":
+                os.killpg(pid, sig)
+            else:
+                os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    for kind, pid, _ in targets:
+        send(kind, pid, signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    for kind, pid, p in targets:
+        try:
+            p.wait(max(0.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            send(kind, pid, signal.SIGKILL)
+            try:
+                p.wait(5)
+            except subprocess.TimeoutExpired:
+                pass
+    # Stragglers in the emulator's group (children of the emulator that outlived it).
+    if proc is not None:
+        send("group", proc.pid, signal.SIGKILL)
+
+
+class HarnessInterrupted(BaseException):
+    """Raised by the SIGTERM/SIGINT handlers so the try/finally teardown in run_once runs."""
+
+
+def _raise_interrupted(signum, frame):
+    raise HarnessInterrupted(f"harness interrupted by signal {signum}")
+
+
 def run_once(args, out_dir, attempt):
     env = dict(os.environ)
     env.setdefault("DOTNET_ROOT", os.path.expanduser("~/.dotnet"))
@@ -470,51 +513,68 @@ def run_once(args, out_dir, attempt):
         cmd = ["nice", "-n", str(args.nice)] + cmd
     proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             start_new_session=True)
-    run.pid = proc.pid
-    csv = os.path.join(out_dir, "perf.csv")
-    perf_note = None
-    if not args.no_perf:
-        err = run.start_perf(proc.pid, csv, [e for e, _ in PERF_EVENTS + PERF_SYSCALLS])
-        if err:  # e.g. tracepoints not readable: retry with the software/hardware events only
-            perf_note = "syscall tracepoints unavailable: " + err.strip().splitlines()[-1]
-            err2 = run.start_perf(proc.pid, csv, [e for e, _ in PERF_EVENTS])
-            if err2:
-                perf_note += "; perf unavailable: " + err2.strip().splitlines()[-1]
-
-    def reader():
-        for raw in proc.stdout:
-            run.on_line(raw.decode(errors="replace").rstrip("\n"), time.monotonic())
-        run.done.set()
-
-    th = threading.Thread(target=reader, daemon=True)
-    th.start()
-    t_launch = time.monotonic()
-    timed_out = False
-    while not run.done.is_set():
-        run.done.wait(0.5)
-        elapsed = time.monotonic() - t_launch
-        limit = args.timeout if run.end is None else (run.end[0] - t_launch) + 60
-        if run.finished_at is not None:  # the emulator reported its result but did not exit (e.g. after a guest trap)
-            limit = min(limit, (run.finished_at - t_launch) + 20)
-        if elapsed > limit:
-            timed_out = True
-            os.killpg(proc.pid, signal.SIGTERM)
-            try:
-                proc.wait(10)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-            break
-    th.join(5)
-    rc = proc.wait()
-    if run.perf:
-        run.perf.send_signal(signal.SIGINT)
+    # Everything from here to the end is inside try/finally: whatever happens (SIGTERM/SIGINT turned into an exception, a bug in a wait
+    # loop), the emulator's process group and perf are killed and reaped before the bench lock can drop with the process.
+    def record_pids():  # what the teardown self-test (selftest-teardown.sh) checks against
         try:
-            run.perf.wait(10)
-        except subprocess.TimeoutExpired:
-            run.perf.kill()
-    with open(os.path.join(out_dir, "guest.log"), "w") as f:
-        for _, line in run.lines:
-            f.write(line + "\n")
+            with open(os.path.join(out_dir, "pids.json"), "w") as f:
+                json.dump(dict(harness=os.getpid(), emulator=proc.pid, emulator_pgid=proc.pid, perf=run.perf.pid if run.perf else None), f)
+        except OSError:
+            pass
+
+    try:
+        run.pid = proc.pid
+        record_pids()
+        csv = os.path.join(out_dir, "perf.csv")
+        perf_note = None
+        if not args.no_perf:
+            err = run.start_perf(proc.pid, csv, [e for e, _ in PERF_EVENTS + PERF_SYSCALLS])
+            if err:  # e.g. tracepoints not readable: retry with the software/hardware events only
+                perf_note = "syscall tracepoints unavailable: " + err.strip().splitlines()[-1]
+                err2 = run.start_perf(proc.pid, csv, [e for e, _ in PERF_EVENTS])
+                if err2:
+                    perf_note += "; perf unavailable: " + err2.strip().splitlines()[-1]
+            record_pids()
+
+        def reader():
+            for raw in proc.stdout:
+                run.on_line(raw.decode(errors="replace").rstrip("\n"), time.monotonic())
+            run.done.set()
+
+        th = threading.Thread(target=reader, daemon=True)
+        th.start()
+        t_launch = time.monotonic()
+        timed_out = False
+        while not run.done.is_set():
+            run.done.wait(0.5)
+            elapsed = time.monotonic() - t_launch
+            limit = args.timeout if run.end is None else (run.end[0] - t_launch) + 60
+            if run.finished_at is not None:  # the emulator reported its result but did not exit (e.g. after a guest trap)
+                limit = min(limit, (run.finished_at - t_launch) + 20)
+            if elapsed > limit:
+                timed_out = True
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                break
+        th.join(5)
+        rc = proc.wait()
+        if run.perf:
+            run.perf.send_signal(signal.SIGINT)
+            try:
+                run.perf.wait(10)
+            except subprocess.TimeoutExpired:
+                run.perf.kill()
+    finally:
+        kill_tree(proc, run.perf)
+        try:
+            with open(os.path.join(out_dir, "guest.log"), "w") as f:
+                for _, line in run.lines:
+                    f.write(line + "\n")
+        except OSError:
+            pass
     return run, rc, timed_out, perf_note, csv
 
 
@@ -531,10 +591,17 @@ def acquire_bench_lock():
     try:
         for fd in os.listdir("/proc/self/fd"):
             try:
-                if os.path.realpath(f"/proc/self/fd/{fd}") == os.path.realpath(LOCK_PATH):
-                    return 0.0, "inherited"
+                if os.path.realpath(f"/proc/self/fd/{fd}") != os.path.realpath(LOCK_PATH):
+                    continue
+                # An open fd on the lock file proves nothing: probe it. flock on a description that already holds the lock succeeds at
+                # once (and a description that did not hold it takes it now); if someone else holds it the probe fails, so this fd is
+                # not ours and we queue normally below.
+                fcntl.flock(int(fd), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return 0.0, "inherited"
+            except BlockingIOError:
+                continue
             except OSError:
-                pass
+                continue
     except OSError:
         pass
     _lock_file = open(LOCK_PATH, "a")
@@ -566,6 +633,8 @@ def main():
                     help="before launching, wait up to this many seconds for other processes to use < --quiet-cores cores")
     ap.add_argument("--quiet-cores", type=float, default=float(os.environ.get("SYNTH_QUIET_CORES", "0.75")))
     args = ap.parse_args()
+    signal.signal(signal.SIGTERM, _raise_interrupted)  # so run_once's finally tears the emulator and perf down before the lock drops
+    signal.signal(signal.SIGINT, _raise_interrupted)
     lock_wait_s, lock_how = acquire_bench_lock()  # held until this process exits (after the emulator is gone)
 
     runs_root = os.environ.get("SYNTH_RUNS", "/home/xnetcat/Projects/sharpemu/ds-cpu/synth-runs")
@@ -743,4 +812,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except HarnessInterrupted as exc:
+        print(f"[harness] {exc}; emulator and perf were torn down", file=sys.stderr, flush=True)
+        sys.exit(143)

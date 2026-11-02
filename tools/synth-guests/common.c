@@ -253,6 +253,9 @@ void thread_identify(const char *guest_name, int idx)
     host_comm(comm, sizeof comm, guest_name);
     if (idx < 0 || idx >= IDENT_MAX) return;
     sceKernelCreateEventFlag(&s_ident_ef[idx], "identTurn", EVF_ATTR_FIFO_MULTI, 0, NULL);
+    /* A thread that gets here after wait_identified() gave up (timeout) must not park forever: the flag exists before the abort flag is
+     * read, so either this sees the abort, or the abort's release loop finds (and sets) the flag. */
+    if (__atomic_load_n(&s_ident_abort, __ATOMIC_ACQUIRE)) return;
     /* Park first so a host thread's own start-up work (JIT, thunks) is over before the harness's baseline snapshot; the print also
      * warms this thread's first-call path for the import that reports the burn. */
     EMIT("identpark comm=%s idx=%d", comm, idx);
