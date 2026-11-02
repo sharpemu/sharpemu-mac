@@ -73,7 +73,7 @@ running after the end marker so the harness can snapshot them.
 | Guest | Knobs |
 |---|---|
 | jobpool | `WORKERS=13` `PARKED=3` (0 = pure pause path) `PRODUCER_HZ=15000` ready jobs/s (250 per frame; <= 256 fit array B) `JOB_US=300` `FRAME_HZ=60` `AFFINITY=0x1ffe` `PIN_WORKERS=1` (pass `1<<k` as thread affinity) `FORK=0` (children a job pushes on its own deque) `DL_CHECK=1` `GROUP=0` |
-| scream | `THREADS=15` `RATE=193000` guards/s (0 = flat out) `OWNER_PCT=50` `NCA_HZ=3500` `NCA_WORK_US=100` `CS_NS=500` `PERIOD_US=2000` `CONTENDED=1` (0 = one mutex per thread) |
+| scream | `THREADS=15` `RATE=193000` guards/s (0 = flat out) `OWNER_PCT=50` `NCA_HZ=3500` `NCA_WORK_US=100` `CS_NS=500` `PERIOD_US=2000` `PACE=1` (busy-work to the deadline; 0 = usleep) `CONTENDED=1` (0 = one mutex per thread) |
 | wakeping | `MODE=2` both (each half of the duration), `0` evf only, `1` cond only `PERIOD_US=0` (sleep between round trips) |
 | sleeplat | `SWEEP_N="0,1,50,100,250,1000,4000"` `GAP_US=2000` `YIELD=1` `ONLY_N=<n>` `ONLY_GAP=0\|1` |
 | baseline | `SLEEP_US=100000` |
@@ -101,6 +101,13 @@ Optional, they add work and so are for counts rather than CPU: `RUN_HLE=1` (`SHA
 
 Guest output protocol: `@@ <section> key=value ...` lines (`@@ MARK start|end|phase_start|phase_end`, `@@ jobpool.total`, ...)
 written with one `_write(1, ...)` per line; the harness parses them.
+
+## Everything at once
+
+`run-all.sh [OUT_ROOT]` builds all guests plus the sanity variants (4 workers, pause-only, usleep-paced and flat-out Scream),
+runs each once with `run.sh`, adds one `RUN_HLE=1 RUN_GC=1` Scream run, and prints `summarize.py`'s markdown table
+(cores busy, top 3 threads, ctx/futex/yield per second, key guest counters). `check-shapes.py guest.bin` classifies every
+`pause` / locked op in a guest the way the spin-nap patcher does.
 
 ## A/B
 

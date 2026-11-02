@@ -12,10 +12,15 @@
  * Rates (totals): RATE guards/s (default 193000 = 386k getthreadid/s), OWNER_PCT of them from the owner
  * thread (default 50, so ~97k lock+unlock pairs = ~193k mutex ops/s), NCA_HZ NCA jobs/s (default 3500 = ~14k pool
  * mutex ops/s). RATE=0 runs every thread flat out (finds the maximum the emulator sustains).
- * Pacing is batch-and-sleep: each thread runs the guards due in PERIOD_US back to back, then usleeps until the period
- * ends (spinning only for the last ~1.5 ms, where a usleep would overshoot), so idle time is idle, not a busy-wait.
+ * Pacing: each thread runs the guards due in PERIOD_US back to back, then waits for the period to end.
+ *   PACE=1 (default): busy-work until the deadline, like a DS worker that is always running jobs or polling. No sleep
+ *                     import is involved, so the CPU is the guard calls plus a constant per-thread spin (all THREADS+1
+ *                     threads are 100% busy, oversubscribing the host as DS does).
+ *   PACE=0          : sceKernelUsleep until the deadline (spinning for the last ~1.5 ms). Idle time is idle, but on
+ *                     Linux the emulator's usleep itself burns CPU (a sched_yield spin), which then dominates; use it
+ *                     only to study that.
  *
- * Knobs: THREADS=15 RATE=193000 OWNER_PCT=50 NCA_HZ=3500 NCA_WORK_US=100 CS_NS=500 PERIOD_US=2000 CONTENDED=1
+ * Knobs: THREADS=15 RATE=193000 OWNER_PCT=50 NCA_HZ=3500 NCA_WORK_US=100 CS_NS=500 PERIOD_US=2000 PACE=1 CONTENDED=1
  *        (CONTENDED=0: one sound mutex per thread, no sharing)
  */
 #include "common.h"
@@ -40,6 +45,9 @@
 #endif
 #ifndef PERIOD_US
 #define PERIOD_US 2000 /* pacing period: guards due in this window run back to back */
+#endif
+#ifndef PACE
+#define PACE 1
 #endif
 #ifndef BATCH
 #define BATCH 32 /* batch size when RATE=0 (flat out) */
@@ -139,9 +147,10 @@ static void *thread_main(void *arg)
             for (;;) {
                 u64 t = rdtsc();
                 if (t >= next) { if (t - next > 8 * batch_ticks) next = t; break; }
+                if (g_stop) break;
+                if (PACE) continue; /* busy-wait */
                 u64 left_us = tsc_to_ns(next - t) / 1000;
                 if (left_us > 1500) sceKernelUsleep((u32)(left_us - 700));
-                if (g_stop) break;
             }
         }
     }
@@ -152,8 +161,8 @@ int _start(void *args, void *exit_fn)
 {
     (void)args; (void)exit_fn;
     synth_init("scream");
-    EMIT("scream.cfg threads=%d rate=%d owner_pct=%d nca_hz=%d nca_work_us=%d cs_ns=%d period_us=%d contended=%d duration_s=%d warmup_s=%d",
-         THREADS, RATE, OWNER_PCT, NCA_HZ, NCA_WORK_US, CS_NS, PERIOD_US, CONTENDED, DURATION_S, WARMUP_S);
+    EMIT("scream.cfg threads=%d rate=%d owner_pct=%d nca_hz=%d nca_work_us=%d cs_ns=%d period_us=%d pace=%d contended=%d duration_s=%d warmup_s=%d",
+         THREADS, RATE, OWNER_PCT, NCA_HZ, NCA_WORK_US, CS_NS, PERIOD_US, PACE, CONTENDED, DURATION_S, WARMUP_S);
     scePthreadMutexInit(&g_snd_lock, NULL, "sndGlobal");
     scePthreadMutexInit(&g_nca_lock, NULL, "ncaPool");
     for (int i = 0; i < NT; i++) scePthreadMutexInit(&g_own_lock[i], NULL, "own");

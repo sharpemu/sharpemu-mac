@@ -13,7 +13,22 @@ def g(m, key, scale=1.0, fmt="{:.1f}"):
     return "-" if v is None else fmt.format(v / scale)
 
 
+def hle_top(m, n=4):
+    per = (m.get("hle") or {}).get("per_nid_per_s") or {}
+    if not per:
+        return ""
+    top = ", ".join(f"{k.split(':')[-1]}={v:,.0f}/s" for k, v in list(per.items())[:n])
+    gc = m.get("gc") or {}
+    return f"HLE: {top}; GC gen0/1/2={gc.get('gc0')}/{gc.get('gc1')}/{gc.get('gc2')} pause={gc.get('pause_ms')} ms alloc={gc.get('alloc_mb')} MB"
+
+
 def key_counters(m):
+    text = key_counters_guest(m)
+    extra = hle_top(m)
+    return f"{text} | {extra}" if extra else text
+
+
+def key_counters_guest(m):
     f = m.get("guest_flat", {})
     name = m["guest"]
     ms = f.get("jobpool.total.measured_us") or f.get("scream.total.measured_us") or 0
