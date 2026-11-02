@@ -73,6 +73,25 @@ public static partial class AgcExports
     public static int SetShRegIndirectPatchSetAddress(CpuContext ctx) =>
         SetIndirectPatchAddress(ctx, IndirectRegisterSpace.Sh);
 
+    // The Sh and Uc counterparts of sceAgcSetCxRegIndirectPatchSetNumRegisters (Demon's Souls imports
+    // all three). The three SET_*_REG_INDIRECT packets share one layout, which the patcher derives from
+    // the header; without these the call came back NOT_FOUND and the count stayed as built.
+    [SysAbiExport(
+        Nid = "nCUgItdN2ms",
+        ExportName = "sceAgcSetShRegIndirectPatchSetNumRegisters",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int SetShRegIndirectPatchSetNumRegisters(CpuContext ctx) =>
+        SetIndirectPatchRegisterCount(ctx, IndirectRegisterSpace.Sh);
+
+    [SysAbiExport(
+        Nid = "fRG-JOH5+sI",
+        ExportName = "sceAgcSetUcRegIndirectPatchSetNumRegisters",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int SetUcRegIndirectPatchSetNumRegisters(CpuContext ctx) =>
+        SetIndirectPatchRegisterCount(ctx, IndirectRegisterSpace.Uc);
+
     [SysAbiExport(
         Nid = "6lNcCp+fxi4",
         ExportName = "sceAgcSetUcRegIndirectPatchSetAddress",
