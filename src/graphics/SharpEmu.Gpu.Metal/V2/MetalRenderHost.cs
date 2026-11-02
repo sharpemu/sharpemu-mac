@@ -1358,6 +1358,7 @@ internal sealed partial class MetalRenderHost :
 
         if (ConservativeReads)
         {
+            SupersedeAllKernelCopyChecks();
             _gpuWrites.NoteUnbounded(SubmissionSerial);
             _cpOverlay.Clear();
             _labelOverlay.Clear();
@@ -1374,6 +1375,7 @@ internal sealed partial class MetalRenderHost :
 
         var sequence = _gpuWrites.Note(address, size, serial, origin);
         NotePendingCopyDestination(address, size, origin, serial, sequence);
+        NoteKernelCopyCheckWrite(address, size, origin, serial, sequence);
         NoteFencedWrite(address, size);
     }
 
@@ -1405,6 +1407,7 @@ internal sealed partial class MetalRenderHost :
     {
         // The store may reach DCC metadata without re-arming a claim there.
         _imageCache.ForgetAllStandingDccClaims();
+        SupersedeAllKernelCopyChecks();
         _gpuWrites.NoteUnbounded(SubmissionSerial);
         _cpOverlay.Clear();
         _labelOverlay.Clear();
@@ -1554,6 +1557,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         WriteGuestPattern(address, size, value);
+        SupersedeKernelCopyChecks(address, size);
         _cpOverlay.Forget(address, size);
         _labelOverlay.Forget(address, size);
         _imageCache.InvalidateMemory(address, size);
@@ -1826,6 +1830,7 @@ internal sealed partial class MetalRenderHost :
 
     private void CopyGuestBytesOnHost(ulong destination, ulong source, ulong size)
     {
+        SupersedeKernelCopyChecks(destination, size);
         _cpOverlay.Forget(destination, size);
         _labelOverlay.Forget(destination, size);
         if (_guard is null)
