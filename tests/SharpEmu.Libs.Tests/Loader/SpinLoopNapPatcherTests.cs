@@ -544,6 +544,105 @@ public sealed unsafe class SpinLoopNapPatcherTests
         Assert.Equal(0UL, slotA[3]); // A's own HLE call restarted it
     }
 
+    // SHARPEMU_SPIN_NAP_PROBE_BENCH_OUTPUT=<path>: ns per pause-probe call (the probe never naps) for 1, 4
+    // and 8 threads calling it back to back on stacks 64 KiB apart in one 64 MiB bucket, private vs shared
+    // state, with no delay and with the 19 ns Zen 2 delay. Best of 3 runs of 2M calls per thread; the time
+    // is wall-clock per thread, so it includes cache-line contention between the threads. Run it on the
+    // Mac to see what the key load and the probe cost under Rosetta.
+    [Fact]
+    public void MeasureProbeCostWhenRequested()
+    {
+        var path = Environment.GetEnvironmentVariable("SHARPEMU_SPIN_NAP_PROBE_BENCH_OUTPUT");
+        if (path is null || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        // runner(stackTop, probe, calls): switch to the stack, call the probe `calls` times, switch back.
+        var a = new Assembler(64);
+        var loop = a.CreateLabel();
+        var (top, probeRegister, count) = OperatingSystem.IsWindows() ? (rcx, rdx, r8) : (rdi, rsi, rdx);
+        a.push(rbx);
+        a.push(rsi);
+        a.mov(rbx, count);
+        a.mov(rsi, probeRegister);
+        a.mov(rax, rsp);
+        a.mov(rsp, top);
+        a.push(rax);
+        a.push(rax);
+        a.Label(ref loop);
+        a.call(rsi);
+        a.dec(rbx);
+        a.jnz(loop);
+        a.pop(rax);
+        a.pop(rsp);
+        a.pop(rsi);
+        a.pop(rbx);
+        a.ret();
+        using var runnerCode = new ExecutableCode(Assemble(a));
+        var runner = (delegate* unmanaged<ulong, nint, long, void>)runnerCode.Address;
+
+        const int MaxThreads = 8;
+        const ulong Spacing = 0x10000;
+        const int Bytes = 4 << 20;
+        var block = (byte*)NativeMemory.Alloc(Bytes);
+        try
+        {
+            var highest = ((ulong)block + Bytes - 64) & ~15UL;
+            var lowest = highest - (MaxThreads - 1) * Spacing;
+            if (lowest >> SpinNapRuntime.StackKeyShift != highest >> SpinNapRuntime.StackKeyShift)
+            {
+                highest = ((highest >> SpinNapRuntime.StackKeyShift) << SpinNapRuntime.StackKeyShift) - 64;
+            }
+
+            Assert.True(highest - MaxThreads * Spacing >= (ulong)block);
+            var tscFrequency = SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency;
+            const long Calls = 2_000_000;
+            var lines = new List<string>();
+            foreach (var threads in new[] { 1, 4, MaxThreads })
+            foreach (var sharedState in new[] { false, true })
+            foreach (var delayNanoseconds in new uint[] { 0, SpinNapRuntime.Zen2PauseDelayNanoseconds })
+            {
+                var best = double.MaxValue;
+                for (var repetition = 0; repetition < 3; repetition++)
+                {
+                    using var probe = new ExecutableCode(SpinNapRuntime.BuildRunnableProbeForTest(
+                        tscFrequency, SpinNapRuntime.AllocatePauseTableForTest(sharedState), sharedState, long.MaxValue,
+                        long.MaxValue, SpinNapRuntime.TicksForNanoseconds(delayNanoseconds, tscFrequency), 0));
+                    using var start = new Barrier(threads + 1);
+                    var workers = new Thread[threads];
+                    for (var index = 0; index < threads; index++)
+                    {
+                        var stackTop = highest - (ulong)index * Spacing;
+                        var probeAddress = probe.Address;
+                        workers[index] = new Thread(() =>
+                        {
+                            start.SignalAndWait();
+                            runner(stackTop, probeAddress, Calls);
+                        });
+                        workers[index].Start();
+                    }
+
+                    start.SignalAndWait();
+                    var clock = System.Diagnostics.Stopwatch.StartNew();
+                    foreach (var worker in workers)
+                    {
+                        worker.Join();
+                    }
+
+                    best = Math.Min(best, clock.Elapsed.TotalNanoseconds / Calls);
+                }
+
+                lines.Add(FormattableString.Invariant(
+                    $"threads={threads} state={(sharedState ? "shared" : "private")} delay_ns={delayNanoseconds} ns_per_call={best:F1}"));
+            }
+
+            File.WriteAllLines(path, lines);
+        }
+        finally
+        {
+            NativeMemory.Free(block);
+        }
+    }
+
     [Fact]
     public void PatchesAPauseInABackwardLoopAndStaysTransparent()
     {
