@@ -47,13 +47,17 @@ public static partial class Gen5MslTranslator
             }
 
             var instructions = _request.Program.Instructions;
+            if (M0AtBlockEntries(blocks, instructions) is not { } entries)
+            {
+                return;
+            }
+
             var slotsByAddress = new Dictionary<uint, int>();
             var slotsByPc = new Dictionary<uint, int>();
-            foreach (var block in blocks)
+            for (var blockIndex = 0; blockIndex < blocks.Count; blockIndex++)
             {
-                // M0 is only known from a constant written earlier in the same block: another
-                // path into the block could have left anything there.
-                uint? m0 = null;
+                var block = blocks[blockIndex];
+                uint? m0 = entries[blockIndex];
                 for (var index = block.StartIndex; index < block.EndIndex; index++)
                 {
                     var instruction = instructions[index];
@@ -91,6 +95,93 @@ public static partial class Gen5MslTranslator
 
             _ldsLaneSlots = slotsByPc;
             _ldsLaneSlotCount = slotsByAddress.Count;
+        }
+
+        /// <summary>
+        /// M0 on entry to each block where every path into it set the same constant, else null; null for the whole
+        /// program when a block leaves by a jump this cannot follow. The guest compiler sets M0 once before a run of
+        /// ADDTID spills and keeps it across the branches between them (Wukong's 8 KB-array pixel programs set
+        /// it in one block and spill in the next), so a constant written in the same block is not enough.
+        /// </summary>
+        private static uint?[]? M0AtBlockEntries(IReadOnlyList<ShaderBlock> blocks, IReadOnlyList<Gen5ShaderInstruction> instructions)
+        {
+            var entries = new uint?[blocks.Count];
+            var reached = new bool[blocks.Count];
+            var queued = new bool[blocks.Count];
+            var work = new Queue<int>();
+            if (blocks.Count == 0)
+            {
+                return entries;
+            }
+
+            reached[0] = true;
+            work.Enqueue(0);
+            queued[0] = true;
+            Span<int> successors = stackalloc int[2];
+            while (work.TryDequeue(out var blockIndex))
+            {
+                queued[blockIndex] = false;
+                var block = blocks[blockIndex];
+                var m0 = entries[blockIndex];
+                for (var index = block.StartIndex; index < block.EndIndex; index++)
+                {
+                    if (WritesM0(instructions[index]))
+                    {
+                        m0 = ConstantM0(instructions[index]);
+                    }
+                }
+
+                var last = instructions[block.EndIndex - 1];
+                var count = 0;
+                if (last.Opcode is "SSetpcB64" or "SSwappcB64" or "SRfeB64" or "SCbranchJoin" or "SCbranchGFork" or "SCbranchIFork")
+                {
+                    return null;
+                }
+
+                if (last.Opcode == "SEndpgm")
+                {
+                }
+                else if (last.Opcode == "SBranch" || last.Opcode.StartsWith("SCbranch", StringComparison.Ordinal))
+                {
+                    if (!IsExitBranchTarget(instructions, last))
+                    {
+                        if (!TryGetBranchTargetBlock(blocks, last, out var target))
+                        {
+                            return null;
+                        }
+
+                        successors[count++] = target;
+                    }
+
+                    if (last.Opcode != "SBranch" && blockIndex + 1 < blocks.Count)
+                    {
+                        successors[count++] = blockIndex + 1;
+                    }
+                }
+                else if (blockIndex + 1 < blocks.Count)
+                {
+                    successors[count++] = blockIndex + 1;
+                }
+
+                foreach (var successor in successors[..count])
+                {
+                    var merged = reached[successor] ? (entries[successor] == m0 ? m0 : null) : m0;
+                    if (reached[successor] && merged == entries[successor])
+                    {
+                        continue;
+                    }
+
+                    reached[successor] = true;
+                    entries[successor] = merged;
+                    if (!queued[successor])
+                    {
+                        queued[successor] = true;
+                        work.Enqueue(successor);
+                    }
+                }
+            }
+
+            return entries;
         }
 
         private static bool WritesM0(Gen5ShaderInstruction instruction)

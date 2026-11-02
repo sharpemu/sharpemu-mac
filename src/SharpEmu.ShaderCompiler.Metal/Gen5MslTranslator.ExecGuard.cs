@@ -25,10 +25,36 @@ namespace SharpEmu.ShaderCompiler.Metal;
 // told the wave size and the host can withhold the elision per request
 // (EnableExecGuardElision), which is how the Vulkan backend handles a driver that
 // needs the guards.
+//
+// EXEC runs. Where EXEC is not provably full, a guard per write is a select per VALU
+// result: about a quarter of the GPU time of Black Myth: Wukong's hottest pixel
+// programs (2.5 -> 1.9 ms on the shader bench with every guard removed). A run of
+// consecutive VALU instructions that only read and write their own lane's registers
+// leaves EXEC alone, so one "if (exec) { ... }" around the run writes exactly the lanes
+// the per-write guards did: the hardware masks the lanes off instead, and a simdgroup
+// whose lanes are all off skips the run. The run ends before anything that is not
+// lane-local - a lane read across the wave, a write to VCC, SCC or a scalar register (a
+// lane that skipped it would keep a stale copy of a value every lane must agree on), a
+// derivative, a barrier - so those keep running in every lane. The emitted text of a
+// run is checked for such constructs as well, and a program where one slipped through
+// is translated again with a guard per write (ExecRunRefused).
 public static partial class Gen5MslTranslator
 {
+    private static long _execRunsRefused;
+
+    /// <summary>Programs translated again with a guard per write because an EXEC run met
+    /// something that is not lane-local.</summary>
+    public static long ExecRunsRefused => Interlocked.Read(ref _execRunsRefused);
+
     private sealed partial class CompilationContext
     {
+        private bool _execRunOpen;
+        private int _execRunStart;
+
+        /// <summary>A run's text held a construct that is not lane-local; the program is
+        /// not used and is translated again without runs.</summary>
+        internal bool ExecRunRefused { get; private set; }
+
         /// <summary>Pcs the analysis proved run with every EXEC lane set, computed on
         /// first use because most programs never ask.</summary>
         private IReadOnlySet<uint>? _execFullPcs;
@@ -42,25 +68,31 @@ public static partial class Gen5MslTranslator
 
         private void BeginInstruction(Gen5ShaderInstruction instruction)
         {
-            _execKnownFull = IsExecKnownFull(instruction.Pc);
+            _execKnownFull = _execRunOpen || IsExecKnownFull(instruction.Pc);
             _unobservedAluWrites = default;
             // Only pure ALU destination writes participate. Memory, exports and
             // mask updates retain their guards even when their result is dead.
             if (_options.UnobservedAluWrites && _options.ExecGuardElision && _request.EnableExecGuardElision &&
-                _waveLaneCount == 32 && (_stage == Gen5MslStage.Compute ||
-                    (_stage == Gen5MslStage.Mesh && Mesh.ThreadsPerThreadgroup <= 32)) &&
+                UnobservedWritesApply() &&
                 instruction.Encoding is (Gen5ShaderEncoding.Vop1 or Gen5ShaderEncoding.Vop2 or
                     Gen5ShaderEncoding.Vop3 or Gen5ShaderEncoding.Vop3p) &&
                 instruction.Control is not (Gen5DppControl or Gen5Dpp8Control))
             {
                 if (!_observationPlanBuilt)
                 {
-                    _observationPlan = Ir.Gen5VectorObservationAnalysis.Analyze(_request.Program, wave32: true);
+                    _observationPlan = Ir.Gen5VectorObservationAnalysis.Analyze(_request.Program, wave32: _waveLaneCount == 32);
                     _observationPlanBuilt = true;
                 }
                 _unobservedAluWrites = _observationPlan?.UnobservedWrites(instruction.Pc) ?? default;
             }
         }
+
+        private bool UnobservedWritesApply() =>
+            _options.UnobservedAluAllStages
+                ? _stage is Gen5MslStage.Compute or Gen5MslStage.Pixel or Gen5MslStage.Vertex ||
+                    (_stage == Gen5MslStage.Mesh && _waveLaneCount == 32 && Mesh.ThreadsPerThreadgroup <= 32)
+                : _waveLaneCount == 32 && (_stage == Gen5MslStage.Compute ||
+                    (_stage == Gen5MslStage.Mesh && Mesh.ThreadsPerThreadgroup <= 32));
 
         private bool IsExecKnownFull(uint pc)
         {
@@ -73,6 +105,123 @@ public static partial class Gen5MslTranslator
                 _request.Program,
                 wave32: _waveLaneCount == 32);
             return _execFullPcs.Contains(pc);
+        }
+
+        private bool ExecRunsApply => _options.ExecRuns && _options.ExecGuardElision && _request.EnableExecGuardElision;
+
+        /// <summary>
+        /// Whether an instruction may sit inside an EXEC run: a VALU operation whose every
+        /// operand and result is a register of its own lane (no DPP, lane reads or writes,
+        /// relative register numbers, interpolation), with no scalar result - no compare,
+        /// carry, VCC write or scalar destination.
+        /// </summary>
+        private bool IsExecRunInstruction(Gen5ShaderInstruction instruction)
+        {
+            if (!ExecRunsApply || IsExecKnownFull(instruction.Pc) ||
+                instruction.Encoding is not (Gen5ShaderEncoding.Vop1 or Gen5ShaderEncoding.Vop2 or
+                    Gen5ShaderEncoding.Vop3 or Gen5ShaderEncoding.Vop3p) ||
+                instruction.Control is Gen5DppControl or Gen5Dpp8Control or
+                    Gen5Vop3Control { ScalarDestination: not null } or Gen5SdwaControl { ScalarDestination: not null })
+            {
+                return false;
+            }
+
+            var opcode = instruction.Opcode;
+            if (opcode.StartsWith("VCmp", StringComparison.Ordinal) ||
+                opcode.StartsWith("VReadlane", StringComparison.Ordinal) ||
+                opcode.StartsWith("VReadfirstlane", StringComparison.Ordinal) ||
+                opcode.StartsWith("VWritelane", StringComparison.Ordinal) ||
+                opcode.StartsWith("VPermlane", StringComparison.Ordinal) ||
+                opcode.StartsWith("VMovrel", StringComparison.Ordinal) ||
+                opcode.StartsWith("VSwaprel", StringComparison.Ordinal) ||
+                opcode.StartsWith("VInterp", StringComparison.Ordinal) ||
+                opcode.StartsWith("VDivScale", StringComparison.Ordinal) ||
+                opcode.Contains("Co", StringComparison.Ordinal) ||
+                opcode is "VAddcU32" or "VSubbU32" or "VSubbrevU32" or "VMadU64U32" or "VMadI64I32" or "VNop")
+            {
+                return false;
+            }
+
+            foreach (var destination in instruction.Destinations)
+            {
+                if (destination.Kind != Gen5OperandKind.VectorRegister)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private void OpenExecRun()
+        {
+            if (_execRunOpen)
+            {
+                return;
+            }
+
+            Line("if (exec)");
+            Line("{");
+            _indent++;
+            _execRunOpen = true;
+            _execRunStart = _body.Length;
+        }
+
+        private void CloseExecRun()
+        {
+            if (!_execRunOpen)
+            {
+                return;
+            }
+
+            CheckExecRun(_execRunStart);
+            _indent--;
+            Line("}");
+            _execRunOpen = false;
+        }
+
+        // What must never run in only some lanes: a cross-lane read, a wave-uniform result,
+        // a derivative, a barrier or control flow out of the run.
+        private static readonly string[] NotLaneLocal =
+        [
+            "sharpemu_ballot", "simd_", "quad_", "threadgroup_barrier", "sharpemu_wave", "sharpemu_lane <",
+            "vcc =", "exec =", "scc =", "atomic_", "sharpemu_lds", "dfdx", "dfdy", "fwidth", ".sample(",
+            "discard_fragment", "return", "break;", "continue;", "goto ", "pc =", "active =",
+        ];
+
+        private void CheckExecRun(int start)
+        {
+            if (ExecRunRefused)
+            {
+                return;
+            }
+
+            var text = _body.ToString(start, _body.Length - start);
+            foreach (var token in NotLaneLocal)
+            {
+                if (text.Contains(token, StringComparison.Ordinal))
+                {
+                    ExecRunRefused = true;
+                    return;
+                }
+            }
+
+            // A scalar register written inside the run ("s[12] = ..." before renaming).
+            for (var index = text.IndexOf("s[", StringComparison.Ordinal); index >= 0;
+                 index = text.IndexOf("s[", index + 2, StringComparison.Ordinal))
+            {
+                if (index > 0 && (char.IsLetterOrDigit(text[index - 1]) || text[index - 1] == '_'))
+                {
+                    continue;
+                }
+
+                var close = text.IndexOf(']', index);
+                if (close > 0 && close + 3 < text.Length && text.AsSpan(close + 1).TrimStart(' ').StartsWith("= "))
+                {
+                    ExecRunRefused = true;
+                    return;
+                }
+            }
         }
 
         /// <summary>One statement behind the per-lane EXEC guard, or the statement alone

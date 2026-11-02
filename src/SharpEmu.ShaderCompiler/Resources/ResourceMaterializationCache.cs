@@ -3176,19 +3176,37 @@ public sealed partial class ResourceMaterializationCache
         Origin = snapshot.Origin,
     };
 
+    // Each image's T# position in the recorded words, when it occurs there exactly once. The
+    // positions of every T#'s first dword are gathered in one pass over the words, so a table of
+    // many images (Ghost's fire: 130 candidates, every draw) is not scanned once per image.
     private static int[]? MapImageStatisticsWords(ResourceSnapshot snapshot, ReadOnlySpan<byte> bytes)
     {
         int[]? map = null;
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+        Dictionary<uint, List<int>>? starts = null;
+        foreach (var descriptor in snapshot.Images)
+        {
+            if (descriptor.Length >= 8 && (descriptor[0] != 0 || descriptor[1] != 0))
+                (starts ??= [])[descriptor[0]] = [];
+        }
+
+        if (starts is null)
+            return null;
+        for (var word = 0; word + 8 <= words.Length; word++)
+        {
+            if (starts.TryGetValue(words[word], out var positions))
+                positions.Add(word);
+        }
+
         for (var image = 0; image < snapshot.Images.Length; image++)
         {
             var descriptor = snapshot.Images[image];
             if (descriptor.Length < 8 || (descriptor[0] == 0 && descriptor[1] == 0))
                 continue;
             var match = -1;
-            for (var word = 0; word + 8 <= words.Length; word++)
+            foreach (var word in starts[descriptor[0]])
             {
-                if (words[word] != descriptor[0] || !words.Slice(word, 8).SequenceEqual(descriptor.AsSpan(0, 8)))
+                if (!words.Slice(word, 8).SequenceEqual(descriptor.AsSpan(0, 8)))
                     continue;
                 if (match >= 0)
                 {

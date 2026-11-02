@@ -15,8 +15,13 @@ internal sealed partial class RenderRecorder
     // while its pipeline still compiles (the draw is left out this time, before anything of it was recorded).
     // indices: the local half's vertex of each control point, with the draw's vertex offset.
     internal bool RunTessellationHull(ComputeProgram hull, ShaderInterfaceRegisters shaderInterface, uint[] indices,
-        uint controlPoints, bool quad, uint patchCount, uint instances, uint firstInstance)
+        uint controlPoints, bool quad, uint patchCount, uint instances, uint firstInstance) =>
+        RunTessellationHull(new TessellationHullLaunch(hull, shaderInterface.MinTessellationLevel,
+            shaderInterface.MaxTessellationLevel, indices, controlPoints, quad, patchCount, instances, firstInstance));
+
+    internal bool RunTessellationHull(TessellationHullLaunch launch)
     {
+        var (hull, minLevel, maxLevel, indices, controlPoints, quad, patchCount, instances, firstInstance) = launch;
         var hullPatches = patchCount * instances;
         var patchesPerGroup = ShaderPipelineCache.TessellationPatchesPerGroup(controlPoints);
         var groups = (hullPatches + patchesPerGroup - 1) / patchesPerGroup;
@@ -45,8 +50,8 @@ internal sealed partial class RenderRecorder
             _host.ShaderAccessBarrier();
             _host.PrepareTessellationFactors(
                 Agc.TessellationRings.TessFactorRing, hullPatches, quad,
-                BitConverter.UInt32BitsToSingle(shaderInterface.MinTessellationLevel),
-                BitConverter.UInt32BitsToSingle(shaderInterface.MaxTessellationLevel));
+                BitConverter.UInt32BitsToSingle(minLevel),
+                BitConverter.UInt32BitsToSingle(maxLevel));
         }
 
         _host.ResetBindings();

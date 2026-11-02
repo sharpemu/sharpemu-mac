@@ -37,10 +37,14 @@ public sealed class MslUnobservedAluTests
             0xBF810000,
         ], 8, 32 * 8);
         var request = Gen5ComputeFixtures.CreateComputeRequest(fixture);
+        // The guard text is per write: EXEC runs (on by default) would put both writes under one
+        // guard. The run form is checked on the device against the same reference below.
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var slow, out var error,
-            new Gen5MslCodegenOptions { UnobservedAluWrites = false }), error);
+            new Gen5MslCodegenOptions { UnobservedAluWrites = false, ExecRuns = false }), error);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var fast, out error,
-            new Gen5MslCodegenOptions { UnobservedAluWrites = true }), error);
+            new Gen5MslCodegenOptions { UnobservedAluWrites = true, ExecRuns = false }), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var runs, out error,
+            new Gen5MslCodegenOptions { UnobservedAluWrites = true, ExecRuns = true }), error);
         if (crossRead)
             Assert.Contains("if (exec) { v1 = ", fast.Source, StringComparison.Ordinal);
         else
@@ -51,6 +55,7 @@ public sealed class MslUnobservedAluTests
         var reference = Execute(slow);
         var actual = Execute(fast);
         Assert.Equal(reference, actual);
+        Assert.Equal(reference, Execute(runs));
         for (var lane = 0; lane < 32; lane++)
         {
             Assert.Equal(((mask >> lane) & 1) != 0 ? 10u : 5u,

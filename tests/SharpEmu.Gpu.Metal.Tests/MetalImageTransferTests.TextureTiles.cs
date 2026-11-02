@@ -118,7 +118,20 @@ public sealed partial class MetalImageTransferTests
 
     [Theory]
     [MemberData(nameof(TextureTileCases))]
-    public void ATiledColorWritebackReadsTheTextureInOnePassExactlyAsTheOracleTiles(string name)
+    public void ATiledColorWritebackReadsTheTextureInOnePassExactlyAsTheOracleTiles(string name) =>
+        AssertOnePassWriteback(name);
+
+    // SHARPEMU_METAL_V2_TEXTURE_TILER_SUBDWORD_TILE=1 tiles one and two byte texels out in one pass too, each element
+    // stored on its own; the guest bytes have to come out exactly as the oracle tiles them.
+    [Theory]
+    [MemberData(nameof(SubDwordTextureTileCases))]
+    public void ASubDwordWritebackReadsTheTextureInOnePassWhenSwitchedOn(string name)
+    {
+        if (!MetalTilerShaders.SubDwordTile) return;
+        AssertOnePassWriteback(name);
+    }
+
+    private void AssertOnePassWriteback(string name)
     {
         if (!RequireDevice()) return;
         using var harness = new MetalTransferHarness(Device.Value);

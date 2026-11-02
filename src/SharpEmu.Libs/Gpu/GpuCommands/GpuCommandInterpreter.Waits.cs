@@ -430,11 +430,23 @@ public sealed partial class GpuCommandInterpreter
                 $"address=0x{address:X16} count={executeCount} remaining={packet.Remaining}.");
         }
 
+        // Only where the read would park: a label this queue recorded ahead answers it at once.
+        if (ConditionalExecuteSpeculation.ShouldTakeAsZero(address) &&
+            !(PendingLabelLookup is { } pendingLabel && pendingLabel(address, false, out _)) &&
+            _host.TryTakeOwedOperandAsZero(address, sizeof(uint)))
+        {
+            ConditionalExecuteSpeculation.NoteTakenAsZero();
+            TraceSkippedPackets("conditional-execute", packet.PacketAddress + (payloadDwords + 1) * sizeof(uint), executeCount, (uint)address);
+            return payloadDwords + executeCount;
+        }
+
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (!TryReadOperandOrSuspend(address, bytes))
         {
             return payloadDwords;
         }
+
+        ConditionalExecuteSpeculation.Observe(address, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes));
 
         if (address == TraceConditionalExecuteAddress && Interlocked.Increment(ref _tracedConditionalExecutes) <= 48)
         {

@@ -206,6 +206,14 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             SetDebugInformation(in record.Debug);
         }
 
+        // A tessellated draw whose executor handed it over to be recorded later: its hull kernel first, where
+        // the direct recorder would have run it (RenderExecutor.DrawTessellatedInstances).
+        if (record.TessellationHull is { } hull && !RunTessellationHull(hull))
+        {
+            record.Kind = ResolvedDrawKind.Skipped;
+            record.ResetBindings = true;
+        }
+
         var state = record.State;
         if (record.Kind != ResolvedDrawKind.Draw)
         {

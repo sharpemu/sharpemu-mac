@@ -168,8 +168,20 @@ public sealed record Gen5MslCodegenOptions(
 
     /// <summary>Experimental removal of pure ALU guards when inactive values cannot
     /// be observed. SHARPEMU_MSL_UNOBSERVED_ALU=1 enables this for wave32 compute
-    /// and single-wave mesh shaders.</summary>
+    /// and single-wave mesh shaders; =all also for pixel, vertex and wave64 compute
+    /// programs (<see cref="UnobservedAluAllStages"/>).</summary>
     public bool UnobservedAluWrites { get; init; }
+
+    /// <summary>Consecutive lane-local VALU instructions under one EXEC share a single
+    /// "if (exec)" block instead of a guard on every write (Gen5MslTranslator.ExecGuard.cs).
+    /// SHARPEMU_MSL_EXEC_RUNS=0 guards each write again.</summary>
+    public bool ExecRuns { get; init; } = true;
+
+    /// <summary>The unobserved-write elision for every stage but multi-wave mesh shaders.
+    /// The analysis follows lanes, not simdgroups: a value an inactive lane never reads
+    /// back after EXEC widens is dead in that lane whether the guest wave is one Apple
+    /// simdgroup or two.</summary>
+    public bool UnobservedAluAllStages { get; init; }
 
     /// <summary>Experimental separation of fused geometry input and output capacities,
     /// with complete wave64 execution. SHARPEMU_MSL_GEOMETRY_CAPACITY=1.</summary>
@@ -217,6 +229,11 @@ public sealed record Gen5MslCodegenOptions(
     /// culler). SHARPEMU_MSL_MULTIWAVE64=0 bridges only those programs.</summary>
     public bool MultiWaveCompute64 { get; init; } = true;
 
+    /// <summary>With <see cref="MultiWaveCompute64"/>, bridge only a program whose results could tell
+    /// its waves were run as wave32 halves (Gen5MslTranslator.WholeWaves.cs).
+    /// SHARPEMU_MSL_MULTIWAVE64_BY_NEED=0 bridges every such group.</summary>
+    public bool MultiWaveComputeByNeed { get; init; } = true;
+
     /// <summary>In a bridged multi-wave compute group, meet at a threadgroup barrier for the
     /// exchanges of blocks every wave runs alike, instead of at the wave's pair barrier
     /// (Gen5MslTranslator.GroupWaves.cs). SHARPEMU_MSL_GROUP_BARRIERS=0 keeps the pair barriers.</summary>
@@ -226,6 +243,12 @@ public sealed record Gen5MslCodegenOptions(
     /// on EXEC in each half on its own, without exchanging EXEC per trip
     /// (Gen5MslTranslator.GroupWaves.cs). SHARPEMU_MSL_HALF_LOOPS=0 exchanges per trip.</summary>
     public bool HalfLocalWaveLoops { get; init; } = true;
+
+    /// <summary>An image access over many indirect candidates of one class and form reads its
+    /// texture by a runtime element of the class array instead of one case per candidate
+    /// (Gen5MslTranslator.Resources.cs, TryIndexImageCandidates). SHARPEMU_MSL_INDEXED_CANDIDATES=0
+    /// keeps the cases.</summary>
+    public bool IndexedImageCandidates { get; init; } = true;
 
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -256,7 +279,9 @@ public sealed record Gen5MslCodegenOptions(
         RuntimeDwordFormatLoads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_RUNTIME_DWORD_FORMAT") != "0",
         FusedLaneReads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_READLANE_FUSE") != "0")
     {
-        UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "1",
+        UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") is "1" or "all",
+        UnobservedAluAllStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "all",
+        ExecRuns = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_RUNS") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
         DecodedFormatLoadThreshold = int.TryParse(
@@ -270,8 +295,10 @@ public sealed record Gen5MslCodegenOptions(
         MeshExitJoin = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_EXIT_JOIN") == "1",
         BridgeComputeWaves = Environment.GetEnvironmentVariable("SHARPEMU_BRIDGE_COMPUTE_WAVES") != "0",
         MultiWaveCompute64 = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MULTIWAVE64") != "0",
+        MultiWaveComputeByNeed = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MULTIWAVE64_BY_NEED") != "0",
         GroupUniformBarriers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GROUP_BARRIERS") != "0",
         HalfLocalWaveLoops = Environment.GetEnvironmentVariable("SHARPEMU_MSL_HALF_LOOPS") != "0",
+        IndexedImageCandidates = Environment.GetEnvironmentVariable("SHARPEMU_MSL_INDEXED_CANDIDATES") != "0",
         MeshDeviceLdsThresholdBytes = uint.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_THRESHOLD"), out var threshold)
                 ? Math.Min(threshold, 16384u) : 12288u,

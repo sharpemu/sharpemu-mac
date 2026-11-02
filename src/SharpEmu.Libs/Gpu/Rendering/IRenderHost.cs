@@ -368,6 +368,10 @@ public interface IRenderHost
 
     void Dispatch(uint groupsX, uint groupsY, uint groupsZ);
 
+    // The next Dispatch or TryDispatchIndirect may run beside the dispatch before it: the
+    // stream put no barrier, wait or other ordering between them. Consumed by that dispatch.
+    bool NextDispatchMayOverlap { get => false; set { } }
+
     // Executes a dispatch from three uint32 group counts in guest memory when the backend can
     // consume the guest buffer directly. Backends without native indirect dispatch return false.
     // physicalAxisOfLogical is the group axis order the program was compiled for.
