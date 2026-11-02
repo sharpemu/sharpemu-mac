@@ -19,6 +19,8 @@
  * calls act on the last packet of their register space, so they need N_*_IND >= 1. (The Sh/Uc SetNumRegisters imports DS also has are
  * not implemented in this tree and are not called.) Set the DS mix from a profile with e.g. -DN_CX_IND=3 -DP_CX_ADD=6.
  *
+ * -DVERIFY_CORRUPT=1 is a test hook that makes every indirect-packet check expect a wrong count (the run must come out invalid).
+ *
  * Knobs: THREADS=4  DRAWS_HZ=50000 (total draws/s, 0 = flat out)  FRAME_DRAWS=512  PACE=1 (busy-work to the deadline; 0 = usleep)
  *        PERIOD_US=2000 (pacing batch)  REGS=4 (registers per indirect packet at build time)
  */
@@ -153,6 +155,9 @@ static void bad(TStat *st, const char *what, int a, u64 got, u64 want)
 static void verify_indirect(TStat *st, const u32 *pkt, u32 op, u64 regs_addr, u32 count, const char *what)
 {
     st->checks++;
+#ifdef VERIFY_CORRUPT /* test hook: expect one register too many, to prove a failing check invalidates the run */
+    count += 1;
+#endif
     u32 want_hdr = PM4(5, op, 0);
     if (pkt[0] != want_hdr) bad(st, what, 0, pkt[0], want_hdr);
     else if (pkt[1] != (u32)(regs_addr & 0xFFFFFFFCu)) bad(st, what, 1, pkt[1], regs_addr & 0xFFFFFFFCu);
@@ -299,6 +304,7 @@ int _start(void *args, void *exit_fn)
     EMIT("agcbuild.total measured_us=%lu draws=%lu calls=%lu draws_per_s=%lu calls_per_s=%lu", measured_us, draws, total_calls,
          draws * 1000000 / measured_us, total_calls * 1000000 / measured_us);
     EMIT("agcbuild.verify checks=%lu bad=%lu first_bad=%s", checks, badn, *first_bad ? first_bad : "none");
+    if (badn) EMIT("ERROR agcbuild_verify bad=%lu checks=%lu first_bad=%s", badn, checks, first_bad); /* invalidates the run */
     for (int k = 0; k < NI; k++) {
         if (!calls[k]) continue;
         char b[256];
