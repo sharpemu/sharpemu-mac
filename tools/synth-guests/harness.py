@@ -238,6 +238,7 @@ class Run:
                 everyone = sorted(((v["run_ns"] - self.ident_base.get(tid, {}).get("run_ns", 0)) / 1e9, tid, v["comm"], tid in known)
                                   for tid, v in s1.items())[::-1][:3]
                 log_entry = dict(comm=comm, idx=key[1], burn_s=burn, lag_ms=round(lag * 1000, 1),
+                                 guest_wall_s=round(rest.get("wall_us", 0) / 1e6, 4), guest_gap_s=round(rest.get("gap_us", 0) / 1e6, 4),
                                  top3=[dict(tid=t, comm=c, delta_s=round(d, 4), already_identified=k) for d, t, c, k in everyone])
                 reason = None
                 if self.ident_base_late:
@@ -246,12 +247,15 @@ class Run:
                     reason = f"snapshot lag {lag * 1000:.0f} ms exceeds the idle margin {self.ident_margin_s * 1000:.0f} ms"
                 elif not deltas:
                     reason = "no unidentified host thread of that name"
-                elif deltas[0][0] > 1.5 * burn:
-                    reason = f"top delta {deltas[0][0]:.3f} s is far above the burn {burn:.3f} s (other CPU leaked into the window)"
+                elif deltas[0][0] > burn + (rest["gap_us"] / 1e6 if "gap_us" in rest else 0.2) + 0.05:
+                    # The burner can legitimately show more than its burn: the guest does not count rdtsc gaps >= 20 us, but the kernel may
+                    # still bill part of them (interrupts, host work in the thread) as run time; the guest reports those gaps (gap_us).
+                    reason = (f"top delta {deltas[0][0]:.3f} s exceeds the burn {burn:.3f} s plus the guest's own excluded gaps "
+                              f"{rest.get('gap_us', 0) / 1e6:.3f} s plus 50 ms (other CPU leaked into the window)")
                 elif deltas[0][0] < 0.6 * burn:
                     reason = f"top delta {deltas[0][0]:.3f} s is below 60% of the burn {burn:.3f} s"
-                elif len(deltas) > 1 and deltas[0][0] < 2 * deltas[1][0]:
-                    reason = f"top delta {deltas[0][0]:.3f} s is not 2x the runner-up {deltas[1][0]:.3f} s"
+                elif len(deltas) > 1 and deltas[0][0] < 3 * deltas[1][0]:
+                    reason = f"top delta {deltas[0][0]:.3f} s is not 3x the runner-up {deltas[1][0]:.3f} s"
                 # Only this guest thread burned CPU since the previous snapshot (everything else is idle), so it is the biggest grower.
                 if reason is None:
                     self.idents[key] = dict(tid=deltas[0][1], delta_s=round(deltas[0][0], 4))

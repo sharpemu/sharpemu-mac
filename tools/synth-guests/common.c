@@ -262,8 +262,16 @@ void thread_identify(const char *guest_name, int idx)
     u64 r;
     sceKernelWaitEventFlag(s_ident_ef[idx], 1, EVF_WAIT_AND | EVF_WAIT_CLEAR_ALL, &r, NULL);
     if (__atomic_load_n(&s_ident_abort, __ATOMIC_ACQUIRE)) return; /* main gave up (timeout): no identification this run */
-    spin_cpu(ns_to_tsc((u64)IDENT_MS * 1000000ull)); /* CPU time, so preemption cannot shorten it; everything else is idle */
-    EMIT("MARK ident_end comm=%s idx=%d cpu_ms=%d margin_ms=%d", comm, idx, IDENT_MS, IDENT_MARGIN_MS);
+    /* Burn IDENT_MS of CPU time (rdtsc gaps >= SPIN_GAP_NS are not counted), and report what the thread saw: the wall time of the burn and
+     * the gap time excluded from it, so the harness can compare them with the host's CPU delta for the thread. */
+    u64 want = ns_to_tsc((u64)IDENT_MS * 1000000ull), acc = 0, gap = 0, t_begin = rdtsc(), last = t_begin;
+    while (acc < want) {
+        u64 t = rdtsc(), d = t - last;
+        last = t;
+        if (d < g_spin_gap_ticks) acc += d; else gap += d;
+    }
+    EMIT("MARK ident_end comm=%s idx=%d cpu_ms=%d margin_ms=%d wall_us=%lu gap_us=%lu", comm, idx, IDENT_MS, IDENT_MARGIN_MS,
+         tsc_to_ns(last - t_begin) / 1000, tsc_to_ns(gap) / 1000);
     for (int i = 0; i < IDENT_MARGIN_MS / 20; i++) sceKernelUsleep(20000); /* idle: the harness takes its snapshot in here */
     __atomic_fetch_add(&s_ident_done, 1, __ATOMIC_ACQ_REL);
     if (idx + 1 < IDENT_MAX && s_ident_ef[idx + 1]) sceKernelSetEventFlag(s_ident_ef[idx + 1], 1); /* next turn */
