@@ -31,9 +31,12 @@ public static partial class KernelMemoryCompatExports
     private static int _staleOwnerWarning;
     private static int _registeredFreeRangeWarning;
 
+    // A texture inside a PRT aperture is read and written where its tiles really are: a GPU address
+    // inside macOS 27's blocked window is translated as the kernel translated the tiles' mappings.
     internal static bool TryReadPrtBacking(IGuestBackedSpace backing, ulong address, Span<byte> destination)
     {
         var size = (ulong)destination.Length;
+        address = GuestVaHole.TranslateRange(address, size);
         lock (_memoryGate)
         {
             if (!ReferenceEquals(backing, _backingOwner) ||
@@ -72,6 +75,7 @@ public static partial class KernelMemoryCompatExports
     internal static bool TryWritePrtBacking(IGuestBackedSpace backing, ulong address, ReadOnlySpan<byte> source)
     {
         var size = (ulong)source.Length;
+        address = GuestVaHole.TranslateRange(address, size);
         lock (_memoryGate)
         {
             if (!ReferenceEquals(backing, _backingOwner) ||
@@ -449,8 +453,9 @@ public static partial class KernelMemoryCompatExports
         replaced = [];
         if ((flags & OrbisKernelMapFixed) != 0)
         {
-            // The host cannot place anything in its blocked window, and nothing here may
-            // translate a guest address; fail before the request touches any state.
+            // The host cannot place anything in its blocked window. Callers translate a request
+            // that lies wholly inside it (GuestVaHole.Relocates), so what still overlaps here
+            // straddles its edge or comes with relocation off: fail before it touches any state.
             if (GuestVaHole.IsFixedRequestBlocked(requested, length))
                 return false;
             if (!TryReplaceWithHole(space, requested, length, (flags & OrbisKernelMapNoOverwrite) != 0, out replaced))
@@ -465,10 +470,24 @@ public static partial class KernelMemoryCompatExports
             address = requested;
             return true;
         }
+        // Kernel-chosen placements stay out of the window's shadow, where a relocated fixed
+        // request would land on them; only a search that found no other room goes in. A hint
+        // that starts in the shadow (inside a reservation the title made there) is honoured.
+        var avoidShadow = requested == 0 || !GuestVaHole.OverlapsShadow(requested, 1);
+        if (TrySearchBackingAddress(space, requested, length, alignment, reuseReservation, avoidShadow, out address))
+            return true;
+        return avoidShadow && GuestVaHole.Relocates &&
+            TrySearchBackingAddress(space, requested, length, alignment, reuseReservation, avoidShadow: false, out address);
+    }
+
+    private static bool TrySearchBackingAddress(IGuestBackedSpace space, ulong requested, ulong length,
+        ulong alignment, bool reuseReservation, bool avoidShadow, out ulong address)
+    {
+        address = 0;
         var desired = requested != 0 ? requested : DefaultMapSearchBase;
         while (true)
         {
-            desired = GuestVaHole.SkipForSearch(desired, length);
+            desired = GuestVaHole.SkipForSearch(desired, length, avoidShadow);
             var hintedRegions = reuseReservation && desired == requested && requested != 0
                 ? GetMappingSlices(requested, length) : [];
             var reusableHint = hintedRegions.Length != 0 && requested % alignment == 0 &&
@@ -477,9 +496,9 @@ public static partial class KernelMemoryCompatExports
                 desired = FindAvailableMappingAddress(desired, length, alignment);
             if (desired == 0)
                 return false;
-            if (GuestVaHole.SkipForSearch(desired, length) != desired)
+            if (GuestVaHole.SkipForSearch(desired, length, avoidShadow) != desired)
             {
-                desired = GuestVaHole.SkipForSearch(desired, length);
+                desired = GuestVaHole.SkipForSearch(desired, length, avoidShadow);
                 continue;
             }
             // On Windows, search lower addresses before using the startup data reservation.
@@ -531,7 +550,8 @@ public static partial class KernelMemoryCompatExports
         => RunMappingTransaction(
             () => ReserveBackingRangeCore(ctx, pointer, length, flags, alignment),
             () => (flags & OrbisKernelMapFixed) == 0 ||
-                (ctx.TryReadUInt64(pointer, out var requested) && IsUntouchedByGpu(requested, length)));
+                (ctx.TryReadUInt64(pointer, out var requested) &&
+                    IsUntouchedByGpu(GuestVaHole.TranslateRange(requested, length), length)));
 
     internal static bool TryReserveDriverMemory(ICpuMemory memory, ulong length, ulong alignment, out ulong address)
     {
@@ -629,6 +649,8 @@ public static partial class KernelMemoryCompatExports
             return MemoryFault;
         }
         alignment = Math.Max(alignment, OrbisPageSize);
+        if ((flags & OrbisKernelMapFixed) != 0)
+            requested = GuestVaHole.RelocateFixedRequest(requested, length);
         if ((flags & OrbisKernelMapFixed) != 0 &&
             (requested == 0 || !IsAligned(requested, OrbisPageSize) || requested > ulong.MaxValue - length))
             return MemoryInvalidArgument;
@@ -782,6 +804,7 @@ public static partial class KernelMemoryCompatExports
 
     private static int ProtectMappedRange(CpuContext ctx, ulong address, ulong length, int protection, int? memoryType = null)
     {
+        address = GuestVaHole.TranslateRange(address, length);
         if (GuestGpuMemoryHook.Traces(address, length))
             GuestGpuMemoryHook.Trace(address, length, $"kernel-protect raw=0x{protection:X}");
         if (address == 0 || length == 0 || !TryDecodeMappedProtection(protection, out var mode) ||

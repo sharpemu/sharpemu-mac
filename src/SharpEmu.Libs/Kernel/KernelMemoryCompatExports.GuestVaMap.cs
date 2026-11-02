@@ -202,7 +202,7 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelVirtualQuery(CpuContext ctx)
     {
-        var queryAddress = ctx[CpuRegister.Rdi];
+        var queryAddress = GuestVaHole.Translate(ctx[CpuRegister.Rdi]);
         var flags = ctx[CpuRegister.Rsi];
         var infoAddress = ctx[CpuRegister.Rdx];
         var infoSize = ctx[CpuRegister.Rcx];
@@ -223,7 +223,7 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelQueryMemoryProtection(CpuContext ctx)
     {
-        var queryAddress = ctx[CpuRegister.Rdi];
+        var queryAddress = GuestVaHole.Translate(ctx[CpuRegister.Rdi]);
         var startOut = ctx[CpuRegister.Rsi];
         var endOut = ctx[CpuRegister.Rdx];
         var protectionOut = ctx[CpuRegister.Rcx];
@@ -245,7 +245,7 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelIsStack(CpuContext ctx)
     {
-        var address = ctx[CpuRegister.Rdi];
+        var address = GuestVaHole.Translate(ctx[CpuRegister.Rdi]);
         var startOut = ctx[CpuRegister.Rsi];
         var endOut = ctx[CpuRegister.Rdx];
 
@@ -275,8 +275,8 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelSetVirtualRangeName(CpuContext ctx)
     {
-        var address = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
+        var address = GuestVaHole.TranslateRange(ctx[CpuRegister.Rdi], length);
         var nameAddress = ctx[CpuRegister.Rdx];
         if (address == 0 || length == 0 || address > ulong.MaxValue - length)
             return MemoryInvalidArgument;
@@ -295,8 +295,8 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelClearVirtualRangeName(CpuContext ctx)
     {
-        var address = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
+        var address = GuestVaHole.TranslateRange(ctx[CpuRegister.Rdi], length);
         if (address == 0 || length == 0 || address > ulong.MaxValue - length)
             return MemoryInvalidArgument;
         RenameMappedRange(address, length, null);

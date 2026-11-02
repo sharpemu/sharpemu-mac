@@ -126,6 +126,11 @@ public struct ImageDescription
 {
     public const int MaxLevels = 16;
 
+    // The levels a full mip chain of this extent has, down to 1x1x1. A guest descriptor may
+    // name more (its last levels all 1x1); a host texture cannot have them.
+    public static uint FullChainLevels(uint width, uint height, uint depth) =>
+        32u - (uint)System.Numerics.BitOperations.LeadingZeroCount(Math.Max(Math.Max(width, height), Math.Max(depth, 1u)));
+
     public GuestSpan Data;
     public GuestSpan Stencil;
     public MetadataDescription Metadata;

@@ -3,6 +3,7 @@
 
 using Iced.Intel;
 using SharpEmu.Core.Memory;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Core.Loader;
 
@@ -10,22 +11,26 @@ namespace SharpEmu.Core.Loader;
 // permanent guard region every process starts with (vmmap: Guard fc0000000-7000000000, ---/---),
 // which neither MAP_FIXED nor mach_vm_allocate with VM_FLAGS_OVERWRITE can replace. Titles that
 // hardcode the start of the PS5 user area (0x10_0000_0000) as the base of an arena they map with
-// sceKernelBatchMap crash at boot, and direct execution cannot relocate those fixed requests. Until
-// guest addresses in that window can be translated, the hardcoded base is moved above the window
-// where the loader finds it stored as an arena base:
+// sceKernelBatchMap would map fixed inside that window.
+//
+// The kernel-side memory calls already move any guest address inside the window by one shift
+// (GuestVaHole.Shift, 0x10_0000_0000 -> 0x80_0000_0000 unless SHARPEMU_VA_HOLE_BASE says otherwise),
+// so a title that uses the address it gets back needs nothing more. This patch is the other half of
+// the same scheme: where the loader finds a hardcoded base stored as an arena base, it moves the
+// base by that same shift in the code, so the title asks for the moved address itself and every
+// address it derives from that base stays consistent with the kernel's relocation. Without it a
+// title that mixes a patched base with constants it computes from the unpatched one would split
+// between two places:
 //  - GTA V Enhanced (RAGE) stores its streaming arena base in a global;
 //  - Ghost of Tsushima maps its arenas one batch entry at a time (0x10_0000_0000 for libc and its
 //    direct-memory pools, 0x11_0000_0000 and 0x15_0000_0000 for two more) from a base it keeps in a
 //    global after the call.
-// Every such base moves by the same amount (0x10_0000_0000 -> 0x80_0000_0000), so arenas keep their
-// order and spacing. Other loads of these constants stay as they are: the user area base also feeds
-// range checks ("below the user area"), which an arena moved higher still passes, and the others are
-// packed 32-bit pairs in struct initialisers, which must not change.
+// Every such base moves by the same amount, so arenas keep their order and spacing. Other loads of
+// these constants stay as they are: the user area base also feeds range checks ("below the user
+// area"), which an arena moved higher still passes, and the others are packed 32-bit pairs in
+// struct initialisers, which must not change.
 internal static class GuestVaHolePatcher
 {
-    private const ulong HardcodedUserAreaBase = 0x10_0000_0000UL;
-    private const ulong DefaultRelocatedBase = 0x80_0000_0000UL;
-
     // A signature byte that matches anything.
     private const short AnyByte = -1;
 
@@ -251,13 +256,6 @@ internal static class GuestVaHolePatcher
             return 0;
         }
 
-        var relocatedBase = DefaultRelocatedBase;
-        var overrideText = Environment.GetEnvironmentVariable("SHARPEMU_VA_HOLE_BASE");
-        if (!string.IsNullOrWhiteSpace(overrideText))
-        {
-            relocatedBase = Convert.ToUInt64(overrideText.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? overrideText[2..] : overrideText, 16);
-        }
-
         var moveRegions = Environment.GetEnvironmentVariable("SHARPEMU_VA_HOLE_REGIONS") == "1";
         var patched = 0;
         foreach (var header in programHeaders)
@@ -281,7 +279,7 @@ internal static class GuestVaHolePatcher
             foreach (var found in FindArenaBaseSites(bytes))
             {
                 var site = segmentStart + (ulong)found.Offset;
-                var moved = found.Base - HardcodedUserAreaBase + relocatedBase;
+                var moved = unchecked(found.Base + GuestVaHole.Shift);
                 BitConverter.TryWriteBytes(immediate, moved);
                 var ok = memory.TryWrite(site + 2, immediate);
                 Console.Error.WriteLine(

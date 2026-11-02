@@ -281,9 +281,18 @@ public static partial class ImageRequestBuilders
         var type = TextureType(descriptor.Type);
         var multisampled = IsMultisampledTexture(type);
         var maxMip = shape.R128 ? lastLevel : descriptor.MaxMip;
-        var levels = multisampled ? 1 : maxMip + 1;
+        // Levels past the chain's 1x1 level are dropped: they are the last ones in guest memory,
+        // so the rest keep their offsets, and no host texture can hold them (Beast of
+        // Reincarnation: a 32x32 texture with 8 levels aborted Metal's descriptor validation).
+        var guestLevels = maxMip + 1;
+        var levels = multisampled ? 1 : Math.Min(guestLevels,
+            ImageDescription.FullChainLevels(width, height, type == GuestImageType.Color3D ? descriptor.Depth + 1 : 1));
         var dynamicStorage = storage && shape.DynamicMip;
         var viewLastLevel = !multisampled && !dynamicStorage ? Math.Min(lastLevel, maxMip) : lastLevel;
+        if (!multisampled && viewLastLevel < guestLevels)
+        {
+            viewLastLevel = Math.Min(viewLastLevel, levels - 1);
+        }
         var tile = descriptor.TileMode;
         var depthTile = tile == GuestTileMode.Depth;
         var msaaTile = depthTile || tile == GuestTileMode.RenderTarget;
