@@ -13,7 +13,7 @@ tmp=$(mktemp -d)
 SYNTH_WAIT_QUIET=0 "$here/run.sh" "$tmp/bin/baseline.bin" teardown-test --out-dir "$tmp/run" > "$tmp/harness.out" 2>&1 &
 h=$!
 # wait for the harness to record the emulator and perf pids
-for _ in $(seq 1 600); do
+for _ in $(seq 1 7200); do  # up to an hour: the harness first queues for the bench lock
   [[ -s $tmp/run/pids.json ]] && grep -q '"perf": [0-9]' "$tmp/run/pids.json" && break
   sleep 0.5
 done
