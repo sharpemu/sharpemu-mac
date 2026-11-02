@@ -11,7 +11,8 @@ namespace SharpEmu.Libs;
 /// routinely overshoots by a scheduler quantum, which turns per-frame waits
 /// (flip pacing, usleep-based game loops) into a hard frame-rate cap. On macOS
 /// these are absolute-deadline <c>mach_wait_until</c> waits
-/// (<see cref="HostPreciseClock"/>) that burn no CPU; elsewhere they sleep coarsely
+/// (<see cref="HostPreciseClock"/>) that burn no CPU, as do Linux's absolute-deadline
+/// <c>clock_nanosleep</c> waits; elsewhere (or with SHARPEMU_LINUX_PRECISE_SLEEP=0) they sleep coarsely
 /// for the bulk of the interval and yield-spin the remainder so wakeups land
 /// within tens of microseconds of the target.
 /// </summary>
@@ -23,12 +24,21 @@ internal static class HostTiming
     /// </summary>
     public static void SleepUntil(long targetTimestamp)
     {
-        if (HostPreciseClock.IsPrecise)
+        if (HostPreciseClock.HasPreciseSleep)
         {
             HostPreciseClock.SleepUntil(targetTimestamp);
             return;
         }
 
+        SleepUntilCoarse(targetTimestamp);
+    }
+
+    /// <summary>
+    /// The portable fallback: coarse sleep for the bulk, 1 ms naps, then a yield/spin tail.
+    /// Used where no precise clock exists and on Linux with SHARPEMU_LINUX_PRECISE_SLEEP=0.
+    /// </summary>
+    internal static void SleepUntilCoarse(long targetTimestamp)
+    {
         while (true)
         {
             var remainingTicks = targetTimestamp - Stopwatch.GetTimestamp();
