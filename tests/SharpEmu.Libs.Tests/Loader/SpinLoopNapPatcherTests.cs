@@ -39,6 +39,174 @@ public sealed unsafe class SpinLoopNapPatcherTests
         Assert.Equal((long)int.MaxValue, SpinNapRuntime.TicksFor(100_000, 100_000_000_000));
     }
 
+    // BuildProbe(table 0x600000000000, threshold 500000, gap 50000, usleep(250) at 0x1122334455667788,
+    // control 0x700000001000) as assembled before SHARPEMU_PAUSE_DELAY_NS existed (main bf7a409ce).
+    private const string ProbeBeforePauseDelay =
+        "9C50515253555657415041514152415341544155415641574989E349C1EB1A0F3148C1E2204809C24989D24C89D84825" +
+        "FF1F000048C1E00548BB00000000006000004801C3488B034C39D80F857F0000004C89D1482B4B1048B850C300000000" +
+        "00004839C172044C8953084C8953104C89D1482B4B0848B820A10700000000004839C1725648BE00100000007000004D" +
+        "89D54889E54883E4F04881EC00020000480FAE04244989E44883EC20FCBFFA000000B9FA00000048B888776655443322" +
+        "11FFD0490FAE0C244889EC4D89EAEB0B4C891B4C8953084C895310415F415E415D415C415B415A415941585F5E5D5B5A" +
+        "59589DC3";
+
+    private static byte[] FixedProbe(long delayTicks, ulong statsAddress) =>
+        SpinNapRuntime.BuildProbeForTest(
+            0x0000600000000000UL, 500_000, 50_000, 0x1122334455667788UL, 250, 0x0000700000001000UL, delayTicks, statsAddress);
+
+    private static int CountRdtsc(byte[] code)
+    {
+        var count = 0;
+        for (var index = 0; index + 1 < code.Length; index++)
+        {
+            if (code[index] == 0x0F && code[index + 1] == 0x31)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    [Fact]
+    public void WithoutAPauseDelayTheProbeIsByteForByteUnchanged()
+    {
+        Assert.Equal(ProbeBeforePauseDelay, Convert.ToHexString(FixedProbe(0, 0)));
+    }
+
+    [Fact]
+    public void OnlyADelayAddsAnRdtsc()
+    {
+        Assert.Equal(1, CountRdtsc(FixedProbe(0, 0)));
+        Assert.Equal(1, CountRdtsc(FixedProbe(0, 0x0000710000000000UL))); // counters alone: no second clock read
+        Assert.Equal(2, CountRdtsc(FixedProbe(19, 0)));
+        Assert.Equal(2, CountRdtsc(FixedProbe(19, 0x0000710000000000UL)));
+    }
+
+    [Theory]
+    [InlineData(19u, 1_000_000_000UL, 19L)]      // Rosetta reports a 1 GHz TSC
+    [InlineData(19u, 3_500_000_000UL, 67L)]      // PS5 Zen 2 at 3.5 GHz: 66.5 rounds up
+    [InlineData(38u, 2_445_000_000UL, 93L)]      // 92.91 rounds up
+    [InlineData(19u, 24_000_000UL, 1L)]          // a 24 MHz counter: never rounds a delay to nothing
+    [InlineData(19u, 10_000_000UL, 1L)]
+    [InlineData(1_000u, 3_000_000_000UL, 3_000L)] // exact: no extra tick
+    [InlineData(0u, 3_500_000_000UL, 0L)]
+    [InlineData(100_000u, 100_000_000_000_000UL, int.MaxValue)]
+    public void PauseDelayNanosecondsConvertToTscTicks(uint nanoseconds, ulong tscFrequency, long ticks)
+    {
+        Assert.Equal(ticks, SpinNapRuntime.TicksForNanoseconds(nanoseconds, tscFrequency));
+    }
+
+    [Fact]
+    public void PauseDelayIsOffByDefaultAndCountsFollowIt()
+    {
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.PauseDelayEnvironmentVariable, ""))
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.PauseStatsEnvironmentVariable, ""))
+        {
+            Assert.Equal(0u, SpinNapRuntime.PauseDelayNanoseconds);
+            Assert.False(SpinNapRuntime.PauseStatsEnabled);
+        }
+
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.PauseDelayEnvironmentVariable, "19"))
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.PauseStatsEnvironmentVariable, ""))
+        {
+            Assert.Equal(19u, SpinNapRuntime.PauseDelayNanoseconds);
+            Assert.True(SpinNapRuntime.PauseStatsEnabled);
+        }
+
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.PauseDelayEnvironmentVariable, "19"))
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.PauseStatsEnvironmentVariable, "0"))
+        {
+            Assert.False(SpinNapRuntime.PauseStatsEnabled);
+        }
+
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.PauseDelayEnvironmentVariable, "0"))
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.PauseStatsEnvironmentVariable, "1"))
+        {
+            Assert.True(SpinNapRuntime.PauseStatsEnabled);
+        }
+
+        using (EnvironmentVariableScope.Set(SpinNapRuntime.PauseDelayEnvironmentVariable, "1000000"))
+        {
+            Assert.Equal(0u, SpinNapRuntime.PauseDelayNanoseconds); // out of range: off
+        }
+    }
+
+    // A probe call must last at least the delay, measured on the host clock rather than the TSC the
+    // probe uses. The bounds are lower bounds only (with 10% for TSC calibration error), so a slow or
+    // preempted CI machine can only make the call longer.
+    [Fact]
+    public void ADelayingProbeCallTakesAtLeastTheDelay()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var tscFrequency = SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency;
+        const uint delayNanoseconds = 50_000;
+        var probe = SpinNapRuntime.BuildDelayingProbeForTest(tscFrequency, delayNanoseconds, out var stats);
+        var page = (byte*)HostMemory.Alloc(
+            null, 4096, HostMemory.MEM_COMMIT | HostMemory.MEM_RESERVE, HostMemory.PAGE_EXECUTE_READWRITE);
+        Assert.True(page != null);
+        try
+        {
+            probe.CopyTo(new Span<byte>(page, probe.Length));
+            var call = (delegate* unmanaged<void>)page;
+            call(); // warm up the page and the counters' line
+
+            var single = System.Diagnostics.Stopwatch.StartNew();
+            call();
+            single.Stop();
+            Assert.True(
+                single.Elapsed.TotalMicroseconds >= delayNanoseconds / 1000.0 * 0.9,
+                $"one call took {single.Elapsed.TotalMicroseconds:F1} us");
+
+            const int calls = 20;
+            var many = System.Diagnostics.Stopwatch.StartNew();
+            for (var index = 0; index < calls; index++)
+            {
+                call();
+            }
+
+            many.Stop();
+            Assert.True(
+                many.Elapsed.TotalMicroseconds >= calls * delayNanoseconds / 1000.0 * 0.9,
+                $"{calls} calls took {many.Elapsed.TotalMicroseconds:F1} us");
+
+            var (entries, delayedTicks) = SpinNapRuntime.ReadPauseStats((byte*)stats);
+            Assert.Equal(calls + 2, entries);
+            Assert.True(delayedTicks >= (calls + 2) * SpinNapRuntime.TicksForNanoseconds(delayNanoseconds, tscFrequency));
+        }
+        finally
+        {
+            _ = HostMemory.Free(page, 0, HostMemory.MEM_RELEASE);
+        }
+    }
+
+    // The delaying probe still hands the guest back every register and flag: the loop counter in
+    // ecx and the flags the jnz reads survive four delayed probe calls.
+    [Fact]
+    public void ADelayingProbeInAPatchedLoopStaysTransparent()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        byte[] function =
+        [
+            0xB9, 0x04, 0x00, 0x00, 0x00, // mov ecx, 4
+            0xF3, 0x90,                   // loop: pause
+            0xFF, 0xC9,                   // dec ecx
+            0x75, 0xFA,                   // jnz loop
+            0xB8, 0x44, 0x33, 0x22, 0x11, // mov eax, 0x11223344
+            0xC3,                         // ret
+        ];
+
+        var probe = SpinNapRuntime.BuildDelayingProbeForTest(
+            SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency, 1_000, out var stats);
+        using var image = SpinImage.Create(function, probe: probe);
+        Assert.Equal(1, image.Result.PatchedSites);
+        Assert.Equal(0x11223344u, ((delegate* unmanaged<uint>)image.Base)());
+        Assert.Equal(4, SpinNapRuntime.ReadPauseStats((byte*)stats).Entries);
+    }
+
     [Fact]
     public void PatchesAPauseInABackwardLoopAndStaysTransparent()
     {
@@ -544,7 +712,8 @@ public sealed unsafe class SpinLoopNapPatcherTests
         public GuestRedZonePatcher.SpinPatchResult Result { get; }
 
         public static SpinImage Create(byte[] function, bool locked = false, byte[]? lockedProbe = null,
-            ulong reserveAt = 0, ulong reservedSize = 0, (ulong Offset, byte[] Bytes)? readOnlyData = null)
+            ulong reserveAt = 0, ulong reservedSize = 0, (ulong Offset, byte[] Bytes)? readOnlyData = null,
+            byte[]? probe = null)
         {
             var memory = new PhysicalVirtualMemory();
             const ulong holeSize = 0x4000000;
@@ -579,7 +748,7 @@ public sealed unsafe class SpinLoopNapPatcherTests
                 arena = new GuestRedZonePatcher.SpinNapArena(arenaAddress, reservedSize);
             }
 
-            var probe = SpinNapRuntime.EnsureProbeBytes(1_000_000_000);
+            probe ??= SpinNapRuntime.EnsureProbeBytes(1_000_000_000);
             lockedProbe ??= locked ? SpinNapRuntime.EnsureLockedProbeBytes(1_000_000_000) : [];
             var result = GuestRedZonePatcher.PatchSpinLoops(memory, memory, headers, imageBase, ImageSize, probe, "test", lockedProbe, arena);
             return new SpinImage(memory, imageBase, result, arena);
