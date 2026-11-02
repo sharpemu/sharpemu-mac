@@ -140,6 +140,8 @@ class Run:
         self.perf_enabled_at = self.perf_disabled_at = self.end_snap_at = None
         self.sys_start = self.sys_end = None
         self.finished_at = None
+        self.idents = {}         # (comm, idx) -> dict(tid, delta_s) from the guests' ident handshake
+        self.ident_open = {}
         self.pid = None
 
     # --- perf --------------------------------------------------------------------------------------------
@@ -201,6 +203,24 @@ class Run:
                 self.end_snap_at = time.monotonic()
                 self.perf_disabled_at = self.perf_cmd("disable")
                 self.end_rest = rest
+            elif kind == "ident_start":
+                self.ident_open[(rest.get("comm"), rest.get("idx"))] = (snap_threads(self.pid), rest.get("cpu_ms", 40) / 1000.0)
+            elif kind == "ident_end":
+                key = (rest.get("comm"), rest.get("idx"))
+                if key in self.ident_open:
+                    s0, burn = self.ident_open.pop(key)
+                    s1 = snap_threads(self.pid)
+                    comm = str(key[0]).replace("_", " ")
+                    best = None
+                    for tid, v in s1.items():
+                        if v["comm"] != comm:
+                            continue
+                        d = (v["run_ns"] - s0.get(tid, {}).get("run_ns", 0)) / 1e9
+                        if best is None or d > best[1]:
+                            best = (tid, d)
+                    # The guest burned `burn` s of CPU between the markers; only the thread that did can have grown by about that much.
+                    if best and best[1] >= 0.6 * burn:
+                        self.idents[key] = dict(tid=best[0], delta_s=round(best[1], 4))
             elif kind == "phase_start":
                 self.open_phases[rest.get("name")] = (t, snap_threads(self.pid))
             elif kind == "phase_end":
@@ -276,27 +296,38 @@ def flatten_guest(rows):
     return tree, flat
 
 
-def gbusy_by_comm(rows):
-    """{host comm: [(idx, busy_s)]} from the guests' "@@ gbusy" rows (work_ns + pace_ns = CPU burned on purpose)."""
-    out = {}
+def gbusy_rows(rows):
+    """[(host comm, idx, busy_s)] from the guests' "@@ gbusy" rows (work_ns + pace_ns = CPU burned on purpose)."""
+    out = []
     for sec, kv in rows:
         if sec != "gbusy":
             continue
         comm = "SharpEmu Emulat" if kv.get("comm") == "main" else str(kv.get("comm", "")).replace("_", " ")
-        out.setdefault(comm, []).append((kv.get("idx", 0), (kv.get("work_ns", 0) + kv.get("pace_ns", 0)) / 1e9))
-    for v in out.values():
-        v.sort()
+        out.append((comm, kv.get("idx", 0), (kv.get("work_ns", 0) + kv.get("pace_ns", 0)) / 1e9))
     return out
 
 
-def diff_threads(s0, s1, wall, gbusy=None):
+def diff_threads(s0, s1, wall, gbusy=None, idents=None):
+    """Per-thread CPU over the window. A guest thread's busy time is matched to a host thread exactly: by the tid its ident handshake
+    produced, or by name when only one host thread has that name (the entry thread). Anything else gets no guest_busy_s. A matched
+    row whose guest_busy_s exceeds its CPU by more than 2% is untrusted: emu_cpu_s is null and the reason is recorded."""
     rows = []
-    # Host thread names are cut to 15 chars ("SharpEmu-BPE Jo"); number same-named threads by tid (= creation order,
-    # so BPE JobWorkerThread CPU<k> is "#k"), which is also how the guests' gbusy rows are matched to threads.
     seen = {}
     for tid in sorted(s1):
         n = s1[tid]["comm"]
         seen[n] = seen.get(n, 0) + 1
+    # tid -> busy_s
+    busy_of, unmatched = {}, []
+    by_tid = {v["tid"]: key for key, v in (idents or {}).items()}
+    for comm, idx, busy in (gbusy or []):
+        ident = (idents or {}).get((comm.replace(" ", "_"), idx))
+        if ident:
+            busy_of[ident["tid"]] = busy
+        elif seen.get(comm) == 1:
+            busy_of[next(t for t, v in s1.items() if v["comm"] == comm)] = busy
+        else:
+            unmatched.append((comm, idx, busy))
+    gbusy_comms = {c for c, _, _ in (gbusy or [])}
     order = {}
     for tid, v in sorted(s1.items()):
         b = s0.get(tid)
@@ -309,13 +340,23 @@ def diff_threads(s0, s1, wall, gbusy=None):
                    cores=round(run / 1e9 / wall, 3) if wall > 0 else None,
                    vol_ctx=v["vol"] - (b["vol"] if b else 0), nonvol_ctx=v["nonvol"] - (b["nonvol"] if b else 0),
                    new_in_window=b is None)
-        g = (gbusy or {}).get(v["comm"])
-        if g and k < len(g):
-            row["guest_busy_s"] = round(g[k][1], 4)
-            row["emu_cpu_s"] = round(run / 1e9 - g[k][1], 4)
+        if tid in by_tid:
+            row["guest_idx"] = by_tid[tid][1]
+        cpu = run / 1e9
+        if tid in busy_of:
+            busy = busy_of[tid]
+            row["guest_busy_s"] = round(busy, 4)
+            if busy > cpu * 1.02:
+                row["emu_cpu_s"] = None
+                row["emu_untrusted"] = f"guest_busy_s {busy:.3f} > cpu_s {cpu:.3f} x 1.02: thread match or accounting wrong"
+            else:
+                row["emu_cpu_s"] = round(max(0.0, cpu - busy), 4)
+        elif v["comm"] in gbusy_comms:
+            row["emu_cpu_s"] = None
+            row["emu_untrusted"] = "guest thread not identified (no ident handshake for this tid)"
         rows.append(row)
     rows.sort(key=lambda r: -r["cpu_s"])
-    return rows
+    return rows, unmatched
 
 
 def inner_window(reports, run):
@@ -548,8 +589,17 @@ def main():
                 metrics[f"{key}_per_s"] = round(v / pw, 1)
         if perf.get("instructions") and perf.get("cycles"):
             metrics["ipc"] = round(perf["instructions"] / perf["cycles"], 3)
-        gbusy = gbusy_by_comm(run.guest_rows)
-        thr = diff_threads(run.start[1], run.end[1], wall, gbusy)
+        gbusy = gbusy_rows(run.guest_rows)
+        thr, unmatched = diff_threads(run.start[1], run.end[1], wall, gbusy, run.idents)
+        metrics["idents"] = len(run.idents)
+        if unmatched:
+            metrics["gbusy_unmatched"] = [f"{c}#{i}" for c, i, _ in unmatched]
+        # Per-thread emu_cpu_s must add up to the total: threads with a trusted row contribute cpu - busy, the others their cpu.
+        trusted_sum = sum((t["emu_cpu_s"] if t.get("emu_cpu_s") is not None else t["cpu_s"]) for t in thr)
+        metrics["thread_emu_cpu_sum_s"] = round(trusted_sum, 4)
+        metrics["untrusted_thread_rows"] = sum(1 for t in thr if t.get("emu_untrusted"))
+        if "emu_cpu_s" in metrics and metrics["emu_cpu_s"]:
+            metrics["thread_emu_cpu_sum_vs_total_pct"] = round(100.0 * (trusted_sum - metrics["emu_cpu_s"]) / metrics["emu_cpu_s"], 2)
         metrics["threads"] = thr[:40]
         metrics["thread_count"] = len(run.end[1])
         metrics["top_threads"] = [f"{t['name']}[{t['tid']}]={t['cpu_s']:.2f}s" for t in thr[:3]]

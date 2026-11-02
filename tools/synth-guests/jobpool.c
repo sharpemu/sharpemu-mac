@@ -477,6 +477,7 @@ static void run_job(Sched *S, int w, Job *j)
 static void *worker_main(void *arg)
 {
     int w = ((WArg *)arg)->w;
+    thread_identify("BPE JobWorkerThread CPU", w);
     Sched *S = &g_sched;
     Wstat *st = &g_ws[w];
     while (!g_go) sceKernelUsleep(20000); /* >= 20 ms: a shorter usleep spins on Linux and would burn ~0.5 core per idle worker */
@@ -577,6 +578,7 @@ int _start(void *args, void *exit_fn)
         thread_spawn(&th[w], worker_main, &g_wargs[w], names[w], PIN_WORKERS ? (1ull << w) : 0);
     }
 
+    wait_identified(WORKERS);
     warmup_and_start();
     g_two_tscf = DL_CHECK ? 2 * g_tsc_hz : ~0ull; /* after the TSC calibration is final */
     g_go = 1;

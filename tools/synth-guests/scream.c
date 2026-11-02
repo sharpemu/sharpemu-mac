@@ -81,6 +81,7 @@ static void *thread_main(void *arg)
     int idx = ((TArg *)arg)->idx;
     int owner = idx == 0;
     TStat *st = &g_ts[idx];
+    thread_identify(idx ? "ScreamGuard" : "ScreamSynth", idx);
     ScePthreadMutex *snd = CONTENDED ? &g_snd_lock : &g_own_lock[idx];
     /* Everything that needs ticks is computed after g_go: the TSC calibration is final only at the end of warm-up. */
     while (!g_go) sceKernelUsleep(20000);
@@ -177,6 +178,7 @@ int _start(void *args, void *exit_fn)
         ksnprintf(names[i], sizeof names[i], i ? "ScreamGuard%d" : "ScreamSynth%d", i);
         thread_spawn(&th[i], thread_main, &g_targ[i], names[i], 0);
     }
+    wait_identified(NT);
     warmup_and_start();
     g_go = 1;
     run_for_sleep();

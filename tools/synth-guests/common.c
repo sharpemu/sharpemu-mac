@@ -227,15 +227,38 @@ u64 hist_pct(const Hist *h, unsigned pct)
     return h->max;
 }
 
+/* Host thread name SharpEmu gives a guest thread: "SharpEmu-" + name, cut to 15 chars; spaces become '_' so the value is one token. */
+static void host_comm(char *comm, unsigned cap, const char *guest_name)
+{
+    if (!guest_name) { ksnprintf(comm, cap, "main"); return; }
+    ksnprintf(comm, cap, "SharpEmu-%s", guest_name);
+    comm[15] = 0;
+    for (char *p = comm; *p; p++) if (*p == ' ') *p = '_';
+}
+
 void emit_gbusy(const char *guest_name, int idx, u64 work_ticks, u64 pace_ticks)
 {
-    char comm[24] = "main";
-    if (guest_name) {
-        ksnprintf(comm, sizeof comm, "SharpEmu-%s", guest_name);
-        comm[15] = 0;
-        for (char *p = comm; *p; p++) if (*p == ' ') *p = '_';
-    }
+    char comm[40];
+    host_comm(comm, sizeof comm, guest_name);
     EMIT("gbusy comm=%s idx=%d work_ns=%lu pace_ns=%lu", comm, idx, tsc_to_ns(work_ticks), tsc_to_ns(pace_ticks));
+}
+
+static volatile int s_ident_turn;
+
+void thread_identify(const char *guest_name, int idx)
+{
+    char comm[40];
+    host_comm(comm, sizeof comm, guest_name);
+    while (__atomic_load_n(&s_ident_turn, __ATOMIC_ACQUIRE) != idx) sceKernelUsleep(20000);
+    EMIT("MARK ident_start comm=%s idx=%d cpu_ms=%d", comm, idx, IDENT_MS);
+    spin_cpu(ns_to_tsc((u64)IDENT_MS * 1000000ull)); /* CPU time, not wall time: robust against preemption */
+    EMIT("MARK ident_end comm=%s idx=%d", comm, idx);
+    __atomic_store_n(&s_ident_turn, idx + 1, __ATOMIC_RELEASE);
+}
+
+void wait_identified(int n)
+{
+    while (__atomic_load_n(&s_ident_turn, __ATOMIC_ACQUIRE) < n) sceKernelUsleep(20000);
 }
 
 void hist_emit_fields(char *buf, unsigned cap, const char *p, const Hist *h)
