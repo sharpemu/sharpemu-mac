@@ -23,6 +23,7 @@ printf 'A=%s\nB=%s\nguest=%s\nruns_per_arm=%s\n' "$specA" "$specB" "$guest" "$n"
 
 run_arm() { # arm spec index
   local arm=$1 spec=$2 idx=$3 dir="" envs="" bin_args=() env_args=()
+  shift 3
   if [[ $spec != - ]]; then
     if [[ $spec == *:* && -d ${spec%%:*} ]]; then dir=${spec%%:*}; envs=${spec#*:}
     elif [[ -d $spec ]]; then dir=$spec
