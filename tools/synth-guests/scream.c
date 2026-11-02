@@ -60,6 +60,8 @@
 
 typedef struct TStat {
     u64 guards, gtid, locks, unlocks, nca_jobs;
+    u64 work_ticks; /* guarded-call bodies + NCA work: CPU the guest burns on purpose */
+    u64 pace_ticks; /* pacing busy-waits (PACE=1) */
     Hist gtid_h, lock_h, unlock_h;
 } TStat;
 
@@ -80,6 +82,8 @@ static void *thread_main(void *arg)
     int owner = idx == 0;
     TStat *st = &g_ts[idx];
     ScePthreadMutex *snd = CONTENDED ? &g_snd_lock : &g_own_lock[idx];
+    /* Everything that needs ticks is computed after g_go: the TSC calibration is final only at the end of warm-up. */
+    while (!g_go) sceKernelUsleep(20000);
     const u64 cs_ticks = ns_to_tsc(CS_NS), nca_work_ticks = ns_to_tsc((u64)NCA_WORK_US * 1000), nca_cs_ticks = ns_to_tsc(200);
     /* per-thread guard rate and batch period */
     u64 guards_hz = 0, batch_ticks = 0, nca_acc = 0, nca_step = 0;
@@ -90,7 +94,7 @@ static void *thread_main(void *arg)
         if (!guards_hz) guards_hz = 1;
         batch = (u32)(guards_hz * PERIOD_US / 1000000);
         if (batch < 1) batch = 1;
-        batch_ticks = (u64)batch * g_tsc_hz / guards_hz;
+        batch_ticks = muldiv_u64(batch, g_tsc_hz, guards_hz);
     }
     /* NCA jobs per batch, as a 16.16 fixed-point accumulator */
     if (!owner && NCA_HZ) {
@@ -98,9 +102,8 @@ static void *thread_main(void *arg)
         nca_step = RATE ? (u64)batch * 65536 * per_thread_hz / guards_hz : 65536 / 16;
     }
 
-    while (!g_go) sceKernelUsleep(5000);
     u64 next = rdtsc() + batch_ticks * (u64)idx / NT; /* stagger the threads' phases so the batches do not all start together */
-    while (rdtsc() < next) { }
+    st->pace_ticks += spin_until(next);
     while (!g_stop) {
         if (owner) g_synth_tid = scePthreadGetthreadid(); /* synth tick: snd_OSFunc_GetThreadId() -> [0x2997988] */
         for (u32 i = 0; i < batch; i++) {
@@ -115,7 +118,7 @@ static void *thread_main(void *arg)
                 hist_add(&st->lock_h, tsc_to_ns(t2 - t1));
                 st->locks++;
             }
-            if (cs_ticks) spin_ticks(cs_ticks); /* the guarded API call body */
+            if (cs_ticks) st->work_ticks += spin_cpu(cs_ticks); /* the guarded API call body */
             u64 t3 = rdtsc();
             (void)scePthreadGetthreadid(); /* the assert in GuardLeave */
             u64 t4 = rdtsc();
@@ -133,11 +136,11 @@ static void *thread_main(void *arg)
             while (nca_acc >= 65536) {
                 nca_acc -= 65536;
                 scePthreadMutexLock(&g_nca_lock); /* pop a work context */
-                spin_ticks(nca_cs_ticks);
+                st->work_ticks += spin_cpu(nca_cs_ticks);
                 scePthreadMutexUnlock(&g_nca_lock);
-                spin_ticks(nca_work_ticks);
+                st->work_ticks += spin_cpu(nca_work_ticks);
                 scePthreadMutexLock(&g_nca_lock); /* return it */
-                spin_ticks(nca_cs_ticks);
+                st->work_ticks += spin_cpu(nca_cs_ticks);
                 scePthreadMutexUnlock(&g_nca_lock);
                 st->nca_jobs++;
             }
@@ -146,9 +149,9 @@ static void *thread_main(void *arg)
             next += batch_ticks;
             for (;;) {
                 u64 t = rdtsc();
-                if (t >= next) { if (t - next > 8 * batch_ticks) next = t; break; }
+                if ((i64)(t - next) >= 0) { if (t - next > 8 * batch_ticks) next = t; break; }
                 if (g_stop) break;
-                if (PACE) continue; /* busy-wait */
+                if (PACE) { st->pace_ticks += spin_until(next); continue; } /* busy-wait, counted as guest CPU */
                 u64 left_us = tsc_to_ns(next - t) / 1000;
                 if (left_us > 1500) sceKernelUsleep((u32)(left_us - 700));
             }
@@ -182,11 +185,12 @@ int _start(void *args, void *exit_fn)
     measure_end();
     for (int i = 0; i < NT; i++) thread_join(th[i]);
 
-    Hist gh = {0}, lh = {0}, uh = {0};
+    static Hist gh, lh, uh; /* static: the entry thread's stack is only a few tens of KB */
     u64 guards = 0, gtid = 0, locks = 0, unlocks = 0, nca = 0;
     for (int i = 0; i < NT; i++) {
         const TStat *s = &g_snap[i];
-        EMIT("scream.thread idx=%d owner=%d guards=%lu gtid=%lu locks=%lu unlocks=%lu nca_jobs=%lu", i, i == 0, s->guards, s->gtid, s->locks, s->unlocks, s->nca_jobs);
+        EMIT("scream.thread idx=%d owner=%d guards=%lu gtid=%lu locks=%lu unlocks=%lu nca_jobs=%lu work_ns=%lu pace_ns=%lu", i, i == 0, s->guards, s->gtid, s->locks, s->unlocks, s->nca_jobs, tsc_to_ns(s->work_ticks), tsc_to_ns(s->pace_ticks));
+        emit_gbusy(names[i], i, s->work_ticks, s->pace_ticks);
         hist_merge(&gh, &s->gtid_h); hist_merge(&lh, &s->lock_h); hist_merge(&uh, &s->unlock_h);
         guards += s->guards; gtid += s->gtid; locks += s->locks; unlocks += s->unlocks; nca += s->nca_jobs;
     }

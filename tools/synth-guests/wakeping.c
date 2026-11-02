@@ -30,7 +30,7 @@ static void *thread_b(void *arg)
 {
     (void)arg;
     for (;;) {
-        while (!g_b_go && !g_stop) sceKernelUsleep(5000);
+        while (!g_b_go && !g_stop) sceKernelUsleep(20000);
         if (g_stop) return NULL;
         if (g_variant == 0) {
             while (!g_phase_stop) {
@@ -58,7 +58,7 @@ static void *thread_b(void *arg)
 static void run_variant(int variant, u64 ticks)
 {
     static const char *names[] = {"evf", "cond"};
-    Hist h;
+    static Hist h; /* static: the entry thread's stack is only a few tens of KB, a Hist is 8 KB */
     memset(&h, 0, sizeof h);
     g_phase_stop = 0;
     g_variant = variant;

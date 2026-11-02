@@ -85,25 +85,57 @@ static inline u64 rdtsc(void)
 static inline void cpu_pause(void) { __asm__ volatile("pause" ::: "memory"); }
 
 extern u64 g_tsc_hz; /* ticks/s, calibrated against sceKernelGetProcessTime by synth_init() */
-/* a*b/c with a 128-bit intermediate. Inline mul/div, NOT unsigned __int128 (that lowers to a __udivti3 import). */
+/* a*b/c with a 128-bit intermediate. Inline mul/div, NOT unsigned __int128 (that lowers to a __udivti3 import).
+ * Saturates to ~0 when the quotient does not fit in 64 bits (a bare divq would raise #DE) and returns 0 for c == 0. */
 static inline u64 muldiv_u64(u64 a, u64 b, u64 c)
 {
-    u64 d;
-    __asm__("mulq %2\n\tdivq %3" : "+a"(a), "=&d"(d) : "r"(b), "r"(c) : "cc");
-    return a;
+    u64 lo, hi;
+    if (!c) return 0;
+    __asm__("mulq %3" : "=a"(lo), "=d"(hi) : "0"(a), "r"(b) : "cc");
+    if (hi >= c) return ~0ull;
+    __asm__("divq %4" : "=a"(lo), "=d"(hi) : "0"(lo), "1"(hi), "r"(c) : "cc");
+    return lo;
 }
-static inline u64 tsc_to_ns(u64 t) { return muldiv_u64(t, 1000000000ull, g_tsc_hz); }
+/* Tick deltas that came out "negative" (the unsigned difference of two timestamps taken on different threads in the
+ * wrong order) are clamped to 0 instead of becoming ~2^64 ticks. */
+static inline u64 tsc_to_ns(u64 t) { return (i64)t < 0 ? 0 : muldiv_u64(t, 1000000000ull, g_tsc_hz); }
 static inline u64 ns_to_tsc(u64 ns) { return muldiv_u64(ns, g_tsc_hz, 1000000000ull); }
 static inline u64 now_us(void) { return sceKernelGetProcessTime(); }
 
-/* Burn guest CPU with no import call and no `pause` (a "job body": real work, which spin-nap must not mistake for a
- * spin-wait). */
-static inline void spin_ticks(u64 ticks)
+/* ---- guest CPU accounting -------------------------------------------------------------------------------
+ * The harness reports emu_cpu = process CPU - the CPU the guest itself burns on purpose (job bodies, guarded-call bodies,
+ * pacing busy-waits). So every deliberate busy-wait goes through these helpers, which return the CPU ticks they really
+ * consumed: a rdtsc gap of SPIN_GAP_NS or more is the thread being descheduled, not CPU, and is not counted. */
+#define SPIN_GAP_NS 20000
+extern u64 g_spin_gap_ticks; /* SPIN_GAP_NS in ticks, set whenever g_tsc_hz is (re)calibrated */
+
+/* Spin (no import call, no `pause`: a "job body" that spin-nap must not mistake for a spin-wait) until `ticks` of CPU
+ * time have been consumed. Under oversubscription the wall time stretches, the CPU does not. */
+static inline u64 spin_cpu(u64 ticks)
 {
-    u64 end = rdtsc() + ticks;
-    while (rdtsc() < end) __asm__ volatile("" ::: "memory");
+    u64 acc = 0, last = rdtsc();
+    while (acc < ticks) {
+        u64 t = rdtsc(), d = t - last;
+        last = t;
+        if (d < g_spin_gap_ticks) acc += d;
+    }
+    return acc;
 }
-static inline void spin_ns(u64 ns) { spin_ticks(ns_to_tsc(ns)); }
+/* Spin until the TSC reaches `deadline` (a pacing wait); returns the CPU ticks consumed. */
+static inline u64 spin_until(u64 deadline)
+{
+    u64 acc = 0, last = rdtsc();
+    for (;;) {
+        u64 t = rdtsc();
+        if ((i64)(t - deadline) >= 0) return acc;
+        u64 d = t - last;
+        last = t;
+        if (d < g_spin_gap_ticks) acc += d;
+    }
+}
+/* One "@@ gbusy" line per guest thread: comm is the host thread name SharpEmu gives it ("SharpEmu-" + guest name, cut to
+ * 15 chars, spaces as '_'; "main" for the entry thread), idx its creation order within that name. */
+void emit_gbusy(const char *guest_name, int idx, u64 work_ticks, u64 pace_ticks);
 
 /* ---- output -------------------------------------------------------------------------------------------- */
 /* Tiny printf: %s %c %d %u %ld %lu %llu %llx %x %%. Written with one sceKernelWrite per call so lines
@@ -137,8 +169,11 @@ void run_for_sleep(void);       /* sleep (in 50 ms steps) until the measured pha
 void measure_end(void);
 extern volatile int g_stop;     /* set by measure_end() after the grace period; workers poll it */
 
-/* ---- log-linear latency histogram (ns): 8 sub-buckets per power of two, ~12% resolution ---------------- */
-#define HIST_BUCKETS 512
+/* ---- log-linear latency histogram (ns): 32 sub-buckets per power of two (<= 3.1% wide; percentiles report the bucket
+ * midpoint, so +-1.6% worst case) --------------------------------------------------------------------- */
+#define HIST_SUB_BITS 5
+#define HIST_SUB (1u << HIST_SUB_BITS)
+#define HIST_BUCKETS 2048 /* 8 KB per Hist: keep them static or heap-like; the entry thread's stack is only a few tens of KB */
 typedef struct {
     u64 count, sum, max;
     u32 b[HIST_BUCKETS];
@@ -146,10 +181,10 @@ typedef struct {
 static inline void hist_add(Hist *h, u64 ns)
 {
     unsigned idx;
-    if (ns < 8) idx = (unsigned)ns;
+    if (ns < HIST_SUB) idx = (unsigned)ns;
     else {
         unsigned msb = 63 - (unsigned)__builtin_clzll(ns);
-        idx = (msb - 2) * 8 + (unsigned)((ns >> (msb - 3)) & 7);
+        idx = (msb - HIST_SUB_BITS + 1) * HIST_SUB + (unsigned)((ns >> (msb - HIST_SUB_BITS)) & (HIST_SUB - 1));
     }
     if (idx >= HIST_BUCKETS) idx = HIST_BUCKETS - 1;
     h->b[idx]++;
@@ -158,7 +193,7 @@ static inline void hist_add(Hist *h, u64 ns)
     if (ns > h->max) h->max = ns;
 }
 void hist_merge(Hist *dst, const Hist *src);
-u64 hist_pct(const Hist *h, unsigned pct); /* upper edge of the bucket holding the pct-th percentile */
+u64 hist_pct(const Hist *h, unsigned pct); /* midpoint of the bucket holding the pct-th percentile (clamped to max) */
 /* "<prefix>_n=.. <prefix>_avg_ns=.. <prefix>_p50_ns=.. _p95_ns, _p99_ns, _max_ns" fragment for EMIT. */
 void hist_emit_fields(char *buf, unsigned cap, const char *prefix, const Hist *h);
 

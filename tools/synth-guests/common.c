@@ -7,11 +7,14 @@
 
 #include "common.h"
 
-u64 g_tsc_hz = 2000000000ull; /* overwritten by synth_init() */
+u64 g_tsc_hz = 2000000000ull; /* overwritten by synth_init() and refined by warmup_and_start() */
+u64 g_spin_gap_ticks = 40000;
 volatile int g_stop;
 
 static u64 s_measure_start_tsc;
 static u64 s_measure_start_us;
+static u64 s_cal_us0, s_cal_tsc0; /* clock pair taken at the start of synth_init(), the origin of the long calibration */
+static u64 s_prelim_hz;
 static const char *s_name = "guest";
 
 /* ---- libc stand-ins (clang lowers struct copies and zero-init to these) -------------------------------- */
@@ -46,7 +49,7 @@ static unsigned fmt_u64(char *out, u64 v, unsigned base)
 static int vfmt(char *buf, unsigned cap, const char *fmt, va_list ap)
 {
     unsigned n = 0;
-#define PUT(c) do { if (n + 1 < cap) buf[n] = (c); n++; } while (0)
+#define PUT(c) do { char c_ = (c); if (n + 1 < cap) buf[n] = c_; n++; } while (0) /* c has side effects: evaluate once, even when truncating */
     for (; *fmt; fmt++) {
         if (*fmt != '%') { PUT(*fmt); continue; }
         fmt++;
@@ -126,15 +129,37 @@ int thread_spawn(ScePthread *t, void *(*fn)(void *), void *arg, const char *name
 void thread_join(ScePthread t) { scePthreadJoin(t, NULL); }
 
 /* ---- run control --------------------------------------------------------------------------------------- */
+/* One (process time, tsc) pair. The import call sits between two rdtsc reads and the pair with the shortest bracket of
+ * several tries wins, so the clock value is attributed to the midpoint of the call instead of a cold first-call latency. */
+static void clock_pair(u64 *us, u64 *tsc)
+{
+    u64 best = ~0ull;
+    for (int i = 0; i < 16; i++) {
+        u64 t0 = rdtsc();
+        u64 u = sceKernelGetProcessTime();
+        u64 t1 = rdtsc();
+        if (t1 - t0 < best) { best = t1 - t0; *us = u; *tsc = t0 + (t1 - t0) / 2; }
+    }
+}
+
+static void set_tsc_hz(u64 hz)
+{
+    g_tsc_hz = hz;
+    g_spin_gap_ticks = ns_to_tsc(SPIN_GAP_NS);
+}
+
 void synth_init(const char *guest_name)
 {
     s_name = guest_name;
-    /* Calibrate rdtsc against the process clock over ~50 ms (the guest's own time base for all intervals). */
-    u64 us0 = now_us(), t0 = rdtsc();
+    u64 u0, t0, u1, t1;
+    clock_pair(&u0, &t0); /* also warms the import (first call is far slower than the rest) */
+    clock_pair(&u0, &t0);
     sceKernelUsleep(50000);
-    u64 us1 = now_us(), t1 = rdtsc();
-    u64 dus = us1 - us0;
-    if (dus) g_tsc_hz = (t1 - t0) * 1000000ull / dus;
+    clock_pair(&u1, &t1);
+    if (u1 > u0) set_tsc_hz(muldiv_u64(t1 - t0, 1000000ull, u1 - u0));
+    s_prelim_hz = g_tsc_hz;
+    s_cal_us0 = u0;
+    s_cal_tsc0 = t0;
     EMIT("calib guest=%s tsc_hz=%lu emu_tsc_hz=%lu", guest_name, g_tsc_hz, sceKernelGetTscFrequency());
 }
 
@@ -142,6 +167,16 @@ void warmup_and_start(void)
 {
     EMIT("MARK warmup_start guest=%s t_us=%lu warmup_s=%d", s_name, now_us(), WARMUP_S);
     for (int i = 0; i < WARMUP_S * 20; i++) sceKernelUsleep(50000);
+    /* Refine the TSC frequency across the whole warm-up (seconds, so the +-1 us clock granularity is ~1e-7), then
+     * report it against the emulator's own sceKernelGetTscFrequency(). Anything that needs ticks runs after this. */
+    {
+        u64 u1, t1;
+        clock_pair(&u1, &t1);
+        if (u1 - s_cal_us0 >= 1000000ull) set_tsc_hz(muldiv_u64(t1 - s_cal_tsc0, 1000000ull, u1 - s_cal_us0));
+        u64 emu = sceKernelGetTscFrequency();
+        EMIT("calib2 guest=%s tsc_hz=%lu prelim_hz=%lu emu_tsc_hz=%lu vs_emu_ppm=%ld span_us=%lu",
+             s_name, g_tsc_hz, s_prelim_hz, emu, emu ? ((i64)g_tsc_hz - (i64)emu) * 1000000 / (i64)emu : 0, u1 - s_cal_us0);
+    }
     s_measure_start_tsc = rdtsc();
     s_measure_start_us = now_us();
     EMIT("MARK start guest=%s t_us=%lu duration_s=%d", s_name, s_measure_start_us, DURATION_S);
@@ -159,7 +194,7 @@ void run_for_sleep(void)
 void measure_end(void)
 {
     u64 us = now_us();
-    EMIT("MARK end guest=%s t_us=%lu measured_us=%lu", s_name, us, us - s_measure_start_us);
+    EMIT("MARK end guest=%s t_us=%lu measured_us=%lu grace_ms=%d", s_name, us, us - s_measure_start_us, GRACE_MS);
     for (int i = 0; i < GRACE_MS / 10; i++) sceKernelUsleep(10000);
     g_stop = 1;
 }
@@ -173,11 +208,12 @@ void hist_merge(Hist *dst, const Hist *src)
     if (src->max > dst->max) dst->max = src->max;
 }
 
-static u64 bucket_upper(unsigned idx)
+static u64 bucket_mid(unsigned idx)
 {
-    if (idx < 8) return idx;
-    unsigned msb = idx / 8 + 2, sub = idx % 8;
-    return ((u64)(8 + sub + 1) << (msb - 3)) - 1;
+    if (idx < HIST_SUB) return idx;
+    unsigned msb = idx / HIST_SUB + HIST_SUB_BITS - 1, sub = idx % HIST_SUB, sh = msb - HIST_SUB_BITS;
+    u64 lo = (u64)(HIST_SUB + sub) << sh, hi = ((u64)(HIST_SUB + sub + 1) << sh) - 1;
+    return lo + (hi - lo) / 2;
 }
 
 u64 hist_pct(const Hist *h, unsigned pct)
@@ -186,9 +222,20 @@ u64 hist_pct(const Hist *h, unsigned pct)
     u64 want = (h->count * pct + 99) / 100, seen = 0;
     for (unsigned i = 0; i < HIST_BUCKETS; i++) {
         seen += h->b[i];
-        if (seen >= want) { u64 u = bucket_upper(i); return u > h->max ? h->max : u; }
+        if (seen >= want) { u64 m = bucket_mid(i); return m > h->max ? h->max : m; }
     }
     return h->max;
+}
+
+void emit_gbusy(const char *guest_name, int idx, u64 work_ticks, u64 pace_ticks)
+{
+    char comm[24] = "main";
+    if (guest_name) {
+        ksnprintf(comm, sizeof comm, "SharpEmu-%s", guest_name);
+        comm[15] = 0;
+        for (char *p = comm; *p; p++) if (*p == ' ') *p = '_';
+    }
+    EMIT("gbusy comm=%s idx=%d work_ns=%lu pace_ns=%lu", comm, idx, tsc_to_ns(work_ticks), tsc_to_ns(pace_ticks));
 }
 
 void hist_emit_fields(char *buf, unsigned cap, const char *p, const Hist *h)

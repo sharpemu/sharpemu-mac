@@ -17,7 +17,7 @@
  * condition stays false for a whole frame), then waits for the ready jobs with DS's non-worker WaitForCounter
  * idiom (pause + usleep(1) per 1000 polls) and sleeps out the rest of the frame.
  *
- * Knobs (-D): WORKERS PARKED PRODUCER_HZ JOB_US FRAME_HZ AFFINITY PIN_WORKERS FORK DL_CHECK; see README.md.
+ * Knobs (-D): WORKERS PARKED PRODUCER_HZ JOB_US FRAME_HZ AFFINITY PIN_WORKERS FORK DL_CHECK LIGHT; see README.md.
  */
 #include "common.h"
 
@@ -26,6 +26,11 @@
 #endif
 #ifndef PARKED
 #define PARKED 3 /* parked jobs alive at any time in group 0 (0 = pure WaitForJobs pause path) */
+#endif
+#ifdef LIGHT /* -DLIGHT=1: unsaturated preset, ~1.35 cores of job work (4500 jobs/s x 300 us) instead of ~4.5 */
+#ifndef PRODUCER_HZ
+#define PRODUCER_HZ 4500
+#endif
 #endif
 #ifndef PRODUCER_HZ
 #define PRODUCER_HZ 15000 /* ready-job submissions per second (250 per 60 Hz frame; <= 256 fit the B array) */
@@ -124,14 +129,17 @@ static Sched g_sched ALIGNED(4096);
 static Group g_groups[NG] ALIGNED(64); /* contiguous, stride 0x9220: G+0x91e0 straddles cache lines like DS */
 static Job g_jobs[NJOBS] ALIGNED(64);
 static volatile u32 g_job_next;
-static volatile i64 g_park_ctr[64] ALIGNED(64);
+/* One monotonic counter per parked-job slot: a parked job waits for ctr >= its own generation, the release is a store of that
+ * generation, and a counter is never reset, so an old job can never be starved or aliased by a later one. */
+static volatile i64 g_park_ctr[PARKED > 0 ? PARKED : 1] ALIGNED(64);
+static i64 g_park_gen[PARKED > 0 ? PARKED : 1];
 static volatile int g_go;
 
 typedef struct Wstat {
     u64 polls, jobs, pred_calls, pauses, dl_checks, forks, stolen;
     Hist lat;  /* enqueue -> start, ready jobs */
     Hist plat; /* release -> start, parked jobs */
-    u64 busy_ns;
+    u64 work_ticks; /* CPU ticks spent in job bodies (spin_cpu), excluding descheduled gaps */
 } Wstat; /* 4 KiB each, so the hot counters of neighbouring workers never share a line */
 static Wstat g_ws[WORKERS];
 static Wstat g_snap[WORKERS];
@@ -447,7 +455,7 @@ static void run_job(Sched *S, int w, Job *j)
 {
     Wstat *st = &g_ws[w];
     u64 t0 = rdtsc();
-    u64 lat = tsc_to_ns(t0 - j->enq_tsc);
+    u64 lat = tsc_to_ns(t0 - j->enq_tsc); /* a negative cross-thread delta clamps to 0 */
     if (j->parked) hist_add(&st->plat, lat); else hist_add(&st->lat, lat);
     __atomic_exchange_n(&S->lastJobTsc[w], t0, __ATOMIC_SEQ_CST); /* xchg at 0x86f5f3 */
     for (int i = 0; i < FORK && j->done_ctr; i++) { /* worker-side submit: ready child on my own deque (parked jobs have no frame counter) */
@@ -460,8 +468,7 @@ static void run_job(Sched *S, int w, Job *j)
         deque_push(&G->dq[w], c);
         st->forks++;
     }
-    spin_ns(j->work_ns);
-    st->busy_ns += tsc_to_ns(rdtsc() - t0);
+    st->work_ticks += spin_cpu(ns_to_tsc(j->work_ns));
     st->jobs++;
     if (j->done_ctr) __atomic_fetch_add(j->done_ctr, -1, __ATOMIC_SEQ_CST); /* lock xadd -1 at job end */
     __atomic_store_n(&j->state, 0, __ATOMIC_RELEASE);
@@ -472,7 +479,7 @@ static void *worker_main(void *arg)
     int w = ((WArg *)arg)->w;
     Sched *S = &g_sched;
     Wstat *st = &g_ws[w];
-    while (!g_go) sceKernelUsleep(2000);
+    while (!g_go) sceKernelUsleep(20000); /* >= 20 ms: a shorter usleep spins on Linux and would burn ~0.5 core per idle worker */
     S->lastJobTsc[w] = rdtsc();
     for (;;) {
         wait_for_jobs(S, w, &st->pauses);
@@ -508,12 +515,12 @@ static void submit_ready(Sched *S, u64 work_ns)
     while (insert_slot(G->B, G->Blk, j) < 0) cpu_pause(); /* non-worker submit -> array B */
 }
 
-static Job *submit_parked(Sched *S, volatile i64 *ctr, u64 work_ns)
+static Job *submit_parked(Sched *S, volatile i64 *ctr, i64 gen, u64 work_ns)
 {
     Group *G = &S->groups[GROUP];
     Job *j = alloc_job();
     j->affinity = AFFINITY; j->grp = GROUP; j->work_ns = work_ns; j->done_ctr = NULL; j->parked = 1;
-    j->c0_ptr = ctr; j->c0_target = 1; j->c0_op = 3; /* waits for *ctr >= 1 */
+    j->c0_ptr = ctr; j->c0_target = gen; j->c0_op = 3; /* waits for *ctr >= gen */
     j->flags |= 0x10;
     j->enq_tsc = ~0ull / 2;
     counts_inc(G, j->affinity);
@@ -521,26 +528,28 @@ static Job *submit_parked(Sched *S, volatile i64 *ctr, u64 work_ns)
     return j;
 }
 
-static void emit_results(const Wstat *ws, u64 measured_us, u64 frames, const Hist *frame_hist)
+static void emit_results(const Wstat *ws, u64 measured_us, u64 frames, const Hist *frame_hist, u64 main_pace_ticks)
 {
     char buf[512];
-    Hist lat = {0}, plat = {0};
+    static Hist lat, plat; /* static: the entry thread's stack is only a few tens of KB */
     u64 polls = 0, jobs = 0, pred = 0, pauses = 0, dl = 0, busy = 0, forks = 0, stolen = 0;
     for (int w = 0; w < WORKERS; w++) {
         const Wstat *s = &ws[w];
         hist_emit_fields(buf, sizeof buf, "lat", &s->lat);
-        EMIT("jobpool.worker w=%d polls=%lu jobs=%lu pred_calls=%lu pauses=%lu dl_checks=%lu busy_ns=%lu forks=%lu stolen=%lu %s",
-             w, s->polls, s->jobs, s->pred_calls, s->pauses, s->dl_checks, s->busy_ns, s->forks, s->stolen, buf);
+        EMIT("jobpool.worker w=%d polls=%lu jobs=%lu pred_calls=%lu pauses=%lu dl_checks=%lu work_ns=%lu forks=%lu stolen=%lu %s",
+             w, s->polls, s->jobs, s->pred_calls, s->pauses, s->dl_checks, tsc_to_ns(s->work_ticks), s->forks, s->stolen, buf);
         hist_merge(&lat, &s->lat); hist_merge(&plat, &s->plat);
         polls += s->polls; jobs += s->jobs; pred += s->pred_calls; pauses += s->pauses; dl += s->dl_checks;
-        busy += s->busy_ns; forks += s->forks; stolen += s->stolen;
+        busy += s->work_ticks; forks += s->forks; stolen += s->stolen;
     }
     char b1[256], b2[256], b3[256];
     hist_emit_fields(b1, sizeof b1, "lat", &lat);
     hist_emit_fields(b2, sizeof b2, "parked_lat", &plat);
     hist_emit_fields(b3, sizeof b3, "frame", frame_hist);
-    EMIT("jobpool.total measured_us=%lu polls=%lu jobs=%lu pred_calls=%lu pauses=%lu dl_checks=%lu busy_ns=%lu forks=%lu stolen=%lu frames=%lu",
-         measured_us, polls, jobs, pred, pauses, dl, busy, forks, stolen, frames);
+    EMIT("jobpool.total measured_us=%lu polls=%lu jobs=%lu pred_calls=%lu pauses=%lu dl_checks=%lu work_ns=%lu forks=%lu stolen=%lu frames=%lu",
+         measured_us, polls, jobs, pred, pauses, dl, tsc_to_ns(busy), forks, stolen, frames);
+    for (int w = 0; w < WORKERS; w++) emit_gbusy("BPE JobWorkerThread CPU", w, ws[w].work_ticks, 0);
+    emit_gbusy(NULL, 0, 0, main_pace_ticks);
     EMIT("jobpool.lat %s", b1);
     EMIT("jobpool.parked_lat %s", b2);
     EMIT("jobpool.frame %s", b3);
@@ -558,7 +567,6 @@ int _start(void *args, void *exit_fn)
     S->groups = g_groups;
     for (int g = 0; g < NG; g++)
         for (int q = 0; q < NQ; q++) g_groups[g].dq[q].mask = SLOTS - 1;
-    g_two_tscf = DL_CHECK ? 2 * g_tsc_hz : ~0ull;
     S->exit = 0;
 
     ScePthread th[WORKERS];
@@ -570,41 +578,45 @@ int _start(void *args, void *exit_fn)
     }
 
     warmup_and_start();
+    g_two_tscf = DL_CHECK ? 2 * g_tsc_hz : ~0ull; /* after the TSC calibration is final */
     g_go = 1;
 
     const u64 frame_tsc = ns_to_tsc(1000000000ull / FRAME_HZ);
     const int per_frame = PRODUCER_HZ / FRAME_HZ;
     volatile i64 *parked[PARKED > 0 ? PARKED : 1];
     Job *parked_job[PARKED > 0 ? PARKED : 1];
+    i64 parked_gen[PARKED > 0 ? PARKED : 1];
     int nparked = 0;
     u64 frames = 0;
-    Hist frame_hist = {0};
+    static Hist frame_hist;
     u64 next = rdtsc();
-    int park_slot = 0;
+    u64 main_pace_ticks = 0;
     while (!run_expired()) {
         u64 f0 = rdtsc();
         /* release last frame's parked jobs */
         for (int i = 0; i < nparked; i++) {
             parked_job[i]->enq_tsc = rdtsc();
-            __atomic_store_n(parked[i], 1, __ATOMIC_SEQ_CST);
+            __atomic_store_n(parked[i], parked_gen[i], __ATOMIC_SEQ_CST);
         }
         nparked = 0;
         for (int i = 0; i < per_frame; i++) submit_ready(S, (u64)JOB_US * 1000);
         for (int i = 0; i < PARKED; i++) {
-            volatile i64 *ctr = &g_park_ctr[park_slot++ & 31];
-            *ctr = 0;
-            parked_job[nparked] = submit_parked(S, ctr, (u64)JOB_US * 1000);
-            parked[nparked++] = ctr;
+            volatile i64 *ctr = &g_park_ctr[i];
+            i64 gen = ++g_park_gen[i];
+            parked_job[nparked] = submit_parked(S, ctr, gen, (u64)JOB_US * 1000);
+            parked[nparked] = ctr;
+            parked_gen[nparked++] = gen;
         }
         wait_for_counter_le(&g_frame_pending, 0);
         hist_add(&frame_hist, tsc_to_ns(rdtsc() - f0));
         frames++;
         next += frame_tsc;
-        for (;;) { /* sleep out the frame */
+        for (;;) { /* sleep out the frame: usleep while the slack is large, then a pacing spin (counted as guest CPU) */
             u64 t = rdtsc();
-            if (t >= next) { if (t - next > 4 * frame_tsc) next = t; break; }
+            if ((i64)(t - next) >= 0) { if (t - next > 4 * frame_tsc) next = t; break; }
             u64 left_us = tsc_to_ns(next - t) / 1000;
             if (left_us > 1500) sceKernelUsleep((u32)(left_us - 1000));
+            else main_pace_ticks += spin_until(next);
         }
     }
 
@@ -613,7 +625,7 @@ int _start(void *args, void *exit_fn)
     measure_end();
     S->exit = 1;
     for (int w = 0; w < WORKERS; w++) thread_join(th[w]);
-    emit_results(g_snap, measured_us, frames, &frame_hist);
+    emit_results(g_snap, measured_us, frames, &frame_hist, main_pace_ticks);
     EMIT("DONE guest=jobpool");
     return 0;
 }

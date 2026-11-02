@@ -29,6 +29,7 @@ static const u32 k_sweep[] = {SWEEP_N};
 #define NSWEEP ((int)(sizeof k_sweep / sizeof k_sweep[0]))
 
 static Hist g_h;
+static u64 g_gap_ticks_spent; /* CPU the guest itself burns in the gap spins */
 
 static void phase(const char *kind, u32 n_us, int gapped, u64 phase_ticks)
 {
@@ -42,7 +43,7 @@ static void phase(const char *kind, u32 n_us, int gapped, u64 phase_ticks)
         u64 t0 = rdtsc();
         if (yield) scePthreadYield(); else sceKernelUsleep(n_us);
         hist_add(&g_h, tsc_to_ns(rdtsc() - t0));
-        if (gapped) spin_ticks(gap_ticks);
+        if (gapped) g_gap_ticks_spent += spin_cpu(gap_ticks);
     }
     u64 us = tsc_to_ns(rdtsc() - start) / 1000;
     char buf[320];
@@ -71,6 +72,7 @@ int _start(void *args, void *exit_fn)
         phase("yield", 0, 1, phase_ticks);
     }
 #endif
+    emit_gbusy(NULL, 0, g_gap_ticks_spent, 0);
     measure_end();
     EMIT("DONE guest=sleeplat");
     return 0;
