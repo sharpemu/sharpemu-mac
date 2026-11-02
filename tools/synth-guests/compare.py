@@ -16,8 +16,9 @@ Runs are dropped before comparing (and listed) when they failed (result_ok false
 Which metrics are valid A/B metrics depends on the guest (the others are context, not evidence of an emulator change):
   scream   emu_cpu_s / emu_cores / emu_cpu_us_per_guard, scream.gtid p50, scream.lock/unlock percentiles, achieved
            gtid/s and mutex ops/s, futex/ctx rates. NOT cores_busy: pacing is a busy-wait, so total CPU is ~constant.
-  jobpool  emu_cpu_s / emu_cpu_us_per_job, jobs/s, jobpool.parked_lat, jobpool.lat, frame percentiles. cores_busy only in
-           the unsaturated -DLIGHT=1 preset or with few workers; with 13 spinning workers it saturates at the core count.
+  jobpool  emu_cpu_s / emu_cpu_us_per_job, jobs/s, jobpool.parked_lat, jobpool.lat, frame percentiles. With NAP=1 (DS default)
+           cores_busy is meaningful too; with NAP=0 and 13 spinning workers it saturates at the core count.
+  agcbuild emu_cpu_us_per_draw, agcbuild.import.<name> ns p50/p95/p99, calls/s; agcbuild.verify bad must stay 0.
   wakeping, sleeplat, baseline: cores_busy / task_clock_s and the guest's latency percentiles.
 """
 import glob
@@ -37,7 +38,8 @@ HEADLINE = [
 
 VALID_METRICS = {
     "scream": "emu_cpu_s, emu_cores, emu_cpu_us_per_guard, scream.gtid/lock/unlock percentiles, achieved rates (NOT cores_busy)",
-    "jobpool": "emu_cpu_s, emu_cpu_us_per_job, jobs/s, parked_lat, lat, frame (cores_busy only for -DLIGHT=1 / few workers)",
+    "jobpool": "emu_cpu_s, emu_cpu_us_per_job, jobs/s, parked_lat, lat, frame (cores_busy with NAP=1; it saturates with NAP=0)",
+    "agcbuild": "emu_cpu_us_per_draw, agcbuild.import.<name> ns percentiles, calls/s, agcbuild.verify bad (NOT cores_busy)",
     "wakeping": "cores_busy, task_clock_s, rtt percentiles, round trips/s",
     "sleeplat": "cores_busy, task_clock_s, per-phase elapsed percentiles and phase CPU",
     "baseline": "cores_busy, task_clock_s",

@@ -38,7 +38,13 @@ def key_counters_guest(m):
                 f"pause/s={f.get('jobpool.total.pauses', 0) / s:,.0f} pred/s={f.get('jobpool.total.pred_calls', 0) / s:,.0f} "
                 f"lat p50/p95={g(m, 'jobpool.lat.lat_p50_ns', 1e6)}/{g(m, 'jobpool.lat.lat_p95_ns', 1e6)} ms "
                 f"frame p50={g(m, 'jobpool.frame.frame_p50_ns', 1e6)} ms parked_lat p50/p95={g(m, 'jobpool.parked_lat.parked_lat_p50_ns', 1e3, '{:.0f}')}/{g(m, 'jobpool.parked_lat.parked_lat_p95_ns', 1e3, '{:.0f}')} us "
-                f"cpu/job={m.get('cpu_us_per_job', '-')} emu cpu/job={m.get('emu_cpu_us_per_job', '-')} us")
+                f"naps/s={f.get('jobpool.total.naps', 0) / s:,.0f} cpu/job={m.get('cpu_us_per_job', '-')} emu cpu/job={m.get('emu_cpu_us_per_job', '-')} us")
+    if name.startswith("agcbuild"):
+        f2 = f
+        return (f"draws/s={g(m, 'agcbuild.total.draws_per_s', 1, '{:,.0f}')} calls/s={g(m, 'agcbuild.total.calls_per_s', 1, '{:,.0f}')} "
+                f"emu cpu/draw={m.get('emu_cpu_us_per_draw', '-')} us, cpu/draw={m.get('cpu_us_per_draw', '-')} us; "
+                f"verify bad={f2.get('agcbuild.verify.bad')}/{f2.get('agcbuild.verify.checks')}; "
+                f"ns p50 stub-able cx_ind={g(m, 'agcbuild.import.DcbSetCxRegistersIndirect.ns_p50_ns', 1, '{:.0f}')} patch addr={g(m, 'agcbuild.import.SetCxRegIndirectPatchSetAddress.ns_p50_ns', 1, '{:.0f}')} add={g(m, 'agcbuild.import.SetCxRegIndirectPatchAddRegisters.ns_p50_ns', 1, '{:.0f}')}")
     if name.startswith("scream"):
         return (f"gtid/s={g(m, 'scream.total.gtid_per_s', 1, '{:,.0f}')} mutex ops/s={g(m, 'scream.total.mutex_ops_per_s', 1, '{:,.0f}')} "
                 f"gtid p50={g(m, 'scream.gtid.gtid_p50_ns', 1, '{:.0f}')} ns lock p50/p99={g(m, 'scream.lock.lock_p50_ns', 1, '{:.0f}')}/"

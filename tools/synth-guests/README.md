@@ -23,9 +23,22 @@ Specs referenced below are the P1 static model of DS (`p1-static-model.md`, sect
 | `scream.c` | The Scream guard: 2x `scePthreadGetthreadid` plus a global `scePthreadMutexLock/Unlock` when the caller is not the synth thread, plus NCA pool-mutex jobs (4 mutex ops each). | section 2, 5(b) |
 | `wakeping.c` | Event-flag ping-pong (`bpe::SyncEvent` semantics: attr 0x21, bit 1, `AND\|CLEAR_ALL`, no timeout) and a `scePthreadCond` variant; round-trip latency. | section 3 (event flags), 5(c') |
 | `sleeplat.c` | `sceKernelUsleep(N)` for N in 0,1,50,100,250,1000,4000 back to back and with 2 ms gaps, then `scePthreadYield` the same two ways; per-call elapsed p50/p95/max. | section 6 (nap policies), 5(d) |
+| `agcbuild.c` | AGC command-buffer building on render-job workers (lever L1): THREADS workers each build DCBs with `sceAgcDcbSet{Cx,Sh,Uc}RegistersIndirect`, the `sceAgcSet{Cx,Sh,Uc}RegIndirectPatch{SetAddress,AddRegisters}` / `SetCxRegIndirectPatchSetNumRegisters` calls DS makes on those packets, and a draw packet (`DcbDrawIndexAuto`, optionally `DcbDrawIndex`). The guest checks the DCB the exports wrote (cursor advance, PM4 header, address, count, before and after patching). | `src/SharpEmu.Libs/Agc` exports; DS imports in `re-ds/imports.tsv` |
 | `baseline.c` | Warm-up, then `sceKernelUsleep(100000)` for the whole measured phase: the emulator's idle floor. | - |
 
 The GPU staging-copy guest (e) is out of scope: Linux runs Vulkan, the Mac runs Metal.
+
+### jobpool NAP: DS's shipped idle nap (default on)
+
+`DemonsSoulsIdleNapPatch` (src/SharpEmu.Core/Loader) is on by default for DS, so every job-pool A/B must start from it. `-DNAP=1`
+(default) reproduces it with the same hooks and arguments: **T2** after every `RunJob` stamps the worker's slot `[S+0xF00+8w]` with
+the TSC at job end; **T1** wraps the `ChooseJobToRun` call and, when no job was found, calls **T3** with the worker's slot; **T3**
+(also replacing WaitForJobs' TSC read, so it sits inside the `pause` window just like the original `call`) does `rdtsc`, and if
+`now - slot >= threshold` calls the private import `SharpEmuNap(nap_us)` (a host `usleep`, `IdleNapExports`), returning the pre-nap TSC.
+The loader computes `threshold = idle_us x TscFrequency` and reads `SHARPEMU_DS_IDLE_NAP_IDLE_US` / `SHARPEMU_DS_IDLE_NAP_US` only for the
+DS title, and the export reads no env, so here they are `-DNAP_IDLE_US=500 -DNAP_US=250` (the same defaults; the threshold uses
+`sceKernelGetTscFrequency`, like the patch). `-DNAP=0` is `SHARPEMU_DS_IDLE_NAP=0`. Counters: per worker `naps`, `nap_ns`, `nap_max_ns`
+(guest-observed time inside `SharpEmuNap`); the host side shows up as `clock_nanosleep` in `metrics.json`.
 
 ### jobpool: the instruction shapes that matter
 
@@ -54,7 +67,8 @@ count only CPU ticks (a rdtsc gap >= 20 us is the thread being descheduled, not 
 | Guest | Valid A/B metrics | Not valid |
 |---|---|---|
 | scream | `emu_cpu_s`, `emu_cores`, `emu_cpu_us_per_guard`; `scream.gtid` p50/p95, `scream.lock` / `scream.unlock` percentiles; achieved `gtid_per_s`, `mutex_ops_per_s`; futex and ctx-switch rates | `cores_busy` (PACE=1 busy-waits to each deadline, so total CPU stays ~100% per thread whatever the emulator does; fewer parked waits even raise it) |
-| jobpool | `emu_cpu_s`, `emu_cpu_us_per_job`, `jobs/s`, `parked_lat`, `lat`, `frame` percentiles | `cores_busy` with 13 spinning workers (saturates at the core count); use `-DLIGHT=1` or few workers when you want it |
+| jobpool | `emu_cpu_s`, `emu_cpu_us_per_job`, `jobs/s`, `parked_lat`, `lat`, `frame` percentiles; with NAP=1 also `cores_busy` (the workers no longer saturate the host), `naps/s`, `clock_nanosleep/s` | `cores_busy` with NAP=0 and 13 spinning workers (saturates at the core count) |
+| agcbuild | `emu_cpu_us_per_draw`, `agcbuild.import.<name>` ns p50/p95/p99 (per-import guest-observed latency), calls/s, `agcbuild.verify` (must stay `bad=0`); NOT `cores_busy` (PACE=1 busy-waits) | `cores_busy` |
 | wakeping, sleeplat, baseline | `cores_busy`, `task_clock_s`, latency percentiles, per-phase CPU (sleeplat's gapped phases include the guest's own 2 ms spin, which `emu_cpu_s` removes) | - |
 
 Job bodies are CPU-time spins: under oversubscription a job takes longer wall-clock but the same CPU, like real work.
@@ -94,10 +108,11 @@ running after the end marker so the harness can snapshot them.
 
 | Guest | Knobs |
 |---|---|
-| jobpool | `WORKERS=13` `PARKED=3` (0 = pure pause path) `PRODUCER_HZ=15000` ready jobs/s (250 per frame; <= 256 fit array B; `-DLIGHT=1` presets 4500) `JOB_US=300` `FRAME_HZ=60` `AFFINITY=0x1ffe` `PIN_WORKERS=1` (pass `1<<k` as thread affinity) `FORK=0` (children a job pushes on its own deque) `DL_CHECK=1` `GROUP=0` |
+| jobpool | `NAP=1` (DS default; 0 = off) `NAP_IDLE_US=500` `NAP_US=250` `WORKERS=13` `PARKED=3` (0 = pure pause path) `PRODUCER_HZ=15000` ready jobs/s (250 per frame; <= 256 fit array B; `-DLIGHT=1` presets 4500) `JOB_US=300` `FRAME_HZ=60` `AFFINITY=0x1ffe` `PIN_WORKERS=1` (pass `1<<k` as thread affinity) `FORK=0` (children a job pushes on its own deque) `DL_CHECK=1` `GROUP=0` |
 | scream | `THREADS=15` `RATE=193000` guards/s (0 = flat out) `OWNER_PCT=50` `NCA_HZ=3500` `NCA_WORK_US=100` `CS_NS=500` `PERIOD_US=2000` `PACE=1` (busy-work to the deadline; 0 = usleep) `CONTENDED=1` (0 = one mutex per thread) |
 | wakeping | `MODE=2` both (each half of the duration), `0` evf only, `1` cond only `PERIOD_US=0` (sleep between round trips) |
 | sleeplat | `SWEEP_N="0,1,50,100,250,1000,4000"` `GAP_US=2000` `YIELD=1` `ONLY_N=<n>` `ONLY_GAP=0\|1` |
+| agcbuild | `THREADS=4` `DRAWS_HZ=50000` total draws/s (0 = flat out) `FRAME_DRAWS=512` (draws per DCB) `PACE=1` `PERIOD_US=2000` `REGS=4`; per-draw call counts `N_CX_IND N_SH_IND N_UC_IND P_CX_ADDR P_SH_ADDR P_UC_ADDR P_CX_ADD P_SH_ADD P_UC_ADD P_CX_NUM N_DRAW_AUTO` (1 each) `N_DRAW_INDEX` (0); the DS mix: `-DN_CX_IND=3 -DP_CX_ADD=6 ...`. `SHARPEMU_AGC_PACKET_STUBS=0` (run.sh `--env`) keeps the Dcb builders on the managed exports instead of native stubs |
 | baseline | `SLEEP_US=100000` |
 
 ## Run one
