@@ -243,26 +243,30 @@ void emit_gbusy(const char *guest_name, int idx, u64 work_ticks, u64 pace_ticks)
     EMIT("gbusy comm=%s idx=%d work_ns=%lu pace_ns=%lu", comm, idx, tsc_to_ns(work_ticks), tsc_to_ns(pace_ticks));
 }
 
-static volatile int s_ident_ready, s_ident_go, s_ident_turn, s_ident_done, s_ident_abort;
+#define IDENT_MAX 64
+static volatile int s_ident_ready, s_ident_done, s_ident_abort;
+static SceKernelEventFlag s_ident_ef[IDENT_MAX]; /* thread idx waits (blocked, zero CPU) on s_ident_ef[idx]; the previous turn sets it */
 
 void thread_identify(const char *guest_name, int idx)
 {
     char comm[40];
     host_comm(comm, sizeof comm, guest_name);
+    if (idx < 0 || idx >= IDENT_MAX) return;
+    sceKernelCreateEventFlag(&s_ident_ef[idx], "identTurn", EVF_ATTR_FIFO_MULTI, 0, NULL);
     /* Park first so a host thread's own start-up work (JIT, thunks) is over before the harness's baseline snapshot; the print also
      * warms this thread's first-call path for the import that reports the burn. */
     EMIT("identpark comm=%s idx=%d", comm, idx);
     __atomic_fetch_add(&s_ident_ready, 1, __ATOMIC_ACQ_REL);
-    while (!__atomic_load_n(&s_ident_go, __ATOMIC_ACQUIRE)) sceKernelUsleep(20000);
-    while (__atomic_load_n(&s_ident_turn, __ATOMIC_ACQUIRE) != idx) {
-        if (__atomic_load_n(&s_ident_abort, __ATOMIC_ACQUIRE)) return; /* main gave up (timeout): no identification this run */
-        sceKernelUsleep(20000);
-    }
+    /* Wait for the turn in a blocking event-flag wait. (A sceKernelUsleep poll is not idle on Linux: the host sleep yield-spins its
+     * last ~1.2 ms, which put ~15-30 ms of a parked thread's own CPU into its identification window.) */
+    u64 r;
+    sceKernelWaitEventFlag(s_ident_ef[idx], 1, EVF_WAIT_AND | EVF_WAIT_CLEAR_ALL, &r, NULL);
+    if (__atomic_load_n(&s_ident_abort, __ATOMIC_ACQUIRE)) return; /* main gave up (timeout): no identification this run */
     spin_cpu(ns_to_tsc((u64)IDENT_MS * 1000000ull)); /* CPU time, so preemption cannot shorten it; everything else is idle */
     EMIT("MARK ident_end comm=%s idx=%d cpu_ms=%d margin_ms=%d", comm, idx, IDENT_MS, IDENT_MARGIN_MS);
     for (int i = 0; i < IDENT_MARGIN_MS / 20; i++) sceKernelUsleep(20000); /* idle: the harness takes its snapshot in here */
-    __atomic_store_n(&s_ident_turn, idx + 1, __ATOMIC_RELEASE);
     __atomic_fetch_add(&s_ident_done, 1, __ATOMIC_ACQ_REL);
+    if (idx + 1 < IDENT_MAX && s_ident_ef[idx + 1]) sceKernelSetEventFlag(s_ident_ef[idx + 1], 1); /* next turn */
 }
 
 /* Wait for *p >= n, but give up after IDENT_TIMEOUT_S: a thread that never reaches thread_identify() must not hang the run. */
@@ -273,7 +277,7 @@ static int ident_wait(volatile int *p, int n, const char *what)
         if (now_us() - t0 > (u64)IDENT_TIMEOUT_S * 1000000ull) {
             EMIT("ERROR ident_timeout while waiting for %s: %d of %d threads after %d s", what, __atomic_load_n(p, __ATOMIC_ACQUIRE), n, IDENT_TIMEOUT_S);
             __atomic_store_n(&s_ident_abort, 1, __ATOMIC_RELEASE);
-            __atomic_store_n(&s_ident_go, 1, __ATOMIC_RELEASE);
+            for (int i = 0; i < IDENT_MAX; i++) if (s_ident_ef[i]) sceKernelSetEventFlag(s_ident_ef[i], 1); /* release every parked thread */
             return 0;
         }
         sceKernelUsleep(20000);
@@ -287,7 +291,7 @@ void wait_identified(int n)
     for (int i = 0; i < 15; i++) sceKernelUsleep(20000); /* parked threads' start-up CPU dies down */
     EMIT("MARK ident_begin n=%d margin_ms=%d", n, IDENT_MARGIN_MS); /* harness: baseline per-thread CPU */
     for (int i = 0; i < IDENT_MARGIN_MS / 20; i++) sceKernelUsleep(20000);
-    __atomic_store_n(&s_ident_go, 1, __ATOMIC_RELEASE);
+    if (s_ident_ef[0]) sceKernelSetEventFlag(s_ident_ef[0], 1); /* turn 0; each thread passes the turn on */
     ident_wait(&s_ident_done, n, "threads to finish their identification burn");
 }
 

@@ -146,6 +146,7 @@ class Run:
         self.ident_base_late = False
         self.ident_margin_s = 0.24
         self.ident_lags = []
+        self.ident_log = []
         self.guest_errors = []
         self.ident_failed = []
         self.pid = None
@@ -232,6 +233,12 @@ class Run:
                 known = {v["tid"] for v in self.idents.values()}  # already identified: cannot be this one, whatever they just did
                 deltas = sorted(((v["run_ns"] - self.ident_base.get(tid, {}).get("run_ns", 0)) / 1e9, tid)
                                 for tid, v in s1.items() if v["comm"] == comm and tid not in known)[::-1]
+                # Diagnostics for every turn (accepted or not): the three biggest CPU growers across ALL host threads since the
+                # previous snapshot, with tids and names, so a leak into the window can be attributed.
+                everyone = sorted(((v["run_ns"] - self.ident_base.get(tid, {}).get("run_ns", 0)) / 1e9, tid, v["comm"], tid in known)
+                                  for tid, v in s1.items())[::-1][:3]
+                log_entry = dict(comm=comm, idx=key[1], burn_s=burn, lag_ms=round(lag * 1000, 1),
+                                 top3=[dict(tid=t, comm=c, delta_s=round(d, 4), already_identified=k) for d, t, c, k in everyone])
                 reason = None
                 if self.ident_base_late:
                     reason = f"baseline snapshot was {self.ident_lags[0] * 1000:.0f} ms late (> margin {self.ident_margin_s * 1000:.0f} ms)"
@@ -250,6 +257,10 @@ class Run:
                     self.idents[key] = dict(tid=deltas[0][1], delta_s=round(deltas[0][0], 4))
                 else:
                     self.ident_failed.append(f"{comm}#{key[1]}: {reason}")
+                log_entry["accepted"] = reason is None
+                log_entry["tid"] = deltas[0][1] if reason is None else None
+                log_entry["reason"] = reason
+                self.ident_log.append(log_entry)
                 self.ident_base = s1
                 self.ident_base_late = False
             elif kind == "phase_start":
@@ -664,6 +675,10 @@ def main():
         gbusy = gbusy_rows(run.guest_rows)
         thr, unmatched = diff_threads(run.start[1], run.end[1], wall, gbusy, run.idents)
         metrics["idents"] = len(run.idents)
+        if run.ident_log:
+            metrics["ident_log"] = run.ident_log  # per turn: burn, lag, top-3 CPU growers (tid, comm, delta), accepted + reason
+            metrics["ident_map"] = {f"{k[0]}#{k[1]}": v for k, v in run.idents.items()}
+            metrics["ident_refusals"] = sum(1 for e in run.ident_log if not e["accepted"])
         if run.ident_lags:
             metrics["ident_snapshot_lag_ms_max"] = round(max(run.ident_lags) * 1000, 1)
         if run.ident_failed:
@@ -699,6 +714,9 @@ def main():
         reasons.append(metrics["error"])
     if metrics.get("emu_untrusted"):
         reasons.append("emu_cpu_s untrusted: " + metrics["emu_untrusted"])
+    vbad = run.guest_flat.get("agcbuild.verify.bad") if hasattr(run, "guest_flat") else None
+    if vbad:  # also enforced here, not only through the guest's "@@ ERROR": a failing DCB check means the builders early-out
+        reasons.append(f"agcbuild verify: bad={vbad} of {run.guest_flat.get('agcbuild.verify.checks')} checks")
     if run.guest_errors:
         metrics["guest_errors"] = run.guest_errors
         reasons.append("guest reported: " + "; ".join(run.guest_errors))
