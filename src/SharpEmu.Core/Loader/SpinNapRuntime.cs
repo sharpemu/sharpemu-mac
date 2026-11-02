@@ -14,8 +14,9 @@ namespace SharpEmu.Core.Loader;
 /// The host-side half of the generic spin-loop nap (see <see cref="GuestRedZonePatcher"/>'s spin
 /// pass). Every patched guest <c>pause</c> jumps through one shared, position-independent native
 /// probe this class emits. The probe keeps per-thread state in a direct-mapped table of 64-byte
-/// slots keyed on the host thread pointer (one segment-relative load: <c>fs:[0]</c> on Linux,
-/// <c>gs:[0]</c> on macOS, <c>gs:[0x30]</c> on Windows; it can never fault), tracks how long the
+/// slots keyed on the host thread pointer (one segment-relative load: <c>fs:[0]</c> on Linux, through
+/// a based operand the guest-TLS scan leaves alone, <c>gs:[0]</c> on macOS, <c>gs:[0x30]</c> on
+/// Windows; it can never fault), tracks how long the
 /// thread has spun without interruption, and once that passes the idle threshold naps (a real
 /// short host sleep). A gap between two <c>pause</c>es longer than the reset window restarts the
 /// streak, so a lock backoff that resolves quickly never sleeps. <c>SHARPEMU_SPIN_NAP_SHARED_STATE=1</c>
@@ -503,7 +504,7 @@ internal static unsafe class SpinNapRuntime
             }
 
             var a = new Assembler(64);
-            EmitThreadKey(a, rax);
+            EmitThreadKey(a, rax, eax);
             a.ret();
             using var stream = new MemoryStream();
             a.Assemble(new StreamCodeWriter(stream), 0);
@@ -737,7 +738,10 @@ internal static unsafe class SpinNapRuntime
         a.cmp(rcx, rax);
         a.jb(done);
 
-        // Spun past the threshold: nap. Keep the epoch so it keeps napping while it stays idle.
+        // Spun past the threshold: nap. The epoch stays, but `last` is this entry's pre-nap time, so
+        // the thread's next pause sees the nap as a gap and starts a new streak: per-thread state
+        // gives a 500 us spin / 250 us nap cycle (with the shared state, other threads' pauses kept
+        // `last` fresh, so a bucket napped on every entry once anyone had spun past the threshold).
         EmitNap(a, target, napCounter: statsAddress != 0 ? ControlPauseNaps : -1, skip: done);
         a.jmp(done);
 
@@ -991,7 +995,7 @@ internal static unsafe class SpinNapRuntime
         }
         else
         {
-            EmitThreadKey(a, r11);
+            EmitThreadKey(a, r11, r11d);
         }
     }
 
@@ -1001,7 +1005,14 @@ internal static unsafe class SpinNapRuntime
     // (TSD slot 0, pthread_self; Rosetta translates gs-relative loads, the TlsGetValue stub relies
     // on it), gs:[0x30] on Windows (NT_TIB.Self). Unique per live thread, constant for its life, and
     // the same for every fiber the thread runs, so a fiber switch keeps the thread's streak.
-    private static void EmitThreadKey(Assembler a, AssemblerRegister64 destination)
+    //
+    // On Linux the load must not be `mov reg, fs:[0]` (no base, no index): the backend's guest-TLS
+    // scan (DirectExecutionBackend.PatchDecodedTlsInstruction, at start and on every lazy commit of
+    // executable memory) rewrites exactly that form, in every executable guest region, the spin-nap
+    // arena included, into a call that returns the guest's TLS base. So it zeroes the register and
+    // loads fs:[destination], a based form the scan skips. The xor clobbers flags, which the probes
+    // have saved; the managed reader emits the same two instructions, so both see the same value.
+    private static void EmitThreadKey(Assembler a, AssemblerRegister64 destination, AssemblerRegister32 destination32)
     {
         if (OperatingSystem.IsWindows())
         {
@@ -1013,7 +1024,8 @@ internal static unsafe class SpinNapRuntime
         }
         else
         {
-            a.mov(destination, __qword_ptr.fs[0]);
+            a.xor(destination32, destination32);
+            a.mov(destination, __qword_ptr.fs[destination]);
         }
     }
 

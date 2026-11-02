@@ -118,20 +118,23 @@ public sealed unsafe class SpinLoopNapPatcherTests
         }
     }
 
-    // The private probes key on the host thread pointer with one segment-relative load (absolute
-    // displacement, not RIP-relative) and never read rsp for it; the shared ones do `mov r11, rsp;
-    // shr r11, 26` and no segment load.
+    // The private probes key on the host thread pointer with a segment-relative load and never read
+    // rsp for it; the shared ones do `mov r11, rsp; shr r11, 26` and no segment load. On Linux the load
+    // is based (xor r11d, r11d ; mov r11, fs:[r11]): the guest-TLS scan rewrites a base-less
+    // `mov r11, fs:[0]` into a call that returns the guest's TLS base.
     [Fact]
     public void PrivateProbesKeyOnTheHostThreadPointer()
     {
         var threadKeyLoad =
             OperatingSystem.IsWindows() ? "654C8B1C2530000000" :      // mov r11, gs:[0x30]
             OperatingSystem.IsMacOS() ? "654C8B1C2500000000" :        // mov r11, gs:[0]
-            "644C8B1C2500000000";                                     // mov r11, fs:[0]
+            "4531DB644D8B1B";                                         // xor r11d, r11d ; mov r11, fs:[r11]
+        const string baseLessFsLoad = "644C8B1C2500000000";           // mov r11, fs:[0]
         const string rspKey = "4989E349C1EB1A";                       // mov r11, rsp ; shr r11, 26
         foreach (var probe in new[] { FixedProbe(0, 0, sharedState: false), FixedLockedProbe(sharedState: false) })
         {
             Assert.True(Contains(probe, threadKeyLoad));
+            Assert.False(Contains(probe, baseLessFsLoad));
             Assert.False(Contains(probe, rspKey));
         }
 
@@ -163,6 +166,142 @@ public sealed unsafe class SpinLoopNapPatcherTests
 
     [DllImport("libc")]
     private static extern nint pthread_self();
+
+    // The backend's guest-TLS scan runs over every executable guest region, the spin-nap arena
+    // included, after the loader copied the probes there. Run the real scan over each probe in an
+    // executable page: it must leave every byte alone. The control, a base-less `mov r11, fs:[0]`,
+    // shows the scan does patch what it matches.
+    [Fact]
+    public void TheGuestTlsScanLeavesTheProbesAlone()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var tscFrequency = SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency;
+        var probes = new List<byte[]>();
+        foreach (var sharedState in new[] { false, true })
+        {
+            probes.Add(FixedProbe(0, 0, sharedState));
+            probes.Add(FixedProbe(19, 0x0000710000000000UL, sharedState));
+            probes.Add(FixedLockedProbe(sharedState));
+            probes.Add(SpinNapRuntime.BuildNappingLockedProbeForTest(tscFrequency, sharedState));
+        }
+
+        foreach (var probe in probes)
+        {
+            using var scan = new TlsScanFixture();
+            scan.Write(probe);
+            scan.Scan(probe.Length);
+            Assert.Equal(probe, scan.Read(probe.Length));
+        }
+
+        using (var control = new TlsScanFixture())
+        {
+            byte[] baseLessLoad = [0x64, 0x4C, 0x8B, 0x1C, 0x25, 0, 0, 0, 0, 0xC3]; // mov r11, fs:[0] ; ret
+            control.Write(baseLessLoad);
+            control.Scan(baseLessLoad.Length);
+            Assert.NotEqual(baseLessLoad, control.Read(baseLessLoad.Length));
+        }
+    }
+
+    // End to end: after the TLS scan has run over them in place, the probes still key on the host
+    // thread pointer, and NoteHleEntry bumps the HLE generation in the slot the locked probe uses
+    // for the same thread (a patched key load would put the probe in another slot, so the thread's
+    // own HLE calls would never end its window).
+    [Fact]
+    public void AfterTheTlsScanTheProbesAndNoteHleEntryShareTheThreadsSlot()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var tscFrequency = SharpEmu.Libs.Kernel.KernelRuntimeCompatExports.TscFrequency;
+        Assert.NotEmpty(SpinNapRuntime.EnsureLockedProbeBytes(1_000_000_000));
+        if (SpinNapRuntime.RuntimeLockedSharedState)
+            return; // the process built the runtime probe with SHARPEMU_SPIN_NAP_SHARED_STATE=1
+
+        var lockedTable = SpinNapRuntime.RuntimeLockedTable;
+        var pauseTable = SpinNapRuntime.AllocatePauseTableForTest(sharedState: false);
+        var locked = SpinNapRuntime.BuildRunnableLockedProbeForTest(
+            tscFrequency, lockedTable, null, sharedState: false, int.MaxValue, int.MaxValue, int.MaxValue, 8);
+        var pause = SpinNapRuntime.BuildRunnableProbeForTest(
+            tscFrequency, pauseTable, sharedState: false, long.MaxValue, long.MaxValue, 0, 0);
+        using var lockedScan = new TlsScanFixture();
+        using var pauseScan = new TlsScanFixture();
+        lockedScan.Write(locked);
+        lockedScan.Scan(locked.Length);
+        pauseScan.Write(pause);
+        pauseScan.Scan(pause.Length);
+
+        using var threads = new WorkerThreads();
+        var (thread, _) = threads.TwoWithDistinctSlots(key => (nint)SpinNapRuntime.LockedSlot(lockedTable, false, key));
+        var lockedSlot = (ulong*)SpinNapRuntime.LockedSlot(lockedTable, false, thread.Key);
+        var pauseSlot = (ulong*)SpinNapRuntime.PauseSlot(pauseTable, false, thread.Key);
+        thread.Run(() =>
+        {
+            ((delegate* unmanaged<void>)lockedScan.Address)();
+            ((delegate* unmanaged<void>)lockedScan.Address)();
+            ((delegate* unmanaged<void>)pauseScan.Address)();
+        });
+        Assert.Equal(thread.Key, lockedSlot[0]);
+        Assert.Equal(1UL, lockedSlot[3]);
+        Assert.Equal(thread.Key, pauseSlot[0]);
+
+        var generation = (long*)((byte*)lockedSlot + SpinNapRuntime.LockedHleGenerationOffsetForTest);
+        var before = *generation;
+        thread.Run(() =>
+        {
+            SpinNapRuntime.NoteHleEntry(0);
+            ((delegate* unmanaged<void>)lockedScan.Address)();
+        });
+        Assert.Equal(before + 1, *generation);
+        Assert.Equal(0UL, lockedSlot[3]); // the thread's own HLE call restarted its window
+    }
+
+    // The backend's TLS scan over one executable page, with a stand-in TLS handler on a later page
+    // (as TlsLoadPatchBoundaryTests does, through HostMemory so it runs on every host).
+    private sealed class TlsScanFixture : IDisposable
+    {
+        private const int Bytes = 0x4000;
+        private readonly SharpEmu.Core.Cpu.Native.DirectExecutionBackend _backend = new(new ModuleManager());
+
+        public TlsScanFixture()
+        {
+            Address = (nint)HostMemory.Alloc(
+                null, Bytes, HostMemory.MEM_COMMIT | HostMemory.MEM_RESERVE, HostMemory.PAGE_EXECUTE_READWRITE);
+            Assert.NotEqual(0, Address);
+            new Span<byte>((void*)Address, Bytes).Fill(0x90);
+            var handler = new Span<byte>((void*)(Address + 0x3000), 11);
+            handler[0] = 0x48; // mov rax, imm64 ; ret
+            handler[1] = 0xB8;
+            BinaryPrimitives.WriteUInt64LittleEndian(handler[2..], 0x00007FFE00000000UL);
+            handler[10] = 0xC3;
+            SetField("_tlsHandlerAddress", Address + 0x3000);
+            SetField("_tlsPatchStubOffset", 0x100);
+        }
+
+        public nint Address { get; }
+
+        public void Write(byte[] code) => code.CopyTo(new Span<byte>((void*)Address, code.Length));
+
+        public byte[] Read(int length) => new ReadOnlySpan<byte>((void*)Address, length).ToArray();
+
+        public void Scan(int length) =>
+            typeof(SharpEmu.Core.Cpu.Native.DirectExecutionBackend)
+                .GetMethod("PatchTlsPatternsInRange", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(_backend, [(ulong)Address, (ulong)Address + (ulong)length]);
+
+        private void SetField(string name, object value) =>
+            typeof(SharpEmu.Core.Cpu.Native.DirectExecutionBackend)
+                .GetField(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(_backend, value);
+
+        public void Dispose()
+        {
+            SetField("_tlsHandlerAddress", (nint)0);
+            _backend.Dispose();
+            _ = HostMemory.Free((void*)Address, 0, HostMemory.MEM_RELEASE);
+        }
+    }
 
     [Theory]
     [InlineData(false)]
