@@ -65,6 +65,9 @@ public static partial class KernelMemoryCompatExports
         var length = ctx[CpuRegister.Rsi];
         var protection = unchecked((int)ctx[CpuRegister.Rdx]);
         var flags = ctx[CpuRegister.Rcx] & 0xFFFF_FFFFUL;
+        // Only a fixed request is held to its address; a hint inside the window is searched around.
+        if ((flags & OrbisKernelMapFixed) != 0 && length != 0 && length <= ulong.MaxValue - OrbisPageSize)
+            requested = GuestVaHole.RelocateFixedRequest(requested, AlignUp(length, OrbisPageSize));
         var fd = unchecked((int)ctx[CpuRegister.R8]);
         var offset = ctx[CpuRegister.R9];
         var anonymous = (flags & PosixMapAnonymous) != 0;
