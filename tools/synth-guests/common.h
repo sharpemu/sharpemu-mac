@@ -144,6 +144,7 @@ void emit_gbusy(const char *guest_name, int idx, u64 work_ticks, u64 pace_ticks)
  * since the previous snapshot is the guest thread's tid. The idle margins make the harness's snapshot latency irrelevant. */
 #define IDENT_MS 80
 #define IDENT_MARGIN_MS 240
+#define IDENT_TIMEOUT_S 30 /* wait_identified gives up (with an "@@ ERROR" line) after this long */
 void thread_identify(const char *guest_name, int idx);
 void wait_identified(int n);
 

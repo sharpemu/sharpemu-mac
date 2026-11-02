@@ -243,7 +243,7 @@ void emit_gbusy(const char *guest_name, int idx, u64 work_ticks, u64 pace_ticks)
     EMIT("gbusy comm=%s idx=%d work_ns=%lu pace_ns=%lu", comm, idx, tsc_to_ns(work_ticks), tsc_to_ns(pace_ticks));
 }
 
-static volatile int s_ident_ready, s_ident_go, s_ident_turn, s_ident_done;
+static volatile int s_ident_ready, s_ident_go, s_ident_turn, s_ident_done, s_ident_abort;
 
 void thread_identify(const char *guest_name, int idx)
 {
@@ -254,22 +254,41 @@ void thread_identify(const char *guest_name, int idx)
     EMIT("identpark comm=%s idx=%d", comm, idx);
     __atomic_fetch_add(&s_ident_ready, 1, __ATOMIC_ACQ_REL);
     while (!__atomic_load_n(&s_ident_go, __ATOMIC_ACQUIRE)) sceKernelUsleep(20000);
-    while (__atomic_load_n(&s_ident_turn, __ATOMIC_ACQUIRE) != idx) sceKernelUsleep(20000);
+    while (__atomic_load_n(&s_ident_turn, __ATOMIC_ACQUIRE) != idx) {
+        if (__atomic_load_n(&s_ident_abort, __ATOMIC_ACQUIRE)) return; /* main gave up (timeout): no identification this run */
+        sceKernelUsleep(20000);
+    }
     spin_cpu(ns_to_tsc((u64)IDENT_MS * 1000000ull)); /* CPU time, so preemption cannot shorten it; everything else is idle */
-    EMIT("MARK ident_end comm=%s idx=%d cpu_ms=%d", comm, idx, IDENT_MS);
+    EMIT("MARK ident_end comm=%s idx=%d cpu_ms=%d margin_ms=%d", comm, idx, IDENT_MS, IDENT_MARGIN_MS);
     for (int i = 0; i < IDENT_MARGIN_MS / 20; i++) sceKernelUsleep(20000); /* idle: the harness takes its snapshot in here */
     __atomic_store_n(&s_ident_turn, idx + 1, __ATOMIC_RELEASE);
     __atomic_fetch_add(&s_ident_done, 1, __ATOMIC_ACQ_REL);
 }
 
+/* Wait for *p >= n, but give up after IDENT_TIMEOUT_S: a thread that never reaches thread_identify() must not hang the run. */
+static int ident_wait(volatile int *p, int n, const char *what)
+{
+    u64 t0 = now_us();
+    while (__atomic_load_n(p, __ATOMIC_ACQUIRE) < n) {
+        if (now_us() - t0 > (u64)IDENT_TIMEOUT_S * 1000000ull) {
+            EMIT("ERROR ident_timeout while waiting for %s: %d of %d threads after %d s", what, __atomic_load_n(p, __ATOMIC_ACQUIRE), n, IDENT_TIMEOUT_S);
+            __atomic_store_n(&s_ident_abort, 1, __ATOMIC_RELEASE);
+            __atomic_store_n(&s_ident_go, 1, __ATOMIC_RELEASE);
+            return 0;
+        }
+        sceKernelUsleep(20000);
+    }
+    return 1;
+}
+
 void wait_identified(int n)
 {
-    while (__atomic_load_n(&s_ident_ready, __ATOMIC_ACQUIRE) < n) sceKernelUsleep(20000);
+    if (!ident_wait(&s_ident_ready, n, "threads to park in thread_identify")) return;
     for (int i = 0; i < 15; i++) sceKernelUsleep(20000); /* parked threads' start-up CPU dies down */
-    EMIT("MARK ident_begin n=%d", n);                    /* harness: baseline per-thread CPU */
+    EMIT("MARK ident_begin n=%d margin_ms=%d", n, IDENT_MARGIN_MS); /* harness: baseline per-thread CPU */
     for (int i = 0; i < IDENT_MARGIN_MS / 20; i++) sceKernelUsleep(20000);
     __atomic_store_n(&s_ident_go, 1, __ATOMIC_RELEASE);
-    while (__atomic_load_n(&s_ident_done, __ATOMIC_ACQUIRE) < n) sceKernelUsleep(20000);
+    ident_wait(&s_ident_done, n, "threads to finish their identification burn");
 }
 
 void hist_emit_fields(char *buf, unsigned cap, const char *p, const Hist *h)

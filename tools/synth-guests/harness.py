@@ -142,6 +142,10 @@ class Run:
         self.finished_at = None
         self.idents = {}         # (comm, idx) -> dict(tid, delta_s) from the guests' ident handshake
         self.ident_base = None
+        self.ident_base_late = False
+        self.ident_margin_s = 0.24
+        self.ident_lags = []
+        self.guest_errors = []
         self.ident_failed = []
         self.pid = None
 
@@ -190,6 +194,9 @@ class Run:
             self.finished_at = t
 
     def on_guest_line(self, body, t):
+        if body.startswith("ERROR"):
+            self.guest_errors.append(body)
+            return
         m = re.match(r"MARK (\S+)(.*)", body)
         if m:
             kind, rest = m.group(1), parse_kv(m.group(2))
@@ -205,23 +212,45 @@ class Run:
                 self.perf_disabled_at = self.perf_cmd("disable")
                 self.end_rest = rest
             elif kind == "ident_begin":
+                self.ident_margin_s = rest.get("margin_ms", 240) / 1000.0
                 self.ident_base = snap_threads(self.pid)
-            elif kind == "ident_end" and self.ident_base is not None:
+                lag = time.monotonic() - t
+                self.ident_lags.append(lag)
+                # The guest idles for the margin after this marker before the first burn; a later baseline cannot be trusted.
+                self.ident_base_late = lag > self.ident_margin_s
+            elif kind == "ident_end":
                 key = (rest.get("comm"), rest.get("idx"))
+                if self.ident_base is None:
+                    self.ident_failed.append(f"{key[0]}#{key[1]}: ident_end without ident_begin")
+                    return
                 burn = rest.get("cpu_ms", 80) / 1000.0
                 s1 = snap_threads(self.pid)
+                lag = time.monotonic() - t  # marker arrival -> snapshot done; the guest idles `margin` after the marker
+                self.ident_lags.append(lag)
                 comm = str(key[0]).replace("_", " ")
                 known = {v["tid"] for v in self.idents.values()}  # already identified: cannot be this one, whatever they just did
                 deltas = sorted(((v["run_ns"] - self.ident_base.get(tid, {}).get("run_ns", 0)) / 1e9, tid)
                                 for tid, v in s1.items() if v["comm"] == comm and tid not in known)[::-1]
-                # Only this guest thread burned CPU since the previous snapshot (everything else is idle), so it is the biggest grower:
-                # accept it when it grew by at least 60% of the burn and by 2x as much as the runner-up of the same name among the
-                # not yet identified threads.
-                if deltas and deltas[0][0] >= 0.6 * burn and (len(deltas) == 1 or deltas[0][0] >= 2 * deltas[1][0]):
+                reason = None
+                if self.ident_base_late:
+                    reason = f"baseline snapshot was {self.ident_lags[0] * 1000:.0f} ms late (> margin {self.ident_margin_s * 1000:.0f} ms)"
+                elif lag > self.ident_margin_s:
+                    reason = f"snapshot lag {lag * 1000:.0f} ms exceeds the idle margin {self.ident_margin_s * 1000:.0f} ms"
+                elif not deltas:
+                    reason = "no unidentified host thread of that name"
+                elif deltas[0][0] > 1.5 * burn:
+                    reason = f"top delta {deltas[0][0]:.3f} s is far above the burn {burn:.3f} s (other CPU leaked into the window)"
+                elif deltas[0][0] < 0.6 * burn:
+                    reason = f"top delta {deltas[0][0]:.3f} s is below 60% of the burn {burn:.3f} s"
+                elif len(deltas) > 1 and deltas[0][0] < 2 * deltas[1][0]:
+                    reason = f"top delta {deltas[0][0]:.3f} s is not 2x the runner-up {deltas[1][0]:.3f} s"
+                # Only this guest thread burned CPU since the previous snapshot (everything else is idle), so it is the biggest grower.
+                if reason is None:
                     self.idents[key] = dict(tid=deltas[0][1], delta_s=round(deltas[0][0], 4))
                 else:
-                    self.ident_failed.append(f"{comm}#{key[1]}: top deltas {[round(d, 3) for d, _ in deltas[:3]]} for burn {burn}")
+                    self.ident_failed.append(f"{comm}#{key[1]}: {reason}")
                 self.ident_base = s1
+                self.ident_base_late = False
             elif kind == "phase_start":
                 self.open_phases[rest.get("name")] = (t, snap_threads(self.pid))
             elif kind == "phase_end":
@@ -576,13 +605,23 @@ def main():
         base = metrics.get("task_clock_s", metrics.get("proc_cpu_s"))
         metrics["guest_busy_s"] = round(gb, 4)
         if base is not None:
-            metrics["emu_cpu_s"] = round(base - gb, 4)
-            metrics["emu_cores"] = round((base - gb) / pw, 3)
-            for key, label in (("jobpool.total.jobs", "job"), ("scream.total.guards", "guard")):
+            raw = base - gb
+            metrics["emu_cpu_s_raw"] = round(raw, 4)
+            if gb > base * 1.02:
+                # The guest claims more deliberate busy-work than the process had CPU: the accounting is broken for this run.
+                metrics["emu_cpu_s"] = None
+                metrics["emu_untrusted"] = f"guest_busy_s {gb:.3f} > process CPU {base:.3f} x 1.02"
+                emu = None
+            else:
+                emu = max(0.0, raw)  # within 2%: noise, clamp
+                metrics["emu_cpu_s"] = round(emu, 4)
+                metrics["emu_cores"] = round(emu / pw, 3)
+            for key, label in (("jobpool.total.jobs", "job"), ("scream.total.guards", "guard"), ("agcbuild.total.draws", "draw")):
                 n = run.guest_flat.get(key) if hasattr(run, "guest_flat") else None
                 if n:
                     metrics[f"cpu_us_per_{label}"] = round(base * 1e6 / n, 2)
-                    metrics[f"emu_cpu_us_per_{label}"] = round((base - gb) * 1e6 / n, 2)
+                    if emu is not None:
+                        metrics[f"emu_cpu_us_per_{label}"] = round(emu * 1e6 / n, 2)
         for key in ("ctx_switches", "cpu_migrations", "instructions", "cycles", "futex", "sched_yield", "nanosleep", "clock_nanosleep"):
             v = perf.get(key)
             if v is not None:
@@ -593,6 +632,8 @@ def main():
         gbusy = gbusy_rows(run.guest_rows)
         thr, unmatched = diff_threads(run.start[1], run.end[1], wall, gbusy, run.idents)
         metrics["idents"] = len(run.idents)
+        if run.ident_lags:
+            metrics["ident_snapshot_lag_ms_max"] = round(max(run.ident_lags) * 1000, 1)
         if run.ident_failed:
             metrics["ident_failures"] = run.ident_failed
         if unmatched:
@@ -624,6 +665,11 @@ def main():
                 reasons.append(f"{key}={metrics[key]} >= guest grace {grace} ms (counters include the guest shutting down)")
     if "error" in metrics:
         reasons.append(metrics["error"])
+    if metrics.get("emu_untrusted"):
+        reasons.append("emu_cpu_s untrusted: " + metrics["emu_untrusted"])
+    if run.guest_errors:
+        metrics["guest_errors"] = run.guest_errors
+        reasons.append("guest reported: " + "; ".join(run.guest_errors))
     metrics["valid"] = not reasons
     if reasons:
         metrics["invalid_reasons"] = reasons
