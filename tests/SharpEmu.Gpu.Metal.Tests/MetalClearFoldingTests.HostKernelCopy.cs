@@ -12,8 +12,10 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// The counters of a recognised copy or fill kernel the host refuses: whether its result is
 /// already in memory (would_elide_identical) or how much it would change (would_write, bytes,
 /// pages), why the answer could not be taken, which kernel each fallback reason is for, and
-/// which owner made the resolve thread abandon a read. With the switch off, nothing changes:
-/// the kernel still runs as its dispatch and its copy is still armed for read-through.
+/// which owner made the resolve thread abandon a read. These are the dry run's
+/// (SHARPEMU_METAL_V2_HOST_KERNEL_COPY_DRYRUN); with the switch at 0 nothing changes: the kernel
+/// still runs as its dispatch and its copy is still armed for read-through. With both off, a
+/// refused kernel is not checked at all.
 /// </summary>
 public sealed unsafe partial class MetalClearFoldingTests
 {
@@ -45,19 +47,42 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.HostKernelCopyDryRun = true;
         host.HostKernelCopyMode = MetalHostKernelCopyMode.Off;
         WriteKernelSource(rig);
         WriteKernelResult(rig);
 
         Assert.False(host.TryCopyWordsOnHost(KernelDestination, KernelSource, KernelPeriod, KernelWords));
-        Assert.Equal((1L, 0L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
+        Assert.Equal((1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
         // Still the dispatch: its storage binding records the copy for read-through.
         host.NoteGuestMemoryWrite(KernelDestination, KernelWords * sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
         Assert.Equal(1, host.PendingCopyCount);
         var churn = host.TakeKernelFillCounters();
         Assert.Contains("copy:no-image=1", churn);
         Assert.Contains(" host_kernel_copy=[mode=0,fills=0,identical=0,would_elide_identical=1,would_write=0,changed_bytes=0,changed_pages=0,", churn);
-        Assert.Equal((0L, 0L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
+        Assert.Equal((0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
+    }
+
+    [Fact]
+    public void WithoutTheDryRunOrTheSwitchARefusedKernelIsNotChecked()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.HostKernelCopyDryRun = false;
+        host.HostKernelCopyMode = MetalHostKernelCopyMode.Off;
+        WriteKernelSource(rig);
+        WriteKernelResult(rig);
+
+        Assert.False(host.TryCopyWordsOnHost(KernelDestination, KernelSource, KernelPeriod, KernelWords));
+        Assert.False(host.TryClearImageFromKernelFill(KernelDestination, KernelBytes, [0xB000u]));
+        Assert.Equal((0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
+        // Still recorded for read-through, and the fallback reasons still name their kernel.
+        host.NoteGuestMemoryWrite(KernelDestination, KernelBytes, MetalGpuWriteOrigin.StorageBuffer);
+        Assert.Equal(1, host.PendingCopyCount);
+        var churn = host.TakeKernelFillCounters();
+        Assert.Contains("copy:no-image=1", churn);
+        Assert.Contains("fill:no-image=1", churn);
     }
 
     [Fact]
@@ -66,6 +91,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.HostKernelCopyDryRun = true;
         WriteKernelSource(rig);
         WriteKernelResult(rig);
         // Two words differ, on one page.
@@ -73,7 +99,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         rig.WriteBacking32(KernelDestination + 9 * sizeof(uint), 0);
 
         Assert.False(host.TryCopyWordsOnHost(KernelDestination, KernelSource, KernelPeriod, KernelWords));
-        Assert.Equal((0L, 1L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
+        Assert.Equal((0L, 1L, 0L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
         Assert.Equal((8L, 1L), host.HostKernelCopyChanges);
     }
 
@@ -83,6 +109,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.HostKernelCopyDryRun = true;
         WriteKernelSource(rig);
         WriteKernelResult(rig);
 
@@ -95,7 +122,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         // Too wide to compare at record time.
         Assert.False(host.TryCopyWordsOnHost(KernelDestination + 0x10000, KernelSource, KernelPeriod, 0x10001));
 
-        Assert.Equal((0L, 0L, 1L, 1L, 0L, 1L, 0L), host.HostKernelCopyOutcomes);
+        Assert.Equal((0L, 0L, 1L, 1L, 0L, 1L, 0L, 0L), host.HostKernelCopyOutcomes);
     }
 
     [Fact]
@@ -104,6 +131,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.HostKernelCopyDryRun = true;
         host.HostKernelCopyMode = MetalHostKernelCopyMode.Off;
         for (var word = 0UL; word < KernelWords; word++)
         {
@@ -112,7 +140,7 @@ public sealed unsafe partial class MetalClearFoldingTests
 
         Assert.False(host.TryClearImageFromKernelFill(KernelDestination, KernelWords * sizeof(uint), [0x1u, 0x2u]));
         Assert.False(host.TryClearImageFromKernelFill(KernelDestination, KernelWords * sizeof(uint), [0x2u, 0x1u]));
-        Assert.Equal((1L, 1L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
+        Assert.Equal((1L, 1L, 0L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
         Assert.Equal(((long)KernelWords * sizeof(uint), 1L), host.HostKernelCopyChanges);
         host.NoteKernelFillFallback("copy-shape");
         var churn = host.TakeKernelFillCounters();
@@ -126,6 +154,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
+        host.HostKernelCopyDryRun = true;
         WriteKernelSource(rig);
         Assert.False(host.TryCopyWordsOnHost(KernelDestination, KernelSource, KernelPeriod, KernelWords));
         host.NoteGuestMemoryWrite(KernelDestination, KernelWords * sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);

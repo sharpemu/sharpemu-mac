@@ -62,8 +62,9 @@ internal sealed partial class MetalRenderHost
 
         // Refused: the fill runs as a dispatch, unless its destination already holds the
         // pattern (SHARPEMU_METAL_V2_HOST_KERNEL_COPY).
-        return !pattern.IsEmpty && size % sizeof(uint) == 0 &&
-            TakeIdenticalKernel(EvaluateKernelFill(address, size / sizeof(uint), pattern), address, size / sizeof(uint), 0, pattern);
+        return ChecksRefusedKernels && !pattern.IsEmpty && size % sizeof(uint) == 0 &&
+            TakeIdenticalKernel(
+                EvaluateKernelFill(address, size / sizeof(uint), pattern), address, size / sizeof(uint), 0, (ulong)pattern.Length, pattern);
     }
 
     private bool TryClearImageFromKernelFillCore(ulong address, ulong size, ReadOnlySpan<uint> pattern)
@@ -101,8 +102,8 @@ internal sealed partial class MetalRenderHost
         // (SHARPEMU_METAL_V2_HOST_KERNEL_COPY). Otherwise it runs as the dispatch it is, and
         // a read of its destination before that submission completes can be answered from
         // its source.
-        if (MetalV2Diagnostics.KernelFills &&
-            TakeIdenticalKernel(EvaluateKernelCopy(destination, words, source, sourceWords), destination, words, source, default))
+        if (MetalV2Diagnostics.KernelFills && ChecksRefusedKernels &&
+            TakeIdenticalKernel(EvaluateKernelCopy(destination, words, source, sourceWords), destination, words, source, sourceWords, default))
         {
             return true;
         }
@@ -226,12 +227,19 @@ internal sealed partial class MetalRenderHost
     //     upload recorded that still reads it, and metadata bytes mean more than memory says);
     //   - no recorded write that has not completed covers the destination, and no pending
     //     command-processor or label bytes do (they land before the kernel would run);
-    //   - the source is final, as for copy read-through (IsCopySourceFinal), and no pending
-    //     label bytes cover it. A fill's pattern is its own words.
+    //   - the source is final, as for copy read-through (IsCopySourceFinal), no pending
+    //     label bytes cover it, and it is no surface metadata. A fill's pattern is its own words.
     // Then nothing is written, so no shader recorded earlier can read a changed byte. The
     // destinations are small tables: a wider kernel (Demon's Souls has one of 4 MiB) is
-    // refused before anything is read.
+    // refused before anything is read. The check runs only when its answer is used
+    // (SHARPEMU_METAL_V2_HOST_KERNEL_COPY) or counted (SHARPEMU_METAL_V2_HOST_KERNEL_COPY_DRYRUN):
+    // otherwise a refused kernel reads no memory and takes no lock it did not take before.
     private const ulong MaxHostKernelCopyBytes = 64 * 1024;
+
+    /// <summary>SHARPEMU_METAL_V2_HOST_KERNEL_COPY_DRYRUN, read once; tests set it per host before any kernel.</summary>
+    internal bool HostKernelCopyDryRun { get; set; } = MetalV2Diagnostics.HostKernelCopyDryRun;
+
+    private bool ChecksRefusedKernels => HostKernelCopyDryRun || HostKernelCopyMode != MetalHostKernelCopyMode.Off;
 
     private enum KernelCopyOutcome : byte
     {
@@ -242,10 +250,11 @@ internal sealed partial class MetalRenderHost
         DestinationImage,
         Size,
         Unreadable,
+        SourceMetadata,
     }
 
     private static readonly string[] KernelCopyOutcomeNames =
-        ["would_elide_identical", "would_write", "src_pending", "dst_written_pending", "dst_image", "size", "unreadable"];
+        ["would_elide_identical", "would_write", "src_pending", "dst_written_pending", "dst_image", "size", "unreadable", "src_metadata"];
 
     private readonly long[] _kernelCopyOutcomes = new long[KernelCopyOutcomeNames.Length];
     private long _kernelCopyFills;
@@ -256,10 +265,10 @@ internal sealed partial class MetalRenderHost
     private uint[] _kernelCopySource = [];
 
     internal (long Identical, long Differs, long SourcePending, long DestinationWrittenPending, long DestinationImage, long Size,
-        long Unreadable) HostKernelCopyOutcomes =>
+        long Unreadable, long SourceMetadata) HostKernelCopyOutcomes =>
         (Interlocked.Read(ref _kernelCopyOutcomes[0]), Interlocked.Read(ref _kernelCopyOutcomes[1]), Interlocked.Read(ref _kernelCopyOutcomes[2]),
             Interlocked.Read(ref _kernelCopyOutcomes[3]), Interlocked.Read(ref _kernelCopyOutcomes[4]), Interlocked.Read(ref _kernelCopyOutcomes[5]),
-            Interlocked.Read(ref _kernelCopyOutcomes[6]));
+            Interlocked.Read(ref _kernelCopyOutcomes[6]), Interlocked.Read(ref _kernelCopyOutcomes[7]));
 
     internal (long Bytes, long Pages) HostKernelCopyChanges =>
         (Interlocked.Read(ref _kernelCopyChangedBytes), Interlocked.Read(ref _kernelCopyChangedPages));
@@ -304,6 +313,11 @@ internal sealed partial class MetalRenderHost
         }
 
         var sourceSize = sourceWords * sizeof(uint);
+        if (!fill && _imageCache.OverlapsSurfaceMetadata(source, sourceSize))
+        {
+            return KernelCopyOutcome.SourceMetadata;
+        }
+
         if (!fill && (!IsCopySourceFinal(source, sourceSize, CompletedSerial) ||
             (_labelOverlay.Count != 0 && _labelOverlay.Coverage(source, sourceSize, _completedSerialReader ??= () => CompletedSerial) != MetalOverlayCoverage.None)))
         {
@@ -373,9 +387,11 @@ internal sealed partial class MetalRenderHost
     internal long KernelCopiesElided => Interlocked.Read(ref _kernelCopiesElided);
 
     // A kernel found identical: consumed under `identical`, which is the whole of the elision
-    // (no write, no write record, no pass end); armed for its check under `verify`, where it
-    // still runs. The destination words just compared are what it must leave there.
-    private bool TakeIdenticalKernel(KernelCopyOutcome outcome, ulong destination, ulong words, ulong source, ReadOnlySpan<uint> pattern)
+    // (no write, no write record, no pass end); armed for its checks under `verify`, where it
+    // still runs. `stored` is the source the check judged (a copy's source words, a fill's
+    // pattern), repeated by `period`.
+    private bool TakeIdenticalKernel(
+        KernelCopyOutcome outcome, ulong destination, ulong words, ulong source, ulong period, ReadOnlySpan<uint> pattern)
     {
         var mode = HostKernelCopyMode;
         if (mode == MetalHostKernelCopyMode.Verify)
@@ -383,7 +399,9 @@ internal sealed partial class MetalRenderHost
             CheckKernelCopies(CompletedSerial);
             if (outcome == KernelCopyOutcome.Identical)
             {
-                ArmKernelCopyCheck(destination, words, source, pattern.IsEmpty);
+                var fill = !pattern.IsEmpty;
+                ArmKernelCopyCheck(destination, words, source, period,
+                    fill ? pattern : _kernelCopySource.AsSpan(0, (int)Math.Min(period, words)), fill);
             }
 
             return false;
@@ -398,13 +416,21 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
-    // Verify mode. A kernel that would have been consumed is armed here, recorded with its
-    // write's serial and sequence when the dispatch's storage binding notes the destination
-    // (as a pending copy is), and checked once that serial completes: the destination must
-    // still hold the words it held when the kernel was found identical, or consuming it would
-    // have left different bytes. A later write over the destination (a recorded one, or a
-    // host write) supersedes the check, since what it leaves is not the kernel's. A guest CPU
-    // write in between is not seen, and shows as a mismatch.
+    // Verify mode: the kernel runs, and two checks say whether consuming it would have left the
+    // same bytes. Expected is the result the elision assumed: dst[i] = src[i % period] over the
+    // source as it was judged (a fill's pattern).
+    //   - The destination side. A blit encoded right before the kernel, in the same command
+    //     order, copies the destination into a buffer of its own; once that runs, the bytes the
+    //     kernel would have overwritten must already be Expected. This is what catches a GPU
+    //     write to the destination the guards missed, which the kernel itself overwrites.
+    //   - The source side. Once the kernel's submission completes, the destination must hold
+    //     Expected: the kernel stored what the judged source said, so the source did not change
+    //     under it. A fill's pattern cannot change, so for a fill this side always holds. A later
+    //     write over the destination (a recorded one, or a host write) supersedes this side,
+    //     since what it leaves is not the kernel's.
+    // The check is armed here and recorded with the kernel write's serial and sequence when the
+    // dispatch's storage binding notes the destination, as a pending copy is. A guest CPU write
+    // in between is not seen, and shows as a mismatch on either side.
     private sealed class KernelCopyCheck
     {
         public ulong Destination;
@@ -414,10 +440,14 @@ internal sealed partial class MetalRenderHost
         public ulong Serial;
         public ulong Sequence;
         public bool Superseded;
+        // The blit's copy of the destination before the kernel, or 0 when none was encoded.
+        public nint Before;
+        public nint BeforeContents;
 
         public ulong End => Destination + (ulong)Expected.Length * sizeof(uint);
     }
 
+    private static readonly nint SelKernelCheckRelease = MetalNative.Selector("release");
     private const int MaxKernelCopyChecks = 1024;
     private const int MaxKernelCopyMismatchLines = 32;
     private KernelCopyCheck? _armedKernelCopyCheck;
@@ -427,6 +457,9 @@ internal sealed partial class MetalRenderHost
     private ulong _kernelCopyChecksHigh;
     private long _kernelCopyChecked;
     private long _kernelCopyMismatches;
+    private long _kernelCopyDestinationChecked;
+    private long _kernelCopyDestinationMismatches;
+    private long _kernelCopyDestinationSkipped;
     private long _kernelCopySuperseded;
     private long _kernelCopyChecksDropped;
     private int _kernelCopyMismatchLines;
@@ -435,21 +468,97 @@ internal sealed partial class MetalRenderHost
         (Interlocked.Read(ref _kernelCopyChecked), Interlocked.Read(ref _kernelCopyMismatches),
             Interlocked.Read(ref _kernelCopySuperseded), Interlocked.Read(ref _kernelCopyChecksDropped));
 
+    internal (long Checked, long Mismatches, long Skipped) KernelCopyDestinationCheckCounters =>
+        (Interlocked.Read(ref _kernelCopyDestinationChecked), Interlocked.Read(ref _kernelCopyDestinationMismatches),
+            Interlocked.Read(ref _kernelCopyDestinationSkipped));
+
     internal int PendingKernelCopyChecks => _kernelCopyChecks.Count;
 
-    private void ArmKernelCopyCheck(ulong destination, ulong words, ulong source, bool copy) =>
-        _armedKernelCopyCheck = new KernelCopyCheck
+    private void ArmKernelCopyCheck(ulong destination, ulong words, ulong source, ulong period, ReadOnlySpan<uint> stored, bool fill)
+    {
+        DisarmKernelCopyCheck();
+        var expected = new uint[words];
+        var index = 0UL;
+        for (var word = 0; word < expected.Length; word++)
         {
-            Destination = destination,
-            Source = source,
-            Fill = !copy,
-            Expected = _kernelCopyDestination.AsSpan(0, (int)words).ToArray(),
-        };
+            expected[word] = stored[(int)index];
+            index = index + 1 == period ? 0 : index + 1;
+        }
 
-    private void DisarmKernelCopyCheck() => _armedKernelCopyCheck = null;
+        var check = new KernelCopyCheck { Destination = destination, Source = source, Fill = fill, Expected = expected };
+        EncodeDestinationBefore(check);
+        _armedKernelCopyCheck = check;
+    }
+
+    // The destination's bytes on the GPU timeline, just before the kernel: a blit from its
+    // window, ordered like any transfer after the encoders, staged stores and deferred label
+    // copies recorded before it. A destination with no window in place is not copied (a staged
+    // copy would hold what the CPU sees now, not what the GPU will).
+    private void EncodeDestinationBefore(KernelCopyCheck check)
+    {
+        var size = (ulong)check.Expected.Length * sizeof(uint);
+        if (!_guestMemory.TryResolveInPlace(check.Destination, size, out var window) || window.Size < size)
+        {
+            Interlocked.Increment(ref _kernelCopyDestinationSkipped);
+            return;
+        }
+
+        var buffer = _guestMemory.CreateReportBuffer(size, "kernel-copy.verify", out var contents, out _);
+        if (buffer == 0)
+        {
+            Interlocked.Increment(ref _kernelCopyDestinationSkipped);
+            return;
+        }
+
+        OrderAfterDeferredCopies(check.Destination, size);
+        OrderAfterStagedStores(check.Destination, size);
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
+        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        MetalMemoryTelemetry.BlitEncoders.Add();
+        if (encoder == 0)
+        {
+            MetalNative.SendVoid(buffer, SelKernelCheckRelease);
+            Interlocked.Increment(ref _kernelCopyDestinationSkipped);
+            return;
+        }
+
+        WaitForPreviousEncoder(encoder, render: false);
+        try
+        {
+            MetalNative.SendCopyBuffer(encoder, SelCopyBuffer, window.Buffer, (nuint)window.Offset, buffer, 0, (nuint)size);
+        }
+        finally
+        {
+            UpdateEncoderFence(encoder, render: false);
+            MetalNative.SendVoid(encoder, SelEndEncoding);
+        }
+
+        check.Before = buffer;
+        check.BeforeContents = contents;
+    }
+
+    // The command buffer holds the blit's buffer until it completes; this lets go of ours.
+    private static void ReleaseKernelCopyCheck(KernelCopyCheck check)
+    {
+        if (check.Before != 0)
+        {
+            MetalNative.SendVoid(check.Before, SelKernelCheckRelease);
+            check.Before = 0;
+            check.BeforeContents = 0;
+        }
+    }
+
+    private void DisarmKernelCopyCheck()
+    {
+        if (_armedKernelCopyCheck is { } armed)
+        {
+            ReleaseKernelCopyCheck(armed);
+            _armedKernelCopyCheck = null;
+        }
+    }
 
     // Every recorded write: the armed kernel's own store records its check, and any other
-    // store over a destination being checked supersedes that check.
+    // store over a destination being checked supersedes that check's source side.
     private void NoteKernelCopyCheckWrite(ulong address, ulong size, MetalGpuWriteOrigin origin, ulong serial, ulong sequence)
     {
         if (_armedKernelCopyCheck is { } armed && origin == MetalGpuWriteOrigin.StorageBuffer && sequence != 0 &&
@@ -460,6 +569,7 @@ internal sealed partial class MetalRenderHost
             armed.Sequence = sequence;
             if (_kernelCopyChecks.Count >= MaxKernelCopyChecks)
             {
+                ReleaseKernelCopyCheck(_kernelCopyChecks[0]);
                 _kernelCopyChecks.RemoveAt(0);
                 Interlocked.Increment(ref _kernelCopyChecksDropped);
             }
@@ -515,13 +625,8 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
-            if (check.Superseded)
-            {
-                Interlocked.Increment(ref _kernelCopySuperseded);
-                continue;
-            }
-
             CheckKernelCopy(check);
+            ReleaseKernelCopyCheck(check);
         }
 
         _kernelCopyChecks.RemoveRange(kept, _kernelCopyChecks.Count - kept);
@@ -534,27 +639,45 @@ internal sealed partial class MetalRenderHost
         }
     }
 
-    private void CheckKernelCopy(KernelCopyCheck check)
+    private unsafe void CheckKernelCopy(KernelCopyCheck check)
     {
+        if (check.BeforeContents != 0)
+        {
+            var before = new ReadOnlySpan<uint>((void*)check.BeforeContents, check.Expected.Length);
+            Interlocked.Increment(ref _kernelCopyDestinationChecked);
+            if (ModuloCopyCompare.FirstDifference(before, check.Expected, (ulong)check.Expected.Length) is var first and >= 0)
+            {
+                Interlocked.Increment(ref _kernelCopyDestinationMismatches);
+                ReportKernelCopyMismatch(check, "dst", before, first);
+            }
+        }
+
+        if (check.Superseded)
+        {
+            Interlocked.Increment(ref _kernelCopySuperseded);
+            return;
+        }
+
         var found = new uint[check.Expected.Length];
         if (!_memory.TryRead(check.Destination, System.Runtime.InteropServices.MemoryMarshal.AsBytes(found.AsSpan())))
         {
             return;
         }
 
-        var first = ModuloCopyCompare.FirstDifference(found, check.Expected, (ulong)check.Expected.Length);
-        if (first < 0)
-        {
-            Interlocked.Increment(ref _kernelCopyChecked);
-            return;
-        }
-
         Interlocked.Increment(ref _kernelCopyChecked);
-        Interlocked.Increment(ref _kernelCopyMismatches);
+        if (ModuloCopyCompare.FirstDifference(found, check.Expected, (ulong)check.Expected.Length) is var after and >= 0)
+        {
+            Interlocked.Increment(ref _kernelCopyMismatches);
+            ReportKernelCopyMismatch(check, "src", found, after);
+        }
+    }
+
+    private void ReportKernelCopyMismatch(KernelCopyCheck check, string side, ReadOnlySpan<uint> found, int first)
+    {
         if (_kernelCopyMismatchLines++ < MaxKernelCopyMismatchLines)
         {
             Console.Error.WriteLine(
-                $"[METAL-V2][HOST-KERNEL-COPY] verify mismatch kind={(check.Fill ? "fill" : "copy")} dst=0x{check.Destination:X16} " +
+                $"[METAL-V2][HOST-KERNEL-COPY] verify mismatch side={side} kind={(check.Fill ? "fill" : "copy")} dst=0x{check.Destination:X16} " +
                 $"words={check.Expected.Length} src=0x{check.Source:X16} serial={check.Serial} word={first} " +
                 $"expected=0x{check.Expected[first]:X8} found=0x{found[first]:X8} " +
                 $"differing={ModuloCopyCompare.DifferingWords(found, check.Expected, (ulong)check.Expected.Length)}");
@@ -580,6 +703,9 @@ internal sealed partial class MetalRenderHost
 
         return builder.Append(",verify_checked=").Append(Interlocked.Exchange(ref _kernelCopyChecked, 0))
             .Append(",verify_mismatch=").Append(Interlocked.Exchange(ref _kernelCopyMismatches, 0))
+            .Append(",verify_dst_checked=").Append(Interlocked.Exchange(ref _kernelCopyDestinationChecked, 0))
+            .Append(",verify_mismatch_dst=").Append(Interlocked.Exchange(ref _kernelCopyDestinationMismatches, 0))
+            .Append(",verify_dst_skipped=").Append(Interlocked.Exchange(ref _kernelCopyDestinationSkipped, 0))
             .Append(",verify_superseded=").Append(Interlocked.Exchange(ref _kernelCopySuperseded, 0))
             .Append(",verify_dropped=").Append(Interlocked.Exchange(ref _kernelCopyChecksDropped, 0))
             .Append(']').ToString();

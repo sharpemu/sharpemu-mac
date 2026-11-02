@@ -90,9 +90,15 @@ internal sealed partial class MetalRenderHost
         var copy = _armedCopy;
         copy.Serial = serial;
         copy.Sequence = sequence;
-        // Changed under the lock, for the resolve thread's abandon attribution; the worker
-        // alone changes the list, so its own reads take no lock.
-        lock (_pendingCopies)
+        // Changed under the lock while the resolve thread reads it to attribute its abandons
+        // (the dry run); the worker alone changes the list, so its own reads take no lock.
+        var shared = HostKernelCopyDryRun;
+        if (shared)
+        {
+            Monitor.Enter(_pendingCopies);
+        }
+
+        try
         {
             if (_pendingCopies.Count >= MaxPendingCopies)
             {
@@ -100,6 +106,13 @@ internal sealed partial class MetalRenderHost
             }
 
             _pendingCopies.Add(copy);
+        }
+        finally
+        {
+            if (shared)
+            {
+                Monitor.Exit(_pendingCopies);
+            }
         }
 
         if (_tracedCopies.Count < MaxCopyReadTraces && _tracedCopies.Add((copy.Destination, copy.Words)))
@@ -125,7 +138,13 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        lock (_pendingCopies)
+        var shared = HostKernelCopyDryRun;
+        if (shared)
+        {
+            Monitor.Enter(_pendingCopies);
+        }
+
+        try
         {
             for (var index = kept + 1; index < _pendingCopies.Count; index++)
             {
@@ -137,13 +156,27 @@ internal sealed partial class MetalRenderHost
 
             _pendingCopies.RemoveRange(kept, _pendingCopies.Count - kept);
         }
+        finally
+        {
+            if (shared)
+            {
+                Monitor.Exit(_pendingCopies);
+            }
+        }
     }
 
     // Off the worker: whether a recognised copy whose submission has not completed writes the
     // range. Only attributes a resolve-thread abandon (ConcurrentResolve), so a record the worker
-    // has yet to retire is answered by its serial.
-    private bool IsPendingCopyDestinationConcurrent(ulong address, ulong size, ulong completed)
+    // has yet to retire is answered by its serial. Only under the dry run, which is what makes
+    // the worker change the list under the lock.
+    private bool IsPendingCopyDestinationConcurrent(ulong address, ulong size, Func<ulong> completedSerial)
     {
+        if (!HostKernelCopyDryRun)
+        {
+            return false;
+        }
+
+        var completed = completedSerial();
         var end = address + size;
         lock (_pendingCopies)
         {

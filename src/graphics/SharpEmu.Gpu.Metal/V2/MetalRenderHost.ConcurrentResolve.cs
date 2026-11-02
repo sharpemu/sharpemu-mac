@@ -259,11 +259,11 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     }
 
     // Why the resolve thread abandoned a resolution, by the first thing that owned the word it
-    // read (the order IsOwnedConcurrent tests them in), so the worker's redone resolutions (own,
-    // own_ms) can be laid at a cause's door. A pending GPU write is a recognised copy's when a
-    // copy whose submission has not completed writes the word. Abandons thrown elsewhere (a
-    // fatal condition in the resolution) are not counted here; nothing found means the owner
-    // went away between the two tests.
+    // read, as the ownership test itself found it (nothing is tested again), so the worker's
+    // redone resolutions (own, own_ms) can be laid at a cause's door. A pending GPU write is a
+    // recognised copy's when a copy whose submission has not completed writes the word; that is
+    // asked only under the dry run, and otherwise counts as gpu_write. Abandons thrown elsewhere
+    // (a fatal condition in the resolution) are not counted here.
     private enum AbandonCause : byte
     {
         GpuWrite,
@@ -274,25 +274,28 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         Code,
         Queued,
         Other,
+        // Not owned; never counted.
+        None,
     }
 
     private static readonly string[] AbandonCauseNames = ["gpu_write", "copy_dst", "label", "cp", "image", "code", "queued", "other"];
 
     private readonly long[] _abandonCauses = new long[AbandonCauseNames.Length];
 
+    // The owner IsOwnedRecorded last found for this resolving thread, so the abandon that follows
+    // is attributed without testing ownership again.
+    [ThreadStatic]
+    private static AbandonCause _lastConcurrentOwner;
+
     private void NoteAbandonCause(ulong address, ulong size)
     {
-        var completed = SignaledSerial();
-        var cause = PendingCommandWriteHolds(address, size) ? AbandonCause.Queued
-            : _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size) ? AbandonCause.Image
-            : IsGpuWritePendingConcurrent(address, size)
-                ? IsPendingCopyDestinationConcurrent(address, size, completed) ? AbandonCause.CopyDestination : AbandonCause.GpuWrite
-            : _cpOverlay.Count != 0 && _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None
-                ? AbandonCause.CommandProcessor
-            : _labelOverlay.Count != 0 && _labelOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None
-                ? AbandonCause.Label
-            : AbandonCause.Other;
-        Interlocked.Increment(ref _abandonCauses[(int)cause]);
+        var cause = _lastConcurrentOwner;
+        if (cause == AbandonCause.GpuWrite && IsPendingCopyDestinationConcurrent(address, size, _signaledSerialReader ??= SignaledSerial))
+        {
+            cause = AbandonCause.CopyDestination;
+        }
+
+        Interlocked.Increment(ref _abandonCauses[(int)(cause == AbandonCause.None ? AbandonCause.Other : cause)]);
     }
 
     internal string TakeAbandonCauses()
@@ -331,13 +334,20 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // is checked first: the worker records a write's ownership before it lets go of the queued range,
     // so the range found gone means the ownership below is already there.
     private bool IsOwnedConcurrent(ConcurrentQuery query, ulong address, ulong size) =>
-        PendingCommandWriteHolds(address, size) ||
-        _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size) ||
-        IsGpuWritePendingConcurrent(address, size) ||
-        (_cpOverlay.Count != 0 &&
-            _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None) ||
-        (_labelOverlay.Count != 0 &&
-            _labelOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None);
+        ConcurrentOwner(address, size) != AbandonCause.None;
+
+    // The first owner of the range, in the order the tests above are cheapest to fail.
+    private AbandonCause ConcurrentOwner(ulong address, ulong size) =>
+        PendingCommandWriteHolds(address, size) ? AbandonCause.Queued
+        : _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size) ? AbandonCause.Image
+        : IsGpuWritePendingConcurrent(address, size) ? AbandonCause.GpuWrite
+        : _cpOverlay.Count != 0 &&
+            _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None
+            ? AbandonCause.CommandProcessor
+        : _labelOverlay.Count != 0 &&
+            _labelOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None
+            ? AbandonCause.Label
+        : AbandonCause.None;
 
     private bool PendingCommandWriteHolds(ulong address, ulong size) =>
         _commandThread is { } thread && ParallelProgramPrefetch.ResolvingJob is var job and >= 0 &&
@@ -370,7 +380,8 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             }
         }
 
-        var owned = IsOwnedConcurrent(query, address, size);
+        _lastConcurrentOwner = ConcurrentOwner(address, size);
+        var owned = _lastConcurrentOwner != AbandonCause.None;
         assumptions.Record(query, address, size, owned);
         return owned;
     }

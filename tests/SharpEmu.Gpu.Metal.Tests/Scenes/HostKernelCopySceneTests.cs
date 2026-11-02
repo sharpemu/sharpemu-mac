@@ -93,6 +93,41 @@ public sealed class HostKernelCopySceneTests(ITestOutputHelper output) : SceneTe
         Assert.Empty(rig.Fatals);
     }
 
+    // Under verify the identical copy runs on the GPU behind the blit of its table, and neither
+    // side of the check finds a difference.
+    [Fact]
+    public void UnderVerifyTheIdenticalTableCopyRunsAndBothChecksHold()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var host = rig.Host;
+        host.HostKernelCopyMode = MetalHostKernelCopyMode.Off;
+        var source = rig.Memory.Upload<uint>(Pattern);
+        var table = rig.Memory.Allocate(Words * 4, 256);
+        var constants = rig.Memory.Upload<uint>([Words, Mask]);
+        var stream = rig.Dispatch(new ScenePm4(), MaskedCopy,
+            [.. Descriptors.Buffer(source, 4, (uint)Pattern.Length, BufferFormat), .. Descriptors.Buffer(table, 4, Words, BufferFormat),
+                .. Descriptors.Buffer(constants, 4, 2, BufferFormat)], 1).ToArray();
+        // Once through as a dispatch first, so the verified run does not park on its pipeline
+        // (a suspended dispatch is retried without being offered to the host again).
+        rig.Submit(stream);
+        rig.Memory.Write<uint>(table, Expected());
+        host.HostKernelCopyMode = MetalHostKernelCopyMode.Verify;
+
+        rig.Submit(stream);
+        rig.Drain();
+        host.FlushAndWaitForGpu();
+        Assert.Equal(0, host.PendingKernelCopyChecks);
+        var (checkedAfter, mismatches, superseded, _) = host.KernelCopyCheckCounters;
+        Assert.Equal((1L, 0L, 0L), (checkedAfter, mismatches, superseded));
+        var (checkedBefore, mismatchesBefore, skipped) = host.KernelCopyDestinationCheckCounters;
+        Assert.Equal(1L, checkedBefore + skipped);
+        Assert.Equal(0L, mismatchesBefore);
+        Assert.Equal(0, host.KernelCopiesElided);
+        Assert.Equal(Expected(), rig.Read<uint>(table, (int)Words));
+        Assert.Empty(rig.Fatals);
+    }
+
     private static uint[] Expected() => Enumerable.Range(0, (int)Words).Select(index => Pattern[index & (int)Mask]).ToArray();
 
     private static IDisposable Watchdog(nint gate, Action fired)

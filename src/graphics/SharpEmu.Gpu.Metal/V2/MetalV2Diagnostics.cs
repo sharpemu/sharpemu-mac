@@ -228,6 +228,14 @@ internal static class MetalV2Diagnostics
     public static readonly MetalHostKernelCopyMode HostKernelCopy =
         ParseHostKernelCopy(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_HOST_KERNEL_COPY"));
 
+    // SHARPEMU_METAL_V2_HOST_KERNEL_COPY_DRYRUN=1 checks every refused copy or fill kernel against
+    // memory with the switch above at 0, for the CHURN line's host_kernel_copy=[...] counters
+    // (would_elide_identical, would_write and why the check was refused), and attributes the
+    // resolve thread's abandons to pending copies (abandoned_by copy_dst). Off, a refused kernel
+    // reads no memory and takes no lock beyond what it did before.
+    public static readonly bool HostKernelCopyDryRun =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_HOST_KERNEL_COPY_DRYRUN"), "1", StringComparison.Ordinal);
+
     internal static MetalHostKernelCopyMode ParseHostKernelCopy(string? text)
     {
         switch (text)

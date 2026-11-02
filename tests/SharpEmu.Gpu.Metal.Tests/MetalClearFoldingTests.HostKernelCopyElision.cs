@@ -57,7 +57,7 @@ public sealed unsafe partial class MetalClearFoldingTests
         host.NoteGuestMemoryWrite(KernelDestination, KernelBytes, MetalGpuWriteOrigin.StorageBuffer);
         Assert.Equal(1, host.PendingCopyCount);
         Assert.Equal(0, host.KernelCopiesElided);
-        Assert.Equal((0L, 1L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
+        Assert.Equal((0L, 1L, 0L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
     }
 
     [Fact]
@@ -74,7 +74,7 @@ public sealed unsafe partial class MetalClearFoldingTests
 
         Assert.False(host.TryCopyWordsOnHost(KernelDestination, KernelSource, KernelPeriod, KernelWords));
         Assert.Equal(0, host.KernelCopiesElided);
-        Assert.Equal((0L, 0L, 1L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
+        Assert.Equal((0L, 0L, 1L, 0L, 0L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
     }
 
     [Fact]
@@ -95,7 +95,7 @@ public sealed unsafe partial class MetalClearFoldingTests
 
         Assert.False(host.TryCopyWordsOnHost(destination, KernelSource, KernelPeriod, KernelWords));
         Assert.Equal(0, host.KernelCopiesElided);
-        Assert.Equal((0L, 0L, 0L, 0L, 1L, 0L, 0L), host.HostKernelCopyOutcomes);
+        Assert.Equal((0L, 0L, 0L, 0L, 1L, 0L, 0L, 0L), host.HostKernelCopyOutcomes);
     }
 
     [Fact]
@@ -117,7 +117,7 @@ public sealed unsafe partial class MetalClearFoldingTests
     }
 
     [Fact]
-    public void VerifyRunsTheKernelAndChecksTheDestinationOnceItCompletes()
+    public void VerifyRunsTheKernelAndChecksBothSidesOnceItCompletes()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
@@ -126,27 +126,54 @@ public sealed unsafe partial class MetalClearFoldingTests
         WriteKernelSource(rig);
         WriteKernelResult(rig);
 
-        // Left as found: the check holds.
+        // Left as found: both sides hold.
         RecordVerifiedCopy(host);
         host.FlushAndWaitForGpu();
         Assert.Equal(0, host.PendingKernelCopyChecks);
         Assert.Equal((1L, 0L, 0L, 0L), host.KernelCopyCheckCounters);
+        Assert.Equal((1L, 0L, 0L), host.KernelCopyDestinationCheckCounters);
 
-        // The kernel left something else (its source changed under it): a mismatch.
+        // The destination changed after the check and before the GPU reached the kernel (a write
+        // the guards missed): the blit ahead of the kernel sees it, and so does the source side
+        // here, since no kernel ran to store over it.
         RecordVerifiedCopy(host);
         rig.WriteBacking32(KernelDestination + 3 * sizeof(uint), 0xDEADu);
         host.FlushAndWaitForGpu();
         Assert.Equal((2L, 1L, 0L, 0L), host.KernelCopyCheckCounters);
+        Assert.Equal((2L, 1L, 0L), host.KernelCopyDestinationCheckCounters);
 
-        // A later recorded store over the destination: what it leaves is not the kernel's.
+        // A later recorded store over the destination supersedes the source side only.
         rig.WriteBacking32(KernelDestination + 3 * sizeof(uint), 0xB003u);
         RecordVerifiedCopy(host);
         host.NoteGuestMemoryWrite(KernelDestination + 8, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
-        rig.WriteBacking32(KernelDestination + 8, 0x1234u);
         host.FlushAndWaitForGpu();
         Assert.Equal((2L, 1L, 1L, 0L), host.KernelCopyCheckCounters);
+        Assert.Equal((3L, 1L, 0L), host.KernelCopyDestinationCheckCounters);
         Assert.Equal(0, host.KernelCopiesElided);
-        Assert.Contains("verify_checked=2,verify_mismatch=1,verify_superseded=1,verify_dropped=0]", host.TakeKernelFillCounters());
+        Assert.Contains(
+            "verify_checked=2,verify_mismatch=1,verify_dst_checked=3,verify_mismatch_dst=1,verify_dst_skipped=0,verify_superseded=1,verify_dropped=0]",
+            host.TakeKernelFillCounters());
+    }
+
+    [Fact]
+    public void VerifyCatchesAFillWhoseDestinationChangesBeforeTheGpuReachesIt()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.HostKernelCopyMode = MetalHostKernelCopyMode.Verify;
+        for (var word = 0UL; word < KernelWords; word++)
+        {
+            rig.WriteBacking32(KernelDestination + word * sizeof(uint), 0x7u);
+        }
+
+        Assert.False(host.TryClearImageFromKernelFill(KernelDestination, KernelBytes, [0x7u]));
+        host.NoteGuestMemoryWrite(KernelDestination, KernelBytes, MetalGpuWriteOrigin.StorageBuffer);
+        host.ResetBindings();
+        Assert.Equal(1, host.PendingKernelCopyChecks);
+        rig.WriteBacking32(KernelDestination + 9 * sizeof(uint), 0x8u);
+        host.FlushAndWaitForGpu();
+        Assert.Equal((1L, 1L, 0L), host.KernelCopyDestinationCheckCounters);
     }
 
     // The executor's order under verify: the refusal (armed for its check), then the dispatch's
