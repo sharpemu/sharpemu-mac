@@ -16,12 +16,15 @@ export SYNTH_RUNS=$out SYNTH_WAIT_QUIET=${SYNTH_WAIT_QUIET:-180}
 # Variants that sanity-check the harness and the patcher story (fewer workers than cores, so each poller can reach ~1 core).
 "$here/build.sh" -o "$out/bin/w4" jobpool -- -DWORKERS=4 -DAFFINITY=0xe -DPRODUCER_HZ=0 >/dev/null || exit 1                   # 3 parked-job pollers + worker 0 in WaitForJobs
 "$here/build.sh" -o "$out/bin/w4pause" jobpool -- -DWORKERS=4 -DAFFINITY=0xe -DPRODUCER_HZ=0 -DPARKED=0 -DDL_CHECK=0 >/dev/null || exit 1  # nothing but the WaitForJobs pause loop
+"$here/build.sh" -o "$out/bin/light" jobpool -- -DLIGHT=1 >/dev/null || exit 1                                                 # unsaturated: ~1.35 cores of job work
 "$here/build.sh" -o "$out/bin/pause" jobpool -- -DPARKED=0 -DPRODUCER_HZ=0 >/dev/null || exit 1                                # 13 workers, pure WaitForJobs path (+ dlLock after 2 s)
 "$here/build.sh" -o "$out/bin/sleep" scream -- -DPACE=0 >/dev/null || exit 1                                                   # paced with usleep
 "$here/build.sh" -o "$out/bin/flat" scream -- -DRATE=0 >/dev/null || exit 1                                                    # as fast as possible
 runs=(
   "$out/bin/baseline.bin idle"
   "$out/bin/jobpool.bin default"
+  "$out/bin/light/jobpool.bin light"
+  "$out/bin/light/jobpool.bin light-spin-nap-locked --env SHARPEMU_SPIN_NAP_LOCKED=1"
   "$out/bin/jobpool.bin spin-nap-locked --env SHARPEMU_SPIN_NAP_LOCKED=1"
   "$out/bin/w4/jobpool.bin workers4-parked"
   "$out/bin/w4/jobpool.bin workers4-parked-locked --env SHARPEMU_SPIN_NAP_LOCKED=1"

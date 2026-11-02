@@ -42,6 +42,28 @@ so the two hot loops are written in assembly (top-level `__asm__` in `jobpool.c`
 poll while any parked job keeps `count[g][w] > 0`; with `PARKED=0` they sit in the pause loop instead, and after 2 s
 without a job take `dlLock` on every pass (CPU0 does this in the default config because `AFFINITY=0x1ffe` excludes it).
 
+### Which metrics are valid A/B metrics
+
+`cores_busy` (total CPU) is **not** a valid A/B metric for the two guests that burn CPU on purpose, because the guest's own
+busy-work hides the emulator's share. Every deliberate busy-wait goes through `spin_cpu` / `spin_until` (`common.h`), which
+count only CPU ticks (a rdtsc gap >= 20 us is the thread being descheduled, not CPU), and each guest prints its totals as
+`@@ gbusy comm=.. idx=.. work_ns=.. pace_ns=..` rows. The harness subtracts them: `emu_cpu_s = task_clock_s - guest_busy_s`
+(total, and per thread: `threads[].guest_busy_s` / `emu_cpu_s`, matched by host thread name + creation order), with
+`emu_cores`, `emu_cpu_us_per_job` (jobpool) and `emu_cpu_us_per_guard` (scream) next to the raw `cores_busy`.
+
+| Guest | Valid A/B metrics | Not valid |
+|---|---|---|
+| scream | `emu_cpu_s`, `emu_cores`, `emu_cpu_us_per_guard`; `scream.gtid` p50/p95, `scream.lock` / `scream.unlock` percentiles; achieved `gtid_per_s`, `mutex_ops_per_s`; futex and ctx-switch rates | `cores_busy` (PACE=1 busy-waits to each deadline, so total CPU stays ~100% per thread whatever the emulator does; fewer parked waits even raise it) |
+| jobpool | `emu_cpu_s`, `emu_cpu_us_per_job`, `jobs/s`, `parked_lat`, `lat`, `frame` percentiles | `cores_busy` with 13 spinning workers (saturates at the core count); use `-DLIGHT=1` or few workers when you want it |
+| wakeping, sleeplat, baseline | `cores_busy`, `task_clock_s`, latency percentiles, per-phase CPU (sleeplat's gapped phases include the guest's own 2 ms spin, which `emu_cpu_s` removes) | - |
+
+Job bodies are CPU-time spins: under oversubscription a job takes longer wall-clock but the same CPU, like real work.
+
+`-DLIGHT=1` is the unsaturated jobpool preset: `PRODUCER_HZ=4500` x `JOB_US=300` = ~1.35 cores of job work (default
+15000 x 300 us = 4.5 cores, which together with 12 spinning pollers overloads an 8-core host and makes the closed
+frame loop run behind). The pollers still spin (that is the behaviour under study), so `cores_busy` stays near the host size
+until an emulator change stops them; compare `emu_cpu_us_per_job`.
+
 ### Machine size and oversubscription
 
 13 workers + the game thread + emulator threads oversubscribe an 8-core host, as DS does on the Mac (more workers than
@@ -67,12 +89,12 @@ import at run time) or if jobpool's loop shapes drift.
 ## Knobs (all `-D`; defaults in the source headers)
 
 Common (`common.h`): `DURATION_S=20` measured seconds, `WARMUP_S=5` idle seconds before the measured phase (the
-emulator's own JIT/tiering is still running for a few seconds after the guest starts), `GRACE_MS=500` workers keep
+emulator's own JIT/tiering is still running for a few seconds after the guest starts), `GRACE_MS=500` (printed in the end marker; the harness invalidates a run whose perf/snapshot lag reaches it) workers keep
 running after the end marker so the harness can snapshot them.
 
 | Guest | Knobs |
 |---|---|
-| jobpool | `WORKERS=13` `PARKED=3` (0 = pure pause path) `PRODUCER_HZ=15000` ready jobs/s (250 per frame; <= 256 fit array B) `JOB_US=300` `FRAME_HZ=60` `AFFINITY=0x1ffe` `PIN_WORKERS=1` (pass `1<<k` as thread affinity) `FORK=0` (children a job pushes on its own deque) `DL_CHECK=1` `GROUP=0` |
+| jobpool | `WORKERS=13` `PARKED=3` (0 = pure pause path) `PRODUCER_HZ=15000` ready jobs/s (250 per frame; <= 256 fit array B; `-DLIGHT=1` presets 4500) `JOB_US=300` `FRAME_HZ=60` `AFFINITY=0x1ffe` `PIN_WORKERS=1` (pass `1<<k` as thread affinity) `FORK=0` (children a job pushes on its own deque) `DL_CHECK=1` `GROUP=0` |
 | scream | `THREADS=15` `RATE=193000` guards/s (0 = flat out) `OWNER_PCT=50` `NCA_HZ=3500` `NCA_WORK_US=100` `CS_NS=500` `PERIOD_US=2000` `PACE=1` (busy-work to the deadline; 0 = usleep) `CONTENDED=1` (0 = one mutex per thread) |
 | wakeping | `MODE=2` both (each half of the duration), `0` evf only, `1` cond only `PERIOD_US=0` (sleep between round trips) |
 | sleeplat | `SWEEP_N="0,1,50,100,250,1000,4000"` `GAP_US=2000` `YIELD=1` `ONLY_N=<n>` `ONLY_GAP=0\|1` |
@@ -88,7 +110,7 @@ Output goes to `$SYNTH_RUNS/<time>-<guest>-<label>/` (default `/home/xnetcat/Pro
 git): `guest.log` (everything the emulator printed), `perf.csv`, `metrics.json`. The harness starts counting at the
 guest's `@@ MARK start` line and stops at `@@ MARK end`, so the emulator's startup JIT is excluded.
 
-`metrics.json` (selected fields): `wall_s`, `cores_busy` (= `task_clock_s` / perf window; `cores_busy_proc` and
+`metrics.json` (selected fields): `valid` / `invalid_reasons`, `emu_cpu_s`, `guest_busy_s`, `wall_s`, `cores_busy` (= `task_clock_s` / perf window; `cores_busy_proc` and
 `cores_busy_threads` are cross-checks), `host_other_cores`, `threads` (per-thread CPU s, vcsw/nvcsw, `#k` = k-th thread of
 that name by creation), `ctx_switches[_per_s]`, `cpu_migrations`, `futex`, `sched_yield`, `nanosleep`,
 `clock_nanosleep` (+ `_per_s`), `instructions`, `cycles`, `ipc`, `phases` (CPU per `phase_start/end` for sleeplat/wakeping),
@@ -116,6 +138,8 @@ tools/synth-guests/ab.sh "-" "SHARPEMU_SPIN_NAP_LOCKED=1" artifacts/synth-guests
 tools/synth-guests/ab.sh /path/to/build-A /path/to/build-B artifacts/synth-guests/scream.bin 6
 python3 tools/synth-guests/compare.py <ab>/A <ab>/B [--all] [--grep REGEX]
 ```
+
+`compare.py` drops failed / invalid runs and runs with `host_other_cores` > 0.5 (`--max-other`, `--keep-invalid`) and prints how many runs each side used.
 
 `ab.sh` runs A B B A A B B A ... (N per arm, rounded up to even), one emulator at a time, then prints `compare.py`'s median and
 min..max table (`*` marks non-overlapping ranges). An arm is an emulator build directory (a copy of the linux-x64 output),

@@ -37,7 +37,8 @@ def key_counters_guest(m):
         return (f"jobs/s={f.get('jobpool.total.jobs', 0) / s:.0f} polls/s={f.get('jobpool.total.polls', 0) / s:,.0f} "
                 f"pause/s={f.get('jobpool.total.pauses', 0) / s:,.0f} pred/s={f.get('jobpool.total.pred_calls', 0) / s:,.0f} "
                 f"lat p50/p95={g(m, 'jobpool.lat.lat_p50_ns', 1e6)}/{g(m, 'jobpool.lat.lat_p95_ns', 1e6)} ms "
-                f"frame p50={g(m, 'jobpool.frame.frame_p50_ns', 1e6)} ms")
+                f"frame p50={g(m, 'jobpool.frame.frame_p50_ns', 1e6)} ms parked_lat p50/p95={g(m, 'jobpool.parked_lat.parked_lat_p50_ns', 1e3, '{:.0f}')}/{g(m, 'jobpool.parked_lat.parked_lat_p95_ns', 1e3, '{:.0f}')} us "
+                f"cpu/job={m.get('cpu_us_per_job', '-')} emu cpu/job={m.get('emu_cpu_us_per_job', '-')} us")
     if name.startswith("scream"):
         return (f"gtid/s={g(m, 'scream.total.gtid_per_s', 1, '{:,.0f}')} mutex ops/s={g(m, 'scream.total.mutex_ops_per_s', 1, '{:,.0f}')} "
                 f"gtid p50={g(m, 'scream.gtid.gtid_p50_ns', 1, '{:.0f}')} ns lock p50/p99={g(m, 'scream.lock.lock_p50_ns', 1, '{:.0f}')}/"
@@ -63,8 +64,8 @@ def key_counters_guest(m):
 
 
 def main():
-    print("| run | cores busy | other cores | top 3 threads (CPU s) | ctx/s | futex/s | yield/s | nanosleep/s | key guest counters |")
-    print("|---|---|---|---|---|---|---|---|---|")
+    print("| run | cores busy | emu cpu s (guest busy s) | other cores | top 3 threads (CPU s) | ctx/s | futex/s | yield/s | nanosleep/s | key guest counters |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     for d in sys.argv[1:]:
         p = os.path.join(d, "metrics.json")
         if not os.path.exists(p):
@@ -73,8 +74,8 @@ def main():
         m = json.load(open(p))
         top = ", ".join(f"{t['name']}={t['cpu_s']:.2f}" for t in m.get("threads", [])[:3])
         label = f"{m['guest'].replace('.bin', '')} {m['label']}"
-        ok = "" if m.get("result_ok") else " **FAILED**"
-        row = [label + ok, m.get("cores_busy", "-"), m.get("host_other_cores", "-"), top,
+        ok = "" if m.get("result_ok") and m.get("valid", True) else " **INVALID**"
+        row = [label + ok, m.get("cores_busy", "-"), f"{m.get('emu_cpu_s', '-')} ({m.get('guest_busy_s', '-')})", m.get("host_other_cores", "-"), top,
                m.get("ctx_switches_per_s", "-"), m.get("futex_per_s", "-"), m.get("sched_yield_per_s", "-"),
                m.get("nanosleep_per_s", "-"), key_counters(m)]
         print("| " + " | ".join(str(x) for x in row) + " |")
