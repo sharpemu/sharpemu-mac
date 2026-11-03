@@ -8,6 +8,7 @@ using SharpEmu.Libs.Pad;
 using SDL;
 using static SDL.SDL3;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.VideoOut.Overlay;
 using SharpEmu.Adapters.Sdl.Input;
 
 namespace SharpEmu.Adapters.Sdl.Windowing;
@@ -518,13 +519,29 @@ public sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                     break;
                 case SDL_EventType.SDL_EVENT_MOUSE_MOTION:
                     ShowCursorTemporarily();
+                    ForwardPointer(OverlayPointerKind.Move, windowEvent.motion.x, windowEvent.motion.y,
+                        ((uint)windowEvent.motion.state & 4u) != 0 ? OverlayMouseButton.Right : OverlayMouseButton.Left);
                     break;
                 case SDL_EventType.SDL_EVENT_MOUSE_BUTTON_DOWN:
                     ShowCursorTemporarily();
-                    if (windowEvent.button.button == 1 && windowEvent.button.clicks == 2)
+                    // The overlay's widgets take clicks first; a double-click elsewhere toggles fullscreen.
+                    if (!ForwardPointer(OverlayPointerKind.Down, windowEvent.button.x, windowEvent.button.y,
+                            MapButton(windowEvent.button.button)) &&
+                        windowEvent.button.button == 1 && windowEvent.button.clicks == 2)
                     {
                         ToggleFullscreen();
                     }
+                    break;
+                case SDL_EventType.SDL_EVENT_MOUSE_BUTTON_UP:
+                    ForwardPointer(OverlayPointerKind.Up, windowEvent.button.x, windowEvent.button.y,
+                        MapButton(windowEvent.button.button));
+                    break;
+                case SDL_EventType.SDL_EVENT_MOUSE_WHEEL:
+                    ForwardPointer(OverlayPointerKind.Scroll, windowEvent.wheel.mouse_x, windowEvent.wheel.mouse_y,
+                        OverlayMouseButton.None, windowEvent.wheel.y);
+                    break;
+                case SDL_EventType.SDL_EVENT_WINDOW_MOUSE_LEAVE:
+                    PerfOverlay.HandlePointer(new OverlayPointerEvent(OverlayPointerKind.Leave, -1, -1, OverlayMouseButton.None));
                     break;
                 case SDL_EventType.SDL_EVENT_GAMEPAD_ADDED:
                     if (_gamepad is null)
@@ -571,7 +588,25 @@ public sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             }
             else if (keyEvent.key == SDL_Keycode.SDLK_F2)
             {
-                PerfOverlay.CycleCorner();
+                PerfOverlay.HandleKey(OverlayKey.CyclePreset);
+                return;
+            }
+            else if (keyEvent.key == SDL_Keycode.SDLK_F3)
+            {
+                PerfOverlay.HandleKey(OverlayKey.ToggleEdit);
+                return;
+            }
+            else if (keyEvent.key == SDL_Keycode.SDLK_F4)
+            {
+                PerfOverlay.HandleKey(OverlayKey.TogglePause);
+                return;
+            }
+            else if (OverlayKeyFor(keyEvent.key) is { } overlayKey && PerfOverlay.HandleKey(overlayKey))
+            {
+                // Arrows, Escape and 1-4 reach the overlay only while it is paused or editing
+                // (HandleKey says no otherwise), so the guest keeps them during play.
+                _overlayKeysDown.Add(keyEvent.key);
+                return;
             }
             else if (IsCaptureKey(keyEvent.key))
             {
@@ -583,10 +618,55 @@ public sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             }
         }
 
+        // The release of a key the overlay took stays with the overlay too.
+        if (!down && _overlayKeysDown.Remove(keyEvent.key))
+        {
+            return;
+        }
+
         if (TryMapVirtualKey(keyEvent.key, out var virtualKey))
         {
             HostWindowInput.SetKey(virtualKey, down);
         }
+    }
+
+    private readonly HashSet<SDL_Keycode> _overlayKeysDown = [];
+
+    private static OverlayKey? OverlayKeyFor(SDL_Keycode key) => key switch
+    {
+        SDL_Keycode.SDLK_LEFT => OverlayKey.StepBack,
+        SDL_Keycode.SDLK_RIGHT => OverlayKey.StepForward,
+        SDL_Keycode.SDLK_ESCAPE => OverlayKey.Escape,
+        SDL_Keycode.SDLK_1 => OverlayKey.Preset1,
+        SDL_Keycode.SDLK_2 => OverlayKey.Preset2,
+        SDL_Keycode.SDLK_3 => OverlayKey.Preset3,
+        SDL_Keycode.SDLK_4 => OverlayKey.Preset4,
+        _ => null,
+    };
+
+    private static OverlayMouseButton MapButton(byte button) => button switch
+    {
+        1 => OverlayMouseButton.Left,
+        2 => OverlayMouseButton.Middle,
+        3 => OverlayMouseButton.Right,
+        _ => OverlayMouseButton.None,
+    };
+
+    // SDL reports the mouse in window coordinates, the overlay's layout space (the presenter
+    // passes the window's pixel density as the overlay's pixel scale). Mouse input never reaches
+    // the guest, so this only decides whether the overlay used the event.
+    private static bool ForwardPointer(OverlayPointerKind kind, float x, float y, OverlayMouseButton button, float scroll = 0)
+    {
+        if (!PerfOverlay.Enabled || !PerfOverlay.DrawOnScreen)
+        {
+            return false;
+        }
+
+        var keys = SDL_GetModState();
+        var modifiers = ((keys & SDL_Keymod.SDL_KMOD_ALT) != 0 ? OverlayModifiers.Alt : 0) |
+            ((keys & SDL_Keymod.SDL_KMOD_SHIFT) != 0 ? OverlayModifiers.Shift : 0) |
+            ((keys & SDL_Keymod.SDL_KMOD_CTRL) != 0 ? OverlayModifiers.Control : 0);
+        return PerfOverlay.HandlePointer(new OverlayPointerEvent(kind, x, y, button, modifiers, scroll));
     }
 
     internal static bool IsCaptureKey(SDL_Keycode key) => key == SDL_Keycode.SDLK_F12;
