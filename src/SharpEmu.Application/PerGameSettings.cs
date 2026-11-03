@@ -53,6 +53,12 @@ public sealed class PerGameSettings
     public string? OverlayCorner { get; set; }
     public string? OverlayMode { get; set; }
 
+    /// <summary>
+    /// The overlay layout preset a launch starts with. Null inherits; an empty string explicitly
+    /// keeps the last used layout (what a game does when the settings for every game name a preset).
+    /// </summary>
+    public string? OverlayPreset { get; set; }
+
     public string? BinkPlaybackMode { get; set; }
 
     // Written by older launchers: the game's whole switch list, which replaces the default one
@@ -84,10 +90,14 @@ public sealed class PerGameSettings
         OverlayEnabled is null &&
         OverlayCorner is null &&
         OverlayMode is null &&
+        OverlayPreset is null &&
         BinkPlaybackMode is null &&
         EnvironmentToggles is null &&
         EnvironmentChanges is null &&
         CustomEnvironmentVariables is null;
+
+    /// <summary>The overlay preset a stored "Minimal" display mode becomes (SharpEmu.Libs names it too).</summary>
+    internal const string MinimalOverlayPreset = "Minimal FPS";
 
     public static string DirectoryPath =>
         SharpEmuPaths.UserPath("custom_configs");
@@ -162,6 +172,13 @@ public sealed class PerGameSettings
     public static PerGameSettings? NormalizeFromJson(string json)
     {
         var settings = JsonSerializer.Deserialize<PerGameSettings>(json, SerializerOptions);
+        // The old "Minimal" display mode is the on-screen overlay with the minimal preset.
+        if (settings is not null && string.Equals(settings.OverlayMode, "Minimal", StringComparison.OrdinalIgnoreCase))
+        {
+            settings.OverlayMode = "Full";
+            settings.OverlayPreset ??= MinimalOverlayPreset;
+        }
+
         if (settings?.EnvironmentToggles is { } toggles)
         {
             settings.EnvironmentToggles = toggles.Where(entry => !string.IsNullOrEmpty(entry)).ToList();
@@ -208,6 +225,7 @@ public sealed class PerGameSettings
         OverlayEnabled = UnlessEqual(OverlayEnabled, defaults.OverlayEnabled);
         OverlayCorner = UnlessEqual(OverlayCorner, defaults.OverlayCorner);
         OverlayMode = UnlessEqual(OverlayMode, defaults.OverlayMode);
+        OverlayPreset = UnlessEqual(OverlayPreset, defaults.OverlayPreset);
         BinkPlaybackMode = UnlessEqual(BinkPlaybackMode, defaults.BinkPlaybackMode);
 
         if (EnvironmentToggles is { } environmentToggles &&
@@ -339,6 +357,7 @@ public sealed record EffectiveLaunchSettings(
     bool OverlayEnabled,
     string OverlayCorner,
     string OverlayMode,
+    string OverlayPreset,
     string BinkPlaybackMode,
     IReadOnlyList<string> EnvironmentToggles)
 {
@@ -366,6 +385,8 @@ public sealed record EffectiveLaunchSettings(
         OverlayEnabled: true,
         OverlayCorner: "TopRight",
         OverlayMode: "Full",
+        // Empty keeps the last used layout.
+        OverlayPreset: "",
         BinkPlaybackMode: "Guest",
         EnvironmentToggles: ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"]);
 
@@ -400,6 +421,7 @@ public sealed record EffectiveLaunchSettings(
             perGame?.OverlayEnabled ?? defaults.OverlayEnabled,
             perGame?.OverlayCorner ?? defaults.OverlayCorner,
             perGame?.OverlayMode ?? defaults.OverlayMode,
+            perGame?.OverlayPreset ?? defaults.OverlayPreset,
             perGame?.BinkPlaybackMode ?? defaults.BinkPlaybackMode,
             EnvironmentOverrides.Merge(
                 perGame?.EnvironmentToggles ?? defaults.EnvironmentToggles,

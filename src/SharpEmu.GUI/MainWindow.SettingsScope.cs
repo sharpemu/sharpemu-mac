@@ -69,10 +69,10 @@ public partial class MainWindow
             e => GameGpuReadbacksBox.SelectedItem = FindChoice(_gpuReadbackChoices, e.GpuReadbacks, "Full"));
         Add(GameOverlayEnabledRow, e => e.OverlayEnabled, e => OnOff(e.OverlayEnabled),
             e => GameOverlayEnabledToggle.IsChecked = e.OverlayEnabled);
-        Add(GameOverlayModeRow, e => e.OverlayMode, e => Choice(_overlayModeChoices, e.OverlayMode, "TitleBar"),
-            e => GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, e.OverlayMode, "TitleBar"));
-        Add(GameOverlayCornerRow, e => e.OverlayCorner, e => Choice(_overlayCornerChoices, e.OverlayCorner, "TopRight"),
-            e => GameOverlayCornerBox.SelectedItem = FindChoice(_overlayCornerChoices, e.OverlayCorner, "TopRight"));
+        Add(GameOverlayModeRow, e => e.OverlayMode, e => Choice(_overlayModeChoices, e.OverlayMode, "Full"),
+            e => GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, e.OverlayMode, "Full"));
+        Add(GameOverlayPresetRow, e => e.OverlayPreset, e => Choice(_overlayPresetChoices, e.OverlayPreset, ""),
+            e => GameOverlayPresetBox.SelectedItem = FindChoice(_overlayPresetChoices, e.OverlayPreset, ""));
         Add(GameBinkPlaybackRow, e => e.BinkPlaybackMode, e => Choice(_binkPlaybackChoices, e.BinkPlaybackMode, "Guest"),
             e => GameBinkPlaybackBox.SelectedItem = FindChoice(_binkPlaybackChoices, e.BinkPlaybackMode, "Guest"));
 
