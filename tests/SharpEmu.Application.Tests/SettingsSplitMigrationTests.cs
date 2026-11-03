@@ -115,7 +115,8 @@ public sealed class SettingsSplitMigrationTests : IDisposable
 
         var shared = Shared();
         Assert.Equal("BottomRight", shared.OverlayCorner);
-        Assert.Equal("Minimal", shared.OverlayMode);
+        Assert.Null(shared.OverlayMode); // on screen is the default
+        Assert.Equal("Minimal FPS", shared.OverlayPreset);
         Assert.False(shared.VSync);
         Assert.True(shared.LogToFile);
         Assert.Equal("Host", shared.BinkPlaybackMode);
@@ -178,7 +179,8 @@ public sealed class SettingsSplitMigrationTests : IDisposable
 
         Assert.True(Migrate());
 
-        Assert.Equal("Minimal", Shared().OverlayMode);
+        Assert.Equal("Full", Shared().OverlayMode);
+        Assert.Equal("Minimal FPS", Shared().OverlayPreset);
         Assert.Equal("BottomRight", Shared().OverlayCorner);
     }
 
@@ -196,7 +198,8 @@ public sealed class SettingsSplitMigrationTests : IDisposable
         Directory.Delete(SharedPath);
         Assert.True(Migrate());
 
-        Assert.Equal("Minimal", Shared().OverlayMode);
+        Assert.Null(Shared().OverlayMode);
+        Assert.Equal("Minimal FPS", Shared().OverlayPreset);
         Assert.DoesNotContain("OverlayMode", File.ReadAllText(SettingsPath));
         Assert.Equal(LegacyGlobal, File.ReadAllText(SettingsPath + SettingsSplitMigration.BackupSuffix));
     }
