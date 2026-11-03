@@ -61,6 +61,12 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         // A range item that stores this word over its whole range (PostFill).
         public bool IsFill;
         public uint FillValue;
+        // A range item whose bytes the stream knows when it queues it: a command-processor write
+        // (PostWrite) or a run of equal qwords at a stride (PostQwords). Reads of them need not drain.
+        public byte[]? RangeBytes;
+        public bool IsQwords;
+        public ulong QwordValue;
+        public ulong QwordStride;
         // An end-of-pipe label: the GPU writes it once the work before it retires, so a read on the
         // stream's thread finds the bytes as they are until then (PostLabel).
         public bool IsLabel;
@@ -341,9 +347,93 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         Enqueue(item);
     }
 
+    // A command-processor write of known bytes: like PostRange, but a read of bytes it covers, with
+    // nothing queued after it over them, is answered from the bytes without draining the queue.
+    public void PostWrite(Action action, ulong address, byte[] bytes, bool ungated = false)
+    {
+        PostKnownRange(action, address, (ulong)bytes.Length, ungated, bytes, qwords: false, 0, 0);
+    }
+
+    // Equal qwords every strideBytes from address (count of them), known when queued.
+    public void PostQwords(Action action, ulong address, ulong size, ulong value, ulong strideBytes, bool ungated = false)
+    {
+        PostKnownRange(action, address, size, ungated, null, qwords: strideBytes >= sizeof(ulong), value, strideBytes);
+    }
+
+    private void PostKnownRange(Action action, ulong address, ulong size, bool ungated, byte[]? bytes, bool qwords, ulong value, ulong stride)
+    {
+        var item = RentAsyncItem(Kind.Call);
+        item.Action = action;
+        item.Address = address;
+        item.RangeSize = size;
+        item.Ungated = ungated && size != 0;
+        item.JobsBefore = _prefetch?.Submitted ?? 0;
+        if (KnownRangeReads)
+        {
+            item.RangeBytes = bytes;
+            item.IsQwords = qwords;
+            item.QwordValue = value;
+            item.QwordStride = stride;
+        }
+
+        if (size != 0)
+        {
+            lock (_writeLock)
+            {
+                _pendingRanges.Add(item);
+                _pendingRangeCount = _pendingRanges.Count;
+            }
+        }
+
+        Enqueue(item);
+    }
+
+    // SHARPEMU_CTHREAD_KNOWN_RANGE_READS=0: a read over a queued command-processor write drains the
+    // queue again. Demon's Souls polls words its compute queues just wrote some 240 times a frame,
+    // and each drain held the stream until the render thread had run everything queued (~25 ms a frame).
+    private static readonly bool KnownRangeReads =
+        Environment.GetEnvironmentVariable("SHARPEMU_CTHREAD_KNOWN_RANGE_READS") != "0";
+
+    // The byte the item stores at address, when the stream knows it.
+    private static bool TryKnownByte(Item item, ulong address, out byte value)
+    {
+        value = 0;
+        var offset = address - item.Address;
+        if (item.IsFill)
+        {
+            value = (byte)(item.FillValue >> (int)(offset % sizeof(uint) * 8));
+            return true;
+        }
+
+        if (item.RangeBytes is { } bytes)
+        {
+            if (offset >= (ulong)bytes.Length)
+            {
+                return false;
+            }
+
+            value = bytes[(int)offset];
+            return true;
+        }
+
+        if (item.IsQwords)
+        {
+            var within = offset % item.QwordStride;
+            if (within >= sizeof(ulong))
+            {
+                return false;
+            }
+
+            value = (byte)(item.QwordValue >> (int)(within * 8));
+            return true;
+        }
+
+        return false;
+    }
+
     /// <summary>
-    /// The bytes as the stream wrote them when the last queued range item over them is a fill that
-    /// covers them all and no queued store overlaps them; false otherwise. Command stream thread.
+    /// The bytes as the stream wrote them when the last queued range item over them is a fill or a
+    /// write of known bytes (PostWrite, PostQwords) that covers them all and no queued store overlaps them; false otherwise. Command stream thread.
     /// </summary>
     public bool TryReadQueuedFill(ulong address, Span<byte> destination)
     {
@@ -364,8 +454,8 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 }
             }
 
-            if (last is not { IsFill: true } fill ||
-                address < fill.Address || address + size > fill.Address + fill.RangeSize)
+            if (last is null || address < last.Address || address + size > last.Address + last.RangeSize ||
+                !(last.IsFill || last.RangeBytes is not null || last.IsQwords))
             {
                 return false;
             }
@@ -378,12 +468,14 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 }
             }
 
-            Span<byte> word = stackalloc byte[sizeof(uint)];
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(word, fill.FillValue);
-            var phase = (int)((address - fill.Address) % sizeof(uint));
+            // The last item over the bytes stores every one of them, so it alone decides them; a byte
+            // between its strided qwords is some earlier item's, and the read drains as before.
             for (var index = 0; index < destination.Length; index++)
             {
-                destination[index] = word[(phase + index) % sizeof(uint)];
+                if (!TryKnownByte(last, address + (ulong)index, out destination[index]))
+                {
+                    return false;
+                }
             }
 
             return true;

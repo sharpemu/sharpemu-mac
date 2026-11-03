@@ -180,6 +180,50 @@ public sealed class DeferredCommandThreadTests
         }
     }
 
+    [Fact]
+    public void QueuedWritesOfKnownBytesAnswerReadsTheyFullyCoverWithoutDraining()
+    {
+        var host = new RecordingCommandStreamHost();
+        var queue = new CommandStreamQueue(host);
+        var producer = new DeferredCommandThread(queue, host.Memory, _ => { }, null, () => { }, false);
+        using var queued = new ManualResetEventSlim();
+        var written = new byte[4];
+        var qword = new byte[8];
+        bool readWrite = false, readPastWrite = true, readQword = false, readGap = true, readShadowed = true;
+        Assert.True(queue.TryEnqueueControlBarrier(() =>
+        {
+            // An 8-byte command-processor write: reads inside it are its bytes.
+            producer.PostWrite(() => { }, 0x2000, [1, 2, 3, 4, 5, 6, 7, 8], ungated: true);
+            readWrite = producer.TryReadQueuedFill(0x2002, written);
+            readPastWrite = producer.TryReadQueuedFill(0x2006, new byte[4]);
+            // Two qwords 16 bytes apart: the gap between them is not this item's to answer.
+            producer.PostQwords(() => { }, 0x3000, 0x18, 0x1122334455667788ul, 0x10, ungated: true);
+            readQword = producer.TryReadQueuedFill(0x3010, qword);
+            readGap = producer.TryReadQueuedFill(0x3008, new byte[4]);
+            // An unknown range queued after the write decides its bytes again.
+            producer.PostRange(() => { }, 0x2000, 0x4, ungated: true);
+            readShadowed = producer.TryReadQueuedFill(0x2000, new byte[4]);
+            queued.Set();
+        }, () => { }));
+        producer.Start();
+        try
+        {
+            Assert.True(queued.Wait(TimeSpan.FromSeconds(10)));
+            Assert.True(readWrite);
+            Assert.Equal(new byte[] { 3, 4, 5, 6 }, written);
+            Assert.False(readPastWrite);
+            Assert.True(readQword);
+            Assert.Equal(BitConverter.GetBytes(0x1122334455667788ul), qword);
+            Assert.False(readGap);
+            Assert.False(readShadowed);
+            producer.ThrowIfFailed();
+        }
+        finally
+        {
+            producer.Stop(() => producer.RunBatch(long.MaxValue, 64, () => { }));
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
