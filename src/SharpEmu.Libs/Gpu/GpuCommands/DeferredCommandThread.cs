@@ -22,8 +22,19 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     // The thread runs this far ahead of the render thread at most: enough to keep it busy, and
     // no more, since a GPU round trip (a readback, a label wait) waits for everything queued.
     // Measured in Astro Bot: 4096 items halved the frame rate of a crowd scene, 16 starved the
-    // render thread, 32 to 64 kept it busy.
-    private const int MaxOutstanding = 64;
+    // render thread, 32 to 64 kept it busy. SHARPEMU_DEFERRED_QUEUE_DEPTH sets it for comparisons: a power
+    // of two from 16 to 4096 (the recycling ring masks with it), rounded up.
+    private static readonly int MaxOutstanding = ReadQueueDepth();
+
+    private static int ReadQueueDepth()
+    {
+        if (!int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DEFERRED_QUEUE_DEPTH"), out var depth))
+        {
+            return 64;
+        }
+
+        return (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Clamp(depth, 16, 4096));
+    }
 
     private enum Kind : byte
     {
