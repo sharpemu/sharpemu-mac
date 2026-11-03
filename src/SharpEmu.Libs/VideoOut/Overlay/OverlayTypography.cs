@@ -32,9 +32,10 @@ public sealed class OverlayTypography : IDisposable
     private readonly Dictionary<long, SizeMetrics> _sizes = [];
     private readonly byte[] _coverageLut = new byte[256];
 
-    public OverlayTypography(OverlayCanvas canvas, IFontFactory? factory)
+    public OverlayTypography(OverlayCanvas canvas, IFontFactory? factory, OverlayFont font = OverlayFont.Inter)
     {
         _canvas = canvas;
+        Font = font;
         for (var i = 0; i < 256; i++)
         {
             // A slight boost keeps light text on dark panels from looking thin.
@@ -45,8 +46,18 @@ public sealed class OverlayTypography : IDisposable
         {
             if (factory is not null)
             {
-                _regular = factory.CreateSystemFace(FontStyle.Normal);
-                _bold = factory.CreateSystemFace(FontStyle.Bold);
+                if (BundledFaceNames(font) is var (regularName, boldName))
+                {
+                    _regular = CreateBundledFace(factory, regularName);
+                    _bold = CreateBundledFace(factory, boldName);
+                    if (_regular is null || _bold is null)
+                    {
+                        DisposeFaces();
+                    }
+                }
+
+                _regular ??= factory.CreateSystemFace(FontStyle.Normal);
+                _bold ??= factory.CreateSystemFace(FontStyle.Bold);
             }
         }
         catch (Exception)
@@ -65,6 +76,44 @@ public sealed class OverlayTypography : IDisposable
     }
 
     public bool UsesBuiltInFont { get; }
+
+    /// <summary>The typeface asked for; a bundled one falls back to the system face if it cannot load.</summary>
+    public OverlayFont Font { get; }
+
+    private static (string Regular, string Bold)? BundledFaceNames(OverlayFont font) => font switch
+    {
+        OverlayFont.Inter => ("Inter-Regular.ttf", "Inter-SemiBold.ttf"),
+        OverlayFont.JetBrainsMono => ("JetBrainsMono-Regular.ttf", "JetBrainsMono-Bold.ttf"),
+        _ => null,
+    };
+
+    private static readonly Dictionary<string, byte[]?> BundledFontBytes = new(StringComparer.Ordinal);
+
+    /// <summary>The bytes of a font embedded in this assembly, or null when it is missing.</summary>
+    internal static byte[]? BundledFont(string fileName)
+    {
+        lock (BundledFontBytes)
+        {
+            if (BundledFontBytes.TryGetValue(fileName, out var cached))
+            {
+                return cached;
+            }
+
+            using var stream = typeof(OverlayTypography).Assembly.GetManifestResourceStream("SharpEmu.Overlay.Fonts." + fileName);
+            byte[]? bytes = null;
+            if (stream is not null)
+            {
+                bytes = new byte[stream.Length];
+                stream.ReadExactly(bytes);
+            }
+
+            BundledFontBytes[fileName] = bytes;
+            return bytes;
+        }
+    }
+
+    private static IFontFace? CreateBundledFace(IFontFactory factory, string fileName) =>
+        BundledFont(fileName) is { } bytes ? factory.CreateMemoryFace(bytes, 0) : null;
 
     private sealed class Glyph(byte[] coverage, int width, int height, float bearingX, float bearingY, float advance)
     {

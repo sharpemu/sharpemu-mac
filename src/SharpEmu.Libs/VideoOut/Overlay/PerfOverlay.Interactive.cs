@@ -41,11 +41,30 @@ public static partial class PerfOverlay
                 // SHARPEMU_OVERLAY_SIMULATE=<scenario> replaces the emulator's telemetry with the simulator.
                 var source = _attachedSource ?? SimulatedOverlayDataSource.FromEnvironment() ?? OverlayTelemetry.DataSource;
                 _host = new OverlayHost(source, _attachedFonts, static () => DisplayState.DrawOnScreen,
-                    new OverlayLayoutStore(SharpEmuPaths.UserPath("overlay")), preset);
+                    new OverlayLayoutStore(SharpEmuPaths.UserPath("overlay")), preset, LaunchPreset());
                 return _host;
             }
         }
     }
+
+    /// <summary>
+    /// The preset a launch asked for (<c>--overlay-preset</c>, carried in <see cref="PresetEnvironment"/>
+    /// so the split GPU host sees it too), or the minimal one for the legacy minimal mode; null keeps
+    /// the saved layout.
+    /// </summary>
+    private static string? LaunchPreset()
+    {
+        var named = Environment.GetEnvironmentVariable(PresetEnvironment);
+        if (!string.IsNullOrWhiteSpace(named))
+        {
+            return named.Trim();
+        }
+
+        return DisplayState.Mode == PerformanceOverlayMode.Minimal ? OverlayLayoutModel.MinimalPreset : null;
+    }
+
+    /// <summary>Names the overlay preset to start with; empty or unset keeps the last used layout.</summary>
+    public const string PresetEnvironment = "SHARPEMU_OVERLAY_PRESET";
 
     /// <summary>Supplies the snapshots the widgets draw (OverlayTelemetry in the emulator).</summary>
     public static void AttachDataSource(IOverlayDataSource source)

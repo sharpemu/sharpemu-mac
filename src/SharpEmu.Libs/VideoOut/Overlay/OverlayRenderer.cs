@@ -91,7 +91,8 @@ public sealed partial class OverlayRenderer : IDisposable
     private readonly OverlayController _ctl;
     private readonly OverlayAnalyzer _analyzer;
     private readonly OverlayCanvas _c = new();
-    private readonly OverlayTypography _t;
+    private readonly IFontFactory? _fonts;
+    private OverlayTypography _t;
     private readonly TextBuf _tb = new();
     private readonly TextBuf _tb2 = new();
     private readonly List<OverlayRectI> _regions = [];
@@ -114,7 +115,8 @@ public sealed partial class OverlayRenderer : IDisposable
     {
         _ctl = controller;
         _analyzer = analyzer;
-        _t = new OverlayTypography(_c, fonts);
+        _fonts = fonts;
+        _t = new OverlayTypography(_c, fonts, controller.Model.Globals.Font);
     }
 
     public bool UsesBuiltInFont => _t.UsesBuiltInFont;
@@ -169,6 +171,13 @@ public sealed partial class OverlayRenderer : IDisposable
         _g = _ctl.Model.Globals;
         _g.Clamp();
         _pal = OverlayPalette.For(_g.Theme);
+        if (_g.Font != _t.Font && !_t.UsesBuiltInFont)
+        {
+            // The typeface changed (settings, or the layout file reloaded): rebuild the glyph cache.
+            _t.Dispose();
+            _t = new OverlayTypography(_c, _fonts, _g.Font);
+        }
+
         _fs = _g.FontSize;
         _m = new OverlayMetrics(frame.Width / _ps, frame.Height / _ps, _ps, _g.Scale);
         _ctl.UpdateSurface(_m);

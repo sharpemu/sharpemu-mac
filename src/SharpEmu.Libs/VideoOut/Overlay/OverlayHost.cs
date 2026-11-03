@@ -47,7 +47,7 @@ public sealed class OverlayHost : IDisposable
     private readonly long _memoryIntervalTicks = Stopwatch.Frequency / 2;
 
     public OverlayHost(IOverlayDataSource? source = null, IFontFactory? fonts = null, Func<bool>? isVisible = null,
-        OverlayLayoutStore? store = null, string? initialPreset = null)
+        OverlayLayoutStore? store = null, string? initialPreset = null, string? launchPreset = null)
     {
         _source = source;
         _fonts = fonts;
@@ -56,12 +56,52 @@ public sealed class OverlayHost : IDisposable
         Model = new OverlayLayoutModel();
         Controller = new OverlayController(Model);
         var loaded = store?.LoadInto(Model) ?? false;
-        if (!loaded && initialPreset is not null)
+        // A preset named at launch wins over the saved layout, except that a saved layout of that same
+        // preset is kept, so edits made to it survive a relaunch.
+        var launched = launchPreset is not null &&
+            ((loaded && string.Equals(Model.PresetName, launchPreset, StringComparison.Ordinal)) || Model.ApplyPreset(launchPreset));
+        if (!launched && !loaded && initialPreset is not null)
         {
             Model.ApplyPreset(initialPreset);
         }
 
         _savedRevision = _lastRevisionSeen = Model.Revision;
+        _storeStamp = store?.Stamp() ?? 0;
+    }
+
+    private long _storeStamp;
+    private long _nextStampCheck;
+
+    // Picks up layout and style changes written by another process (the launcher's settings page)
+    // while the game runs. Edits in progress here win: nothing reloads mid-drag or with a popover open.
+    private void ReloadIfChangedOnDisk(long now)
+    {
+        if (_store is null || now < _nextStampCheck)
+        {
+            return;
+        }
+
+        _nextStampCheck = now + Stopwatch.Frequency;
+        var stamp = _store.Stamp();
+        if (stamp == _storeStamp)
+        {
+            return;
+        }
+
+        lock (Controller.Gate)
+        {
+            if (Controller.Dragging || Controller.Popover != OverlayPopoverKind.None || Model.Revision != _savedRevision)
+            {
+                return;
+            }
+
+            _storeStamp = stamp;
+            if (_store.LoadInto(Model))
+            {
+                _savedRevision = _lastRevisionSeen = Model.Revision;
+                Controller.Dirty = true;
+            }
+        }
     }
 
     public OverlayLayoutModel Model { get; }
@@ -275,6 +315,7 @@ public sealed class OverlayHost : IDisposable
                 RenderOnce(w, h, scale);
                 lastRender = Stopwatch.GetTimestamp();
                 SaveIfChanged();
+                ReloadIfChangedOnDisk(lastRender);
             }
             catch (Exception ex)
             {
@@ -477,6 +518,7 @@ public sealed class OverlayHost : IDisposable
             {
                 _store.Save(Model);
                 _savedRevision = Model.Revision;
+                _storeStamp = _store.Stamp();
             }
         }
     }
@@ -495,6 +537,7 @@ public sealed class OverlayHost : IDisposable
             {
                 _store.Save(Model);
                 _savedRevision = Model.Revision;
+                _storeStamp = _store.Stamp();
             }
         }
     }

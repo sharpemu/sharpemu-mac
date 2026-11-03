@@ -674,6 +674,12 @@ public sealed class OverlayController
             _model.Globals.Theme = (OverlayTheme)(((int)_model.Globals.Theme + (direction >= 0 ? 1 : -1) + themes) % themes);
             _model.Touch();
         }
+        else if (Popover == OverlayPopoverKind.Style && index == 4)
+        {
+            var fonts = Enum.GetValues<OverlayFont>().Length;
+            _model.Globals.Font = (OverlayFont)(((int)_model.Globals.Font + (direction >= 0 ? 1 : -1) + fonts) % fonts);
+            _model.Touch();
+        }
 
         Dirty = true;
     }

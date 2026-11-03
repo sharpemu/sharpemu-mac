@@ -25,6 +25,28 @@ public sealed class OverlayLayoutStore
     public string LayoutPath { get; }
     public string PresetsPath { get; }
 
+    /// <summary>
+    /// Changes whenever either file is written, by this process or another (the launcher's settings
+    /// page edits the same files a running game draws from).
+    /// </summary>
+    public long Stamp()
+    {
+        static long Of(string path)
+        {
+            try
+            {
+                var info = new FileInfo(path);
+                return info.Exists ? info.LastWriteTimeUtc.Ticks ^ (info.Length << 1) : 0;
+            }
+            catch (Exception)
+            {
+                return 0;
+            }
+        }
+
+        return Of(LayoutPath) * 31 + Of(PresetsPath);
+    }
+
     /// <summary>Loads custom presets, then the layout; true when a valid saved layout was applied.</summary>
     public bool LoadInto(OverlayLayoutModel model)
     {
@@ -67,6 +89,12 @@ public sealed class OverlayLayoutStore
                     Enum.TryParse<OverlayTheme>(t.GetString(), true, out var theme) && Enum.IsDefined(theme))
                 {
                     globals.Theme = theme;
+                }
+
+                if (g.TryGetProperty("font", out var f) && f.ValueKind == JsonValueKind.String &&
+                    Enum.TryParse<OverlayFont>(f.GetString(), true, out var font) && Enum.IsDefined(font))
+                {
+                    globals.Font = font;
                 }
             }
 
@@ -206,6 +234,7 @@ public sealed class OverlayLayoutStore
                 w.WriteNumber("scale", model.Globals.Scale);
                 w.WriteNumber("fontSize", model.Globals.FontSize);
                 w.WriteString("theme", model.Globals.Theme.ToString().ToLowerInvariant());
+                w.WriteString("font", model.Globals.Font.ToString().ToLowerInvariant());
                 w.WriteEndObject();
                 w.WritePropertyName("widgets");
                 WriteWidgets(w, model.Widgets);

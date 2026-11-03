@@ -205,4 +205,66 @@ public sealed class OverlayLayoutTests : IDisposable
         model.ApplyPreset(OverlayLayoutModel.InspectorPreset);
         Assert.True(OverlayHost.DemandFor(model.Widgets).HasFlag(OverlayCaptureDemand.Timeline));
     }
+
+    [Theory]
+    [InlineData("Inter-Regular.ttf")]
+    [InlineData("Inter-SemiBold.ttf")]
+    [InlineData("JetBrainsMono-Regular.ttf")]
+    [InlineData("JetBrainsMono-Bold.ttf")]
+    public void BundledFontsAreEmbedded(string fileName)
+    {
+        var bytes = OverlayTypography.BundledFont(fileName);
+        Assert.NotNull(bytes);
+        // A TrueType file starts with the 0x00010000 sfnt version.
+        Assert.Equal(new byte[] { 0, 1, 0, 0 }, bytes![..4]);
+    }
+
+    [Fact]
+    public void FontRoundTripsAndUnknownFontsFallBackToInter()
+    {
+        var store = new OverlayLayoutStore(_dir);
+        var model = new OverlayLayoutModel();
+        model.Globals.Font = OverlayFont.JetBrainsMono;
+        model.Touch();
+        Assert.True(store.Save(model));
+        var loaded = new OverlayLayoutModel();
+        Assert.True(store.LoadInto(loaded));
+        Assert.Equal(OverlayFont.JetBrainsMono, loaded.Globals.Font);
+
+        File.WriteAllText(store.LayoutPath, File.ReadAllText(store.LayoutPath).Replace("jetbrainsmono", "comic"));
+        var fallback = new OverlayLayoutModel();
+        Assert.True(store.LoadInto(fallback));
+        Assert.Equal(OverlayFont.Inter, fallback.Globals.Font);
+    }
+
+    [Fact]
+    public void LaunchPresetWinsUnlessTheSavedLayoutIsThatPreset()
+    {
+        var store = new OverlayLayoutStore(_dir);
+        var model = new OverlayLayoutModel();
+        model.ApplyPreset(OverlayLayoutModel.FullPreset);
+        model.Widgets[0].X = 0.123f;
+        model.MarkModified();
+        Assert.True(store.Save(model));
+
+        using (var same = new OverlayHost(store: store, launchPreset: OverlayLayoutModel.FullPreset))
+        {
+            Assert.Equal(0.123f, same.Model.Widgets[0].X, 3);
+        }
+
+        using var other = new OverlayHost(store: store, launchPreset: OverlayLayoutModel.MinimalPreset);
+        Assert.Equal(OverlayLayoutModel.MinimalPreset, other.Model.PresetName);
+    }
+
+    [Fact]
+    public void StampChangesWhenAnotherWriterSavesTheLayout()
+    {
+        var store = new OverlayLayoutStore(_dir);
+        var before = store.Stamp();
+        var model = new OverlayLayoutModel();
+        model.Globals.Theme = OverlayTheme.Oled;
+        model.Touch();
+        Assert.True(store.Save(model));
+        Assert.NotEqual(before, store.Stamp());
+    }
 }

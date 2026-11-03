@@ -27,6 +27,14 @@ public enum OverlayTheme : byte
     Glass,
 }
 
+/// <summary>The overlay's typeface. Inter and JetBrains Mono ship with the emulator, so they look the same on every OS.</summary>
+public enum OverlayFont : byte
+{
+    Inter,
+    System,
+    JetBrainsMono,
+}
+
 public enum WidgetSettingKind : byte
 {
     Toggle,
@@ -323,6 +331,7 @@ public sealed class OverlayGlobals
     /// <summary>Base font size in reference units, 9..14.</summary>
     public float FontSize { get; set; } = 11f;
     public OverlayTheme Theme { get; set; } = OverlayTheme.Graphite;
+    public OverlayFont Font { get; set; } = OverlayFont.Inter;
 
     public void Clamp()
     {
@@ -333,7 +342,12 @@ public sealed class OverlayGlobals
         {
             Theme = OverlayTheme.Graphite;
         }
+
+        if (!Enum.IsDefined(Font))
+        {
+            Font = OverlayFont.Inter;
+        }
     }
 
-    public OverlayGlobals Clone() => new() { Opacity = Opacity, Scale = Scale, FontSize = FontSize, Theme = Theme };
+    public OverlayGlobals Clone() => new() { Opacity = Opacity, Scale = Scale, FontSize = FontSize, Theme = Theme, Font = Font };
 }

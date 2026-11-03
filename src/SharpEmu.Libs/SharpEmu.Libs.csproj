@@ -37,6 +37,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
        The existing Core exception above is limited to loader diagnostics. -->
 
   <ItemGroup>
+    <!-- The performance overlay's bundled faces (OFL-1.1), so its text looks the same on every OS. -->
+    <EmbeddedResource Include="VideoOut\Overlay\Fonts\*.ttf" LogicalName="SharpEmu.Overlay.Fonts.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="FFmpeg.AutoGen" />
     <PackageReference Include="NLayer" />
     <PackageReference Include="System.IO.Hashing" />

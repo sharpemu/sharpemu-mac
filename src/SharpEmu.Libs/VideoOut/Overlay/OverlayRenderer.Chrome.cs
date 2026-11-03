@@ -248,7 +248,7 @@ public sealed partial class OverlayRenderer
                 contentH = rows * RowH;
                 break;
             case OverlayPopoverKind.Style:
-                rows = 4;
+                rows = 5;
                 contentH = rows * RowH + 4f;
                 break;
             default:
@@ -399,8 +399,8 @@ public sealed partial class OverlayRenderer
         var right = x + PopW - PopPad;
         const float trackW = 108f;
         var trackX = right - 42f - trackW;
-        string[] labels = ["Opacity", "Scale", "Font size", "Theme"];
-        for (var i = 0; i < 4; i++)
+        string[] labels = ["Opacity", "Scale", "Font size", "Theme", "Font"];
+        for (var i = 0; i < labels.Length; i++)
         {
             var y = top + i * RowH;
             Txt(labels[i], x + PopPad, y + (RowH - LineH(12f)) / 2f, 12f, ChromeLabel);
@@ -421,15 +421,21 @@ public sealed partial class OverlayRenderer
                 default:
                 {
                     const float valueW = 80f;
-                    ArrowButton(right - 20f, y + 3f, 20f, RowH - 6f, 3, OverlayHitKind.PopoverCycleNext, 3);
-                    ArrowButton(right - 20f - valueW - 4f - 20f, y + 3f, 20f, RowH - 6f, 2, OverlayHitKind.PopoverCyclePrev, 3);
-                    var label = g.Theme switch { OverlayTheme.Oled => "OLED black", OverlayTheme.Glass => "Glass", _ => "Graphite" };
+                    ArrowButton(right - 20f, y + 3f, 20f, RowH - 6f, 3, OverlayHitKind.PopoverCycleNext, i);
+                    ArrowButton(right - 20f - valueW - 4f - 20f, y + 3f, 20f, RowH - 6f, 2, OverlayHitKind.PopoverCyclePrev, i);
+                    var label = i == 3 ? ThemeLabel(g.Theme) : FontLabel(g.Font);
                     Txt(label, right - 24f - valueW / 2f, y + (RowH - LineH(11.5f)) / 2f, 11.5f, ChromeText, false, OverlayTextAlign.Center, valueW);
                     break;
                 }
             }
         }
     }
+
+    internal static string ThemeLabel(OverlayTheme theme) =>
+        theme switch { OverlayTheme.Oled => "OLED black", OverlayTheme.Glass => "Glass", _ => "Graphite" };
+
+    internal static string FontLabel(OverlayFont font) =>
+        font switch { OverlayFont.System => "System", OverlayFont.JetBrainsMono => "JetBrains Mono", _ => "Inter" };
 
     private void DrawAddRows(float x, float top, float viewTop, float viewH)
     {
