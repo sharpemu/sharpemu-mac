@@ -178,7 +178,14 @@ public static class SpirvFixedShaders
     // The performance overlay for an sRGB-encoded colour attachment. The overlay image holds
     // premultiplied sRGB-encoded colour; the attachment encodes on write and blends in linear
     // light, so un-premultiply, decode to linear, and premultiply again (alpha passes through).
-    public static byte[] CreateSrgbOverlayFragment()
+    public static byte[] CreateSrgbOverlayFragment() => CreateOverlayFragment(pqWhiteNits: null);
+
+    // The performance overlay for an HDR10 (PQ, BT.2020) attachment: the decoded linear colour is
+    // moved to BT.2020 primaries, SDR white is placed at pqWhiteNits, and the result is PQ-encoded,
+    // then premultiplied, so the One / OneMinusSrcAlpha blend mixes the panel in PQ code values.
+    public static byte[] CreatePqOverlayFragment(float pqWhiteNits = 203f) => CreateOverlayFragment(pqWhiteNits);
+
+    private static byte[] CreateOverlayFragment(float? pqWhiteNits)
     {
         var module = new SpirvModuleBuilder();
         module.AddCapability(SpirvCapability.Shader);
@@ -284,6 +291,40 @@ public static class SpirvFixedShaders
             straight,
             Vec3(0.04045f));
         var linear = module.AddInstruction(SpirvOp.Select, vec3Type, useLow, low, high);
+        if (pqWhiteNits is { } whiteNits)
+        {
+            // BT.709 -> BT.2020 primaries (ITU-R BT.2087), one row per output channel.
+            uint Row(float x, float y, float z) => module.ConstantComposite(vec3Type, Float(x), Float(y), Float(z));
+            var bt2020 = module.AddInstruction(
+                SpirvOp.CompositeConstruct,
+                vec3Type,
+                module.AddInstruction(SpirvOp.Dot, floatType, linear, Row(0.6274040f, 0.3292820f, 0.0433136f)),
+                module.AddInstruction(SpirvOp.Dot, floatType, linear, Row(0.0690970f, 0.9195400f, 0.0113612f)),
+                module.AddInstruction(SpirvOp.Dot, floatType, linear, Row(0.0163916f, 0.0880132f, 0.8955950f)));
+            var normalized = Ext(
+                40,
+                vec3Type,
+                module.AddInstruction(SpirvOp.FMul, vec3Type, bt2020, Vec3(whiteNits / 10000f)),
+                Vec3(0f));
+            // SMPTE ST 2084 inverse EOTF.
+            var ym1 = Ext(26, vec3Type, normalized, Vec3(2610f / 16384f));
+            var numerator = module.AddInstruction(
+                SpirvOp.FAdd,
+                vec3Type,
+                Vec3(3424f / 4096f),
+                module.AddInstruction(SpirvOp.FMul, vec3Type, ym1, Vec3(2413f / 128f)));
+            var denominator = module.AddInstruction(
+                SpirvOp.FAdd,
+                vec3Type,
+                Vec3(1f),
+                module.AddInstruction(SpirvOp.FMul, vec3Type, ym1, Vec3(2392f / 128f)));
+            linear = Ext(
+                26,
+                vec3Type,
+                module.AddInstruction(SpirvOp.FDiv, vec3Type, numerator, denominator),
+                Vec3(2523f / 32f));
+        }
+
         var alpha3 = module.AddInstruction(
             SpirvOp.CompositeConstruct,
             vec3Type,

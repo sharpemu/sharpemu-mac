@@ -37,6 +37,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private PipelineLayout _blendOverlayPipelineLayout;
         private RenderPass _blendOverlayRenderPass;
         private Pipeline _blendOverlayPipeline;
+        // The same draw for an HDR10 target holding PQ code values.
+        private Pipeline _blendOverlayPqPipeline;
         private bool _blendOverlayFailed;
 
         // The overlay image already holds this frame object at this version and these regions.
@@ -60,18 +62,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RecordOverlay(uint imageIndex, int frameSlot, bool contentIsPq)
         {
-            if (_hdrOutputActive && contentIsPq)
-            {
-                // The target holds PQ code values, not sRGB; there is no PQ-encoding variant of
-                // the overlay shader, so this case keeps the opaque panel copy.
-                RecordOverlayBlit(imageIndex, frameSlot);
-                return;
-            }
-
-            RecordBlendedOverlay(imageIndex, frameSlot);
+            // A PQ target holds HDR10 code values, so the panel is PQ-encoded before it blends.
+            RecordBlendedOverlay(imageIndex, frameSlot, _hdrOutputActive && contentIsPq);
         }
 
-        private void RecordBlendedOverlay(uint imageIndex, int frameSlot)
+        private void RecordBlendedOverlay(uint imageIndex, int frameSlot, bool pq)
         {
             if (_blendOverlayFailed || _extent.Width == 0 || _extent.Height == 0)
             {
@@ -112,7 +107,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _blendOverlayUploadedRegions = [.. regions];
                 }
 
-                DrawBlendOverlay(imageIndex, regions);
+                DrawBlendOverlay(imageIndex, regions, pq ? _blendOverlayPqPipeline : _blendOverlayPipeline);
             }
             finally
             {
@@ -203,7 +198,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _blendOverlayInitialized = true;
         }
 
-        private void DrawBlendOverlay(uint imageIndex, List<OverlayRectangle> regions)
+        private void DrawBlendOverlay(uint imageIndex, List<OverlayRectangle> regions, Pipeline pipeline)
         {
             // Whatever wrote the target (upload, guest draw, blit) must finish before blending
             // reads it. The layout is unchanged; the render pass does its own transition.
@@ -235,7 +230,7 @@ internal static unsafe partial class VulkanVideoPresenter
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
             {
                 _vk.CmdBeginRenderPass(_commandBuffer, &renderPassInfo, SubpassContents.Inline);
-                _vk.CmdBindPipeline(_commandBuffer, PipelineBindPoint.Graphics, _blendOverlayPipeline);
+                _vk.CmdBindPipeline(_commandBuffer, PipelineBindPoint.Graphics, pipeline);
             }
 
             SharpEmu.Gpu.Vulkan.GraphicsDynamicStateEpoch.Advance();
@@ -438,7 +433,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 "vkCreatePipelineLayout(overlay)");
 
             CreateBlendOverlayRenderPass();
-            CreateBlendOverlayPipeline();
+            _blendOverlayPipeline = CreateBlendOverlayPipeline(
+                IsSrgbFormat(PresentationTargetFormat)
+                    ? SpirvFixedShaders.CreateSrgbOverlayFragment()
+                    : SpirvFixedShaders.CreateCopyFragment());
+            _blendOverlayPqPipeline = CreateBlendOverlayPipeline(SpirvFixedShaders.CreatePqOverlayFragment());
         }
 
         // Loads and keeps the presentation target. The framebuffers made for the guest-draw render
@@ -489,13 +488,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 "vkCreateRenderPass(overlay)");
         }
 
-        private void CreateBlendOverlayPipeline()
+        // An sRGB attachment encodes on write and blends in linear light, so its shader hands it
+        // linear colour; a UNORM target takes the overlay's encoded colour unchanged, and a PQ one
+        // takes PQ code values.
+        private Pipeline CreateBlendOverlayPipeline(byte[] fragmentBytes)
         {
-            // An sRGB attachment encodes on write and blends in linear light, so the shader hands
-            // it linear colour; any other target takes the overlay's encoded colour unchanged.
-            var fragmentBytes = IsSrgbFormat(PresentationTargetFormat)
-                ? SpirvFixedShaders.CreateSrgbOverlayFragment()
-                : SpirvFixedShaders.CreateCopyFragment();
             var vertexModule = CreateShaderModule(SpirvFixedShaders.CreateFullscreenVertex(1));
             var fragmentModule = CreateShaderModule(fragmentBytes);
             var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
@@ -589,9 +586,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     RenderPass = _blendOverlayRenderPass,
                 };
                 Check(
-                    _vk.CreateGraphicsPipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out _blendOverlayPipeline),
+                    _vk.CreateGraphicsPipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out var pipeline),
                     "vkCreateGraphicsPipelines(overlay)");
                 MarkPipelineCacheDirty();
+                return pipeline;
             }
             finally
             {
@@ -608,6 +606,12 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _vk.DestroyPipeline(_device, _blendOverlayPipeline, null);
                 _blendOverlayPipeline = default;
+            }
+
+            if (_blendOverlayPqPipeline.Handle != 0)
+            {
+                _vk.DestroyPipeline(_device, _blendOverlayPqPipeline, null);
+                _blendOverlayPqPipeline = default;
             }
 
             if (_blendOverlayRenderPass.Handle != 0)

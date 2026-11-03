@@ -95,6 +95,7 @@ public enum SpirvOp : ushort
     SMod = 139,
     FRem = 140,
     FMod = 141,
+    Dot = 148,
     IAddCarry = 149,
     ISubBorrow = 150,
     UMulExtended = 151,
