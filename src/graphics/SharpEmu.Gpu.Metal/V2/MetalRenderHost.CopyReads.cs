@@ -71,7 +71,11 @@ internal sealed partial class MetalRenderHost
         _copyArmed = true;
     }
 
-    private void DisarmPendingCopy() => _copyArmed = false;
+    private void DisarmPendingCopy()
+    {
+        _copyArmed = false;
+        DisarmKernelCopyCheck();
+    }
 
     // The dispatch's storage binding notes the write into the copy's destination.
     private void NotePendingCopyDestination(ulong address, ulong size, MetalGpuWriteOrigin origin, ulong serial, ulong sequence)
@@ -86,12 +90,31 @@ internal sealed partial class MetalRenderHost
         var copy = _armedCopy;
         copy.Serial = serial;
         copy.Sequence = sequence;
-        if (_pendingCopies.Count >= MaxPendingCopies)
+        // Changed under the lock while the resolve thread reads it to attribute its abandons
+        // (the dry run); the worker alone changes the list, so its own reads take no lock.
+        var shared = HostKernelCopyDryRun;
+        if (shared)
         {
-            _pendingCopies.RemoveAt(0);
+            Monitor.Enter(_pendingCopies);
         }
 
-        _pendingCopies.Add(copy);
+        try
+        {
+            if (_pendingCopies.Count >= MaxPendingCopies)
+            {
+                _pendingCopies.RemoveAt(0);
+            }
+
+            _pendingCopies.Add(copy);
+        }
+        finally
+        {
+            if (shared)
+            {
+                Monitor.Exit(_pendingCopies);
+            }
+        }
+
         if (_tracedCopies.Count < MaxCopyReadTraces && _tracedCopies.Add((copy.Destination, copy.Words)))
         {
             _copyReadTraces.Enqueue(
@@ -102,11 +125,28 @@ internal sealed partial class MetalRenderHost
 
     private void RetirePendingCopies(ulong completed)
     {
-        if (_pendingCopies.Count != 0)
+        CheckKernelCopies(completed);
+        // In place and in order; the lambda over `completed` allocated its closure on every call.
+        var kept = 0;
+        while (kept < _pendingCopies.Count && _pendingCopies[kept].Serial > completed)
         {
-            // In place and in order; the lambda over `completed` allocated its closure on every call.
-            var kept = 0;
-            for (var index = 0; index < _pendingCopies.Count; index++)
+            kept++;
+        }
+
+        if (kept == _pendingCopies.Count)
+        {
+            return;
+        }
+
+        var shared = HostKernelCopyDryRun;
+        if (shared)
+        {
+            Monitor.Enter(_pendingCopies);
+        }
+
+        try
+        {
+            for (var index = kept + 1; index < _pendingCopies.Count; index++)
             {
                 if (_pendingCopies[index].Serial > completed)
                 {
@@ -114,11 +154,42 @@ internal sealed partial class MetalRenderHost
                 }
             }
 
-            if (kept != _pendingCopies.Count)
+            _pendingCopies.RemoveRange(kept, _pendingCopies.Count - kept);
+        }
+        finally
+        {
+            if (shared)
             {
-                _pendingCopies.RemoveRange(kept, _pendingCopies.Count - kept);
+                Monitor.Exit(_pendingCopies);
             }
         }
+    }
+
+    // Off the worker: whether a recognised copy whose submission has not completed writes the
+    // range. Only attributes a resolve-thread abandon (ConcurrentResolve), so a record the worker
+    // has yet to retire is answered by its serial. Only under the dry run, which is what makes
+    // the worker change the list under the lock.
+    private bool IsPendingCopyDestinationConcurrent(ulong address, ulong size, Func<ulong> completedSerial)
+    {
+        if (!HostKernelCopyDryRun)
+        {
+            return false;
+        }
+
+        var completed = completedSerial();
+        var end = address + size;
+        lock (_pendingCopies)
+        {
+            foreach (var copy in _pendingCopies)
+            {
+                if (copy.Serial > completed && copy.Destination <= address && end <= copy.DestinationEnd)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

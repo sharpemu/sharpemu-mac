@@ -96,6 +96,14 @@ public static partial class KernelRuntimeCompatExports
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_USLEEP_SHORT_PUMP"), "1", StringComparison.Ordinal);
     private static readonly bool _traceUsleep =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_USLEEP"), "1", StringComparison.Ordinal);
+    private static long _usleepOneCalls;
+
+    /// <summary>Set by the spin-nap runtime when it counts pause-probe activity
+    /// (<c>SHARPEMU_PAUSE_DELAY_STATS</c>): sceKernelUsleep(1) is how spin backoffs that run out of
+    /// pauses give up, so its rate is the A/B metric for the pause delay.</summary>
+    internal static bool CountUsleepOneCalls;
+
+    internal static long UsleepOneCalls => Volatile.Read(ref _usleepOneCalls);
     private static readonly bool _traceGuestThreads =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREADS"), "1", StringComparison.Ordinal);
 
@@ -237,6 +245,11 @@ public static partial class KernelRuntimeCompatExports
     public static int KernelUsleep(CpuContext ctx)
     {
         var micros = ctx[CpuRegister.Rdi];
+        if (micros == 1 && CountUsleepOneCalls)
+        {
+            Interlocked.Increment(ref _usleepOneCalls);
+        }
+
         var dsUsleep = DsTrace.Sched && DsTrace.Armed;
         var dsEnter = dsUsleep ? Stopwatch.GetTimestamp() : 0;
         TraceUsleepSpin(ctx, micros);

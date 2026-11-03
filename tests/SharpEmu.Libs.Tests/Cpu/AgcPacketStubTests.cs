@@ -44,7 +44,7 @@ public sealed unsafe class AgcPacketStubTests
         using var harness = new StubHarness(spec);
         var manager = new ModuleManager();
         manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
-        var random = new System.Random(unchecked(nid.GetHashCode() ^ 0x5A17));
+        var random = new System.Random(unchecked(StableSeed(nid) ^ 0x5A17));
         var interesting = new ulong[]
         {
             0, 1, 2, 3, 7, 0x28, 0x40, 0xA038, 0xFFFF, 0x1_0000, 0xFFFF_FFFC, 0xFFFF_FFFF, 0x1_0000_0000, 0x1_0000_0001, 0x2_6000_0A08,
@@ -142,7 +142,7 @@ public sealed unsafe class AgcPacketStubTests
         using var harness = new StubHarness(kind);
         var manager = new ModuleManager();
         manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
-        var random = new System.Random(unchecked(nid.GetHashCode() ^ 0x77A1));
+        var random = new System.Random(unchecked(StableSeed(nid) ^ 0x77A1));
         var stubRan = 0;
         var declinedWithRoom = 0;
         for (var iteration = 0; iteration < 1500; iteration++)
@@ -272,6 +272,184 @@ public sealed unsafe class AgcPacketStubTests
         Assert.True(declinedWithRoom < 40, $"{nid}: the stub declined {declinedWithRoom} calls the export builds as one in-place packet");
     }
 
+    public static IEnumerable<object[]> PatchNids() =>
+        new[]
+        {
+            "vcmNN+AAXnY", "Qrj4c+61z4A", "6lNcCp+fxi4", "whb1RL7K4Ss", "nCUgItdN2ms", "fRG-JOH5+sI", "d-6uF9sZDIU", "z2duB-hHQSM", "vRoArM9zaIk",
+        }.Select(nid => new object[] { nid });
+
+    private const int PatchRegionBytes = 0x2000;
+
+    [Theory]
+    [MemberData(nameof(PatchNids))]
+    public void ThePatchStubPatchesWhatTheExportPatchesAndDeclinesEverythingElse(string nid)
+    {
+        if (OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
+        Assert.True(AgcExports.TryGetRegIndirectPatchStub(nid, out var spec));
+        using var harness = new StubHarness(spec);
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        var random = new System.Random(unchecked(StableSeed(nid) ^ 0x9A7C));
+        var managedRegion = (byte*)NativeMemory.AlignedAlloc(PatchRegionBytes, 0x1000);
+        var stubRegion = (byte*)NativeMemory.AlignedAlloc(PatchRegionBytes, 0x1000);
+        try
+        {
+            var opcode = (spec.Header >> 8) & 0xFFu;
+            var legacyRegister = opcode switch { 0x9Fu => 0x12u, 0x63u => 0x11u, _ => 0x13u };
+            uint Header(uint dwords, uint op, uint register) => 0xC000_0000u | ((dwords - 2) << 16) | (op << 8) | (register << 2);
+            var headers = new Func<uint>[]
+            {
+                // The space's packet, with the bits the export ignores (type, shader type, predicate, sub-register) varied.
+                () => spec.Header,
+                () => spec.Header,
+                () => spec.Header ^ ((uint)random.Next(4) << 30) ^ (uint)random.Next(256),
+                // Another space's packet, the legacy NOP layout, a wrong length, anything.
+                () => Header(5, opcode == 0x9Fu ? 0x63u : 0x9Fu, 0),
+                () => Header(5, 0x64u, 0) == spec.Header ? Header(5, 0x63u, 0) : Header(5, 0x64u, 0),
+                () => Header(4, 0x10u, legacyRegister),
+                () => Header((uint)random.Next(2, 9) | 1u, opcode, 0) is var h && h == spec.Header ? h + 0x2_0000u : h,
+                () => (uint)random.NextInt64(),
+            };
+            var interesting = new ulong[]
+            {
+                0, 1, 2, 3, 4, 0x3FFF, 0x4000, 0x4001, 0x7FFF, 0xFFFF_FFFC, 0xFFFF_FFFF, 0x1_0000_0000, 0x1_0000_0003, 0x2_3456_789C,
+                0x7FFF_FFFF_FFFF_FFFF, 0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF,
+            };
+            var stubRan = 0;
+            for (var iteration = 0; iteration < 2000; iteration++)
+            {
+                // Where the packet sits: inside a page, flush against its end, one to sixteen bytes over it,
+                // against the region's end (header readable, the rest not), unaligned, or a pointer the stub
+                // must not touch at all.
+                ulong? specialPointer = null;
+                var offset = random.Next(10) switch
+                {
+                    0 => 0x1000 - 20,
+                    1 => 0x1000 - 20 + random.Next(1, 17),
+                    2 => PatchRegionBytes - 4 * random.Next(1, 5),
+                    3 => random.Next(0x10, 0x1F00),
+                    _ => 4 * random.Next(4, 0x7C0),
+                };
+                if (random.Next(12) == 0)
+                {
+                    specialPointer = random.Next(4) switch
+                    {
+                        0 => 0UL,
+                        1 => (ulong)random.Next(1, 0x10000),
+                        2 => 0x8000_0000_0000UL + (ulong)random.Next(0, 0x1000),
+                        _ => 0xFFFF_8000_0000_0000UL | (ulong)random.NextInt64(0, 0x7FFF_FFFF_FFFF),
+                    };
+                }
+
+                var header = headers[random.Next(headers.Length)]();
+                var argument = random.Next(3) == 0 ? (ulong)random.NextInt64() | ((ulong)random.Next(2) << 63) : interesting[random.Next(interesting.Length)];
+                var seed = random.Next();
+                var fill = new System.Random(seed);
+                for (var index = 0; index < PatchRegionBytes; index++)
+                {
+                    managedRegion[index] = (byte)fill.Next(256);
+                }
+
+                if (offset + 4 <= PatchRegionBytes)
+                {
+                    *(uint*)(managedRegion + offset) = header;
+                }
+
+                // The count field now and then at the edges of its 14 bits.
+                if (offset + 20 <= PatchRegionBytes && random.Next(3) == 0)
+                {
+                    *(uint*)(managedRegion + offset + 16) = random.Next(3) switch { 0 => 0x3FFFu, 1 => 0xFFFF_C000u, _ => 0xFFFF_FFFFu };
+                }
+
+                Buffer.MemoryCopy(managedRegion, stubRegion, PatchRegionBytes, PatchRegionBytes);
+                var pristine = new ReadOnlySpan<byte>(stubRegion, PatchRegionBytes).ToArray();
+
+                var context = new CpuContext(new RegionMemory(managedRegion, PatchRegionBytes), Generation.Gen5);
+                context[CpuRegister.Rdi] = specialPointer ?? (ulong)(managedRegion + offset);
+                context[CpuRegister.Rsi] = argument;
+                Assert.True(manager.TryDispatch(nid, context, out var managedResult));
+
+                var stubPacket = specialPointer ?? (ulong)(stubRegion + offset);
+                var stubRax = harness.Call(stubPacket, argument, 0, 0, 0);
+                var fastCase = specialPointer is null &&
+                    (offset & 0xFFF) <= 0x1000 - 20 &&
+                    (header & AgcExports.RegIndirectPatchHeaderMask) == (spec.Header & AgcExports.RegIndirectPatchHeaderMask) &&
+                    !(spec.Kind == AgcRegIndirectPatchStub.SetAddress && argument == 0);
+                if (stubRax == (Sentinel ^ stubPacket ^ argument))
+                {
+                    // Declined with RDI and RSI intact (the fallback answers from them) and nothing written.
+                    Assert.False(fastCase, $"{nid}: the stub declined a patch the export makes (offset=0x{offset:X} header=0x{header:X8} arg=0x{argument:X})");
+                    Assert.Equal(pristine, new ReadOnlySpan<byte>(stubRegion, PatchRegionBytes).ToArray());
+                    continue;
+                }
+
+                stubRan++;
+                Assert.True(fastCase, $"{nid}: the stub patched where the export declines (offset=0x{offset:X} header=0x{header:X8} arg=0x{argument:X} result={managedResult})");
+                Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, managedResult);
+                Assert.Equal(context[CpuRegister.Rax], stubRax);
+                Assert.Equal(
+                    new ReadOnlySpan<byte>(managedRegion, PatchRegionBytes).ToArray(),
+                    new ReadOnlySpan<byte>(stubRegion, PatchRegionBytes).ToArray());
+            }
+
+            Assert.True(stubRan > 400, $"{nid}: the stub took the fast path only {stubRan} times");
+        }
+        finally
+        {
+            NativeMemory.AlignedFree(managedRegion);
+            NativeMemory.AlignedFree(stubRegion);
+        }
+    }
+
+    // FNV-1a over the NID: string.GetHashCode is randomized per process, so a failing case would not replay.
+    private static int StableSeed(string nid)
+    {
+        var hash = 2166136261u;
+        foreach (var c in nid)
+        {
+            hash = (hash ^ c) * 16777619u;
+        }
+
+        return unchecked((int)hash);
+    }
+
+    // A patcher stub only matches its import while the export behind the trampoline exists: without
+    // it every declined call would answer NOT_FOUND where the stub patches. So the stub needs the
+    // export, and both switches can turn it off; the builder stubs need neither the export check
+    // nor the patch switch.
+    [Fact]
+    public void APatchStubIsInstalledOnlyWithItsExportAndBothSwitchesOn()
+    {
+        var all = new ModuleManager();
+        all.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        var none = new ModuleManager();
+        foreach (var nid in PatchNids().Select(row => (string)row[0]))
+        {
+            Assert.True(all.TryGetExport(nid, out _), nid);
+            Assert.True(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: true, patchStubsEnabled: true, all), nid);
+            Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: true, patchStubsEnabled: false, all), nid);
+            Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: false, patchStubsEnabled: true, all), nid);
+            Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: true, patchStubsEnabled: true, none), nid);
+
+            // The registry without just this export: the case of a tree that never had it.
+            var allButOne = new ModuleManager();
+            allButOne.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5).Where(export => export.Nid != nid).ToList());
+            Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: true, patchStubsEnabled: true, allButOne), nid);
+        }
+
+        foreach (var nid in Nids().Concat(VariableNids()).Select(row => (string)row[0]))
+        {
+            Assert.True(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: true, patchStubsEnabled: false, none), nid);
+            Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: false, patchStubsEnabled: true, all), nid);
+        }
+
+        Assert.False(DirectExecutionBackend.IsAgcStubAllowed("Ikfdt-rIqCE", packetStubsEnabled: true, patchStubsEnabled: true, all));
+    }
+
     [Fact]
     public void EveryStubbedBuilderIsAlsoALeafBuilder()
     {
@@ -282,7 +460,7 @@ public sealed unsafe class AgcPacketStubTests
         }
 
         Assert.True(DirectExecutionBackend.IsAgcBuilderLeafImport("n2fD4A+pb+g"));
-        foreach (var nid in VariableNids().Select(row => (string)row[0]))
+        foreach (var nid in VariableNids().Concat(PatchNids()).Select(row => (string)row[0]))
         {
             Assert.Equal(DirectExecutionBackend.GuestFastPathStub.AgcPacket, DirectExecutionBackend.ClassifyGuestFastPathStub(nid));
         }
@@ -374,6 +552,34 @@ public sealed unsafe class AgcPacketStubTests
         }
     }
 
+    /// <summary>Guest memory that is exactly [pointer, pointer + length) of native memory.</summary>
+    private sealed class RegionMemory(byte* pointer, int length) : ICpuMemory
+    {
+        public bool TryRead(ulong virtualAddress, Span<byte> destination)
+        {
+            var offset = virtualAddress - (ulong)pointer;
+            if (offset > (ulong)length || (ulong)destination.Length > (ulong)length - offset)
+            {
+                return false;
+            }
+
+            new ReadOnlySpan<byte>(pointer + offset, destination.Length).CopyTo(destination);
+            return true;
+        }
+
+        public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source)
+        {
+            var offset = virtualAddress - (ulong)pointer;
+            if (offset > (ulong)length || (ulong)source.Length > (ulong)length - offset)
+            {
+                return false;
+            }
+
+            source.CopyTo(new Span<byte>(pointer + offset, source.Length));
+            return true;
+        }
+    }
+
     private sealed class StubHarness : IDisposable
     {
         private readonly byte* _page;
@@ -389,18 +595,38 @@ public sealed unsafe class AgcPacketStubTests
         {
         }
 
+        // The patch stubs' fallback answers sentinel ^ rdi ^ rsi, so a decline shows its arguments arrived intact.
+        public StubHarness(AgcRegIndirectPatchStubSpec spec)
+            : this(fallback => DirectExecutionBackend.EmitGuestAgcRegIndirectPatchStub(spec, fallback), echoArguments: true)
+        {
+        }
+
         private StubHarness(AgcPacketStubSpec? spec, AgcVariablePacketStub? kind)
+            : this(fallback => spec is not null
+                ? DirectExecutionBackend.EmitGuestAgcPacketStub(spec, fallback)
+                : DirectExecutionBackend.EmitGuestAgcVariablePacketStub(kind!.Value, fallback), echoArguments: false)
+        {
+        }
+
+        private StubHarness(Func<nint, List<byte>> emit, bool echoArguments)
         {
             _page = (byte*)HostMemory.Alloc(null, 4096, HostMemory.MEM_COMMIT | HostMemory.MEM_RESERVE, HostMemory.PAGE_EXECUTE_READWRITE);
             Assert.True(_page != null);
-            // Fallback trampoline at +0x100: mov rax, sentinel / ret.
+            // Fallback trampoline at +0x100: mov rax, sentinel / [xor rax, rdi / xor rax, rsi] / ret.
             _page[0x100] = 0x48;
             _page[0x101] = 0xB8;
             *(ulong*)(_page + 0x102) = Sentinel;
-            _page[0x10A] = 0xC3;
-            var stub = spec is not null
-                ? DirectExecutionBackend.EmitGuestAgcPacketStub(spec, (nint)(_page + 0x100))
-                : DirectExecutionBackend.EmitGuestAgcVariablePacketStub(kind!.Value, (nint)(_page + 0x100));
+            var end = 0x10A;
+            if (echoArguments)
+            {
+                foreach (var b in new byte[] { 0x48, 0x31, 0xF8, 0x48, 0x31, 0xF0 })
+                {
+                    _page[end++] = b;
+                }
+            }
+
+            _page[end] = 0xC3;
+            var stub = emit((nint)(_page + 0x100));
             Assert.True(stub.Count < 0x400);
             for (var i = 0; i < stub.Count; i++)
             {

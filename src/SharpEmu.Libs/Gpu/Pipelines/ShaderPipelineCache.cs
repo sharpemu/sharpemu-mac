@@ -314,6 +314,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 banks.Stamp(RegisterStamp.ShaderPrograms), banks.Stamp(RegisterStamp.VertexUserData), banks.Stamp(RegisterStamp.PixelUserData),
                 banks.Stamp(RegisterStamp.ColorTargets, RegisterStamp.ShaderInterface), ShaderHeaderRegistry.Registrations);
             var flags = new KeptGraphicsFlags(pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, startInstanceUserData);
+            ClaimKeptPrograms();
             var kept = _keptGraphics ??= new KeptGraphicsPrograms();
             if (TryKeepGraphicsPrograms(context, kept, stamps, flags, targetExportMapping, out var keptPrograms))
             {
@@ -377,11 +378,27 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
             depthAspectBound, stencilAspectBound, triangleList, null);
 
+    // The kept programs are per thread, but their handles belong to the host of the cache that resolved them:
+    // a thread that resolves for another cache (a new render host in the same process) drops them first.
+    private static long _nextKeptOwner;
+    private readonly long _keptOwner = Interlocked.Increment(ref _nextKeptOwner);
+    [ThreadStatic]
+    private static long _keptOwnerOnThread;
     [ThreadStatic]
     private static KeptGraphicsPrograms? _keptGraphics;
     [ThreadStatic]
     private static Dictionary<ulong, List<KeptComputeProgram>>? _keptComputes;
     private const int KeptComputesPerShader = 4;
+
+    private void ClaimKeptPrograms()
+    {
+        if (_keptOwnerOnThread != _keptOwner)
+        {
+            _keptOwnerOnThread = _keptOwner;
+            _keptGraphics = null;
+            _keptComputes = null;
+        }
+    }
     // A rebound compute program reads its code's identity again every this many dispatches.
     private const int IdentityRecheckPeriod = 64;
     [ThreadStatic]
@@ -1382,6 +1399,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             var registrations = ShaderHeaderRegistry.Registrations;
+            ClaimKeptPrograms();
             var all = _keptComputes ??= new Dictionary<ulong, List<KeptComputeProgram>>();
             if (!all.TryGetValue(compute.Address, out var keptList))
             {

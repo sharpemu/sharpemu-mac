@@ -306,4 +306,45 @@ internal sealed partial class MetalImageCache
         image.GpuWriteSerial = _owner.CurrentSerial;
         image.NoteUse(image.GpuWriteSerial);
     }
+
+    /// <summary>
+    /// Whether surface metadata (DCC, HTILE, CMASK or FMASK, adopted DCC, or a DCC fill still
+    /// waiting for its target) lies in the range. Its bytes mean more than memory says: a fill
+    /// over metadata that already holds the clear code still asks for the clear again
+    /// (TryAbsorbDccFill), so a kernel there is never taken as a no-op. A surface whose size is
+    /// not known is answered by its address.
+    /// </summary>
+    public bool OverlapsSurfaceMetadata(ulong address, ulong size)
+    {
+        if (!IsValidRange(address, size))
+        {
+            return true;
+        }
+
+        var end = address + size;
+        using var held = _lock.Hold();
+        foreach (var (start, metadata) in _surfaceMetadata)
+        {
+            if (start >= end)
+            {
+                break;
+            }
+
+            var extent = Math.Max(Math.Max(metadata.Size, metadata.RangeSize), Math.Max(metadata.FillSize, 1));
+            if (start + extent > address)
+            {
+                return true;
+            }
+        }
+
+        foreach (var (start, metadataSize) in _adoptedDccMetadata)
+        {
+            if (address < start + metadataSize && start < end)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }
