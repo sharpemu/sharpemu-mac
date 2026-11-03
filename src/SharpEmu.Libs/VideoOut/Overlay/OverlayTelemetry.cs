@@ -564,6 +564,8 @@ public static partial class OverlayTelemetry
         private static readonly Dictionary<ulong, ThreadTrack> Threads = [];
         private static long _lastThreadSample;
         private static ulong _guestMainId;
+        // The guest worker with the most CPU in the last frame: its calls fill the workers lane.
+        private static ulong _busiestWorkerId;
 
         // HLE.
         private static long[] _hleMainTicks = new long[512];
@@ -575,6 +577,8 @@ public static partial class OverlayTelemetry
         private static readonly List<TimelineSegment> SegmentScratch = new(1024);
         private static readonly List<ThreadSample> ThreadSampleScratch = new(128);
         private static readonly List<(long Start, long End, int Import)> LongCallScratch = new(128);
+        // The split guest's long calls not yet placed (they can straddle frames).
+        private static readonly List<(long Start, long End, int Import, OverlayLane Lane)> RemoteCalls = new(1024);
 
         private sealed class ThreadTrack
         {
@@ -597,6 +601,8 @@ public static partial class OverlayTelemetry
             GpuCarry.Clear();
             Threads.Clear();
             _guestMainId = 0;
+            _busiestWorkerId = 0;
+            RemoteCalls.Clear();
         }
 
         /// <summary>
@@ -628,6 +634,7 @@ public static partial class OverlayTelemetry
                 {
                     Bridge.TryOpen(PerfOverlay.GuestProcessId);
                     Bridge.WriteDemand(_demand);
+                    Bridge.WriteFocus(_guestMainId, _busiestWorkerId);
                     Bridge.ReadGuestThreads();
                     var record = Build(raw);
                     if (record is not null)
@@ -710,6 +717,8 @@ public static partial class OverlayTelemetry
             SampleThreads(end, frameMs, raw.ThreadId);
             float guestMain = 0, guestWorkers = 0, renderThreadCpu = 0;
             var activeWorkers = 0;
+            var busiestWorker = 0f;
+            ulong busiestWorkerId = 0;
             ThreadSampleScratch.Clear();
             foreach (var (id, track) in Threads)
             {
@@ -731,6 +740,12 @@ public static partial class OverlayTelemetry
                     case ThreadClass.Guest:
                         guestWorkers += busy;
                         if (busy > 0.1f) activeWorkers++;
+                        if (busy > busiestWorker)
+                        {
+                            busiestWorker = busy;
+                            busiestWorkerId = id;
+                        }
+
                         break;
                     case ThreadClass.Render:
                         renderThreadCpu += busy;
@@ -747,6 +762,7 @@ public static partial class OverlayTelemetry
                 }
             }
 
+            _busiestWorkerId = busiestWorkerId;
             if (!raw.HasPhases)
             {
                 renderBusy = Math.Min(renderThreadCpu, frameMs);
@@ -1029,17 +1045,20 @@ public static partial class OverlayTelemetry
             var frequency = (double)Stopwatch.Frequency;
             if (Bridge.IsOpen)
             {
-                // The split: the guest's gateway totals, all charged to the guest-main lane (the
-                // guest publishes one sum per import, not one per thread).
+                // The split: the guest's gateway totals, split by the guest into the main thread
+                // this process picked and every other guest thread.
                 var ticksPerMs = frequency / 1000.0;
-                Bridge.TakeImportDeltas((index, ms, calls) =>
+                Bridge.TakeImportDeltas((index, mainMs, mainCalls, workerMs, workerCalls) =>
                 {
+                    var ms = mainMs + workerMs;
                     if (IsWaitImport(index)) wait += ms; else body += ms;
                     if (!HleTimingActive) return;
                     EnsureHleCapacity(index);
                     if (_hleMainTicks[index] == 0 && _hleWorkerTicks[index] == 0) HleTouched.Add(index);
-                    _hleMainTicks[index] += (long)(ms * ticksPerMs);
-                    _hleMainCounts[index] += calls;
+                    _hleMainTicks[index] += (long)(mainMs * ticksPerMs);
+                    _hleMainCounts[index] += mainCalls;
+                    _hleWorkerTicks[index] += (long)(workerMs * ticksPerMs);
+                    _hleWorkerCounts[index] += workerCalls;
                 });
             }
 
@@ -1127,62 +1146,121 @@ public static partial class OverlayTelemetry
         private static void AddGuestSegments(long start, long end, float frameMs, float guestMain, float guestWorkers,
             int activeWorkers, Func<long, float> relative)
         {
-            var placed = false;
-            if (TimelineActive && _guestMainId != 0)
+            var mainPlaced = false;
+            var workerPlaced = false;
+            if (TimelineActive)
             {
-                HleThreadSlots? main = null;
-                lock (HleThreads)
+                if (Bridge.IsOpen)
                 {
-                    foreach (var slots in HleThreads)
+                    Bridge.TakeCalls(RemoteCalls);
+                    mainPlaced = PlaceRemoteCalls(OverlayLane.GuestMain, start, end, frameMs, relative);
+                    workerPlaced = PlaceRemoteCalls(OverlayLane.GuestWorkers, start, end, frameMs, relative);
+                    // Calls that ended before this frame can no longer be placed; keep the ring of
+                    // pending ones bounded if frames stop coming.
+                    RemoteCalls.RemoveAll(call => call.End <= start);
+                    if (RemoteCalls.Count > 8192)
                     {
-                        if (slots.ThreadId == _guestMainId) { main = slots; break; }
+                        RemoteCalls.RemoveRange(0, RemoteCalls.Count - 8192);
                     }
                 }
-
-                if (main is not null)
+                else
                 {
-                    LongCallScratch.Clear();
-                    main.TakeLongCalls(start, end, LongCallScratch);
-                    if (LongCallScratch.Count > 0)
-                    {
-                        placed = true;
-                        var cursor = 0f;
-                        foreach (var (callStart, callEnd, import) in LongCallScratch)
-                        {
-                            var from = relative(callStart);
-                            var to = relative(callEnd);
-                            if (from > cursor)
-                            {
-                                SegmentScratch.Add(new TimelineSegment(cursor, from, OverlayLane.GuestMain, CostKind.Guest, GuestRunNameId));
-                            }
-
-                            if (to > from)
-                            {
-                                SegmentScratch.Add(new TimelineSegment(from, to, OverlayLane.GuestMain,
-                                    IsWaitImport(import) ? CostKind.Wait : CostKind.Hle, HleNameBase + import));
-                            }
-
-                            cursor = Math.Max(cursor, to);
-                        }
-
-                        if (cursor < frameMs)
-                        {
-                            SegmentScratch.Add(new TimelineSegment(cursor, frameMs, OverlayLane.GuestMain, CostKind.Guest, GuestRunNameId));
-                        }
-                    }
+                    mainPlaced = PlaceLocalCalls(_guestMainId, OverlayLane.GuestMain, start, end, frameMs, relative);
+                    workerPlaced = PlaceLocalCalls(_busiestWorkerId, OverlayLane.GuestWorkers, start, end, frameMs, relative);
                 }
             }
 
-            if (!placed && guestMain > 0)
+            if (!mainPlaced && guestMain > 0)
             {
                 SegmentScratch.Add(new TimelineSegment(0, Math.Min(guestMain, frameMs), OverlayLane.GuestMain, CostKind.Guest, GuestCpuNameId));
             }
 
-            if (guestWorkers > 0 && activeWorkers > 0)
+            if (!workerPlaced && guestWorkers > 0 && activeWorkers > 0)
             {
                 SegmentScratch.Add(new TimelineSegment(0, Math.Min(guestWorkers / activeWorkers, frameMs),
                     OverlayLane.GuestWorkers, CostKind.Guest, WorkerCpuNameId));
             }
+        }
+
+        private static bool PlaceLocalCalls(ulong threadId, OverlayLane lane, long start, long end, float frameMs,
+            Func<long, float> relative)
+        {
+            if (threadId == 0)
+            {
+                return false;
+            }
+
+            HleThreadSlots? thread = null;
+            lock (HleThreads)
+            {
+                foreach (var slots in HleThreads)
+                {
+                    if (slots.ThreadId == threadId) { thread = slots; break; }
+                }
+            }
+
+            if (thread is null)
+            {
+                return false;
+            }
+
+            LongCallScratch.Clear();
+            thread.TakeLongCalls(start, end, LongCallScratch);
+            return PlaceCalls(LongCallScratch, lane, frameMs, relative);
+        }
+
+        private static bool PlaceRemoteCalls(OverlayLane lane, long start, long end, float frameMs, Func<long, float> relative)
+        {
+            LongCallScratch.Clear();
+            foreach (var call in RemoteCalls)
+            {
+                if (call.Lane == lane && call.End > start && call.Start < end)
+                {
+                    LongCallScratch.Add((call.Start, call.End, call.Import));
+                }
+            }
+
+            LongCallScratch.Sort(static (left, right) => left.Start.CompareTo(right.Start));
+            return PlaceCalls(LongCallScratch, lane, frameMs, relative);
+        }
+
+        /// <summary>
+        /// Lays one thread's long HLE calls out in time and fills the gaps between them with guest
+        /// code (a guest thread between two gateway calls is running guest code).
+        /// </summary>
+        private static bool PlaceCalls(List<(long Start, long End, int Import)> calls, OverlayLane lane, float frameMs,
+            Func<long, float> relative)
+        {
+            if (calls.Count == 0)
+            {
+                return false;
+            }
+
+            var cursor = 0f;
+            foreach (var (callStart, callEnd, import) in calls)
+            {
+                var from = relative(callStart);
+                var to = relative(callEnd);
+                if (from > cursor)
+                {
+                    SegmentScratch.Add(new TimelineSegment(cursor, from, lane, CostKind.Guest, GuestRunNameId));
+                }
+
+                if (to > from)
+                {
+                    SegmentScratch.Add(new TimelineSegment(from, to, lane,
+                        IsWaitImport(import) ? CostKind.Wait : CostKind.Hle, HleNameBase + import));
+                }
+
+                cursor = Math.Max(cursor, to);
+            }
+
+            if (cursor < frameMs)
+            {
+                SegmentScratch.Add(new TimelineSegment(cursor, frameMs, lane, CostKind.Guest, GuestRunNameId));
+            }
+
+            return true;
         }
 
         private static (bool Hitch, string? Reason) DetectHitch(float frameMs, float gcPauseMs, int gcGeneration,

@@ -11,14 +11,18 @@ namespace SharpEmu.Libs.VideoOut.Overlay;
 // draws in the GPU host, which also owns the render thread, the GPU intervals and its own thread
 // CPU; the guest's HLE gateway, its guest-thread ids and its GC run in the other process. The
 // guest publishes those into a small file-backed shared mapping that the GPU host reads, and the
-// GPU host writes the capture demand back. Single writer per field; torn reads of a counter cost
-// at most one frame's accuracy, which the overlay tolerates.
+// GPU host writes the capture demand and the threads it wants timed back. Single writer per field;
+// torn reads of a counter cost at most one frame's accuracy, which the overlay tolerates.
+//
+// Timestamps cross the boundary in nanoseconds of the monotonic clock both processes' Stopwatch
+// reads (CLOCK_UPTIME_RAW on macOS, also under Rosetta), so a guest call lines up with the GPU
+// host's frames.
 public static partial class OverlayTelemetry
 {
     private static class Bridge
     {
         private const uint Magic = 0x424F4553; // "SEOB"
-        private const int LayoutVersion = 1;
+        private const int LayoutVersion = 2;
         internal const int MaxImports = 8192;
         private const int MaxThreads = 512;
         private const int NameBytes = 96;
@@ -35,11 +39,22 @@ public static partial class OverlayTelemetry
         private const int ThreadCountOffset = 36;
         private const int AllocatedBytesOffset = 40;
         private const int HeartbeatOffset = 48;      // Stopwatch-free sequence number
+        private const int MainThreadOffset = 56;     // written by the GPU host: the guest main thread
+        private const int WorkerThreadOffset = 64;   // written by the GPU host: the busiest worker
+        private const int CallWriteOffset = 72;      // calls ever written to the ring
         private const int HeaderBytes = 128;
         private const int ThreadsOffset = HeaderBytes;
+        // Per import: main-thread ticks (100 ns), main calls, worker ticks, worker calls.
         private const int ImportsOffset = ThreadsOffset + MaxThreads * sizeof(ulong);
-        private const int NamesOffset = ImportsOffset + MaxImports * 2 * sizeof(long);
-        private const int TotalBytes = NamesOffset + MaxImports * NameBytes;
+        private const int NamesOffset = ImportsOffset + MaxImports * 4 * sizeof(long);
+        // Long calls (>= 100 µs) of the two timed threads: start ns, end ns, import, lane.
+        private const int CallEntries = 4096;
+        private const int CallBytes = 24;
+        private const int CallsOffset = NamesOffset + MaxImports * NameBytes;
+        private const int TotalBytes = CallsOffset + CallEntries * CallBytes;
+
+        private static long ToNanoseconds(long ticks) => (long)(ticks * (1_000_000_000.0 / Stopwatch.Frequency));
+        private static long FromNanoseconds(long nanoseconds) => (long)(nanoseconds * (Stopwatch.Frequency / 1_000_000_000.0));
 
         private static MemoryMappedFile? _file;
         private static MemoryMappedViewAccessor? _view;
@@ -91,15 +106,14 @@ public static partial class OverlayTelemetry
                     *(int*)(basePointer + VersionOffset) = LayoutVersion;
                     Volatile.Write(ref *(uint*)(basePointer + MagicOffset), Magic);
                     AppDomain.CurrentDomain.ProcessExit += (_, _) => TryDelete(path);
-                    var named = new bool[MaxImports];
-                    var totalsTicks = new long[MaxImports];
-                    var totalsCounts = new long[MaxImports];
+                    var state = new GuestState();
                     long heartbeat = 0;
                     while (true)
                     {
                         var demand = (OverlayCaptureDemand)Volatile.Read(ref *(int*)(basePointer + DemandOffset));
                         HleTimingActive = (demand & (OverlayCaptureDemand.HleCalls | OverlayCaptureDemand.Timeline)) != 0;
-                        PublishGuest(basePointer, named, totalsTicks, totalsCounts);
+                        TimelineActive = (demand & OverlayCaptureDemand.Timeline) != 0;
+                        PublishGuest(basePointer, state);
                         Volatile.Write(ref *(long*)(basePointer + HeartbeatOffset), ++heartbeat);
                         Thread.Sleep(demand == OverlayCaptureDemand.None ? 250 : 16);
                     }
@@ -115,7 +129,23 @@ public static partial class OverlayTelemetry
             }
         }
 
-        private static unsafe void PublishGuest(byte* basePointer, bool[] named, long[] totalsTicks, long[] totalsCounts)
+        // The publisher thread's running totals. Each thread's growth since the last publish is
+        // added to the bucket of its current role, so the buckets only grow when the GPU host
+        // picks a different main thread.
+        private sealed class GuestState
+        {
+            public readonly bool[] Named = new bool[MaxImports];
+            public readonly long[] MainTicks = new long[MaxImports];
+            public readonly long[] MainCounts = new long[MaxImports];
+            public readonly long[] WorkerTicks = new long[MaxImports];
+            public readonly long[] WorkerCounts = new long[MaxImports];
+            public readonly Dictionary<HleThreadSlots, (long[] Ticks, int[] Counts)> Previous = [];
+            public readonly List<(long Start, long End, int Import)> Calls = new(256);
+            public long CallsWritten;
+            public int ImportCount;
+        }
+
+        private static unsafe void PublishGuest(byte* basePointer, GuestState state)
         {
             var gcPause = GC.GetTotalPauseDuration();
             Volatile.Write(ref *(long*)(basePointer + GcPauseTicksOffset), gcPause.Ticks);
@@ -140,39 +170,77 @@ public static partial class OverlayTelemetry
                 slots = HleThreads.ToArray();
             }
 
-            Array.Clear(totalsTicks);
-            Array.Clear(totalsCounts);
-            var importCount = 0;
+            var mainId = Volatile.Read(ref *(ulong*)(basePointer + MainThreadOffset));
+            var workerId = Volatile.Read(ref *(ulong*)(basePointer + WorkerThreadOffset));
             foreach (var slot in slots)
             {
                 var arrays = slot.Arrays;
                 var length = Math.Min(arrays.Ticks.Length, MaxImports);
+                if (!state.Previous.TryGetValue(slot, out var previous) || previous.Ticks.Length < length)
+                {
+                    var grown = (new long[length], new int[length]);
+                    if (previous.Ticks is not null)
+                    {
+                        Array.Copy(previous.Ticks, grown.Item1, previous.Ticks.Length);
+                        Array.Copy(previous.Counts, grown.Item2, previous.Counts.Length);
+                    }
+
+                    previous = grown;
+                    state.Previous[slot] = previous;
+                }
+
+                var isMain = slot.ThreadId == mainId && mainId != 0;
+                var ticksBucket = isMain ? state.MainTicks : state.WorkerTicks;
+                var countsBucket = isMain ? state.MainCounts : state.WorkerCounts;
                 for (var index = 0; index < length; index++)
                 {
                     var ticks = arrays.Ticks[index];
-                    if (ticks == 0) continue;
-                    totalsTicks[index] += ticks;
-                    totalsCounts[index] += arrays.Counts[index];
-                    importCount = Math.Max(importCount, index + 1);
+                    var delta = ticks - previous.Ticks[index];
+                    if (delta <= 0) continue;
+                    var count = arrays.Counts[index];
+                    ticksBucket[index] += delta;
+                    countsBucket[index] += count - previous.Counts[index];
+                    previous.Ticks[index] = ticks;
+                    previous.Counts[index] = count;
+                    state.ImportCount = Math.Max(state.ImportCount, index + 1);
+                }
+
+                // Long calls: the two threads the GPU host times go into the ring; the rest are dropped.
+                state.Calls.Clear();
+                slot.TakeLongCalls(long.MinValue, long.MaxValue, state.Calls);
+                var lane = isMain ? 0 : slot.ThreadId == workerId && workerId != 0 ? 1 : -1;
+                if (lane < 0) continue;
+                foreach (var (callStart, callEnd, import) in state.Calls)
+                {
+                    var entry = basePointer + CallsOffset + (state.CallsWritten % CallEntries) * CallBytes;
+                    *(long*)entry = ToNanoseconds(callStart);
+                    *(long*)(entry + 8) = ToNanoseconds(callEnd);
+                    *(int*)(entry + 16) = import;
+                    *(int*)(entry + 20) = lane;
+                    state.CallsWritten++;
                 }
             }
 
+            Volatile.Write(ref *(long*)(basePointer + CallWriteOffset), state.CallsWritten);
             var imports = (long*)(basePointer + ImportsOffset);
-            for (var index = 0; index < importCount; index++)
+            var ticksTo100ns = 10_000_000.0 / Stopwatch.Frequency;
+            for (var index = 0; index < state.ImportCount; index++)
             {
-                if (totalsTicks[index] == 0) continue;
-                if (!named[index])
+                if (state.MainTicks[index] == 0 && state.WorkerTicks[index] == 0) continue;
+                if (!state.Named[index])
                 {
-                    named[index] = true;
+                    state.Named[index] = true;
                     WriteName(basePointer + NamesOffset + (long)index * NameBytes, HleName(index));
                 }
 
                 // Ticks are converted to 100 ns units so the two processes' Stopwatch frequencies never matter.
-                Volatile.Write(ref imports[index * 2], totalsTicks[index] * 10_000_000 / Stopwatch.Frequency);
-                Volatile.Write(ref imports[index * 2 + 1], totalsCounts[index]);
+                Volatile.Write(ref imports[index * 4], (long)(state.MainTicks[index] * ticksTo100ns));
+                Volatile.Write(ref imports[index * 4 + 1], state.MainCounts[index]);
+                Volatile.Write(ref imports[index * 4 + 2], (long)(state.WorkerTicks[index] * ticksTo100ns));
+                Volatile.Write(ref imports[index * 4 + 3], state.WorkerCounts[index]);
             }
 
-            Volatile.Write(ref *(int*)(basePointer + ImportCountOffset), Math.Max(importCount, *(int*)(basePointer + ImportCountOffset)));
+            Volatile.Write(ref *(int*)(basePointer + ImportCountOffset), state.ImportCount);
         }
 
         private static unsafe void WriteName(byte* destination, string name)
@@ -201,8 +269,8 @@ public static partial class OverlayTelemetry
 
         private static int _openedFor;
         private static long _lastOpenAttempt;
-        private static long[] _previousImportTicks = new long[MaxImports];
-        private static long[] _previousImportCounts = new long[MaxImports];
+        private static readonly long[] PreviousImport = new long[MaxImports * 4];
+        private static long _callsRead;
         private static long _previousGcPauseTicks = -1;
         private static readonly int[] PreviousGenerations = new int[3];
         private static readonly string?[] Names = new string?[MaxImports];
@@ -259,6 +327,8 @@ public static partial class OverlayTelemetry
                 _base = basePointer;
                 _openedFor = guestProcessId;
                 _previousGcPauseTicks = -1;
+                Array.Clear(PreviousImport);
+                _callsRead = Volatile.Read(ref *(long*)(basePointer + CallWriteOffset));
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
@@ -270,6 +340,35 @@ public static partial class OverlayTelemetry
             if (_base != null)
             {
                 Volatile.Write(ref *(int*)(_base + DemandOffset), (int)demand);
+            }
+        }
+
+        /// <summary>Tells the guest which of its threads are the main one and the busiest worker, for lane attribution and timing.</summary>
+        internal static unsafe void WriteFocus(ulong mainThreadId, ulong workerThreadId)
+        {
+            if (_base != null)
+            {
+                Volatile.Write(ref *(ulong*)(_base + MainThreadOffset), mainThreadId);
+                Volatile.Write(ref *(ulong*)(_base + WorkerThreadOffset), workerThreadId);
+            }
+        }
+
+        /// <summary>Appends the long calls the guest published since the previous call, in this process's Stopwatch ticks.</summary>
+        internal static unsafe void TakeCalls(List<(long Start, long End, int Import, OverlayLane Lane)> into)
+        {
+            if (_base == null) return;
+            var written = Volatile.Read(ref *(long*)(_base + CallWriteOffset));
+            if (written - _callsRead > CallEntries)
+            {
+                // The reader fell a whole ring behind; the oldest entries are already overwritten.
+                _callsRead = written - CallEntries;
+            }
+
+            for (; _callsRead < written; _callsRead++)
+            {
+                var entry = _base + CallsOffset + (_callsRead % CallEntries) * CallBytes;
+                var lane = *(int*)(entry + 20) == 0 ? OverlayLane.GuestMain : OverlayLane.GuestWorkers;
+                into.Add((FromNanoseconds(*(long*)entry), FromNanoseconds(*(long*)(entry + 8)), *(int*)(entry + 16), lane));
             }
         }
 
@@ -307,24 +406,31 @@ public static partial class OverlayTelemetry
             return (pauseMs, collections, highest);
         }
 
-        /// <summary>Calls <paramref name="visit"/> with (import, milliseconds, calls) for each import that moved.</summary>
-        internal static unsafe void TakeImportDeltas(Action<int, float, int> visit)
+        /// <summary>
+        /// Calls <paramref name="visit"/> with (import, main ms, main calls, worker ms, worker calls)
+        /// for each import that moved since the previous call.
+        /// </summary>
+        internal static unsafe void TakeImportDeltas(Action<int, float, int, float, int> visit)
         {
             if (_base == null) return;
             var count = Math.Min(Volatile.Read(ref *(int*)(_base + ImportCountOffset)), MaxImports);
             var imports = (long*)(_base + ImportsOffset);
+            Span<long> delta = stackalloc long[4];
             for (var index = 0; index < count; index++)
             {
-                var ticks = Volatile.Read(ref imports[index * 2]);
-                var delta = ticks - _previousImportTicks[index];
-                if (delta == 0) continue;
-                var calls = Volatile.Read(ref imports[index * 2 + 1]);
-                var callDelta = calls - _previousImportCounts[index];
-                _previousImportTicks[index] = ticks;
-                _previousImportCounts[index] = calls;
-                if (delta > 0)
+                var moved = false;
+                for (var field = 0; field < 4; field++)
                 {
-                    visit(index, delta / 10_000f, (int)Math.Max(0, callDelta));
+                    var at = index * 4 + field;
+                    var value = Volatile.Read(ref imports[at]);
+                    delta[field] = Math.Max(0, value - PreviousImport[at]);
+                    moved |= value != PreviousImport[at];
+                    PreviousImport[at] = value;
+                }
+
+                if (moved && (delta[0] > 0 || delta[2] > 0))
+                {
+                    visit(index, delta[0] / 10_000f, (int)delta[1], delta[2] / 10_000f, (int)delta[3]);
                 }
             }
         }
