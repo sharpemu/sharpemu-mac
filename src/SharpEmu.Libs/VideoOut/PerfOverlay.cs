@@ -6,7 +6,7 @@ using System.Diagnostics;
 namespace SharpEmu.Libs.VideoOut;
 
 // Draws performance statistics without changing guest or presentation timing.
-public static class PerfOverlay
+public static partial class PerfOverlay
 {
     public const int PanelWidth = 390;
     public const int PanelHeight = 194;
@@ -567,7 +567,7 @@ public static class PerfOverlay
     }
 
     // Classic 5x7 column-encoded font (bit 0 = top row), ASCII 32..90.
-    private static ReadOnlySpan<byte> Font =>
+    internal static ReadOnlySpan<byte> Font =>
     [
         0x00, 0x00, 0x00, 0x00, 0x00, // ' '
         0x00, 0x00, 0x5F, 0x00, 0x00, // '!'
