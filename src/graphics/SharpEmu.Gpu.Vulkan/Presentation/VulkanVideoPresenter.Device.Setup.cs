@@ -599,6 +599,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_window is not null)
             {
                 _window.SetTitle(VideoOutBackendServices.GetWindowTitle());
+                PerfOverlay.SetSessionInfo("Vulkan", VideoOutBackendServices.GetWindowTitle());
             }
         }
 
@@ -1812,7 +1813,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
             CreateStagingBuffer((ulong)_extent.Width * _extent.Height * 4);
             CreateFrameUploadBuffers(_stagingSize);
-            CreateOverlayResources();
         }
     }
 }

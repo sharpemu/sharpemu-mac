@@ -98,6 +98,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _swapchainFormat = surfaceFormat.Format;
             _swapchainColorSpace = surfaceFormat.ColorSpace;
             _extent = ChooseExtent(capabilities);
+            UpdateOverlayPixelScale();
             SharpEmu.Libs.Media.MoviePresentationServices.SetPresentationSize(_extent.Width, _extent.Height);
             var presentMode = ChoosePresentMode();
             var imageCount = capabilities.MinImageCount + 1;
@@ -597,6 +598,8 @@ internal static unsafe partial class VulkanVideoPresenter
             _overlayStagingMemory = [];
             _overlayStagingMapped = [];
             _overlayImageInitialized = false;
+            DestroyBlendOverlayResources();
+            _blendOverlayFailed = false;
             _frameInFlight = [];
             _frameTimelines = [];
             _frameGuestImageVersions = [];

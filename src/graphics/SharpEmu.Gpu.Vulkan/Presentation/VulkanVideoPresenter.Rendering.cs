@@ -1538,6 +1538,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Dispatch,
                 _profileComputePipeline, groupsX, groupsY, groupsZ);
             CountDraw();
+            SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.RecordDispatch();
             NoteShaderMayWriteMappedMemory();
         }
 
@@ -1597,6 +1598,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.CmdDispatchIndirect(command, buffer, offset);
             }
             CountDraw();
+            SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.RecordDispatch();
             NoteShaderMayWriteMappedMemory();
             return true;
         }

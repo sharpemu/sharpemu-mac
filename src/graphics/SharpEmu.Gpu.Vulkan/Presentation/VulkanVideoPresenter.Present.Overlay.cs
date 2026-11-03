@@ -14,8 +14,9 @@ internal static unsafe partial class VulkanVideoPresenter
     {
         // This partial manages presentation of the performance overlay.
 
-        // Perf overlay: CPU-rasterized panel copied through per-slot staging
-        // buffers into one image, then blitted onto the swapchain.
+        // Legacy perf overlay: CPU-rasterized opaque panel copied through per-slot staging
+        // buffers into one image, then copied onto the target. Only the HDR/PQ presentation
+        // still uses it; everything else goes through Present.OverlayBlend.cs.
         private Image _overlayImage;
         private DeviceMemory _overlayImageMemory;
         private bool _overlayImageInitialized;
@@ -25,6 +26,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void CreateOverlayResources()
         {
+            if (_overlayImage.Handle != 0)
+            {
+                return;
+            }
+
             const ulong overlayBytes = PerfOverlay.PixelBufferWidth * PerfOverlay.PixelBufferHeight * 4;
             var imageInfo = new ImageCreateInfo
             {
@@ -78,6 +84,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RecordOverlayBlit(uint imageIndex, int frameSlot)
         {
+            CreateOverlayResources();
             var rectangle = PerfOverlay.GetRectangle((int)_extent.Width, (int)_extent.Height);
             if (_overlayImage.Handle == 0 || _overlayStagingMapped.Length <= frameSlot ||
                 rectangle.Width == 0 || rectangle.Height == 0)
