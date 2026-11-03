@@ -38,7 +38,8 @@ public static partial class PerfOverlay
                 var preset = DisplayState.Mode == PerformanceOverlayMode.Minimal
                     ? OverlayLayoutModel.MinimalPreset
                     : OverlayLayoutModel.InspectorPreset;
-                var source = _attachedSource ?? SimulatedOverlayDataSource.FromEnvironment();
+                // SHARPEMU_OVERLAY_SIMULATE=<scenario> replaces the emulator's telemetry with the simulator.
+                var source = _attachedSource ?? SimulatedOverlayDataSource.FromEnvironment() ?? OverlayTelemetry.DataSource;
                 _host = new OverlayHost(source, _attachedFonts, static () => DisplayState.DrawOnScreen,
                     new OverlayLayoutStore(SharpEmuPaths.UserPath("overlay")), preset);
                 return _host;

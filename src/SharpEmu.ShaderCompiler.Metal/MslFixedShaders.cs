@@ -60,6 +60,13 @@ public static class MslFixedShaders
     public static string CreatePresentHdrFragment() => MslTemplates.Render("present_hdr_fragment");
 
     /// <summary>
+    /// The performance overlay's blend stage: overlay_fs passes a premultiplied image through;
+    /// overlay_hdr_fs decodes it to linear SDR white for an extended-range drawable (parameters
+    /// as for the HDR present stage, at buffer 0).
+    /// </summary>
+    public static string CreateOverlayFragment() => MslTemplates.Render("overlay_fragment");
+
+    /// <summary>
     /// Output-free fragment stage for fixed-function depth-only passes: the
     /// guest has no pixel shader, so no color may be written while depth
     /// testing still runs for the translated vertex shader.

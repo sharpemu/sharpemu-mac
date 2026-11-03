@@ -566,6 +566,7 @@ internal static partial class MetalV2Presenter
         {
             using var window = new MacHostWindow(VideoOutBackendServices.GetWindowTitle(), _videoOptions);
             Volatile.Write(ref _hostWindow, window);
+            PerfOverlay.SetSessionInfo("Metal", VideoOutBackendServices.GetWindowTitle());
             var pool = MetalNative.objc_autoreleasePoolPush();
             try
             {
@@ -1129,7 +1130,8 @@ internal static partial class MetalV2Presenter
         out string error,
         string? fragmentSource = null,
         string fragmentEntry = "present_fs",
-        ulong pixelFormat = PixelFormatBgra8Unorm)
+        ulong pixelFormat = PixelFormatBgra8Unorm,
+        bool premultipliedBlend = false)
     {
         pipeline = 0;
         error = string.Empty;
@@ -1183,6 +1185,16 @@ internal static partial class MetalV2Presenter
                 0);
             MetalV2Native.SendVoidValue(
                 attachment, MetalNative.Selector("setPixelFormat:"), (nuint)pixelFormat);
+            if (premultipliedBlend)
+            {
+                // MTLBlendFactorOne = 1, MTLBlendFactorOneMinusSourceAlpha = 5.
+                MetalNative.SendVoidBool(attachment, MetalNative.Selector("setBlendingEnabled:"), true);
+                MetalV2Native.SendVoidValue(attachment, MetalNative.Selector("setSourceRGBBlendFactor:"), 1);
+                MetalV2Native.SendVoidValue(attachment, MetalNative.Selector("setDestinationRGBBlendFactor:"), 5);
+                MetalV2Native.SendVoidValue(attachment, MetalNative.Selector("setSourceAlphaBlendFactor:"), 1);
+                MetalV2Native.SendVoidValue(attachment, MetalNative.Selector("setDestinationAlphaBlendFactor:"), 5);
+            }
+
             nint pipelineError = 0;
             pipeline = MetalNative.Send(
                 device,

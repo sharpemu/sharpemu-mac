@@ -1,0 +1,52 @@
+#include <metal_stdlib>
+
+using namespace metal;
+
+struct PresentIn
+{
+    float4 attr0 [[user(locn0)]];
+};
+
+struct PresentHdrParameters
+{
+    float sdrScale;
+    float pqScale;
+    float headroom;
+    uint pq;
+};
+
+// The performance overlay: a premultiplied-alpha BGRA image the size of the drawable, sampled
+// 1:1 and blended One / OneMinusSourceAlpha over the presented frame.
+fragment float4 overlay_fs(
+    PresentIn in [[stage_in]],
+    texture2d<float> tex0 [[texture(0)]],
+    sampler smp0 [[sampler(0)]])
+{
+    return tex0.sample(smp0, float2(in.attr0.x, 1.0f - in.attr0.y));
+}
+
+static float3 overlay_srgb_to_linear(float3 encoded)
+{
+    encoded = max(encoded, 0.0f);
+    float3 low = encoded / 12.92f;
+    float3 high = powr((encoded + 0.055f) / 1.055f, 2.4f);
+    return select(high, low, encoded <= 0.04045f);
+}
+
+// On an extended-range drawable: un-premultiply, decode sRGB to linear at SDR reference white,
+// premultiply again, so translucent panels blend in linear light like the frame below them.
+fragment float4 overlay_hdr_fs(
+    PresentIn in [[stage_in]],
+    texture2d<float> tex0 [[texture(0)]],
+    sampler smp0 [[sampler(0)]],
+    constant PresentHdrParameters& parameters [[buffer(0)]])
+{
+    float4 color = tex0.sample(smp0, float2(in.attr0.x, 1.0f - in.attr0.y));
+    if (color.a <= 0.0f)
+    {
+        return float4(0.0f);
+    }
+
+    float3 straight = color.rgb / color.a;
+    return float4(overlay_srgb_to_linear(straight) * parameters.sdrScale * color.a, color.a);
+}
