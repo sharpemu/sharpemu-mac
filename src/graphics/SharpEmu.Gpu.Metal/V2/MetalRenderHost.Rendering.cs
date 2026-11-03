@@ -1189,6 +1189,7 @@ internal sealed partial class MetalRenderHost
 
         NoteRecordedWork();
         _renderingActive = true;
+        _renderPassScope++;
         _renderingState = state;
         ForgetEncoderState();
         if (launch is not null)
@@ -1373,7 +1374,11 @@ internal sealed partial class MetalRenderHost
         SnapshotComputeStorage();
     }
 
-    internal nint EnsureComputeEncoder()
+    internal nint EnsureComputeEncoder() => EnsureComputeEncoder(materializeClears: true);
+
+    // materializeClears false: for a transfer that touches no texture, which leaves the clears still waiting for the
+    // pass that absorbs them, as BeginTransfer does for one.
+    private nint EnsureComputeEncoder(bool materializeClears)
     {
         NoteRecordedWork();
         if (_computeEncoder == 0)
@@ -1392,7 +1397,11 @@ internal sealed partial class MetalRenderHost
         // Only the clears this dispatch can see are encoded ahead of it; the rest keep
         // waiting for the pass that absorbs them. A clear is a pass of its own, so one
         // the dispatch sees ends an open compute encoder and this opens another.
-        MaterializePendingClearsForCompute();
+        if (materializeClears)
+        {
+            MaterializePendingClearsForCompute();
+        }
+
         if (_computeEncoder != 0)
         {
             return _computeEncoder;
@@ -1400,11 +1409,17 @@ internal sealed partial class MetalRenderHost
 
         var computeBuffer = EnsureCommandBuffer();
         _computeEncoder = PassProfileEnabled ? PassProfileComputeEncoder(computeBuffer) : 0;
+        _computeEncoderConcurrent = false;
         if (_computeEncoder == 0)
         {
-            _computeEncoder = MetalNative.Send(computeBuffer, SelComputeEncoder);
+            _computeEncoderConcurrent = _concurrentDispatchSeen;
+            _computeEncoder = _computeEncoderConcurrent
+                ? MetalNative.Send(computeBuffer, SelComputeEncoderWithDispatchType, DispatchTypeConcurrent)
+                : MetalNative.Send(computeBuffer, SelComputeEncoder);
             MetalMemoryTelemetry.ComputeEncoders.Add();
         }
+
+        _computeBarrierPending = false;
 
         RetainEncoder(_computeEncoder);
         LabelEncoder(_computeEncoder, "compute");
@@ -1772,7 +1787,7 @@ internal sealed partial class MetalRenderHost
 
     public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
         if (entry.Mesh is { } mesh)
@@ -1824,7 +1839,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         if (_indexBuffer == 0)
         {
             throw Fatal("An indexed draw has no bound index buffer.");
@@ -1886,7 +1901,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndirect(BufferBinding arguments)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         // The guest's argument layout is (vertexCount, instanceCount, firstVertex,
         // firstInstance), which is exactly MTLDrawPrimitivesIndirectArguments.
         ApplyGraphicsState();
@@ -1951,7 +1966,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         if (_indexBuffer == 0)
         {
             throw Fatal("An indexed indirect draw has no bound index buffer.");
@@ -2024,7 +2039,7 @@ internal sealed partial class MetalRenderHost
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         // A persistent-thread kernel spins on memory other work publishes, which can be what a
         // label copy held for the commit writes: the copy would land only after the kernel had
         // waited out its budget for it (UE5's Nanite culling took twice as long per dispatch).
@@ -2055,12 +2070,14 @@ internal sealed partial class MetalRenderHost
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
         ApplyHullLaunch(encoder);
+        OrderGuestDispatch(encoder);
         MetalNative.SendDispatch(
             encoder,
             SelDispatchThreadgroups,
             new MtlSize { Width = Math.Max(groupsX, 1), Height = Math.Max(groupsY, 1), Depth = Math.Max(groupsZ, 1) },
             entry.ThreadsPerThreadgroup);
         CountDraw(started);
+        SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.RecordDispatch();
         ProfileWork(
             entry,
             "dispatch",
@@ -2134,12 +2151,13 @@ internal sealed partial class MetalRenderHost
         // The GPU reads the group counts where the dispatch sits in the stream.
         OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint));
         TraceIndirectDispatch(argumentsAddress);
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = DrawTimingStart();
         var encoder = EnsureComputeEncoder();
         var entry = _pendingComputePipeline ??
             throw Fatal("An indirect dispatch has no bound Metal compute pipeline state.");
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
+        OrderGuestDispatch(encoder);
         MetalV2Native.SendDispatchIndirect(
             encoder,
             SelDispatchIndirect,
@@ -2147,6 +2165,7 @@ internal sealed partial class MetalRenderHost
             (nuint)range.Offset,
             entry.ThreadsPerThreadgroup);
         CountDraw(started);
+        SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.RecordDispatch();
         ProfileWork(
             entry,
             "dispatch-indirect",
@@ -2441,10 +2460,29 @@ internal sealed partial class MetalRenderHost
         NoteRecordedWork();
         OcclusionAuditCountDraw();
         Interlocked.Increment(ref _drawCount);
+        SharpEmu.Libs.VideoOut.PerfOverlay.RecordDraw();
         NotePassDraw(_boundGraphicsPipeline?.Profile);
-        Interlocked.Add(ref _drawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks);
+        if (startedTicks != 0)
+        {
+            Interlocked.Add(ref _drawTicks, (System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks) * (DrawTimingSampleMask + 1));
+        }
+
         _recordedCommands++;
     }
+
+    // The PERF line's draw_ms times one draw or dispatch in SHARPEMU_METAL_V2_DRAW_TIMING_SAMPLE (a power of
+    // two, 16 unless set; 1 times every one) and scales it: two clock reads around every draw were ~2.5% of
+    // Grand Theft Auto V's GPU worker, which bounds its frame rate.
+    private static readonly long DrawTimingSampleMask = ParseDrawTimingSample() - 1;
+    private long _drawTimingTick;
+
+    private static long ParseDrawTimingSample() =>
+        long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DRAW_TIMING_SAMPLE"), out var every) &&
+        every >= 1 && (every & (every - 1)) == 0 ? every : 16;
+
+    // The start of a timed draw, or 0 for one the sample skips (CountDraw).
+    private long DrawTimingStart() =>
+        (++_drawTimingTick & DrawTimingSampleMask) == 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
     // Shader stores become visible to later work. Inside a render pass a scoped
     // barrier is enough; across encoders Metal's own tracking orders the windows.
@@ -2475,9 +2513,93 @@ internal sealed partial class MetalRenderHost
 
     public long RenderPassSerial => _renderPassSerial;
 
-    public void ShaderWriteHazardBarrier() => RecordMemoryBarrier();
+    public void ShaderWriteHazardBarrier()
+    {
+        if (!DeferComputeBarrier())
+        {
+            RecordMemoryBarrier();
+        }
+    }
 
-    public void ShaderAccessBarrier() => RecordMemoryBarrier();
+    public void ShaderAccessBarrier()
+    {
+        if (!DeferComputeBarrier())
+        {
+            RecordMemoryBarrier();
+        }
+    }
+
+    // While a render pass stays open and nothing an attachment acquisition reads has changed (the image
+    // cache's binding epoch counts every such change, and refreshes still owed hold it off), the recorder
+    // gives the next draw into the same targets the attachments the last one acquired
+    // (RenderRecorder.RepeatsPreviousTargets): GTA V acquired the same colour and depth targets for
+    // nearly every one of its ~4,000 draws a frame. SHARPEMU_METAL_V2_DRAW_SCOPE=0 acquires them each time.
+    private static readonly bool DrawScopeEnabled = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DRAW_SCOPE") != "0";
+    private long _renderPassScope;
+
+    public bool ReusesTargetsAcrossPrograms => DrawScopeEnabled;
+
+    public DrawScopeToken DrawScope =>
+        DrawScopeEnabled && _renderingActive && _renderEncoder != 0 && !_imageCache.HasDeferredRefreshes
+            ? new DrawScopeToken(_renderPassScope, (ulong)_imageCache.Epochs.Binding, _imageCache.ImageSetVersion)
+            : default;
+
+    // Once the stream marks a dispatch that may run beside the one before it (DispatchOverlap),
+    // compute encoders open concurrent. Every dispatch then leaves a barrier pending, which the
+    // next one records unless it is marked too: a queue's dispatches with no barrier, wait or
+    // other ordering between them, which the console also runs together. Anything else recorded
+    // into the encoder (a shared transfer, a fill, tessellation factors) orders itself.
+    private bool _concurrentDispatchSeen;
+    private bool _computeEncoderConcurrent;
+    private bool _computeBarrierPending;
+    private bool _nextDispatchMayOverlap;
+    private long _guestDispatchesOverlapped;
+
+    public bool NextDispatchMayOverlap
+    {
+        get => _nextDispatchMayOverlap;
+        set
+        {
+            _nextDispatchMayOverlap = value;
+            _concurrentDispatchSeen |= value;
+        }
+    }
+
+    private bool DeferComputeBarrier()
+    {
+        if (!_computeEncoderConcurrent || _renderEncoder != 0 || _computeEncoder == 0)
+        {
+            return false;
+        }
+
+        _computeBarrierPending = true;
+        return true;
+    }
+
+    private void OrderGuestDispatch(nint encoder)
+    {
+        if (!_computeEncoderConcurrent)
+        {
+            _nextDispatchMayOverlap = false;
+            return;
+        }
+
+        if (_computeBarrierPending)
+        {
+            if (_nextDispatchMayOverlap)
+            {
+                _guestDispatchesOverlapped++;
+            }
+            else
+            {
+                MetalV2Native.SendMemoryBarrierScope(
+                    encoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+            }
+        }
+
+        _computeBarrierPending = true;
+        _nextDispatchMayOverlap = false;
+    }
 
     private void RecordMemoryBarrier() => RecordMemoryBarrier(Mtl.RenderStageVertex | Mtl.RenderStageFragment);
 
@@ -2495,10 +2617,11 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        // Every compute encoder this host opens is serial, where Metal ignores the barrier
-        // (MetalV2Diagnostics.SkipSerialComputeBarriers).
-        if (_computeEncoder != 0 && !MetalV2Diagnostics.SkipSerialComputeBarriers)
+        // A serial compute encoder orders its dispatches already, and Metal ignores the barrier
+        // there (MetalV2Diagnostics.SkipSerialComputeBarriers); a concurrent one needs it.
+        if (_computeEncoder != 0 && (_computeEncoderConcurrent || !MetalV2Diagnostics.SkipSerialComputeBarriers))
         {
+            _computeBarrierPending = false;
             // A compute encoder has no render targets to order against, and Metal
             // rejects a scope that names them: validation fails the assertion rather
             // than ignoring the bit, which ends the process.

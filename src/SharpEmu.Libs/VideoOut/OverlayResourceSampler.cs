@@ -39,6 +39,10 @@ internal readonly record struct ResourceSample(
 /// </summary>
 internal sealed class OverlayResourceSampler
 {
+    /// <summary>What the process memory figure is on this OS, for its label.</summary>
+    public static string FootprintKind =>
+        OperatingSystem.IsMacOS() ? "footprint" : OperatingSystem.IsLinux() ? "RSS" : OperatingSystem.IsWindows() ? "commit" : "private";
+
     private readonly int _guestProcessId;
     private readonly int _selfProcessId;
     private readonly int _logicalCores;
@@ -142,11 +146,11 @@ internal static class ProcessUsageReader
             {
                 var cpu = Environment.CpuUsage;
                 using var self = Process.GetCurrentProcess();
-                return new ProcessUsage((cpu.UserTime + cpu.PrivilegedTime).TotalSeconds, (ulong)self.PrivateMemorySize64);
+                return new ProcessUsage((cpu.UserTime + cpu.PrivilegedTime).TotalSeconds, Footprint(self));
             }
 
             using var process = Process.GetProcessById(processId);
-            return new ProcessUsage(process.TotalProcessorTime.TotalSeconds, (ulong)process.PrivateMemorySize64);
+            return new ProcessUsage(process.TotalProcessorTime.TotalSeconds, Footprint(process));
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException
             or System.ComponentModel.Win32Exception or NotSupportedException)
@@ -154,6 +158,11 @@ internal static class ProcessUsageReader
             return null;
         }
     }
+
+    // Linux: resident set (VmRSS) - PrivateMemorySize64 there is VmData, address space rather than
+    // memory in use. Windows: private bytes (commit), Task Manager's "Commit size".
+    private static ulong Footprint(Process process) =>
+        (ulong)(OperatingSystem.IsLinux() ? process.WorkingSet64 : process.PrivateMemorySize64);
 
     [DllImport("libSystem.B.dylib")]
     private static extern int proc_pid_rusage(int pid, int flavor, ref ulong buffer);

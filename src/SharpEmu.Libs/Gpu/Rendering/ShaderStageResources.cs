@@ -72,6 +72,26 @@ public class ShaderProgramInfo
     public Pipelines.BoundedCopy? BoundedCopy { get; init; }
     public bool StoresUniformValues { get; init; }
     public BufferResourceInfo[] Buffers { get; init; } = [];
+
+    // Whether any buffer is written (BufferResourceInfo.Written), found once: the executor asks
+    // several times a draw, and most programs write none.
+    public bool WritesAnyBuffer
+    {
+        get
+        {
+            var known = Volatile.Read(ref _writesAnyBuffer);
+            if (known == 0)
+            {
+                known = Array.Exists(Buffers, static buffer => buffer.Written) ? 2 : 1;
+                Volatile.Write(ref _writesAnyBuffer, known);
+            }
+
+            return known == 2;
+        }
+    }
+
+    private int _writesAnyBuffer;
+
     public ImageResourceInfo[] Images { get; init; } = [];
     public int SamplerCount { get; init; }
     public uint WaveSize { get; init; } = 64;

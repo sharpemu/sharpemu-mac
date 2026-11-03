@@ -214,6 +214,7 @@ internal sealed partial class MetalRenderHost
         _hasPushData = false;
         // The attachment subresources are recorded as the draw acquires them, which
         // happens inside this preparation.
+        _acquisitionSequence++;
         _attachmentCount = 0;
         _depthAttachmentLevel = 0;
         _depthAttachmentSlice = 0;
@@ -240,6 +241,7 @@ internal sealed partial class MetalRenderHost
         _pendingComputePipeline = null;
         _vertexBufferCount = 0;
         _indexBuffer = 0;
+        _acquisitionSequence++;
         _attachmentCount = 0;
         _depthAttachmentLevel = 0;
         _depthAttachmentSlice = 0;
@@ -306,7 +308,25 @@ internal sealed partial class MetalRenderHost
         public MetalImageCache.TextureMemoStamp Stamp;
     }
 
-    private readonly Dictionary<TextureMemoKey, TextureMemoEntry> _textureMemo = new();
+    private readonly Dictionary<TextureMemoKey, TextureMemoEntry> _textureMemo = new(TextureMemoKeyComparer.Instance);
+
+    // The T# words alone pick the bucket: the record struct's own hash also walks the shape's dozen fields, for
+    // every sampled binding of every draw. Equality still compares the whole key.
+    private sealed class TextureMemoKeyComparer : IEqualityComparer<TextureMemoKey>
+    {
+        public static readonly TextureMemoKeyComparer Instance = new();
+
+        public bool Equals(TextureMemoKey x, TextureMemoKey y) => x.Equals(y);
+
+        public int GetHashCode(TextureMemoKey key)
+        {
+            var hash = ((key.W0 | ((ulong)key.W1 << 32)) * 0x9E3779B97F4A7C15UL) ^
+                ((key.W2 | ((ulong)key.W3 << 32)) * 0xC2B2AE3D27D4EB4FUL) ^
+                ((key.W4 | ((ulong)key.W5 << 32)) * 0x165667B19E3779F9UL) ^
+                ((key.W6 | ((ulong)key.W7 << 32)) * 0x27D4EB2F165667C5UL);
+            return (int)(hash ^ (hash >> 29));
+        }
+    }
     private long _textureMemoHits, _textureMemoLate, _textureMemoMisses, _textureMemoStores;
 
     internal string TakeTextureMemoCounters()
@@ -854,7 +874,12 @@ internal sealed partial class MetalRenderHost
             var written = info.Buffers[index].Written;
             FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
             var range = ResolveStorageBuffer(descriptor.Address, size, written);
-            TraceBufferUser(stage, $"storage[{index}]{(written ? " written" : string.Empty)}", descriptor.Address, size);
+            // The text is built only when the trace is on: this runs per storage buffer per draw.
+            if (_traceBufferUserAddress != 0)
+            {
+                TraceBufferUser(stage, $"storage[{index}]{(written ? " written" : string.Empty)}", descriptor.Address, size);
+            }
+
             TraceRecordChain(stage, index, descriptor.Address, size);
             TraceBufferAtCompletion(stage, index, descriptor.Address, size);
             if (written)
@@ -970,7 +995,11 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = ClampMappedSize(range.Base, range.Size);
-            TraceBufferUser(stage, $"device_address h{range.Handle}{(range.Written ? " written" : string.Empty)}", range.Base, size);
+            if (_traceBufferUserAddress != 0)
+            {
+                TraceBufferUser(stage, $"device_address h{range.Handle}{(range.Written ? " written" : string.Empty)}", range.Base, size);
+            }
+
             if (_traceBigDeviceRangeBytes != 0 &&
                 (_traceDeviceRangeOverlap.Size != 0
                     ? range.Base < _traceDeviceRangeOverlap.Base + _traceDeviceRangeOverlap.Size && _traceDeviceRangeOverlap.Base < range.Base + size

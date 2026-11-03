@@ -168,8 +168,20 @@ public sealed record Gen5MslCodegenOptions(
 
     /// <summary>Experimental removal of pure ALU guards when inactive values cannot
     /// be observed. SHARPEMU_MSL_UNOBSERVED_ALU=1 enables this for wave32 compute
-    /// and single-wave mesh shaders.</summary>
+    /// and single-wave mesh shaders; =all also for pixel, vertex and wave64 compute
+    /// programs (<see cref="UnobservedAluAllStages"/>).</summary>
     public bool UnobservedAluWrites { get; init; }
+
+    /// <summary>Consecutive lane-local VALU instructions under one EXEC share a single
+    /// "if (exec)" block instead of a guard on every write (Gen5MslTranslator.ExecGuard.cs).
+    /// SHARPEMU_MSL_EXEC_RUNS=0 guards each write again.</summary>
+    public bool ExecRuns { get; init; } = true;
+
+    /// <summary>The unobserved-write elision for every stage but multi-wave mesh shaders.
+    /// The analysis follows lanes, not simdgroups: a value an inactive lane never reads
+    /// back after EXEC widens is dead in that lane whether the guest wave is one Apple
+    /// simdgroup or two.</summary>
+    public bool UnobservedAluAllStages { get; init; }
 
     /// <summary>Experimental separation of fused geometry input and output capacities,
     /// with complete wave64 execution. SHARPEMU_MSL_GEOMETRY_CAPACITY=1.</summary>
@@ -192,6 +204,19 @@ public sealed record Gen5MslCodegenOptions(
     /// <summary>Constant-address-space bindings for scalar-only buffers
     /// in mesh shaders without device-memory writes. SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS=0 disables this.</summary>
     public bool ScalarConstantBuffers { get; init; } = true;
+
+    /// <summary><see cref="ScalarConstantBuffers"/> in vertex and pixel shaders too: Black Myth: Wukong +3%,
+    /// Ghost of Tsushima and Grand Theft Auto V unchanged. SHARPEMU_MSL_SCALAR_CONSTANT_STAGES=mesh keeps them
+    /// to mesh shaders; =all extends them to compute shaders (<see cref="ScalarConstantBuffersAllStages"/>, unmeasured).</summary>
+    public bool ScalarConstantBuffersGraphicsStages { get; init; } = true;
+
+    public bool ScalarConstantBuffersAllStages { get; init; }
+
+    /// <summary><see cref="ScalarConstantBuffers"/> in a shader that writes other device resources: the binding
+    /// itself is still read only by scalar loads without GLC/DLC, which do not see the shader's own vector
+    /// stores on the guest either (the scalar cache is not coherent with them).
+    /// SHARPEMU_MSL_SCALAR_CONSTANT_BESIDE_WRITES=0 refuses such shaders.</summary>
+    public bool ScalarConstantBuffersBesideWrites { get; init; } = true;
 
     /// <summary>Read a raw buffer dword (sharpemu_load_dword and the runs sharpemu_load_dwords makes)
     /// at an index clamped into the binding and select zero for one past the end, instead of
@@ -217,6 +242,11 @@ public sealed record Gen5MslCodegenOptions(
     /// culler). SHARPEMU_MSL_MULTIWAVE64=0 bridges only those programs.</summary>
     public bool MultiWaveCompute64 { get; init; } = true;
 
+    /// <summary>With <see cref="MultiWaveCompute64"/>, bridge only a program whose results could tell
+    /// its waves were run as wave32 halves (Gen5MslTranslator.WholeWaves.cs).
+    /// SHARPEMU_MSL_MULTIWAVE64_BY_NEED=0 bridges every such group.</summary>
+    public bool MultiWaveComputeByNeed { get; init; } = true;
+
     /// <summary>In a bridged multi-wave compute group, meet at a threadgroup barrier for the
     /// exchanges of blocks every wave runs alike, instead of at the wave's pair barrier
     /// (Gen5MslTranslator.GroupWaves.cs). SHARPEMU_MSL_GROUP_BARRIERS=0 keeps the pair barriers.</summary>
@@ -226,6 +256,12 @@ public sealed record Gen5MslCodegenOptions(
     /// on EXEC in each half on its own, without exchanging EXEC per trip
     /// (Gen5MslTranslator.GroupWaves.cs). SHARPEMU_MSL_HALF_LOOPS=0 exchanges per trip.</summary>
     public bool HalfLocalWaveLoops { get; init; } = true;
+
+    /// <summary>An image access over many indirect candidates of one class and form reads its
+    /// texture by a runtime element of the class array instead of one case per candidate
+    /// (Gen5MslTranslator.Resources.cs, TryIndexImageCandidates). SHARPEMU_MSL_INDEXED_CANDIDATES=0
+    /// keeps the cases.</summary>
+    public bool IndexedImageCandidates { get; init; } = true;
 
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
@@ -256,7 +292,9 @@ public sealed record Gen5MslCodegenOptions(
         RuntimeDwordFormatLoads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_RUNTIME_DWORD_FORMAT") != "0",
         FusedLaneReads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_READLANE_FUSE") != "0")
     {
-        UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "1",
+        UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") is "1" or "all",
+        UnobservedAluAllStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "all",
+        ExecRuns = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_RUNS") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
         DecodedFormatLoadThreshold = int.TryParse(
@@ -264,14 +302,19 @@ public sealed record Gen5MslCodegenOptions(
                 ? Math.Max(decodedLoads, 0) : 16,
         MeshLdsForwarding = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_FORWARDING") == "1",
         ScalarConstantBuffers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS") != "0",
+        ScalarConstantBuffersGraphicsStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_STAGES") != "mesh",
+        ScalarConstantBuffersAllStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_STAGES") == "all",
+        ScalarConstantBuffersBesideWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BESIDE_WRITES") != "0",
         MeshHotLds = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_HOT_LDS") == "1",
         BranchlessDwordLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_BRANCHLESS_LOADS") != "0",
         StaticScratchSlots = Environment.GetEnvironmentVariable("SHARPEMU_MSL_STATIC_SCRATCH") != "0",
         MeshExitJoin = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_EXIT_JOIN") == "1",
         BridgeComputeWaves = Environment.GetEnvironmentVariable("SHARPEMU_BRIDGE_COMPUTE_WAVES") != "0",
         MultiWaveCompute64 = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MULTIWAVE64") != "0",
+        MultiWaveComputeByNeed = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MULTIWAVE64_BY_NEED") != "0",
         GroupUniformBarriers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GROUP_BARRIERS") != "0",
         HalfLocalWaveLoops = Environment.GetEnvironmentVariable("SHARPEMU_MSL_HALF_LOOPS") != "0",
+        IndexedImageCandidates = Environment.GetEnvironmentVariable("SHARPEMU_MSL_INDEXED_CANDIDATES") != "0",
         MeshDeviceLdsThresholdBytes = uint.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_THRESHOLD"), out var threshold)
                 ? Math.Min(threshold, 16384u) : 12288u,

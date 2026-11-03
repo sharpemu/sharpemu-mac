@@ -253,6 +253,11 @@ public sealed partial class DirectExecutionBackend
 				};
 				Console.Error.WriteLine("[LOADER][INFO]   AV access: " + accessText);
 				Console.Error.WriteLine($"[LOADER][INFO]   AV target: 0x{target:X16}");
+				if (SharpEmu.Libs.Kernel.GuestVaHole.Relocates && SharpEmu.Libs.Kernel.GuestVaHole.Translate(target) != target)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][INFO]   the guest touched 0x{target:X} inside macOS 27's blocked window; relocated mappings live at +0x{SharpEmu.Libs.Kernel.GuestVaHole.Shift:X} (0x{SharpEmu.Libs.Kernel.GuestVaHole.Translate(target):X}): the title keeps an unrelocated pointer");
+				}
 				if (VirtualQuery((void*)target, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0)
 				{
 					Console.Error.WriteLine($"[LOADER][INFO]   AV target region: base=0x{mbi.BaseAddress:X16} size=0x{mbi.RegionSize:X16} state=0x{mbi.State:X08} protect=0x{mbi.Protect:X08}");

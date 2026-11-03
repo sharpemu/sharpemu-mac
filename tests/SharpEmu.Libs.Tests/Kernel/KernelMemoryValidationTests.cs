@@ -199,10 +199,11 @@ public sealed class KernelMemoryValidationTests
     }
 
     [Fact]
-    public void FixedRequestsInTheBlockedHostWindowFailBeforeTouchingState()
+    public void FixedRequestsInTheBlockedHostWindowFailBeforeTouchingStateWithRelocationOff()
     {
         using var test = new BackedKernelMemory();
         GuestVaHole.BlocksFixedOverride = true;
+        GuestVaHole.RelocatesOverride = false;
         try
         {
             test.Allocate(0, 0x4000);
@@ -219,6 +220,113 @@ public sealed class KernelMemoryValidationTests
         finally
         {
             GuestVaHole.BlocksFixedOverride = null;
+            GuestVaHole.RelocatesOverride = null;
+        }
+    }
+
+    private const ulong WindowAddress = 0x30_0000_0000;
+    private const ulong RelocatedAddress = WindowAddress + 0x70_0000_0000;
+
+    [Fact]
+    public void AFixedMapInTheBlockedWindowIsRelocatedAndReportsTheMappedAddress()
+    {
+        using var test = new BackedKernelMemory();
+        GuestVaHole.BlocksFixedOverride = true;
+        GuestVaHole.RelocatesOverride = true;
+        try
+        {
+            test.Allocate(0, 0x4000);
+            Assert.Equal(0, MapDirect(test, 0, 0x4000, WindowAddress, 0x10));
+            Assert.True(test.Context.TryReadUInt64(test.Output, out var address));
+            Assert.Equal(RelocatedAddress, address);
+            Assert.True(test.Memory.IsBackedRange(RelocatedAddress, 0x4000));
+        }
+        finally
+        {
+            GuestVaHole.BlocksFixedOverride = null;
+            GuestVaHole.RelocatesOverride = null;
+        }
+    }
+
+    [Fact]
+    public void UnmapProtectAndQueryAtTheWindowAddressActOnTheRelocatedMapping()
+    {
+        using var test = new BackedKernelMemory();
+        GuestVaHole.BlocksFixedOverride = true;
+        GuestVaHole.RelocatesOverride = true;
+        try
+        {
+            test.Allocate(0, 0x8000);
+            Assert.Equal(0, MapDirect(test, 0, 0x8000, WindowAddress, 0x10));
+
+            Assert.Equal((RelocatedAddress, RelocatedAddress + 0x8000), test.Query(WindowAddress));
+            Assert.Equal((RelocatedAddress, RelocatedAddress + 0x8000), test.Query(WindowAddress + 0x4000));
+
+            test.Context[CpuRegister.Rdi] = WindowAddress;
+            test.Context[CpuRegister.Rsi] = 0x4000;
+            test.Context[CpuRegister.Rdx] = 0x1;
+            Assert.Equal(0, KernelMemoryCompatExports.KernelMprotect(test.Context));
+            Assert.Equal((RelocatedAddress, RelocatedAddress + 0x4000), test.Query(RelocatedAddress));
+
+            Assert.Equal(0, test.Unmap(WindowAddress, 0x8000));
+            Assert.False(test.Memory.IsBackedRange(RelocatedAddress, 0x4000));
+        }
+        finally
+        {
+            GuestVaHole.BlocksFixedOverride = null;
+            GuestVaHole.RelocatesOverride = null;
+        }
+    }
+
+    [Fact]
+    public void ARangeStraddlingTheWindowEdgeIsStillRefusedWhenRelocating()
+    {
+        using var test = new BackedKernelMemory();
+        GuestVaHole.BlocksFixedOverride = true;
+        GuestVaHole.RelocatesOverride = true;
+        try
+        {
+            test.Allocate(0, 0x8000);
+            Assert.Equal(Enomem, MapDirect(test, 0, 0x8000, 0x6F_FFFF_C000, 0x10));
+            Assert.False(GuestVaHole.TryTranslateRange(0x6F_FFFF_C000, 0x8000, out _));
+            Assert.True(GuestVaHole.TryTranslateRange(0x6F_FFFF_C000, 0x4000, out var translated));
+            Assert.Equal(0xDF_FFFF_C000UL, translated);
+        }
+        finally
+        {
+            GuestVaHole.BlocksFixedOverride = null;
+            GuestVaHole.RelocatesOverride = null;
+        }
+    }
+
+    [Fact]
+    public void KernelChosenSearchesStayOutOfTheShadowOfTheWindowWhileThereIsRoomElsewhere()
+    {
+        using var test = new BackedKernelMemory();
+        GuestVaHole.SkipsSearchOverride = true;
+        GuestVaHole.BlocksFixedOverride = true;
+        GuestVaHole.RelocatesOverride = true;
+        try
+        {
+            // A hint ending inside the shadow [0x80_0000_0000, 0xE0_0000_0000) moves above it.
+            Assert.True(test.Context.TryWriteUInt64(test.Output, 0x7F_FFFF_C000));
+            test.Context[CpuRegister.Rdi] = test.Output;
+            test.Context[CpuRegister.Rsi] = 0x8000;
+            test.Context[CpuRegister.Rdx] = 0;
+            test.Context[CpuRegister.Rcx] = 0;
+            Assert.Equal(0, KernelRuntimeCompatExports.KernelReserveVirtualRange(test.Context));
+            Assert.True(test.Context.TryReadUInt64(test.Output, out var address));
+            Assert.False(GuestVaHole.OverlapsShadow(address, 0x8000));
+            Assert.Equal(0xE0_0000_0000UL, address);
+            Assert.Equal(0xE0_0000_0000UL, GuestVaHole.SkipForSearch(0x7F_FFFF_C000, 0x8000));
+            // With no other room the search may use the shadow after all.
+            Assert.Equal(0x7F_FFFF_C000UL, GuestVaHole.SkipForSearch(0x7F_FFFF_C000, 0x8000, avoidShadow: false));
+        }
+        finally
+        {
+            GuestVaHole.SkipsSearchOverride = null;
+            GuestVaHole.BlocksFixedOverride = null;
+            GuestVaHole.RelocatesOverride = null;
         }
     }
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Rendering;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
@@ -287,8 +288,21 @@ public sealed partial class GpuCommandInterpreter
 
     internal void DispatchDirect(uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
-        _host.DispatchDirect(SubmitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
+        var initiator = _dispatchMayOverlap ? dispatchInitiator | RenderExecutor.DispatchMayOverlapBit : dispatchInitiator;
+        _host.DispatchDirect(SubmitId, groupsX, groupsY, groupsZ, initiator, indirectArgumentsAddress);
+        _dispatchMayOverlap = TrackDispatchOverlap;
         SuspendIfPipelineNotReady();
+    }
+
+    // A dispatch reached from the one before it through packets DispatchOverlap.Keeps may run beside it.
+    private bool _dispatchMayOverlap;
+    private int _trackDispatchOverlap = -1;
+
+    /// <summary>Whether dispatches are marked when they may overlap (<see cref="DispatchOverlap.Enabled"/> unless set).</summary>
+    internal bool TrackDispatchOverlap
+    {
+        get => _trackDispatchOverlap >= 0 ? _trackDispatchOverlap == 1 : (_trackDispatchOverlap = DispatchOverlap.Enabled ? 1 : 0) == 1;
+        set => _trackDispatchOverlap = value ? 1 : 0;
     }
 
     // A draw or dispatch whose pipeline is still compiling runs again from this same

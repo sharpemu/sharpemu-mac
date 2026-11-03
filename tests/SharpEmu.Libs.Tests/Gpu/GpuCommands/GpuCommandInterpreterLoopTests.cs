@@ -211,6 +211,49 @@ public sealed class GpuCommandInterpreterLoopTests
         Assert.DoesNotContain(Command, runner.Host.OperandReads);
     }
 
+    // The command processor fetches a called buffer ahead of the work before it: a call reads behind
+    // that work again only once a packet orders it (here PFP_SYNC_ME), not after state and draws.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CallsReadBehindEarlierWorkAgainOnlyAfterAnOrderingPacket(bool ordered)
+    {
+        var runner = new StreamRunner();
+        var second = Nested + 0x100;
+        runner.Load(Nested, CreateInstanceCountPacket(5));
+        runner.Host.WriteWords(second, CreateInstanceCountPacket(6));
+        var between = ordered ? StreamRunner.Packet(PacketOpcode.PfpSyncMe, 0) : CreateInstanceCountPacket(3);
+
+        var progress = runner.Run(IndirectBuffer(Nested, 2), between, IndirectBuffer(second, 2));
+
+        Assert.Equal(SubmissionProgress.Complete, progress);
+        Assert.Equal(6u, runner.Interpreter.InstanceCount);
+        Assert.Equal(ordered ? [Nested, second] : [Nested], runner.Host.OperandReads);
+    }
+
+    // A release signals once the work before it is done and a rewind waits for the CPU; the command
+    // processor waits for neither, so the next call stays unordered. A wait, a cache acquire or a
+    // partial flush orders it.
+    [Theory]
+    [InlineData(PacketOpcode.Nop, PacketCustomCode.ReleaseMemory, true)]
+    [InlineData(PacketOpcode.Nop, PacketCustomCode.DrawIndexAuto, true)]
+    [InlineData(PacketOpcode.ReleaseMemory, 0u, true)]
+    [InlineData(PacketOpcode.EventWriteEndOfPipe, 0u, true)]
+    [InlineData(PacketOpcode.DrawIndexAuto, 0u, true)]
+    [InlineData(PacketOpcode.Rewind, 0u, true)]
+    [InlineData(PacketOpcode.Nop, PacketCustomCode.WaitMemory32, false)]
+    [InlineData(PacketOpcode.Nop, PacketCustomCode.AcquireMemory, false)]
+    [InlineData(PacketOpcode.WaitRegisterMemory, 0u, false)]
+    [InlineData(PacketOpcode.AcquireMemory, 0u, false)]
+    [InlineData(PacketOpcode.EventWrite, 0u, false)]
+    [InlineData(PacketOpcode.PfpSyncMe, 0u, false)]
+    [InlineData(PacketOpcode.WriteData, 0u, false)]
+    [InlineData(PacketOpcode.DmaData, 0u, false)]
+    public void OnlyPacketsThatMakeTheCommandProcessorWaitOrderACall(uint opcode, uint customCode, bool unordered)
+    {
+        Assert.Equal(unordered, GpuCommandInterpreter.LeavesCallReadUnordered(opcode, PacketHeader.Make(3, opcode, customCode)));
+    }
+
     [Fact]
     public void IndirectBufferPaddingAndRingChunkAdvance()
     {

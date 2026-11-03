@@ -56,6 +56,27 @@ public sealed class Gen5MslLaneSlotLdsTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void AnM0SetInAnEarlierBlockStillGivesSlots()
+    {
+        // s_branch to the next instruction: the spills sit in a block of their own, after the one that set M0.
+        var words = SpillWords(MovkM0Zero).ToList();
+        words.Insert(1, 0xBF820000);
+        var source = Compile([.. words], structured: true).Source;
+        Assert.Contains("    thread uint sharpemu_lds[2];", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_lane << 2u", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PathsThatDisagreeOnM0KeepTheFullArray()
+    {
+        // s_cbranch_scc1 over a second M0 write: the spill block is reached with M0 = 0 or M0 = 64.
+        var words = SpillWords(MovkM0Zero).ToList();
+        words.InsertRange(1, [0xBF850001, 0xB07C0040]);
+        var source = Compile([.. words], structured: true).Source;
+        Assert.Contains("    thread uint sharpemu_lds[2048];", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AnM0TheBlockDidNotSetKeepsTheFullArray()
     {
         var source = Compile(SpillWords(MovM0FromS0), structured: true).Source;

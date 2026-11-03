@@ -116,6 +116,10 @@ public sealed record LaunchConfiguration(EffectiveLaunchSettings Settings, IRead
             // The GUI mirrors stdout itself; avoid a second file mirror in its child.
             "--no-log-file",
         };
+        if (!string.IsNullOrWhiteSpace(settings.OverlayPreset))
+        {
+            args.Add($"--overlay-preset={settings.OverlayPreset.Trim()}");
+        }
         if (!macOS) args.Add($"--refresh-rate={settings.RefreshRate.ToString(CultureInfo.InvariantCulture)}");
         args.Add(Path.GetFullPath(gamePath));
         return args;

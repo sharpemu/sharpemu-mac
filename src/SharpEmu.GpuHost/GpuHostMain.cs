@@ -73,6 +73,8 @@ public static class GpuHostMain
 
         // The window title's CPU and memory cover the guest process as well as this one.
         PerfOverlay.SetGuestProcessId(parent);
+        // The guest's font services live in the other process; the overlay draws its text here.
+        PerfOverlay.SetFontFactory(new SharpEmu.Fonts.CoreTextMac.CoreTextFontFactory());
 
         // Before anything can post the window: the presenter runs it on this thread.
         HostMainThread.Enable();

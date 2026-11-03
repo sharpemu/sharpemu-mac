@@ -138,7 +138,7 @@ internal sealed partial class MetalRenderHost
 
         System.Runtime.InteropServices.MemoryMarshal.AsBytes(_labelScatterList.AsSpan(0, count)).CopyTo(payload);
         var pipeline = LabelScatterPipeline();
-        EncodeLabelBarrier(commandBuffer);
+        EncodeLabelBarrier(commandBuffer, copies);
         var encoder = RetainEncoder(MetalNative.Send(commandBuffer, SelComputeEncoder));
         if (encoder == 0)
         {

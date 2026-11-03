@@ -721,7 +721,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         value[..bytes].CopyTo(payload);
 
         var copy = new DeferredLabelCopy(
-            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, bytes, write.Destination);
+            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, bytes, write.Destination,
+            CpuVisible: !LabelBarrierByCacheAction || WritesBackForCpu(write.Kind));
         var serial = EncodeOrderedCopy(in copy, write.Destination,
             CommandProcessorWriteHistory.Enabled ? GpuClobberDiagnostics.LandedKind(write.Kind) : null,
             bytes == sizeof(uint) ? (uint)write.Value : write.Value,
@@ -1401,13 +1402,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // A label copy waiting for a boundary between encoders. Its staging allocation lives
     // in this submission's ring, so the copy has to be encoded before the command buffer
     // is committed, which is the last boundary there is.
+    // CpuVisible false: an end-of-pipe label the guest asked for with no cache action, which on the console writes
+    // nothing back for the CPU either; its copy only has to be ordered after the work on the GPU (EncodeLabelBarrier).
     private readonly record struct DeferredLabelCopy(
         nint StagingBuffer,
         ulong StagingOffset,
         nint DestinationBuffer,
         ulong DestinationOffset,
         int Bytes,
-        ulong GuestAddress);
+        ulong GuestAddress,
+        bool CpuVisible = true);
 
     private readonly List<DeferredLabelCopy> _deferredLabelCopies = [];
     private bool _encodingDeferredLabels;
@@ -1573,15 +1577,73 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // thread freed a block that way and its free-list link became feedback-buffer words
     // (0x0400E00EFFFFFFFF). Signalling an MTLSharedEvent - one the CPU can observe - makes
     // the earlier stores visible first; none landed late in hundreds of tries.
-    private void EncodeLabelBarrier(nint commandBuffer)
+    private void EncodeLabelBarrier(nint commandBuffer, ReadOnlySpan<DeferredLabelCopy> copies)
     {
         if (!LabelBarrierEnabled)
         {
             return;
         }
 
-        EncodeEventBarrier(commandBuffer);
+        var cpuVisible = !LabelBarrierByCacheAction;
+        foreach (ref readonly var copy in copies)
+        {
+            cpuVisible |= copy.CpuVisible;
+        }
+
+        if (cpuVisible)
+        {
+            EncodeEventBarrier(commandBuffer);
+        }
+        else
+        {
+            EncodeDeviceEventBarrier(commandBuffer);
+        }
+
         Interlocked.Increment(ref _labelBarriers);
+    }
+
+    // SHARPEMU_METAL_V2_LABEL_BARRIER_BY_CACHE_ACTION (on; =0 off) orders a batch of label copies none of which the
+    // guest asked to be written back for the CPU (RELEASE_MEM / EVENT_WRITE_EOP with no cache action) behind a
+    // device-only MTLEvent: the copies still wait for all the work before them, without the shared event's flush
+    // for the CPU. Ghost of Tsushima lands ~450 label batches a second for its own dispatches to read; with no
+    // shared-event barrier at all it ran ~9% faster (12.46 vs 11.46 fps).
+    private static readonly bool LabelBarrierByCacheAction =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABEL_BARRIER_BY_CACHE_ACTION") != "0";
+
+    // A label that raises an interrupt wakes the CPU on it, so it keeps the shared event whatever its cache action.
+    private static bool WritesBackForCpu(EndOfPipeWriteKind kind) => kind is not
+        (EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.Write64 or EndOfPipeWriteKind.ClockWrite);
+
+    private nint _deviceBarrierEvent;
+    private ulong _deviceBarrierValue;
+    private nint _deviceBarrierCommandBuffer;
+    private ulong _deviceBarrierSerial;
+
+    // EncodeEventBarrier's ordering without its visibility: one device-only event per command buffer.
+    private void EncodeDeviceEventBarrier(nint commandBuffer)
+    {
+        if (_deviceBarrierEvent == 0 || commandBuffer != _deviceBarrierCommandBuffer)
+        {
+            ReleaseCompletedLabelBarrierEvents();
+            if (_deviceBarrierEvent != 0)
+            {
+                _retiredLabelBarrierEvents.Add((_deviceBarrierEvent, _deviceBarrierSerial));
+            }
+
+            _deviceBarrierEvent = MetalNative.Send(_device, SelNewEvent);
+            if (_deviceBarrierEvent == 0)
+            {
+                throw GpuFatal.Fatal("Metal v2 needs an MTLEvent to order label copies after the work before them.");
+            }
+
+            _deviceBarrierCommandBuffer = commandBuffer;
+            _deviceBarrierSerial = SubmissionSerial;
+            _deviceBarrierValue = 0;
+        }
+
+        var value = ++_deviceBarrierValue;
+        MetalV2Native.SendEventValue(commandBuffer, SelEncodeSignalEvent, _deviceBarrierEvent, value);
+        MetalV2Native.SendEventValue(commandBuffer, SelEncodeWaitForEvent, _deviceBarrierEvent, value);
     }
 
     // Work encoded after this point starts only when everything encoded before it in the
@@ -1648,7 +1710,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             return;
         }
 
-        EncodeLabelBarrier(commandBuffer);
+        EncodeLabelBarrier(commandBuffer, copies);
         var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)

@@ -97,6 +97,20 @@ public sealed partial class DirectExecutionBackend
 				}
 			}
 
+			// The performance overlay: which host threads run guest code, and (only while a
+			// widget shows it) what each import costs. One thread-static read when off.
+			SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.NoteGuestThread();
+			if (SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.IsHleTimingActive)
+			{
+				var started = System.Diagnostics.Stopwatch.GetTimestamp();
+				var timedResult = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
+				directExecutionBackend.ClearActiveImportIndex();
+				SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.RecordHleCall(
+					importIndex, started, System.Diagnostics.Stopwatch.GetTimestamp());
+				CompleteImportContextTransfer(threadState, transferStubAddress);
+				return timedResult;
+			}
+
 			var result = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
 			directExecutionBackend.ClearActiveImportIndex();
 			CompleteImportContextTransfer(threadState, transferStubAddress);

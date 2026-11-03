@@ -11,7 +11,13 @@ public static partial class Gen5MslTranslator
     {
         private bool IsScalarConstantBuffer(int binding)
         {
-            if (!_options.ScalarConstantBuffers || !_options.RawDwordAccess || _stage != Gen5MslStage.Mesh)
+            if (!_options.ScalarConstantBuffers || !_options.RawDwordAccess ||
+                _stage switch
+                {
+                    Gen5MslStage.Mesh => false,
+                    Gen5MslStage.Vertex or Gen5MslStage.Pixel => !_options.ScalarConstantBuffersGraphicsStages,
+                    _ => !_options.ScalarConstantBuffersAllStages,
+                })
                 return false;
 
             // SMEM coherence is carried by the instruction control, not consistently
@@ -21,10 +27,15 @@ public static partial class Gen5MslTranslator
                 return false;
 
             // A store through another descriptor, a flat address or an image can alias
-            // this binding. Refuse the entire shader when any device resource is written.
-            // LDS and private scratch cannot alias a host-bound buffer.
+            // this binding, but a scalar load without GLC/DLC does not see such a store on the
+            // guest either. ScalarConstantBuffersBesideWrites off refuses the entire shader when
+            // any device resource is written. LDS and private scratch cannot alias a host-bound buffer.
+            // A shader that invalidates its scalar cache (S_DCACHE_INV, S_GL1_INV) may read its own
+            // stores back through scalar loads, which a constant binding would not see.
             if (_request.Memory.Entries.Any(entry => entry.Access is MemoryAccess.Write or MemoryAccess.Atomic &&
-                entry.Kind is not (MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch)))
+                    entry.Kind is not (MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch)) &&
+                (!_options.ScalarConstantBuffersBesideWrites ||
+                 _request.Program.Instructions.Any(instruction => instruction.Opcode is "SDcacheInv" or "SGl1Inv")))
                 return false;
 
             var uses = _request.Memory.Entries.Where(entry => !entry.PlanningOnly &&

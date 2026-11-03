@@ -13,6 +13,13 @@ using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
+/// <summary>The recorder's counters for a host's periodic report.</summary>
+public static class RenderRecorderStatistics
+{
+    /// <summary>Draws given the previous draw's attachments, and draws refused that, since the last call.</summary>
+    public static string TakeInPlaceReport() => RenderRecorder.TakeInPlaceReport();
+}
+
 internal sealed partial class RenderRecorder : IResolvedCommandSink
 {
     private const uint TransientIndexAlignment = 16;
@@ -31,9 +38,14 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private long _sequence;
     private static readonly ThreadCounter _inPlaceDraws = new();
     private static readonly ThreadCounter _inPlaceRefused = new();
+    private static readonly ThreadCounter _pipelineKept = new();
+    private static readonly ThreadCounter _pipelineMissed = new();
+    private static readonly ThreadCounter _pipelineSame = new();
 
-    public static string TakeInPlaceReport() => FormattableString.Invariant(
-        $"in_place={_inPlaceDraws.Take()} in_place_refused={_inPlaceRefused.Take()}");
+    public static string TakeInPlaceReport() =>
+        FormattableString.Invariant($"in_place={_inPlaceDraws.Take()} in_place_refused={_inPlaceRefused.Take()} ") +
+        FormattableString.Invariant($"pipe_kept={_pipelineKept.Take()} ") +
+        FormattableString.Invariant($"pipe_missed={_pipelineMissed.Take()} pipe_same={_pipelineSame.Take()}");
 
     private sealed class InPlaceDraw
     {
@@ -57,13 +69,22 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         public RenderingState Rendering;
     }
 
+    // The draw renders into what the previous one did. The target version covers every register the
+    // targets and their acquisition read (RenderExecutor.ResolveTargetLayout); with the wide reuse the
+    // rest of the context and the programs may differ, since what the pixel program drops is checked
+    // again after it is dropped (TryRestoreAttachments).
     private bool RepeatsPreviousTargets(ResolvedDraw record, in DrawState state, DrawScopeToken token)
     {
         var kept = _inPlace;
-        return kept.Valid && token.IsActive && token == kept.Token && !ImageClearTrace.Enabled && record.ContextStamp == kept.ContextStamp &&
-            record.DynamicStamp == kept.DynamicStamp && record.TargetVersion == kept.TargetVersion && state.PixelActive == kept.PixelActive &&
-            state.Programs.Vertex.Id == kept.VertexProgram && state.Programs.Pixel.Id == kept.PixelProgram && state.ColorCount == kept.FoundCount &&
-            state.DepthResolved == kept.DepthResolved;
+        if (!kept.Valid || !token.IsActive || token != kept.Token || ImageClearTrace.Enabled || record.TargetVersion != kept.TargetVersion ||
+            state.PixelActive != kept.PixelActive || state.ColorCount != kept.FoundCount || state.DepthResolved != kept.DepthResolved)
+        {
+            return false;
+        }
+
+        return (RenderExecutor.WideTargetReuse && _host.ReusesTargetsAcrossPrograms) ||
+            (record.ContextStamp == kept.ContextStamp && record.DynamicStamp == kept.DynamicStamp &&
+             state.Programs.Vertex.Id == kept.VertexProgram && state.Programs.Pixel.Id == kept.PixelProgram);
     }
 
     private void RestoreFoundTargets(ref DrawState state)
@@ -103,6 +124,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             state.Colors[index].View = kept.Views[index];
         }
 
+        _host.KeepAttachments();
         if (state.Depth.HasTarget)
         {
             state.Depth.View = kept.DepthView;
@@ -131,7 +153,10 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     {
         var kept = _inPlace;
         kept.Token = _host.DrawScope;
-        kept.Valid = kept.Token.IsActive;
+        // A draw whose attachments carried a clear is not kept: the clear was this pass's load action,
+        // and the next draw acquiring the same targets finds it consumed. Handing that draw the clear
+        // again restarted the pass with it (Metal: GTA V's render passes doubled).
+        kept.Valid = kept.Token.IsActive && !CarriesClear(in state.Rendering);
         kept.ContextStamp = record.ContextStamp;
         kept.DynamicStamp = record.DynamicStamp;
         kept.TargetVersion = record.TargetVersion;
@@ -148,6 +173,24 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         kept.DepthView = state.Depth.View;
         kept.DepthMetadataClear = state.Depth.MetadataClear;
         kept.Rendering = state.Rendering;
+    }
+
+    private static bool CarriesClear(in RenderingState rendering)
+    {
+        if (rendering.DepthStencilAttachment.DepthClear || rendering.DepthStencilAttachment.StencilClear)
+        {
+            return true;
+        }
+
+        for (var index = 0; index < rendering.ColorAttachmentCount; index++)
+        {
+            if (rendering.ColorAttachments[index].IsClear)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private struct VertexBufferRange
@@ -206,7 +249,17 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             SetDebugInformation(in record.Debug);
         }
 
-        var state = record.State;
+        // A tessellated draw whose executor handed it over to be recorded later: its hull kernel first, where
+        // the direct recorder would have run it (RenderExecutor.DrawTessellatedInstances).
+        if (record.TessellationHull is { } hull && !RunTessellationHull(hull))
+        {
+            record.Kind = ResolvedDrawKind.Skipped;
+            record.ResetBindings = true;
+        }
+
+        // By reference: DrawState holds arrays of references, and a copy per draw was ~2.5% of GTA V's GPU
+        // worker. Nothing reads the record's state after it is recorded; the pool's next use begins it again.
+        ref var state = ref record.State;
         if (record.Kind != ResolvedDrawKind.Draw)
         {
             _inPlace.Valid = false;
@@ -555,9 +608,8 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         // Nothing after the pipeline touches guest memory. A draw that may be left out while its
         // pipeline compiles is left out here, before anything of it is recorded: what came before
         // only bound state the record's ResetBindings drops, and uploaded what it reads.
-        var mayLeaveOut = MayLeaveOutWhileCompiling(record, ref state, vertexInput.Stage, pixelBindings is not null ? pixelInput.Stage : null,
-            indirectMesh is not null);
-        if (!ResolvePipeline(record, ref state, vertexInput, state.PixelActive ? pixelInput : null, mayLeaveOut, out var pipeline))
+        if (!ResolvePipeline(record, ref state, vertexInput, state.PixelActive ? pixelInput : null,
+                pixelBindings is not null ? pixelInput.Stage : null, indirectMesh is not null, out var pipeline))
         {
             _inPlace.Valid = false;
             IndexedDrawTrace.Write(record.IndexedTrace, "pipeline-compiling", submitId, record.PacketAddress);
@@ -1029,9 +1081,10 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     }
 
     // The draw's pipeline, kept from the previous draw when nothing it is made from changed. False
-    // when mayLeaveOut and the host is still compiling it: the draw is left out.
+    // when the host is still compiling it and the draw may be left out meanwhile
+    // (MayLeaveOutWhileCompiling, asked only then: a ready pipeline makes the answer moot).
     private bool ResolvePipeline(ResolvedDraw record, ref DrawState state, VertexInputInfo vertexInput, PixelInputInfo? pixelInput,
-        bool mayLeaveOut, out PipelineHandle pipeline)
+        ShaderStageResources? pixelStage, bool indirectMesh, out PipelineHandle pipeline)
     {
         var boundSlots = 0u;
         for (var index = 0; index < state.ColorCount; index++)
@@ -1055,13 +1108,33 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             record.PrimitiveRestart,
             state.Programs.DisableBlending);
         var kept = _pipeline;
-        if (kept.Valid && kept.Key == key && kept.Rendering.Equals(state.Rendering))
+        if (kept.Valid && (PipelineKey.ByContent
+                ? kept.Key.SamePipelineAs(in key) && PipelineKey.SamePipelineRendering(in kept.Rendering, in state.Rendering, state.ColorCount)
+                : kept.Key == key && kept.Rendering.Equals(state.Rendering)))
         {
+            _pipelineKept.Increment();
             pipeline = kept.Handle;
             return true;
         }
 
-        if (mayLeaveOut)
+        _pipelineMissed.Increment();
+        if (_pipelines.TryFindGraphicsPipeline(
+                DrawState.BoundColors(ref state),
+                in state.Depth,
+                vertexInput,
+                pixelInput,
+                record.Context,
+                in state.Rendering,
+                record.Topology,
+                record.PrimitiveRestart,
+                state.Programs.DisableBlending,
+                state.Programs.Vertex,
+                state.Programs.Pixel,
+                out pipeline))
+        {
+            // Built already: whether the draw could have been left out does not matter.
+        }
+        else if (MayLeaveOutWhileCompiling(record, ref state, vertexInput.Stage, pixelStage, indirectMesh))
         {
             if (!_pipelines.TryCreateGraphicsPipeline(
                     DrawState.BoundColors(ref state),
@@ -1095,6 +1168,11 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                 state.Programs.DisableBlending,
                 state.Programs.Vertex,
                 state.Programs.Pixel);
+        }
+
+        if (kept.Valid && kept.Handle.Equals(pipeline))
+        {
+            _pipelineSame.Increment();
         }
 
         kept.Key = key;

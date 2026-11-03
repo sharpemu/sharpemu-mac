@@ -155,6 +155,38 @@ internal sealed partial class MetalRenderHost
             new GpuImageHandle((ulong)texture), image.Shape.SampleCount, metadataClear);
     }
 
+    // What the last draw that acquired attachments recorded about them: each draw's preparation
+    // starts the per-draw record over (BeginPreparation), and a draw given the same attachments
+    // without acquiring them (KeepAttachments) takes it back, so the open pass still sees them as
+    // its own (CanContinuePass). The per-attachment arrays keep their values until an acquisition
+    // overwrites them.
+    private long _acquisitionSequence;
+    private long _keptAcquisition;
+    private int _keptAttachmentCount;
+    private uint _keptDepthLevel;
+    private uint _keptDepthSlice;
+
+    public void KeepAttachments()
+    {
+        _attachmentCount = _keptAttachmentCount;
+        _depthAttachmentLevel = _keptDepthLevel;
+        _depthAttachmentSlice = _keptDepthSlice;
+    }
+
+    private void NoteAttachmentRecorded()
+    {
+        if (_keptAcquisition != _acquisitionSequence)
+        {
+            _keptAcquisition = _acquisitionSequence;
+            _keptDepthLevel = 0;
+            _keptDepthSlice = 0;
+        }
+
+        _keptAttachmentCount = _attachmentCount;
+        _keptDepthLevel = _depthAttachmentLevel;
+        _keptDepthSlice = _depthAttachmentSlice;
+    }
+
     // A created texture view starts at its own level zero; the image texture keeps
     // the real level and slice, so the render pass needs to know which it got.
     private void RecordAttachmentSubresource(
@@ -192,6 +224,7 @@ internal sealed partial class MetalRenderHost
                 _attachmentCount++;
             }
 
+            NoteAttachmentRecorded();
             return;
         }
 
@@ -203,6 +236,7 @@ internal sealed partial class MetalRenderHost
         _depthAttachmentTexture = texture;
         _depthAttachmentRealLevel = view.BaseLevel;
         _depthAttachmentRealLayer = view.BaseLayer;
+        NoteAttachmentRecorded();
     }
 
     public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageAspect writeAspects)

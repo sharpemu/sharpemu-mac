@@ -92,11 +92,28 @@ public static partial class Gen5MslTranslator
 
         options ??= Gen5MslCodegenOptions.FromEnvironment;
         var context = new CompilationContext(request, options);
-        if (!context.TryCompile(out shader, out error) &&
-            (!context.HalfLocalLoopExchanged ||
-             !new CompilationContext(request, options with { HalfLocalWaveLoops = false }).TryCompile(out shader, out error)))
+        var compiled = context.TryCompile(out shader, out error);
+        if (!compiled && context.HalfLocalLoopExchanged)
         {
-            return false;
+            options = options with { HalfLocalWaveLoops = false };
+            context = new CompilationContext(request, options);
+            compiled = context.TryCompile(out shader, out error);
+        }
+
+        if (!compiled)
+        {
+            // A run of VALU writes emitted something that is not lane-local; the program is
+            // translated again with a guard on every write.
+            if (!context.ExecRunRefused)
+            {
+                return false;
+            }
+
+            Interlocked.Increment(ref _execRunsRefused);
+            if (!new CompilationContext(request, options with { ExecRuns = false }).TryCompile(out shader, out error))
+            {
+                return false;
+            }
         }
 
         Gen5MslDump.Write(request, shader);
@@ -118,6 +135,10 @@ public static partial class Gen5MslTranslator
         // The handle table and entry index of the bindless access being emitted, which its
         // constant variant cases read their texture through.
         private (string Table, string Index)? _bindlessAccess;
+        // The runtime class-array element and image resource of an indexed candidate access
+        // (TryIndexImageCandidates), which replace the constant case's.
+        private string? _indexedImageElement;
+        private string? _indexedImageResource;
         private bool _hasGlobalDataShare;
         private bool _hasDeviceAddressTable;
         private bool _hasFlattenedTable;
@@ -555,6 +576,18 @@ public static partial class Gen5MslTranslator
             }
 
             return $"({index}u < {ResourcesName}.shader_data_words ? {ResourcesName}.shader_data[{index}u] : 0u)";
+        }
+
+        // The same at a runtime index (a uint local) into the block.
+        private string ShaderDataDword(string index)
+        {
+            var layout = _request.Bindings;
+            if (layout.UsesPushData)
+            {
+                return $"{PushDataName}[{layout.PushDataStartDword}u + {index}]";
+            }
+
+            return $"({index} < {ResourcesName}.shader_data_words ? {ResourcesName}.shader_data[{index}] : 0u)";
         }
 
         private string ComputeThreadLimit(uint component)
@@ -2168,6 +2201,88 @@ public static partial class Gen5MslTranslator
             return false;
         }
 
+        // Indirect candidates that differ only in their element of one class array (same view
+        // class, swizzle, emulated compare, packed format and LOD statistics) are one access
+        // through a runtime element: the selector is always a candidate (SelectIndirectCandidate
+        // maps a missing key to candidate 0), so each lane reads the texture its case would.
+        // Sets _indexedImageElement (and _indexedImageResource for the statistics field).
+        // A runtime texture element costs more than a short case chain (shader bench, Ghost: 5
+        // cases up to +36%, 9-13 cases -11 to -14%, 130 cases -20%), so short lists keep their cases.
+        private const int IndexedCandidateMinimum = 8;
+
+        private bool TryIndexImageCandidates(Gen5ShaderInstruction instruction, string selector, IReadOnlyList<(uint Resource, uint Element)> elements)
+        {
+            var request = _request;
+            if (!_options.IndexedImageCandidates || elements.Count < IndexedCandidateMinimum ||
+                !request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) ||
+                !request.IndirectRootByMemoryIndex.ContainsKey(memoryIndex))
+            {
+                return false;
+            }
+
+            var info = request.Resources.Info;
+            var entry = request.Memory[memoryIndex];
+            var imageInfo = info.Images[(int)entry.Resource];
+            if (imageInfo.BindlessSlot != DescriptorConstants.NoIndex || imageInfo.IndirectSearchIterations == 0 ||
+                (imageInfo.MipMode == ImageMipMode.DynamicStorage && Gen5ImageOpcodes.Has(instruction.Opcode, Gen5ImageOp.Mip)))
+            {
+                return false;
+            }
+
+            var first = info.Images[(int)elements[0].Resource];
+            var kind = ImageDescriptorBinding.ForImage(first);
+            foreach (var (resource, _) in elements)
+            {
+                var candidate = info.Images[(int)resource];
+                if (ImageDescriptorBinding.ForImage(candidate) != kind || candidate.ShaderSwizzle != first.ShaderSwizzle ||
+                    candidate.EmulatedCompareFunction != first.EmulatedCompareFunction ||
+                    candidate.PackedFormat != first.PackedFormat || candidate.MipStatistics != first.MipStatistics ||
+                    candidate.BindlessSlot != DescriptorConstants.NoIndex)
+                {
+                    return false;
+                }
+            }
+
+            _indexedImageElement = CandidateMap(selector, elements.Select(static element => element.Element).ToArray());
+            _indexedImageResource = first.MipStatistics
+                ? CandidateMap(selector, elements.Select(static element => element.Resource).ToArray())
+                : null;
+            return true;
+        }
+
+        // values[selector] as an expression: a few runs of consecutive values are selects over
+        // offsets, anything else a constant table.
+        private string CandidateMap(string selector, uint[] values)
+        {
+            var runs = new List<(int Start, long Offset)>();
+            for (var index = 0; index < values.Length; index++)
+            {
+                var offset = (long)values[index] - index;
+                if (runs.Count == 0 || runs[^1].Offset != offset)
+                {
+                    runs.Add((index, offset));
+                }
+            }
+
+            if (runs.Count > 4)
+            {
+                var table = $"t{_nextTemp++}";
+                Line($"const uint {table}[{values.Length}] = {{ {string.Join(", ", values.Select(static value => $"{value}u"))} }};");
+                return Temp("uint", $"{table}[{selector}]");
+            }
+
+            string RunValue((int Start, long Offset) run) =>
+                run.Offset >= 0 ? $"({selector} + {run.Offset}u)" : $"({selector} - {-run.Offset}u)";
+
+            var expression = RunValue(runs[^1]);
+            for (var run = runs.Count - 2; run >= 0; run--)
+            {
+                expression = $"({selector} < {runs[run + 1].Start}u ? {RunValue(runs[run])} : {expression})";
+            }
+
+            return Temp("uint", expression);
+        }
+
         // Resolves the image an instruction reads through its class array into a texture local,
         // with its sampler for sampling operations. Every image dimension the binding layout
         // can describe is accessible; the resolved class carries the shape the caller needs
@@ -2268,7 +2383,8 @@ public static partial class Gen5MslTranslator
             }
             else
             {
-                texture = Temp(imageClass.TextureType, $"{ResourcesName}.{imageClass.Field}[{fixedElement?.Element ?? (uint)element}u]");
+                texture = Temp(imageClass.TextureType,
+                    $"{ResourcesName}.{imageClass.Field}[{_indexedImageElement ?? $"{fixedElement?.Element ?? (uint)element}u"}]");
             }
 
             resolved = imageClass;

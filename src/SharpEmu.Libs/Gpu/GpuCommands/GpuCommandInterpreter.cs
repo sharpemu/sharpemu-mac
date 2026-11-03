@@ -320,6 +320,7 @@ public sealed partial class GpuCommandInterpreter
         execution.MadeProgress = false;
         // Forwarding is local to this slice, never a cached signal from an older submission.
         _lastWriteLength = 0;
+        _dispatchMayOverlap = false;
         // So is whatever was copied out of a command buffer: the guest may have stored into it since.
         BeginPacketBlockSlice();
         _pendingCommands = _host.CommandSignal;
@@ -379,8 +380,48 @@ public sealed partial class GpuCommandInterpreter
     // Earlier work in the stream can build the buffer a packet calls or chains to (a GPU pass that writes
     // a dispatch list). An operand read completes that work first, so the packets read next hold what it
     // wrote. A ring chunk the guest still appends to is read as it is written.
+    //
+    // The console's command processor fetches a called buffer ahead of the work before it, so a buffer
+    // the GPU writes is read after that work only when the stream makes the command processor wait in
+    // between (a wait, an acquire, a partial flush, PFP_SYNC_ME, a command-processor write). Without such
+    // a packet since the last read behind earlier work, nothing the work still queued here writes can be
+    // the buffer, and the call reads it as any packet is read: bytes the GPU owns or a queued
+    // command-processor write covers still wait. Grand Theft Auto V street: command-thread round trips
+    // 10.7-12.3k -> 3.5k per 2 s, 31.4 -> 33.4 median fps (means 31.3 -> 35.0), interleaved runs.
+    // SHARPEMU_CALL_READ_BEHIND=all reads behind earlier work at every call.
+    private static readonly bool CallsReadBehindAllWork =
+        Environment.GetEnvironmentVariable("SHARPEMU_CALL_READ_BEHIND") == "all";
+
+    // Set by a packet that may order earlier work before the command processor's reads; cleared by
+    // the read behind that work. Kept across submissions: an ordering packet at the end of one
+    // submission still covers a call at the start of the next.
+    private bool _callReadsBehindWork = true;
+
+    // Packets that order no earlier work before what the command processor reads next: state, draws,
+    // dispatches, the end-of-pipe signals (a release writes its label once the work before it is
+    // done, but the command processor does not wait for it; a wait on that label does) and a rewind
+    // (it waits for the CPU to finish writing the buffer, not for the GPU). Grand Theft Auto V ends
+    // nearly every buffer it calls with a fence release, and two thirds of its calls follow a rewind.
+    internal static bool LeavesCallReadUnordered(uint opcode, uint header) =>
+        DispatchOverlap.Keeps(opcode, header) || opcode switch
+        {
+            PacketOpcode.Nop => PacketHeader.CustomCode(header) is PacketCustomCode.DrawIndexAuto or PacketCustomCode.ReleaseMemory,
+            PacketOpcode.DrawIndex2 or PacketOpcode.DrawIndexAuto or PacketOpcode.DrawIndexOffset2 or PacketOpcode.DrawIndirect or
+                PacketOpcode.DrawIndexIndirect or PacketOpcode.DrawIndirectMulti or PacketOpcode.DrawIndexIndirectMulti or
+                PacketOpcode.DrawIndexMultiAuto or PacketOpcode.IndexType or PacketOpcode.IndexBase or
+                PacketOpcode.IndexBufferSize or PacketOpcode.NumInstances or PacketOpcode.ReleaseMemory or
+                PacketOpcode.EventWriteEndOfPipe or PacketOpcode.EventWriteEndOfShader or PacketOpcode.Rewind => true,
+            _ => false,
+        };
+
     private void ReadBehindEarlierWork(ulong address)
     {
+        if (!_callReadsBehindWork && !CallsReadBehindAllWork)
+        {
+            return;
+        }
+
+        _callReadsBehindWork = false;
         Span<byte> first = stackalloc byte[sizeof(uint)];
         _ = _host.TryReadGuestOperand(address, first);
     }
@@ -586,6 +627,16 @@ public sealed partial class GpuCommandInterpreter
             {
                 _lastWriteLength = 0;
             }
+            if (_dispatchMayOverlap && !DispatchOverlap.Keeps(opcode, header))
+            {
+                _dispatchMayOverlap = false;
+            }
+
+            if (!_callReadsBehindWork && !LeavesCallReadUnordered(opcode, header))
+            {
+                _callReadsBehindWork = true;
+            }
+
             var handler = _packetHandlers[opcode];
             if (handler is null)
             {

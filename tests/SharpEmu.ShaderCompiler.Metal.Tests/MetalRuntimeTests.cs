@@ -599,13 +599,20 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
         Assert.Contains("sharpemu_wave_scratch[8]", bridged.Source);
         Assert.DoesNotContain("sharpemu_wave_pair", bridged.Source);
 
+        var everyGroup = Gen5MslCodegenOptions.FromEnvironment with { MultiWaveComputeByNeed = false };
         foreach (var fixture in new[] { Gen5ComputeFixtures.Wave64Broadcast, Gen5ComputeFixtures.Wave64ReadLane })
         {
-            var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount: 64, localSizeX: 256);
-            Assert.Contains("sharpemu_wave_scratch[32]", shader.Source);
-            Assert.Contains("sharpemu_wave_pair[4]", shader.Source);
-            Assert.Contains("sharpemu_wave_set = (sharpemu_tg_index >> 6u) * 8u", shader.Source);
+            var source = Source(fixture, everyGroup);
+            Assert.Contains("sharpemu_wave_scratch[32]", source);
+            Assert.Contains("sharpemu_wave_pair[4]", source);
+            Assert.Contains("sharpemu_wave_set = (sharpemu_tg_index >> 6u) * 8u", source);
         }
+
+        // By need (the default), a group whose lanes only broadcast the first lane runs as wave32s;
+        // one that reads lane 63 by number keeps its bridge.
+        var byNeed = Gen5MslCodegenOptions.FromEnvironment with { MultiWaveComputeByNeed = true };
+        Assert.DoesNotContain("sharpemu_wave_pair", Source(Gen5ComputeFixtures.Wave64Broadcast, byNeed));
+        Assert.Contains("sharpemu_wave_pair[4]", Source(Gen5ComputeFixtures.Wave64ReadLane, byNeed));
 
         // SHARPEMU_MSL_MULTIWAVE64=0 bridges only a program that combines the halves itself
         // (V_READLANE of lane 63); SHARPEMU_BRIDGE_COMPUTE_WAVES=0 bridges none.

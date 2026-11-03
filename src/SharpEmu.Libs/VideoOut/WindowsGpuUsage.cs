@@ -18,6 +18,8 @@ internal sealed class WindowsGpuUsage : IGpuUsage
 
     public double Percent => Volatile.Read(ref _percent);
 
+    public string SourceName => "PDH, busiest engine";
+
     public void RequestSample()
     {
         if (!OperatingSystem.IsWindows() || Interlocked.CompareExchange(ref _samplePending, 1, 0) != 0)

@@ -55,10 +55,17 @@ public sealed partial class RenderExecutor
     // the host is then prepared here, before the program resolves, as it was before the split.
     private bool RecordsDirectly => _recorder is RenderRecorder;
 
+    // Set by the command stream on a dispatch that may run beside the one before it
+    // (GpuCommands.DispatchOverlap); bit 31 of DISPATCH_INITIATOR is unused by the hardware.
+    public const uint DispatchMayOverlapBit = 1u << 31;
+
     public void Dispatch(ulong submitId, RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
+        var mayOverlap = (dispatchInitiator & DispatchMayOverlapBit) != 0;
+        dispatchInitiator &= ~DispatchMayOverlapBit;
         var compute = banks.Shader.Compute;
         var record = _pool.RentDispatch();
+        record.MayOverlap = mayOverlap;
         record.Debug = new DebugInformation(RecordedOperation.DispatchDirect, submitId, groupsX, groupsY, groupsZ, dispatchInitiator, compute.Address);
         record.Skipped = true;
         record.SubmitId = submitId;

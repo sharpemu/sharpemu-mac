@@ -14,12 +14,15 @@ internal sealed unsafe class VulkanCommandPool : IGpuCommandBufferSource, IDispo
     private readonly Device _device;
     private readonly CommandPool _pool;
     private readonly VulkanCommandProfile? _profile;
+    private readonly VulkanGpuBusyMeter? _busyMeter;
 
-    public VulkanCommandPool(Vk vk, Device device, uint queueFamilyIndex, VulkanCommandProfile? profile)
+    public VulkanCommandPool(Vk vk, Device device, uint queueFamilyIndex, VulkanCommandProfile? profile,
+        VulkanGpuBusyMeter? busyMeter = null)
     {
         _vk = vk;
         _device = device;
         _profile = profile;
+        _busyMeter = busyMeter;
         var poolInfo = new CommandPoolCreateInfo
         {
             SType = StructureType.CommandPoolCreateInfo,
@@ -62,12 +65,14 @@ internal sealed unsafe class VulkanCommandPool : IGpuCommandBufferSource, IDispo
         };
         VulkanTickDevice.RequireSuccess(_vk.BeginCommandBuffer(new CommandBuffer(buffer), &beginInfo), "vkBeginCommandBuffer(scheduler)");
         _profile?.BeginBuffer(new CommandBuffer(buffer));
+        _busyMeter?.BeginBuffer(new CommandBuffer(buffer));
     }
 
     public void EndBuffer(nint buffer, bool hostRead)
     {
         var command = new CommandBuffer(buffer);
         _profile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Tail);
+        _busyMeter?.EndBuffer(command);
         if (hostRead)
         {
             var barrier = new MemoryBarrier2
@@ -96,8 +101,10 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
     private readonly VulkanCommandPool _pool;
     private readonly List<VulkanCommandPool> _pools = new();
     private readonly VkSemaphore _timeline;
+    private readonly VulkanGpuBusyMeter? _busyMeter;
 
-    public VulkanTickDevice(Vk vk, Device device, Queue queue, uint queueFamilyIndex, object queueGate, PhysicalDevice profilePhysicalDevice = default)
+    public VulkanTickDevice(Vk vk, Device device, Queue queue, uint queueFamilyIndex, object queueGate, PhysicalDevice profilePhysicalDevice = default,
+        VulkanGpuBusyMeter? busyMeter = null)
     {
         _vk = vk;
         _device = device;
@@ -118,7 +125,8 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
         RequireSuccess(_vk.CreateSemaphore(_device, &createInfo, null, out _timeline), "vkCreateSemaphore(scheduler timeline)");
         if (profilePhysicalDevice.Handle != 0)
             CommandProfile = new VulkanCommandProfile(vk, profilePhysicalDevice, device, queueFamilyIndex);
-        _pool = new VulkanCommandPool(vk, device, queueFamilyIndex, CommandProfile);
+        _busyMeter = busyMeter;
+        _pool = new VulkanCommandPool(vk, device, queueFamilyIndex, CommandProfile, busyMeter);
     }
 
     public VulkanCommandProfile? CommandProfile { get; }
@@ -274,6 +282,7 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
     {
         ulong value;
         RequireSuccess(_vk.GetSemaphoreCounterValue(_device, _timeline, &value), "vkGetSemaphoreCounterValue");
+        _busyMeter?.Poll();
         return RetiredValue(value);
     }
 
@@ -314,7 +323,7 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
 
     public IGpuCommandBufferSource CreateBufferSource()
     {
-        var pool = new VulkanCommandPool(_vk, _device, _queueFamilyIndex, null);
+        var pool = new VulkanCommandPool(_vk, _device, _queueFamilyIndex, null, _busyMeter);
         lock (_pools)
         {
             _pools.Add(pool);
@@ -429,6 +438,14 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
                 }
             }
 
+            if (result == Result.Success && _busyMeter is { } meter)
+            {
+                foreach (var buffer in buffers)
+                {
+                    meter.MarkSubmitted(buffer);
+                }
+            }
+
             failure = result.ToString();
             return result == Result.Success;
         }
@@ -437,6 +454,7 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
     public void Dispose()
     {
         CommandProfile?.Dispose();
+        _busyMeter?.Dispose();
         lock (_fenceGate)
         {
             foreach (var entry in _inFlightFences.Concat(_retiredWithWaiters))

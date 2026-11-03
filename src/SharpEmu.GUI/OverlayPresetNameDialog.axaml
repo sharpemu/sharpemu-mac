@@ -1,0 +1,42 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<local:SheetView xmlns="https://github.com/avaloniaui"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:local="clr-namespace:SharpEmu.GUI"
+                 x:Class="SharpEmu.GUI.OverlayPresetNameDialog"
+                 SheetWidth="520">
+  <Grid Margin="32,28" RowDefinitions="Auto,Auto,Auto,Auto">
+    <TextBlock Grid.Row="0"
+               Classes="sheetTitle"
+               Text="{Binding [Overlay.Preset.Name.Title], Source={x:Static local:Localization.Instance}}" />
+
+    <TextBlock Grid.Row="1"
+               Margin="0,8,0,16"
+               Text="{Binding [Overlay.Preset.Name.Desc], Source={x:Static local:Localization.Instance}}"
+               Foreground="{StaticResource SecondaryTextBrush}"
+               LineHeight="20"
+               TextWrapping="Wrap" />
+
+    <TextBox x:Name="NameTextBox"
+             Grid.Row="2"
+             MaxLength="32"
+             PlaceholderText="{Binding [Overlay.Preset.Name.Placeholder], Source={x:Static local:Localization.Instance}}" />
+
+    <Grid Grid.Row="3"
+          Margin="0,18,0,0"
+          ColumnDefinitions="*,Auto,Auto"
+          ColumnSpacing="8">
+      <Button x:Name="CancelButton"
+              Grid.Column="1"
+              Classes="ghost"
+              Content="{Binding [Common.Cancel], Source={x:Static local:Localization.Instance}}" />
+      <Button x:Name="SaveButton"
+              Grid.Column="2"
+              Classes="accent"
+              Content="{Binding [Common.Save], Source={x:Static local:Localization.Instance}}" />
+    </Grid>
+  </Grid>
+</local:SheetView>

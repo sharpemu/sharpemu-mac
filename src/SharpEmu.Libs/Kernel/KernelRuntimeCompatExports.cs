@@ -83,7 +83,11 @@ public static partial class KernelRuntimeCompatExports
     internal const int SceSysmoduleErrorInvalidValue = unchecked((int)0x805A1000);
     internal const int SceSysmoduleErrorUnloaded = unchecked((int)0x805A1001);
     private static readonly object _prtApertureGate = new();
-    private static readonly (ulong Base, ulong Size)[] _prtApertures = new (ulong Base, ulong Size)[3];
+    // Base is where the aperture's memory really is; GuestBase is what the guest set, which differs
+    // only for an aperture inside macOS 27's blocked window (GuestVaHole: the kernel keeps it Shift
+    // higher, as it keeps the fixed mappings made into it).
+    private static readonly (ulong Base, ulong Size, ulong GuestBase)[] _prtApertures =
+        new (ulong Base, ulong Size, ulong GuestBase)[3];
     private static int _stackChkFailCount;
     private static long _usleepTraceCount;
     // SHARPEMU_USLEEP_SHORT_PUMP=1 restores the old behaviour of pumping the guest
@@ -1091,14 +1095,18 @@ public static partial class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        // The PRT area starts at the window, so an aperture can lie inside it; the tiles mapped into
+        // it are relocated by the kernel, and the aperture moves with them.
+        var residentBase = GuestVaHole.TranslateRange(apertureBase, apertureSize);
         lock (_prtApertureGate)
         {
-            _prtApertures[apertureId] = (apertureBase, apertureSize);
+            _prtApertures[apertureId] = (residentBase, apertureSize, apertureBase);
         }
 
-        SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.NoteLazyRange(apertureId, apertureBase, apertureSize);
+        SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.NoteLazyRange(apertureId, residentBase, apertureSize);
         Console.Error.WriteLine(
-            $"[LOADER][TRACE] set_prt_aperture: id={apertureId} base=0x{apertureBase:X16} size=0x{apertureSize:X16}");
+            $"[LOADER][TRACE] set_prt_aperture: id={apertureId} base=0x{apertureBase:X16} size=0x{apertureSize:X16}" +
+            (residentBase != apertureBase ? $" relocated=0x{residentBase:X16}" : string.Empty));
         if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_ALLOC_IMPORTS"), "1", StringComparison.Ordinal))
         {
             Console.Error.WriteLine(
@@ -1123,18 +1131,22 @@ public static partial class KernelRuntimeCompatExports
             return unchecked((int)0x80020016);
         if (baseAddress == 0 || sizeAddress == 0)
             return unchecked((int)0x8002000E);
-        (ulong Base, ulong Size) aperture;
+        (ulong Base, ulong Size, ulong GuestBase) aperture;
         lock (_prtApertureGate)
             aperture = _prtApertures[apertureId];
-        return ctx.TryWriteUInt64(baseAddress, aperture.Base) && ctx.TryWriteUInt64(sizeAddress, aperture.Size)
+        // The guest gets back the base it set; every address it derives from it is translated again.
+        return ctx.TryWriteUInt64(baseAddress, aperture.GuestBase) && ctx.TryWriteUInt64(sizeAddress, aperture.Size)
             ? 0
             : unchecked((int)0x8002000E);
     }
 
+    // Both take guest addresses as the guest or its GPU commands hold them: one inside the blocked
+    // window is translated first, so it finds an aperture the kernel moved above the window.
     internal static bool OverlapsPrtAperture(ulong address, ulong size)
     {
         if (size == 0)
             return false;
+        address = GuestVaHole.TranslateRange(address, size);
         var end = address > ulong.MaxValue - size ? ulong.MaxValue : address + size;
         lock (_prtApertureGate)
         {
@@ -1147,6 +1159,7 @@ public static partial class KernelRuntimeCompatExports
     {
         if (size == 0 || address > ulong.MaxValue - size)
             return false;
+        address = GuestVaHole.TranslateRange(address, size);
         lock (_prtApertureGate)
         {
             return _prtApertures.Any(aperture => address >= aperture.Base &&

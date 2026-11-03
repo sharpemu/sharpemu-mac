@@ -280,6 +280,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void Run()
         {
+            PerfOverlay.SetSessionInfo("Vulkan", VideoOutBackendServices.GetWindowTitle());
             _window.Run(
                 Initialize,
                 Render,

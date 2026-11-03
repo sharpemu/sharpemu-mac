@@ -110,6 +110,16 @@ public interface IRenderHost
 
     DrawScopeToken DrawScope => default;
 
+    // The host's DrawScope stays valid across draws whose programs and other context differ, so the
+    // recorder may reuse attachments whenever the target registers are unchanged (RenderExecutor.WideTargetReuse).
+    bool ReusesTargetsAcrossPrograms => false;
+
+    // A draw given the previous draw's attachments (RenderRecorder.TryRestoreAttachments): the host
+    // keeps what its last acquisitions recorded about them, as if this draw had acquired them again.
+    void KeepAttachments()
+    {
+    }
+
     void KeepDepthAttachment(in DepthAttachmentState depth)
     {
     }
@@ -367,6 +377,10 @@ public interface IRenderHost
         throw new NotSupportedException("The render host does not support mesh shaders.");
 
     void Dispatch(uint groupsX, uint groupsY, uint groupsZ);
+
+    // The next Dispatch or TryDispatchIndirect may run beside the dispatch before it: the
+    // stream put no barrier, wait or other ordering between them. Consumed by that dispatch.
+    bool NextDispatchMayOverlap { get => false; set { } }
 
     // Executes a dispatch from three uint32 group counts in guest memory when the backend can
     // consume the guest buffer directly. Backends without native indirect dispatch return false.

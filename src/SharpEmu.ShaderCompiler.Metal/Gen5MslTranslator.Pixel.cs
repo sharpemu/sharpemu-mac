@@ -42,6 +42,16 @@ public static partial class Gen5MslTranslator
             {
                 if (TryGetImageElementCases(instruction, image, out var selector, out var elements, out error))
                 {
+                    if (TryIndexImageCandidates(instruction, selector, elements))
+                    {
+                        var indexed =
+                            TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out packedFormat, out samplerInfo, out error, out resourceIndex, elements[0]) &&
+                            EmitImageOperation(instruction, image, texture, samplerName, imageClass, dstSelect, mipLevel, compareFunction, packedFormat, samplerInfo, resourceIndex, out error);
+                        _indexedImageElement = null;
+                        _indexedImageResource = null;
+                        return indexed;
+                    }
+
                     // One case per descriptor over a constant element, like a switch on the selector.
                     for (var index = 0; index < elements.Count; index++)
                     {

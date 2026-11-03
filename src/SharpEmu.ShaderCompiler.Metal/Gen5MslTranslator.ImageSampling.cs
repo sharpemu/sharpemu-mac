@@ -271,7 +271,9 @@ public static partial class Gen5MslTranslator
                 _indent++;
             }
 
-            var field = Temp("uint", ShaderDataDword(_request.Bindings.MipStatisticsDword + (uint)resourceIndex));
+            var field = Temp("uint", _indexedImageResource is { } resource
+                ? ShaderDataDword(Temp("uint", $"{_request.Bindings.MipStatisticsDword}u + {resource}"))
+                : ShaderDataDword(_request.Bindings.MipStatisticsDword + (uint)resourceIndex));
             Line($"if (({field} & 0x8000u) == 0u)");
             Line("{");
             _indent++;

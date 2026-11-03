@@ -41,6 +41,12 @@ internal static class MacVirtualKeyCode
     public const ushort Delete = 0x33;
     public const ushort Escape = 0x35;
     public const ushort F11 = 0x67;
+    public const ushort F3 = 0x63;
+    public const ushort F4 = 0x76;
+    public const ushort Digit1 = 0x12;
+    public const ushort Digit2 = 0x13;
+    public const ushort Digit3 = 0x14;
+    public const ushort Digit4 = 0x15;
     public const ushort F2 = 0x78;
     public const ushort F1 = 0x7A;
     public const ushort LeftArrow = 0x7B;

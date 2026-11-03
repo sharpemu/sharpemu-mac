@@ -23,6 +23,10 @@ internal sealed class MacGpuUsage : IGpuUsage
     // NaN (shown as N/A) until the backend has reported any GPU time, e.g. a non-Metal presenter.
     public double Percent => Volatile.Read(ref _percent);
 
+    public bool HasSamples => _tracker.HasSamples;
+
+    public string SourceName => OperatingSystem.IsMacOS() ? "Metal command buffers" : "GPU timestamps";
+
     // Closes the window that started at the previous request. Cheap and synchronous: the
     // refresh runs it once per window.
     public void RequestSample()
@@ -41,6 +45,9 @@ internal sealed class MacGpuUsage : IGpuUsage
 internal interface IGpuUsage : IDisposable
 {
     double Percent { get; }
+
+    /// <summary>Where the figure comes from, so the overlay can label it.</summary>
+    string SourceName { get; }
 
     void RequestSample();
 }

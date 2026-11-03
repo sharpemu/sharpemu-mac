@@ -125,6 +125,8 @@ public static partial class KernelMemoryCompatExports
         var alignment = ctx[CpuRegister.Rdx];
         var flags = ctx[CpuRegister.Rcx] & (OrbisKernelMapFixed | OrbisKernelMapNoOverwrite);
         var output = ctx[CpuRegister.R8];
+        if ((flags & OrbisKernelMapFixed) != 0)
+            requested = GuestVaHole.RelocateFixedRequest(requested, length);
         if (output == 0 || length == 0 || !IsAligned(length, PoolReserveGranularity) ||
             (alignment != 0 && ((alignment & (alignment - 1)) != 0 || !IsAligned(alignment, PoolReserveGranularity))))
             return MemoryInvalidArgument;
@@ -185,6 +187,7 @@ public static partial class KernelMemoryCompatExports
 
     private static int PoolCommitCore(CpuContext ctx, ulong address, ulong length, int type, int protection)
     {
+        address = GuestVaHole.TranslateRange(address, length);
         if (!IsPoolRange(address, length) || !IsValidMemoryType(type) || (protection & OrbisProtCpuExec) != 0 ||
             !TryDecodeMappedProtection(protection, out var mode))
             return MemoryInvalidArgument;
@@ -246,6 +249,7 @@ public static partial class KernelMemoryCompatExports
 
     private static int PoolDecommitCore(CpuContext ctx, ulong address, ulong length)
     {
+        address = GuestVaHole.TranslateRange(address, length);
         if (!IsPoolRange(address, length))
             return MemoryInvalidArgument;
         lock (_memoryGate)
@@ -285,6 +289,8 @@ public static partial class KernelMemoryCompatExports
     // contents) follow, the source becomes reserved again.
     private static int PoolMoveCore(CpuContext ctx, ulong destination, ulong source, ulong length)
     {
+        destination = GuestVaHole.TranslateRange(destination, length);
+        source = GuestVaHole.TranslateRange(source, length);
         if (!IsPoolRange(destination, length) || !IsPoolRange(source, length) ||
             (destination < source + length && source < destination + length))
             return MemoryInvalidArgument;
@@ -385,6 +391,7 @@ public static partial class KernelMemoryCompatExports
 
     private static int ProtectPoolRange(CpuContext ctx, ulong address, ulong length, int protection, int? type)
     {
+        address = GuestVaHole.TranslateRange(address, length);
         if (!IsPoolRange(address, length) || (type is { } value && !IsValidMemoryType(value)))
             return MemoryInvalidArgument;
         lock (_memoryGate)

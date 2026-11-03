@@ -3826,7 +3826,8 @@ public static partial class KernelMemoryCompatExports
     // A kernel-placed mapping lands in free space; a fixed one must target untouched space.
     private static bool IsNewMappingOutsideGpuMemory(CpuContext ctx, ulong inOutAddressPointer, ulong length, ulong flags) =>
         (flags & OrbisKernelMapFixed) == 0 ||
-        (ctx.TryReadUInt64(inOutAddressPointer, out var requested) && IsUntouchedByGpu(requested, length));
+        (ctx.TryReadUInt64(inOutAddressPointer, out var requested) &&
+            IsUntouchedByGpu(GuestVaHole.TranslateRange(requested, length), length));
 
     private static MappingTraits TraitsFromMapFlags(ulong flags) =>
         (flags & OrbisKernelMapNoCoalesce) != 0 ? MappingTraits.NoCoalesce : MappingTraits.None;
@@ -3847,6 +3848,8 @@ public static partial class KernelMemoryCompatExports
             return MemoryInvalidArgument;
         if (!ctx.TryReadUInt64(inOutAddressPointer, out var requested))
             return MemoryFault;
+        if ((flags & OrbisKernelMapFixed) != 0)
+            requested = GuestVaHole.RelocateFixedRequest(requested, length);
         if ((flags & OrbisKernelMapFixed) != 0 &&
             (requested == 0 || !IsAligned(requested, alignment) || requested > ulong.MaxValue - length))
             return MemoryInvalidArgument;
@@ -3980,6 +3983,8 @@ public static partial class KernelMemoryCompatExports
             return MemoryInvalidArgument;
         if (!ctx.TryReadUInt64(pointer, out var requested))
             return MemoryFault;
+        if ((flags & OrbisKernelMapFixed) != 0)
+            requested = GuestVaHole.RelocateFixedRequest(requested, length);
         if ((flags & OrbisKernelMapFixed) != 0 &&
             (requested == 0 || !IsAligned(requested, alignment) || requested > ulong.MaxValue - length))
             return MemoryInvalidArgument;
@@ -4081,8 +4086,8 @@ public static partial class KernelMemoryCompatExports
     private static int UnmapMemoryCore(CpuContext ctx)
     {
         using var unmapProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelMemoryUnmap);
-        var address = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
+        var address = GuestVaHole.TranslateRange(ctx[CpuRegister.Rdi], length);
         if (length == 0 || address > ulong.MaxValue - length)
             return MemoryInvalidArgument;
         lock (_memoryGate)

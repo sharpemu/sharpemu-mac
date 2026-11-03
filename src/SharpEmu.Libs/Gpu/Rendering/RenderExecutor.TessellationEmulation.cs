@@ -41,6 +41,9 @@ public sealed partial class RenderExecutor
     private static readonly bool EmulateTessellation =
         Environment.GetEnvironmentVariable("SHARPEMU_TESSELLATION") != "0";
 
+    private static readonly bool DeferredTessellationHull =
+        Environment.GetEnvironmentVariable("SHARPEMU_TESSELLATION_DEFERRED_HULL") != "0";
+
     private static int _tessellationRefusalWarnings;
     private bool _tessellationAnnounced;
 
@@ -171,9 +174,12 @@ public sealed partial class RenderExecutor
     private bool DrawTessellatedInstances(ulong submitId, RegisterBanks banks, in TessellatedDraw arguments,
         uint controlPoints, bool quad, uint patchCount, uint instances, uint firstInstance, ref TessellationPrograms? resolved)
     {
-        // The hull kernel is recorded here, between the records before and after it, so the draw
-        // needs a recorder that records each record as it is handed over.
-        if (DirectRecorder is not { } recorder)
+        // The hull kernel is recorded here, between the records before and after it, by a recorder that
+        // records each record as it is handed over; a sink that records them later (the Metal translation)
+        // gets it on the draw's record instead and runs it just before the draw (RenderRecorder.RecordDraw).
+        // SHARPEMU_TESSELLATION_DEFERRED_HULL=0 skips such draws, as before.
+        var recorder = DirectRecorder;
+        if (recorder is null && !DeferredTessellationHull)
         {
             WarnTessellationRefused("the host records draws apart from their resolution");
             return false;
@@ -226,7 +232,13 @@ public sealed partial class RenderExecutor
             indices[index] = unchecked((uint)((int)(arguments.Indexed ? indices[index] : (uint)index) + arguments.VertexOffset));
         }
 
-        if (!recorder.RunTessellationHull(hull, banks.Context.ShaderInterface, indices, controlPoints, quad, patchCount, instances, firstInstance))
+        if (recorder is null)
+        {
+            var shaderInterface = banks.Context.ShaderInterface;
+            record.TessellationHull = new TessellationHullLaunch(hull, shaderInterface.MinTessellationLevel,
+                shaderInterface.MaxTessellationLevel, indices, controlPoints, quad, patchCount, instances, firstInstance);
+        }
+        else if (!recorder.RunTessellationHull(hull, banks.Context.ShaderInterface, indices, controlPoints, quad, patchCount, instances, firstInstance))
         {
             record.ResetBindings = true;
             Record(record);
