@@ -27,7 +27,8 @@ public readonly record struct OverlayPalette(
             OverlayColor.Hex(0xE6EAF0, 0.78f), OverlayColor.Hex(0xFFFFFF, 0.18f), OverlayColor.Hex(0xFFFFFF, 0.20f),
             OverlayColor.Hex(0xFFFFFF, 0.40f)),
         _ => new(
-            OverlayColor.Hex(0x0E1014, 0.78f), OverlayColor.Hex(0xFFFFFF, 0.09f), OverlayColor.Hex(0xE8EAEE),
+            // Dense enough that bright game frames do not show through the text (Glass is the see-through theme).
+            OverlayColor.Hex(0x0E1014, 0.90f), OverlayColor.Hex(0xFFFFFF, 0.09f), OverlayColor.Hex(0xE8EAEE),
             OverlayColor.Hex(0x8B93A1), OverlayColor.Hex(0xFFFFFF, 0.08f), OverlayColor.Hex(0xFFFFFF, 0.09f),
             OverlayColor.Hex(0xFFFFFF, 0.20f)),
     };

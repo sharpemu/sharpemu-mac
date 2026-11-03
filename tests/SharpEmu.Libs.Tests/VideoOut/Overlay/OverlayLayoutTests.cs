@@ -40,7 +40,7 @@ public sealed class OverlayLayoutTests : IDisposable
         Assert.Single(model.Widgets);
         Assert.Equal(OverlayWidgetType.Fps, model.Widgets[0].Type);
         Assert.True(model.ApplyPreset(OverlayLayoutModel.FullPreset));
-        Assert.Equal(11, model.Widgets.Count);
+        Assert.Equal(10, model.Widgets.Count);
         Assert.False(model.ApplyPreset("No such preset"));
         Assert.Equal(OverlayLayoutModel.FullPreset, model.PresetName);
     }

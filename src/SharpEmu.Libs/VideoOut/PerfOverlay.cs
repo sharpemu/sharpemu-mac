@@ -92,12 +92,13 @@ public static partial class PerfOverlay
         // queries), otherwise the OS's per-process GPU counters.
         IGpuUsage? fallback = OperatingSystem.IsWindows() ? new WindowsGpuUsage()
             : OperatingSystem.IsLinux() ? new LinuxDrmGpuUsage() : null;
-        _gpuUsage = new PreferredGpuUsage(new MacGpuUsage(GpuBusy), fallback);
+        var gpuUsage = new PreferredGpuUsage(new MacGpuUsage(GpuBusy), fallback);
+        _gpuUsage = gpuUsage;
         _resources = OverlayResourceSampler.CreateForCurrentProcess(Volatile.Read(ref _guestProcessId));
         DisplayState.Configure(options,
             string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_OVERLAY"), "0", StringComparison.Ordinal));
         Console.Error.WriteLine(
-            $"[OVERLAY][INFO] enabled={DisplayState.Enabled} mode={DisplayState.Mode} gpu_source={_gpuUsage.SourceName}");
+            $"[OVERLAY][INFO] enabled={DisplayState.Enabled} mode={DisplayState.Mode} gpu_source={gpuUsage.Describe()}");
         _sessionStartTimestamp = Stopwatch.GetTimestamp();
         // The CPU and GPU sampling windows start here, so the first one is not stretched back to startup.
         _statsWindowStart = Stopwatch.GetTimestamp();

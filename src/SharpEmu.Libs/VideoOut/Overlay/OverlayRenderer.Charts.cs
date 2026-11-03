@@ -435,7 +435,7 @@ public sealed partial class OverlayRenderer
 
             var ny = MathF.Max(y0, y - h);
             var color = OverlayColors.OfKind(kind);
-            _c.FillRect(x, ny, barW, y - ny, kind == CostKind.Wait ? color.WithAlpha(0.45f) : color);
+            _c.FillRect(x, ny, barW, y - ny, kind == CostKind.Wait ? color.WithAlpha(0.75f) : color);
             y = ny;
             if (y <= y0)
             {

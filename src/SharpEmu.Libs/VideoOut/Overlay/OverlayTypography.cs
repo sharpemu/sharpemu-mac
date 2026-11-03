@@ -203,10 +203,10 @@ public sealed class OverlayTypography : IDisposable
         return c;
     }
 
-    private float AdvanceOf(char c, float px, bool bold, bool upper, float spacingPx)
+    private float AdvanceOf(char c, float px, bool bold, bool upper, float spacingPx, bool tabular = false)
     {
         var cp = Normalize(c, upper);
-        if (cp is >= '0' and <= '9')
+        if (tabular)
         {
             return MetricsFor(px, bold).DigitAdvance + spacingPx;
         }
@@ -214,12 +214,22 @@ public sealed class OverlayTypography : IDisposable
         return GlyphFor(cp, px, bold).Advance + spacingPx;
     }
 
+    private static bool IsNumeric(char c) => c is >= '0' and <= '9' or '.' or ',';
+
+    /// <summary>
+    /// Digits inside a number take one shared width so changing figures do not jitter; a digit
+    /// standing alone in a label ("1% low") keeps its own width.
+    /// </summary>
+    private static bool Tabular(ReadOnlySpan<char> text, int index) =>
+        text[index] is >= '0' and <= '9' &&
+        ((index > 0 && IsNumeric(text[index - 1])) || (index + 1 < text.Length && IsNumeric(text[index + 1])));
+
     private float MeasurePixels(ReadOnlySpan<char> text, float px, bool bold, bool upper, float spacingPx)
     {
         var width = 0f;
-        foreach (var c in text)
+        for (var i = 0; i < text.Length; i++)
         {
-            width += AdvanceOf(c, px, bold, upper, spacingPx);
+            width += AdvanceOf(text[i], px, bold, upper, spacingPx, Tabular(text, i));
         }
 
         return width;
@@ -267,7 +277,7 @@ public sealed class OverlayTypography : IDisposable
             count = 0;
             while (count < text.Length)
             {
-                var adv = AdvanceOf(text[count], px, bold, upper, spacingPx);
+                var adv = AdvanceOf(text[count], px, bold, upper, spacingPx, Tabular(text, count));
                 if (acc + adv > budget)
                 {
                     break;
@@ -294,27 +304,30 @@ public sealed class OverlayTypography : IDisposable
         var baseline = MathF.Round(_canvas.OriginY + y * scale + (lineBox - (metrics.Ascent + metrics.Descent)) / 2f + metrics.Ascent);
         for (var i = 0; i < count; i++)
         {
-            penX = DrawGlyph(Normalize(text[i], upper), penX, baseline, px, bold, spacingPx, color);
+            penX = DrawGlyph(Normalize(text[i], upper), penX, baseline, px, bold, spacingPx, color, Tabular(text, i));
         }
 
         if (ellipsis)
         {
-            DrawGlyph('…', penX, baseline, px, bold, 0f, color);
+            DrawGlyph('…', penX, baseline, px, bold, 0f, color, false);
         }
 
         return drawn / scale;
     }
 
-    private float DrawGlyph(int codePoint, float penX, float baseline, float px, bool bold, float spacingPx, OverlayColor color)
+    private float DrawGlyph(int codePoint, float penX, float baseline, float px, bool bold, float spacingPx, OverlayColor color,
+        bool tabular)
     {
         var glyph = GlyphFor(codePoint, px, bold);
+        var advance = tabular ? MetricsFor(px, bold).DigitAdvance : glyph.Advance;
+        // A narrow digit sits in the middle of its tabular cell, as a font's own tabular figures do.
+        var offset = tabular ? (advance - glyph.Advance) / 2f : 0f;
         if (glyph.Width > 0 && glyph.Height > 0)
         {
-            _canvas.BlendMask((int)MathF.Round(penX + glyph.BearingX), (int)(baseline - glyph.BearingY + 0.5f),
+            _canvas.BlendMask((int)MathF.Round(penX + offset + glyph.BearingX), (int)(baseline - glyph.BearingY + 0.5f),
                 glyph.Width, glyph.Height, glyph.Coverage, color);
         }
 
-        var advance = codePoint is >= '0' and <= '9' ? MetricsFor(px, bold).DigitAdvance : glyph.Advance;
         return penX + advance + spacingPx;
     }
 

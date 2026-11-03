@@ -144,6 +144,9 @@ internal sealed class PreferredGpuUsage(MacGpuUsage intervals, IGpuUsage? fallba
 
     public string SourceName => intervals.HasSamples || fallback is null ? intervals.SourceName : fallback.SourceName;
 
+    /// <summary>Both sources, for the startup log: which one is live is only known once frames arrive.</summary>
+    public string Describe() => fallback is null ? intervals.SourceName : $"{intervals.SourceName}, else {fallback.SourceName}";
+
     public void RequestSample()
     {
         intervals.RequestSample();

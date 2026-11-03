@@ -315,12 +315,26 @@ public sealed partial class OverlayRenderer
 
     // ------------------------------------------------------------------ gpu
 
+    /// <summary>Short name for where the GPU figure comes from.</summary>
+    internal static string GpuSourceLabel(bool fromFrames, string systemSource)
+    {
+        if (fromFrames)
+        {
+            return OperatingSystem.IsMacOS() ? "Metal cmd buffers" : "GPU timestamps";
+        }
+
+        var comma = systemSource.IndexOf(',');
+        return comma > 0 ? systemSource[..comma] : systemSource;
+    }
+
     private void DrawGpu(WidgetInstance w, RectF r, ref OverlayColor chip)
     {
         var v = _v;
         var a = v.Aggregate;
         var big = _fs * 2.35f;
-        var util = a.FrameMs > 0 ? Math.Clamp(a.Busy(OverlayBusyLane.Gpu) / a.FrameMs * 100.0, 0, 100) : v.System.GpuPercent;
+        // Frame intervals when the backend reports GPU time; the OS counter otherwise.
+        var fromFrames = a.FrameMs > 0 && a.Busy(OverlayBusyLane.Gpu) > 0;
+        var util = fromFrames ? Math.Clamp(a.Busy(OverlayBusyLane.Gpu) / a.FrameMs * 100.0, 0, 100) : v.System.GpuPercent;
         var top = r.Y - big * 0.12f;
         var number = _tb.Clear();
         if (v.Frame is null || !double.IsFinite(util)) { number.Append("--"); } else { number.AppendFixed(util, 0); }
@@ -354,6 +368,8 @@ public sealed partial class OverlayRenderer
 
             y = DrawRow(r.X, y, r.W, "Resolution", res.Span);
         }
+
+        y = DrawRow(r.X, y, r.W, "Source", GpuSourceLabel(fromFrames, v.System.GpuSource));
 
         if (w.Bool(WidgetKeys.Gpu.Graph) && r.Bottom - y >= 14f)
         {
