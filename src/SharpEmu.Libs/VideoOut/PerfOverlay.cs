@@ -6,7 +6,7 @@ using System.Diagnostics;
 namespace SharpEmu.Libs.VideoOut;
 
 // Draws performance statistics without changing guest or presentation timing.
-public static class PerfOverlay
+public static partial class PerfOverlay
 {
     public const int PanelWidth = 390;
     public const int PanelHeight = 194;
@@ -88,10 +88,17 @@ public static class PerfOverlay
     public static void Configure(HostVideoOptions options)
     {
         _gpuUsage?.Dispose();
-        _gpuUsage = OperatingSystem.IsMacOS() ? new MacGpuUsage(GpuBusy) : new WindowsGpuUsage();
+        // Command-buffer intervals from the backend when it reports them (Metal; Vulkan timestamp
+        // queries), otherwise the OS's per-process GPU counters.
+        IGpuUsage? fallback = OperatingSystem.IsWindows() ? new WindowsGpuUsage()
+            : OperatingSystem.IsLinux() ? new LinuxDrmGpuUsage() : null;
+        var gpuUsage = new PreferredGpuUsage(new MacGpuUsage(GpuBusy), fallback);
+        _gpuUsage = gpuUsage;
         _resources = OverlayResourceSampler.CreateForCurrentProcess(Volatile.Read(ref _guestProcessId));
         DisplayState.Configure(options,
             string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_OVERLAY"), "0", StringComparison.Ordinal));
+        Console.Error.WriteLine(
+            $"[OVERLAY][INFO] enabled={DisplayState.Enabled} mode={DisplayState.Mode} gpu_source={gpuUsage.Describe()}");
         _sessionStartTimestamp = Stopwatch.GetTimestamp();
         // The CPU and GPU sampling windows start here, so the first one is not stretched back to startup.
         _statsWindowStart = Stopwatch.GetTimestamp();
@@ -104,12 +111,32 @@ public static class PerfOverlay
     /// </summary>
     public static void SetGuestProcessId(int processId) => Volatile.Write(ref _guestProcessId, processId);
 
+    /// <summary>The guest process in the GPU/guest split, or 0 when one process does both.</summary>
+    internal static int GuestProcessId => Volatile.Read(ref _guestProcessId);
+
     /// <summary>
     /// Records the GPU execution interval of one command buffer (seconds on the mach absolute
     /// clock, i.e. Metal's GPUStartTime and GPUEndTime). The overlay's GPU percentage is the
     /// union of these intervals over its window, so overlapping buffers are not counted twice.
     /// </summary>
-    public static void RecordGpuBusy(double startSeconds, double endSeconds) => GpuBusy.Record(startSeconds, endSeconds);
+    public static void RecordGpuBusy(double startSeconds, double endSeconds)
+    {
+        GpuBusy.Record(startSeconds, endSeconds);
+        Overlay.OverlayTelemetry.RecordGpuIntervalHostSeconds(startSeconds, endSeconds);
+    }
+
+    private static string _sessionBackend = string.Empty;
+    private static string _sessionTitle = string.Empty;
+
+    /// <summary>Names the graphics backend ("Metal", "Vulkan") and the running title for the overlay's session widget.</summary>
+    public static void SetSessionInfo(string backend, string title)
+    {
+        Volatile.Write(ref _sessionBackend, backend ?? string.Empty);
+        Volatile.Write(ref _sessionTitle, title ?? string.Empty);
+    }
+
+    /// <summary>Refreshes the once-a-second figures for <see cref="Overlay.OverlayTelemetry"/>; called from its builder thread.</summary>
+    internal static void RefreshStatsForTelemetry() => RefreshStatsIfDue(0, 0);
 
     /// <summary>Supplies the size of the GPU device's allocations (MTLDevice.currentAllocatedSize), read once per refresh.</summary>
     public static void SetGpuAllocatedBytesProvider(Func<ulong>? provider) => Volatile.Write(ref _gpuAllocatedBytes, provider);
@@ -174,6 +201,7 @@ public static class PerfOverlay
         var now = Stopwatch.GetTimestamp();
         Interlocked.CompareExchange(ref _sessionStartTimestamp, now, 0);
         Interlocked.Increment(ref _submittedInWindow);
+        Overlay.OverlayTelemetry.RecordSubmit();
         if (!_trackPresentedGuestFrames)
         {
             RecordFrameInterval();
@@ -194,7 +222,11 @@ public static class PerfOverlay
     }
 
     /// <summary>Called per translated draw/dispatch executed.</summary>
-    public static void RecordDraw() => Interlocked.Increment(ref _drawsInWindow);
+    public static void RecordDraw()
+    {
+        Interlocked.Increment(ref _drawsInWindow);
+        Overlay.OverlayTelemetry.RecordDraw();
+    }
 
     public static void SetGuestCacheStatistics(ulong bufferBytes, ulong imageBytes, int liveDeviceAllocations, int peakDeviceAllocations)
     {
@@ -345,6 +377,31 @@ public static class PerfOverlay
             _minimalLine1 = $"FPS {_fps:0.0}  CPU {cpuLabel}";
             _minimalLine2 = $"GPU {gpuLabel}  TIME {timeLabel}";
             _minimalSummary = OverlayText.FormatTitle(stats);
+            Overlay.OverlayTelemetry.PublishSystemStats(new Overlay.SystemStats
+            {
+                Fps = _fps,
+                PresentFps = _presentFps,
+                CpuPercent = resources.TotalCpuPercent,
+                CpuCores = resources.TotalCpuPercent * Environment.ProcessorCount / 100.0,
+                GpuPercent = gpuPercent,
+                GpuSource = double.IsFinite(gpuPercent) ? _gpuUsage?.SourceName ?? "n/a" : "n/a",
+                ProcessMemoryBytes = resources.TotalFootprintBytes,
+                ProcessMemoryKind = OverlayResourceSampler.FootprintKind,
+                GpuAllocatedBytes = ReadGpuAllocatedBytes(),
+                GuestBufferCacheBytes = (ulong)Math.Max(0, Interlocked.Read(ref _guestBufferCacheBytes)),
+                GuestImageCacheBytes = (ulong)Math.Max(0, Interlocked.Read(ref _guestImageCacheBytes)),
+                AllocatedMbPerSecond = _allocatedMbPerSecond,
+                Gen0 = _gen0PerWindow,
+                Gen1 = _gen1PerWindow,
+                Gen2 = _gen2PerWindow,
+                RenderWidth = (uint)(resolution >> 32),
+                RenderHeight = (uint)resolution,
+                ElapsedSeconds = elapsedSeconds,
+                DrawsPerSecond = _drawsPerSecond,
+                Backend = Volatile.Read(ref _sessionBackend),
+                Os = OperatingSystem.IsMacOS() ? "macOS" : OperatingSystem.IsWindows() ? "Windows" : OperatingSystem.IsLinux() ? "Linux" : "Unknown",
+                Title = Volatile.Read(ref _sessionTitle),
+            });
         }
     }
 
@@ -516,7 +573,7 @@ public static class PerfOverlay
     }
 
     // Classic 5x7 column-encoded font (bit 0 = top row), ASCII 32..90.
-    private static ReadOnlySpan<byte> Font =>
+    internal static ReadOnlySpan<byte> Font =>
     [
         0x00, 0x00, 0x00, 0x00, 0x00, // ' '
         0x00, 0x00, 0x5F, 0x00, 0x00, // '!'

@@ -513,6 +513,21 @@ public sealed class PageGuardTests : IDisposable
     }
 
     [Fact]
+    public void HasActiveWatches_TracksTheLastWatch()
+    {
+        var guard = new PageGuard(_space);
+        Assert.False(guard.HasActiveWatches());
+
+        guard.AddWatch(0x40000, 0x1000, blockReads: true);
+        Assert.True(guard.HasActiveWatches());
+
+        guard.RemoveWatch(0x40000, 0x1000, blockReads: true);
+        Assert.False(guard.HasActiveWatches());
+        guard.Dispose();
+        Assert.Empty(_fatals);
+    }
+
+    [Fact]
     public void Dispose_WithLiveWatchersIsFatal()
     {
         var guard = new PageGuard(_space);

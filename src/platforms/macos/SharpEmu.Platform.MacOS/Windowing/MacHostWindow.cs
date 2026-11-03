@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.VideoOut.Overlay;
 using SharpEmu.Platform.MacOS.Input;
 
 namespace SharpEmu.Platform.MacOS.Windowing;
@@ -61,13 +62,21 @@ public sealed class MacHostWindow : IMetalHostWindow
 
     // NSEventType
     private const nuint EventLeftMouseDown = 1;
+    private const nuint EventLeftMouseUp = 2;
+    private const nuint EventRightMouseDown = 3;
+    private const nuint EventRightMouseUp = 4;
     private const nuint EventMouseMoved = 5;
     private const nuint EventLeftMouseDragged = 6;
+    private const nuint EventRightMouseDragged = 7;
+    private const nuint EventMouseExited = 9;
+    private const nuint EventScrollWheel = 22;
     private const nuint EventKeyDown = 10;
     private const nuint EventKeyUp = 11;
 
     // NSEventModifierFlags
+    private const nuint ModifierShift = 1 << 17;
     private const nuint ModifierControl = 1 << 18;
+    private const nuint ModifierOption = 1 << 19;
     private const nuint ModifierCommand = 1 << 20;
 
     private const ulong EventMaskAny = ulong.MaxValue;
@@ -641,10 +650,18 @@ public sealed class MacHostWindow : IMetalHostWindow
                 return HandleKeyEvent(nsEvent, type == EventKeyDown);
             case EventMouseMoved:
             case EventLeftMouseDragged:
+            case EventRightMouseDragged:
                 ShowCursorTemporarily();
-                return false;
+                return ForwardPointer(nsEvent, OverlayPointerKind.Move,
+                    type == EventRightMouseDragged ? OverlayMouseButton.Right : OverlayMouseButton.Left);
             case EventLeftMouseDown:
                 ShowCursorTemporarily();
+                // The overlay's widgets take clicks first; a double-click elsewhere toggles fullscreen.
+                if (ForwardPointer(nsEvent, OverlayPointerKind.Down, OverlayMouseButton.Left))
+                {
+                    return true;
+                }
+
                 if (MacObjC.SendInt(nsEvent, MacObjC.Selector("clickCount")) == 2 &&
                     IsInsideContentView(nsEvent))
                 {
@@ -652,6 +669,17 @@ public sealed class MacHostWindow : IMetalHostWindow
                     return true;
                 }
 
+                return false;
+            case EventLeftMouseUp:
+                return ForwardPointer(nsEvent, OverlayPointerKind.Up, OverlayMouseButton.Left);
+            case EventRightMouseDown:
+                return ForwardPointer(nsEvent, OverlayPointerKind.Down, OverlayMouseButton.Right);
+            case EventRightMouseUp:
+                return ForwardPointer(nsEvent, OverlayPointerKind.Up, OverlayMouseButton.Right);
+            case EventScrollWheel:
+                return ForwardPointer(nsEvent, OverlayPointerKind.Scroll, OverlayMouseButton.None);
+            case EventMouseExited:
+                PerfOverlay.HandlePointer(new OverlayPointerEvent(OverlayPointerKind.Leave, -1, -1, OverlayMouseButton.None));
                 return false;
             default:
                 return false;
@@ -678,12 +706,35 @@ public sealed class MacHostWindow : IMetalHostWindow
                     PerfOverlay.Toggle();
                     return true;
                 case MacVirtualKeyCode.F2:
-                    PerfOverlay.CycleCorner();
+                    PerfOverlay.HandleKey(OverlayKey.CyclePreset);
+                    return true;
+                case MacVirtualKeyCode.F3:
+                    PerfOverlay.HandleKey(OverlayKey.ToggleEdit);
+                    return true;
+                case MacVirtualKeyCode.F4:
+                    PerfOverlay.HandleKey(OverlayKey.TogglePause);
+                    return true;
+                // Arrows, Escape and 1-4 reach the overlay only while it is paused or editing
+                // (HandleKey says no otherwise), so the guest keeps them during play.
+                case MacVirtualKeyCode.LeftArrow when PerfOverlay.HandleKey(OverlayKey.StepBack):
+                case MacVirtualKeyCode.RightArrow when PerfOverlay.HandleKey(OverlayKey.StepForward):
+                case MacVirtualKeyCode.Escape when PerfOverlay.HandleKey(OverlayKey.Escape):
+                case MacVirtualKeyCode.Digit1 when PerfOverlay.HandleKey(OverlayKey.Preset1):
+                case MacVirtualKeyCode.Digit2 when PerfOverlay.HandleKey(OverlayKey.Preset2):
+                case MacVirtualKeyCode.Digit3 when PerfOverlay.HandleKey(OverlayKey.Preset3):
+                case MacVirtualKeyCode.Digit4 when PerfOverlay.HandleKey(OverlayKey.Preset4):
+                    _overlayKeysDown.Add(keyCode);
                     return true;
                 case MacVirtualKeyCode.F11:
                     ToggleFullscreen();
                     return true;
             }
+        }
+
+        // The release of a key the overlay took stays with the overlay too.
+        if (!down && _overlayKeysDown.Remove(keyCode))
+        {
+            return true;
         }
 
         if (!MacKeyMap.TryMapVirtualKey(keyCode, out var virtualKey))
@@ -701,6 +752,36 @@ public sealed class MacHostWindow : IMetalHostWindow
 
         HostWindowInput.SetKey(virtualKey, down);
         return true;
+    }
+
+    private readonly HashSet<ushort> _overlayKeysDown = [];
+
+    // Hands a mouse event to the performance overlay in content-view points, top-left origin
+    // (the drawable's layout space). True when the overlay consumed it. Mouse input never
+    // reaches the guest, so an unconsumed event only goes on to AppKit.
+    private bool ForwardPointer(nint nsEvent, OverlayPointerKind kind, OverlayMouseButton button)
+    {
+        if (!PerfOverlay.Enabled || !PerfOverlay.DrawOnScreen || _view == 0 ||
+            MacObjC.Send(nsEvent, MacObjC.Selector("window")) != _window)
+        {
+            return false;
+        }
+
+        var location = MacObjC.SendPoint(nsEvent, MacObjC.Selector("locationInWindow"));
+        var frame = MacObjC.SendRect(_view, MacObjC.Selector("frame"));
+        var x = (float)(location.X - frame.Origin.X);
+        var y = (float)(frame.Size.Height - (location.Y - frame.Origin.Y));
+        var flags = MacObjC.SendUInt(nsEvent, MacObjC.Selector("modifierFlags"));
+        var modifiers = ((flags & ModifierOption) != 0 ? OverlayModifiers.Alt : 0) |
+            ((flags & ModifierShift) != 0 ? OverlayModifiers.Shift : 0) |
+            ((flags & ModifierControl) != 0 ? OverlayModifiers.Control : 0);
+        var scroll = kind == OverlayPointerKind.Scroll
+            ? (float)MacObjC.SendDouble(nsEvent, MacObjC.Selector("scrollingDeltaY"))
+            : 0f;
+        var consumed = PerfOverlay.HandlePointer(new OverlayPointerEvent(kind, x, y, button, modifiers, scroll));
+        // A drag that starts on a widget keeps going to the overlay; plain moves stay unconsumed
+        // so the cursor logic keeps running.
+        return consumed && kind != OverlayPointerKind.Move;
     }
 
     private bool IsInsideContentView(nint nsEvent)
@@ -774,8 +855,9 @@ public sealed class MacHostWindow : IMetalHostWindow
 
     private void UpdateCursorAutoHide()
     {
+        // The overlay's edit mode and hovered widgets need the cursor.
         if (!_fullscreen || !_focused || !_cursorVisible || _cursorHideDeadline == 0 ||
-            Stopwatch.GetTimestamp() < _cursorHideDeadline)
+            Stopwatch.GetTimestamp() < _cursorHideDeadline || PerfOverlay.WantsPointer)
         {
             return;
         }

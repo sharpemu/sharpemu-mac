@@ -23,6 +23,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.GnmMode\SharpEmu.GnmMode.csproj" />
     <ProjectReference Include="..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+    <!-- Font rasterizer for the overlay preview in the Options page. -->
+    <ProjectReference Include="..\adapters\SharpEmu.Fonts.Skia\SharpEmu.Fonts.Skia.csproj" />
   </ItemGroup>
 
   <ItemGroup>

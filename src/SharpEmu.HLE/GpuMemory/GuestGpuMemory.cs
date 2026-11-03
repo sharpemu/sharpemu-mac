@@ -702,6 +702,9 @@ public sealed class GuestGpuMemory : IDisposable
         }
     }
 
+    /// <summary>Whether GPU caches still watch guest pages, e.g. a presenter that never released its images.</summary>
+    public bool HasActiveWatches() => _pages.HasActiveWatches();
+
     public void Dispose()
     {
         _pages.Dispose();

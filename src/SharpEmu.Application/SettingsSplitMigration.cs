@@ -174,6 +174,7 @@ public static class SettingsSplitMigration
         game.OverlayEnabled = Fill(game.OverlayEnabled, carried.OverlayEnabled, ref changed);
         game.OverlayCorner = Fill(game.OverlayCorner, carried.OverlayCorner, ref changed);
         game.OverlayMode = Fill(game.OverlayMode, carried.OverlayMode, ref changed);
+        game.OverlayPreset = Fill(game.OverlayPreset, carried.OverlayPreset, ref changed);
         game.BinkPlaybackMode = Fill(game.BinkPlaybackMode, carried.BinkPlaybackMode, ref changed);
 
         // A whole list of its own never followed the carried one. Otherwise its changes are laid

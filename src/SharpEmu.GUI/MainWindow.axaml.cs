@@ -106,18 +106,11 @@ public partial class MainWindow : Window
         LocalizedChoice.FromKey("Stretch", "Options.Scaling.Stretch"),
         LocalizedChoice.FromKey("Integer", "Options.Scaling.Integer"),
     ];
+    // The stored values stay "Full" and "TitleBar"; "Full" now reads as the on-screen widget overlay.
     private readonly LocalizedChoice[] _overlayModeChoices =
     [
-        LocalizedChoice.FromKey("Full", "Options.OverlayMode.Full"),
-        LocalizedChoice.FromKey("Minimal", "Options.OverlayMode.Minimal"),
-        LocalizedChoice.FromKey("TitleBar", "Options.OverlayMode.TitleBar"),
-    ];
-    private readonly LocalizedChoice[] _overlayCornerChoices =
-    [
-        LocalizedChoice.FromKey("TopLeft", "Options.OverlayCorner.TopLeft"),
-        LocalizedChoice.FromKey("TopRight", "Options.OverlayCorner.TopRight"),
-        LocalizedChoice.FromKey("BottomRight", "Options.OverlayCorner.BottomRight"),
-        LocalizedChoice.FromKey("BottomLeft", "Options.OverlayCorner.BottomLeft"),
+        LocalizedChoice.FromKey("Full", "Options.OverlayDisplay.OnScreen"),
+        LocalizedChoice.FromKey("TitleBar", "Options.OverlayDisplay.TitleBar"),
     ];
     private readonly LocalizedChoice[] _hdrModeChoices =
     [
@@ -388,6 +381,7 @@ public partial class MainWindow : Window
         ConsoleToggle.IsCheckedChanged += (_, _) => UpdateEmbeddedConsoleVisibility();
         WireOptionsNavigation();
         WireGameOptions();
+        WireOverlayEditor();
         BuildEnvironmentSettingRows();
         BuildScopedRows();
         HideUnsupportedPlatformOptions();
@@ -582,6 +576,7 @@ public partial class MainWindow : Window
             AttachGlobalGameSettings();
         }
         OptionsPage.IsVisible = index == 1;
+        UpdateOverlayEditorActive();
         AnimatePageChange(previousPage, index);
         UpdateEmbeddedConsoleVisibility();
 
@@ -736,6 +731,7 @@ public partial class MainWindow : Window
         OptionsGeneralNav,
         OptionsLoggingNav,
         OptionsGraphicsNav,
+        OptionsOverlayNav,
         OptionsEnvironmentNav,
         OptionsLauncherNav,
         OptionsGnmModeNav,
@@ -747,6 +743,7 @@ public partial class MainWindow : Window
         OptionsGeneralPanel,
         OptionsLoggingPanel,
         OptionsGraphicsPanel,
+        OptionsOverlayPanel,
         OptionsEnvironmentPanel,
         OptionsLauncherPanel,
         OptionsGnmModePanel,
@@ -776,6 +773,8 @@ public partial class MainWindow : Window
         {
             RefreshLogsFolderText();
         }
+
+        UpdateOverlayEditorActive();
     }
 
     private static void SetOptionsPanelInteraction(Control panel, bool active)
@@ -1423,6 +1422,7 @@ public partial class MainWindow : Window
         _libraryLayoutTimer.Stop();
         _settingsSaveTimer.Stop();
         _gamepadTimer.Stop();
+        ShutDownOverlayEditor();
     }
 
     private void CompleteWindowClosing()
@@ -1576,7 +1576,9 @@ public partial class MainWindow : Window
         RefreshChoices(_gpuReadbackChoices);
         RefreshChoices(_binkPlaybackChoices);
         RefreshChoices(_overlayModeChoices);
-        RefreshChoices(_overlayCornerChoices);
+        RefreshChoices(_overlayPresetChoices);
+        RefreshChoices(_overlayThemeChoices);
+        RefreshChoices(_overlayFontChoices);
         RefreshEnvironmentSettingChoices();
     }
 

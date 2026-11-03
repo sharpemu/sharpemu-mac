@@ -446,7 +446,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (PerfOverlay.DrawOnScreen)
             {
-                RecordOverlayBlit(imageIndex, frameSlot);
+                RecordOverlay(imageIndex, frameSlot, presentation.IsHdr);
             }
 
             if (_hdrOutputActive)

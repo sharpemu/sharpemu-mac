@@ -98,6 +98,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _swapchainFormat = surfaceFormat.Format;
             _swapchainColorSpace = surfaceFormat.ColorSpace;
             _extent = ChooseExtent(capabilities);
+            UpdateOverlayPixelScale();
             SharpEmu.Libs.Media.MoviePresentationServices.SetPresentationSize(_extent.Width, _extent.Height);
             var presentMode = ChoosePresentMode();
             var imageCount = capabilities.MinImageCount + 1;
@@ -572,31 +573,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
             _renderFinishedPerImage = [];
-            if (_overlayImage.Handle != 0)
-            {
-                _vk.DestroyImage(_device, _overlayImage, null);
-                _overlayImage = default;
-            }
-            if (_overlayImageMemory.Handle != 0)
-            {
-                _deviceInfo.FreeMemory(_overlayImageMemory);
-                _overlayImageMemory = default;
-            }
-            for (var slot = 0; slot < _overlayStagingBuffers.Length; slot++)
-            {
-                if (_overlayStagingBuffers[slot].Handle != 0)
-                {
-                    _vk.DestroyBuffer(_device, _overlayStagingBuffers[slot], null);
-                }
-                if (_overlayStagingMemory[slot].Handle != 0)
-                {
-                    _deviceInfo.FreeMemory(_overlayStagingMemory[slot]);
-                }
-            }
-            _overlayStagingBuffers = [];
-            _overlayStagingMemory = [];
-            _overlayStagingMapped = [];
-            _overlayImageInitialized = false;
+            DestroyBlendOverlayResources();
+            _blendOverlayFailed = false;
             _frameInFlight = [];
             _frameTimelines = [];
             _frameGuestImageVersions = [];

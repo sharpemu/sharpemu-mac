@@ -51,6 +51,21 @@ public sealed unsafe partial class DirectExecutionBackend :
 	// once rather than a string per dispatch.
 	private void PublishImportProfileNames()
 	{
+		// The overlay names import slots lazily, from whatever table is current.
+		SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.SetHleNameResolver(index =>
+		{
+			var entries = _importEntries;
+			if ((uint)index >= (uint)entries.Length)
+			{
+				return null;
+			}
+
+			var entry = entries[index];
+			return entry.Export is { } export
+				? $"{export.LibraryName}:{export.Name}"
+				: DescribeUnresolvedImport(entry.Nid) is var name && name != "?" ? name : entry.Nid;
+		});
+
 		if (!ImportProfile.Enabled)
 		{
 			return;

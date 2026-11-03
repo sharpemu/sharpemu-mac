@@ -1124,20 +1124,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         </local:SettingRow>
                         <local:SettingRow x:Name="GameOverlayModeRow"
                                           Classes="optionRow"
-                                          Label="{Binding [Options.OverlayMode.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                          Description="{Binding [Options.OverlayMode.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                                          Label="{Binding [Options.OverlayDisplay.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                          Description="{Binding [Options.OverlayDisplay.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
                           <ComboBox x:Name="GameOverlayModeBox"
                                     Classes="optionValue"
-                                    ToolTip.Tip="{Binding [Options.OverlayMode.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                    ToolTip.Tip="{Binding [Options.OverlayDisplay.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
                                     ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
                         </local:SettingRow>
-                        <local:SettingRow x:Name="GameOverlayCornerRow"
+                        <local:SettingRow x:Name="GameOverlayPresetRow"
                                           Classes="optionRow"
-                                          Label="{Binding [Options.OverlayCorner.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                          Description="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
-                          <ComboBox x:Name="GameOverlayCornerBox"
+                                          Label="{Binding [Options.OverlayPreset.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                          Description="{Binding [Options.OverlayPreset.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                          <ComboBox x:Name="GameOverlayPresetBox"
                                     Classes="optionValue"
-                                    ToolTip.Tip="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                    ToolTip.Tip="{Binding [Options.OverlayPreset.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
                                     ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
                         </local:SettingRow>
                       </StackPanel>
@@ -1382,6 +1382,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Text="{Binding [Options.Graphics], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                     </Grid>
                   </Button>
+                  <Button x:Name="OptionsOverlayNav" Classes="optionsNav"
+                          AutomationProperties.Name="{Binding [Options.Overlay.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0" Classes="materialSymbol optionsNavIcon" Text="speed" />
+                      <TextBlock Grid.Column="1" Classes="optionsNavLabel"
+                                 Text="{Binding [Options.Overlay.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    </Grid>
+                  </Button>
                   <Button x:Name="OptionsEnvironmentNav" Classes="optionsNav"
                           AutomationProperties.Name="{Binding [Options.Env.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
                     <Grid ColumnDefinitions="36,*">
@@ -1488,6 +1496,189 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
               <ScrollViewer x:Name="OptionsGraphicsPanel" Classes="optionsSectionPanel" />
               <ScrollViewer x:Name="OptionsEnvironmentPanel" Classes="optionsSectionPanel" />
+
+              <ScrollViewer x:Name="OptionsOverlayPanel" Classes="optionsSectionPanel">
+                <StackPanel>
+                  <StackPanel Classes="optionsSectionHeader">
+                    <TextBlock Classes="optionsSectionTitle"
+                               Text="{Binding [Options.Overlay.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    <TextBlock Classes="optionsSectionDesc"
+                               Text="{Binding [Options.Page.Overlay.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
+
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <Border x:Name="OverlayPreviewFrame"
+                              Margin="12,12,12,4"
+                              MaxWidth="760"
+                              Background="{StaticResource BgBrush}"
+                              BorderBrush="{StaticResource CardBorderBrush}"
+                              BorderThickness="1"
+                              CornerRadius="{StaticResource RadiusMd}"
+                              ClipToBounds="True">
+                        <Image x:Name="OverlayPreviewImage" Stretch="Fill" />
+                      </Border>
+                      <Border Classes="optionsInfoRow groupFirst">
+                        <TextBlock x:Name="OverlayHintText"
+                                   Text="{Binding [Overlay.Preview.Hint], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                   FontSize="{StaticResource FontSizeDescription}"
+                                   Foreground="{StaticResource SettingsDescriptionBrush}"
+                                   LineHeight="20"
+                                   TextWrapping="Wrap" />
+                      </Border>
+                    </StackPanel>
+                  </Border>
+
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Overlay.Group.Preset], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow x:Name="OverlayPresetEditRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Preset.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Preset.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <ComboBox x:Name="OverlayPresetEditBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlaySaveAsRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Preset.SaveAs.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Preset.SaveAs.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <Button x:Name="OverlaySaveAsButton" Classes="optionAction">
+                          <TextBlock Text="{Binding [Overlay.Preset.SaveAs.Button], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" VerticalAlignment="Center" />
+                        </Button>
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayResetRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Preset.Reset.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Preset.Reset.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <Button x:Name="OverlayResetButton" Classes="optionAction">
+                          <TextBlock Text="{Binding [Overlay.Preset.Reset.Button], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" VerticalAlignment="Center" />
+                        </Button>
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayDeleteRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Preset.Delete.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Preset.Delete.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <Button x:Name="OverlayDeleteButton" Classes="optionAction">
+                          <TextBlock Text="{Binding [Overlay.Preset.Delete.Button], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" VerticalAlignment="Center" />
+                        </Button>
+                      </local:SettingRow>
+                    </StackPanel>
+                  </Border>
+
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Overlay.Group.Style], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow x:Name="OverlayThemeRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Style.Theme.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Style.Theme.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <ComboBox x:Name="OverlayThemeBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayFontRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Style.Font.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Style.Font.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <ComboBox x:Name="OverlayFontBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayOpacityRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Style.Opacity.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Style.Opacity.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                          <Slider x:Name="OverlayOpacitySlider"
+                                  Classes="appearanceSlider"
+                                  Minimum="30" Maximum="100"
+                                  SmallChange="5" LargeChange="10"
+                                  TickFrequency="5" IsSnapToTickEnabled="True" />
+                          <TextBlock x:Name="OverlayOpacitySliderValue" Classes="sliderValue" />
+                        </StackPanel>
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayScaleRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Style.Scale.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Style.Scale.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                          <Slider x:Name="OverlayScaleSlider"
+                                  Classes="appearanceSlider"
+                                  Minimum="75" Maximum="150"
+                                  SmallChange="5" LargeChange="10"
+                                  TickFrequency="5" IsSnapToTickEnabled="True" />
+                          <TextBlock x:Name="OverlayScaleSliderValue" Classes="sliderValue" />
+                        </StackPanel>
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayFontSizeRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Style.FontSize.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Style.FontSize.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                          <Slider x:Name="OverlayFontSizeSlider"
+                                  Classes="appearanceSlider"
+                                  Minimum="9" Maximum="14"
+                                  SmallChange="1" LargeChange="1"
+                                  TickFrequency="1" IsSnapToTickEnabled="True" />
+                          <TextBlock x:Name="OverlayFontSizeSliderValue" Classes="sliderValue" />
+                        </StackPanel>
+                      </local:SettingRow>
+                    </StackPanel>
+                  </Border>
+
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Overlay.Group.Widgets], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border x:Name="OverlayWidgetsGroup" Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow x:Name="OverlayWidgetSelectRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Widget.Select.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Widget.Select.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <ComboBox x:Name="OverlayWidgetSelectBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayWidgetRemoveRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Widget.Remove.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Widget.Remove.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <Button x:Name="OverlayWidgetRemoveButton" Classes="optionAction">
+                          <TextBlock Text="{Binding [Overlay.Widget.Remove.Button], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" VerticalAlignment="Center" />
+                        </Button>
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayWidgetAddRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Overlay.Widget.Add.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Overlay.Widget.Add.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                          <ComboBox x:Name="OverlayWidgetAddBox"
+                                    Classes="optionValue"
+                                    ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                    HorizontalContentAlignment="Left"
+                                    VerticalAlignment="Center" />
+                          <Button x:Name="OverlayWidgetAddButton" Classes="optionAction">
+                            <TextBlock Text="{Binding [Overlay.Widget.Add.Button], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" VerticalAlignment="Center" />
+                          </Button>
+                        </StackPanel>
+                      </local:SettingRow>
+                    </StackPanel>
+                  </Border>
+
+                  <TextBlock x:Name="OverlayWidgetSettingsHeader" Classes="optionsGroupHeader" />
+                  <Border x:Name="OverlayWidgetSettingsGroup" Classes="optionsGroup">
+                    <StackPanel x:Name="OverlayWidgetSettingsHost" />
+                  </Border>
+                </StackPanel>
+              </ScrollViewer>
 
               <ScrollViewer x:Name="OptionsLoggingPanel"
                             Classes="optionsSectionPanel">
