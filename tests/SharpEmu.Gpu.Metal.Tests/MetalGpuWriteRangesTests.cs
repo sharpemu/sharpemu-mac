@@ -542,7 +542,7 @@ public sealed class MetalGpuWriteRangesTests
     [Fact]
     public void AFoldDropsTheGranulesItsMergedRecordsNowCover()
     {
-        var ranges = new MetalGpuWriteRanges();
+        var ranges = new MetalGpuWriteRanges(FoldCap);
         var gaps = new List<ulong>();
         for (var index = 0; index < 511; index++)
         {
