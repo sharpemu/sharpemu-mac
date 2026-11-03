@@ -310,14 +310,22 @@ public sealed partial class OverlayRenderer
             }
         }
 
-        if (viewMode == 0)
+        if (viewMode is 0 or 3)
         {
             for (var k = Math.Max(0, s0); k <= end; k++)
             {
                 var fr = frames[k];
                 var x = x0 + (k - s0) * bw;
                 var barW = MathF.Max(0.8f, bw - (bw > 3f ? 0.6f : 0.2f));
-                DrawStackedBar(fr, x, barW, y0, ph, yMax);
+                if (viewMode == 0)
+                {
+                    DrawBoundBar(fr, x, barW, y0, ph, yMax);
+                }
+                else
+                {
+                    DrawStackedBar(fr, x, barW, y0, ph, yMax);
+                }
+
                 if (fr.FrameMs > yMax)
                 {
                     _c.FillRect(x, y0, barW, 1.5f, OverlayColor.Hex(0xFFFFFF));
@@ -405,6 +413,37 @@ public sealed partial class OverlayRenderer
         }
     }
 
+    private readonly float[] _boundKinds = new float[(int)CostKind.Count];
+
+    /// <summary>
+    /// A bar of the frame's height: the slowest lane's busy time split by kind, then the rest of the
+    /// frame (time that lane spent waiting on the others or the pacer) as sync / wait.
+    /// </summary>
+    private void DrawBoundBar(FrameRecord fr, float x, float barW, float y0, float ph, float yMax)
+    {
+        OverlayAnalyzer.BoundBreakdown(fr, _boundKinds);
+        var bottom = y0 + ph;
+        var pxPerMs = ph / yMax;
+        var y = bottom;
+        foreach (var kind in StackOrder)
+        {
+            var h = _boundKinds[(int)kind] * pxPerMs;
+            if (h <= 0.05f)
+            {
+                continue;
+            }
+
+            var ny = MathF.Max(y0, y - h);
+            var color = OverlayColors.OfKind(kind);
+            _c.FillRect(x, ny, barW, y - ny, kind == CostKind.Wait ? color.WithAlpha(0.45f) : color);
+            y = ny;
+            if (y <= y0)
+            {
+                break;
+            }
+        }
+    }
+
     /// <summary>A bar of the frame's height split by each kind's share of the frame's work.</summary>
     private void DrawStackedBar(FrameRecord fr, float x, float barW, float y0, float ph, float yMax)
     {
@@ -453,10 +492,13 @@ public sealed partial class OverlayRenderer
             TipLine(OverlayColors.Bad).Append("hitch: ").Append(string.IsNullOrEmpty(fr.HitchReason) ? "slow frame" : fr.HitchReason);
         }
 
+        var lane = OverlayAnalyzer.BoundBreakdown(fr, _boundKinds);
+        TipLine(_pal.Text).Append("bound by ").Append(OverlayAnalyzer.BusyLaneLabel(lane)).Append("  ")
+            .AppendMs(fr.FrameMs - _boundKinds[(int)CostKind.Wait]);
         var shown = 0;
         foreach (var kind in StackOrder)
         {
-            var ms = fr.KindMs[(int)kind];
+            var ms = _boundKinds[(int)kind];
             if (ms <= 0.04f || shown >= 3)
             {
                 continue;

@@ -187,7 +187,7 @@ public static class WidgetCatalog
         new(OverlayWidgetType.History, "history", "Frame time history", "Frame-time history coloured by cost kind; click a bar to inspect that frame", 360, 112, 200, 70,
         [
             WidgetSetting.Choice("len", "Frames shown", 1, Numbers(60, 120, 180, 240)),
-            WidgetSetting.Choice("view", "Chart", 0, new SettingOption("stack", "Stacked (ms)"), new SettingOption("line", "Line (ms)"), new SettingOption("fps", "Line (fps)")),
+            WidgetSetting.Choice("view", "Chart", 0, new SettingOption("stack", "Slowest lane (ms)"), new SettingOption("line", "Line (ms)"), new SettingOption("fps", "Line (fps)"), new SettingOption("work", "All work by kind (ms)")),
             WidgetSetting.Choice("ymax", "Y axis", 0, new SettingOption("auto", "Auto"), new SettingOption("2x", "2× budget")),
             WidgetSetting.Toggle("legend", "Show legend", true),
         ]),

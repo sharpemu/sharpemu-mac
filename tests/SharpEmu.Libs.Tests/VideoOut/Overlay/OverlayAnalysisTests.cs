@@ -193,4 +193,28 @@ public sealed class OverlayAnalysisTests
         Assert.Equal(2, analyzer.MemoryTrend.Length);
         Assert.Equal(3f, analyzer.MemoryTrend[^1], 3);
     }
+
+    [Fact]
+    public void AGpuBoundFrameStacksAsGpuThenWait()
+    {
+        var frame = Frame(1, 26f, main: 6f, workers: 8f, render: 2f, gpu: 21f);
+        Span<float> kinds = stackalloc float[(int)CostKind.Count];
+        Assert.Equal(OverlayBusyLane.Gpu, OverlayAnalyzer.BoundBreakdown(frame, kinds));
+        Assert.Equal(21f, kinds[(int)CostKind.Gpu], 3);
+        Assert.Equal(5f, kinds[(int)CostKind.Wait], 3);
+        Assert.Equal(0f, kinds[(int)CostKind.Guest], 3);
+    }
+
+    [Fact]
+    public void AGuestBoundFrameSplitsHleFromGuestCode()
+    {
+        var frame = Frame(1, 40f, main: 36f, gpu: 10f,
+            costs: [new CostSample(OverlayTelemetry.HleNameBase + 1, CostKind.Hle, OverlayLane.GuestMain, 9f, 100),
+                    new CostSample(OverlayTelemetry.HleNameBase + 2, CostKind.Hle, OverlayLane.GuestWorkers, 30f, 100)]);
+        Span<float> kinds = stackalloc float[(int)CostKind.Count];
+        Assert.Equal(OverlayBusyLane.GuestMain, OverlayAnalyzer.BoundBreakdown(frame, kinds));
+        Assert.Equal(9f, kinds[(int)CostKind.Hle], 3);
+        Assert.Equal(27f, kinds[(int)CostKind.Guest], 3);
+        Assert.Equal(4f, kinds[(int)CostKind.Wait], 3);
+    }
 }

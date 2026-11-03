@@ -349,6 +349,98 @@ public sealed class OverlayAnalyzer
         return any ? best : frame.GuestWorkersMs / Math.Max(1, frame.ActiveWorkers);
     }
 
+    /// <summary>
+    /// The lane that took longest this frame (guest main, busiest worker, render thread or GPU) and
+    /// its busy ms; the frame cannot finish before that lane does, so it is what to chase.
+    /// </summary>
+    public static (OverlayBusyLane Lane, float BusyMs) BoundOf(FrameRecord frame)
+    {
+        var lane = OverlayBusyLane.GuestMain;
+        var busy = frame.GuestMainMs;
+        void Consider(OverlayBusyLane candidate, float ms)
+        {
+            if (ms > busy)
+            {
+                lane = candidate;
+                busy = ms;
+            }
+        }
+
+        Consider(OverlayBusyLane.Workers, WorkerBusiestMs(frame));
+        Consider(OverlayBusyLane.Render, frame.RenderBusyMs);
+        Consider(OverlayBusyLane.Gpu, frame.GpuMs);
+        return (lane, MathF.Min(busy, frame.FrameMs));
+    }
+
+    /// <summary>
+    /// Splits the bound lane's busy time by kind (HLE vs guest code on the guest lanes; render,
+    /// shader and other work on the render thread; GPU on the GPU). Writes into <paramref name="kindMs"/>
+    /// (cleared first) and returns the bound lane.
+    /// </summary>
+    public static OverlayBusyLane BoundBreakdown(FrameRecord frame, Span<float> kindMs)
+    {
+        kindMs.Clear();
+        var (lane, busy) = BoundOf(frame);
+        switch (lane)
+        {
+            case OverlayBusyLane.Gpu:
+                kindMs[(int)CostKind.Gpu] = busy;
+                break;
+            case OverlayBusyLane.Render:
+            {
+                var k = frame.KindMs;
+                var render = k[(int)CostKind.Render];
+                var shader = k[(int)CostKind.Shader];
+                var other = k[(int)CostKind.Other];
+                var sum = render + shader + other;
+                if (sum <= 0)
+                {
+                    kindMs[(int)CostKind.Render] = busy;
+                    break;
+                }
+
+                kindMs[(int)CostKind.Render] = busy * render / sum;
+                kindMs[(int)CostKind.Shader] = busy * shader / sum;
+                kindMs[(int)CostKind.Other] = busy * other / sum;
+                break;
+            }
+            default:
+            {
+                var target = lane == OverlayBusyLane.GuestMain ? OverlayLane.GuestMain : OverlayLane.GuestWorkers;
+                var hle = 0f;
+                foreach (var c in frame.Costs)
+                {
+                    if (c.Lane == target && c.Kind == CostKind.Hle)
+                    {
+                        hle += c.Milliseconds;
+                    }
+                }
+
+                if (lane == OverlayBusyLane.Workers && frame.GuestWorkersMs > 0)
+                {
+                    // Worker HLE time is summed over every worker; take the busiest one's share.
+                    hle *= busy / frame.GuestWorkersMs;
+                }
+
+                hle = Math.Clamp(hle, 0f, busy);
+                kindMs[(int)CostKind.Hle] = hle;
+                kindMs[(int)CostKind.Guest] = busy - hle;
+                break;
+            }
+        }
+
+        kindMs[(int)CostKind.Wait] = MathF.Max(0f, frame.FrameMs - busy);
+        return lane;
+    }
+
+    public static string BusyLaneLabel(OverlayBusyLane lane) => lane switch
+    {
+        OverlayBusyLane.GuestMain => "guest main thread",
+        OverlayBusyLane.Workers => "busiest guest worker",
+        OverlayBusyLane.Render => "render thread",
+        _ => "GPU",
+    };
+
     private static void AddFrame(FrameAggregate a, FrameRecord f)
     {
         a.Frames++;
