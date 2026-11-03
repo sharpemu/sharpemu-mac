@@ -318,8 +318,24 @@ public static partial class OverlayTelemetry
         return name;
     }
 
-    private static bool IsWaitImport(int importIndex) =>
-        HleIsWait.GetOrAdd(importIndex, static index => IsWaitName(HleName(index)));
+    private static bool IsWaitImport(int importIndex)
+    {
+        if (HleIsWait.TryGetValue(importIndex, out var known))
+        {
+            return known;
+        }
+
+        // Only a resolved name is classified for good: the split guest publishes names a moment
+        // after the first calls, and the placeholder would pin a wait as a cost.
+        var name = HleName(importIndex);
+        var wait = IsWaitName(name);
+        if (HleNames.ContainsKey(importIndex))
+        {
+            HleIsWait[importIndex] = wait;
+        }
+
+        return wait;
+    }
 
     /// <summary>True for exports that block the calling thread (waits, sleeps, yields, joins, mutex locks).</summary>
     internal static bool IsWaitName(string name)
@@ -331,6 +347,7 @@ public static partial class OverlayTelemetry
             bare.Contains("Yield", StringComparison.OrdinalIgnoreCase) ||
             bare.Contains("Join", StringComparison.OrdinalIgnoreCase) ||
             bare.Contains("PollEvent", StringComparison.OrdinalIgnoreCase) ||
+            bare.Contains("Nap", StringComparison.Ordinal) ||
             (bare.Contains("Mutex", StringComparison.OrdinalIgnoreCase) &&
                 bare.Contains("Lock", StringComparison.OrdinalIgnoreCase) &&
                 !bare.Contains("Unlock", StringComparison.OrdinalIgnoreCase));

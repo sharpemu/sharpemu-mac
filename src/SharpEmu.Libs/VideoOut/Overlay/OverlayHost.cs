@@ -216,6 +216,8 @@ public sealed class OverlayHost : IDisposable
         }
     }
 
+    private bool _reportedFailure;
+
     private void RenderLoop()
     {
         var lastRender = 0L;
@@ -274,9 +276,16 @@ public sealed class OverlayHost : IDisposable
                 lastRender = Stopwatch.GetTimestamp();
                 SaveIfChanged();
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 // The overlay must never take the emulator down; try again on the next tick.
+                // The first failure is reported so a dead overlay is not silent.
+                if (!_reportedFailure)
+                {
+                    _reportedFailure = true;
+                    Console.Error.WriteLine($"[OVERLAY][ERROR] The overlay render loop failed: {ex}");
+                }
+
                 Thread.Sleep(50);
             }
         }

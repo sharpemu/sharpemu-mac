@@ -111,7 +111,7 @@ public sealed partial class OverlayRenderer
         }
 
         var labelSize = Math.Clamp(_fs * 0.78f, 7f, 10f);
-        var gx = Math.Clamp(Measure("Workers × 13", labelSize) + 6f, 50f, 78f);
+        var gx = Math.Clamp(Measure("Workers × 13", labelSize) + 8f, 50f, 100f);
         const float pr = 6f, top = 3f, axisH = 13f;
         var pw = r.W - gx - pr;
         var laneH = MathF.Max(8f, (r.H - top - axisH) / laneCount - 3f);
@@ -355,11 +355,22 @@ public sealed partial class OverlayRenderer
         var tb = _tb.Clear();
         if (viewMode == 2) { tb.AppendFixed(v.TargetFps, 0); } else { tb.AppendFixed(b, 1); }
 
-        Txt(tb.Span, r.X, Math.Clamp(budgetY - LineH(axisSize) / 2f, y0, y0 + ph - LineH(axisSize)), axisSize, _pal.Dim);
-        tb = _tb.Clear();
-        tb.AppendFixed(viewMode == 2 ? fMax : yMax, 0);
-        Txt(tb.Span, r.X, y0 - 1f, axisSize, _pal.Dim);
-        Txt("0", r.X, y0 + ph - LineH(axisSize) + 1f, axisSize, _pal.Dim);
+        var lineH = LineH(axisSize);
+        var budgetLabelY = Math.Clamp(budgetY - lineH / 2f, y0, y0 + ph - lineH);
+        Txt(tb.Span, r.X, budgetLabelY, axisSize, _pal.Dim);
+        // The scale's ends are labelled only where the budget label leaves room for them.
+        if (budgetLabelY - y0 >= lineH)
+        {
+            tb = _tb.Clear();
+            tb.AppendFixed(viewMode == 2 ? fMax : yMax, 0);
+            Txt(tb.Span, r.X, y0 - 1f, axisSize, _pal.Dim);
+        }
+
+        var zeroY = y0 + ph - lineH + 1f;
+        if (zeroY - budgetLabelY >= lineH)
+        {
+            Txt("0", r.X, zeroY, axisSize, _pal.Dim);
+        }
 
         if (hoverIdx >= 0)
         {

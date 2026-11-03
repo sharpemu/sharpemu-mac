@@ -190,7 +190,8 @@ public static class WidgetCatalog
             WidgetSetting.Choice("src", "Source", 0, new SettingOption("frame", "Selected / last frame"), new SettingOption("avg", "Average of last N")),
             WidgetSetting.Choice("avgN", "Average over", 1, Numbers(30, 60, 120)),
             WidgetSetting.Choice("thread", "Threads", 0, new SettingOption("all", "All"), new SettingOption("main", "Guest main"), new SettingOption("workers", "Workers"), new SettingOption("render", "Render"), new SettingOption("gpu", "GPU")),
-            WidgetSetting.Toggle("waits", "Include waits", true),
+            // Off by default: sleeps summed over a dozen worker threads bury the costs worth chasing.
+            WidgetSetting.Toggle("waits", "Include waits", false),
             WidgetSetting.Toggle("pct", "% of frame column", true),
             WidgetSetting.Toggle("bars", "Inline bars", true),
             WidgetSetting.Toggle("count", "Call count column", false),

@@ -37,6 +37,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.GpuSplit\SharpEmu.GpuSplit.csproj" />
     <ProjectReference Include="..\graphics\SharpEmu.Gpu.Metal\SharpEmu.Gpu.Metal.csproj" />
     <ProjectReference Include="..\platforms\macos\SharpEmu.Platform.MacOS\SharpEmu.Platform.MacOS.csproj" />
+    <ProjectReference Include="..\platforms\macos\SharpEmu.Fonts.CoreTextMac\SharpEmu.Fonts.CoreTextMac.csproj" />
   </ItemGroup>
 
 </Project>

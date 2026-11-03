@@ -52,6 +52,7 @@ public sealed class OverlayTelemetryTests : IDisposable
     [InlineData("libKernel:scePthreadMutexLock", true)]
     [InlineData("libKernel:scePthreadMutexUnlock", false)]
     [InlineData("libKernel:scePthreadJoin", true)]
+    [InlineData("LibKernel:IdleNap", true)]
     [InlineData("libSceAgc:sceAgcDcbDrawIndex", false)]
     [InlineData("libSceVideoOut:sceVideoOutSubmitFlip", false)]
     public void BlockingExportsAreWaits(string name, bool expected) =>
