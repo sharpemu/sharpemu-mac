@@ -2882,7 +2882,8 @@ internal sealed partial class MetalRenderHost :
             $"subset_joins={subsetJoins} subset_join_sampled={subsetJoinsSampled}{TakeSubsetRefusals()} " +
             $"transfers=[{TakeTransferCauses()}]" +
             (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +
-            $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()}");
+            $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()} " +
+            SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport());
         if (_guard is not null)
         {
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");

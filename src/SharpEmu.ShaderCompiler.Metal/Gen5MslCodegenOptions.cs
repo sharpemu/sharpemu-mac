@@ -205,6 +205,19 @@ public sealed record Gen5MslCodegenOptions(
     /// in mesh shaders without device-memory writes. SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS=0 disables this.</summary>
     public bool ScalarConstantBuffers { get; init; } = true;
 
+    /// <summary><see cref="ScalarConstantBuffers"/> in vertex and pixel shaders too: Black Myth: Wukong +3%,
+    /// Ghost of Tsushima and Grand Theft Auto V unchanged. SHARPEMU_MSL_SCALAR_CONSTANT_STAGES=mesh keeps them
+    /// to mesh shaders; =all extends them to compute shaders (<see cref="ScalarConstantBuffersAllStages"/>, unmeasured).</summary>
+    public bool ScalarConstantBuffersGraphicsStages { get; init; } = true;
+
+    public bool ScalarConstantBuffersAllStages { get; init; }
+
+    /// <summary><see cref="ScalarConstantBuffers"/> in a shader that writes other device resources: the binding
+    /// itself is still read only by scalar loads without GLC/DLC, which do not see the shader's own vector
+    /// stores on the guest either (the scalar cache is not coherent with them).
+    /// SHARPEMU_MSL_SCALAR_CONSTANT_BESIDE_WRITES=0 refuses such shaders.</summary>
+    public bool ScalarConstantBuffersBesideWrites { get; init; } = true;
+
     /// <summary>Read a raw buffer dword (sharpemu_load_dword and the runs sharpemu_load_dwords makes)
     /// at an index clamped into the binding and select zero for one past the end, instead of
     /// branching around the load. Every dword is what the checked form reads; only the branch
@@ -289,6 +302,9 @@ public sealed record Gen5MslCodegenOptions(
                 ? Math.Max(decodedLoads, 0) : 16,
         MeshLdsForwarding = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_FORWARDING") == "1",
         ScalarConstantBuffers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BUFFERS") != "0",
+        ScalarConstantBuffersGraphicsStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_STAGES") != "mesh",
+        ScalarConstantBuffersAllStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_STAGES") == "all",
+        ScalarConstantBuffersBesideWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_SCALAR_CONSTANT_BESIDE_WRITES") != "0",
         MeshHotLds = Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_HOT_LDS") == "1",
         BranchlessDwordLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_BRANCHLESS_LOADS") != "0",
         StaticScratchSlots = Environment.GetEnvironmentVariable("SHARPEMU_MSL_STATIC_SCRATCH") != "0",

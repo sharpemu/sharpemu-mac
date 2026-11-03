@@ -95,6 +95,11 @@ public sealed partial class RenderExecutor
         return layout.ColorCount != 0 || layout.Depth is not null;
     }
 
+    // A draw's targets are kept across program changes that leave its target registers alone, and
+    // the recorder reuses the previous draw's attachments for them (RenderRecorder.RepeatsPreviousTargets).
+    // SHARPEMU_WIDE_TARGET_REUSE=0 re-resolves the targets whenever the programs change.
+    internal static readonly bool WideTargetReuse = Environment.GetEnvironmentVariable("SHARPEMU_WIDE_TARGET_REUSE") != "0";
+
     private DrawResolution ResolveTargetLayout(RegisterBanks banks)
     {
         var resolution = _drawResolution;
@@ -102,6 +107,23 @@ public sealed partial class RenderExecutor
         var programsStamp = banks.Stamp(RegisterStamp.ShaderPrograms);
         if (resolution.TargetContextStamp == contextStamp && resolution.TargetProgramsStamp == programsStamp)
         {
+            return resolution;
+        }
+
+        // The programs decide only whether a pixel stage runs: with the target registers unchanged,
+        // a new program pair keeps the targets, and their version, unless that flips.
+        if (WideTargetReuse && _host.ReusesTargetsAcrossPrograms && resolution.TargetContextStamp == contextStamp &&
+            resolution.TargetVersion != 0)
+        {
+            resolution.TargetProgramsStamp = programsStamp;
+            var pixelActive = HasActivePixelShader(banks);
+            if (pixelActive == resolution.PixelActive)
+            {
+                return resolution;
+            }
+
+            resolution.PixelActive = pixelActive;
+            resolution.TargetVersion = (uint)Interlocked.Increment(ref _targetVersions);
             return resolution;
         }
 

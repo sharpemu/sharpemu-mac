@@ -880,63 +880,74 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         var address = image.Description.Data.Address;
         var size = image.Description.Data.Size;
-        foreach (var ownerIdentifier in _stencilOwners)
+        var foreignPlanes = !StencilOverlapMemo || image.NoForeignStencilVersion != _stencilOwnersVersion;
+        var foundForeign = false;
+        if (foreignPlanes)
         {
-            if (ownerIdentifier == imageIdentifier || _slots.TryGet(ownerIdentifier) is not { } depth ||
-                !depth.Description.HasStencil || depth.Overlaps(address, size) ||
-                !GuestRangeOverlap.Bytes(depth.Description.Stencil.Address, depth.Description.Stencil.Size, address, size))
+            foreach (var ownerIdentifier in _stencilOwners)
             {
-                continue;
-            }
-
-            NoteForeignStencilShare(depth, image);
-            if (TracedStencilPlane != 0 && depth.Description.Stencil.Address == TracedStencilPlane)
-            {
-                Console.Error.WriteLine(
-                    $"[METAL-V2][STENCIL-VIEW] view={image.Description.PixelFormat} {image.Description.Extent.Width}x{image.Description.Extent.Height}s{image.Description.Samples} " +
-                    $"v{image.ContentVersion} takesGpu={takesGpuOwnership} depth {depth.Description.Extent.Width}x{depth.Description.Extent.Height} " +
-                    $"depthGpu={depth.IsGpuModified} depthStale={depth.StencilPlaneStale}");
-            }
-
-            var (start, end) = image.OverlapWithin(depth.Description.Stencil.Address, depth.Description.Stencil.Size);
-            var copiedOnDevice = false;
-            if (depth.IsGpuModified && !depth.StencilPlaneStale)
-            {
-                // Only the depth image's texture holds the stencil: copied straight into this
-                // texture when the device can, and otherwise both planes go out together.
-                copiedOnDevice = TryCopyStencilToColorOnDevice(depth, image);
-                if (!copiedOnDevice)
+                if (ownerIdentifier == imageIdentifier || _slots.TryGet(ownerIdentifier) is not { } depth ||
+                    !depth.Description.HasStencil || depth.Overlaps(address, size) ||
+                    !GuestRangeOverlap.Bytes(depth.Description.Stencil.Address, depth.Description.Stencil.Size, address, size))
                 {
-                    WriteBackToGuest(depth, MetalWritebackCause.ImageOverlap);
-                    MarkAliasRunDirty(image, start, end);
-                    _stencilPlanePublishes++;
-                }
-            }
-
-            if (takesGpuOwnership)
-            {
-                // Written back above if it owed anything. The depth plane its texture holds is
-                // still the newest; only the stencil is this image's from now on, and it is
-                // copied over on the device when the depth image binds next. Reloading both
-                // planes from guest memory instead round-trips the depth plane, and a reload
-                // that does not give back exactly what was written left Black Myth: Wukong's
-                // scene depth as garbage or zeros, every pass that tests or samples it with it.
-                // A depth image that handed its stencil over on the device, or had already
-                // given it up, still owes guest memory its depth plane and keeps it.
-                if (!copiedOnDevice && !depth.StencilPlaneStale)
-                {
-                    depth.ClearGpuModified();
+                    continue;
                 }
 
-                if (StencilDeviceHandOver)
+                foundForeign = true;
+                NoteForeignStencilShare(depth, image);
+                if (TracedStencilPlane != 0 && depth.Description.Stencil.Address == TracedStencilPlane)
                 {
-                    depth.StencilPlaneStale = true;
+                    Console.Error.WriteLine(
+                        $"[METAL-V2][STENCIL-VIEW] view={image.Description.PixelFormat} {image.Description.Extent.Width}x{image.Description.Extent.Height}s{image.Description.Samples} " +
+                        $"v{image.ContentVersion} takesGpu={takesGpuOwnership} depth {depth.Description.Extent.Width}x{depth.Description.Extent.Height} " +
+                        $"depthGpu={depth.IsGpuModified} depthStale={depth.StencilPlaneStale}");
                 }
-                else
+
+                var (start, end) = image.OverlapWithin(depth.Description.Stencil.Address, depth.Description.Stencil.Size);
+                var copiedOnDevice = false;
+                if (depth.IsGpuModified && !depth.StencilPlaneStale)
                 {
-                    depth.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                    // Only the depth image's texture holds the stencil: copied straight into this
+                    // texture when the device can, and otherwise both planes go out together.
+                    copiedOnDevice = TryCopyStencilToColorOnDevice(depth, image);
+                    if (!copiedOnDevice)
+                    {
+                        WriteBackToGuest(depth, MetalWritebackCause.ImageOverlap);
+                        MarkAliasRunDirty(image, start, end);
+                        _stencilPlanePublishes++;
+                    }
+                }
+
+                if (takesGpuOwnership)
+                {
+                    // Written back above if it owed anything. The depth plane its texture holds is
+                    // still the newest; only the stencil is this image's from now on, and it is
+                    // copied over on the device when the depth image binds next. Reloading both
+                    // planes from guest memory instead round-trips the depth plane, and a reload
+                    // that does not give back exactly what was written left Black Myth: Wukong's
+                    // scene depth as garbage or zeros, every pass that tests or samples it with it.
+                    // A depth image that handed its stencil over on the device, or had already
+                    // given it up, still owes guest memory its depth plane and keeps it.
+                    if (!copiedOnDevice && !depth.StencilPlaneStale)
+                    {
+                        depth.ClearGpuModified();
+                    }
+
+                    if (StencilDeviceHandOver)
+                    {
+                        depth.StencilPlaneStale = true;
+                    }
+                    else
+                    {
+                        depth.MarkCpuDirty(MetalImageDirtyCause.AliasWrite);
+                    }
                 }
             }
+        }
+
+        if (foreignPlanes && !foundForeign)
+        {
+            image.NoForeignStencilVersion = _stencilOwnersVersion;
         }
 
         if (!image.Description.HasStencil)
@@ -1179,6 +1190,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // comparison.
     private static readonly bool StencilPlaneSyncEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STENCIL_PLANES") != "0";
+
+    // An image found clear of every other stencil plane skips the walk until the owner set changes
+    // (MetalCachedImage.NoForeignStencilVersion). SHARPEMU_METAL_V2_STENCIL_OVERLAP_MEMO=0 walks it every bind.
+    private static readonly bool StencilOverlapMemo =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STENCIL_OVERLAP_MEMO") != "0";
 
     /// <summary>Stencil planes handed between a depth image and an image over them.</summary>
     public long TakeStencilPlanePublishes() => Interlocked.Exchange(ref _stencilPlanePublishes, 0);

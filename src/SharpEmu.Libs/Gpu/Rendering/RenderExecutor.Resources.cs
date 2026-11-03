@@ -26,6 +26,11 @@ public sealed partial class RenderExecutor
             throw _host.Fatal($"The buffer descriptor count does not match the program: descriptors={descriptors.Length} program={program.Buffers.Length}.");
         }
 
+        if (!program.WritesAnyBuffer)
+        {
+            return false;
+        }
+
         for (var i = 0; i < program.Buffers.Length; i++)
         {
             if (!program.Buffers[i].Written)

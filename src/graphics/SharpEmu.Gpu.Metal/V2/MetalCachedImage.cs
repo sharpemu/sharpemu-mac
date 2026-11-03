@@ -255,6 +255,13 @@ internal sealed class MetalCachedImage : IDisposable
     public bool StencilPlaneStale { get; set; }
 
     /// <summary>
+    /// The stencil-owner set version (MetalImageCache._stencilOwnersVersion) at which no other image's
+    /// stencil plane lay over this image's bytes; -1 when not known. Which planes overlap follows from
+    /// the images' ranges alone, so while the set holds the walk over it finds nothing again.
+    /// </summary>
+    public long NoForeignStencilVersion { get; set; } = -1;
+
+    /// <summary>
     /// An image over this depth image's stencil bytes whose texture holds a newer stencil, to copy in on the
     /// device once this image has reloaded its depth plane from guest memory (MetalImageCache.SynchronizeStencilPlanes).
     /// </summary>
