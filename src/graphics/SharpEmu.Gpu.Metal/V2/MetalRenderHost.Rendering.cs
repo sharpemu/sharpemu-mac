@@ -2459,6 +2459,7 @@ internal sealed partial class MetalRenderHost
         NoteRecordedWork();
         OcclusionAuditCountDraw();
         Interlocked.Increment(ref _drawCount);
+        SharpEmu.Libs.VideoOut.PerfOverlay.RecordDraw();
         NotePassDraw(_boundGraphicsPipeline?.Profile);
         Interlocked.Add(ref _drawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - startedTicks);
         _recordedCommands++;
