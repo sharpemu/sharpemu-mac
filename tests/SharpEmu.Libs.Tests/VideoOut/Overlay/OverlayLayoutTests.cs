@@ -152,7 +152,7 @@ public sealed class OverlayLayoutTests : IDisposable
         var model = new OverlayLayoutModel();
         Assert.True(store.Save(model));
         Assert.True(store.Save(model));
-        var files = Directory.GetFiles(_dir).Select(Path.GetFileName).OrderBy(n => n).ToArray();
+        var files = Directory.GetFiles(_dir).Select(path => Path.GetFileName(path)!).OrderBy(n => n).ToArray();
         Assert.Equal(["layout.json", "presets.json"], files);
     }
 
