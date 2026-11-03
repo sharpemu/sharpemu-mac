@@ -48,6 +48,9 @@ internal static unsafe partial class VulkanVideoPresenter
         // Surface pixels per SDL window coordinate; the overlay maps pointer events with it.
         private double _overlayPixelScale;
 
+        // "KHR" or "EXT" when the device enabled VK_*_calibrated_timestamps; null otherwise.
+        private string? _calibratedTimestampsSuffix;
+
         // The window's pixel density, from the requested window size and the first swapchain.
         // Only a windowed window still has its requested size then; anything else reports 1.
         private void UpdateOverlayPixelScale()
@@ -220,6 +223,26 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void DrawBlendOverlay(uint imageIndex, List<OverlayRectangle> regions)
         {
+            // Whatever wrote the target (upload, guest draw, blit) must finish before blending
+            // reads it. The layout is unchanged; the render pass does its own transition.
+            var beforeBlend = new ImageMemoryBarrier2
+            {
+                SType = StructureType.ImageMemoryBarrier2,
+                SrcAccessMask = AccessFlags2.MemoryWriteBit,
+                DstAccessMask = AccessFlags2.ColorAttachmentReadBit | AccessFlags2.ColorAttachmentWriteBit,
+                OldLayout = PresentationTargetFinalLayout,
+                NewLayout = PresentationTargetFinalLayout,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = PresentationTargetImage(imageIndex),
+                SubresourceRange = ColorSubresourceRange(),
+            };
+            VulkanSynchronization.PipelineBarrier(_vk,
+                _commandBuffer,
+                PipelineStageFlags.AllCommandsBit,
+                PipelineStageFlags.ColorAttachmentOutputBit,
+                0, 0, null, 0, null, 1, &beforeBlend);
+
             var renderPassInfo = new RenderPassBeginInfo
             {
                 SType = StructureType.RenderPassBeginInfo,
@@ -458,26 +481,16 @@ internal static unsafe partial class VulkanVideoPresenter
                 ColorAttachmentCount = 1,
                 PColorAttachments = &reference,
             };
-            var dependencies = stackalloc SubpassDependency[2];
-            dependencies[0] = new SubpassDependency
+            // The same single dependency as the guest-draw render pass: compatibility with its
+            // framebuffers requires identical dependencies. DrawBlendOverlay's own barrier orders
+            // everything before the pass and makes the target readable for blending.
+            var dependency = new SubpassDependency
             {
                 SrcSubpass = Vk.SubpassExternal,
                 DstSubpass = 0,
-                SrcStageMask = PipelineStageFlags.AllCommandsBit,
-                DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
-                SrcAccessMask = AccessFlags.MemoryWriteBit,
-                DstAccessMask = AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit,
-            };
-            dependencies[1] = new SubpassDependency
-            {
-                SrcSubpass = 0,
-                DstSubpass = Vk.SubpassExternal,
                 SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
-                DstStageMask = _hdrOutputActive
-                    ? PipelineStageFlags.FragmentShaderBit
-                    : PipelineStageFlags.BottomOfPipeBit,
-                SrcAccessMask = AccessFlags.ColorAttachmentWriteBit,
-                DstAccessMask = _hdrOutputActive ? AccessFlags.ShaderReadBit : 0,
+                DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
+                DstAccessMask = AccessFlags.ColorAttachmentWriteBit,
             };
             var renderPassInfo = new RenderPassCreateInfo
             {
@@ -486,8 +499,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 PAttachments = &attachment,
                 SubpassCount = 1,
                 PSubpasses = &subpass,
-                DependencyCount = 2,
-                PDependencies = dependencies,
+                DependencyCount = 1,
+                PDependencies = &dependency,
             };
             Check(
                 _vk.CreateRenderPass(_device, &renderPassInfo, null, out _blendOverlayRenderPass),

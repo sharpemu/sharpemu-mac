@@ -1132,6 +1132,13 @@ internal static unsafe partial class VulkanVideoPresenter
             var meshExtension = (byte*)SilkMarshal.StringToPtr(MeshShaderExtensionName);
             var imageAtomicInt64Extension = (byte*)SilkMarshal.StringToPtr(ShaderImageAtomicInt64ExtensionName);
             var unifiedImageLayoutsExtension = (byte*)SilkMarshal.StringToPtr(UnifiedImageLayoutsExtensionName);
+            // Pairs GPU timestamps with the host clock for the overlay's GPU lane.
+            _calibratedTimestampsSuffix = IsDeviceExtensionAvailable("VK_KHR_calibrated_timestamps")
+                ? "KHR"
+                : IsDeviceExtensionAvailable("VK_EXT_calibrated_timestamps") ? "EXT" : null;
+            var calibratedTimestampsExtension = _calibratedTimestampsSuffix is null
+                ? null
+                : (byte*)SilkMarshal.StringToPtr($"VK_{_calibratedTimestampsSuffix}_calibrated_timestamps");
             try
             {
                 var extensions = stackalloc byte*[24];
@@ -1188,6 +1195,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (_supportsFillRectangle)
                 {
                     extensions[extensionCount++] = fillRectangleExtension;
+                }
+
+                if (calibratedTimestampsExtension is not null)
+                {
+                    extensions[extensionCount++] = calibratedTimestampsExtension;
                 }
 
                 if (supportsImageInt64Atomics)
@@ -1388,6 +1400,7 @@ internal static unsafe partial class VulkanVideoPresenter
             finally
             {
                 SilkMarshal.Free((nint)swapchainExtension);
+                SilkMarshal.Free((nint)calibratedTimestampsExtension);
                 SilkMarshal.Free((nint)maintenance8Extension);
                 SilkMarshal.Free((nint)maintenance5Extension);
                 SilkMarshal.Free((nint)imageViewMinLodExtension);
