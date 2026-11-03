@@ -476,6 +476,9 @@ internal sealed class MetalGpuWriteRanges
 
     private void EndMutation() => Volatile.Write(ref _mutation, _mutation + 1);
 
+    /// <summary>Changes whenever the worker changes the records (odd while it does); any thread.</summary>
+    public int MutationStamp => Volatile.Read(ref _mutation);
+
     /// <summary>
     /// <see cref="PendingSerial"/> for a thread other than the worker: nothing is retired, and false
     /// when the worker changed the records meanwhile, so the caller treats the bytes as pending.

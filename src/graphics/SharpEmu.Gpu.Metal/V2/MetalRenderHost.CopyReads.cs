@@ -226,9 +226,35 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        var completed = SignaledSerial();
         var end = address + size;
-        PendingCopy copy = default;
+        PendingCopy copy;
+        // A resolution reads a copied table word by word: the copy found for the last read, with no
+        // later write anywhere over its destination, stands while the worker changes no record.
+        var stamp = _gpuWrites.MutationStamp;
+        if (_verifiedCopy is { } verified && _verifiedCopyHost == this && _verifiedCopyStamp == stamp && (stamp & 1) == 0 &&
+            verified.Destination <= address && end <= verified.DestinationEnd)
+        {
+            copy = verified;
+        }
+        else if (!TryFindVerifiedCopyConcurrent(address, end, out copy))
+        {
+            return false;
+        }
+
+        return TryReadCopySourceConcurrent(copy, address, destination, assumptions);
+    }
+
+    [ThreadStatic]
+    private static PendingCopy? _verifiedCopy;
+    [ThreadStatic]
+    private static MetalRenderHost? _verifiedCopyHost;
+    [ThreadStatic]
+    private static int _verifiedCopyStamp;
+
+    private bool TryFindVerifiedCopyConcurrent(ulong address, ulong end, out PendingCopy copy)
+    {
+        copy = default;
+        var completed = SignaledSerial();
         var found = false;
         lock (_pendingCopies)
         {
@@ -249,21 +275,50 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        ulong latest = 0;
-        var known = false;
-        for (var attempt = 0; attempt < 4 && !known; attempt++)
+        // Verified over the whole destination first, so the following reads of the table can use it;
+        // else over this range only.
+        var size = copy.DestinationEnd - copy.Destination;
+        for (var pass = 0; pass < 2; pass++)
         {
-            known = _gpuWrites.TryLatestSequenceSnapshot(address, size, out latest);
+            var stamp = _gpuWrites.MutationStamp;
+            var start = pass == 0 ? copy.Destination : address;
+            var length = pass == 0 ? size : end - address;
+            ulong latest = 0;
+            var known = false;
+            for (var attempt = 0; attempt < 4 && !known; attempt++)
+            {
+                known = _gpuWrites.TryLatestSequenceSnapshot(start, length, out latest);
+                if (!known)
+                {
+                    Thread.SpinWait(8);
+                }
+            }
+
             if (!known)
             {
-                Thread.SpinWait(8);
+                return false;
+            }
+
+            if (latest == copy.Sequence)
+            {
+                if (pass == 0)
+                {
+                    _verifiedCopy = copy;
+                    _verifiedCopyHost = this;
+                    _verifiedCopyStamp = stamp;
+                }
+
+                return true;
             }
         }
 
-        if (!known || latest != copy.Sequence)
-        {
-            return false;
-        }
+        return false;
+    }
+
+    private bool TryReadCopySourceConcurrent(PendingCopy copy, ulong address, Span<byte> destination, ConcurrentAssumptions assumptions)
+    {
+        var size = (ulong)destination.Length;
+        var end = address + size;
 
         var firstWord = (address - copy.Destination) / sizeof(uint);
         var lastWord = (end - 1 - copy.Destination) / sizeof(uint);
