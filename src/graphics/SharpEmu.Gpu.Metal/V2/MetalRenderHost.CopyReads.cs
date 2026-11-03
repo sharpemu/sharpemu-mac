@@ -90,9 +90,10 @@ internal sealed partial class MetalRenderHost
         var copy = _armedCopy;
         copy.Serial = serial;
         copy.Sequence = sequence;
-        // Changed under the lock while the resolve thread reads it to attribute its abandons
-        // (the dry run); the worker alone changes the list, so its own reads take no lock.
-        var shared = HostKernelCopyDryRun;
+        // Changed under the lock while the resolve thread reads it (its abandons under the dry run,
+        // its copy reads under parallel resolve); the worker alone changes the list, so its own
+        // reads take no lock.
+        var shared = PendingCopiesShared;
         if (shared)
         {
             Monitor.Enter(_pendingCopies);
@@ -138,7 +139,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        var shared = HostKernelCopyDryRun;
+        var shared = PendingCopiesShared;
         if (shared)
         {
             Monitor.Enter(_pendingCopies);
@@ -191,6 +192,113 @@ internal sealed partial class MetalRenderHost
 
         return false;
     }
+
+    // The resolve thread reads the list too when it answers reads through copies (ConcurrentCopyReads).
+    private bool PendingCopiesShared => HostKernelCopyDryRun || (ParallelResolve && ConcurrentCopyReads);
+
+    /// <summary>
+    /// SHARPEMU_METAL_V2_CONCURRENT_COPY_READS=0 abandons a program resolution off the worker that
+    /// reads a word a pending copy writes, as before. Demon's Souls' draws read a 3 KB table its copy
+    /// kernel (0x2A12B35175B11703) writes every frame: ~1,000 resolutions a frame were abandoned and
+    /// done again on the worker, behind the resolve lock (~21 ms of its time a frame plus the waits).
+    /// </summary>
+    internal bool ConcurrentCopyReads { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CONCURRENT_COPY_READS") != "0";
+
+    /// <summary>
+    /// Off the worker: <see cref="TryReadThroughPendingCopy"/> for one resolution. The copy must be
+    /// the latest recorded write over the range and its source must be owned by nothing (no chained
+    /// copies here); the source's answer is recorded so the take checks it again. The read range
+    /// itself needs no answer: the copy writes these bytes whether it has landed by the take or not,
+    /// and a write recorded after it would come from stream items after the draw.
+    /// </summary>
+    private bool TryReadThroughPendingCopyConcurrent(ulong address, Span<byte> destination, ConcurrentAssumptions assumptions)
+    {
+        if (!MetalV2Diagnostics.CopyReadThrough || !ConcurrentCopyReads || !PendingCopiesShared)
+        {
+            return false;
+        }
+
+        var size = (ulong)destination.Length;
+        if (size == 0 || address > ulong.MaxValue - size ||
+            (_imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size)))
+        {
+            return false;
+        }
+
+        var completed = SignaledSerial();
+        var end = address + size;
+        PendingCopy copy = default;
+        var found = false;
+        lock (_pendingCopies)
+        {
+            for (var index = _pendingCopies.Count - 1; index >= 0; index--)
+            {
+                var candidate = _pendingCopies[index];
+                if (candidate.Destination <= address && end <= candidate.DestinationEnd)
+                {
+                    copy = candidate;
+                    found = copy.Serial > completed;
+                    break;
+                }
+            }
+        }
+
+        if (!found)
+        {
+            return false;
+        }
+
+        ulong latest = 0;
+        var known = false;
+        for (var attempt = 0; attempt < 4 && !known; attempt++)
+        {
+            known = _gpuWrites.TryLatestSequenceSnapshot(address, size, out latest);
+            if (!known)
+            {
+                Thread.SpinWait(8);
+            }
+        }
+
+        if (!known || latest != copy.Sequence)
+        {
+            return false;
+        }
+
+        var firstWord = (address - copy.Destination) / sizeof(uint);
+        var lastWord = (end - 1 - copy.Destination) / sizeof(uint);
+        var wordCount = lastWord - firstWord + 1;
+        if (wordCount > 64)
+        {
+            return false;
+        }
+
+        Span<byte> words = stackalloc byte[(int)(wordCount * sizeof(uint))];
+        var word = firstWord;
+        var offset = 0;
+        while (word <= lastWord)
+        {
+            var sourceIndex = word % copy.Period;
+            var run = Math.Min(lastWord - word + 1, copy.Period - sourceIndex);
+            var sourceAddress = copy.Source + sourceIndex * sizeof(uint);
+            var runBytes = (int)(run * sizeof(uint));
+            if (IsOwnedRecorded(ConcurrentQuery.Word, sourceAddress, (ulong)runBytes, assumptions) ||
+                !_backing.TryReadBacking(sourceAddress, words.Slice(offset, runBytes)))
+            {
+                return false;
+            }
+
+            word += run;
+            offset += runBytes;
+        }
+
+        var skip = (int)((address - copy.Destination) % sizeof(uint));
+        words.Slice(skip, destination.Length).CopyTo(destination);
+        Interlocked.Increment(ref _concurrentCopyReads);
+        return true;
+    }
+
+    private long _concurrentCopyReads;
 
     /// <summary>
     /// Answers a read the GPU is still writing from the source of the pending copy that
@@ -358,7 +466,8 @@ internal sealed partial class MetalRenderHost
         $" copy_reads={Interlocked.Exchange(ref _copyReads, 0)}" +
         $" copy_read_pending={Interlocked.Exchange(ref _copyReadPending, 0)}" +
         $" copy_read_order={Interlocked.Exchange(ref _copyReadOrder, 0)}" +
-        $" copy_read_none={Interlocked.Exchange(ref _copyReadNone, 0)}";
+        $" copy_read_none={Interlocked.Exchange(ref _copyReadNone, 0)}" +
+        $" concurrent_copy_reads={Interlocked.Exchange(ref _concurrentCopyReads, 0)}";
 
     private void WriteCopyReadTraces()
     {

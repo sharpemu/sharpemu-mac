@@ -155,6 +155,8 @@ public sealed unsafe partial class MetalClearFoldingTests
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
         host.HostKernelCopyDryRun = true;
+        // Read through the copy, the resolution would not abandon (APendingCopyAnswersAConcurrentRead...).
+        host.ConcurrentCopyReads = false;
         WriteKernelSource(rig);
         Assert.False(host.TryCopyWordsOnHost(KernelDestination, KernelSource, KernelPeriod, KernelWords));
         host.NoteGuestMemoryWrite(KernelDestination, KernelWords * sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
@@ -174,5 +176,38 @@ public sealed unsafe partial class MetalClearFoldingTests
         }
 
         Assert.Equal("gpu_write=1,copy_dst=1,label=0,cp=0,image=0,code=0,queued=0,other=0", host.TakeAbandonCauses());
+    }
+
+    [Fact]
+    public void APendingCopyAnswersAConcurrentReadFromItsSourceAndAPendingSourceStillAbandons()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.ConcurrentCopyReads = true;
+        WriteKernelSource(rig);
+        Assert.False(host.TryCopyWordsOnHost(KernelDestination, KernelSource, KernelPeriod, KernelWords));
+        host.NoteGuestMemoryWrite(KernelDestination, KernelWords * sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
+        host.ResetBindings();
+        // One source word is itself still being written: a destination word copied from it abandons.
+        host.NoteGuestMemoryWrite(KernelSource + 0x8, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
+
+        var concurrent = (IConcurrentResolveHost)host;
+        concurrent.BeginConcurrentResolve();
+        object assumptions;
+        try
+        {
+            Assert.True(host.TryReadGuestWord(KernelDestination + 4, out var word));
+            Assert.Equal(rig.ReadBacking32(KernelSource + 4), word);
+            Assert.Throws<GpuFatal.AbandonedWorkException>(() => host.TryReadGuestWord(KernelDestination + 8, out _));
+        }
+        finally
+        {
+            assumptions = concurrent.EndConcurrentResolve();
+        }
+
+        // The read-through recorded the source, not the destination the copy owns.
+        Assert.True(concurrent.IsStillCurrent(assumptions));
+        concurrent.ReleaseAssumptions(assumptions);
     }
 }
