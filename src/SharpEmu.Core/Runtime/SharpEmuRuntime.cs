@@ -1559,6 +1559,16 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         _aprSession?.Dispose();
 
+        if (_gpuMemory != null && _gpuMemory.HasActiveWatches())
+        {
+            // A host shutdown can end the guest before the presenter drops its cached images,
+            // which still watch guest pages. Releasing the memory under them would fail fast;
+            // keep it registered, as for leaked guest workers above.
+            Console.Error.WriteLine(
+                "[RUNTIME] GPU caches still watch guest pages at teardown; keeping guest GPU memory registered.");
+            return;
+        }
+
         if (_gpuMemory != null)
         {
             if (GuestGpuMemoryHook.TryTakeShutdownSummary(out var gpuSummary))

@@ -160,6 +160,29 @@ public sealed class PageGuard : IDisposable
     /// <summary>The highest write-watch count an add left on one page since the last call.</summary>
     public int TakePeakPageWriteWatches() => Interlocked.Exchange(ref _peakPageWriteWatches, 0);
 
+    /// <summary>Whether any page still carries a read or write watch.</summary>
+    public bool HasActiveWatches()
+    {
+        foreach (var block in _blocks)
+        {
+            if (block == null)
+            {
+                continue;
+            }
+
+            using var _ = new BlockLock(block);
+            foreach (var page in block.Pages)
+            {
+                if (page.WriteWatchCount != 0 || page.ReadWatchCount != 0)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     public void Dispose()
     {
         foreach (var block in _blocks)
