@@ -108,6 +108,9 @@ public static partial class PerfOverlay
     /// </summary>
     public static void SetGuestProcessId(int processId) => Volatile.Write(ref _guestProcessId, processId);
 
+    /// <summary>The guest process in the GPU/guest split, or 0 when one process does both.</summary>
+    internal static int GuestProcessId => Volatile.Read(ref _guestProcessId);
+
     /// <summary>
     /// Records the GPU execution interval of one command buffer (seconds on the mach absolute
     /// clock, i.e. Metal's GPUStartTime and GPUEndTime). The overlay's GPU percentage is the

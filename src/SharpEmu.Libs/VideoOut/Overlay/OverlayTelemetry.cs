@@ -23,7 +23,7 @@ namespace SharpEmu.Libs.VideoOut.Overlay;
 /// lane shows what the GPU executed during the frame's interval, which on a pipelined title is
 /// earlier frames' work.</para>
 /// </remarks>
-public static class OverlayTelemetry
+public static partial class OverlayTelemetry
 {
     public const int HistoryCapacity = 300;
     internal const int HleNameBase = 1 << 16;
@@ -153,6 +153,10 @@ public static class OverlayTelemetry
     {
         _guestThreadNoted = true;
         GuestThreadIds.TryAdd(OsThreadId(), 0);
+        if (Bridge.IsSplitGuest)
+        {
+            Bridge.StartGuestPublisher();
+        }
     }
 
     /// <summary>Charges one HLE call (Stopwatch ticks, gateway entry to exit) to the calling thread.</summary>
@@ -287,20 +291,32 @@ public static class OverlayTelemetry
         return "?";
     }
 
-    private static string HleName(int importIndex) =>
-        HleNames.GetOrAdd(importIndex, static index =>
+    private static string HleName(int importIndex)
+    {
+        if (HleNames.TryGetValue(importIndex, out var cached))
         {
-            string? name = null;
-            try
-            {
-                name = Volatile.Read(ref _hleNameResolver)?.Invoke(index);
-            }
-            catch (Exception exception) when (exception is IndexOutOfRangeException or ArgumentOutOfRangeException)
-            {
-            }
+            return cached;
+        }
 
-            return string.IsNullOrEmpty(name) ? $"import #{index}" : name;
-        });
+        string? name = null;
+        try
+        {
+            // This process's import table, or in the GPU host of the split the guest's published names.
+            name = Volatile.Read(ref _hleNameResolver)?.Invoke(importIndex) ?? Bridge.NameOf(importIndex);
+        }
+        catch (Exception exception) when (exception is IndexOutOfRangeException or ArgumentOutOfRangeException)
+        {
+        }
+
+        if (string.IsNullOrEmpty(name))
+        {
+            // Not cached: the guest may publish the name a moment later.
+            return $"import #{importIndex}";
+        }
+
+        HleNames[importIndex] = name;
+        return name;
+    }
 
     private static bool IsWaitImport(int importIndex) =>
         HleIsWait.GetOrAdd(importIndex, static index => IsWaitName(HleName(index)));
@@ -433,6 +449,7 @@ public static class OverlayTelemetry
 
     private static void Deactivate()
     {
+        Bridge.WriteDemand(OverlayCaptureDemand.None);
         Active = false;
         PhasesActive = false;
         TimelineActive = false;
@@ -524,7 +541,8 @@ public static class OverlayTelemetry
         private static int _recentCount;
 
         // Thread CPU.
-        private static readonly OverlayThreadSampler? Sampler = OverlayThreadSampler.CreateForCurrentProcess();
+        private static readonly OverlayThreadSampler? Sampler =
+            OverlayThreadSampler.CreateForCurrentProcess(PerfOverlay.GuestProcessId);
         private static readonly List<OverlayThreadSampler.ThreadCpu> ThreadScratch = new(256);
         private static readonly Dictionary<ulong, ThreadTrack> Threads = [];
         private static long _lastThreadSample;
@@ -591,6 +609,9 @@ public static class OverlayTelemetry
 
                 try
                 {
+                    Bridge.TryOpen(PerfOverlay.GuestProcessId);
+                    Bridge.WriteDemand(_demand);
+                    Bridge.ReadGuestThreads();
                     var record = Build(raw);
                     if (record is not null)
                     {
@@ -731,6 +752,7 @@ public static class OverlayTelemetry
             // ---- GC and counters ----
             var gcPause = GC.GetTotalPauseDuration();
             var gcPauseMs = (float)(gcPause - _previousGcPause).TotalMilliseconds;
+            var (guestGcMs, guestCollections, guestGeneration) = Bridge.TakeGuestGc();
             _previousGcPause = gcPause;
             var collections = 0;
             var highestGeneration = -1;
@@ -746,6 +768,11 @@ public static class OverlayTelemetry
 
                 if (generation == 0) collections = delta; // gen0 count includes the higher ones
             }
+
+            // In the split the guest's collections stop the guest threads; they matter more than the host's.
+            gcPauseMs += guestGcMs;
+            collections += guestCollections;
+            highestGeneration = Math.Max(highestGeneration, guestGeneration);
 
             if (gcPauseMs > 0)
             {
@@ -905,7 +932,7 @@ public static class OverlayTelemetry
                     track.NameId = InternName(string.IsNullOrEmpty(thread.Name) ? $"thread {thread.ThreadId}" : thread.Name);
                 }
 
-                track.Class = Classify(thread.ThreadId, thread.Name, renderThreadId);
+                track.Class = Classify(thread.ThreadId, thread.Name, renderThreadId, thread.Remote);
                 var delta = track.LastCpu < 0 ? 0 : Math.Max(0, thread.CpuNanoseconds - track.LastCpu);
                 track.LastCpu = thread.CpuNanoseconds;
                 var busyMs = delta / 1_000_000.0 * scale;
@@ -931,9 +958,21 @@ public static class OverlayTelemetry
             }
         }
 
-        private static ThreadClass Classify(ulong id, string name, ulong renderThreadId)
+        private static ThreadClass Classify(ulong id, string name, ulong renderThreadId, bool remote)
         {
             if (id == renderThreadId) return ThreadClass.Render;
+            if (remote)
+            {
+                // The guest process of the split: its gateway threads and guest runners are guest;
+                // the rest is its runtime and emulator housekeeping.
+                return Bridge.GuestThreads.Contains(id) ||
+                    name.StartsWith("GuestContinuation-", StringComparison.Ordinal) ||
+                    (name.StartsWith("SharpEmu-", StringComparison.Ordinal) &&
+                        name is not ("SharpEmu-StallWatchdog" or "SharpEmu-ReadyDispatch"))
+                    ? ThreadClass.Guest
+                    : ThreadClass.Other;
+            }
+
             if (GuestThreadIds.ContainsKey(id) ||
                 name.StartsWith("GuestContinuation-", StringComparison.Ordinal) ||
                 (name.StartsWith("SharpEmu-", StringComparison.Ordinal) &&
@@ -971,6 +1010,22 @@ public static class OverlayTelemetry
             HleTouched.Clear();
             float body = 0, wait = 0;
             var frequency = (double)Stopwatch.Frequency;
+            if (Bridge.IsOpen)
+            {
+                // The split: the guest's gateway totals, all charged to the guest-main lane (the
+                // guest publishes one sum per import, not one per thread).
+                var ticksPerMs = frequency / 1000.0;
+                Bridge.TakeImportDeltas((index, ms, calls) =>
+                {
+                    if (IsWaitImport(index)) wait += ms; else body += ms;
+                    if (!HleTimingActive) return;
+                    EnsureHleCapacity(index);
+                    if (_hleMainTicks[index] == 0 && _hleWorkerTicks[index] == 0) HleTouched.Add(index);
+                    _hleMainTicks[index] += (long)(ms * ticksPerMs);
+                    _hleMainCounts[index] += calls;
+                });
+            }
+
             foreach (var slots in threads)
             {
                 var arrays = slots.Arrays;

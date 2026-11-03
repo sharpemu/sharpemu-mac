@@ -21,7 +21,7 @@ namespace SharpEmu.Libs.VideoOut.Overlay;
 /// </remarks>
 internal abstract partial class OverlayThreadSampler
 {
-    internal readonly record struct ThreadCpu(ulong ThreadId, long CpuNanoseconds, string Name);
+    internal readonly record struct ThreadCpu(ulong ThreadId, long CpuNanoseconds, string Name, bool Remote = false);
 
     /// <summary>Fills <paramref name="into"/> with every live thread; returns false if the platform read failed.</summary>
     public abstract bool Sample(List<ThreadCpu> into);
@@ -47,11 +47,15 @@ internal abstract partial class OverlayThreadSampler
         return (ulong)Environment.CurrentManagedThreadId;
     }
 
-    public static OverlayThreadSampler? CreateForCurrentProcess()
+    /// <param name="remoteProcessId">
+    /// The guest process in the macOS GPU/guest split (its threads are read with proc_pidinfo and
+    /// marked <see cref="ThreadCpu.Remote"/>), or 0.
+    /// </param>
+    public static OverlayThreadSampler? CreateForCurrentProcess(int remoteProcessId = 0)
     {
         try
         {
-            if (OperatingSystem.IsMacOS()) return new MacSampler();
+            if (OperatingSystem.IsMacOS()) return new MacSampler(remoteProcessId);
             if (OperatingSystem.IsLinux()) return new LinuxSampler();
             if (OperatingSystem.IsWindows()) return new WindowsSampler();
         }
@@ -62,8 +66,12 @@ internal abstract partial class OverlayThreadSampler
         return null;
     }
 
-    private sealed unsafe class MacSampler : OverlayThreadSampler
+    private sealed unsafe class MacSampler(int remoteProcessId) : OverlayThreadSampler
     {
+        private const int ProcPidListThreadIds = 28;
+        private const int ProcPidThreadId64Info = 15;
+        private ulong[] _remoteIds = new ulong[256];
+        private readonly Dictionary<ulong, (int Hash, string Name)> _remoteNames = [];
         private const int ThreadExtendedInfo = 5;
         private const uint ThreadExtendedInfoCount = 28;
         private const int ThreadIdentifierInfo = 4;
@@ -152,7 +160,63 @@ internal abstract partial class OverlayThreadSampler
                 PruneNames(into);
             }
 
+            if (remoteProcessId > 0)
+            {
+                SampleRemote(into);
+            }
+
             return true;
+        }
+
+        // proc_threadinfo has thread_extended_info's layout; same-user processes need no privilege.
+        private void SampleRemote(List<ThreadCpu> into)
+        {
+            int bytes;
+            while (true)
+            {
+                fixed (ulong* ids = _remoteIds)
+                {
+                    bytes = MacNative.proc_pidinfo(remoteProcessId, ProcPidListThreadIds, 0, ids, _remoteIds.Length * sizeof(ulong));
+                }
+
+                if (bytes <= 0) return;
+                if (bytes < _remoteIds.Length * sizeof(ulong)) break;
+                _remoteIds = new ulong[_remoteIds.Length * 2];
+            }
+
+            var count = bytes / sizeof(ulong);
+            for (var index = 0; index < count; index++)
+            {
+                var id = _remoteIds[index];
+                if (id == 0) continue;
+                ThreadExtendedInfoData info;
+                if (MacNative.proc_pidinfo(remoteProcessId, ProcPidThreadId64Info, id, &info, sizeof(ThreadExtendedInfoData)) <
+                    sizeof(ThreadExtendedInfoData))
+                {
+                    continue;
+                }
+
+                var nameLength = 0;
+                while (nameLength < 64 && info.Name[nameLength] != 0) nameLength++;
+                var nameBytes = new ReadOnlySpan<byte>(info.Name, nameLength);
+                var hash = (int)System.IO.Hashing.XxHash32.HashToUInt32(nameBytes);
+                if (!_remoteNames.TryGetValue(id, out var cached) || cached.Hash != hash)
+                {
+                    cached = (hash, Encoding.UTF8.GetString(nameBytes));
+                    _remoteNames[id] = cached;
+                }
+
+                into.Add(new ThreadCpu(id, (long)(info.UserTime + info.SystemTime), cached.Name, Remote: true));
+            }
+
+            if (_remoteNames.Count > count * 2 + 64)
+            {
+                var live = new HashSet<ulong>(_remoteIds.AsSpan(0, count).ToArray());
+                foreach (var stale in _remoteNames.Keys.Where(key => !live.Contains(key)).ToArray())
+                {
+                    _remoteNames.Remove(stale);
+                }
+            }
         }
 
         private void PruneNames(List<ThreadCpu> live)
@@ -325,6 +389,9 @@ internal abstract partial class OverlayThreadSampler
 
         [LibraryImport(LibSystem)]
         internal static partial int vm_deallocate(uint task, nuint address, nuint size);
+
+        [LibraryImport(LibSystem)]
+        internal static partial int proc_pidinfo(int pid, int flavor, ulong argument, void* buffer, int bufferSize);
 
         // mach_task_self() is a macro over the mach_task_self_ variable.
         internal static uint TaskSelf()
