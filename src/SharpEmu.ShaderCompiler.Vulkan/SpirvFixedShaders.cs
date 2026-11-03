@@ -177,7 +177,8 @@ public static class SpirvFixedShaders
 
     // The performance overlay for an sRGB-encoded colour attachment. The overlay image holds
     // premultiplied sRGB-encoded colour; the attachment encodes on write and blends in linear
-    // light, so un-premultiply, decode to linear, and premultiply again (alpha passes through).
+    // light, so un-premultiply, decode to linear, and premultiply again by an alpha raised to
+    // keep the panels as opaque as an encoded-space blend shows them.
     public static byte[] CreateSrgbOverlayFragment() => CreateOverlayFragment(pqWhiteNits: null);
 
     // The performance overlay for an HDR10 (PQ, BT.2020) attachment: the decoded linear colour is
@@ -323,6 +324,16 @@ public static class SpirvFixedShaders
                 vec3Type,
                 module.AddInstruction(SpirvOp.FDiv, vec3Type, numerator, denominator),
                 Vec3(2523f / 32f));
+        }
+
+        if (pqWhiteNits is null)
+        {
+            // The attachment blends in linear light, where a dark panel at alpha a lets far more
+            // of a bright scene through than the same panel blended on an UNORM target (Metal):
+            // 0.5 over white reads 0.73 encoded instead of 0.5. 1 - (1 - a)^2.2 leaves the
+            // destination the share it keeps in encoded space, so panels look the same.
+            var keep = Ext(40, floatType, module.AddInstruction(SpirvOp.FSub, floatType, Float(1f), alpha), Float(0f));
+            alpha = module.AddInstruction(SpirvOp.FSub, floatType, Float(1f), Ext(26, floatType, keep, Float(2.2f)));
         }
 
         var alpha3 = module.AddInstruction(
