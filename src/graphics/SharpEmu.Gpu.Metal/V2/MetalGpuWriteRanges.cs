@@ -77,8 +77,23 @@ internal static class MetalGpuWriteOrigins
 internal sealed class MetalGpuWriteRanges
 {
     // Above this the oldest records are folded together; a folded record covers more
-    // bytes than were written, which can only make a read wait when it need not.
-    private const int MaxRecords = 512;
+    // bytes than were written, which can only make a read wait when it need not. Demon's
+    // Souls keeps more than 512 live and folded two or three times a frame; a folded span
+    // over a word no one writes made its once-a-frame resource read wait ~50 ms for the
+    // whole queue. A query scans records only when their buckets may cover it.
+    // SHARPEMU_METAL_V2_WRITE_RECORDS sets the cap (512 before).
+    private static readonly int DefaultMaxRecords =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WRITE_RECORDS"), out var cap) && cap >= 64
+            ? cap
+            : 4096;
+
+    private readonly int MaxRecords;
+
+    public MetalGpuWriteRanges() : this(DefaultMaxRecords)
+    {
+    }
+
+    internal MetalGpuWriteRanges(int maxRecords) => MaxRecords = Math.Max(64, maxRecords);
 
     private struct Record
     {

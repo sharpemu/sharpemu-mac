@@ -14,6 +14,9 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// </summary>
 public sealed class MetalGpuWriteRangesTests
 {
+    // The cap the folding tests were written for; production keeps more records (MetalGpuWriteRanges).
+    private const int FoldCap = 512;
+
     [Fact]
     public void AReadOutsideEveryRecordedRangeNeverWaits()
     {
@@ -95,7 +98,7 @@ public sealed class MetalGpuWriteRangesTests
     [Fact]
     public void FoldingManyRecordsNeverLosesAPendingWrite()
     {
-        var ranges = new MetalGpuWriteRanges();
+        var ranges = new MetalGpuWriteRanges(FoldCap);
         // Disjoint pages, each in its own submission, far past the record cap.
         for (var index = 0UL; index < 4096; index++)
         {
@@ -127,7 +130,7 @@ public sealed class MetalGpuWriteRangesTests
         Assert.Equal(merged, ranges.LatestSequence(0x1_0000, 4));
 
         // Folded records keep the largest sequence of their parts.
-        var folding = new MetalGpuWriteRanges();
+        var folding = new MetalGpuWriteRanges(FoldCap);
         var newest = 0UL;
         for (var index = 0UL; index < 4096; index++)
         {
@@ -216,7 +219,7 @@ public sealed class MetalGpuWriteRangesTests
     [Fact]
     public void FoldingKeepsTheCheapCoverTestHonest()
     {
-        var ranges = new MetalGpuWriteRanges();
+        var ranges = new MetalGpuWriteRanges(FoldCap);
         for (var index = 0UL; index < 2048; index++)
         {
             ranges.Note(0x10_0000 + (index * 0x2000), 0x1000, serial: index + 1);
@@ -232,7 +235,7 @@ public sealed class MetalGpuWriteRangesTests
     [Fact]
     public void LabelWritesNeverWidenTheFoldOfOrdinaryRecords()
     {
-        var ranges = new MetalGpuWriteRanges();
+        var ranges = new MetalGpuWriteRanges(FoldCap);
         for (ulong i = 0; i < 2000; i++)
         {
             ranges.Note(0x80_0000_0000UL + i * 0x40_0000, 8, serial: 1 + i, MetalGpuWriteOrigin.EndOfPipeLabel);
@@ -246,7 +249,7 @@ public sealed class MetalGpuWriteRangesTests
     [Fact]
     public void AReadOverlappingALabelStillReportsItsSerial()
     {
-        var ranges = new MetalGpuWriteRanges();
+        var ranges = new MetalGpuWriteRanges(FoldCap);
         for (ulong i = 0; i < 1500; i++)
         {
             ranges.Note(0x80_0000_0000UL + i * 0x1000, 4, serial: 10 + i, MetalGpuWriteOrigin.EndOfPipeLabel);
@@ -263,7 +266,7 @@ public sealed class MetalGpuWriteRangesTests
     [Fact]
     public void FoldingScatteredRecordsKeepsEveryByteCoveredWithoutSpanningUnrelatedMemory()
     {
-        var ranges = new MetalGpuWriteRanges();
+        var ranges = new MetalGpuWriteRanges(FoldCap);
         const int n = 3000;
         // Two far-apart clusters of scattered 8-byte records.
         ulong AddressOf(int i) => (i % 2 == 0 ? 0x1000_0000UL : 0x9000_0000UL) + (ulong)(i / 2) * 0x40;
