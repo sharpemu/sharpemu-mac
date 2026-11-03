@@ -258,6 +258,23 @@ public static class RenderPhaseProfile
             ? (long)(slowMilliseconds * Stopwatch.Frequency / 1000.0)
             : 0;
 
+    // The performance overlay turns measurement on at run time while a widget shows the
+    // render-thread breakdown, without the env-var reports: phases are then charged per frame and
+    // handed to OverlayTelemetry. Plain fields; a frame of staleness is harmless.
+    private static bool _overlayPhases;
+    private static bool _overlayTimeline;
+
+    /// <summary>True while scopes are charged: the env-var profile or the overlay's live capture.</summary>
+    internal static bool Measuring => Enabled || _overlayPhases;
+
+    internal static void SetOverlayCapture(bool phases, bool timeline)
+    {
+        _overlayTimeline = phases && timeline;
+        _overlayPhases = phases;
+    }
+
+    [ThreadStatic] private static Overlay.RenderSegmentBuffer? _overlaySegments;
+
     internal static readonly bool FrameTraceEnabled =
         Enabled &&
         (SlowFrameTicks > 0 || string.Equals(
@@ -543,7 +560,7 @@ public static class RenderPhaseProfile
 
     public static Scope Measure(Phase phase)
     {
-        if (!Enabled)
+        if (!Enabled && !_overlayPhases)
         {
             return default;
         }
@@ -570,7 +587,7 @@ public static class RenderPhaseProfile
     /// </summary>
     /// <remarks>Backend contract: the measurement entry point backends use.</remarks>
     public static Scope MeasureDetail(Phase phase) =>
-        Enabled && _scopeDepth > 0 ? Measure(phase) : default;
+        (Enabled || _overlayPhases) && _scopeDepth > 0 ? Measure(phase) : default;
 
     internal static bool DetailMeasurementsEnabled => Enabled && _scopeDepth > 0;
 
@@ -596,9 +613,14 @@ public static class RenderPhaseProfile
                 _ticks[(int)previous] += now - _lastTimestamp;
             }
 
-            if (FrameTraceEnabled && _threadTicks is null)
+            if ((FrameTraceEnabled || _overlayPhases) && _threadTicks is null)
             {
                 _framePhaseTicks[(int)previous] += now - _lastTimestamp;
+            }
+
+            if (_overlayTimeline && _threadTicks is null)
+            {
+                (_overlaySegments ??= new Overlay.RenderSegmentBuffer()).Append((int)previous, _lastTimestamp, now);
             }
         }
 
@@ -625,6 +647,11 @@ public static class RenderPhaseProfile
     /// <summary>Called once per presented frame; also drives the report.</summary>
     public static void RecordFrame()
     {
+        if (Overlay.OverlayTelemetry.Active)
+        {
+            RecordOverlayFrame();
+        }
+
         if (!Enabled)
         {
             return;
@@ -652,6 +679,27 @@ public static class RenderPhaseProfile
         }
 
         ReportWindow(now);
+    }
+
+    // Hands the frame's phase totals and timeline to the overlay. With the env-var frame trace
+    // on, that trace owns (and clears) the per-frame totals; otherwise they are cleared here.
+    private static void RecordOverlayFrame()
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (_overlayPhases)
+        {
+            Charge(_current);
+            Overlay.OverlayTelemetry.EndRenderFrame(now, _framePhaseTicks, _overlaySegments);
+            if (!FrameTraceEnabled)
+            {
+                Array.Clear(_framePhaseTicks);
+            }
+        }
+        else
+        {
+            Overlay.OverlayTelemetry.EndRenderFrame(now, null, null);
+            _overlaySegments?.Clear();
+        }
     }
 
     private static void WriteSlowFrame(long gapTicks)
