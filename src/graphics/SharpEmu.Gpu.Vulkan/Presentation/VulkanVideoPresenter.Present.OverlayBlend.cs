@@ -51,27 +51,9 @@ internal static unsafe partial class VulkanVideoPresenter
         // "KHR" or "EXT" when the device enabled VK_*_calibrated_timestamps; null otherwise.
         private string? _calibratedTimestampsSuffix;
 
-        // The window's pixel density, from the requested window size and the first swapchain.
-        // Only a windowed window still has its requested size then; anything else reports 1.
-        private void UpdateOverlayPixelScale()
-        {
-            if (_overlayPixelScale != 0)
-            {
-                return;
-            }
-
-            var scale = 1.0;
-            if (_videoOptions.WindowMode == HostWindowMode.Windowed && _videoOptions.Width > 0)
-            {
-                var ratio = (double)_extent.Width / _videoOptions.Width;
-                if (ratio is >= 1.0 and <= 4.0)
-                {
-                    scale = Math.Round(ratio * 4) / 4;
-                }
-            }
-
-            _overlayPixelScale = scale;
-        }
+        // The window's pixel density (swapchain pixels per SDL window coordinate), which the
+        // overlay uses to map mouse positions; read each present so fullscreen and display changes follow.
+        private void UpdateOverlayPixelScale() => _overlayPixelScale = _window.PixelDensity;
 
         private static bool IsSrgbFormat(Format format) =>
             format is Format.B8G8R8A8Srgb or Format.R8G8B8A8Srgb or Format.A8B8G8R8SrgbPack32;

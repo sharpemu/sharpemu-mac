@@ -108,6 +108,17 @@ public sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             $"sdr_white={hdr.SdrWhiteLevel:F3} headroom={hdr.Headroom:F3}");
     }
 
+    /// <summary>Drawable pixels per window coordinate (2 on a Retina display); 1 before the window exists.</summary>
+    /// <remarks>The overlay maps the mouse (window coordinates) to swapchain pixels with it.</remarks>
+    public float PixelDensity
+    {
+        get
+        {
+            var density = _window is not null ? SDL_GetWindowPixelDensity(_window) : 0f;
+            return density > 0 ? density : 1f;
+        }
+    }
+
     public (int Width, int Height) PixelSize
     {
         get
