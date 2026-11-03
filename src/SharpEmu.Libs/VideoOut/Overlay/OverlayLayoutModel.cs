@@ -135,7 +135,7 @@ public sealed class OverlayLayoutModel
         switch (name)
         {
             case MinimalPreset:
-                return [Make(OverlayWidgetType.Fps, 12, 12, 150, 96)];
+                return [Make(OverlayWidgetType.Fps, 12, 12, 184, 96)];
             case CompactPreset:
                 return [Make(OverlayWidgetType.Strip, 12, 12, 440, 120)];
             case InspectorPreset:

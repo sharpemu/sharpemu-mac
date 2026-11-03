@@ -415,8 +415,12 @@ public sealed partial class OverlayRenderer
                 sec.AppendMs(v.AvgFrameMs, true);
             }
 
+            // A secondary figure cut to "76.3..." reads worse than none: draw it whole or not at all.
             var sx = r.X + numW + 4f + unitW + 7f;
-            TxtBase(sec.Span, sx, baseline, _fs * 1.15f, _pal.Dim, false, OverlayTextAlign.Left, MathF.Max(0f, r.Right - sx));
+            if (sx + Measure(sec.Span, _fs * 1.15f) <= r.Right)
+            {
+                TxtBase(sec.Span, sx, baseline, _fs * 1.15f, _pal.Dim);
+            }
         }
 
         var y = r.Y + big * 1.0f + 4f;
