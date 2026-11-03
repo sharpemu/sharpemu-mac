@@ -2076,6 +2076,7 @@ internal sealed partial class MetalRenderHost
             new MtlSize { Width = Math.Max(groupsX, 1), Height = Math.Max(groupsY, 1), Depth = Math.Max(groupsZ, 1) },
             entry.ThreadsPerThreadgroup);
         CountDraw(started);
+        SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.RecordDispatch();
         ProfileWork(
             entry,
             "dispatch",
@@ -2163,6 +2164,7 @@ internal sealed partial class MetalRenderHost
             (nuint)range.Offset,
             entry.ThreadsPerThreadgroup);
         CountDraw(started);
+        SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.RecordDispatch();
         ProfileWork(
             entry,
             "dispatch-indirect",

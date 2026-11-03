@@ -175,6 +175,141 @@ public static class SpirvFixedShaders
         return module.Build();
     }
 
+    // The performance overlay for an sRGB-encoded colour attachment. The overlay image holds
+    // premultiplied sRGB-encoded colour; the attachment encodes on write and blends in linear
+    // light, so un-premultiply, decode to linear, and premultiply again (alpha passes through).
+    public static byte[] CreateSrgbOverlayFragment()
+    {
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+        var glsl = module.ImportExtInst("GLSL.std.450");
+        var voidType = module.TypeVoid();
+        var boolType = module.TypeBool();
+        var floatType = module.TypeFloat(32);
+        var vec2Type = module.TypeVector(floatType, 2);
+        var vec3Type = module.TypeVector(floatType, 3);
+        var vec4Type = module.TypeVector(floatType, 4);
+        var bool3Type = module.TypeVector(boolType, 3);
+        var inputVec4Pointer = module.TypePointer(SpirvStorageClass.Input, vec4Type);
+        var outputVec4Pointer = module.TypePointer(SpirvStorageClass.Output, vec4Type);
+        var imageType = module.TypeImage(
+            floatType,
+            SpirvImageDim.Dim2D,
+            depth: false,
+            arrayed: false,
+            multisampled: false,
+            sampled: 1,
+            SpirvImageFormat.Unknown);
+        var sampledImageType = module.TypeSampledImage(imageType);
+        var sampledImagePointer =
+            module.TypePointer(SpirvStorageClass.UniformConstant, sampledImageType);
+        var attribute = module.AddGlobalVariable(inputVec4Pointer, SpirvStorageClass.Input);
+        module.AddDecoration(attribute, SpirvDecoration.Location, 0);
+        var texture = module.AddGlobalVariable(
+            sampledImagePointer,
+            SpirvStorageClass.UniformConstant);
+        module.AddDecoration(texture, SpirvDecoration.DescriptorSet, 0);
+        module.AddDecoration(texture, SpirvDecoration.Binding, 1);
+        var output = module.AddGlobalVariable(outputVec4Pointer, SpirvStorageClass.Output);
+        module.AddDecoration(output, SpirvDecoration.Location, 0);
+
+        uint Float(float value) => module.ConstantFloat(floatType, value);
+        uint Vec3(float value) => module.ConstantComposite(
+            vec3Type,
+            Float(value),
+            Float(value),
+            Float(value));
+        uint Ext(uint operation, uint resultType, params uint[] operands)
+        {
+            var values = new uint[2 + operands.Length];
+            values[0] = glsl;
+            values[1] = operation;
+            operands.CopyTo(values, 2);
+            return module.AddInstruction(SpirvOp.ExtInst, resultType, values);
+        }
+
+        var functionType = module.TypeFunction(voidType);
+        var main = module.BeginFunction(voidType, functionType);
+        module.AddLabel();
+        var attributeValue = module.AddInstruction(SpirvOp.Load, vec4Type, attribute);
+        var coordinates = module.AddInstruction(
+            SpirvOp.VectorShuffle,
+            vec2Type,
+            attributeValue,
+            attributeValue,
+            0,
+            1);
+        var sampledImage = module.AddInstruction(SpirvOp.Load, sampledImageType, texture);
+        var color = module.AddInstruction(
+            SpirvOp.ImageSampleExplicitLod,
+            vec4Type,
+            sampledImage,
+            coordinates,
+            2,
+            Float(0));
+        var alpha = module.AddInstruction(SpirvOp.CompositeExtract, floatType, color, 3);
+        var premultiplied = module.AddInstruction(
+            SpirvOp.VectorShuffle,
+            vec3Type,
+            color,
+            color,
+            0,
+            1,
+            2);
+
+        // FMax(alpha, tiny) keeps a fully transparent pixel at zero instead of dividing by it.
+        var safeAlpha = Ext(40, floatType, alpha, Float(1e-6f));
+        var safeAlpha3 = module.AddInstruction(
+            SpirvOp.CompositeConstruct,
+            vec3Type,
+            safeAlpha,
+            safeAlpha,
+            safeAlpha);
+        var straight = module.AddInstruction(SpirvOp.FDiv, vec3Type, premultiplied, safeAlpha3);
+        straight = Ext(37, vec3Type, Ext(40, vec3Type, straight, Vec3(0f)), Vec3(1f));
+
+        var low = module.AddInstruction(SpirvOp.FDiv, vec3Type, straight, Vec3(12.92f));
+        var high = Ext(
+            26,
+            vec3Type,
+            module.AddInstruction(
+                SpirvOp.FDiv,
+                vec3Type,
+                module.AddInstruction(SpirvOp.FAdd, vec3Type, straight, Vec3(0.055f)),
+                Vec3(1.055f)),
+            Vec3(2.4f));
+        var useLow = module.AddInstruction(
+            SpirvOp.FOrdLessThanEqual,
+            bool3Type,
+            straight,
+            Vec3(0.04045f));
+        var linear = module.AddInstruction(SpirvOp.Select, vec3Type, useLow, low, high);
+        var alpha3 = module.AddInstruction(
+            SpirvOp.CompositeConstruct,
+            vec3Type,
+            alpha,
+            alpha,
+            alpha);
+        var linearPremultiplied = module.AddInstruction(SpirvOp.FMul, vec3Type, linear, alpha3);
+        var result = module.AddInstruction(
+            SpirvOp.CompositeConstruct,
+            vec4Type,
+            module.AddInstruction(SpirvOp.CompositeExtract, floatType, linearPremultiplied, 0),
+            module.AddInstruction(SpirvOp.CompositeExtract, floatType, linearPremultiplied, 1),
+            module.AddInstruction(SpirvOp.CompositeExtract, floatType, linearPremultiplied, 2),
+            alpha);
+        module.AddStatement(SpirvOp.Store, output, result);
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+        module.AddEntryPoint(
+            SpirvExecutionModel.Fragment,
+            main,
+            "main",
+            [attribute, texture, output]);
+        module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+        return module.Build();
+    }
+
     public static byte[] CreatePqToScRgbFragment()
     {
         const float inverseM1 = 16384f / 2610f;
