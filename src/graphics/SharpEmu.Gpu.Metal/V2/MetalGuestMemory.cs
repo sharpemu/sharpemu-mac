@@ -141,9 +141,19 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     // (Dreaming Sarah at five frames a second instead of a hundred and twenty); the windows
     // alone do not: naming them on every encoder cost Grand Theft Auto V's GPU worker about
     // 5% of its time per draw, and Black Myth: Wukong 2% of its frame rate, with system wired
-    // memory unchanged. SHARPEMU_METAL_V2_RESIDENCY_SET=0 names them per encoder instead.
-    private static readonly bool UseResidencySet = !string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_RESIDENCY_SET"), "0", StringComparison.Ordinal);
+    // memory unchanged. SHARPEMU_METAL_V2_RESIDENCY_SET=0 names them per encoder instead, =1 uses the set
+    // for every title. Demon's Souls is the exception by default: with the set its command buffers sat
+    // 80-110 ms idle between encoders (GPU time 104 -> 551 ms a frame, 5.6 -> 1.5 fps on an M-series
+    // MacBook); naming its windows per encoder runs it at 6.4 fps.
+    internal static bool UseResidencySetFor(string? titleId) =>
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_RESIDENCY_SET") switch
+        {
+            "0" => false,
+            "1" => true,
+            _ => !string.Equals(titleId, DemonsSoulsTitleId, StringComparison.Ordinal),
+        };
+
+    private const string DemonsSoulsTitleId = "PPSA01342";
 
     private static readonly bool StageEverything = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_STAGE_ALL"), "1", StringComparison.Ordinal);
@@ -276,7 +286,9 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         _pinnedWindows = new MetalWindowSet(_partition.IdLimit + 64);
 
         InitializeSingleCopyWindows(backing, singleCopy);
-        _residencySet = UseResidencySet ? CreateResidencySet(device) : 0;
+        var titleId = SharpEmu.Libs.VideoOut.VideoOutBackendServices.GetApplicationTitleId();
+        _residencySet = UseResidencySetFor(titleId) ? CreateResidencySet(device) : 0;
+        Console.Error.WriteLine($"[METAL-V2][INFO] residency set: {(_residencySet != 0 ? "on" : "off")} (title {titleId}).");
         _gdsBuffer = CreateSharedBuffer(GdsBytes, "guest.gds", out _, out _);
         _nullBuffer = CreateSharedBuffer(256, "guest.null", out _nullContents, out _);
         // Both are reached through an address in an argument buffer, so the encoder
