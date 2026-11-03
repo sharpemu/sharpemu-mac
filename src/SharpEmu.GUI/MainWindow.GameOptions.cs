@@ -41,7 +41,7 @@ public partial class MainWindow
         GameHdrModeBox.ItemsSource = _hdrModeChoices;
         GameGpuReadbacksBox.ItemsSource = _gpuReadbackChoices;
         GameOverlayModeBox.ItemsSource = _overlayModeChoices;
-        GameOverlayCornerBox.ItemsSource = _overlayCornerChoices;
+        GameOverlayPresetBox.ItemsSource = _overlayPresetChoices;
         GameBinkPlaybackBox.ItemsSource = _binkPlaybackChoices;
 
         var navigationButtons = GameOptionsNavigationButtons();
@@ -112,7 +112,7 @@ public partial class MainWindow
             UpdateGameOverlayRows();
             PersistOpenGameSettings();
         };
-        GameOverlayCornerBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameOverlayPresetBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameBinkPlaybackBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         foreach (var (_, toggle) in GameEnvironmentToggles())
         {
@@ -247,8 +247,9 @@ public partial class MainWindow
             GameVSyncToggle.IsChecked = effective.VSync;
             GameOverlayEnabledToggle.IsChecked = effective.OverlayEnabled;
             GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "Full");
+            RefreshOverlayPresetChoices(effective.OverlayPreset);
+            GameOverlayPresetBox.SelectedItem = FindChoice(_overlayPresetChoices, effective.OverlayPreset, "");
             UpdateGameOverlayRows();
-            GameOverlayCornerBox.SelectedItem = FindChoice(_overlayCornerChoices, effective.OverlayCorner, "TopRight");
             GameHdrModeBox.SelectedItem = FindChoice(
                 _hdrModeChoices,
                 effective.HdrMode,
@@ -299,13 +300,13 @@ public partial class MainWindow
         UpdateScopeBadges();
     }
 
-    // The mode only matters while the overlay is on, and the corner only for a panel drawn
-    // in the game (not the title bar).
+    // The display only matters while the overlay is on, and the layout preset only for the
+    // widgets drawn in the game (not the title bar).
     private void UpdateGameOverlayRows()
     {
         var on = GameOverlayEnabledToggle.IsChecked == true;
         GameOverlayModeRow.IsVisible = on;
-        GameOverlayCornerRow.IsVisible = on && SelectedComboText(GameOverlayModeBox, "Full") != "TitleBar";
+        GameOverlayPresetRow.IsVisible = on && SelectedComboText(GameOverlayModeBox, "Full") != "TitleBar";
     }
 
     // The game's own variables, edited in a sheet over the game settings and saved on Save.
@@ -389,7 +390,9 @@ public partial class MainWindow
             GuestDisplayResolution = Pick(current.GuestDisplayResolution, baseline.GuestDisplayResolution, stored.GuestDisplayResolution),
             OverlayEnabled = Pick(current.OverlayEnabled, baseline.OverlayEnabled, stored.OverlayEnabled),
             OverlayMode = Pick(current.OverlayMode, baseline.OverlayMode, stored.OverlayMode),
-            OverlayCorner = Pick(current.OverlayCorner, baseline.OverlayCorner, stored.OverlayCorner),
+            OverlayPreset = Pick(current.OverlayPreset, baseline.OverlayPreset, stored.OverlayPreset),
+            // No control sets the corner any more (widgets are placed one by one); a stored value stays.
+            OverlayCorner = stored.OverlayCorner,
             BinkPlaybackMode = Pick(current.BinkPlaybackMode, baseline.BinkPlaybackMode, stored.BinkPlaybackMode),
             // An older file's whole list becomes the changes from the list it inherits.
             EnvironmentChanges = EnvironmentOverrides.PickChanged(
@@ -451,7 +454,7 @@ public partial class MainWindow
             GpuReadbacks = SelectedComboText(GameGpuReadbacksBox, "Full"),
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
             OverlayMode = SelectedComboText(GameOverlayModeBox, "Full"),
-            OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),
+            OverlayPreset = SelectedComboText(GameOverlayPresetBox, ""),
             BinkPlaybackMode = SelectedComboText(GameBinkPlaybackBox, "Guest"),
             EnvironmentToggles = BuildGameEnvironmentEntries(),
         };
