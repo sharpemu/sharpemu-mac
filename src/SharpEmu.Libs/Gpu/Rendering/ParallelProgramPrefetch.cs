@@ -218,7 +218,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             // Caller work is reported separately, not disguised as a shorter resolver wait.
             // Keep long queues out of the claim routine's lock/finally frame.
-            if (!_allowCallerResolution || Volatile.Read(ref _outstanding) > MaximumCallerOutstanding || !TryResolveOnCaller(job))
+            if (!_allowCallerResolution ||
+                (Volatile.Read(ref _outstanding) > MaximumCallerOutstanding && !(ClaimSteal && Volatile.Read(ref _workerClaimed))) ||
+                !TryResolveOnCaller(job))
             {
                 WaitFor(job);
                 Interlocked.Add(ref _waitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
@@ -283,20 +285,30 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
     }
 
-    // Claim only the untouched FIFO head. Never race a worker that already peeked at it,
-    // bypass a dependency gate, or resolve concurrently against shared pipeline caches.
+    // Claim only the FIFO head, never bypassing a dependency gate or resolving concurrently against
+    // shared pipeline caches. A head the worker claimed but has not started is the caller's too, whatever
+    // the queue length: under the lock that is a worker waiting on the head's gate (or just woken from
+    // it), so it has no lead on the draw, and the caller would otherwise wait for its wake and its
+    // resolution. The worker checks its head again before it dequeues. Demon's Souls gates most draws on
+    // the work before them and waited about 20 ms a frame here. SHARPEMU_PREFETCH_CLAIM_STEAL=0 keeps
+    // the claim with the worker.
     internal bool TryResolveOnCaller(Job job)
     {
-        if (!_allowCallerResolution || job.State != 0 || Volatile.Read(ref _outstanding) > MaximumCallerOutstanding ||
-            Volatile.Read(ref _running) || Volatile.Read(ref _workerClaimed))
+        if (!_allowCallerResolution || job.State != 0 || Volatile.Read(ref _running))
             return false;
         lock (_lock)
         {
-            if (_stopping || _paused || _running || _workerClaimed || job.State != 0 || _outstanding > MaximumCallerOutstanding ||
+            var claimed = _workerClaimed;
+            if (_stopping || _paused || _running || job.State != 0 ||
+                (claimed ? !ClaimSteal : _outstanding > MaximumCallerOutstanding) ||
                 job.Gate > Volatile.Read(ref _executedGate) || !_queue.TryPeek(out var head) || !ReferenceEquals(head, job))
                 return false;
             _queue.Dequeue();
             _running = true;
+            if (claimed)
+            {
+                _claimSteals++;
+            }
         }
 
         var speculative = GpuFatal.ThrowOnFatal;
@@ -317,6 +329,22 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     }
 
     private long _callerResolves, _callerResolveTicks;
+
+    internal static readonly bool ClaimSteal =
+        Environment.GetEnvironmentVariable("SHARPEMU_PREFETCH_CLAIM_STEAL") != "0";
+
+    // Caller resolutions of a head the worker had claimed, under _lock.
+    private long _claimSteals;
+
+    public long TakeClaimSteals()
+    {
+        lock (_lock)
+        {
+            var steals = _claimSteals;
+            _claimSteals = 0;
+            return steals;
+        }
+    }
 
     public (long Count, double Milliseconds) TakeCallerResolveCounters() =>
         (Interlocked.Exchange(ref _callerResolves, 0),
@@ -391,6 +419,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 if (_stopping)
                 {
                     return;
+                }
+
+                // The caller took the head while this thread waited for its gate (TryResolveOnCaller).
+                if (_running || !_queue.TryPeek(out var head) || !ReferenceEquals(head, job))
+                {
+                    _workerClaimed = false;
+                    continue;
                 }
 
                 _queue.Dequeue();
