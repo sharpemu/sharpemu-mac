@@ -281,11 +281,34 @@ public sealed partial class RenderExecutor
         DrawIndexedCore(submitId, banks, in resolved, arguments);
     }
 
+    // SHARPEMU_DEBUG_DRAW_DELAY_US=<n>: spins n microseconds on the thread that executes each draw.
+    // A diagnostic only: how much the frame time grows with it says how much of the executing
+    // thread's time per draw is on the frame's critical path.
+    private static readonly long DebugDrawDelayTicks =
+        double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DEBUG_DRAW_DELAY_US"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var delayUs) && delayUs > 0
+            ? (long)(delayUs * System.Diagnostics.Stopwatch.Frequency / 1_000_000)
+            : 0;
+
+    private static void SpinDebugDelay()
+    {
+        var until = System.Diagnostics.Stopwatch.GetTimestamp() + DebugDrawDelayTicks;
+        while (System.Diagnostics.Stopwatch.GetTimestamp() < until)
+        {
+            Thread.SpinWait(4);
+        }
+    }
+
     private void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments,
         DrawIndexedArguments? originalIndirectIndexedDraw = null)
     {
         if (MeshDrawTrace.Active) MeshDrawTrace.Write("selection", $"indexed=true count={arguments.IndexCount}");
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
+        if (DebugDrawDelayTicks > 0)
+        {
+            SpinDebugDelay();
+        }
+
         var record = _pool.RentDraw();
         record.Announce = true;
         record.Debug = new DebugInformation(RecordedOperation.DrawIndex, submitId, arguments.IndexCount, 0, 1, arguments.InstanceCount, arguments.IndexAddress);
@@ -609,6 +632,11 @@ public sealed partial class RenderExecutor
         if (MeshDrawTrace.Active)
             MeshDrawTrace.Write("selection", $"count={arguments.VertexCount} instances={arguments.InstanceCount} firstVertex={arguments.FirstVertex} firstInstance={arguments.FirstInstance} primitive={banks.UserConfig.PrimitiveType} geometry=0x{banks.Shader.Vertex.GeometryAddress:X16} hull=0x{banks.Shader.Vertex.HullAddress:X16} local=0x{banks.Shader.Vertex.LocalAddress:X16}");
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
+        if (DebugDrawDelayTicks > 0)
+        {
+            SpinDebugDelay();
+        }
+
         var record = _pool.RentDraw();
         record.Announce = true;
         record.Debug = new DebugInformation(RecordedOperation.DrawIndexAuto, submitId, arguments.VertexCount, 0, arguments.FirstVertex, arguments.InstanceCount, arguments.FirstInstance);
