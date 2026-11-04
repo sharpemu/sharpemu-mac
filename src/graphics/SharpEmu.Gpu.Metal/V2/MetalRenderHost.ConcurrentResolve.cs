@@ -402,10 +402,22 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                 return false;
             }
 
+            if (CrossDrawCleanPages && IsCrossDrawClean(query, page, assumptions.Versions))
+            {
+                assumptions.Record(query, page, ConcurrentPageBytes, false);
+                assumptions.NoteCleanPage(query, page);
+                return false;
+            }
+
             if (!IsOwnedConcurrent(query, page, ConcurrentPageBytes))
             {
                 assumptions.Record(query, page, ConcurrentPageBytes, false);
                 assumptions.NoteCleanPage(query, page);
+                if (CrossDrawCleanPages)
+                {
+                    NoteCrossDrawClean(query, page, assumptions.Versions);
+                }
+
                 return false;
             }
         }
@@ -414,6 +426,63 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var owned = _lastConcurrentOwner != AbandonCause.None;
         assumptions.Record(query, address, size, owned);
         return owned;
+    }
+
+    // SHARPEMU_CONCURRENT_CROSS_CLEAN=0 tests every page of every resolution again. A page found clean stays
+    // clean while the ownership versions stand: only a new recorded GPU write, overlay entry or image change
+    // makes a clean page owned, and each of those moves a version (a write finishing only makes one clean). So
+    // a resolution that starts at the versions an earlier one found a page clean at takes that answer, after
+    // the one test that depends on the draw: the command writes queued ahead of it. Demon's Souls resolves
+    // ~7000 draws a frame out of the same few descriptor pages, each paying the full test per page.
+    private static readonly bool CrossDrawCleanPages =
+        Environment.GetEnvironmentVariable("SHARPEMU_CONCURRENT_CROSS_CLEAN") != "0";
+
+    private const int CrossCleanSlots = 512;
+
+    // Per resolving thread: the pages found clean at t_crossCleanVersions, direct-mapped by page.
+    [ThreadStatic]
+    private static ulong[]? t_crossCleanPages;
+
+    [ThreadStatic]
+    private static (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) t_crossCleanVersions;
+
+    [ThreadStatic]
+    private static MetalRenderHost? t_crossCleanHost;
+
+    private static int CrossCleanSlot(ulong page) => (int)((page / ConcurrentPageBytes) & (CrossCleanSlots - 1));
+
+    private bool IsCrossDrawClean(ConcurrentQuery query, ulong page,
+        (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
+    {
+        var pages = t_crossCleanPages;
+        if (pages is null || !ReferenceEquals(t_crossCleanHost, this) || t_crossCleanVersions != versions ||
+            pages[CrossCleanSlot(page)] != (page | (ulong)query))
+        {
+            return false;
+        }
+
+        return !PendingCommandWriteHolds(page, ConcurrentPageBytes);
+    }
+
+    private void NoteCrossDrawClean(ConcurrentQuery query, ulong page,
+        (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
+    {
+        // Kept only for an answer taken at the versions the resolution started from: one found after a
+        // version moved may not have held at them.
+        if (OwnershipVersions() != versions)
+        {
+            return;
+        }
+
+        var pages = t_crossCleanPages ??= new ulong[CrossCleanSlots];
+        if (!ReferenceEquals(t_crossCleanHost, this) || t_crossCleanVersions != versions)
+        {
+            Array.Fill(pages, ulong.MaxValue);
+            t_crossCleanVersions = versions;
+            t_crossCleanHost = this;
+        }
+
+        pages[CrossCleanSlot(page)] = page | (ulong)query;
     }
 
     // A recorded GPU write the GPU has not finished covers these bytes. The coarse bounds test first, then
