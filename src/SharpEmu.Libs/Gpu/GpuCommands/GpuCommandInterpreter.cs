@@ -318,6 +318,8 @@ public sealed partial class GpuCommandInterpreter
         execution.Suspended = false;
         execution.SuspendCondition = CommandWaitCondition.Unknown;
         execution.MadeProgress = false;
+        execution.Yielded = false;
+        _yieldRequested = false;
         // Forwarding is local to this slice, never a cached signal from an older submission.
         _lastWriteLength = 0;
         _dispatchMayOverlap = false;
@@ -738,8 +740,24 @@ public sealed partial class GpuCommandInterpreter
                 length, consumed, cursorIndex);
             execution.At(cursorIndex).Offset += consumed;
             execution.MadeProgress = true;
+            if (_yieldRequested)
+            {
+                // Another queue was woken while this one ran: stop after this whole packet, as a
+                // suspend would, so its work is encoded next instead of after the rest of this
+                // submission. The queue puts this submission back at its head, runnable.
+                _yieldRequested = false;
+                execution.Suspended = true;
+                execution.Yielded = true;
+                execution.SuspendCondition = CommandWaitCondition.Unknown;
+                return;
+            }
         }
     }
+
+    // Set by the queue, from whichever thread delivered the wake; read between packets.
+    private volatile bool _yieldRequested;
+
+    internal void RequestYield() => _yieldRequested = true;
 
     private sealed class PacketWindow
     {
