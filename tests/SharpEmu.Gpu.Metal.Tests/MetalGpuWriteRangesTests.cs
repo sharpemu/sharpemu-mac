@@ -30,6 +30,35 @@ public sealed class MetalGpuWriteRangesTests
     // Labels are looked up by page: a narrow read finds one on its page, including one that
     // straddles a page boundary, and finds none once it retires; a wide read scans them all.
     [Fact]
+    public void TheWriteLogKeepsAWriteAfterItsRecordRetires()
+    {
+        var ranges = new MetalGpuWriteRanges();
+        var before = ranges.WriteLogVersion;
+        Assert.False(ranges.LoggedWriteSince(before, 0x1000, 0x100));
+
+        ranges.Note(0x1080, 0x40, serial: 3);
+        ranges.Retire(3);
+        Assert.Equal(0UL, ranges.PendingSerial(0x1080, 0x40, completed: 3));
+        // Retired, but written after `before`: a read of these bytes from before it is stale.
+        Assert.True(ranges.LoggedWriteSince(before, 0x1000, 0x100));
+        Assert.False(ranges.LoggedWriteSince(before, 0x2000, 0x100));
+        Assert.False(ranges.LoggedWriteSince(ranges.WriteLogVersion, 0x1000, 0x100));
+
+        // A write for a serial already retired is logged too.
+        var after = ranges.WriteLogVersion;
+        ranges.Note(0x3000, 0x10, serial: 2);
+        Assert.True(ranges.LoggedWriteSince(after, 0x3000, 4));
+
+        // Past what the log holds, every range counts as written.
+        for (var index = 0; index < 5000; index++)
+        {
+            ranges.Note(0x900000 + ((ulong)index * 0x100), 0x10, serial: 10);
+        }
+
+        Assert.True(ranges.LoggedWriteSince(after, 0x5000, 4));
+    }
+
+    [Fact]
     public void ALabelIsFoundThroughItsPagesUntilItRetires()
     {
         var ranges = new MetalGpuWriteRanges();

@@ -29,6 +29,19 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     internal static readonly bool ParallelResolve =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PARALLEL_RESOLVE") != "0";
 
+    /// <summary>
+    /// The draws after a dispatch resolve without waiting for the worker to run it: a dispatch's stores are
+    /// recorded when the worker runs it, and a resolution that read bytes a write logged after it began
+    /// covers is refused when the draw is taken (IsConcurrentResolveStillCurrent), so the worker resolves
+    /// that draw again itself. Demon's Souls runs ~1000 dispatches a frame between its draws, and the worker
+    /// waited ~20 ms a frame for the resolution of the draw after each.
+    /// SHARPEMU_METAL_V2_UNGATED_DISPATCHES=0 holds the resolutions behind the dispatch again.
+    /// </summary>
+    internal static readonly bool UngatedDispatches =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_UNGATED_DISPATCHES") != "0";
+
+    private long _writeLogRefusals;
+
     bool IConcurrentResolveHost.ResolvesConcurrently => ParallelResolve;
 
     // Small unclaimed queues can resolve on the drawing thread without a worker wakeup.
@@ -132,7 +145,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var drained = Interlocked.Exchange(ref _drainedDraws, 0);
         return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
-            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()} {own}{TakeDrainCallers()}";
+            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()} write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} {own}{TakeDrainCallers()}";
     }
 
     internal enum ConcurrentQuery : byte
@@ -160,6 +173,9 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
         // What the ownership answers came from: while none of it changed, they stand.
         public (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) Versions = versions;
+
+        // The GPU write log's count when the resolution began reading (MetalGpuWriteRanges.LoggedWriteSince).
+        public ulong WriteLogVersion;
 
         // The last pages found unowned, for each kind of read.
         private readonly ulong[] _cleanPages = [ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue,
@@ -244,13 +260,16 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             pooled = Interlocked.Exchange(ref _assumptionPool[slot], null);
         }
 
+        // Read before the versions and every guest byte: a write logged after this is one the resolution may have missed.
+        var writeLogVersion = _gpuWrites.WriteLogVersion;
         if (pooled is null)
         {
-            _concurrentAssumptions = new ConcurrentAssumptions(OwnershipVersions());
+            _concurrentAssumptions = new ConcurrentAssumptions(OwnershipVersions()) { WriteLogVersion = writeLogVersion };
             return;
         }
 
         pooled.Reset(OwnershipVersions());
+        pooled.WriteLogVersion = writeLogVersion;
         _concurrentAssumptions = pooled;
     }
 
@@ -344,6 +363,21 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     internal bool IsConcurrentResolveStillCurrent(object assumptionsObject)
     {
         var assumptions = (ConcurrentAssumptions)assumptionsObject;
+        // A GPU write recorded since the resolution began over bytes it read: whether or not its record has
+        // retired by now, the bytes read may be the ones from before it. With the draws after a dispatch
+        // resolving before the worker records it, that write can land and retire before the draw is taken.
+        if (assumptions.WriteLogVersion != _gpuWrites.WriteLogVersion)
+        {
+            foreach (var (_, address, size, _) in assumptions.Answers)
+            {
+                if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, address, size))
+                {
+                    _writeLogRefusals++;
+                    return false;
+                }
+            }
+        }
+
         if (assumptions.Versions == OwnershipVersions())
         {
             return true;

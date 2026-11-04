@@ -241,6 +241,20 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         Enqueue(item);
     }
 
+    // Set by a host that checks each prefetched resolution against every GPU write recorded after it
+    // began (Metal's write log): the draws after a dispatch then resolve without waiting for it to run.
+    public bool UngatedDispatches { get; init; }
+
+    public long EnqueueDispatch(AgcExports.DeferredWork work)
+    {
+        var item = RentAsyncItem(Kind.Deferred);
+        item.Work = work;
+        item.IsDraw = false;
+        item.Ungated = UngatedDispatches;
+        Enqueue(item);
+        return 0;
+    }
+
     // A host call that only orders GPU commands (a barrier, a pass end): the resolutions of the
     // draws after it are not held for it.
     public void PostOrdering(Action action)

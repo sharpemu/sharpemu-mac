@@ -59,6 +59,7 @@ internal sealed partial class MetalRenderHost
                 useHostQos: CommandThreadQosEnabled)
             {
                 ProducerIdle = RequestIdleCommit,
+                UngatedDispatches = UngatedDispatches && ParallelResolve,
             };
             _betweenCommandItems = RunRelayBetweenCommandItems;
             _translation.Sink = _commandThread;
