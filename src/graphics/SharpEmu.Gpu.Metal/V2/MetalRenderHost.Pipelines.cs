@@ -146,6 +146,12 @@ internal sealed partial class MetalRenderHost
 
     private readonly Dictionary<ulong, MetalPipelineEntry> _pipelineEntries = new();
     private readonly List<MetalShaderModule> _modules = new();
+
+    // The modules by handle for the worker's lookups (LookupModule, TryPublishedModule), which take
+    // no lock: the list only grows until disposal, the table is replaced whole when it fills, and it
+    // is published before the count, so a reader that sees a count sees every module under it.
+    private MetalShaderModule[] _moduleTable = new MetalShaderModule[256];
+    private int _moduleTableCount;
     private readonly Dictionary<ulong, nint> _depthStencilStates = new();
     private ulong _nextPipelineId;
 
@@ -234,6 +240,15 @@ internal sealed partial class MetalRenderHost
         {
             _modules.Add(module);
             index = _modules.Count;
+            var table = _moduleTable;
+            if (index > table.Length)
+            {
+                Array.Resize(ref table, Math.Max(index, table.Length * 2));
+            }
+
+            table[index - 1] = module;
+            Volatile.Write(ref _moduleTable, table);
+            Volatile.Write(ref _moduleTableCount, index);
         }
 
         Interlocked.Increment(ref _shaderCompilations);
@@ -553,16 +568,28 @@ internal sealed partial class MetalRenderHost
     // and function may still be compiling or released.
     private MetalShaderModule LookupModule(in ShaderProgram program)
     {
-        lock (_modules)
+        if (!TryPublishedModule(program.Module, out var module))
         {
-            var index = (int)program.Module - 1;
-            if (index < 0 || index >= _modules.Count)
-            {
-                throw Fatal($"The shader module handle is unknown: module={program.Module} program={program.Id}.");
-            }
-
-            return _modules[index];
+            throw Fatal($"The shader module handle is unknown: module={program.Module} program={program.Id}.");
         }
+
+        return module;
+    }
+
+    // The module of a one-based handle from the published table, without the list's lock.
+    private bool TryPublishedModule(ulong handle, out MetalShaderModule module)
+    {
+        var count = Volatile.Read(ref _moduleTableCount);
+        var table = Volatile.Read(ref _moduleTable);
+        var index = handle - 1;
+        if (handle == 0 || index >= (ulong)count || index >= (ulong)table.Length || table[index] is not { } found)
+        {
+            module = null!;
+            return false;
+        }
+
+        module = found;
+        return true;
     }
 
     // The module with its library and function, waiting for a compile still on the pool. A
@@ -2163,6 +2190,8 @@ internal sealed partial class MetalRenderHost
         }
 
         _modules.Clear();
+        Volatile.Write(ref _moduleTableCount, 0);
+        Array.Clear(_moduleTable);
         foreach (var sampler in _samplers.Values)
         {
             MetalNative.SendVoid(sampler.Handle, SelRelease);

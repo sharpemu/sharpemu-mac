@@ -1119,10 +1119,17 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        EnqueueBufferAtCompletion(index, address, hash, (int)Math.Min(bytes, size));
+    }
+
+    // Apart from the check above: the closure's captures would otherwise be allocated on every
+    // call, armed or not (some 15 MB a second of them on the draw path).
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void EnqueueBufferAtCompletion(int index, ulong address, ulong hash, int length)
+    {
         var serial = _tracedBuffersAtCompletion++;
         var flip = Interlocked.Read(ref _flips);
         var directory = _traceBufferAtCompletion[3];
-        var length = (int)Math.Min(bytes, size);
         _completions.Enqueue(SubmissionSerial, () =>
         {
             var contents = new byte[length];

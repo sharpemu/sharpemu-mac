@@ -177,15 +177,11 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     public bool TakesIndirectDrawArguments(ShaderProgram vertexProgram, ulong argumentsAddress, ulong argumentsSize)
     {
-        lock (_modules)
+        // An unknown module is not a mesh program as far as anything here knows; the
+        // draw path reports it where it can say which program it was.
+        if (!TryPublishedModule(vertexProgram.Module, out var module) || module.Shader.Stage != Gen5MslStage.Mesh)
         {
-            var index = (int)vertexProgram.Module - 1;
-            // An unknown module is not a mesh program as far as anything here knows; the
-            // draw path reports it where it can say which program it was.
-            if (index < 0 || index >= _modules.Count || _modules[index].Shader.Stage != Gen5MslStage.Mesh)
-            {
-                return true;
-            }
+            return true;
         }
 
         return TakesLaunchArguments(argumentsAddress, argumentsSize);
