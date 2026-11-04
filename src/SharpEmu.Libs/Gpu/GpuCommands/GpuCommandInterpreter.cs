@@ -740,11 +740,12 @@ public sealed partial class GpuCommandInterpreter
                 length, consumed, cursorIndex);
             execution.At(cursorIndex).Offset += consumed;
             execution.MadeProgress = true;
-            if (_yieldRequested)
+            if (_yieldRequested && HasPacketsLeft(execution))
             {
                 // Another queue was woken while this one ran: stop after this whole packet, as a
                 // suspend would, so its work is encoded next instead of after the rest of this
-                // submission. The queue puts this submission back at its head, runnable.
+                // submission. The queue puts this submission back at its head, runnable. A
+                // submission with nothing left completes instead; the request then lapses.
                 _yieldRequested = false;
                 execution.Suspended = true;
                 execution.Yielded = true;
@@ -756,6 +757,19 @@ public sealed partial class GpuCommandInterpreter
 
     // Set by the queue, from whichever thread delivered the wake; read between packets.
     private volatile bool _yieldRequested;
+
+    private static bool HasPacketsLeft(PacketCursorStack execution)
+    {
+        for (var index = 0; index < execution.Depth; index++)
+        {
+            if (execution.At(index).Remaining > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     internal void RequestYield() => _yieldRequested = true;
 
