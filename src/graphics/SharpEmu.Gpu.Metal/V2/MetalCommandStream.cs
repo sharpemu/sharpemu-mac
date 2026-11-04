@@ -75,7 +75,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // The translation state belongs to the interpreting thread; the command buffer to the worker.
             _submissionsStarted++;
             _translation!.BeginSubmission(queueId, submissionId, geometrySnapshots, CommandStream.GetInterpreter(queueId));
-            _commandThread!.Post(() =>
+            // A commit and a command buffer: nothing a program resolution reads, so the draws after it do not wait
+            // for it (Demon's Souls begins ~190 submissions a frame).
+            PostOrderingToWorker(() =>
             {
                 NativeOcclusionBeginQueue(queueId);
                 CommitCoalescedIfOverdue();
@@ -94,7 +96,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     void ICommandStreamHost.Flush()
     {
-        if (PostToWorker(() => ((ICommandStreamHost)this).Flush()))
+        // A commit orders GPU work only: the resolutions of the draws after it are not held for it.
+        if (PostOrderingToWorker(() => ((ICommandStreamHost)this).Flush()))
         {
             return;
         }
