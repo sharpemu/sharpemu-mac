@@ -112,22 +112,32 @@ public sealed partial class ParallelProgramPrefetchCallerTests
     }
 
     [Fact]
-    public void AWorkerWaitingAtAGateKeepsItsClaimWhenTheGateOpens()
+    public void TheCallerTakesAHeadTheWorkerClaimedOnceItsGateOpens()
     {
         using var f = new Fixture();
-        var job = f.Prefetch.Submit(Banks(), gate: 1);
+        var banks = Banks();
+        var job = f.Prefetch.Submit(banks, gate: 1);
+        var follower = Banks();
+        var next = f.Prefetch.Submit(follower, gate: 1);
         var claim = typeof(ParallelProgramPrefetch).GetField("_workerClaimed", BindingFlags.Instance | BindingFlags.NonPublic)!;
         Assert.True(SpinWait.SpinUntil(() => { lock (f.QueueLock) return (bool)claim.GetValue(f.Prefetch)!; }, TimeSpan.FromSeconds(10)));
         lock (f.QueueLock)
         {
+            // Closed gate: still nobody's to resolve.
             Assert.False(f.Prefetch.TryResolveOnCaller(job));
             f.Prefetch.AdvanceGate(1);
-            Assert.False(f.Prefetch.TryResolveOnCaller(job));
+            // The worker sleeps on the gate behind this lock: the caller takes its head.
+            Assert.True(f.Take(banks, job));
+            Assert.Equal(1, f.Prefetch.TakeClaimSteals());
+            Assert.Equal(0, next.State);
         }
+
+        // The worker finds its head gone; the next job still resolves exactly once, on either thread.
+        Assert.True(f.Take(follower, next));
         f.Idle();
-        Assert.Equal(1, job.State);
-        Assert.Equal(0, f.Prefetch.TakeCallerResolveCounters().Count);
-        Assert.Equal(1, f.Concurrent.Begins);
+        Assert.Equal((2, 2, 1), (f.Concurrent.Begins, f.Concurrent.Releases, f.Concurrent.MaximumActive));
+        Assert.InRange(f.Prefetch.TakeCallerResolveCounters().Count, 1, 2);
+        Assert.Equal(2, f.Prefetch.TakeCounters().Taken);
     }
 
     [Theory]

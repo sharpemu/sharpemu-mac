@@ -132,7 +132,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var drained = Interlocked.Exchange(ref _drainedDraws, 0);
         return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
-            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} {own}{TakeDrainCallers()}";
+            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()} {own}{TakeDrainCallers()}";
     }
 
     internal enum ConcurrentQuery : byte
