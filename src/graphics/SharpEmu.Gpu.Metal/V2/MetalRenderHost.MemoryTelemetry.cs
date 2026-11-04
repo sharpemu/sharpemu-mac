@@ -40,7 +40,7 @@ internal sealed partial class MetalRenderHost
         return string.Create(CultureInfo.InvariantCulture,
             $"recommended_working_set_mb={recommended / Mb:F0} device_allocated_mb={allocated / Mb:F0} " +
             $"ring_mb={_guestMemory.RingBytes / Mb:F0} ring_peak_mb={_guestMemory.RingPeakBytes / Mb:F0} " +
-            $"{DescribeStagingTotals()} {DescribeShaderCache()} {_imageCache.DescribeMemoryCensus()}");
+            $"{DescribeStagingTotals()} {DescribeShaderCache()} {_imageCache.DescribeMemoryCensus()}{_imageCache.DescribeUsageCensus()}");
     }
 
     // The tiler's staging pool since startup: held now, held by nobody (free at the last
