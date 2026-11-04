@@ -172,6 +172,21 @@ internal sealed partial class MetalRenderHost
     private MetalResourcePreparation? _preparationHandle;
     private int _preparedStageMask;
 
+    private static readonly long CommitAgeTicks =
+        MetalV2Diagnostics.CommitAgeMicroseconds * System.Diagnostics.Stopwatch.Frequency / 1_000_000L;
+
+    // Outside a render pass only: a commit there ends no pass, so nothing is stored and reloaded.
+    // Demon's Souls records a 12k-dword graphics submission over tens of milliseconds, and the GPU
+    // otherwise sat idle until a 2048-command budget commit, then ran behind the worker.
+    private void CommitIfAged()
+    {
+        if (CommitAgeTicks > 0 && _commandBuffer != 0 && _recordedCommands >= MetalV2Diagnostics.CommitAgeMinCommands &&
+            System.Diagnostics.Stopwatch.GetTimestamp() - _commandBufferOpenedTicks >= CommitAgeTicks)
+        {
+            FlushCommandBuffer(MetalFlushCause.Age);
+        }
+    }
+
     public IResourcePreparation BeginPreparation()
     {
         if (_preparation is not null)
@@ -197,6 +212,7 @@ internal sealed partial class MetalRenderHost
             if (_renderEncoder == 0)
             {
                 CommitCoalescedIfOverdue();
+                CommitIfAged();
             }
         }
 

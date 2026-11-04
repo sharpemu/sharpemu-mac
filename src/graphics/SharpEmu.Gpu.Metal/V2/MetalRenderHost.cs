@@ -104,6 +104,8 @@ internal sealed partial class MetalRenderHost :
     private ulong _submissionSerial;
     private ulong _nextSerial;
     private long _recordedCommands;
+    // When the open command buffer was created.
+    private long _commandBufferOpenedTicks;
     // The guest byte ranges recorded work may still be writing, with the submission
     // serial that finishes each. A CPU read waits only when it overlaps one whose
     // serial has not completed, and then only for that serial.
@@ -344,6 +346,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _commandBuffer = NewCommandBuffer();
+        _commandBufferOpenedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         MetalMemoryTelemetry.CommandBuffers.Add();
         if (_commandBuffer == 0)
         {
@@ -556,6 +559,7 @@ internal sealed partial class MetalRenderHost :
         WaitUncommitted, // a wait targeted the submission being recorded
         Poll,            // a guest poll with a pending write
         Transient,       // transient staging over budget
+        Age,             // the open buffer recorded for SHARPEMU_METAL_V2_COMMIT_AGE_US, at a pass boundary
         Other,
     }
 

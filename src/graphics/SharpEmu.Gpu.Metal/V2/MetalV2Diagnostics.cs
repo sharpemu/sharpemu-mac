@@ -390,6 +390,18 @@ internal static class MetalV2Diagnostics
     public static readonly int CoalesceMaxMicroseconds =
         PositiveInt("SHARPEMU_METAL_V2_FLUSH_COALESCE_US", 2000);
 
+    // SHARPEMU_METAL_V2_COMMIT_AGE_US: a buffer open this long is committed at the next draw or
+    // dispatch that starts outside a render pass, so the GPU starts on a long submission while the
+    // worker records the rest of it instead of receiving it in 2048-command chunks. 0 turns it off.
+    public static readonly int CommitAgeMicroseconds =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMIT_AGE_US"), System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out var age) && age >= 0
+            ? age
+            : 3000;
+
+    // The fewest commands an aged buffer holds before it is worth a commit of its own.
+    public static readonly int CommitAgeMinCommands = PositiveInt("SHARPEMU_METAL_V2_COMMIT_AGE_COMMANDS", 64);
+
     private static int PositiveInt(string name, int fallback) =>
         int.TryParse(Environment.GetEnvironmentVariable(name), System.Globalization.NumberStyles.Integer,
             System.Globalization.CultureInfo.InvariantCulture, out var value) && value > 0
