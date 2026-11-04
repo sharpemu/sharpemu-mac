@@ -147,6 +147,13 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // inside it for the rest of the resolution, with one recorded answer.
     private const ulong ConcurrentPageBytes = 4096;
 
+    // SHARPEMU_CONCURRENT_WORD_LINES=0 reads every word of a resolution on its own, as before. A resolution reads
+    // ~45 descriptor and table words a stage, mostly a few words apart, and each one cost a clean-page test and a
+    // backing read of its own (a third of the resolving thread's busy time in Demon's Souls).
+    private const int ConcurrentWordLineBytes = 256;
+    private static readonly bool ConcurrentWordLines =
+        Environment.GetEnvironmentVariable("SHARPEMU_CONCURRENT_WORD_LINES") != "0";
+
     internal sealed class ConcurrentAssumptions((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
     {
         public readonly List<(ConcurrentQuery Query, ulong Address, ulong Size, bool Owned)> Answers = new();
@@ -159,6 +166,11 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue];
         private int _nextCleanPage;
 
+        // The last line of a clean page read whole for word reads (TryReadGuestWordConcurrent): the words
+        // after it in the line are answered from it, under the clean-page answer already recorded.
+        public ulong WordLine = ulong.MaxValue;
+        public readonly byte[] WordLineBytes = new byte[ConcurrentWordLineBytes];
+
         // Taken again from the pool for a new resolution.
         public void Reset((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
         {
@@ -166,6 +178,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             Versions = versions;
             Array.Fill(_cleanPages, ulong.MaxValue);
             _nextCleanPage = 0;
+            WordLine = ulong.MaxValue;
         }
 
         public bool IsCleanPage(ConcurrentQuery query, ulong page)
@@ -226,9 +239,9 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     internal void BeginConcurrentResolve()
     {
         ConcurrentAssumptions? pooled = null;
-        lock (_assumptionPool)
+        for (var slot = 0; slot < _assumptionPool.Length && pooled is null; slot++)
         {
-            _assumptionPool.TryPop(out pooled);
+            pooled = Interlocked.Exchange(ref _assumptionPool[slot], null);
         }
 
         if (pooled is null)
@@ -243,7 +256,9 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     // Assumptions the worker has checked, for the resolving thread to fill again: one per draw
     // otherwise, each with its answer list grown from nothing (Grand Theft Auto V, ~10 MB/s).
-    private readonly Stack<ConcurrentAssumptions> _assumptionPool = new();
+    // Slots taken and filled with an exchange each: the resolving thread takes one per draw and the worker
+    // returns one per draw, and a lock both took per draw was contended on every one (Demon's Souls, ~7000 a frame).
+    private readonly ConcurrentAssumptions?[] _assumptionPool = new ConcurrentAssumptions?[MaxPooledAssumptions];
     private const int MaxPooledAssumptions = 32;
     private const int MaxPooledAnswers = 4096;
 
@@ -254,11 +269,11 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             return;
         }
 
-        lock (_assumptionPool)
+        for (var slot = 0; slot < _assumptionPool.Length; slot++)
         {
-            if (_assumptionPool.Count < MaxPooledAssumptions)
+            if (Interlocked.CompareExchange(ref _assumptionPool[slot], assumptions, null) is null)
             {
-                _assumptionPool.Push(assumptions);
+                return;
             }
         }
     }
@@ -426,6 +441,14 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     private bool TryReadGuestWordConcurrent(ulong address, out uint word, ConcurrentAssumptions assumptions)
     {
+        const ulong lineMask = ConcurrentWordLineBytes - 1;
+        if ((address & ~lineMask) == assumptions.WordLine && (address & 3) == 0)
+        {
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                assumptions.WordLineBytes.AsSpan((int)(address & lineMask), sizeof(uint)));
+            return true;
+        }
+
         word = 0;
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (IsOwnedRecorded(ConcurrentQuery.Word, address, sizeof(uint), assumptions))
@@ -451,6 +474,20 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             throw new GpuFatal.AbandonedWorkException($"The resolution reads GPU-owned memory: address=0x{address:X16}.");
         }
 
+        // The whole page answered clean: the rest of the line is read with this word. The line lies within the
+        // page, which an aligned line of a power of two below the page size always does.
+        var line = address & ~lineMask;
+        if (ConcurrentWordLines && (address & 3) == 0 &&
+            assumptions.IsCleanPage(ConcurrentQuery.Word, address & ~(ConcurrentPageBytes - 1)) &&
+            _backing.TryReadBacking(line, assumptions.WordLineBytes))
+        {
+            assumptions.WordLine = line;
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                assumptions.WordLineBytes.AsSpan((int)(address & lineMask), sizeof(uint)));
+            return true;
+        }
+
+        assumptions.WordLine = ulong.MaxValue;
         if (!_backing.TryReadBacking(address, bytes))
         {
             return false;
