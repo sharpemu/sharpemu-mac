@@ -188,6 +188,21 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             _nextCleanPage = (_nextCleanPage + 1) & (_cleanPages.Length - 1);
         }
 
+        // Drops the owned answer recorded for this range before index `before` (the answers recorded
+        // after it stay): a read answered another way no longer depends on it.
+        public void Forget(ConcurrentQuery query, ulong address, ulong size, int before)
+        {
+            for (var index = Math.Min(before, Answers.Count) - 1; index >= 0; index--)
+            {
+                var answer = Answers[index];
+                if (answer.Query == query && answer.Owned && answer.Address == address && answer.Size == size)
+                {
+                    Answers.RemoveAt(index);
+                    return;
+                }
+            }
+        }
+
         public void Record(ConcurrentQuery query, ulong address, ulong size, bool owned)
         {
             // The last few answers repeat often (a resource table read word by word).
@@ -412,13 +427,30 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     private bool TryReadGuestWordConcurrent(ulong address, out uint word, ConcurrentAssumptions assumptions)
     {
         word = 0;
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (IsOwnedRecorded(ConcurrentQuery.Word, address, sizeof(uint), assumptions))
         {
+            // A word a pending copy writes reads as its source, as the worker reads it; the owned
+            // answer just recorded for it is dropped, since the copy writes it either way.
+            var owner = _lastConcurrentOwner;
+            if (owner == AbandonCause.GpuWrite)
+            {
+                var answers = assumptions.Answers.Count;
+                if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions))
+                {
+                    assumptions.Forget(ConcurrentQuery.Word, address, sizeof(uint), answers);
+                    word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+                    return true;
+                }
+
+                // The source tests overwrote the owner; the abandon is the word's.
+                _lastConcurrentOwner = owner;
+            }
+
             NoteAbandonCause(address, sizeof(uint));
             throw new GpuFatal.AbandonedWorkException($"The resolution reads GPU-owned memory: address=0x{address:X16}.");
         }
 
-        Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (!_backing.TryReadBacking(address, bytes))
         {
             return false;

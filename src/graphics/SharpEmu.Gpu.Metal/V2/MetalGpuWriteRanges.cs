@@ -476,6 +476,9 @@ internal sealed class MetalGpuWriteRanges
 
     private void EndMutation() => Volatile.Write(ref _mutation, _mutation + 1);
 
+    /// <summary>Changes whenever the worker changes the records (odd while it does); any thread.</summary>
+    public int MutationStamp => Volatile.Read(ref _mutation);
+
     /// <summary>
     /// <see cref="PendingSerial"/> for a thread other than the worker: nothing is retired, and false
     /// when the worker changed the records meanwhile, so the caller treats the bytes as pending.
@@ -524,6 +527,61 @@ internal sealed class MetalGpuWriteRanges
             }
 
             pending = found;
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return false;
+        }
+
+        Interlocked.MemoryBarrier();
+        return Volatile.Read(ref _mutation) == before;
+    }
+
+    /// <summary>
+    /// <see cref="LatestSequence"/> read from another thread, like <see cref="TryPendingSerialSnapshot"/>:
+    /// false when the worker changed the records meanwhile (the answer is then unknown).
+    /// </summary>
+    public bool TryLatestSequenceSnapshot(ulong address, ulong size, out ulong latest)
+    {
+        latest = 0;
+        var before = Volatile.Read(ref _mutation);
+        if ((before & 1) != 0 || size == 0 || address > ulong.MaxValue - size)
+        {
+            return false;
+        }
+
+        try
+        {
+            var end = address + size;
+            var found = _unboundedSerial != 0 ? _unboundedSequence : 0;
+            var records = _records;
+            var count = Volatile.Read(ref _wideRecordCount) == 0 &&
+                !HashedMayCover(_bucketHashCounts, address >> RecordBucketShift, (end - 1) >> RecordBucketShift, MaxRecordBucketLookups)
+                ? 0
+                : Math.Min(_count, records.Length);
+            for (var index = 0; index < count; index++)
+            {
+                var record = records[index];
+                if (record.Sequence > found && record.End > address && record.Start < end)
+                {
+                    found = record.Sequence;
+                }
+            }
+
+            var labels = _labels;
+            var labelCount = HashedMayCover(_labelPageHashCounts, address >> LabelPageShift, (end - 1) >> LabelPageShift, MaxLabelPageLookups)
+                ? Math.Min(_labelCount, labels.Length)
+                : 0;
+            for (var index = 0; index < labelCount; index++)
+            {
+                var label = labels[index];
+                if (label.Sequence > found && label.End > address && label.Start < end)
+                {
+                    found = label.Sequence;
+                }
+            }
+
+            latest = found;
         }
         catch (IndexOutOfRangeException)
         {

@@ -983,7 +983,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // Reads overlapping this queued write wait until the worker installed
             // its overlay. Unrelated packets can continue; prefetch's non-draw gate
             // still orders future resource reads after the write.
-            _commandThread!.PostRange(() => RecordCommandProcessorWrite(address, queued, kind), address, (ulong)queued.Length, UngatedWrites);
+            _commandThread!.PostWrite(() => RecordCommandProcessorWrite(address, queued, kind), address, queued, UngatedWrites);
         }
         else
         {
@@ -1120,7 +1120,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 (count == 1 || strideBytes <= (ulong.MaxValue - address - sizeof(ulong)) / (ulong)(count - 1)))
             {
                 var size = (ulong)(count - 1) * strideBytes + sizeof(ulong);
-                _commandThread!.PostRange(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind), address, size, UngatedWrites);
+                _commandThread!.PostQwords(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind), address, size, value,
+                    count == 1 ? sizeof(ulong) : strideBytes, UngatedWrites);
             }
             else
             {
