@@ -148,65 +148,6 @@ internal sealed class MetalGpuWriteRanges
     /// </summary>
     public ulong Version { get; private set; }
 
-    // Every write recorded lately, newest last, kept after its record retires. Retiring forgets a write, so a
-    // program resolution checked after a write it overlaps both landed and retired would take the bytes it read
-    // before the write as current (MetalRenderHost.IsConcurrentResolveStillCurrent); the log still has it (LoggedWriteSince).
-    private const int WriteLogLength = 4096;
-    private readonly (ulong Version, ulong Start, ulong End)[] _writeLog = new (ulong, ulong, ulong)[WriteLogLength];
-    private long _writeLogCount;
-
-    // Every write logged at a version above this one is still in the log.
-    private ulong _writeLogFloor;
-
-    /// <summary>Counts the writes logged; a resolution notes it when it starts reading.</summary>
-    public ulong WriteLogVersion { get; private set; }
-
-    private void LogWrite(ulong start, ulong end)
-    {
-        ref var slot = ref _writeLog[(int)(_writeLogCount % WriteLogLength)];
-        if (_writeLogCount >= WriteLogLength)
-        {
-            _writeLogFloor = slot.Version;
-        }
-
-        slot = (++WriteLogVersion, start, end);
-        _writeLogCount++;
-    }
-
-    /// <summary>
-    /// Whether a write logged after <paramref name="version"/> overlaps the range, retired or not; true too
-    /// when the log no longer reaches back that far. Only the worker, which logs, asks.
-    /// </summary>
-    public bool LoggedWriteSince(ulong version, ulong address, ulong size)
-    {
-        if (version == WriteLogVersion)
-        {
-            return false;
-        }
-
-        if (version < _writeLogFloor)
-        {
-            return true;
-        }
-
-        var end = size > ulong.MaxValue - address ? ulong.MaxValue : address + size;
-        for (var index = _writeLogCount - 1; index >= 0 && index >= _writeLogCount - WriteLogLength; index--)
-        {
-            var entry = _writeLog[(int)(index % WriteLogLength)];
-            if (entry.Version <= version)
-            {
-                break;
-            }
-
-            if (entry.Start < end && address < entry.End)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     /// <summary>
     /// Recorded work in <paramref name="serial"/> stores into this range. Returns the
     /// write's sequence (see <see cref="LatestSequence"/>), or zero when nothing was recorded.
@@ -220,11 +161,6 @@ internal sealed class MetalGpuWriteRanges
         BeginMutation();
         try
         {
-            if (size != 0 && address <= ulong.MaxValue - size)
-            {
-                LogWrite(address, address + size);
-            }
-
             if (size == 0 || serial == 0 || serial <= _retiredSerial || address > ulong.MaxValue - size)
             {
                 return 0;
@@ -472,7 +408,6 @@ internal sealed class MetalGpuWriteRanges
         try
         {
             Version++;
-            LogWrite(0, ulong.MaxValue);
             if (serial != 0 && serial > _retiredSerial && serial >= _unboundedSerial)
             {
                 _unboundedSequence = ++_sequence;

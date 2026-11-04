@@ -53,10 +53,6 @@ public static partial class AgcExports
 
         long EnqueueDeferred(DeferredWork work, bool isDraw);
 
-        // A dispatch: a sink whose host checks resolutions against the writes recorded after them leaves the
-        // draws after it free to resolve.
-        long EnqueueDispatch(DeferredWork work) => EnqueueDeferred(work, isDraw: false);
-
         void WaitPending(long sequence)
         {
         }
@@ -878,7 +874,8 @@ public static partial class AgcExports
                 if (_defersWholeWork && Producing)
                 {
                     var snapshot = banks.Snapshot();
-                    Sink!.EnqueueDispatch(new PendingDispatch(submitId, state, snapshot, endX, endY, endZ, dispatchInitiator, indirectArgumentsAddress));
+                    Sink!.EnqueueDeferred(new PendingDispatch(submitId, state, snapshot, endX, endY, endZ, dispatchInitiator, indirectArgumentsAddress),
+                        isDraw: false);
                     return;
                 }
 
