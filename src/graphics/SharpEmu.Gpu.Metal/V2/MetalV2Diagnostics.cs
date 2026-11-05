@@ -396,6 +396,16 @@ internal static class MetalV2Diagnostics
     public static readonly int CoalesceMaxMicroseconds =
         PositiveInt("SHARPEMU_METAL_V2_FLUSH_COALESCE_US", 2000);
 
+    // SHARPEMU_METAL_V2_FLUSH_HOLD_PASS=0 commits a coalesced Stream flush at its limit even
+    // when that ends the open render pass, as before. Otherwise a limit reached with a pass open
+    // holds the commit until no pass is open, for at most SHARPEMU_METAL_V2_FLUSH_HOLD_PASS_US
+    // after the first deferred flush (MetalCommandStream.cs, HoldsCommitForPass).
+    public static readonly bool HoldFlushForPass =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FLUSH_HOLD_PASS"), "0", StringComparison.Ordinal);
+
+    public static readonly int HoldFlushMaxMicroseconds =
+        PositiveInt("SHARPEMU_METAL_V2_FLUSH_HOLD_PASS_US", 4000);
+
     private static int PositiveInt(string name, int fallback) =>
         int.TryParse(Environment.GetEnvironmentVariable(name), System.Globalization.NumberStyles.Integer,
             System.Globalization.CultureInfo.InvariantCulture, out var value) && value > 0

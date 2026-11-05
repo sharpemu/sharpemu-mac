@@ -162,6 +162,62 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         !coalesce || streamIdle || submissions >= maxSubmissions || encoders >= maxEncoders ||
         wantedTicks >= maxTicks;
 
+    // ---- holding a coalesced commit for the open render pass (SHARPEMU_METAL_V2_FLUSH_HOLD_PASS) ----
+    //
+    // A commit ends the open render pass: Metal passes do not span command buffers. Demon's
+    // Souls keeps drawing into the same targets across submissions, and a commit made only
+    // because a coalescing limit was reached stored and reloaded the whole attachment set there
+    // (~0.64 ms of GPU a frame). Such a commit is held while a pass is open and made at the
+    // first commit point with none open, or once the first deferred flush is older than the
+    // hold limit. Only the limits are held: a stream with nothing runnable, labels owed to a
+    // polling guest, completions, host waits and flips commit as before.
+
+    /// <summary>Whether limit-reached Stream commits wait for the open pass to end.</summary>
+    internal bool HoldFlushForPass { get; set; } = MetalV2Diagnostics.HoldFlushForPass;
+
+    /// <summary>Test seam: the stream always has more runnable work (as with a command thread).</summary>
+    internal bool AssumeStreamBusy { get; set; }
+
+    private static readonly long HoldFlushMaxTicks =
+        MetalV2Diagnostics.HoldFlushMaxMicroseconds * System.Diagnostics.Stopwatch.Frequency / 1_000_000L;
+
+    private long _commitsHeldForPass;
+    private long _heldCommitsCapped;
+
+    private string FormatHeldCommits()
+    {
+        var (held, capped) = TakeHeldCommits();
+        return $"held:{held},capped:{capped}";
+    }
+
+    internal (long Held, long Capped) TakeHeldCommits() =>
+        (Interlocked.Exchange(ref _commitsHeldForPass, 0), Interlocked.Exchange(ref _heldCommitsCapped, 0));
+
+    /// <summary>
+    /// Whether a commit a coalescing limit asks for waits for the open render pass. Pure, so the
+    /// policy is testable without a device.
+    /// </summary>
+    internal static bool HoldsCommitForPass(bool hold, bool coalesce, bool passOpen, long wantedTicks, long maxTicks) =>
+        hold && coalesce && passOpen && wantedTicks < maxTicks;
+
+    // A limit was reached: hold the commit for the open pass, or make it.
+    private bool HoldCommitForOpenPass(long wantedTicks)
+    {
+        var passOpen = _renderEncoder != 0;
+        if (HoldsCommitForPass(HoldFlushForPass, MetalV2Diagnostics.CoalesceFlushes, passOpen, wantedTicks, HoldFlushMaxTicks))
+        {
+            _commitsHeldForPass++;
+            return true;
+        }
+
+        if (HoldFlushForPass && passOpen && MetalV2Diagnostics.CoalesceFlushes)
+        {
+            _heldCommitsCapped++;
+        }
+
+        return false;
+    }
+
     private void FlushStream()
     {
         if (_commandBuffer == 0)
@@ -178,14 +234,36 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         _coalescedSubmissions++;
         var coalesce = MetalV2Diagnostics.CoalesceFlushes;
-        // Read only when the cheaper limits leave the decision open: it takes the queue lock.
-        var commit = ShouldCommitStreamFlush(
+        var limits = ShouldCommitStreamFlush(
             coalesce, streamIdle: false, _coalescedSubmissions, _encodersInBuffer, now - _commitWantedSince,
-            MetalV2Diagnostics.CoalesceMaxSubmissions, MetalV2Diagnostics.CoalesceMaxEncoders, CoalesceMaxTicks) ||
-            // With a producer, an empty packet queue can still have many worker items
-            // behind this flush. Its ordered idle callback commits after those items;
-            // testing the producer queue here would commit each parsed submission.
-            (!UsesCommandThread && !(_commandStream?.HasUnblockedPending ?? false));
+            MetalV2Diagnostics.CoalesceMaxSubmissions, MetalV2Diagnostics.CoalesceMaxEncoders, CoalesceMaxTicks);
+        // Read only when the cheaper limits leave the decision open, or a limit would end the
+        // open pass: it takes the queue lock. With a producer, an empty packet queue can still
+        // have many worker items behind this flush. Its ordered idle callback commits after
+        // those items; testing the producer queue here would commit each parsed submission.
+        bool StreamIdle() => !UsesCommandThread && !AssumeStreamBusy && !(_commandStream?.HasUnblockedPending ?? false);
+        bool commit;
+        if (!limits)
+        {
+            commit = StreamIdle();
+        }
+        else if (HoldsCommitForPass(HoldFlushForPass, coalesce, _renderEncoder != 0, now - _commitWantedSince, HoldFlushMaxTicks))
+        {
+            commit = StreamIdle();
+            if (!commit)
+            {
+                _commitsHeldForPass++;
+            }
+        }
+        else
+        {
+            if (HoldFlushForPass && coalesce && _renderEncoder != 0)
+            {
+                _heldCommitsCapped++;
+            }
+
+            commit = true;
+        }
         if (commit)
         {
             FlushCommandBuffer(MetalFlushCause.Stream);
@@ -210,8 +288,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // preparation: a submission start and a draw or dispatch about to prepare.
     private void CommitCoalescedIfOverdue()
     {
-        if (_commitWantedSince != 0 &&
-            System.Diagnostics.Stopwatch.GetTimestamp() - _commitWantedSince >= CoalesceMaxTicks)
+        var wanted = System.Diagnostics.Stopwatch.GetTimestamp() - _commitWantedSince;
+        if (_commitWantedSince != 0 && wanted >= CoalesceMaxTicks && !HoldCommitForOpenPass(wanted))
         {
             FlushCommandBuffer(MetalFlushCause.Stream);
         }
