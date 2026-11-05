@@ -184,6 +184,14 @@ public sealed record Gen5MslCodegenOptions(
     /// first spilled mask, as before.</summary>
     public bool ExecLaneSpills { get; init; } = true;
 
+    /// <summary>EXEC guard elision knows a whole-wave-mode section (S_OR_SAVEEXEC exec, -1 or
+    /// S_ORN2_SAVEEXEC exec, exec up to the move of the saved mask back into EXEC) runs with
+    /// every lane set, and the lane-exact unobserved writes count the lanes such a section wakes
+    /// as reading only what it reads and what they read once it hands EXEC back
+    /// (<see cref="Ir.Gen5LaneObservationAnalysis"/>), not every register live after its entry.
+    /// SHARPEMU_MSL_EXEC_WWM=0 treats the entry as an unknown EXEC write, as before.</summary>
+    public bool ExecWholeWave { get; init; } = true;
+
     /// <summary>Lane-local ALU writes that no masked-off lane reads back run without their
     /// EXEC guard, outside EXEC runs (<see cref="Ir.Gen5LaneObservationAnalysis"/>), in compute,
     /// pixel, vertex and single-wave mesh programs. SHARPEMU_MSL_UNOBSERVED_LANES=0 guards them
@@ -309,6 +317,7 @@ public sealed record Gen5MslCodegenOptions(
         UnobservedAluAllStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "all",
         ExecRuns = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_RUNS") != "0",
         ExecLaneSpills = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_LANE_SPILLS") != "0",
+        ExecWholeWave = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_WWM") != "0",
         LaneExactUnobservedWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_LANES") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",

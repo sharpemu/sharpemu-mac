@@ -114,7 +114,8 @@ public static partial class Gen5MslTranslator
             _execFullPcs ??= Ir.Gen5ExecFullAnalysis.Analyze(
                 _request.Program,
                 wave32: _waveLaneCount == 32,
-                trackLaneSpills: _options.ExecLaneSpills);
+                trackLaneSpills: _options.ExecLaneSpills,
+                trackWholeWave: _options.ExecWholeWave);
             return _execFullPcs.Contains(pc);
         }
 
@@ -139,7 +140,8 @@ public static partial class Gen5MslTranslator
             if (!_laneObservationPlanBuilt)
             {
                 _laneObservationPlan = Ir.Gen5LaneObservationAnalysis.Analyze(
-                    _request.Program, wave32: _waveLaneCount == 32, trackLaneSpills: _options.ExecLaneSpills);
+                    _request.Program, wave32: _waveLaneCount == 32, trackLaneSpills: _options.ExecLaneSpills,
+                    trackWholeWave: _options.ExecWholeWave);
                 _laneObservationPlanBuilt = true;
             }
 

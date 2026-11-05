@@ -72,6 +72,66 @@ public sealed class MslLaneObservationTests
         }
     }
 
+    // A bounds check (lanes 0..47), a write of v6 every remaining lane makes, then a whole-wave
+    // section that reads only its own v7: the lanes the section wakes never read v6, so its
+    // write runs unguarded; without the section's own reads tracked it keeps the guard.
+    private static readonly uint[] WholeWaveSectionProgram =
+    [
+        0xD7650000, 0x000100C1, // v_mbcnt_lo_u32_b32 v0, -1, 0
+        0xD7660000, 0x000200C1, // v_mbcnt_hi_u32_b32 v0, -1, v0
+        0x34080082,             // v_lshlrev_b32 v4, 2, v0
+        0x7DA800B0,             // v_cmpx_gt_u32 exec, 48, v0 (never restored)
+        0x4A0C0085,             // v_add_nc_u32 v6, 5, v0
+        0xBE8425C1,             // s_or_saveexec_b64 s[4:5], -1
+        0x7E0E0283,             // v_mov_b32 v7, 3 (every lane)
+        0xBEFE0404,             // s_mov_b64 exec, s[4:5]
+        0x4A0C0D07,             // v_add_nc_u32 v6, v7, v6
+        0xE0701000, 0x80020604, // buffer_store_dword v6, v4, s[8:11], 0 offen
+        0xBF810000,             // s_endpgm
+    ];
+
+    [Fact]
+    public void AWholeWaveSection_WakesTheMaskedOffLanesOnlyForWhatItReads()
+    {
+        var fixture = new Gen5ComputeFixture("lane-observation-wwm", WholeWaveSectionProgram, 8, 64 * 4);
+        var request = Gen5ComputeFixtures.CreateComputeRequest(fixture, 64, 64);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var tracked, out var error,
+            new Gen5MslCodegenOptions()), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var before, out error,
+            new Gen5MslCodegenOptions { ExecWholeWave = false }), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var guarded, out error,
+            new Gen5MslCodegenOptions(ExecGuardElision: false)), error);
+
+        Assert.True(UnguardedWrites(tracked.Source) > UnguardedWrites(before.Source),
+            $"tracked {UnguardedWrites(tracked.Source)} unguarded writes, before {UnguardedWrites(before.Source)}");
+
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") != "1")
+        {
+            return;
+        }
+
+        Assert.True(MetalNative.IsAvailable, "A Metal device is required.");
+        var expected = Execute(fixture, guarded);
+        Assert.Equal(expected, Execute(fixture, before));
+        var actual = Execute(fixture, tracked);
+        Assert.Equal(expected, actual);
+        for (var lane = 0; lane < 64; lane++)
+        {
+            var value = BinaryPrimitives.ReadUInt32LittleEndian(actual.AsSpan(lane * 4, 4));
+            Assert.Equal(lane < 48 ? (uint)(lane + 8) : 0xCDCDCDCDu, value);
+        }
+    }
+
+    private static byte[] Execute(Gen5ComputeFixture fixture, Gen5MslShader shader)
+    {
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError), compileError);
+        var bytes = Enumerable.Repeat((byte)0xCD, fixture.StoreBackingBytes).ToArray();
+        Assert.True(MetalNative.TryExecuteWithArgumentBuffer(library, shader.EntryPoint, bytes,
+            new byte[Resources.PushData.ByteSize], shader.ArgumentLayout!, 64,
+            out var result, out var runError), runError);
+        return result;
+    }
+
     // Vector register writes outside any "if (exec)" guard or run, in the entry body.
     private static int UnguardedWrites(string source)
     {

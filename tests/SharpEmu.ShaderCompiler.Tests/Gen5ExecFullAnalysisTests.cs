@@ -374,4 +374,35 @@ public sealed class Gen5ExecFullAnalysisTests
 
         Assert.Contains(after, Analyze());
     }
+
+    [Theory]
+    [InlineData("SOrSaveexecB64", false)]
+    [InlineData("SOrn2SaveexecB64", true)]
+    public void AWholeWaveSection_RunsWithAFullExec_UntilTheSavedMaskComesBack(string entry, bool sourceIsExec)
+    {
+        Kill();
+        Scalar(entry, 20, sourceIsExec ? Gen5Operand.Scalar(Exec) : new Gen5Operand(Gen5OperandKind.EncodedConstant, 193));
+        var inside = VectorAdd();
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(20));
+        var after = VectorAdd();
+        Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], [], 0xBF810000u);
+
+        var program = new Gen5ShaderProgram(0x1000, _program);
+        var tracked = Gen5ExecFullAnalysis.Analyze(program, wave32: false, trackLaneSpills: true, trackWholeWave: true);
+        Assert.Contains(inside, tracked);
+        Assert.DoesNotContain(after, tracked);
+        Assert.DoesNotContain(inside, Gen5ExecFullAnalysis.Analyze(program, wave32: false, trackLaneSpills: true));
+    }
+
+    [Fact]
+    public void AnOrn2SaveexecOfAnotherMask_IsNotAWholeWaveSection()
+    {
+        Kill();
+        Scalar("SOrn2SaveexecB64", 20, Gen5Operand.Scalar(30));
+        var inside = VectorAdd();
+        Add("SEndpgm", Gen5ShaderEncoding.Sopp, [], [], 0xBF810000u);
+
+        Assert.DoesNotContain(inside, Gen5ExecFullAnalysis.Analyze(new Gen5ShaderProgram(0x1000, _program), wave32: false,
+            trackLaneSpills: true, trackWholeWave: true));
+    }
 }

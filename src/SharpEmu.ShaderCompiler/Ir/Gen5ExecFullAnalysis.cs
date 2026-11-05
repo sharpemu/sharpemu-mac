@@ -49,7 +49,14 @@ public static class Gen5ExecFullAnalysis
         Analyze(program, wave32, trackLaneSpills: false);
 
     // The same, following full copies through VGPR lane spills when trackLaneSpills is set.
-    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32, bool trackLaneSpills)
+    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32, bool trackLaneSpills) =>
+        Analyze(program, wave32, trackLaneSpills, trackWholeWave: false);
+
+    // The same, and with trackWholeWave also inside a whole-wave-mode section: the guest
+    // compiler enters one with S_OR_SAVEEXEC exec, -1 or S_ORN2_SAVEEXEC exec, exec (both set
+    // every lane, whatever EXEC was) to run a reduction over the whole wave, and leaves it by
+    // moving the saved mask back into EXEC.
+    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32, bool trackLaneSpills, bool trackWholeWave)
     {
         var instructions = program.Instructions;
         var result = new HashSet<uint>();
@@ -79,7 +86,7 @@ public static class Gen5ExecFullAnalysis
         {
             queued[index] = false;
             var instruction = instructions[index];
-            var output = Transfer(instruction, states[index], wave32, trackLaneSpills);
+            var output = Transfer(instruction, states[index], wave32, trackLaneSpills, trackWholeWave);
             void Flow(int successor)
             {
                 var merged = State.Meet(states[successor], output);
@@ -131,7 +138,7 @@ public static class Gen5ExecFullAnalysis
         return result;
     }
 
-    private static State Transfer(Gen5ShaderInstruction instruction, State input, bool wave32, bool trackLaneSpills)
+    private static State Transfer(Gen5ShaderInstruction instruction, State input, bool wave32, bool trackLaneSpills, bool trackWholeWave)
     {
         if (!input.Reached)
         {
@@ -227,6 +234,10 @@ public static class Gen5ExecFullAnalysis
                             IsFullCopy(sources[1], copies, execFull, wide, wave32);
                         break;
                 }
+            }
+            else if (trackWholeWave && EntersWholeWave(instruction, wave32))
+            {
+                nextExecFull = true;
             }
         }
         else if (execFull && opcode is "SMovB64" or "SMovB32" && destinations.Count == 1 &&
@@ -353,6 +364,16 @@ public static class Gen5ExecFullAnalysis
 
         return keys;
     }
+
+    // S_OR_SAVEEXEC with an inline -1, or S_ORN2_SAVEEXEC of EXEC itself (EXEC | ~EXEC): every
+    // lane is set afterwards. A 32-bit form sets only EXEC_LO of a wave64.
+    public static bool EntersWholeWave(Gen5ShaderInstruction instruction, bool wave32) =>
+        (instruction.Opcode is "SOrSaveexecB64" or "SOrn2SaveexecB64" ||
+         (wave32 && instruction.Opcode is "SOrSaveexecB32" or "SOrn2SaveexecB32")) &&
+        instruction.Sources.Count == 1 &&
+        (instruction.Opcode.StartsWith("SOrn2", StringComparison.Ordinal)
+            ? IsExec(instruction.Sources[0])
+            : instruction.Sources[0] is { Kind: Gen5OperandKind.EncodedConstant, Value: 193 });
 
     private static bool IsExec(Gen5Operand operand) =>
         operand.Kind == Gen5OperandKind.ScalarRegister && operand.Value == ExecLow;

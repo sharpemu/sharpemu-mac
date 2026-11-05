@@ -35,7 +35,14 @@ public static class Gen5LaneObservationAnalysis
 
     private readonly record struct Tag(uint Sgpr, VectorRegisterSet Registers);
 
-    private readonly record struct State(VectorRegisterSet Live, VectorRegisterSet Any, Tag[]? Tags)
+    // Wwm and WwmExit, under trackWholeWave, inside a whole-wave-mode section (EXEC provably
+    // full, see Gen5ExecFullAnalysis.EntersWholeWave): Wwm holds what the lanes the section
+    // woke may read from here on - in the section, where every lane runs, and once it hands
+    // EXEC back, where they are off again and read only what is Observed there. WwmExit is the
+    // SGPR pair that hand-back restores, plus one; 0 is no hand-back on any path (yet), -1 is
+    // unknown: a path that leaves the section some other way, or writes the pair first.
+    private readonly record struct State(VectorRegisterSet Live, VectorRegisterSet Any, Tag[]? Tags,
+        VectorRegisterSet Wwm = default, int WwmExit = 0)
     {
         public Tag[] TagList => Tags ?? [];
 
@@ -51,10 +58,13 @@ public static class Gen5LaneObservationAnalysis
         }
 
         public bool SameAs(State other) =>
-            Live == other.Live && Any == other.Any && TagList.AsSpan().SequenceEqual(other.TagList);
+            Live == other.Live && Any == other.Any && TagList.AsSpan().SequenceEqual(other.TagList) &&
+            Wwm == other.Wwm && WwmExit == other.WwmExit;
 
         public static State Union(State left, State right) =>
-            new(left.Live.Union(right.Live), left.Any.Union(right.Any), UnionTags(left.TagList, right.TagList));
+            new(left.Live.Union(right.Live), left.Any.Union(right.Any), UnionTags(left.TagList, right.TagList),
+                left.Wwm.Union(right.Wwm),
+                left.WwmExit == 0 ? right.WwmExit : right.WwmExit == 0 || right.WwmExit == left.WwmExit ? left.WwmExit : -1);
     }
 
     private enum ExecKind : byte
@@ -66,7 +76,13 @@ public static class Gen5LaneObservationAnalysis
         Reactivate,
     }
 
-    public static Gen5VectorObservationPlan? Analyze(Gen5ShaderProgram program, bool wave32, bool trackLaneSpills)
+    public static Gen5VectorObservationPlan? Analyze(Gen5ShaderProgram program, bool wave32, bool trackLaneSpills) =>
+        Analyze(program, wave32, trackLaneSpills, trackWholeWave: false);
+
+    // trackWholeWave: a whole-wave-mode section wakes the masked-off lanes only for what it
+    // reads itself and what they read after it hands EXEC back, not for every register live
+    // after its entry (see State).
+    public static Gen5VectorObservationPlan? Analyze(Gen5ShaderProgram program, bool wave32, bool trackLaneSpills, bool trackWholeWave)
     {
         var instructions = program.Instructions;
         if (instructions.Count == 0)
@@ -88,7 +104,7 @@ public static class Gen5LaneObservationAnalysis
             return null;
         }
 
-        var execFull = Gen5ExecFullAnalysis.Analyze(program, wave32, trackLaneSpills);
+        var execFull = Gen5ExecFullAnalysis.Analyze(program, wave32, trackLaneSpills, trackWholeWave);
         var predecessors = new List<int>[instructions.Count];
         for (var index = 0; index < instructions.Count; index++)
         {
@@ -124,7 +140,7 @@ public static class Gen5LaneObservationAnalysis
 
             queued[index] = false;
             var output = Out(index, successors, states);
-            var input = Transfer(instructions[index], effects[index], execFull.Contains(instructions[index].Pc), wave32, output);
+            var input = Transfer(instructions[index], effects[index], execFull.Contains(instructions[index].Pc), wave32, trackWholeWave, output);
             if (input.SameAs(states[index]))
             {
                 continue;
@@ -174,7 +190,7 @@ public static class Gen5LaneObservationAnalysis
     }
 
     private static State Transfer(Gen5ShaderInstruction instruction, in Gen5VectorObservationAnalysis.Effect effect,
-        bool execFull, bool wave32, State output)
+        bool execFull, bool wave32, bool trackWholeWave, State output)
     {
         var live = output.Live;
         var any = output.Any;
@@ -236,7 +252,15 @@ public static class Gen5LaneObservationAnalysis
             }
         }
 
-        if (kind == ExecKind.Reactivate)
+        if (kind == ExecKind.Reactivate && trackWholeWave && !execFull && saved is { } entrySaved &&
+            (output.WwmExit == 0 || output.WwmExit == (int)entrySaved + 1))
+        {
+            // The entry of a whole-wave section that hands EXEC back from the pair this saved it
+            // in: the lanes it wakes read what the section reads and, once off again, what is
+            // Observed after it, all of it in Wwm.
+            any = any.Union(output.Wwm);
+        }
+        else if (kind == ExecKind.Reactivate)
         {
             // Lanes this turns on read what is Live after it.
             if (source is { } mask && (written & TagBits(mask)) == UInt128.Zero)
@@ -254,7 +278,40 @@ public static class Gen5LaneObservationAnalysis
         if (execFull)
         {
             // No lane is off before this instruction.
-            return new State(live, default, null);
+            if (!trackWholeWave)
+            {
+                return new State(live, default, null);
+            }
+
+            VectorRegisterSet wwm;
+            int exit;
+            if (kind != ExecKind.None)
+            {
+                // Where EXEC stops being full. A move of a whole SGPR pair back into EXEC turns
+                // off the lanes outside that pair, which then read only what is Observed after it.
+                var restore = (instruction.Opcode == "SMovB64" || (wave32 && instruction.Opcode == "SMovB32")) &&
+                    instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: ExecLow }] &&
+                    instruction.Sources is [{ Kind: Gen5OperandKind.ScalarRegister, Value: < ExecLow } restored]
+                        ? restored.Value
+                        : (uint?)null;
+                wwm = output.Observed().Union(effect.Reads).Union(effect.CrossReads);
+                exit = restore is { } pair ? (int)pair + 1 : -1;
+            }
+            else
+            {
+                wwm = output.Wwm.Except(effect.FullWrites).Union(effect.Reads).Union(effect.CrossReads);
+                exit = output.WwmExit > 0 && (written & TagBits((uint)output.WwmExit - 1)) != UInt128.Zero
+                    ? -1
+                    : output.WwmExit;
+            }
+
+            return new State(live, default, null, wwm, exit);
+        }
+
+        if (trackWholeWave)
+        {
+            // Not in a whole-wave section: a section entered here would not be recognised.
+            return new State(live, any, tags.Length == 0 ? null : tags, default, -1);
         }
 
         return new State(live, any, tags.Length == 0 ? null : tags);
