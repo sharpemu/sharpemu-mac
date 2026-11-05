@@ -2906,6 +2906,7 @@ internal sealed partial class MetalRenderHost :
             $"labels_deferred={TakeDeferredLabelWrites()} label_lookup=[{TakeDeferredLabelLookupStats()}] clears_folded={foldedClears} " +
             $"clears_encoded={encodedClears} depth_joins={depthJoins} depth_join_sampled={depthJoinsSampled} depth_join_copies={depthJoinsCopies} " +
             $"subset_joins={subsetJoins} subset_join_sampled={subsetJoinsSampled}{TakeSubsetRefusals()} " +
+            $"join_device_ranges=[{FormatDeviceRangeJoinChecks()}] " +
             $"{TakeUnionPassText()} flush_hold=[{FormatHeldCommits()}] {FormatDeferredFills()} " +
             $"transfers=[{TakeTransferCauses()}]" +
             (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +

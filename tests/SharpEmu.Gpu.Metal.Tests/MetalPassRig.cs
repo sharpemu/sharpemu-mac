@@ -251,6 +251,19 @@ internal sealed unsafe class MetalPassRig : IDisposable
     {
         var host = Host;
         host.ResetBindings();
+        if (stage is { Program.UsesDeviceAddresses: true })
+        {
+            // Bound as PrepareBindings binds it: each range its program reaches ordered after
+            // the held copies over it, before the targets are acquired and the pass begun.
+            host.BeginDeviceRangeOrdering(stage);
+            foreach (var (address, size) in DeviceRangesOf(stage))
+            {
+                host.OrderDeviceRange(stage, address, size);
+            }
+
+            host.EndDeviceRangeOrdering(stage);
+        }
+
         var state = new RenderingState
         {
             Width = targets[0].Width,
@@ -280,10 +293,29 @@ internal sealed unsafe class MetalPassRig : IDisposable
         host.Draw(6, 1, 0, 0);
     }
 
+    // The guest ranges each device-address stage's program reaches, as the planner would name them.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<MetalRenderHost.MetalStageBindings, (ulong Base, ulong Size)[]> DeviceRanges = new();
+
+    private static (ulong Base, ulong Size)[] DeviceRangesOf(MetalRenderHost.MetalStageBindings stage) =>
+        DeviceRanges.TryGetValue(stage, out var ranges) ? ranges : [];
+
     // A stage that samples these textures and binds these buffers; with deviceAddresses its
-    // program reaches guest memory through device addresses, as Demon's Souls' G-buffer programs do.
+    // program reaches guest memory through device addresses, as Demon's Souls' G-buffer programs
+    // do, over deviceRanges (none when not given; (0, ulong.MaxValue) for an unplanned handle).
     public static MetalRenderHost.MetalStageBindings Stage(
-        nint[]? textures = null, MetalGuestRange[]? buffers = null, bool deviceAddresses = false) =>
+        nint[]? textures = null, MetalGuestRange[]? buffers = null, bool deviceAddresses = false,
+        (ulong Base, ulong Size)[]? deviceRanges = null)
+    {
+        var stage = NewStage(textures, buffers, deviceAddresses);
+        if (deviceRanges is not null)
+        {
+            DeviceRanges.AddOrUpdate(stage, deviceRanges);
+        }
+
+        return stage;
+    }
+
+    private static MetalRenderHost.MetalStageBindings NewStage(nint[]? textures, MetalGuestRange[]? buffers, bool deviceAddresses) =>
         new()
         {
             Program = new ShaderProgramInfo

@@ -412,6 +412,12 @@ internal static class MetalV2Diagnostics
     public static readonly int HoldFlushMaxMicroseconds =
         PositiveInt("SHARPEMU_METAL_V2_FLUSH_HOLD_PASS_US", 4000);
 
+    // SHARPEMU_METAL_V2_JOIN_DEVICE_RANGES=0 refuses every depth-only and subset join of a
+    // device-address draw while a label copy is held, as before. Otherwise only one with a held
+    // copy over a range its program reaches that binding did not order (MetalRenderHost.DepthOnlyJoin.cs).
+    public static readonly bool JoinChecksDeviceRanges =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_JOIN_DEVICE_RANGES"), "0", StringComparison.Ordinal);
+
     private static int PositiveInt(string name, int fallback) =>
         int.TryParse(Environment.GetEnvironmentVariable(name), System.Globalization.NumberStyles.Integer,
             System.Globalization.CultureInfo.InvariantCulture, out var value) && value > 0

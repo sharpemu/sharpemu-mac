@@ -71,6 +71,16 @@ internal sealed partial class MetalRenderHost
         public int MovieLuma = -1;
         public int MovieChroma = -1;
 
+        // The guest ranges the device-address program was ordered against the held label copies
+        // over at bind time (an unplanned handle is the whole space), and the held copies that
+        // ordering covered: DeviceRangesHeld of the copies held in epoch DeviceRangesEpoch. Not
+        // ordered until BindDeviceAddressRanges has run for this binding (MetalRenderHost.DepthOnlyJoin.cs).
+        public (ulong Base, ulong Size)[] DeviceRanges = [];
+        public int DeviceRangeCount;
+        public bool DeviceRangesOrdered;
+        public uint DeviceRangesEpoch;
+        public int DeviceRangesHeld;
+
         public ShaderStageResources Stage => StageResources;
 
         public void EnsureCapacity(int images, int samplers, int buffers, int shaderDwords)
@@ -426,6 +436,7 @@ internal sealed partial class MetalRenderHost
         prepared.StageResources = stage;
         prepared.Program = program;
         prepared.Committed = false;
+        BeginDeviceRangeOrdering(prepared);
         var shaderDwords = checked((int)layout.ShaderDataDwordCount);
         prepared.EnsureCapacity(info.Images.Count, info.Samplers.Count, info.Buffers.Count, shaderDwords);
         _preparedStageMask |= 1 << stageIndex;
@@ -1038,6 +1049,7 @@ internal sealed partial class MetalRenderHost
     {
         var unplanned = false;
         var declaredWrite = false;
+        BeginDeviceRangeOrdering(stage);
         if (snapshot.DeviceAddressRanges.Length != 0 && _singleCopy is { } singleCopy)
         {
             // Counted, and given back, only if the program got past BeforeDeviceAddressPreparation:
@@ -1054,7 +1066,7 @@ internal sealed partial class MetalRenderHost
             {
                 // Nothing evaluated this handle, so the store's destination is unknown, and
                 // so is what it reads: every copy still owed lands first.
-                OrderAfterDeferredCopies(0, ulong.MaxValue);
+                OrderDeviceRange(stage, 0, ulong.MaxValue);
                 unplanned |= range.Written;
                 continue;
             }
@@ -1082,7 +1094,7 @@ internal sealed partial class MetalRenderHost
                     $"[METAL-V2][BIG-DEVICE-RANGE] stage={stage.Program.Stage} hash=0x{stage.Program.Hash:X16} h{range.Handle} " +
                     $"base=0x{range.Base:X} size=0x{size:X} planned_size=0x{range.Size:X}{(range.Written ? " written" : string.Empty)}");
             }
-            OrderAfterDeferredCopies(range.Base, size);
+            OrderDeviceRange(stage, range.Base, size);
             OrderAfterStagedStores(range.Base, size);
             var bigWritebacks = _imageCache.BigWritebacks;
             FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor, range.Written);
@@ -1106,6 +1118,7 @@ internal sealed partial class MetalRenderHost
             declaredWrite = true;
         }
 
+        EndDeviceRangeOrdering(stage);
         if (!unplanned && (!info.WritesDeviceAddresses || declaredWrite))
         {
             return;

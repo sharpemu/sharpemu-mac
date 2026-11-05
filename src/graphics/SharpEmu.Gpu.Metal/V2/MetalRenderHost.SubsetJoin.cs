@@ -178,7 +178,8 @@ internal sealed partial class MetalRenderHost
             return RefuseSubsetJoin("sampled");
         }
 
-        // A copy deferred to the next encoder boundary lands there (see TryJoinDepthOnly).
+        // A copy deferred to the next encoder boundary lands there (see TryJoinDepthOnly); a
+        // device-address program is checked against the ranges binding ordered.
         if (_deferredLabelCopies.Count != 0 && BindsDeferredCopyDestination())
         {
             _landDeferredLabels = true;
