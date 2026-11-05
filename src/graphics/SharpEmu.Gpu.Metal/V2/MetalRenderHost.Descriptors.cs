@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
@@ -127,6 +128,9 @@ internal sealed partial class MetalRenderHost
     private sealed class ArgumentPlan(Gen5MslArgumentLayout layout, int[]?[] fieldResources, int[]?[] fieldMips)
     {
         public readonly Gen5MslArgumentLayout Layout = layout;
+
+        // The layout's fields as an array: the per-draw fill walks them without interface calls.
+        public readonly MslArgumentField[] Fields = [.. layout.Fields];
         public readonly int[]?[] FieldResources = fieldResources;
 
         // Per texture element, the mip it binds of its image: a dynamic-mip storage image
@@ -154,6 +158,10 @@ internal sealed partial class MetalRenderHost
     // The same plans by layout instance: a program keeps its layout, so a draw finds its plan by
     // reference instead of comparing the layout field by field (BindingLayout.Equals).
     private readonly Dictionary<BindingLayout, ArgumentPlan> _argumentPlansByInstance = new(ReferenceEqualityComparer.Instance);
+
+    // Each stage's last layout and its plan: consecutive draws mostly keep their programs.
+    private readonly BindingLayout?[] _lastPlanLayouts = new BindingLayout?[StageCount];
+    private readonly ArgumentPlan?[] _lastPlans = new ArgumentPlan?[StageCount];
     private readonly Dictionary<(uint, uint, uint, uint, bool), (nint Handle, ulong ResourceId)> _samplers = new();
     private readonly nint[] _stageArgumentBuffers = new nint[StageCount];
     private readonly ulong[] _stageArgumentOffsets = new ulong[StageCount];
@@ -168,6 +176,7 @@ internal sealed partial class MetalRenderHost
     private nint[] _usedResources = new nint[64];
     private nuint[] _usedResourceUsage = new nuint[64];
     private int _usedResourceCount;
+
     private MetalResourcePreparation? _preparation;
     private MetalResourcePreparation? _preparationHandle;
     private int _preparedStageMask;
@@ -1473,9 +1482,17 @@ internal sealed partial class MetalRenderHost
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ArgumentBufferWrite);
         var layout = stage.Program.Bindings!;
-        var plan = ArgumentPlanOf(layout);
+        var plan = _lastPlans[stageIndex];
+        if (!ReferenceEquals(_lastPlanLayouts[stageIndex], layout) || plan is null)
+        {
+            plan = ArgumentPlanOf(layout);
+            _lastPlanLayouts[stageIndex] = layout;
+            _lastPlans[stageIndex] = plan;
+        }
+
         var argumentLayout = plan.Layout;
-        if (argumentLayout.Fields.Count == 0)
+        var fields = plan.Fields;
+        if (fields.Length == 0)
         {
             _stageArgumentValid[stageIndex] = false;
             return;
@@ -1494,29 +1511,30 @@ internal sealed partial class MetalRenderHost
         var argument = _argumentScratch.AsSpan(0, argumentBytes);
         argument.Clear();
         var imageCursor = 0;
-        var fields = argumentLayout.Fields;
-        for (var fieldIndex = 0; fieldIndex < fields.Count; fieldIndex++)
+        for (var fieldIndex = 0; fieldIndex < fields.Length; fieldIndex++)
         {
             var field = fields[fieldIndex];
             var span = argument.Slice((int)field.ByteOffset, (int)field.ByteSize);
             switch (field.FieldKind)
             {
                 case MslArgumentFieldKind.BufferPointers:
-                    for (var index = 0; index < field.Count && index < stage.BufferCount; index++)
+                {
+                    var pointers = BufferFieldCount(field, stage, sizeof(ulong), span.Length);
+                    var addresses = MemoryMarshal.Cast<byte, ulong>(span)[..pointers];
+                    var buffers = stage.Buffers.AsSpan(0, pointers);
+                    for (var index = 0; index < addresses.Length; index++)
                     {
-                        BinaryPrimitives.WriteUInt64LittleEndian(
-                            span[(index * sizeof(ulong))..], stage.Buffers[index].GpuAddress);
+                        addresses[index] = buffers[index].GpuAddress;
                     }
 
                     break;
+                }
                 case MslArgumentFieldKind.BufferByteCounts:
-                    for (var index = 0; index < field.Count && index < stage.BufferCount; index++)
-                    {
-                        BinaryPrimitives.WriteUInt32LittleEndian(
-                            span[(index * sizeof(uint))..], stage.BufferLengths[index]);
-                    }
-
+                {
+                    var counts = BufferFieldCount(field, stage, sizeof(uint), span.Length);
+                    stage.BufferLengths.AsSpan(0, counts).CopyTo(MemoryMarshal.Cast<byte, uint>(span));
                     break;
+                }
                 case MslArgumentFieldKind.Textures:
                     WriteTextureField(
                         stage, field, plan.FieldResources[fieldIndex], plan.FieldMips[fieldIndex], span, ref imageCursor, stageIndex);
@@ -1583,6 +1601,10 @@ internal sealed partial class MetalRenderHost
         _stageArgumentOffsets[stageIndex] = range.Offset;
         _stageArgumentValid[stageIndex] = true;
     }
+
+    // The elements a buffer field fills: the bound buffers it has room for (little-endian host).
+    private static int BufferFieldCount(MslArgumentField field, MetalStageBindings stage, int elementBytes, int spanBytes) =>
+        Math.Min(Math.Min((int)Math.Min(field.Count, int.MaxValue), stage.BufferCount), spanBytes / elementBytes);
 
     // SHARPEMU_METAL_V2_ARGUMENT_REUSE=0 reserves and fills a ring range for every stage of every draw.
     private static readonly bool ArgumentBufferReuse =
