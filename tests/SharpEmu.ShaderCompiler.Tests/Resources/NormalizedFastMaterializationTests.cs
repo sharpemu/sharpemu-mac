@@ -81,4 +81,26 @@ public sealed class NormalizedFastMaterializationTests
         Assert.Equal(reference.Images[0], snapshot.Images[0]);
         Assert.Equal(referenceSpecialization, specialization);
     }
+    // A program bound with a different image per draw, as a pixel program is with one material table per draw: the
+    // specialization of each of 48 descriptors is still remembered after the other 47 (a plan kept eight).
+    [Fact]
+    public void ManyDistinctDescriptorsKeepTheirSpecializations()
+    {
+        var plan = ShaderResourcePlan.Extract(Program(Image(0, "ImageLoad", 0), EndProgram(8)), ShaderStage.Compute, Hash, 0, 8);
+        Assert.True(ResourceMaterializer.CanMaterializeFast(plan));
+        var first = new ResourceSpecialization[48];
+        for (var round = 0; round < 2; round++)
+        {
+            for (var material = 0; material < first.Length; material++)
+            {
+                var snapshot = new ResourceSnapshot();
+                var specialization = new ResourceSpecialization();
+                Assert.True(ResourceMaterializer.MaterializeFast(plan, Inputs([0x2000u + (uint)material * 0x100, 22u << 20, 0, 0xFACu | (9u << 28), 0, 0, 0, 0]),
+                    ref snapshot, ref specialization, out _));
+                Assert.Equal(0x2000u + (uint)material * 0x100, Assert.Single(snapshot.Images)[0]);
+                if (round == 0) first[material] = specialization;
+                else Assert.Same(first[material], specialization);
+            }
+        }
+    }
 }
