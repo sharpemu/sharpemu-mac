@@ -199,6 +199,13 @@ public sealed record Gen5MslCodegenOptions(
     /// SHARPEMU_MSL_CHEAP_FLOAT_WRAPPERS=0 keeps the previous forms.</summary>
     public bool CheapFloatWrappers { get; init; } = true;
 
+    /// <summary>In a one-wave wave64 compute group, an S_CBRANCH_EXECZ over a forward body that
+    /// holds only lane-local work, narrows EXEC only and leaves no live scalar value behind tests
+    /// each half's own lanes, so the S_AND_SAVEEXEC before it needs no exchange between the two
+    /// simdgroups (Gen5MslTranslator.HalfBranches.cs). SHARPEMU_MSL_HALF_BRANCHES=0 tests the
+    /// whole wave's EXEC, as before.</summary>
+    public bool HalfLocalExecBranches { get; init; } = true;
+
     /// <summary>Lane-local ALU writes that no masked-off lane reads back run without their
     /// EXEC guard, outside EXEC runs (<see cref="Ir.Gen5LaneObservationAnalysis"/>), in compute,
     /// pixel, vertex and single-wave mesh programs. SHARPEMU_MSL_UNOBSERVED_LANES=0 guards them
@@ -326,6 +333,7 @@ public sealed record Gen5MslCodegenOptions(
         ExecLaneSpills = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_LANE_SPILLS") != "0",
         ExecWholeWave = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_WWM") != "0",
         CheapFloatWrappers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_CHEAP_FLOAT_WRAPPERS") != "0",
+        HalfLocalExecBranches = Environment.GetEnvironmentVariable("SHARPEMU_MSL_HALF_BRANCHES") != "0",
         LaneExactUnobservedWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_LANES") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",

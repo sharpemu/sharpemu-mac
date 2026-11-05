@@ -705,6 +705,7 @@ public static partial class Gen5MslTranslator
                 // order body-then-wrap matches how the pixel/vertex stages need it
                 // (their IO discovery happens during block translation).
                 FindHalfLocalLoops(blocks);
+                FindHalfLocalBranches(blocks);
                 if (!TryEmitBlocks(blocks, out error))
                 {
                     return false;
@@ -715,6 +716,12 @@ public static partial class Gen5MslTranslator
                 if (!HalfLocalLoopsHoldNoExchange())
                 {
                     error = "a loop run by each half of a wave on its own still exchanges between them";
+                    return false;
+                }
+
+                if (!HalfLocalBranchesHoldNoExchange())
+                {
+                    error = "a branch each half of a wave takes on its own skips an exchange between them";
                     return false;
                 }
                 NoteWaveScratchUse();
@@ -1965,6 +1972,12 @@ public static partial class Gen5MslTranslator
                         // Each half leaves the loop when its own lanes are done
                         // (Gen5MslTranslator.GroupWaves.cs).
                         condition = HalfLocalExecCondition(zero: instruction.Opcode == "SCbranchExecz");
+                    }
+                    else if (IsHalfLocalBranchBlock(blockIndex))
+                    {
+                        // Each half skips the body when its own lanes are off
+                        // (Gen5MslTranslator.HalfBranches.cs).
+                        condition = HalfLocalExecCondition(zero: true);
                     }
 
                     var fallthrough = blockIndex + 1;
