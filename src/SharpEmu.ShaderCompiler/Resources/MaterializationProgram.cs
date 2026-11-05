@@ -52,6 +52,7 @@ internal sealed class MaterializationProgram
         public ulong[] NullBases = new ulong[64];
         public bool[] Absolute = new bool[64];
         public byte[] Bytes = new byte[1024];
+        public readonly ReadOrder Order = new();
         public int Count;
 
         public void Ensure(int registers)
@@ -706,27 +707,7 @@ internal sealed class MaterializationProgram
         var targets = scratch.Targets;
         var bases = scratch.NullBases;
         var absolute = scratch.Absolute;
-        for (var index = 1; index < count; index++)
-        {
-            var address = addresses[index];
-            var target = targets[index];
-            var baseAddress = bases[index];
-            var isAbsolute = absolute[index];
-            var position = index - 1;
-            while (position >= 0 && addresses[position] > address)
-            {
-                addresses[position + 1] = addresses[position];
-                targets[position + 1] = targets[position];
-                bases[position + 1] = bases[position];
-                absolute[position + 1] = absolute[position];
-                position--;
-            }
-
-            addresses[position + 1] = address;
-            targets[position + 1] = target;
-            bases[position + 1] = baseAddress;
-            absolute[position + 1] = isAbsolute;
-        }
+        scratch.Order.Sort(addresses, targets, bases, absolute, count);
 
         var resident = inputs.ReadResidentMemory;
         var start = 0;
@@ -757,6 +738,94 @@ internal sealed class MaterializationProgram
             }
 
             start = end;
+        }
+    }
+
+    /// <summary>
+    /// Puts a level's reads in address order, equal addresses in the order they were added (a stable sort). A
+    /// table of descriptors interleaves its words across the reads, so they rarely arrive in order: one sort of
+    /// packed (address, position) keys replaces moving every out-of-order read past each read before it.
+    /// </summary>
+    internal sealed class ReadOrder
+    {
+        private ulong[] _keys = new ulong[64];
+        private int[] _targets = new int[64];
+        private ulong[] _bases = new ulong[64];
+        private bool[] _absolute = new bool[64];
+
+        public void Sort(ulong[] addresses, int[] targets, ulong[] bases, bool[] absolute, int count)
+        {
+            var ordered = true;
+            var packable = count <= 1 << 16;
+            for (var index = 0; index < count; index++)
+            {
+                ordered &= index == 0 || addresses[index - 1] <= addresses[index];
+                packable &= addresses[index] <= AddressMask;
+            }
+
+            if (ordered)
+            {
+                return;
+            }
+
+            if (!packable)
+            {
+                InsertionSort(addresses, targets, bases, absolute, count);
+                return;
+            }
+
+            if (_keys.Length < count)
+            {
+                var length = Math.Max(count, _keys.Length * 2);
+                _keys = new ulong[length];
+                _targets = new int[length];
+                _bases = new ulong[length];
+                _absolute = new bool[length];
+            }
+
+            var keys = _keys.AsSpan(0, count);
+            for (var index = 0; index < count; index++)
+            {
+                keys[index] = (addresses[index] << 16) | (uint)index;
+            }
+
+            keys.Sort();
+            Array.Copy(targets, _targets, count);
+            Array.Copy(bases, _bases, count);
+            Array.Copy(absolute, _absolute, count);
+            for (var index = 0; index < count; index++)
+            {
+                var from = (int)(keys[index] & 0xFFFF);
+                addresses[index] = keys[index] >> 16;
+                targets[index] = _targets[from];
+                bases[index] = _bases[from];
+                absolute[index] = _absolute[from];
+            }
+        }
+
+        internal static void InsertionSort(ulong[] addresses, int[] targets, ulong[] bases, bool[] absolute, int count)
+        {
+            for (var index = 1; index < count; index++)
+            {
+                var address = addresses[index];
+                var target = targets[index];
+                var baseAddress = bases[index];
+                var isAbsolute = absolute[index];
+                var position = index - 1;
+                while (position >= 0 && addresses[position] > address)
+                {
+                    addresses[position + 1] = addresses[position];
+                    targets[position + 1] = targets[position];
+                    bases[position + 1] = bases[position];
+                    absolute[position + 1] = absolute[position];
+                    position--;
+                }
+
+                addresses[position + 1] = address;
+                targets[position + 1] = target;
+                bases[position + 1] = baseAddress;
+                absolute[position + 1] = isAbsolute;
+            }
         }
     }
 
