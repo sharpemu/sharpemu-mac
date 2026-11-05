@@ -612,6 +612,12 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 job.ComputeResult = _executor.ResolveComputeProgramAhead(job.Banks, compute.DispatchInitiator, compute.GroupsX,
                     compute.GroupsY, compute.GroupsZ, compute.Indirect, out job.ComputeRefusal);
                 job.Assumptions = _concurrent.EndConcurrentResolve();
+                // The dispatch's binding decode joins its resolution (IConcurrentResolveHost.PrepareBindingsAhead).
+                if (job.ComputeResult is { Available: true, Consumed: false, ImageCopy: null } resolved)
+                {
+                    _concurrent.PrepareBindingsAhead(resolved.Input.Stage, dispatch: true);
+                }
+
                 job.ResolveTicks = System.Diagnostics.Stopwatch.GetTimestamp() - started;
                 Interlocked.Increment(ref _resolvedCount);
                 job.State = 1;
@@ -622,6 +628,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 job.StartInstanceUserData);
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);
             job.Assumptions = _concurrent.EndConcurrentResolve();
+            if (job.Programs is { Available: true } programs)
+            {
+                PrepareGraphicsBindingsAhead(programs, job.Inputs.PixelActive);
+            }
+
             Interlocked.Increment(ref _resolvedCount);
             job.State = 1;
         }
@@ -640,6 +651,20 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         finally
         {
             _resolvingJob = 0;
+        }
+    }
+
+    // The vertex (or mesh) stage's and the active pixel stage's binding decode, after their programs resolved.
+    private void PrepareGraphicsBindingsAhead(GraphicsPrograms programs, bool pixelActive)
+    {
+        if (programs.VertexInput.Stage.Program is not null)
+        {
+            _concurrent.PrepareBindingsAhead(programs.VertexInput.Stage, dispatch: false);
+        }
+
+        if (pixelActive && programs.PixelInput.Stage.Program is not null)
+        {
+            _concurrent.PrepareBindingsAhead(programs.PixelInput.Stage, dispatch: false);
         }
     }
 

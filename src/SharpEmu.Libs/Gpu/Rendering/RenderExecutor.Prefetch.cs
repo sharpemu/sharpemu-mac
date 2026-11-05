@@ -105,6 +105,13 @@ public interface IConcurrentResolveHost
     void ReleaseAssumptions(object assumptions)
     {
     }
+
+    // On the resolving thread, after a job resolved: the host may decode from a resolved stage what binding it will
+    // need (a binding packet on its ResourceSnapshot), so the render thread only checks and encodes. The stage's
+    // program and snapshot are all it may read; it must not throw.
+    void PrepareBindingsAhead(in ShaderStageResources stage, bool dispatch)
+    {
+    }
 }
 
 // Program resolutions computed ahead of their draws. A draw takes one only when it was resolved

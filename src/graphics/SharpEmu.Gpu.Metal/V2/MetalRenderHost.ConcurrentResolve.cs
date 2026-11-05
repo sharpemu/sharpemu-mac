@@ -168,7 +168,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             $"dispatch_saved_ms={computeSavedMs.ToString("F1", culture)}";
         return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
-            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()}{dispatches} {own}{TakeDrainCallers()}";
+            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()}{dispatches}{FormatPacketCounters()} {own}{TakeDrainCallers()}";
     }
 
     private static string FormatProviderRefusals(long[] refused) =>

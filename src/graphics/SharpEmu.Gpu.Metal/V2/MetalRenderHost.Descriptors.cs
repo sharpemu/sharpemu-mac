@@ -267,7 +267,7 @@ internal sealed partial class MetalRenderHost
         return program;
     }
 
-    private static ShaderImageShape ShapeOf(ImageResource image) => new(
+    internal static ShaderImageShape ShapeOf(ImageResource image) => new(
         Volume: image.Dimension == ImageDimension.Dim3D,
         Arrayed: image.Cube || image.Dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or
             ImageDimension.Dim2DMsaaArray,
@@ -338,7 +338,7 @@ internal sealed partial class MetalRenderHost
 
     // A sampled binding found in the memo with a stamp that still holds; otherwise notes the key for
     // the full resolution, which reads the owner-list counts over the request before its lookup.
-    private bool TryTextureMemo(MetalStageBindings prepared, ImageResource image, uint[] words, int index)
+    private bool TryTextureMemo(MetalStageBindings prepared, ImageResource image, uint[] words, int index, MetalBindingPacket? packet = null)
     {
         prepared.MemoHits[index] = null;
         prepared.MemoWanted[index] = false;
@@ -347,7 +347,9 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        var key = new TextureMemoKey(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], ShapeOf(image));
+        var key = packet is not null && packet.HasMemoKey(index)
+            ? packet.MemoKeys![index]
+            : new TextureMemoKey(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], ShapeOf(image));
         if (_textureMemo.TryGetValue(key, out var entry) && _imageCache.TextureStampMayHold(in entry.Stamp))
         {
             prepared.Images[index] = entry.Image;
@@ -404,6 +406,8 @@ internal sealed partial class MetalRenderHost
         }
 
         var stageIndex = StageIndexOf(program.Stage);
+        // What the resolving thread decoded of this stage already (MetalBindingPacket), when it stands for it.
+        var packet = TakeBindingPacket(in stage, program, stageIndex == StageCompute);
         var prepared = _stageBindings[stageIndex];
         prepared.StageResources = stage;
         prepared.Program = program;
@@ -422,12 +426,12 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
-            if (TryTextureMemo(prepared, info.Images[index], snapshot.Images[index], index))
+            if (TryTextureMemo(prepared, info.Images[index], snapshot.Images[index], index, packet))
             {
                 continue;
             }
 
-            ResolveImageBinding(prepared, info.Images[index], snapshot.Images[index], index);
+            ResolveImageBinding(prepared, info.Images[index], snapshot.Images[index], index, packet);
         }
 
         // All image requests, including movie replacements and texture memo hits, are current.
@@ -438,20 +442,42 @@ internal sealed partial class MetalRenderHost
         {
             prepared.Samplers[index] = ResolveSampler(
                 prepared, info.Samplers[index], snapshot.Samplers[index], index,
-                prepared.SamplerViewClasses[index] == MetalSamplerViewClasses.AllInteger, out prepared.SamplerIds[index]);
+                prepared.SamplerViewClasses[index] == MetalSamplerViewClasses.AllInteger, out prepared.SamplerIds[index], packet);
         }
 
         var shaderData = prepared.ShaderData;
-        Array.Clear(shaderData, 0, (int)layout.ShaderDataDwordCount);
+        if (packet?.ShaderData is { } decoded)
+        {
+            Array.Copy(decoded, shaderData, decoded.Length);
+        }
+        else
+        {
+            Array.Clear(shaderData, 0, (int)layout.ShaderDataDwordCount);
+            if (!WriteStageShaderData(shaderData, program, layout, info, snapshot, stage.ShaderBase))
+            {
+                throw UserRegisterOutsideUserData(program, layout, snapshot);
+            }
+        }
+
+        stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
+        stage.WriteCallData(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
+        return prepared;
+    }
+
+    // The stage's shader-data words from its program, snapshot and shader base, before the dispatch thread limits and
+    // call data (ShaderStageResources.WriteDispatchThreadLimits, WriteCallData); shaderData starts cleared. False, with
+    // the words partly written, when a user register lies outside the snapshot's user data. Pure: the resolving thread
+    // runs it for a binding packet (MetalBindingPacket).
+    internal static bool WriteStageShaderData(uint[] shaderData, ShaderProgramInfo program, BindingLayout layout, ShaderResourceInfo info,
+        ResourceSnapshot snapshot, ulong shaderBase)
+    {
         for (var index = 0; index < layout.UserDataRegisters.Count; index++)
         {
             var register = layout.UserDataRegisters[index];
             var userIndex = (int)(register - program.UserDataBase);
             if (register < program.UserDataBase || userIndex >= snapshot.UserData.Length)
             {
-                throw Fatal(
-                    $"A user register is outside the draw's user data: register={register} base={program.UserDataBase} " +
-                    $"count={snapshot.UserData.Length} hash=0x{program.Hash:X16}.");
+                return false;
             }
 
             shaderData[index] = snapshot.UserData[userIndex];
@@ -459,8 +485,8 @@ internal sealed partial class MetalRenderHost
 
         if (layout.UsesShaderBase)
         {
-            shaderData[layout.ShaderBaseDword] = (uint)stage.ShaderBase;
-            shaderData[layout.ShaderBaseDword + 1] = (uint)(stage.ShaderBase >> 32);
+            shaderData[layout.ShaderBaseDword] = (uint)shaderBase;
+            shaderData[layout.ShaderBaseDword + 1] = (uint)(shaderBase >> 32);
         }
 
         if (layout.BufferWordCount != 0)
@@ -482,13 +508,26 @@ internal sealed partial class MetalRenderHost
             MipStatistics.WriteImageFields(shaderData, layout, info, snapshot.Images);
         }
 
-        stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
-        stage.WriteCallData(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
-        return prepared;
+        return true;
+    }
+
+    private Exception UserRegisterOutsideUserData(ShaderProgramInfo program, BindingLayout layout, ResourceSnapshot snapshot)
+    {
+        foreach (var register in layout.UserDataRegisters)
+        {
+            if (register < program.UserDataBase || (int)(register - program.UserDataBase) >= snapshot.UserData.Length)
+            {
+                return Fatal(
+                    $"A user register is outside the draw's user data: register={register} base={program.UserDataBase} " +
+                    $"count={snapshot.UserData.Length} hash=0x{program.Hash:X16}.");
+            }
+        }
+
+        return Fatal($"The shader data could not be written: hash=0x{program.Hash:X16}.");
     }
 
     // Finds the cache image of one shader image descriptor; the view follows in BindResources.
-    private void ResolveImageBinding(MetalStageBindings prepared, ImageResource image, uint[] words, int index)
+    private void ResolveImageBinding(MetalStageBindings prepared, ImageResource image, uint[] words, int index, MetalBindingPacket? packet = null)
     {
         if (words.Length < 4)
         {
@@ -497,7 +536,9 @@ internal sealed partial class MetalRenderHost
         }
 
         var storage = image.ResourceClass == MslImageResourceClass.Storage;
-        var resolution = ImageRequestBuilders.Texture(words, ShapeOf(image));
+        var resolution = packet is not null && packet.HasResolution(index)
+            ? packet.Resolutions![index]
+            : ImageRequestBuilders.Texture(words, ShapeOf(image));
         var request = resolution.Request;
         if (prepared.MemoWanted[index])
         {
@@ -561,7 +602,8 @@ internal sealed partial class MetalRenderHost
         uint[] words,
         int index,
         bool integerViews,
-        out ulong resourceId)
+        out ulong resourceId,
+        MetalBindingPacket? packet = null)
     {
         if (words.Length < 4)
         {
@@ -569,6 +611,18 @@ internal sealed partial class MetalRenderHost
                 $"A sampler descriptor is too short: sampler={index} words={words.Length} hash=0x{prepared.Program.Hash:X16}.");
         }
 
+        if (packet is not null && packet.HasSampler(index))
+        {
+            return GetSampler(in packet.Samplers![index], integerViews, out resourceId);
+        }
+
+        var descriptor = NativeSamplerWords(sampler, words);
+        return GetSampler(in descriptor, integerViews, out resourceId);
+    }
+
+    // The S# the host samples with: depth compare off unless the program compares, point filtering when it is forced.
+    internal static SamplerDescriptorWords NativeSamplerWords(SamplerResource sampler, uint[] words)
+    {
         Span<uint> native = stackalloc uint[4] { words[0], words[1], words[2], words[3] };
         if (!sampler.DepthCompare)
         {
@@ -586,8 +640,7 @@ internal sealed partial class MetalRenderHost
             }
         }
 
-        var descriptor = new SamplerDescriptorWords(native);
-        return GetSampler(in descriptor, integerViews, out resourceId);
+        return new SamplerDescriptorWords(native);
     }
 
     // The binding layout gives a dynamic-mip storage image one element per level of its
