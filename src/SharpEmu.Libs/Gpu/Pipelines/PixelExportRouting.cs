@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Numerics;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
@@ -22,36 +23,45 @@ internal static class PixelExportRouting
             return -1;
         }
 
-        Span<int> exports = stackalloc int[TargetCount];
-        Span<int> slots = stackalloc int[TargetCount];
-        var exportCount = 0;
-        var slotCount = 0;
-        for (var index = 0; index < TargetCount; index++)
+        // Bit n of each mask: export n has a format, slot n is enabled. Called for every bound slot
+        // of every draw from several places, so the pairing is counted in bits rather than listed.
+        var modes = registers.TargetOutputModes;
+        var exports = 0u;
+        for (var index = 0; index < TargetCount && index < modes.Length; index++)
         {
-            if (index < registers.TargetOutputModes.Length && (registers.TargetOutputModes[index] & 0xF) != 0)
+            if ((modes[index] & 0xF) != 0)
             {
-                exports[exportCount++] = index;
-            }
-
-            if (((registers.ColorShaderMask >> (index * 4)) & 0xFu) != 0)
-            {
-                slots[slotCount++] = index;
+                exports |= 1u << index;
             }
         }
 
-        if (exportCount == 0 || exportCount != slotCount)
+        var slots = EnabledSlots(registers.ColorShaderMask);
+        if (exports == 0 || BitOperations.PopCount(exports) != BitOperations.PopCount(slots))
         {
             return (int)slot;
         }
 
-        for (var index = 0; index < slotCount; index++)
+        if ((slots & (1u << (int)slot)) == 0)
         {
-            if (slots[index] == slot)
-            {
-                return exports[index];
-            }
+            return -1;
         }
 
-        return -1;
+        // The slot's rank among the enabled slots picks the export of the same rank.
+        for (var rank = BitOperations.PopCount(slots & ((1u << (int)slot) - 1)); rank > 0; rank--)
+        {
+            exports &= exports - 1;
+        }
+
+        return BitOperations.TrailingZeroCount(exports);
+    }
+
+    // Bit n set when CB_SHADER_MASK enables any component of slot n.
+    private static uint EnabledSlots(uint mask)
+    {
+        var any = mask | (mask >> 1);
+        any = (any | (any >> 2)) & 0x11111111u;
+        any = (any | (any >> 3)) & 0x03030303u;
+        any = (any | (any >> 6)) & 0x000F000Fu;
+        return (any | (any >> 12)) & 0xFFu;
     }
 }
