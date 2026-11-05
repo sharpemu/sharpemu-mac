@@ -135,7 +135,18 @@ public sealed partial class RenderExecutor
         ComputeProgram computeProgram;
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawProgramResolution))
         {
-            computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirectArgumentsAddress != 0, retry);
+            // A program resolved ahead of the dispatch (ParallelProgramPrefetch.SubmitCompute) when it still stands.
+            if (retry is not null || Prefetch is not { } prefetch ||
+                !prefetch.TryTakeCompute(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirectArgumentsAddress != 0, out computeProgram))
+            {
+                computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirectArgumentsAddress != 0, retry);
+            }
+        }
+
+        if (computeProgram.Consumed || computeProgram.ImageCopy is not null || computeProgram.KnownWrite is not null)
+        {
+            // What this dispatch does may not show in the ownership answers of a dispatch resolved ahead of it.
+            Prefetch?.NoteDispatchEffect();
         }
 
         var retried = retry?.Reused == true;

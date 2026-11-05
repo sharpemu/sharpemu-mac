@@ -47,6 +47,10 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     {
         public Kind Kind;
         public bool IsDraw;
+        // A dispatch (EnqueueDeferredDispatch): it leaves DispatchGate where it is. OwnsLastJob: the job submitted just
+        // before it is its own, which it does not wait for before it runs.
+        public bool IsDispatch;
+        public bool OwnsLastJob;
         // Orders GPU commands and changes nothing a program resolution reads: the draws after it
         // resolve without waiting for it, as they do behind a draw.
         public bool Ungated;
@@ -174,6 +178,22 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     public bool IsProducerThread => Environment.CurrentManagedThreadId == Volatile.Read(ref _producerThreadId);
 
     public long Gate => _enqueuedNonDraw;
+
+    // _enqueuedNonDraw as of the last gated non-draw item that was not a dispatch (AgcExports.IDeferredWorkSink.DispatchGate).
+    private long _dispatchGate;
+
+    public long DispatchGate => _dispatchGate;
+
+    public long EnqueueDeferredDispatch(AgcExports.DeferredWork work, bool hasJob)
+    {
+        var item = RentAsyncItem(Kind.Deferred);
+        item.Work = work;
+        item.IsDraw = false;
+        item.IsDispatch = true;
+        item.OwnsLastJob = hasJob;
+        Enqueue(item);
+        return 0;
+    }
 
     // SHARPEMU_CTHREAD_ITEM_SITES=1: the non-draw items by kind and source, in the PERF line.
     private static readonly bool CountItemSites =
@@ -667,8 +687,13 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         ThrowIfFailed();
         if (!item.IsDraw && !item.Ungated)
         {
-            item.JobsBefore = _prefetch?.Submitted ?? 0;
+            item.JobsBefore = (_prefetch?.Submitted ?? 0) - (item.OwnsLastJob ? 1 : 0);
             _enqueuedNonDraw++;
+            if (!item.IsDispatch)
+            {
+                _dispatchGate = _enqueuedNonDraw;
+            }
+
             if (TraceItemKinds)
             {
                 NoteItemKind(item);

@@ -24,6 +24,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         internal GraphicsProgramInputs Inputs;
         internal GraphicsPrograms? Programs;
         internal object? Assumptions;
+        // A dispatch's job (SubmitCompute): its arguments, and what its resolution came to.
+        internal ComputeArguments? Compute;
+        internal ComputeProgram? ComputeResult;
+        internal ComputePrefetchRefusal ComputeRefusal;
+        internal long ResolveTicks;
         // The jobs submitted before this one.
         internal long Index;
         // 0 queued, 1 resolved, 2 abandoned.
@@ -35,6 +40,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // host.Fatal as one delegate: a method group over an interface makes a new one per use, per draw.
     private readonly Func<string, Exception> _fatal;
     private readonly IConcurrentResolveHost _concurrent;
+
+    // What a dispatch's program resolution reads besides its banks.
+    internal sealed record ComputeArguments(uint DispatchInitiator, uint GroupsX, uint GroupsY, uint GroupsZ, bool Indirect);
     private readonly object _lock = new();
     private readonly Queue<Job> _queue = new();
     private readonly SharpEmu.HLE.Host.HostHelperThread _thread;
@@ -93,6 +101,64 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private static readonly int MaxAbandonReports =
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_PREFETCH_ABANDON_REPORTS"), out var reports) ? reports : 0;
 
+    // Dispatch jobs since the last TakeComputeCounters: submitted, taken, refused by reason (ComputeRefusal), the worker's
+    // wait for them, and the resolving time of the taken ones, which the worker would otherwise have spent itself.
+    public enum ComputeRefusal
+    {
+        // The resolution threw (a GPU-owned read, a fatal condition), so the dispatch resolves it.
+        Abandoned,
+        // The provider refused to stand for the dispatch (ComputePrefetchRefusal).
+        Provider,
+        // Different banks or arguments.
+        Inputs,
+        // The ownership answers it read under changed (IConcurrentResolveHost.IsStillCurrentAcrossDispatches).
+        Ownership,
+        // A dispatch it was resolved ahead of did more than encode GPU work (NoteDispatchEffect).
+        Effects,
+        Count,
+    }
+
+    private long _computeSubmitted;
+    private long _computeTaken;
+    private long _computeWaitTicks;
+    private long _computeSavedTicks;
+    private readonly long[] _computeRefusals = new long[(int)ComputeRefusal.Count];
+    private readonly long[] _providerRefusals = new long[(int)ComputePrefetchRefusal.Unavailable + 1];
+
+    // The provider's reasons behind ComputeRefusal.Provider, by ComputePrefetchRefusal; resets them.
+    public long[] TakeProviderRefusals()
+    {
+        var refused = new long[_providerRefusals.Length];
+        for (var index = 0; index < refused.Length; index++)
+        {
+            refused[index] = Interlocked.Exchange(ref _providerRefusals[index], 0);
+        }
+
+        return refused;
+    }
+
+    public (long Submitted, long Taken, long[] Refused, double WaitMilliseconds, double SavedMilliseconds) TakeComputeCounters()
+    {
+        var refused = new long[(int)ComputeRefusal.Count];
+        for (var index = 0; index < refused.Length; index++)
+        {
+            refused[index] = Interlocked.Exchange(ref _computeRefusals[index], 0);
+        }
+
+        return (Interlocked.Exchange(ref _computeSubmitted, 0), Interlocked.Exchange(ref _computeTaken, 0), refused,
+            Interlocked.Exchange(ref _computeWaitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency,
+            Interlocked.Exchange(ref _computeSavedTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+    }
+
+    internal void NoteComputeRefusal(ComputeRefusal reason) => Interlocked.Increment(ref _computeRefusals[(int)reason]);
+
+    // The gated non-draw item the worker runs now is a dispatch that did more than encode GPU work: it was consumed,
+    // copied an image, or has CPU-predicted writes. A dispatch job resolved ahead of it (its gate below this item) is
+    // refused, since what that dispatch did may not show in the ownership answers. -1 while none did.
+    private long _lastDispatchEffect = -1;
+
+    public void NoteDispatchEffect() => Volatile.Write(ref _lastDispatchEffect, Volatile.Read(ref _executedGate));
+
     public (long Resolved, long Abandoned, long Taken, long Refused, double WaitMilliseconds) TakeCounters() =>
         (Interlocked.Exchange(ref _resolvedCount, 0), Interlocked.Exchange(ref _abandonedCount, 0),
             Interlocked.Exchange(ref _takenCount, 0), Interlocked.Exchange(ref _refusedCount, 0),
@@ -100,11 +166,14 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     // A gate above zero holds the job until AdvanceGate reaches it: with the command stream on its own
     // thread, draws are submitted ahead of the work before them, which may change what they read.
-    public Job Submit(RegisterBanks banks, long gate = 0, bool indexed = false, int startInstanceUserData = -1)
+    public Job Submit(RegisterBanks banks, long gate = 0, bool indexed = false, int startInstanceUserData = -1) =>
+        Enqueue(new Job(banks, gate, indexed, startInstanceUserData));
+
+    private Job Enqueue(Job job)
     {
-        var job = new Job(banks, gate, indexed, startInstanceUserData) { Index = Submitted };
         lock (_lock)
         {
+            job.Index = Submitted;
             _queue.Enqueue(job);
             Submitted++;
             _outstanding++;
@@ -118,6 +187,15 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
 
         return job;
+    }
+
+    // A dispatch's job. Its gate may stop short of the dispatches just before it (the sink's DispatchGate): its program
+    // then resolves while they run, and the take checks it against what they did (TryTakeCompute).
+    public Job SubmitCompute(RegisterBanks banks, long gate, uint dispatchInitiator, uint groupsX, uint groupsY, uint groupsZ, bool indirect)
+    {
+        var job = new Job(banks, gate) { Compute = new ComputeArguments(dispatchInitiator, groupsX, groupsY, groupsZ, indirect) };
+        Interlocked.Increment(ref _computeSubmitted);
+        return Enqueue(job);
     }
 
     // Returns once the worker has finished every submitted job: it reads guest memory and cache
@@ -205,7 +283,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     {
         programs = null!;
         var job = Current;
-        if (job is null || !ReferenceEquals(job.Banks, banks))
+        if (job is null || !ReferenceEquals(job.Banks, banks) || job.Compute is not null)
         {
             return false;
         }
@@ -244,6 +322,63 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
         Interlocked.Increment(ref _takenCount);
         programs = job.Programs!;
+        return true;
+    }
+
+    // The dispatch the worker runs now takes the program its job resolved when the job was resolved from the same banks
+    // and arguments, the provider stood for it, no dispatch it was resolved ahead of did more than encode GPU work,
+    // and the host's ownership answers still hold across those dispatches; otherwise it resolves the program itself.
+    public bool TryTakeCompute(RegisterBanks banks, uint dispatchInitiator, uint groupsX, uint groupsY, uint groupsZ, bool indirect,
+        out ComputeProgram program)
+    {
+        program = null!;
+        var job = Current;
+        if (job?.Compute is not { } arguments || !ReferenceEquals(job.Banks, banks))
+        {
+            if (job?.Compute is not null)
+            {
+                Current = null;
+                NoteComputeRefusal(ComputeRefusal.Inputs);
+            }
+
+            return false;
+        }
+
+        Current = null;
+        if (job.State == 0)
+        {
+            var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (!_allowCallerResolution ||
+                (Volatile.Read(ref _outstanding) > MaximumCallerOutstanding && !(ClaimSteal && Volatile.Read(ref _workerClaimed))) ||
+                !TryResolveOnCaller(job))
+            {
+                WaitFor(job);
+                Interlocked.Add(ref _computeWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
+            }
+        }
+
+        using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchValidation);
+        var refusal = job.State != 1 ? ComputeRefusal.Abandoned
+            : job.ComputeResult is null ? ComputeRefusal.Provider
+            : arguments != new ComputeArguments(dispatchInitiator, groupsX, groupsY, groupsZ, indirect) ? ComputeRefusal.Inputs
+            : Volatile.Read(ref _lastDispatchEffect) >= job.Gate ? ComputeRefusal.Effects
+            : !_concurrent.IsStillCurrentAcrossDispatches(job.Assumptions!) ? ComputeRefusal.Ownership
+            : ComputeRefusal.Count;
+        ReleaseAssumptions(job);
+        if (refusal != ComputeRefusal.Count)
+        {
+            NoteComputeRefusal(refusal);
+            if (refusal == ComputeRefusal.Provider)
+            {
+                Interlocked.Increment(ref _providerRefusals[(int)job.ComputeRefusal]);
+            }
+
+            return false;
+        }
+
+        Interlocked.Increment(ref _computeTaken);
+        Interlocked.Add(ref _computeSavedTicks, job.ResolveTicks);
+        program = job.ComputeResult!;
         return true;
     }
 
@@ -469,8 +604,20 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     {
         _concurrent.BeginConcurrentResolve();
         _resolvingJob = job.Index + 1;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
+            if (job.Compute is { } compute)
+            {
+                job.ComputeResult = _executor.ResolveComputeProgramAhead(job.Banks, compute.DispatchInitiator, compute.GroupsX,
+                    compute.GroupsY, compute.GroupsZ, compute.Indirect, out job.ComputeRefusal);
+                job.Assumptions = _concurrent.EndConcurrentResolve();
+                job.ResolveTicks = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+                Interlocked.Increment(ref _resolvedCount);
+                job.State = 1;
+                return;
+            }
+
             job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, WorkerScratch.Enabled ? _fatal : _host.Fatal, job.Indexed,
                 job.StartInstanceUserData);
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);

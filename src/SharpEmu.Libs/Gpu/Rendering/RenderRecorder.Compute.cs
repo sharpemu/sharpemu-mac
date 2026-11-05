@@ -87,6 +87,9 @@ internal sealed partial class RenderRecorder
     // Each program and HTILE surface NoteHtileStores reported, once.
     private readonly HashSet<(ulong Hash, ulong Address)> _loggedHtileStores = new();
 
+    // Told when a dispatch is consumed by a host fill or copy (ParallelProgramPrefetch.NoteDispatchEffect).
+    public Action? DispatchEffect { get; set; }
+
     public void Record(ResolvedDispatch record)
     {
         try
@@ -162,6 +165,8 @@ internal sealed partial class RenderRecorder
 
             if (consumed)
             {
+                // A host fill or copy in its place: a dispatch resolved ahead of it does not stand (ParallelProgramPrefetch).
+                DispatchEffect?.Invoke();
                 _host.ResetBindings();
                 return;
             }

@@ -89,6 +89,17 @@ public interface IConcurrentResolveHost
     // On the render thread.
     bool IsStillCurrent(object assumptions);
 
+    // Dispatches resolve while the dispatches just before them run (ParallelProgramPrefetch.SubmitCompute): with it
+    // off, a dispatch resolves its program itself, as before; with CrossDispatches off, its resolution still waits
+    // for every non-draw item before it, as a draw's does.
+    bool PrefetchesDispatches => false;
+
+    bool PrefetchedDispatchesCrossDispatches => false;
+
+    // On the render thread, for a dispatch's resolution that may have read guest memory before the dispatches ahead of
+    // it ran: the answers hold, and none of the GPU writes those dispatches recorded covers what it read.
+    bool IsStillCurrentAcrossDispatches(object assumptions) => IsStillCurrent(assumptions);
+
     // On the render thread, once a taken resolution's assumptions were checked: the host may reuse
     // them for a later resolution.
     void ReleaseAssumptions(object assumptions)
@@ -101,6 +112,19 @@ public interface IConcurrentResolveHost
 public interface IProgramPrefetch
 {
     bool TryTakeGraphics(RegisterBanks banks, in GraphicsProgramInputs inputs, out GraphicsPrograms programs);
+
+    // A dispatch takes the program its job resolved from the same banks and arguments, or resolves it itself.
+    bool TryTakeCompute(RegisterBanks banks, uint dispatchInitiator, uint groupsX, uint groupsY, uint groupsZ, bool indirect,
+        out ComputeProgram program)
+    {
+        program = null!;
+        return false;
+    }
+
+    // The dispatch running now did more than encode GPU work (consumed, an image copy, CPU-predicted writes).
+    void NoteDispatchEffect()
+    {
+    }
 }
 
 public sealed partial class RenderExecutor
@@ -171,6 +195,11 @@ public sealed partial class RenderExecutor
             inputs.TriangleList,
             inputs.StartInstanceUserData);
     }
+
+    // A dispatch's program resolved ahead of it (ParallelProgramPrefetch), or null with the reason it cannot stand for it.
+    public ComputeProgram? ResolveComputeProgramAhead(RegisterBanks banks, uint dispatchInitiator, uint groupsX, uint groupsY,
+        uint groupsZ, bool indirect, out ComputePrefetchRefusal refusal) =>
+        _pipelines.ResolveComputeProgramAhead(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirect, out refusal);
 
     private static bool AssemblesTriangleList(RegisterBanks banks) =>
         (GuestPrimitiveType)banks.UserConfig.PrimitiveType == GuestPrimitiveType.TriangleList;

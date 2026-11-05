@@ -1386,8 +1386,21 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // resolved keeps that program after its resources revalidate, else rebinds that program's entry to its user data,
     // else resolves; its writes are predicted on the CPU when the kernel is evaluable (ShaderPipelineCache.KernelEvaluation).
     public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect,
-        ComputeProgramRetry? retry)
+        ComputeProgramRetry? retry) =>
+        GetComputeProgramKept(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect, retry, ahead: false, out _)!;
+
+    // The same resolution on a thread ahead of the dispatch (ParallelProgramPrefetch): nothing is consumed or submitted
+    // (GetComputeProgramCore's ahead form), and a program whose writes the dispatch would predict on the CPU, or that a
+    // frontend may turn into an image copy, or that is unavailable, is refused, so the dispatch resolves it as before.
+    // The kept programs it reads and updates are this thread's own.
+    public ComputeProgram? ResolveComputeProgramAhead(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY,
+        uint dimensionZ, bool indirect, out ComputePrefetchRefusal refusal) =>
+        GetComputeProgramKept(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect, retry: null, ahead: true, out refusal);
+
+    private ComputeProgram? GetComputeProgramKept(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ,
+        bool indirect, ComputeProgramRetry? retry, bool ahead, out ComputePrefetchRefusal refusal)
     {
+        refusal = ComputePrefetchRefusal.None;
         var compute = banks.Shader.Compute;
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
         lock (_resolveGate)
@@ -1396,6 +1409,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             if (retry is not null)
             {
                 return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry, out _, out _, out _);
+            }
+
+            if (ahead && _registry.HasFrontend)
+            {
+                refusal = ComputePrefetchRefusal.Frontend;
+                return null;
             }
 
             var registrations = ShaderHeaderRegistry.Registrations;
@@ -1424,7 +1443,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     SameUserScalars(previousRegisters.UserScalars, compute.UserScalars, compute.UserScalarCount) && _programs.Revalidate(previous.Input.Stage))
                 {
                     _computeKept.Increment();
-                    return WithPrediction(previous, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+                    return ahead
+                        ? Ahead(previous, kept.Kernel, kept.Source, out refusal)
+                        : WithPrediction(previous, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
                 }
 
                 if (kept.Entry is { } entry && ++kept.Rebinds % IdentityRecheckPeriod != 0)
@@ -1432,13 +1453,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     _computeRebound.Increment();
                     var rebound = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
                     KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
-                    return WithPrediction(rebound, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+                    return ahead
+                        ? Ahead(rebound, kept.Kernel, kept.Source, out refusal)
+                        : WithPrediction(rebound, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
                 }
             }
 
             _computeResolved.Increment();
             var program = GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null,
-                out var source, out var systemRegisters, out var decoded);
+                out var source, out var systemRegisters, out var decoded, ahead);
             if (program.ImageCopy is not null)
                 return program;
             if (kept is null)
@@ -1458,8 +1481,21 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             kept.Kernel = decoded is not null && usable ? KernelFor(decoded) : null;
             kept.Entry = usable ? ShaderProgramCache.LastEntry : null;
             KeepComputeProgram(kept, program, compute, dimensionX, dimensionY, dimensionZ);
-            return WithPrediction(program, kept.Kernel, source, systemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+            return ahead
+                ? Ahead(program, kept.Kernel, source, out refusal)
+                : WithPrediction(program, kept.Kernel, source, systemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
         }
+    }
+
+    // A program resolved ahead stands for the dispatch's own only where the dispatch would take it unchanged:
+    // WithPrediction returns it as it is, and no frontend or consumption had a say.
+    private static ComputeProgram? Ahead(ComputeProgram program, KernelDemand? kernel, ShaderSource? source, out ComputePrefetchRefusal refusal)
+    {
+        refusal = !program.Available || program.Consumed || program.ImageCopy is not null ? ComputePrefetchRefusal.Unavailable
+            : source?.Registered.Frontend is not null ? ComputePrefetchRefusal.Frontend
+            : WouldPredict(program, kernel, source) ? ComputePrefetchRefusal.Prediction
+            : ComputePrefetchRefusal.None;
+        return refusal == ComputePrefetchRefusal.None ? program : null;
     }
 
     private static void KeepComputeProgram(KeptComputeProgram kept, ComputeProgram program, ComputeStageRegisters compute, uint dimensionX, uint dimensionY, uint dimensionZ)

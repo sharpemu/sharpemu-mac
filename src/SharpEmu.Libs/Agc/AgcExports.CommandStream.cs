@@ -53,6 +53,14 @@ public static partial class AgcExports
 
         long EnqueueDeferred(DeferredWork work, bool isDraw);
 
+        // The non-draw items handed over so far up to the last that is not a dispatch: a dispatch's program may
+        // resolve once they ran, while the dispatches after them still wait (ParallelProgramPrefetch.SubmitCompute).
+        long DispatchGate => Gate;
+
+        // A dispatch whose program a job submitted just before it resolves: the item waits for the jobs before that
+        // one, not for its own, which the dispatch takes or resolves itself where it runs.
+        long EnqueueDeferredDispatch(DeferredWork work, bool hasJob) => EnqueueDeferred(work, isDraw: false);
+
         void WaitPending(long sequence)
         {
         }
@@ -226,6 +234,12 @@ public static partial class AgcExports
                     {
                         _parallel = new ParallelProgramPrefetch(_executor, renderHost, concurrentHost);
                         _executor.Prefetch = _parallel;
+                        _prefetchesDispatches = concurrentHost.PrefetchesDispatches;
+                        _dispatchesCrossDispatches = concurrentHost.PrefetchedDispatchesCrossDispatches;
+                        if (_prefetchesDispatches)
+                        {
+                            _recorder.DispatchEffect = _parallel.NoteDispatchEffect;
+                        }
                     }
                 }
             }
@@ -331,12 +345,20 @@ public static partial class AgcExports
             uint GroupsY,
             uint GroupsZ,
             uint DispatchInitiator,
-            ulong IndirectArgumentsAddress) : DeferredWork;
+            ulong IndirectArgumentsAddress) : DeferredWork
+        {
+            // The resolution of its program ahead of it, when the host prefetches dispatches.
+            public ParallelProgramPrefetch.Job? Job { get; init; }
+        }
 
         private sealed record ResolvedDrawWork(ResolvedDraw Record) : DeferredWork;
         // Resolves the programs of deferred draws ahead of them, for a host that answers reads from
         // another thread; draws are deferred whenever it exists.
         private readonly ParallelProgramPrefetch? _parallel;
+
+        // Dispatches get prefetch jobs too, and their gate may leave out the dispatches just before them.
+        private readonly bool _prefetchesDispatches;
+        private readonly bool _dispatchesCrossDispatches;
 
         // The host resolves draws and dispatches where they run (PendingDraw/PendingDispatch), not on
         // the interpreting thread into resolved records (ResolvedDrawWork/ResolvedDispatchWork).
@@ -446,6 +468,11 @@ public static partial class AgcExports
                     using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DeferredDispatchTranslation);
                     var executing = _executing;
                     _executing = dispatch.State;
+                    if (_parallel is not null)
+                    {
+                        _parallel.Current = dispatch.Job;
+                    }
+
                     try
                     {
                         ExecuteDispatch(_executor!, dispatch.SubmitId, dispatch.Banks, dispatch.GroupsX, dispatch.GroupsY, dispatch.GroupsZ,
@@ -454,6 +481,10 @@ public static partial class AgcExports
                     finally
                     {
                         _executing = executing;
+                        if (_parallel is not null)
+                        {
+                            _parallel.Current = null;
+                        }
                     }
 
                     return;
@@ -874,8 +905,16 @@ public static partial class AgcExports
                 if (_defersWholeWork && Producing)
                 {
                     var snapshot = banks.Snapshot();
-                    Sink!.EnqueueDeferred(new PendingDispatch(submitId, state, snapshot, endX, endY, endZ, dispatchInitiator, indirectArgumentsAddress),
-                        isDraw: false);
+                    var sink = Sink!;
+                    // A dispatch with no program or no groups resolves nothing (RenderExecutor.Dispatch): no job for it.
+                    var job = _prefetchesDispatches && _parallel is { } parallel && compute.Address != 0 &&
+                        (indirectArgumentsAddress != 0 || (endX != 0 && endY != 0 && endZ != 0))
+                        ? parallel.SubmitCompute(snapshot, _dispatchesCrossDispatches ? sink.DispatchGate : sink.Gate,
+                            dispatchInitiator & ~RenderExecutor.DispatchMayOverlapBit, endX, endY, endZ, indirectArgumentsAddress != 0)
+                        : null;
+                    sink.EnqueueDeferredDispatch(
+                        new PendingDispatch(submitId, state, snapshot, endX, endY, endZ, dispatchInitiator, indirectArgumentsAddress) { Job = job },
+                        hasJob: job is not null);
                     return;
                 }
 

@@ -125,6 +125,21 @@ public sealed class KnownGpuWrite(ulong address, uint[] buffer, int count, bool 
 
 public sealed record FrontendImageCopy(ImageRequest Source, ImageRequest Destination, Func<ComputeProgram> Fallback);
 
+// Why a dispatch's program resolved ahead of it (IShaderPipelineProvider.ResolveComputeProgramAhead) cannot stand for
+// the dispatch's own resolution: the dispatch then resolves it itself, as it did before.
+public enum ComputePrefetchRefusal : byte
+{
+    None,
+    // The provider resolves nothing ahead.
+    Unsupported,
+    // A frontend may turn the dispatch into an image copy, which only the dispatch decides.
+    Frontend,
+    // The kernel is evaluable: its writes are predicted, or it is consumed, where the dispatch runs.
+    Prediction,
+    // No program, or one only the dispatch may consume (a masked copy kernel).
+    Unavailable,
+}
+
 public sealed class ComputeProgram
 {
     public FrontendImageCopy? ImageCopy { get; init; }
@@ -306,5 +321,15 @@ public interface IShaderPipelineProvider
     {
         handle = CreateComputePipeline(input, program);
         return true;
+    }
+
+    // A dispatch's program resolved on another thread before the dispatch runs (ParallelProgramPrefetch): what
+    // GetComputeProgram(banks, …, indirect) returns for it, with nothing consumed, submitted or predicted. A
+    // result the dispatch could not take as its own comes back null, with the reason.
+    ComputeProgram? ResolveComputeProgramAhead(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY,
+        uint dimensionZ, bool indirect, out ComputePrefetchRefusal refusal)
+    {
+        refusal = ComputePrefetchRefusal.Unsupported;
+        return null;
     }
 }
