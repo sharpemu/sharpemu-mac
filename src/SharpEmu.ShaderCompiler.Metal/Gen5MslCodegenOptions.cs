@@ -177,6 +177,13 @@ public sealed record Gen5MslCodegenOptions(
     /// SHARPEMU_MSL_EXEC_RUNS=0 guards each write again.</summary>
     public bool ExecRuns { get; init; } = true;
 
+    /// <summary>EXEC guard elision follows a saved full EXEC that the guest parks in a VGPR
+    /// lane (V_WRITELANE_B32) and reloads (V_READLANE_B32) before restoring it, so the code
+    /// after such an if counts as running with every lane set again
+    /// (<see cref="Ir.Gen5ExecFullAnalysis"/>). SHARPEMU_MSL_EXEC_LANE_SPILLS=0 stops at the
+    /// first spilled mask, as before.</summary>
+    public bool ExecLaneSpills { get; init; } = true;
+
     /// <summary>The unobserved-write elision for every stage but multi-wave mesh shaders.
     /// The analysis follows lanes, not simdgroups: a value an inactive lane never reads
     /// back after EXEC widens is dead in that lane whether the guest wave is one Apple
@@ -295,6 +302,7 @@ public sealed record Gen5MslCodegenOptions(
         UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") is "1" or "all",
         UnobservedAluAllStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "all",
         ExecRuns = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_RUNS") != "0",
+        ExecLaneSpills = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_LANE_SPILLS") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
         DecodedFormatLoadThreshold = int.TryParse(

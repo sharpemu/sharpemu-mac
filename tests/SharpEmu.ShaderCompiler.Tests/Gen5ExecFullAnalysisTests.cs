@@ -245,6 +245,127 @@ public sealed class Gen5ExecFullAnalysisTests
         Assert.DoesNotContain(join, Analyze());
     }
 
+    private static Gen5Operand Lane(uint lane) => new(Gen5OperandKind.EncodedConstant, 128 + lane);
+
+    private static readonly Gen5Vop3Control NoModifiers = new(0, 0, 0, false, 0, null);
+
+    private uint WriteLane(uint vector, Gen5Operand value, Gen5Operand lane) =>
+        Add("VWritelaneB32", Gen5ShaderEncoding.Vop3, [Gen5Operand.Vector(vector)], [value, lane], control: NoModifiers);
+
+    private uint ReadLane(uint scalar, uint vector, Gen5Operand lane) =>
+        Add("VReadlaneB32", Gen5ShaderEncoding.Vop3, [Gen5Operand.Scalar(scalar)], [Gen5Operand.Vector(vector), lane], control: NoModifiers);
+
+    private IReadOnlySet<uint> AnalyzeLaneSpills(bool track) =>
+        Gen5ExecFullAnalysis.Analyze(new Gen5ShaderProgram(0x1000, _program), wave32: false, trackLaneSpills: track);
+
+    // The shape a lighting pixel shader takes under SGPR pressure: the if's saved EXEC is parked
+    // in two lanes of v27, s[0:1] are reused, and the pair is read back just before the restore.
+    private (uint Masked, uint Restored) SpilledSaveexecIf(Action? betweenParkAndReload = null)
+    {
+        Scalar("SAndSaveexecB64", 0, Gen5Operand.Scalar(106));
+        WriteLane(27, Gen5Operand.Scalar(0), Lane(34));
+        WriteLane(27, Gen5Operand.Scalar(1), Lane(35));
+        Scalar("SMovB32", 1, Gen5Operand.Scalar(33));
+        var masked = VectorAdd();
+        betweenParkAndReload?.Invoke();
+        ReadLane(0, 27, Lane(34));
+        ReadLane(1, 27, Lane(35));
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(0));
+        return (masked, VectorAdd());
+    }
+
+    [Fact]
+    public void ASavedFullExecReloadedFromVectorLanes_RestoresAFullExec()
+    {
+        var (masked, restored) = SpilledSaveexecIf();
+
+        var tracked = AnalyzeLaneSpills(track: true);
+        Assert.DoesNotContain(masked, tracked);
+        Assert.Contains(restored, tracked);
+        Assert.DoesNotContain(restored, AnalyzeLaneSpills(track: false));
+        Assert.DoesNotContain(restored, Analyze());
+    }
+
+    [Fact]
+    public void AVectorWriteToTheSpillRegister_DropsTheParkedCopy()
+    {
+        var (_, restored) = SpilledSaveexecIf(() =>
+            Add("VMovB32", Gen5ShaderEncoding.Vop1, [Gen5Operand.Vector(27)], [Gen5Operand.Vector(3)]));
+
+        Assert.DoesNotContain(restored, AnalyzeLaneSpills(track: true));
+    }
+
+    [Fact]
+    public void AWideVectorWriteBelowTheSpillRegister_DropsTheParkedCopy()
+    {
+        // A four-dword load into v[24:27] reaches v27.
+        var (_, restored) = SpilledSaveexecIf(() =>
+            Add("BufferLoadDwordx4", Gen5ShaderEncoding.Mubuf, [Gen5Operand.Vector(24)], [Gen5Operand.Vector(4)],
+                control: new Gen5BufferMemoryControl(4, 4, 24, 8, 0, IndexEnabled: false, OffsetEnabled: true, Glc: false, Slc: false)));
+
+        Assert.DoesNotContain(restored, AnalyzeLaneSpills(track: true));
+    }
+
+    [Fact]
+    public void ParkingAnotherValueInTheLane_DropsTheParkedCopy()
+    {
+        var (_, restored) = SpilledSaveexecIf(() => WriteLane(27, Gen5Operand.Scalar(5), Lane(35)));
+
+        Assert.DoesNotContain(restored, AnalyzeLaneSpills(track: true));
+    }
+
+    [Fact]
+    public void ADynamicLaneWrite_DropsEveryCopyInTheRegister()
+    {
+        var (_, restored) = SpilledSaveexecIf(() => WriteLane(27, Gen5Operand.Scalar(5), Gen5Operand.Scalar(7)));
+
+        Assert.DoesNotContain(restored, AnalyzeLaneSpills(track: true));
+    }
+
+    [Fact]
+    public void AReloadFromALaneOnlyOnePathParked_IsUnknown()
+    {
+        Scalar("SAndSaveexecB64", 0, Gen5Operand.Scalar(106));
+        var skip = Branch("SCbranchScc0");
+        WriteLane(27, Gen5Operand.Scalar(0), Lane(34));
+        WriteLane(27, Gen5Operand.Scalar(1), Lane(35));
+        var join = ReadLane(0, 27, Lane(34));
+        PointBranch(skip, join);
+        ReadLane(1, 27, Lane(35));
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(0));
+        var after = VectorAdd();
+
+        Assert.DoesNotContain(after, AnalyzeLaneSpills(track: true));
+    }
+
+    [Fact]
+    public void ParkingAPartialExec_DoesNotRestoreAFullOne()
+    {
+        Kill();
+        WriteLane(27, Gen5Operand.Scalar(Exec), Lane(34));
+        WriteLane(27, Gen5Operand.Scalar(Exec + 1), Lane(35));
+        ReadLane(0, 27, Lane(34));
+        ReadLane(1, 27, Lane(35));
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(0));
+        var after = VectorAdd();
+
+        Assert.DoesNotContain(after, AnalyzeLaneSpills(track: true));
+    }
+
+    [Fact]
+    public void ParkingTheFullExecItself_RestoresAFullOne()
+    {
+        WriteLane(27, Gen5Operand.Scalar(Exec), Lane(34));
+        WriteLane(27, Gen5Operand.Scalar(Exec + 1), Lane(35));
+        Kill();
+        ReadLane(0, 27, Lane(34));
+        ReadLane(1, 27, Lane(35));
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(0));
+        var after = VectorAdd();
+
+        Assert.Contains(after, AnalyzeLaneSpills(track: true));
+    }
+
     [Fact]
     public void WqmOfAFullExec_StaysFull()
     {

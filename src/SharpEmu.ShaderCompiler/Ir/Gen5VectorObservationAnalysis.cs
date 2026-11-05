@@ -55,7 +55,7 @@ public static class Gen5VectorObservationAnalysis
         VectorRegisterSet FullWrites,
         ExecEffect Exec);
 
-    public static Gen5VectorObservationPlan? Analyze(Gen5ShaderProgram program, bool wave32)
+    public static Gen5VectorObservationPlan? Analyze(Gen5ShaderProgram program, bool wave32, bool trackLaneSpills = false)
     {
         var instructions = program.Instructions;
         if (instructions.Count == 0)
@@ -77,7 +77,7 @@ public static class Gen5VectorObservationAnalysis
             return null;
         }
 
-        var execFull = Gen5ExecFullAnalysis.Analyze(program, wave32);
+        var execFull = Gen5ExecFullAnalysis.Analyze(program, wave32, trackLaneSpills);
         var predecessors = new List<int>[instructions.Count];
         for (var index = 0; index < instructions.Count; index++)
         {

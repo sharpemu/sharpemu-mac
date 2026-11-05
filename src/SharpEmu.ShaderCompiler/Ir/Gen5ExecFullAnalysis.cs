@@ -9,29 +9,47 @@ namespace SharpEmu.ShaderCompiler.Ir;
 // and a join is full only when every path into it is. A backend can skip the EXEC guard of
 // a vector register write there: no lane keeps its old value, so the old value need not
 // stay live until the write.
+//
+// Under SGPR pressure the guest compiler parks the saved EXEC of an if in lanes of a VGPR
+// (V_WRITELANE_B32 v27, s0, 34 / s1, 35) and brings it back with V_READLANE_B32 just before
+// S_MOV_B64 exec, s[0:1] closes the if. With trackLaneSpills the analysis follows a full
+// copy into such a lane and back: a constant-lane writelane of a full copy marks the lane,
+// a readlane of a marked lane makes its scalar destination a full copy again, and any other
+// write that may reach the VGPR (any lane, a relative move) unmarks it. Without it EXEC
+// stays unknown from the first spilled if to the end of the program; a Demon's Souls
+// lighting pixel shader runs 1800 of its 2000 vector instructions that way.
 public static class Gen5ExecFullAnalysis
 {
     private const uint ExecLow = 126;
     private const uint ExecHigh = 127;
 
-    private readonly struct State(bool reached, bool execFull, UInt128 fullCopies)
+    private readonly struct State(bool reached, bool execFull, UInt128 fullCopies, int[]? laneCopies = null)
     {
         public readonly bool Reached = reached;
         public readonly bool ExecFull = execFull;
         // SGPRs 0..127 holding (part of) a copy of a full EXEC.
         public readonly UInt128 FullCopies = fullCopies;
+        // VGPR lanes (vector * 64 + lane, ascending) holding such a copy, under trackLaneSpills.
+        public readonly int[] LaneCopies = laneCopies ?? [];
 
         public static State Meet(State left, State right) =>
             !left.Reached ? right
             : !right.Reached ? left
-            : new State(true, left.ExecFull && right.ExecFull, left.FullCopies & right.FullCopies);
+            : new State(true, left.ExecFull && right.ExecFull, left.FullCopies & right.FullCopies,
+                left.LaneCopies.Length == 0 || right.LaneCopies.Length == 0 ? null
+                : left.LaneCopies.Intersect(right.LaneCopies).ToArray());
 
         public bool SameAs(State other) =>
-            Reached == other.Reached && ExecFull == other.ExecFull && FullCopies == other.FullCopies;
+            Reached == other.Reached && ExecFull == other.ExecFull && FullCopies == other.FullCopies &&
+            LaneCopies.AsSpan().SequenceEqual(other.LaneCopies);
     }
 
     // Pcs of the instructions that start with a full EXEC.
-    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32)
+    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32) =>
+        Analyze(program, wave32, trackLaneSpills: false);
+
+    // The same, following full copies through VGPR lane spills when trackLaneSpills is set.
+    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32, bool trackLaneSpills)
     {
         var instructions = program.Instructions;
         var result = new HashSet<uint>();
@@ -61,7 +79,7 @@ public static class Gen5ExecFullAnalysis
         {
             queued[index] = false;
             var instruction = instructions[index];
-            var output = Transfer(instruction, states[index], wave32);
+            var output = Transfer(instruction, states[index], wave32, trackLaneSpills);
             void Flow(int successor)
             {
                 var merged = State.Meet(states[successor], output);
@@ -113,7 +131,7 @@ public static class Gen5ExecFullAnalysis
         return result;
     }
 
-    private static State Transfer(Gen5ShaderInstruction instruction, State input, bool wave32)
+    private static State Transfer(Gen5ShaderInstruction instruction, State input, bool wave32, bool trackLaneSpills)
     {
         if (!input.Reached)
         {
@@ -233,7 +251,107 @@ public static class Gen5ExecFullAnalysis
             }
         }
 
-        return new State(true, nextExecFull, nextCopies);
+        var laneCopies = input.LaneCopies;
+        if (trackLaneSpills)
+        {
+            (nextCopies, laneCopies) = TransferLaneCopies(instruction, execFull, copies, nextCopies, laneCopies);
+        }
+
+        return new State(true, nextExecFull, nextCopies, laneCopies);
+    }
+
+    // A full copy parked in a VGPR lane and read back (see the class comment). execFull and
+    // copies are the state before the instruction, nextCopies after its scalar writes.
+    private static (UInt128 Copies, int[] LaneCopies) TransferLaneCopies(
+        Gen5ShaderInstruction instruction, bool execFull, UInt128 copies, UInt128 nextCopies, int[] laneCopies)
+    {
+        var opcode = instruction.Opcode;
+        if (opcode == "VReadlaneB32")
+        {
+            if (laneCopies.Length != 0 &&
+                Gen5LaneSpillAnalysis.TryGetSpillSlot(instruction, out var vector, out var lane) &&
+                instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: < ExecLow } destination, ..] &&
+                Array.BinarySearch(laneCopies, (int)(vector * 64 + lane)) >= 0)
+            {
+                nextCopies |= Bit(destination.Value);
+            }
+
+            return (nextCopies, laneCopies);
+        }
+
+        if (opcode == "VWritelaneB32")
+        {
+            if (Gen5LaneSpillAnalysis.TryGetSpillSlot(instruction, out var vector, out var lane))
+            {
+                var key = (int)(vector * 64 + lane);
+                var full = instruction.Sources[0] is { Kind: Gen5OperandKind.ScalarRegister } source &&
+                    (source.Value is ExecLow or ExecHigh ? execFull : (copies & Bit(source.Value)) != 0);
+                return (nextCopies, full ? With(laneCopies, key) : Without(laneCopies, key, key + 1));
+            }
+
+            return (nextCopies, instruction.Destinations is [{ Kind: Gen5OperandKind.VectorRegister } dynamic, ..]
+                ? Without(laneCopies, (int)dynamic.Value * 64, (int)dynamic.Value * 64 + 64)
+                : laneCopies);
+        }
+
+        if (laneCopies.Length == 0)
+        {
+            return (nextCopies, laneCopies);
+        }
+
+        if (opcode.StartsWith("VMovreld", StringComparison.Ordinal) ||
+            opcode.StartsWith("VMovrelsd", StringComparison.Ordinal) ||
+            opcode.StartsWith("VSwaprel", StringComparison.Ordinal))
+        {
+            // The destination is relative to M0: any VGPR.
+            return (nextCopies, []);
+        }
+
+        var width = (int)Gen5LaneSpillAnalysis.VectorWriteWidth(instruction);
+        foreach (var destination in instruction.Destinations)
+        {
+            if (destination.Kind == Gen5OperandKind.VectorRegister)
+            {
+                laneCopies = Without(laneCopies, (int)destination.Value * 64, ((int)destination.Value + width) * 64);
+            }
+        }
+
+        if (opcode == "VSwapB32" && instruction.Sources is [{ Kind: Gen5OperandKind.VectorRegister } swapped, ..])
+        {
+            laneCopies = Without(laneCopies, (int)swapped.Value * 64, (int)swapped.Value * 64 + 64);
+        }
+
+        return (nextCopies, laneCopies);
+    }
+
+    private static int[] With(int[] keys, int key)
+    {
+        var at = Array.BinarySearch(keys, key);
+        if (at >= 0)
+        {
+            return keys;
+        }
+
+        at = ~at;
+        var result = new int[keys.Length + 1];
+        keys.AsSpan(0, at).CopyTo(result);
+        result[at] = key;
+        keys.AsSpan(at).CopyTo(result.AsSpan(at + 1));
+        return result;
+    }
+
+    // keys without those in [first, end).
+    private static int[] Without(int[] keys, int first, int end)
+    {
+        foreach (var key in keys)
+        {
+            if (key >= first && key < end)
+            {
+                return keys.Where(key => key < first || key >= end).ToArray();
+            }
+        }
+
+        return keys;
     }
 
     private static bool IsExec(Gen5Operand operand) =>

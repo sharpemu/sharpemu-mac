@@ -80,7 +80,8 @@ public static partial class Gen5MslTranslator
             {
                 if (!_observationPlanBuilt)
                 {
-                    _observationPlan = Ir.Gen5VectorObservationAnalysis.Analyze(_request.Program, wave32: _waveLaneCount == 32);
+                    _observationPlan = Ir.Gen5VectorObservationAnalysis.Analyze(
+                        _request.Program, wave32: _waveLaneCount == 32, trackLaneSpills: _options.ExecLaneSpills);
                     _observationPlanBuilt = true;
                 }
                 _unobservedAluWrites = _observationPlan?.UnobservedWrites(instruction.Pc) ?? default;
@@ -103,7 +104,8 @@ public static partial class Gen5MslTranslator
 
             _execFullPcs ??= Ir.Gen5ExecFullAnalysis.Analyze(
                 _request.Program,
-                wave32: _waveLaneCount == 32);
+                wave32: _waveLaneCount == 32,
+                trackLaneSpills: _options.ExecLaneSpills);
             return _execFullPcs.Contains(pc);
         }
 
