@@ -2227,6 +2227,11 @@ internal sealed partial class MetalRenderHost
             range.Buffer,
             (nuint)range.Offset,
             entry.ThreadsPerThreadgroup);
+        if (PassProfileEnabled)
+        {
+            PassProfileNoteIndirectGroups(encoder, range.Buffer, range.Offset);
+        }
+
         CountDraw(started);
         SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.RecordDispatch();
         ProfileWork(
