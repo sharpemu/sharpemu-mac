@@ -468,8 +468,7 @@ static inline uint sharpemu_present_lane(uint lane)
 static inline float sharpemu_flush_f32_denorm(float value)
 {
     uint bits = as_type<uint>(value);
-    uint magnitude = bits & 0x7FFFFFFFu;
-    return magnitude != 0u && magnitude < 0x00800000u ? as_type<float>(bits & 0x80000000u) : value;
+    return (bits & 0x7F800000u) == 0u ? as_type<float>(bits & 0x80000000u) : value;
 }
 
 // V_MIN/V_MAX/V_MIN3/V_MAX3/V_MED3 on f32 and f16 bits (RDNA2 ISA 12.7, 12.12): with

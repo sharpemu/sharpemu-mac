@@ -192,6 +192,13 @@ public sealed record Gen5MslCodegenOptions(
     /// SHARPEMU_MSL_EXEC_WWM=0 treats the entry as an unknown EXEC write, as before.</summary>
     public bool ExecWholeWave { get; init; } = true;
 
+    /// <summary>Cheaper exact wrappers around the f32 transcendentals: the denormal flush tests
+    /// the exponent field alone (a zero field is a zero or a denormal, both of which become the
+    /// zero of their sign), and V_SQRT/RSQ/LOG_F32 pick the ISA's 0xFFC00000 from the flushed
+    /// operand's sign instead of testing the result and the operand for NaN.
+    /// SHARPEMU_MSL_CHEAP_FLOAT_WRAPPERS=0 keeps the previous forms.</summary>
+    public bool CheapFloatWrappers { get; init; } = true;
+
     /// <summary>Lane-local ALU writes that no masked-off lane reads back run without their
     /// EXEC guard, outside EXEC runs (<see cref="Ir.Gen5LaneObservationAnalysis"/>), in compute,
     /// pixel, vertex and single-wave mesh programs. SHARPEMU_MSL_UNOBSERVED_LANES=0 guards them
@@ -318,6 +325,7 @@ public sealed record Gen5MslCodegenOptions(
         ExecRuns = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_RUNS") != "0",
         ExecLaneSpills = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_LANE_SPILLS") != "0",
         ExecWholeWave = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_WWM") != "0",
+        CheapFloatWrappers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_CHEAP_FLOAT_WRAPPERS") != "0",
         LaneExactUnobservedWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_LANES") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",

@@ -2989,6 +2989,16 @@ public static partial class Gen5MslTranslator
         private string InvalidNanF32Result(Gen5ShaderInstruction instruction, string function, string? cycle = null)
         {
             var operand = Temp("float", F(instruction, 0));
+            if (cycle is null && _options.CheapFloatWrappers)
+            {
+                // sqrt, rsq and log make a NaN of a non-NaN operand exactly when it is below zero
+                // once flushed: a negative number or -infinity, not -0 (a negative denormal is
+                // -0 by then). The flushed operand's sign picks the ISA's NaN without testing the
+                // result and the operand for NaN; a NaN operand still passes through the function.
+                var flushed = Temp("float", $"sharpemu_flush_f32_denorm({operand})");
+                return FloatResult(instruction, $"({flushed} < 0.0f ? as_type<float>(0xFFC00000u) : {function}({flushed}))");
+            }
+
             var argument = cycle is null
                 ? $"sharpemu_flush_f32_denorm({operand})"
                 : $"sharpemu_trig_cycle_f32({operand}, {cycle}) * {TauLiteral}";
