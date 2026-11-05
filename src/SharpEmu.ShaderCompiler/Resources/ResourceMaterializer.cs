@@ -270,9 +270,92 @@ public static partial class ResourceMaterializer
         public required uint[][] Images;
         public required uint[][] Samplers;
         public required ResourceSpecialization Specialization;
+        // SpecializationKeyHash of the key words.
+        public required ulong Hash;
     }
 
-    private const int SpecializationMemoEntries = 8;
+    // A plan's memos, replaced in turn, and their key hashes, scanned before any key is compared. A pixel program
+    // bound with one material table per draw sees a specialization per material: Demon's Souls-shaped draws cycle
+    // through dozens per program, so the eight memos a plan kept before, each compared word by word in turn,
+    // missed every such draw, and each miss rebuilt the specialization. A hash is written after its memo and a
+    // match compares the memo's own, so a reader racing a replacement at most misses.
+    private sealed class SpecializationMemoTable
+    {
+        public readonly ulong[] Hashes = new ulong[SpecializationMemoEntries];
+        public readonly SpecializationMemo?[] Entries = new SpecializationMemo?[SpecializationMemoEntries];
+    }
+
+    private const int SpecializationMemoEntries = 64;
+
+    private static ulong MixKey(ulong hash, uint word) => (hash ^ word) * 0x100000001B3UL;
+
+    // The key words as MatchesOutput and MatchesMemo compare them: of each buffer the stride and the last word, of
+    // each image every word but the mip statistics bits, of each sampler every word, and the counts.
+    private static ulong MixImage(ulong hash, ReadOnlySpan<uint> words)
+    {
+        hash = MixKey(hash, (uint)words.Length);
+        for (var word = 0; word < words.Length; word++)
+        {
+            var mask = word == 5 ? ResourceSnapshot.MipStatisticsEnableWordMask : word == 6 ? ResourceSnapshot.MipStatisticsSlotWordMask : 0u;
+            hash = MixKey(hash, words[word] & ~mask);
+        }
+
+        return hash;
+    }
+
+    private static ulong MixSampler(ulong hash, ReadOnlySpan<uint> words)
+    {
+        hash = MixKey(hash, (uint)words.Length);
+        foreach (var word in words) hash = MixKey(hash, word);
+        return hash;
+    }
+
+    private static ulong SpecializationKeyHash(uint[][] images, uint[][] samplers, uint[] keyBuffers)
+    {
+        var hash = MixKey(MixKey(MixKey(0xCBF29CE484222325UL, (uint)(keyBuffers.Length / 2)), (uint)images.Length), (uint)samplers.Length);
+        foreach (var word in keyBuffers) hash = MixKey(hash, word);
+        foreach (var words in images) hash = MixImage(hash, words);
+        foreach (var words in samplers) hash = MixSampler(hash, words);
+        return hash;
+    }
+
+    // False when a buffer is not four words: no memo holds such a key.
+    private static bool TrySpecializationKeyHash(MaterializationProgram.Output output, int bufferCount, int imageCount, int samplerCount,
+        out ulong hash)
+    {
+        hash = MixKey(MixKey(MixKey(0xCBF29CE484222325UL, (uint)bufferCount), (uint)imageCount), (uint)samplerCount);
+        for (var index = 0; index < bufferCount; index++)
+        {
+            var words = output.Source(index);
+            if (words.Length != 4) return false;
+            hash = MixKey(MixKey(hash, words[1] >> 16), words[3]);
+        }
+
+        for (var index = 0; index < imageCount; index++) hash = MixImage(hash, output.Source(bufferCount + index));
+        for (var index = 0; index < samplerCount; index++) hash = MixSampler(hash, output.Source(bufferCount + imageCount + index));
+        return true;
+    }
+
+    private static bool TrySpecializationKeyHash(MaterializedSnapshot snapshot, out ulong hash)
+    {
+        hash = MixKey(MixKey(MixKey(0xCBF29CE484222325UL, (uint)snapshot.Buffers.Length), (uint)snapshot.Images.Length), (uint)snapshot.Samplers.Length);
+        foreach (var words in snapshot.Buffers)
+        {
+            if (words.Length != 4) return false;
+            hash = MixKey(MixKey(hash, words[1] >> 16), words[3]);
+        }
+
+        foreach (var words in snapshot.Images) hash = MixImage(hash, words);
+        foreach (var words in snapshot.Samplers) hash = MixSampler(hash, words);
+        return true;
+    }
+
+    // The entries of the table whose key hash is the given one, in slot order from start; -1 past the last.
+    private static int NextSpecializationMemo(SpecializationMemoTable table, ulong hash, int start)
+    {
+        var found = table.Hashes.AsSpan(start).IndexOf(hash);
+        return found < 0 ? -1 : start + found;
+    }
 
     internal static Action<ShaderResourcePlan, ResourceRuntimeInputs, ResourceSnapshot, ResourceSpecialization>? MaterializedCheck;
 
@@ -505,14 +588,15 @@ public static partial class ResourceMaterializer
         var bufferCount = info.Buffers.Count;
         var imageCount = info.Images.Count;
         var samplerCount = info.Samplers.Count;
-        var memos = Volatile.Read(ref plan.SpecializationMemos);
+        var memos = (SpecializationMemoTable?)Volatile.Read(ref plan.SpecializationMemos);
         SpecializationMemo? memo = null;
         var statisticsDiffer = false;
-        if (memos is not null)
+        if (memos is not null && TrySpecializationKeyHash(output, bufferCount, imageCount, samplerCount, out var hash))
         {
-            foreach (var candidate in memos)
+            for (var slot = NextSpecializationMemo(memos, hash, 0); slot >= 0; slot = NextSpecializationMemo(memos, hash, slot + 1))
             {
-                if (candidate is SpecializationMemo entry && MatchesOutput(entry, output, bufferCount, imageCount, samplerCount, out statisticsDiffer) &&
+                if (Volatile.Read(ref memos.Entries[slot]) is { } entry && entry.Hash == hash &&
+                    MatchesOutput(entry, output, bufferCount, imageCount, samplerCount, out statisticsDiffer) &&
                     (!statisticsDiffer || entry.Specialization.ImageDescriptorGroups.SequenceEqual(OutputImageGroups(output, bufferCount, imageCount))))
                 {
                     memo = entry;
@@ -665,14 +749,14 @@ public static partial class ResourceMaterializer
             materialized.FlattenedTable[offset + 2] = (uint)Math.Min(range.Size, uint.MaxValue);
         }
 
-        var memos = Volatile.Read(ref plan.SpecializationMemos);
+        var memos = (SpecializationMemoTable?)Volatile.Read(ref plan.SpecializationMemos);
         SpecializationMemo? memo = null;
         var statisticsDiffer = false;
-        if (memos is not null)
+        if (memos is not null && TrySpecializationKeyHash(materialized, out var hash))
         {
-            foreach (var candidate in memos)
+            for (var slot = NextSpecializationMemo(memos, hash, 0); slot >= 0; slot = NextSpecializationMemo(memos, hash, slot + 1))
             {
-                if (candidate is SpecializationMemo entry && MatchesMemo(entry, materialized, out statisticsDiffer) &&
+                if (Volatile.Read(ref memos.Entries[slot]) is { } entry && entry.Hash == hash && MatchesMemo(entry, materialized, out statisticsDiffer) &&
                     (!statisticsDiffer || entry.Specialization.ImageDescriptorGroups.SequenceEqual(DescriptorBindingAliases.Group(materialized.Images, materialized.Images.Length))))
                 {
                     memo = entry;
@@ -724,7 +808,7 @@ public static partial class ResourceMaterializer
     }
 
     private static bool SpecializeAndRemember(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, MaterializedSnapshot materialized,
-        DeviceAddressRange[] ranges, object?[]? memos, ref ResourceSnapshot snapshot, ref ResourceSpecialization specialization,
+        DeviceAddressRange[] ranges, SpecializationMemoTable? memos, ref ResourceSnapshot snapshot, ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
         var keyImages = new uint[materialized.Images.Length][];
@@ -761,10 +845,13 @@ public static partial class ResourceMaterializer
 
         if (keyable)
         {
-            memos ??= Interlocked.CompareExchange(ref plan.SpecializationMemos, new object?[SpecializationMemoEntries], null) ?? plan.SpecializationMemos!;
+            memos ??= (SpecializationMemoTable?)Interlocked.CompareExchange(ref plan.SpecializationMemos, new SpecializationMemoTable(), null) ??
+                (SpecializationMemoTable)plan.SpecializationMemos!;
+            var hash = SpecializationKeyHash(keyImages, keySamplers, keyBuffers);
             var slot = (int)((uint)Interlocked.Increment(ref plan.NextSpecializationMemo) % SpecializationMemoEntries);
-            Volatile.Write(ref memos[slot], new SpecializationMemo
+            Volatile.Write(ref memos.Entries[slot], new SpecializationMemo
             {
+                Hash = hash,
                 KeyImages = keyImages,
                 KeySamplers = keySamplers,
                 KeyBuffers = keyBuffers,
@@ -772,6 +859,7 @@ public static partial class ResourceMaterializer
                 Samplers = nextSnapshot.Samplers,
                 Specialization = nextSpecialization,
             });
+            Volatile.Write(ref memos.Hashes[slot], hash);
         }
 
         snapshot = new ResourceSnapshot
