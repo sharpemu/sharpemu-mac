@@ -412,8 +412,8 @@ internal sealed partial class MetalRenderHost
         prepared.StageResources = stage;
         prepared.Program = program;
         prepared.Committed = false;
-        prepared.EnsureCapacity(
-            info.Images.Count, info.Samplers.Count, info.Buffers.Count, checked((int)layout.ShaderDataDwordCount));
+        var shaderDwords = checked((int)layout.ShaderDataDwordCount);
+        prepared.EnsureCapacity(info.Images.Count, info.Samplers.Count, info.Buffers.Count, shaderDwords);
         _preparedStageMask |= 1 << stageIndex;
         var movie = FindHostMovieBindings(info, snapshot);
         prepared.MovieLuma = movie.Luma;
@@ -452,15 +452,15 @@ internal sealed partial class MetalRenderHost
         }
         else
         {
-            Array.Clear(shaderData, 0, (int)layout.ShaderDataDwordCount);
+            Array.Clear(shaderData, 0, shaderDwords);
             if (!WriteStageShaderData(shaderData, program, layout, info, snapshot, stage.ShaderBase))
             {
                 throw UserRegisterOutsideUserData(program, layout, snapshot);
             }
         }
 
-        stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
-        stage.WriteCallData(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
+        stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, shaderDwords));
+        stage.WriteCallData(shaderData.AsSpan(0, shaderDwords));
         return prepared;
     }
 
@@ -1415,10 +1415,9 @@ internal sealed partial class MetalRenderHost
             var layout = stage.Program.Bindings!;
             if (layout.UsesPushData)
             {
-                for (var index = 0; index < layout.ShaderDataDwordCount; index++)
-                {
-                    pushData[(int)layout.PushDataStartDword + index] = stage.ShaderData[index];
-                }
+                // The count once: it is a chain of a dozen computed offsets, and was walked again for every dword.
+                var shaderDwords = (int)layout.ShaderDataDwordCount;
+                stage.ShaderData.AsSpan(0, shaderDwords).CopyTo(pushData[(int)layout.PushDataStartDword..]);
 
                 hasPushData = true;
                 if (HasGpuThreadLimits(stage))

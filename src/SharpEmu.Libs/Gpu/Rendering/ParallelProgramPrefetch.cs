@@ -42,7 +42,12 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private readonly IConcurrentResolveHost _concurrent;
 
     // What a dispatch's program resolution reads besides its banks.
-    internal sealed record ComputeArguments(uint DispatchInitiator, uint GroupsX, uint GroupsY, uint GroupsZ, bool Indirect);
+    internal sealed record ComputeArguments(uint DispatchInitiator, uint GroupsX, uint GroupsY, uint GroupsZ, bool Indirect)
+    {
+        // Equality with the dispatch's own arguments, without a record made for each take to compare against.
+        public bool Matches(uint dispatchInitiator, uint groupsX, uint groupsY, uint groupsZ, bool indirect) =>
+            DispatchInitiator == dispatchInitiator && GroupsX == groupsX && GroupsY == groupsY && GroupsZ == groupsZ && Indirect == indirect;
+    }
     private readonly object _lock = new();
     private readonly Queue<Job> _queue = new();
     private readonly SharpEmu.HLE.Host.HostHelperThread _thread;
@@ -360,7 +365,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchValidation);
         var refusal = job.State != 1 ? ComputeRefusal.Abandoned
             : job.ComputeResult is null ? ComputeRefusal.Provider
-            : arguments != new ComputeArguments(dispatchInitiator, groupsX, groupsY, groupsZ, indirect) ? ComputeRefusal.Inputs
+            : !arguments.Matches(dispatchInitiator, groupsX, groupsY, groupsZ, indirect) ? ComputeRefusal.Inputs
             : Volatile.Read(ref _lastDispatchEffect) >= job.Gate ? ComputeRefusal.Effects
             : !_concurrent.IsStillCurrentAcrossDispatches(job.Assumptions!) ? ComputeRefusal.Ownership
             : ComputeRefusal.Count;

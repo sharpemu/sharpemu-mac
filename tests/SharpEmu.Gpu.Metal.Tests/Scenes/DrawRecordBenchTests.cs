@@ -263,6 +263,7 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
             var phaseTotals = new Dictionary<string, double>();
             var hostDrawMilliseconds = 0.0;
             long allocatedBytes = 0;
+            long allBytes = 0;
             var gen0Collections = 0;
             // The first variation also pays for the JIT's tier-up of the shared recording path.
             var warmRounds = results.Count == 0 ? warm * 2 : warm;
@@ -275,6 +276,7 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
                 long started;
                 ulong cpuStarted;
                 var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+                var allBefore = GC.GetTotalAllocatedBytes(precise: false);
                 var collectionsBefore = GC.CollectionCount(0);
                 using (profiling ? RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.CommandStream) : default)
                 {
@@ -286,6 +288,7 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
                 var elapsed = Stopwatch.GetTimestamp() - started;
                 var cpuElapsed = ThreadCpuNanoseconds() - cpuStarted;
                 var allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+                var allAllocated = GC.GetTotalAllocatedBytes(precise: false) - allBefore;
                 var collections = GC.CollectionCount(0) - collectionsBefore;
                 var recordedBeforeDrain = rig.Host.ReadAndResetPerfCounters().Draws;
                 var drainStarted = Stopwatch.GetTimestamp();
@@ -299,6 +302,7 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
                 microseconds.Add(elapsed * 1e6 / Stopwatch.Frequency / DrawsPerSubmit);
                 cpuMicroseconds.Add(cpuElapsed / 1e3 / DrawsPerSubmit);
                 allocatedBytes += allocated;
+                allBytes += allAllocated;
                 gen0Collections += collections;
                 hostDrawMilliseconds += counters.DrawMs;
                 if (before is null) continue;
@@ -340,6 +344,8 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
                 cpuP25MicrosecondsPerDraw = cpuMicroseconds[cpuMicroseconds.Count / 4],
                 maxMicrosecondsPerDraw = microseconds[^1],
                 allocatedBytesPerDraw = allocatedBytes / (double)(rounds * DrawsPerSubmit),
+                // Every thread's (command thread, resolving thread, worker), while RecordPending ran.
+                allThreadsAllocatedBytesPerDraw = allBytes / (double)(rounds * DrawsPerSubmit),
                 gen0CollectionsPerThousandDraws = gen0Collections * 1000.0 / (rounds * DrawsPerSubmit),
                 hostDrawMicrosecondsPerDraw = hostDrawMilliseconds * 1000.0 / (rounds * DrawsPerSubmit),
                 checksum = $"{checksum:X16}",
