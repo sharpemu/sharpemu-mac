@@ -66,10 +66,19 @@ public static partial class Gen5MslTranslator
         private bool _observationPlanBuilt;
         private Ir.VectorRegisterSet _unobservedAluWrites;
 
+        private Ir.Gen5VectorObservationPlan? _laneObservationPlan;
+        private bool _laneObservationPlanBuilt;
+
         private void BeginInstruction(Gen5ShaderInstruction instruction)
         {
             _execKnownFull = _execRunOpen || IsExecKnownFull(instruction.Pc);
             _unobservedAluWrites = default;
+            if (IsUnobservedAluInstruction(instruction))
+            {
+                _unobservedAluWrites = _laneObservationPlan!.UnobservedWrites(instruction.Pc);
+                return;
+            }
+
             // Only pure ALU destination writes participate. Memory, exports and
             // mask updates retain their guards even when their result is dead.
             if (_options.UnobservedAluWrites && _options.ExecGuardElision && _request.EnableExecGuardElision &&
@@ -105,11 +114,58 @@ public static partial class Gen5MslTranslator
             _execFullPcs ??= Ir.Gen5ExecFullAnalysis.Analyze(
                 _request.Program,
                 wave32: _waveLaneCount == 32,
-                trackLaneSpills: _options.ExecLaneSpills);
+                trackLaneSpills: _options.ExecLaneSpills,
+                trackWholeWave: _options.ExecWholeWave);
             return _execFullPcs.Contains(pc);
         }
 
         private bool ExecRunsApply => _options.ExecRuns && _options.ExecGuardElision && _request.EnableExecGuardElision;
+
+        /// <summary>
+        /// Whether a lane-local ALU instruction writes only registers no masked-off lane reads
+        /// back (<see cref="Ir.Gen5LaneObservationAnalysis"/>): it is emitted unguarded, outside
+        /// any EXEC run, so its destination's old value need not stay alive for the lanes
+        /// EXEC clears. Multi-wave mesh shaders are left out, as for the older analysis.
+        /// </summary>
+        private bool IsUnobservedAluInstruction(Gen5ShaderInstruction instruction)
+        {
+            if (!_options.LaneExactUnobservedWrites || !_options.ExecGuardElision || !_request.EnableExecGuardElision ||
+                !(_stage is Gen5MslStage.Compute or Gen5MslStage.Pixel or Gen5MslStage.Vertex ||
+                    (_stage == Gen5MslStage.Mesh && _waveLaneCount == 32 && Mesh.ThreadsPerThreadgroup <= 32)) ||
+                IsExecKnownFull(instruction.Pc) || !IsLaneLocalAlu(instruction))
+            {
+                return false;
+            }
+
+            if (!_laneObservationPlanBuilt)
+            {
+                _laneObservationPlan = Ir.Gen5LaneObservationAnalysis.Analyze(
+                    _request.Program, wave32: _waveLaneCount == 32, trackLaneSpills: _options.ExecLaneSpills,
+                    trackWholeWave: _options.ExecWholeWave);
+                _laneObservationPlanBuilt = true;
+            }
+
+            var dead = _laneObservationPlan?.UnobservedWrites(instruction.Pc) ?? default;
+            if (dead.IsEmpty)
+            {
+                return false;
+            }
+
+            var wide = instruction.Opcode.Contains("64", StringComparison.Ordinal);
+            var any = false;
+            foreach (var destination in instruction.Destinations)
+            {
+                if (destination.Kind != Gen5OperandKind.VectorRegister ||
+                    !dead.Contains(destination.Value) || (wide && !dead.Contains(destination.Value + 1)))
+                {
+                    return false;
+                }
+
+                any = true;
+            }
+
+            return any;
+        }
 
         /// <summary>
         /// Whether an instruction may sit inside an EXEC run: a VALU operation whose every
@@ -117,10 +173,13 @@ public static partial class Gen5MslTranslator
         /// relative register numbers, interpolation), with no scalar result - no compare,
         /// carry, VCC write or scalar destination.
         /// </summary>
-        private bool IsExecRunInstruction(Gen5ShaderInstruction instruction)
+        private bool IsExecRunInstruction(Gen5ShaderInstruction instruction) =>
+            ExecRunsApply && !IsExecKnownFull(instruction.Pc) && IsLaneLocalAlu(instruction);
+
+        /// <summary>The instructions an EXEC run may hold, whatever EXEC is.</summary>
+        private static bool IsLaneLocalAlu(Gen5ShaderInstruction instruction)
         {
-            if (!ExecRunsApply || IsExecKnownFull(instruction.Pc) ||
-                instruction.Encoding is not (Gen5ShaderEncoding.Vop1 or Gen5ShaderEncoding.Vop2 or
+            if (instruction.Encoding is not (Gen5ShaderEncoding.Vop1 or Gen5ShaderEncoding.Vop2 or
                     Gen5ShaderEncoding.Vop3 or Gen5ShaderEncoding.Vop3p) ||
                 instruction.Control is Gen5DppControl or Gen5Dpp8Control or
                     Gen5Vop3Control { ScalarDestination: not null } or Gen5SdwaControl { ScalarDestination: not null })

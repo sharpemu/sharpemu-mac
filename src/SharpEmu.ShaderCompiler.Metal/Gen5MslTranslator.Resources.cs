@@ -100,6 +100,13 @@ public static partial class Gen5MslTranslator
             compiled = context.TryCompile(out shader, out error);
         }
 
+        if (!compiled && context.HalfLocalBranchExchanged)
+        {
+            options = options with { HalfLocalExecBranches = false };
+            context = new CompilationContext(request, options);
+            compiled = context.TryCompile(out shader, out error);
+        }
+
         if (!compiled)
         {
             // A run of VALU writes emitted something that is not lane-local; the program is

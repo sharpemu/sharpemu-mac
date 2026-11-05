@@ -44,7 +44,7 @@ public static partial class Gen5MslTranslator
         source.AppendLine("using namespace metal;");
         source.AppendLine();
         CompilationContext.AppendLeadingPreludes(source, preludes);
-        CompilationContext.AppendTrailingPreludes(source, preludes, options.BranchlessDwordLoads);
+        CompilationContext.AppendTrailingPreludes(source, preludes, options.BranchlessDwordLoads, options.CheapFloatWrappers);
         return source.ToString();
     }
 
@@ -705,6 +705,7 @@ public static partial class Gen5MslTranslator
                 // order body-then-wrap matches how the pixel/vertex stages need it
                 // (their IO discovery happens during block translation).
                 FindHalfLocalLoops(blocks);
+                FindHalfLocalBranches(blocks);
                 if (!TryEmitBlocks(blocks, out error))
                 {
                     return false;
@@ -715,6 +716,12 @@ public static partial class Gen5MslTranslator
                 if (!HalfLocalLoopsHoldNoExchange())
                 {
                     error = "a loop run by each half of a wave on its own still exchanges between them";
+                    return false;
+                }
+
+                if (!HalfLocalBranchesHoldNoExchange())
+                {
+                    error = "a branch each half of a wave takes on its own skips an exchange between them";
                     return false;
                 }
                 NoteWaveScratchUse();
@@ -874,7 +881,7 @@ public static partial class Gen5MslTranslator
             // A request binds one argument buffer per stage; its lengths replace the uniforms.
             EmitResourceStruct(source);
 
-            AppendTrailingPreludes(source, preludes, _options.BranchlessDwordLoads);
+            AppendTrailingPreludes(source, preludes, _options.BranchlessDwordLoads, _options.CheapFloatWrappers);
             if (UsesMipStatisticsConstant)
             {
                 source.AppendLine(
@@ -1460,11 +1467,23 @@ public static partial class Gen5MslTranslator
 
         // The helpers after the resource struct. A pair lock reads through the coherent
         // helpers, so it always carries coherent_load_prelude.
-        internal static void AppendTrailingPreludes(StringBuilder source, Gen5MslPreludes preludes, bool branchlessDwordLoads)
+        internal static void AppendTrailingPreludes(StringBuilder source, Gen5MslPreludes preludes, bool branchlessDwordLoads) =>
+            AppendTrailingPreludes(source, preludes, branchlessDwordLoads, exponentDenormalFlush: false);
+
+        internal static void AppendTrailingPreludes(StringBuilder source, Gen5MslPreludes preludes, bool branchlessDwordLoads,
+            bool exponentDenormalFlush)
         {
             var dwordLoads = branchlessDwordLoads ? "dword_loads_branchless" : "dword_loads_checked";
             source.Append(MslTemplates.Render(
                 "prelude",
+                // A zero exponent field is a zero or a denormal; either way the result is the
+                // zero of its sign, so one test of the field gives the two-test form's bits.
+                ("flush_f32_denorm", exponentDenormalFlush
+                    ? "    uint bits = as_type<uint>(value);\n" +
+                      "    return (bits & 0x7F800000u) == 0u ? as_type<float>(bits & 0x80000000u) : value;"
+                    : "    uint bits = as_type<uint>(value);\n" +
+                      "    uint magnitude = bits & 0x7FFFFFFFu;\n" +
+                      "    return magnitude != 0u && magnitude < 0x00800000u ? as_type<float>(bits & 0x80000000u) : value;"),
                 ("ballot_return", (preludes & Gen5MslPreludes.RealWaveLanes) != 0
                     ? "(uint)(uint64_t)simd_ballot(value)"
                     : "value ? 1u : 0u"),
@@ -1848,6 +1867,7 @@ public static partial class Gen5MslTranslator
                 var instruction = instructions[index];
                 var isTerminator = index == block.EndIndex - 1;
                 var inExecRun = IsExecRunInstruction(instruction) &&
+                    !IsUnobservedAluInstruction(instruction) &&
                     !(!isTerminator && CanFuseWave64ReadLanes(instruction, instructions[index + 1]));
                 if (!inExecRun)
                 {
@@ -1952,6 +1972,12 @@ public static partial class Gen5MslTranslator
                         // Each half leaves the loop when its own lanes are done
                         // (Gen5MslTranslator.GroupWaves.cs).
                         condition = HalfLocalExecCondition(zero: instruction.Opcode == "SCbranchExecz");
+                    }
+                    else if (IsHalfLocalBranchBlock(blockIndex))
+                    {
+                        // Each half skips the body when its own lanes are off
+                        // (Gen5MslTranslator.HalfBranches.cs).
+                        condition = HalfLocalExecCondition(zero: true);
                     }
 
                     var fallthrough = blockIndex + 1;
