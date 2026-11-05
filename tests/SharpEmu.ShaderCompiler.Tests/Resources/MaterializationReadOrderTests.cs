@@ -8,7 +8,7 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class MaterializationReadOrderTests
 {
-    // The packed-key sort leaves a level's reads exactly as the stable insertion sort did: address order,
+    // The packed-key sort, and a remembered order it checks first, leave a level's reads exactly as the stable insertion sort did: address order,
     // equal addresses in read order, each read's target, null base and absolute flag still its own.
     [Theory]
     [InlineData(0, 2)]
@@ -43,11 +43,18 @@ public sealed class MaterializationReadOrderTests
             var (expectedAddresses, expectedTargets, expectedBases, expectedAbsolute) =
                 ((ulong[])addresses.Clone(), (int[])targets.Clone(), (ulong[])bases.Clone(), (bool[])absolute.Clone());
             MaterializationProgram.ReadOrder.InsertionSort(expectedAddresses, expectedTargets, expectedBases, expectedAbsolute, count);
-            order.Sort(addresses, targets, bases, absolute, count);
-            Assert.Equal(expectedAddresses, addresses);
-            Assert.Equal(expectedTargets, targets);
-            Assert.Equal(expectedBases, bases);
-            Assert.Equal(expectedAbsolute, absolute);
+            // Unremembered, then twice through one level's remembered order (the second takes it), then through a
+            // level last sorted for other reads, whose order no longer fits.
+            foreach (var level in new[] { -1, 0, 0, trial % 2 == 0 ? 1 : 2 })
+            {
+                var (sortedAddresses, sortedTargets, sortedBases, sortedAbsolute) =
+                    ((ulong[])addresses.Clone(), (int[])targets.Clone(), (ulong[])bases.Clone(), (bool[])absolute.Clone());
+                order.Sort(sortedAddresses, sortedTargets, sortedBases, sortedAbsolute, count, level);
+                Assert.Equal(expectedAddresses, sortedAddresses);
+                Assert.Equal(expectedTargets, sortedTargets);
+                Assert.Equal(expectedBases, sortedBases);
+                Assert.Equal(expectedAbsolute, sortedAbsolute);
+            }
         }
     }
 }
