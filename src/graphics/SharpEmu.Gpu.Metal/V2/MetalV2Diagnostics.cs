@@ -333,6 +333,12 @@ internal static class MetalV2Diagnostics
     public static readonly bool JoinColorSubsets =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_JOIN_SUBSETS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_UNION_PASSES=0 opens every pass with the attachments of the draw that
+    // begins it and joins no mesh draw, as before. Otherwise a pass whose attachment set was last
+    // followed by a superset of it is opened with that superset (MetalRenderHost.UnionPass.cs).
+    public static readonly bool UnionPasses =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_UNION_PASSES"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_DCC_CLAIM_FIRST=1 settles a DCC slice whose claim stands from the
     // claim alone (MetalImageCache.Tracking.cs) instead of querying pending writes and reading
     // the slice first. Off by default: with it on, SH renders its dark room and everything

@@ -142,7 +142,9 @@ internal sealed partial class MetalRenderHost
             return RefuseSubsetJoin("same-set");
         }
 
-        if (upcoming.Mesh is not null || upcoming.RectangleStates is not null ||
+        // A mesh draw joins only with its outputs where they are (no remapped library) and only
+        // with union passes on, which is what it was allowed for.
+        if ((upcoming.Mesh is not null && !(UnionPasses && inOrder)) || upcoming.RectangleStates is not null ||
             upcoming.GraphicsDescription is not { } description || description.Rendering.ColorCount != count ||
             description.StaticParameters.Samples != open.Samples || description.ColorRemap != 0)
         {
@@ -197,6 +199,11 @@ internal sealed partial class MetalRenderHost
         _joinedPipeline = upcoming;
         _joinedVariant = variant;
         _subsetJoins++;
+        if (upcoming.Mesh is not null)
+        {
+            _meshSubsetJoins++;
+        }
+
         PassProfileNoteJoin();
         return true;
     }
