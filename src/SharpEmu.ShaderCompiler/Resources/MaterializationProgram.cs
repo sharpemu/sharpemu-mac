@@ -28,6 +28,66 @@ internal sealed class MaterializationProgram
     {
         public ReadStep[] Reads = [];
         public Step[] Steps = [];
+        // Set when every read loads a word at a constant offset from one base (FixedReads).
+        public FixedReads? Fixed;
+    }
+
+    /// <summary>
+    /// A level whose reads all load scalar words at constant offsets from the same base registers, as a material
+    /// table's T#s and S#s do: their address order and the runs ReadLevel groups them into follow from the offsets
+    /// alone, so they are worked out once here rather than sorted and grouped for every draw. A draw takes them only
+    /// when its base is non-null and every offset resolves from it; any other draw takes ReadLevel's general walk.
+    /// </summary>
+    private sealed class FixedReads
+    {
+        public required int Low;
+        public required int High;
+        // Read indices in (offset, index) order, with their offsets, and each run's end in that order.
+        public required int[] Order;
+        public required long[] Offsets;
+        public required int[] RunEnds;
+        public required int[] RunWords;
+        // The reads with the lowest and highest offset, whose resolution bounds every other's.
+        public required int First;
+        public required int Last;
+
+        private static long OffsetOf(in ReadStep read) => (read.Immediate & ~3L) + (long)(read.ConstantOffset & ~3u);
+
+        public static FixedReads? TryBuild(ReadStep[] reads)
+        {
+            if (reads.Length == 0) return null;
+            foreach (var read in reads)
+            {
+                if (read.Kind == ScalarValueKind.ScalarBufferWord || read.Offset >= 0 || read.Low != reads[0].Low || read.High != reads[0].High)
+                    return null;
+            }
+
+            var order = Enumerable.Range(0, reads.Length).OrderBy(index => OffsetOf(reads[index])).ThenBy(index => index).ToArray();
+            var offsets = order.Select(index => OffsetOf(reads[index])).ToArray();
+            var ends = new List<int>();
+            var words = new List<int>();
+            var start = 0;
+            while (start < order.Length)
+            {
+                var end = start + 1;
+                var count = 1;
+                while (end < order.Length && offsets[end] - offsets[end - 1] <= sizeof(uint) && offsets[end] - offsets[start] < MaximumRunBytes)
+                {
+                    if (offsets[end] != offsets[end - 1]) count++;
+                    end++;
+                }
+
+                ends.Add(end);
+                words.Add(count);
+                start = end;
+            }
+
+            return new FixedReads
+            {
+                Low = reads[0].Low, High = reads[0].High, Order = order, Offsets = offsets, RunEnds = [.. ends], RunWords = [.. words],
+                First = order[0], Last = order[^1],
+            };
+        }
     }
 
     private readonly int _registerCount;
@@ -89,6 +149,11 @@ internal sealed class MaterializationProgram
         _constants = constants;
         _constantValid = constantValid;
         _levels = levels;
+        foreach (var level in levels)
+        {
+            level.Fixed = FixedReads.TryBuild(level.Reads);
+        }
+
         _sourceWords = sourceWords;
         _tableWords = tableWords;
         _tableOffsets = tableOffsets;
@@ -458,7 +523,7 @@ internal sealed class MaterializationProgram
         for (var levelIndex = 0; levelIndex < _levels.Length; levelIndex++)
         {
             var level = _levels[levelIndex];
-            if (level.Reads.Length != 0)
+            if (level.Reads.Length != 0 && (level.Fixed is not { } fixedReads || !TryReadFixed(level.Reads, fixedReads, inputs, scratch)))
             {
                 ReadLevel(level.Reads, inputs, scratch, levelIndex);
             }
@@ -665,6 +730,75 @@ internal sealed class MaterializationProgram
                 return;
             }
         }
+    }
+
+    // ReadLevel for a FixedReads level, with the same words, runs and fallbacks; false, reading nothing, when the base is
+    // not valid, is null, or does not resolve every offset, which ReadLevel handles.
+    private static bool TryReadFixed(ReadStep[] reads, FixedReads plan, ResourceRuntimeInputs inputs, Scratch scratch)
+    {
+        var values = scratch.Values;
+        var valid = scratch.Valid;
+        if (!valid[plan.Low] || !valid[plan.High])
+        {
+            return false;
+        }
+
+        var high = values[plan.High];
+        var baseAddress = ((high << 32) | (uint)values[plan.Low]) & AddressMask;
+        ref readonly var first = ref reads[plan.First];
+        ref readonly var last = ref reads[plan.Last];
+        if ((baseAddress & ~3ul) == 0 ||
+            RuntimeValueEvaluator.ResolveRawAddress(first.Kind, baseAddress, high, 0, first.Immediate, first.ConstantOffset, out var lowest) !=
+            RuntimeValueEvaluator.RawAddress.Read ||
+            RuntimeValueEvaluator.ResolveRawAddress(last.Kind, baseAddress, high, 0, last.Immediate, last.ConstantOffset, out _) !=
+            RuntimeValueEvaluator.RawAddress.Read)
+        {
+            return false;
+        }
+
+        // Every address is the lowest one plus its offset past the lowest offset.
+        var origin = plan.Offsets[0];
+        var order = plan.Order;
+        var offsets = plan.Offsets;
+        var resident = inputs.ReadResidentMemory;
+        var start = 0;
+        for (var run = 0; run < plan.RunEnds.Length; run++)
+        {
+            var end = plan.RunEnds[run];
+            var runFirst = lowest + (ulong)(offsets[start] - origin);
+            if (plan.RunWords[run] >= MinimumRunWords && resident is not null && inputs.ReadMemory is not null)
+            {
+                var length = checked((int)(offsets[end - 1] - offsets[start]) + sizeof(uint));
+                if (scratch.Bytes.Length < length)
+                {
+                    scratch.Bytes = new byte[Math.Max(length, scratch.Bytes.Length * 2)];
+                }
+
+                var bytes = scratch.Bytes.AsSpan(0, length);
+                if (resident(runFirst, bytes, inputs.ReadsClean))
+                {
+                    for (var index = start; index < end; index++)
+                    {
+                        var target = reads[order[index]].Target;
+                        values[target] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(offsets[index] - offsets[start])..]);
+                        valid[target] = true;
+                    }
+
+                    start = end;
+                    continue;
+                }
+            }
+
+            for (var index = start; index < end; index++)
+            {
+                ref readonly var read = ref reads[order[index]];
+                ReadWord(inputs, lowest + (ulong)(offsets[index] - origin), baseAddress, read.Absolute, read.Target, values, valid);
+            }
+
+            start = end;
+        }
+
+        return true;
     }
 
     private static void ReadLevel(ReadStep[] reads, ResourceRuntimeInputs inputs, Scratch scratch, int levelIndex)
