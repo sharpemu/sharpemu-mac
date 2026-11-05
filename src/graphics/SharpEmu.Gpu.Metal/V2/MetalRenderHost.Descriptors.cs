@@ -177,6 +177,11 @@ internal sealed partial class MetalRenderHost
     private nuint[] _usedResourceUsage = new nuint[64];
     private int _usedResourceCount;
 
+    // An open-addressed index over _usedResources (entry = position + 1), valid where its stamp is
+    // the current draw's: a draw finds a resource it already noted without walking the list.
+    private int[] _usedResourceSlots = new int[128];
+    private uint[] _usedResourceStamps = new uint[128];
+    private uint _usedResourceEpoch = 1;
     private MetalResourcePreparation? _preparation;
     private MetalResourcePreparation? _preparationHandle;
     private int _preparedStageMask;
@@ -216,7 +221,7 @@ internal sealed partial class MetalRenderHost
             ? _preparationHandle ??= new MetalResourcePreparation(this)
             : new MetalResourcePreparation(this);
         _preparedStageMask = 0;
-        _usedResourceCount = 0;
+        ResetUsedResources();
         _bindlessDeclarations.Clear();
         Array.Clear(_stageArgumentValid);
         Array.Clear(_stageUsesDeviceAddresses);
@@ -2007,15 +2012,33 @@ internal sealed partial class MetalRenderHost
         return plan;
     }
 
+    private void ResetUsedResources()
+    {
+        _usedResourceCount = 0;
+        if (++_usedResourceEpoch == 0)
+        {
+            Array.Clear(_usedResourceStamps);
+            _usedResourceEpoch = 1;
+        }
+    }
+
+    // Each resource once, in first-use order, with the union of its usages.
     internal void NoteUsedResource(nint resource, nuint usage)
     {
-        for (var index = 0; index < _usedResourceCount; index++)
+        var slots = _usedResourceSlots;
+        var stamps = _usedResourceStamps;
+        var mask = slots.Length - 1;
+        var slot = UsedResourceHash(resource) & mask;
+        while (stamps[slot] == _usedResourceEpoch)
         {
-            if (_usedResources[index] == resource)
+            var position = slots[slot] - 1;
+            if (_usedResources[position] == resource)
             {
-                _usedResourceUsage[index] |= usage;
+                _usedResourceUsage[position] |= usage;
                 return;
             }
+
+            slot = (slot + 1) & mask;
         }
 
         if (_usedResourceCount == _usedResources.Length)
@@ -2027,6 +2050,35 @@ internal sealed partial class MetalRenderHost
         _usedResources[_usedResourceCount] = resource;
         _usedResourceUsage[_usedResourceCount] = usage;
         _usedResourceCount++;
+        stamps[slot] = _usedResourceEpoch;
+        slots[slot] = _usedResourceCount;
+        // At most half full, so a probe always reaches a free slot.
+        if (_usedResourceCount * 2 > slots.Length)
+        {
+            GrowUsedResourceIndex();
+        }
+    }
+
+    private static int UsedResourceHash(nint resource) =>
+        (int)(((ulong)resource * 0x9E3779B97F4A7C15UL) >> 33);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void GrowUsedResourceIndex()
+    {
+        _usedResourceSlots = new int[_usedResourceSlots.Length * 2];
+        _usedResourceStamps = new uint[_usedResourceSlots.Length];
+        var mask = _usedResourceSlots.Length - 1;
+        for (var position = 0; position < _usedResourceCount; position++)
+        {
+            var slot = UsedResourceHash(_usedResources[position]) & mask;
+            while (_usedResourceStamps[slot] == _usedResourceEpoch)
+            {
+                slot = (slot + 1) & mask;
+            }
+
+            _usedResourceStamps[slot] = _usedResourceEpoch;
+            _usedResourceSlots[slot] = position + 1;
+        }
     }
 
     // Argument-buffer references are indirect, so the encoder is told which textures
