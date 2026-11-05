@@ -24,7 +24,16 @@ namespace SharpEmu.Gpu.Metal.V2;
 // windows onto guest memory (a store there would write guest bytes the CPU may have changed),
 // and the first draw must be able to join such a pass (no sampled extra, no sample mask, a
 // variant compiled). A pass opened this way that no draw into the larger set continues is a
-// miss; two misses in a row forget the set.
+// miss; two misses in a row forget the set, and so does one that ended the pass early.
+//
+// Until a draw into the larger set arrives the union pass stands in for the smaller set's own
+// pass, so a draw into exactly that set continues it as it would have continued that pass
+// (ContinueUnionPass), drawn with the same variant: the subset join's extra conditions are for
+// draws that would have begun a pass of their own. Demon's Souls' G-buffer draws reach memory
+// through device addresses while labels are held to the commit, which the subset join refuses
+// ("copies"), so every union pass ended at the second draw of the smaller set: two misses, the
+// set forgotten and learnt again, never a hit, and two passes more than without it each time.
+// The TBDR line's union_miss=[...] says how the passes that missed ended.
 // SHARPEMU_METAL_V2_UNION_PASSES=0 turns it off (and the mesh draws it lets join, too).
 internal sealed partial class MetalRenderHost
 {
@@ -76,22 +85,46 @@ internal sealed partial class MetalRenderHost
     private UnionPrediction? _openUnion;
     private bool _openUnionHit;
 
+    // How the open union pass is ending (the pass-end cause), and why the draw now beginning
+    // could not continue it in the smaller set, if it could not.
+    private string? _unionEndCause;
+    private string? _unionConflict;
+
     private long _unionLearned;
     private long _unionOpened;
     private long _unionHits;
     private long _unionMisses;
     private long _unionRefused;
     private long _meshSubsetJoins;
+    private long _unionContinued;
+    private readonly Dictionary<string, long> _unionMissCauses = new();
 
     internal (long Learned, long Opened, long Hits, long Misses, long Refused, long MeshJoins) TakeUnionPasses() =>
         (Interlocked.Exchange(ref _unionLearned, 0), Interlocked.Exchange(ref _unionOpened, 0),
          Interlocked.Exchange(ref _unionHits, 0), Interlocked.Exchange(ref _unionMisses, 0),
          Interlocked.Exchange(ref _unionRefused, 0), Interlocked.Exchange(ref _meshSubsetJoins, 0));
 
+    /// <summary>Draws into the smaller set that continued a union pass before a draw into the larger one.</summary>
+    internal long TakeUnionContinued() => Interlocked.Exchange(ref _unionContinued, 0);
+
+    /// <summary>How the union passes that missed ended: cause:count, most first.</summary>
+    internal string TakeUnionMissCauses()
+    {
+        if (_unionMissCauses.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var text = string.Join(",", _unionMissCauses.OrderByDescending(pair => pair.Value).Select(pair => $"{pair.Key}:{pair.Value}"));
+        _unionMissCauses.Clear();
+        return text;
+    }
+
     internal string TakeUnionPassText()
     {
         var (learned, opened, hits, misses, refused, meshJoins) = TakeUnionPasses();
-        return $"union=[learned:{learned},opened:{opened},hits:{hits},misses:{misses},refused:{refused},mesh_joins:{meshJoins}]";
+        return $"union=[learned:{learned},opened:{opened},hits:{hits},misses:{misses},refused:{refused},mesh_joins:{meshJoins}] " +
+            $"union_continued={TakeUnionContinued()} union_miss=[{TakeUnionMissCauses()}]";
     }
 
     internal int UnionPredictionCount => _unionPredictions.Count;
@@ -328,46 +361,143 @@ internal sealed partial class MetalRenderHost
                     return null;
                 }
             }
-
-            // Drawn into while the pass holds it, a sampled extra would be read before the pass stores it.
-            if (StagesSampleTexture((nint)attachment.Attachment.View.Handle, attachment.Texture))
-            {
-                _unionRefused++;
-                return null;
-            }
-        }
-
-        if (upcoming.RectangleStates is not null || upcoming.GraphicsDescription is not { } description ||
-            description.Rendering.ColorCount != count || description.StaticParameters.Samples != state.Samples ||
-            description.ColorRemap != 0 || description.PixelInfo is { SampleMaskExportEnable: true } ||
-            (JoinExcludedPixelPrograms.Count != 0 && description.PixelStage is { } pixelStage &&
-                JoinExcludedPixelPrograms.Contains(pixelStage.Hash)))
-        {
-            _unionRefused++;
-            return null;
         }
 
         union = state;
         union.ColorAttachmentCount = (uint)(count + prediction.ExtraCount);
-        var placement = 0u;
-        for (var index = 0; index < count; index++)
-        {
-            placement |= (uint)(index + 1) << (index * 4);
-        }
-
         for (var extra = 0; extra < prediction.ExtraCount; extra++)
         {
             union.ColorAttachments[count + extra] = prediction.Extras[extra].Attachment;
         }
 
-        variant = SubsetJoinVariant(upcoming, description, in union, 0, placement);
-        if (variant is null)
+        if (UnionDrawRefusal(prediction, in union, count, upcoming, out variant) is not null)
         {
             _unionRefused++;
             return null;
         }
 
         return prediction;
+    }
+
+    /// <summary>
+    /// Why a draw into the first <paramref name="count"/> attachments of <paramref name="union"/>
+    /// cannot be drawn in a union pass of that set, or null with the variant of its pipeline that
+    /// writes none of the extra attachments.
+    /// </summary>
+    private string? UnionDrawRefusal(
+        UnionPrediction prediction, in RenderingState union, int count, MetalPipelineEntry upcoming,
+        out MetalPipelineEntry? variant)
+    {
+        variant = null;
+        for (var extra = 0; extra < prediction.ExtraCount; extra++)
+        {
+            // Drawn into while the pass holds it, a sampled extra would be read before the pass stores it.
+            ref readonly var attachment = ref prediction.Extras[extra];
+            if (StagesSampleTexture((nint)attachment.Attachment.View.Handle, attachment.Texture))
+            {
+                return "sampled";
+            }
+        }
+
+        if (upcoming.RectangleStates is not null || upcoming.GraphicsDescription is not { } description ||
+            description.Rendering.ColorCount != count || description.StaticParameters.Samples != union.Samples ||
+            description.ColorRemap != 0)
+        {
+            return "pipeline";
+        }
+
+        if (description.PixelInfo is { SampleMaskExportEnable: true })
+        {
+            return "coverage";
+        }
+
+        if (JoinExcludedPixelPrograms.Count != 0 && description.PixelStage is { } pixelStage &&
+            JoinExcludedPixelPrograms.Contains(pixelStage.Hash))
+        {
+            return "excluded";
+        }
+
+        var placement = 0u;
+        for (var index = 0; index < count; index++)
+        {
+            placement |= (uint)(index + 1) << (index * 4);
+        }
+
+        variant = SubsetJoinVariant(upcoming, description, in union, 0, placement);
+        return variant is null ? "compiling" : null;
+    }
+
+    /// <summary>
+    /// Whether a draw continues the open union pass in the smaller set it was opened for, before
+    /// any draw into the larger set: the draw would have continued that set's own pass, so what
+    /// such a continuation needs (CanContinuePass) is what it needs here, and a pipeline that
+    /// writes none of the extra attachments. A draw into that set that cannot have one ends the
+    /// pass (_unionConflict says why).
+    /// </summary>
+    private bool ContinueUnionPass(in RenderingState state, MetalPipelineEntry? upcoming)
+    {
+        if (_openUnion is not { } union || _openUnionHit || !_renderingActive || _renderEncoder == 0)
+        {
+            return false;
+        }
+
+        ref readonly var open = ref _renderingState;
+        var count = (int)union.Subset.ColorAttachmentCount;
+        if (state.ColorAttachmentCount != (uint)count || _attachmentCount != count ||
+            _passAttachmentCount != count + union.ExtraCount ||
+            state.Width != open.Width || state.Height != open.Height ||
+            state.Layers != open.Layers || state.Samples != open.Samples)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < count; index++)
+        {
+            ref readonly var next = ref state.ColorAttachments[index];
+            ref readonly var opened = ref open.ColorAttachments[index];
+            if (next.IsClear || next.View.Handle != opened.View.Handle || next.Format != opened.Format ||
+                _attachmentLevels[index] != _passLevels[index] || _attachmentSlices[index] != _passSlices[index] ||
+                _attachmentDepthPlanes[index] != _passDepthPlanes[index])
+            {
+                return false;
+            }
+        }
+
+        ref readonly var nextDepth = ref state.DepthStencilAttachment;
+        ref readonly var openDepth = ref open.DepthStencilAttachment;
+        if (nextDepth.DepthClear || nextDepth.StencilClear || nextDepth.View.Handle != openDepth.View.Handle ||
+            nextDepth.HasDepth != openDepth.HasDepth || nextDepth.HasStencil != openDepth.HasStencil ||
+            (nextDepth.View.Handle != 0 &&
+                (_depthAttachmentLevel != _passDepthLevel || _depthAttachmentSlice != _passDepthSlice)))
+        {
+            return false;
+        }
+
+        if (upcoming is null)
+        {
+            _unionConflict = "pipeline";
+            return false;
+        }
+
+        _unionConflict = UnionDrawRefusal(union, in open, count, upcoming, out var variant);
+        if (_unionConflict is not null)
+        {
+            return false;
+        }
+
+        _joinedPipeline = upcoming;
+        _joinedVariant = variant;
+        _unionContinued++;
+        return true;
+    }
+
+    // The cause the pass-end counters give the open pass (PassProfileNoteEnd), kept for a union pass.
+    private void NoteUnionPassEnd(string cause)
+    {
+        if (_openUnion is not null && _renderingActive)
+        {
+            _unionEndCause ??= cause;
+        }
     }
 
     // Whether a texture the next draw binds is this one or a view of it. A program that
@@ -441,8 +571,14 @@ internal sealed partial class MetalRenderHost
         }
         else
         {
+            // A pass a draw into the smaller set had to end was split where its own pass would
+            // not have been: one such miss forgets the set.
+            var conflict = _unionConflict is not null && _unionEndCause == "target";
+            var cause = conflict ? "conflict-" + _unionConflict : _unionEndCause ?? "end";
+            ref var count = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_unionMissCauses, cause, out _);
+            count++;
             _unionMisses++;
-            if (++union.Misses >= 2)
+            if (++union.Misses >= 2 || conflict)
             {
                 foreach (var (key, value) in _unionPredictions)
                 {
@@ -457,5 +593,6 @@ internal sealed partial class MetalRenderHost
 
         _openUnion = null;
         _openUnionHit = false;
+        _unionEndCause = null;
     }
 }

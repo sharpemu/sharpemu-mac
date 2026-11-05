@@ -280,11 +280,16 @@ internal sealed unsafe class MetalPassRig : IDisposable
         host.Draw(6, 1, 0, 0);
     }
 
-    // A stage that samples these textures and binds these buffers.
-    public static MetalRenderHost.MetalStageBindings Stage(nint[]? textures = null, MetalGuestRange[]? buffers = null) =>
+    // A stage that samples these textures and binds these buffers; with deviceAddresses its
+    // program reaches guest memory through device addresses, as Demon's Souls' G-buffer programs do.
+    public static MetalRenderHost.MetalStageBindings Stage(
+        nint[]? textures = null, MetalGuestRange[]? buffers = null, bool deviceAddresses = false) =>
         new()
         {
-            Program = new ShaderProgramInfo { Stage = ShaderStageKind.Vertex, Bindings = new BindingLayout() },
+            Program = new ShaderProgramInfo
+            {
+                Stage = ShaderStageKind.Vertex, Bindings = new BindingLayout(), UsesDeviceAddresses = deviceAddresses,
+            },
             Textures = textures ?? [],
             MipTextures = new nint[]?[textures?.Length ?? 0],
             ImageCount = textures?.Length ?? 0,

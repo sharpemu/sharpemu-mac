@@ -918,6 +918,7 @@ internal sealed partial class MetalRenderHost
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.RenderPassBegin);
         _joinedPipeline = null;
         _joinedVariant = null;
+        _unionConflict = null;
         if (_deferredFills.Count != 0 && UpcomingDrawSeesDeferredFill())
         {
             // The draw may read or write bytes a fill the pass holds lands in: the pass ends
@@ -972,6 +973,14 @@ internal sealed partial class MetalRenderHost
         }
 
         if (continues && (launch is not { } requested || TryTakePreparedLaunch(requested)))
+        {
+            return;
+        }
+
+        // A draw into the set a union pass was opened for, before any into the larger set,
+        // continues it as it would have continued that set's own pass (MetalRenderHost.UnionPass.cs).
+        if (!continues && launch is null && !foldedClear && _pendingClears.Count == 0 && scratchMask == 0 &&
+            _passScratchMask == 0 && !_imageCache.HasDeferredRefreshes && ContinueUnionPass(in state, upcoming))
         {
             return;
         }
