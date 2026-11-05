@@ -111,7 +111,10 @@ internal sealed partial class MetalRenderHost
     internal bool PacketPoolEnabled = PacketPool;
 
     private const int PacketPoolLimit = 512;
-    private readonly Stack<MetalBindingPacket> _packetPool = new();
+    // Lock-free: the worker returns a packet per stage of every draw while the resolving threads rent them, and a
+    // lock both take contends. The queue reuses its ring, so a pool under its limit allocates nothing.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<MetalBindingPacket> _packetPool = new();
+    private int _packetPoolCount;
 
     internal enum PacketRefusal
     {
@@ -278,10 +281,13 @@ internal sealed partial class MetalRenderHost
 
     private MetalBindingPacket? RentPacket()
     {
-        lock (_packetPool)
+        if (!_packetPool.TryDequeue(out var packet))
         {
-            return _packetPool.TryPop(out var packet) ? packet : null;
+            return null;
         }
+
+        Interlocked.Decrement(ref _packetPoolCount);
+        return packet;
     }
 
     // On the worker, once PrepareBindings is done with a packet it took. The snapshot stops naming it first, so no later
@@ -298,12 +304,14 @@ internal sealed partial class MetalRenderHost
         // checks for reuse and rents on one thread, so it never reads a packet it is refilling.
         Interlocked.CompareExchange(ref packet.Snapshot.BindingPacket, null, packet);
 
-        lock (_packetPool)
+        // The count runs ahead of the queue by at most the packets in flight; the limit only bounds the pool.
+        if (Interlocked.Increment(ref _packetPoolCount) <= PacketPoolLimit)
         {
-            if (_packetPool.Count < PacketPoolLimit)
-            {
-                _packetPool.Push(packet);
-            }
+            _packetPool.Enqueue(packet);
+        }
+        else
+        {
+            Interlocked.Decrement(ref _packetPoolCount);
         }
     }
 
