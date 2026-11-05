@@ -40,7 +40,7 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
 
     // Three images sampled through one sampler and summed (T# s[0:7], s[8:15], s[16:23], S# s[24:27]; the
     // primitive mask is s28), the way a material pass reads several textures.
-    private static readonly uint[] SampledThree =
+    internal static readonly uint[] SampledThree =
     [
         0xBEFC031C,                // s_mov_b32 m0, s28
         0xC8080000,                // v_interp_p1_f32_e32 v2, v0, attr0.x
@@ -90,6 +90,9 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
     // Production: Mixed with an occlusion dump after every draw and an end-of-pipe label after every eighth, as a
     // title's frame has them.
     private enum Variation { Same, AlternatingTexture, AlternatingProgram, PassChurn, Mixed, Production }
+
+    private static readonly MethodInfo PrefetchCounters =
+        typeof(MetalRenderHost).GetMethod("FormatPrefetchCounters", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
     private static readonly FieldInfo CpOverlayField =
         typeof(MetalRenderHost).GetField("_cpOverlay", BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -265,6 +268,7 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
             var warmRounds = results.Count == 0 ? warm * 2 : warm;
             for (var round = 0; round < warmRounds + rounds; round++)
             {
+                if (round == warmRounds) _ = PrefetchCounters.Invoke(rig.Host, null);
                 RenderPasses.SetValue(rig.Host, 0L);
                 var before = profiling ? phases.Select(phase => PhaseTicks(phase)).ToArray() : null;
                 rig.Host.CommandStream.EnqueueGraphics(streamAddress, (uint)words.Length, ++submissionId, null);
@@ -307,6 +311,17 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
                 }
             }
 
+            var prefetchCounters = (string)PrefetchCounters.Invoke(rig.Host, null)!;
+            // FNV over both colour targets after the variation's last round, to compare the paths' results.
+            var checksum = 0xCBF29CE484222325UL;
+            foreach (var color in colors)
+            {
+                foreach (var word in rig.Read<uint>(color, (int)(TargetSize * TargetSize * 4)))
+                {
+                    checksum = (checksum ^ word) * 0x100000001B3UL;
+                }
+            }
+
             microseconds.Sort();
             cpuMicroseconds.Sort();
             var median = microseconds[microseconds.Count / 2];
@@ -327,8 +342,10 @@ public sealed class DrawRecordBenchTests(ITestOutputHelper output) : SceneTestBa
                 allocatedBytesPerDraw = allocatedBytes / (double)(rounds * DrawsPerSubmit),
                 gen0CollectionsPerThousandDraws = gen0Collections * 1000.0 / (rounds * DrawsPerSubmit),
                 hostDrawMicrosecondsPerDraw = hostDrawMilliseconds * 1000.0 / (rounds * DrawsPerSubmit),
-                phaseMicrosecondsPerDraw = phaseTotals.Where(pair => pair.Value / rounds >= 0.05)
-                    .OrderByDescending(pair => pair.Value).ToDictionary(pair => pair.Key, pair => Math.Round(pair.Value / rounds, 2)),
+                checksum = $"{checksum:X16}",
+                counters = prefetchCounters,
+                phaseMicrosecondsPerDraw = phaseTotals.Where(pair => pair.Value / rounds >= 0.005)
+                    .OrderByDescending(pair => pair.Value).ToDictionary(pair => pair.Key, pair => Math.Round(pair.Value / rounds, 3)),
             });
         }
 
