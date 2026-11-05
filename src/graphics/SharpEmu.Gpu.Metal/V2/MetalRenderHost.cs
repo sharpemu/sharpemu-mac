@@ -818,6 +818,20 @@ internal sealed partial class MetalRenderHost :
         return 0;
     }
 
+    /// <summary>
+    /// Commits, waits for the GPU to finish everything committed, and returns the GPU time
+    /// the finished submissions took since the last call (the synthetic pass benchmark).
+    /// </summary>
+    internal double TakeGpuBusySecondsWhenIdle()
+    {
+        FlushAndWaitForGpu();
+        DrainFinishedSubmissions();
+        var seconds = _gpuBusySeconds;
+        _gpuBusySeconds = 0;
+        _gpuBusySamples = 0;
+        return seconds;
+    }
+
     /// <summary>Reads and releases every submission the GPU has finished.</summary>
     private void DrainFinishedSubmissions()
     {
@@ -1618,7 +1632,8 @@ internal sealed partial class MetalRenderHost :
 
         // A label held for the commit over these bytes lands first, so the fill overwrites it in stream order.
         OrderAfterDeferredCopies(address, size);
-        if (TryFillInComputeEncoder(address, size, value, in range))
+        if (TryDeferFillToPassEnd(address, size, value, in range) ||
+            TryFillInComputeEncoder(address, size, value, in range))
         {
             _imageCache.InvalidateMemoryFromGpu(address, size);
             NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.Fill);
@@ -1637,37 +1652,7 @@ internal sealed partial class MetalRenderHost :
         WaitForPreviousEncoder(encoder, render: false);
         try
         {
-            var bytes = (byte)value;
-            if (value == bytes * 0x01010101u)
-            {
-                MetalNative.SendFillBuffer(
-                    encoder,
-                    SelFillBuffer,
-                    range.Buffer,
-                    new NsRange { Location = (nuint)range.Offset, Length = (nuint)range.Size },
-                    bytes);
-            }
-            else
-            {
-                // A non-uniform dword needs a pattern source; one ring page is enough
-                // and the blit repeats it across the destination.
-                var pattern = _guestMemory.Allocate(Math.Min(size, 64 * 1024), 256, out var span);
-                var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(span);
-                words.Fill(value);
-                for (var written = 0UL; written < size;)
-                {
-                    var chunk = Math.Min(pattern.Size, size - written);
-                    MetalNative.SendCopyBuffer(
-                        encoder,
-                        SelCopyBuffer,
-                        pattern.Buffer,
-                        (nuint)pattern.Offset,
-                        range.Buffer,
-                        (nuint)(range.Offset + written),
-                        (nuint)chunk);
-                    written += chunk;
-                }
-            }
+            EncodeBlitFill(encoder, range.Buffer, range.Offset, range.Size, value);
         }
         finally
         {
@@ -1682,6 +1667,41 @@ internal sealed partial class MetalRenderHost :
         _imageCache.InvalidateMemoryFromGpu(address, size);
         NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.Fill);
         Interlocked.Increment(ref _gpuFills);
+    }
+
+    // A fill of size bytes at buffer + offset, in an open blit encoder.
+    private void EncodeBlitFill(nint encoder, nint buffer, ulong offset, ulong size, uint value)
+    {
+        var bytes = (byte)value;
+        if (value == bytes * 0x01010101u)
+        {
+            MetalNative.SendFillBuffer(
+                encoder,
+                SelFillBuffer,
+                buffer,
+                new NsRange { Location = (nuint)offset, Length = (nuint)size },
+                bytes);
+            return;
+        }
+
+        // A non-uniform dword needs a pattern source; one ring page is enough
+        // and the blit repeats it across the destination.
+        var pattern = _guestMemory.Allocate(Math.Min(size, 64 * 1024), 256, out var span);
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(span);
+        words.Fill(value);
+        for (var written = 0UL; written < size;)
+        {
+            var chunk = Math.Min(pattern.Size, size - written);
+            MetalNative.SendCopyBuffer(
+                encoder,
+                SelCopyBuffer,
+                pattern.Buffer,
+                (nuint)pattern.Offset,
+                buffer,
+                (nuint)(offset + written),
+                (nuint)chunk);
+            written += chunk;
+        }
     }
 
     private void WriteGuestPattern(ulong address, ulong size, uint value)
@@ -2885,6 +2905,7 @@ internal sealed partial class MetalRenderHost :
             $"labels_deferred={TakeDeferredLabelWrites()} label_lookup=[{TakeDeferredLabelLookupStats()}] clears_folded={foldedClears} " +
             $"clears_encoded={encodedClears} depth_joins={depthJoins} depth_join_sampled={depthJoinsSampled} depth_join_copies={depthJoinsCopies} " +
             $"subset_joins={subsetJoins} subset_join_sampled={subsetJoinsSampled}{TakeSubsetRefusals()} " +
+            $"{TakeUnionPassText()} flush_hold=[{FormatHeldCommits()}] {FormatDeferredFills()} " +
             $"transfers=[{TakeTransferCauses()}]" +
             (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +
             $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()} " +

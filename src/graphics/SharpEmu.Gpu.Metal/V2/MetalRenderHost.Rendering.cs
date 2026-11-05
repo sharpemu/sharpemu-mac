@@ -918,6 +918,14 @@ internal sealed partial class MetalRenderHost
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.RenderPassBegin);
         _joinedPipeline = null;
         _joinedVariant = null;
+        if (_deferredFills.Count != 0 && UpcomingDrawSeesDeferredFill())
+        {
+            // The draw may read or write bytes a fill the pass holds lands in: the pass ends
+            // here, which encodes the fill, and the draw begins one of its own after it.
+            _deferredFillsLandedEarly++;
+            EndEncoders(PassEndCause.Other);
+        }
+
         // Before anything else, because this runs ahead of every draw and is therefore
         // the last moment at which a waiting clear is still invisible. Whatever this
         // pass cannot perform itself is encoded below, where no encoder is open.
@@ -957,6 +965,12 @@ internal sealed partial class MetalRenderHost
         // that pass began, so the pass cannot be continued: it is resolved below instead.
         var continues = !foldedClear && _pendingClears.Count == 0 && !_imageCache.HasDeferredRefreshes &&
             scratchMask == _passScratchMask && CanContinuePass(in state);
+        if (continues && _openUnion is not null)
+        {
+            // A draw into the union pass's whole set: the extra attachments were wanted.
+            _openUnionHit = true;
+        }
+
         if (continues && (launch is not { } requested || TryTakePreparedLaunch(requested)))
         {
             return;
@@ -996,6 +1010,7 @@ internal sealed partial class MetalRenderHost
             else
             {
                 _passEndTarget++;
+                LearnUnionPass(in state);
             }
 
             PassProfileNoteEnd(clears ? "clear" : "target");
@@ -1016,16 +1031,34 @@ internal sealed partial class MetalRenderHost
             EncodeIndirectLaunches(pending);
         }
 
+        // A pass whose set was last followed by a larger one opens with the larger one
+        // (MetalRenderHost.UnionPass.cs); the draw is drawn with a variant that leaves the extra
+        // attachments alone, and the arrays describe them while the pass is made.
+        var union = PlanUnionPass(in state, upcoming, scratchMask, launch is not null, out var unionState, out var unionVariant);
+        var ownAttachments = (int)state.ColorAttachmentCount;
+        var opening = state;
+        if (union is not null)
+        {
+            for (var extra = 0; extra < union.ExtraCount; extra++)
+            {
+                _unionSaved[extra] = CaptureUnionAttachment(default, ownAttachments + extra);
+                InstallUnionAttachment(in union.Extras[extra], ownAttachments + extra);
+            }
+
+            _attachmentCount = ownAttachments + union.ExtraCount;
+            opening = unionState;
+        }
+
         ChooseElidedLoads(in state, upcoming, upcomingVertexCount, upcomingFirstVertex);
-        ResolveDeferredRefreshes(in state);
+        ResolveDeferredRefreshes(in opening);
         var commandBuffer = EnsureCommandBuffer();
         // A depth target with more samples than the pass rasterises with is drawn through a
         // one-sample proxy (MetalRenderHost.MixedSampleDepth), filled before the pass begins.
         var depthLevel = _depthAttachmentLevel;
         var depthSlice = _depthAttachmentSlice;
-        ref readonly var attachedDepth = ref state.DepthStencilAttachment;
+        ref readonly var attachedDepth = ref opening.DepthStencilAttachment;
         var depthTexture = attachedDepth.View.Handle != 0 && (attachedDepth.HasDepth || attachedDepth.HasStencil)
-            ? AttachDepthTexture(commandBuffer, (nint)attachedDepth.View.Handle, state.Samples,
+            ? AttachDepthTexture(commandBuffer, (nint)attachedDepth.View.Handle, opening.Samples,
                 attachedDepth.HasDepth && attachedDepth.DepthClear, attachedDepth.HasStencil && attachedDepth.StencilClear,
                 ref depthLevel, ref depthSlice)
             : 0;
@@ -1040,9 +1073,9 @@ internal sealed partial class MetalRenderHost
         try
         {
             var colors = MetalNative.Send(descriptor, SelColorAttachments);
-            for (var index = 0; index < state.ColorAttachmentCount; index++)
+            for (var index = 0; index < opening.ColorAttachmentCount; index++)
             {
-                ref readonly var attachment = ref state.ColorAttachments[index];
+                ref readonly var attachment = ref opening.ColorAttachments[index];
                 var slot = MetalNative.SendAtIndex(colors, SelObjectAtIndex, (nuint)index);
                 if ((scratchMask & (1u << index)) != 0)
                 {
@@ -1070,7 +1103,10 @@ internal sealed partial class MetalRenderHost
                     NoteColorTargetRebuilt(index);
                 }
 
-                NoteColorTargetDrawn(index);
+                if (index < ownAttachments)
+                {
+                    NoteColorTargetDrawn(index);
+                }
 
                 MetalV2Native.SendVoidValue(slot, SelSetStoreAction, PendingStoreAction);
                 if (clears)
@@ -1082,8 +1118,8 @@ internal sealed partial class MetalRenderHost
                 }
             }
 
-            ref readonly var depthStencil = ref state.DepthStencilAttachment;
-            var attached = state.ColorAttachmentCount != 0;
+            ref readonly var depthStencil = ref opening.DepthStencilAttachment;
+            var attached = opening.ColorAttachmentCount != 0;
             if (depthStencil.View.Handle != 0 && (depthStencil.HasDepth || depthStencil.HasStencil) &&
                 (!depthStencil.HasDepth || depthStencil.DepthClear) && (!depthStencil.HasStencil || depthStencil.StencilClear))
             {
@@ -1136,25 +1172,25 @@ internal sealed partial class MetalRenderHost
             // area, or its fragments run for a single pixel.
             if (!attached)
             {
-                if (state.RasterizesWithoutAttachments)
+                if (opening.RasterizesWithoutAttachments)
                 {
-                    ConfigureAttachmentlessPass(descriptor, state.Samples, state.Width, state.Height);
+                    ConfigureAttachmentlessPass(descriptor, opening.Samples, opening.Width, opening.Height);
                 }
                 else
                 {
-                    ConfigureAttachmentlessPass(descriptor, state.Samples);
+                    ConfigureAttachmentlessPass(descriptor, opening.Samples);
                 }
 
                 _targetlessPasses++;
             }
 
-            if (state.Layers > 1)
+            if (opening.Layers > 1)
             {
-                MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetArrayLength, state.Layers);
+                MetalV2Native.SendVoidValue(descriptor, SelSetRenderTargetArrayLength, opening.Layers);
             }
 
-            CentreFirstDepthSample(descriptor, state.Samples, depthTexture);
-            _tinyPass = IsTinyPass(in state);
+            CentreFirstDepthSample(descriptor, opening.Samples, depthTexture);
+            _tinyPass = IsTinyPass(in opening);
             if (PpProbe && _tinyPass)
             {
                 EncodeTinyPassProbe(commandBuffer);
@@ -1171,13 +1207,13 @@ internal sealed partial class MetalRenderHost
             MetalMemoryTelemetry.RenderEncoders.Add();
             if (EncoderStatusEnabled)
             {
-                LabelEncoder(_renderEncoder, $"render {state.Width}x{state.Height}");
+                LabelEncoder(_renderEncoder, $"render {opening.Width}x{opening.Height}");
             }
             if (_renderEncoder == 0)
             {
                 throw Fatal(
-                    $"A Metal render command encoder could not be created: colors={state.ColorAttachmentCount} " +
-                    $"depth={depthStencil.HasDepth} stencil={depthStencil.HasStencil} area={state.Width}x{state.Height}.");
+                    $"A Metal render command encoder could not be created: colors={opening.ColorAttachmentCount} " +
+                    $"depth={depthStencil.HasDepth} stencil={depthStencil.HasStencil} area={opening.Width}x{opening.Height}.");
             }
 
             WaitForPreviousEncoder(_renderEncoder, render: true);
@@ -1190,7 +1226,7 @@ internal sealed partial class MetalRenderHost
         NoteRecordedWork();
         _renderingActive = true;
         _renderPassScope++;
-        _renderingState = state;
+        _renderingState = opening;
         ForgetEncoderState();
         if (launch is not null)
         {
@@ -1200,21 +1236,21 @@ internal sealed partial class MetalRenderHost
         _renderPasses++;
         var loadBefore = _loadBytes;
         var storeBefore = _storeBytes;
-        NoteAttachmentTraffic(in state);
+        NoteAttachmentTraffic(in opening);
         if (PassProfileEnabled)
         {
-            PassProfileDescribe(in state, _loadBytes - loadBefore, _storeBytes - storeBefore);
+            PassProfileDescribe(in opening, _loadBytes - loadBefore, _storeBytes - storeBefore);
         }
-        NotePassIdentity(in state);
+        NotePassIdentity(in opening);
         if (MetalV2Diagnostics.Verbose || _renderPasses < 4096)
         {
-            var first = state.ColorAttachmentCount != 0 ? state.ColorAttachments[0] : default;
-            ref readonly var passDepth = ref state.DepthStencilAttachment;
+            var first = opening.ColorAttachmentCount != 0 ? opening.ColorAttachments[0] : default;
+            ref readonly var passDepth = ref opening.DepthStencilAttachment;
             MetalV2Diagnostics.InfoOnce(
-                $"pass:{state.Width}x{state.Height}:{state.Samples}:{state.ColorAttachmentCount}:" +
+                $"pass:{opening.Width}x{opening.Height}:{opening.Samples}:{opening.ColorAttachmentCount}:" +
                 $"{(int)first.Format}:{first.IsClear}:{passDepth.HasDepth}:{passDepth.DepthClear}",
-                $"render pass {state.Width}x{state.Height} samples={state.Samples} layers={state.Layers} " +
-                $"colors={state.ColorAttachmentCount} format={(int)first.Format} clear={first.IsClear} " +
+                $"render pass {opening.Width}x{opening.Height} samples={opening.Samples} layers={opening.Layers} " +
+                $"colors={opening.ColorAttachmentCount} format={(int)first.Format} clear={first.IsClear} " +
                 $"depth={passDepth.HasDepth} depth_clear={passDepth.DepthClear} stencil={passDepth.HasStencil}.");
         }
         _passAttachmentCount = _attachmentCount;
@@ -1236,6 +1272,21 @@ internal sealed partial class MetalRenderHost
         _passDepthLevel = _depthAttachmentLevel;
         _passDepthSlice = _depthAttachmentSlice;
         _passDepthTexelBytes = _depthTexelBytes;
+        if (union is not null)
+        {
+            // The arrays go back to describing the draw's own attachments.
+            _attachmentCount = ownAttachments;
+            for (var extra = 0; extra < union.ExtraCount; extra++)
+            {
+                InstallUnionAttachment(in _unionSaved[extra], ownAttachments + extra);
+            }
+
+            _openUnion = union;
+            _openUnionHit = false;
+            _joinedPipeline = upcoming;
+            _joinedVariant = unionVariant;
+            _unionOpened++;
+        }
     }
 
     // A pass with no attachment takes its area and its sample count from the
@@ -1309,11 +1360,14 @@ internal sealed partial class MetalRenderHost
             EndAndReleaseEncoder(_renderEncoder, render: true);
             _renderEncoder = 0;
             _passScratchMask = 0;
+            // The fills the pass held land right behind it (MetalRenderHost.DeferredFills.cs).
+            EncodeDeferredFills();
             NativeOcclusionFinish();
             PassProfileClose();
         }
 
         FinishMixedDepth();
+        FinishUnionPass();
         _renderingActive = false;
         _renderingState = default;
         _renderPassSerial++;

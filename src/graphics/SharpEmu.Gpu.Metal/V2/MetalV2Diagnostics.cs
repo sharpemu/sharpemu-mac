@@ -333,6 +333,12 @@ internal static class MetalV2Diagnostics
     public static readonly bool JoinColorSubsets =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_JOIN_SUBSETS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_UNION_PASSES=0 opens every pass with the attachments of the draw that
+    // begins it and joins no mesh draw, as before. Otherwise a pass whose attachment set was last
+    // followed by a superset of it is opened with that superset (MetalRenderHost.UnionPass.cs).
+    public static readonly bool UnionPasses =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_UNION_PASSES"), "0", StringComparison.Ordinal);
+
     // SHARPEMU_METAL_V2_DCC_CLAIM_FIRST=1 settles a DCC slice whose claim stands from the
     // claim alone (MetalImageCache.Tracking.cs) instead of querying pending writes and reading
     // the slice first. Off by default: with it on, SH renders its dark room and everything
@@ -389,6 +395,22 @@ internal static class MetalV2Diagnostics
 
     public static readonly int CoalesceMaxMicroseconds =
         PositiveInt("SHARPEMU_METAL_V2_FLUSH_COALESCE_US", 2000);
+
+    // SHARPEMU_METAL_V2_FLUSH_HOLD_PASS=0 commits a coalesced Stream flush at its limit even
+    // when that ends the open render pass, as before. Otherwise a limit reached with a pass open
+    // holds the commit until no pass is open, for at most SHARPEMU_METAL_V2_FLUSH_HOLD_PASS_US
+    // after the first deferred flush (MetalCommandStream.cs, HoldsCommitForPass).
+    public static readonly bool HoldFlushForPass =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FLUSH_HOLD_PASS"), "0", StringComparison.Ordinal);
+
+    // SHARPEMU_METAL_V2_DEFER_PASS_FILLS=0 ends the open render pass for every guest fill, as
+    // before. Otherwise a fill recorded in a pass lands when the pass ends, or sooner when work
+    // that may see its bytes comes (MetalRenderHost.DeferredFills.cs).
+    public static readonly bool DeferPassFills =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_PASS_FILLS"), "0", StringComparison.Ordinal);
+
+    public static readonly int HoldFlushMaxMicroseconds =
+        PositiveInt("SHARPEMU_METAL_V2_FLUSH_HOLD_PASS_US", 4000);
 
     private static int PositiveInt(string name, int fallback) =>
         int.TryParse(Environment.GetEnvironmentVariable(name), System.Globalization.NumberStyles.Integer,

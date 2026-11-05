@@ -47,7 +47,8 @@ public static partial class Gen5MslTranslator
             IReadOnlyList<Gen5ShaderInstruction> instructions,
             ShaderClipSpaceTransform clip)
         {
-            if (clip.DepthPlanes != ShaderDepthPlanes.None || clip.UserClipPlanes is { Length: > 0 })
+            var planes = clip.DepthPlanes != ShaderDepthPlanes.None || clip.UserClipPlanes is { Length: > 0 };
+            if (planes && !ClippedPositionsEvaluated)
             {
                 // The program clips planes these positions do not describe.
                 return null;
@@ -56,7 +57,8 @@ public static partial class Gen5MslTranslator
             var positions = new float[ConstantPositionVertices * 4];
             for (uint vertex = 0; vertex < ConstantPositionVertices; vertex++)
             {
-                if (!TryEvaluatePosition(instructions, vertex, out var position))
+                if (!TryEvaluatePosition(instructions, vertex, out var position) ||
+                    (planes && !PlanesKeepWhole(position, clip)))
                 {
                     return null;
                 }
@@ -114,6 +116,55 @@ public static partial class Gen5MslTranslator
             }
 
             return positions;
+        }
+
+        // SHARPEMU_METAL_V2_ELIDE_CLIPPED_LOADS=0 gives up on every program that clips guest depth
+        // or user planes, as before. Otherwise such a program's positions are still known when
+        // every plane keeps every evaluated vertex: a clip distance is linear over a primitive, so
+        // one that is not negative at any corner clips nothing of it. Demon's Souls' full-screen
+        // passes clip the far plane (w - z, zero for their z = w = 1) and so never elided a load.
+        private static readonly bool ClippedPositionsEvaluated = PerfSwitches.Enabled("SHARPEMU_METAL_V2_ELIDE_CLIPPED_LOADS");
+
+        // A user plane's distance is a dot product the host may round differently (fused); only
+        // one clear of zero by this much is taken as keeping the vertex.
+        private const float UserPlaneMargin = 1e-4f;
+
+        /// <summary>Whether every guest plane the program clips with clip distances keeps
+        /// this guest clip-space position (HostPlaneDistances, before the host transform).</summary>
+        internal static bool PlanesKeepWhole(ReadOnlySpan<float> position, ShaderClipSpaceTransform clip)
+        {
+            var (x, y, z, w) = (position[0], position[1], position[2], position[3]);
+            if (!float.IsFinite(x) || !float.IsFinite(y) || !float.IsFinite(z) || !float.IsFinite(w))
+            {
+                return false;
+            }
+
+            if ((clip.DepthPlanes & ShaderDepthPlanes.NearAtZero) != 0 && !(z >= 0f))
+            {
+                return false;
+            }
+
+            if ((clip.DepthPlanes & ShaderDepthPlanes.NearAtNegativeW) != 0 && !(z + w >= 0f))
+            {
+                return false;
+            }
+
+            if ((clip.DepthPlanes & ShaderDepthPlanes.Far) != 0 && !(w - z >= 0f))
+            {
+                return false;
+            }
+
+            var user = clip.UserClipPlanes ?? [];
+            for (var plane = 0; plane + 3 < user.Length; plane += 4)
+            {
+                var distance = (user[plane] * x) + (user[plane + 1] * y) + (user[plane + 2] * z) + (user[plane + 3] * w);
+                if (!(distance > UserPlaneMargin))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private static bool TryEvaluatePosition(
