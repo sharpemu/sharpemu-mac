@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using SharpEmu.Gpu.Metal.V2;
+using SharpEmu.Libs.VideoOut;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -24,6 +25,10 @@ public sealed class DispatchPrefetchBenchTests(ITestOutputHelper output) : Scene
 
     private static readonly MethodInfo PrefetchCounters =
         typeof(MetalRenderHost).GetMethod("FormatPrefetchCounters", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    private static readonly Func<RenderPhaseProfile.Phase, long> PhaseTicks =
+        typeof(RenderPhaseProfile).GetMethod("PhaseTicks", BindingFlags.Static | BindingFlags.NonPublic)!
+            .CreateDelegate<Func<RenderPhaseProfile.Phase, long>>();
 
     // SHARPEMU_DISPATCH_PREFETCH_BENCH_OUTPUT=<path>: microseconds per dispatch for a run of _DISPATCHES (256)
     // dispatches, _ROUNDS (40) times after _WARM (10), with an FNV checksum of every destination image so runs of
@@ -76,13 +81,19 @@ public sealed class DispatchPrefetchBenchTests(ITestOutputHelper output) : Scene
         var microseconds = new List<double>();
         _ = PrefetchCounters.Invoke(rig.Host, null);
         string counters = string.Empty;
+        // With SHARPEMU_PROFILE_RENDER=1, the self time per render phase (all threads' scopes) per dispatch.
+        var phases = Enum.GetValues<RenderPhaseProfile.Phase>().Where(phase => phase != RenderPhaseProfile.Phase.Count).ToArray();
+        var phaseTotals = new Dictionary<string, double>();
+        var collections = 0;
         for (var round = 0; round < warm + rounds; round++)
         {
             if (round == warm)
             {
                 _ = PrefetchCounters.Invoke(rig.Host, null);
+                collections = GC.CollectionCount(0);
             }
 
+            var before = RenderPhaseProfile.Enabled ? phases.Select(phase => PhaseTicks(phase)).ToArray() : null;
             var started = Stopwatch.GetTimestamp();
             rig.Host.CommandStream.EnqueueGraphics(stream, (uint)words.Length, submission++, null);
             rig.Drain();
@@ -90,10 +101,18 @@ public sealed class DispatchPrefetchBenchTests(ITestOutputHelper output) : Scene
             if (round >= warm)
             {
                 microseconds.Add(elapsed * 1e6 / Stopwatch.Frequency / dispatches);
+                for (var index = 0; before is not null && index < phases.Length; index++)
+                {
+                    var delta = PhaseTicks(phases[index]) - before[index];
+                    if (delta == 0) continue;
+                    var key = phases[index].ToString();
+                    phaseTotals[key] = phaseTotals.GetValueOrDefault(key) + delta * 1e6 / Stopwatch.Frequency / dispatches / rounds;
+                }
             }
         }
 
         counters = (string)PrefetchCounters.Invoke(rig.Host, null)!;
+        collections = GC.CollectionCount(0) - collections;
         var checksum = 0xCBF29CE484222325UL;
         foreach (var image in images)
         {
@@ -119,7 +138,10 @@ public sealed class DispatchPrefetchBenchTests(ITestOutputHelper output) : Scene
             p25MicrosecondsPerDispatch = microseconds[microseconds.Count / 4],
             minMicrosecondsPerDispatch = microseconds[0],
             checksum = $"{checksum:X16}",
+            gen0CollectionsPerThousandDispatches = collections * 1000.0 / (rounds * dispatches),
             counters,
+            phaseMicrosecondsPerDispatch = phaseTotals.Where(pair => pair.Value >= 0.005)
+                .OrderByDescending(pair => pair.Value).ToDictionary(pair => pair.Key, pair => Math.Round(pair.Value, 3)),
         }, new JsonSerializerOptions { WriteIndented = true }));
     }
 }
