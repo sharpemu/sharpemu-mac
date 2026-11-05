@@ -570,7 +570,7 @@ internal sealed partial class MetalRenderHost :
             switch (cause)
             {
                 case PassEndCause.Transfer: _passEndTransfer++; break;
-                case PassEndCause.Flush: _passEndFlush++; break;
+                case PassEndCause.Flush: _passEndFlush++; NotePassEndFlush(); break;
                 case PassEndCause.Present: _passEndPresent++; break;
                 default: _passEndOther++; break;
             }
@@ -625,6 +625,10 @@ internal sealed partial class MetalRenderHost :
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandFlush);
         // An upload left for a pass is made before the buffer it belongs in is committed.
         _imageCache.DrainDeferredRefreshes();
+        var reason = why == MetalFlushCause.Stream && _streamCommitReason is { } streamReason
+            ? streamReason
+            : FlushReasonName(why);
+        _streamCommitReason = null;
         if (_commandBuffer == 0)
         {
             return _nextSerial;
@@ -632,7 +636,9 @@ internal sealed partial class MetalRenderHost :
 
         _flushCauses[(int)why]++;
         _landDeferredLabels = true;
+        _passEndFlushReason = reason;
         EndEncoders(cause);
+        _passEndFlushReason = null;
         EncodePendingOcclusionReductions();
         MaterializePendingClears();
         _stagedStorageCopies?.EndSubmission();
@@ -2899,7 +2905,7 @@ internal sealed partial class MetalRenderHost :
             $"discarded_mb={(discardedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"cleared_mb={(clearedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"end_clear={endClearCount} end_target={endTargetCount} end_transfer={endTransferCount} " +
-            $"end_compute={endComputeCount} end_flush={endFlushCount} end_present={endPresentCount} " +
+            $"end_compute={endComputeCount} end_flush={endFlushCount} end_flush_by=[{TakePassEndFlushReasons()}] end_present={endPresentCount} " +
             $"end_other={endOtherCount} end_indirect={TakeIndirectPassEnds()} {TakeExecutorPassEnds()} targetless={targetlessCount} " +
             $"clears=[{TakeClearArrivals()}] clear_passes={clearPasses} " +
             $"clear_depth={clearDepthPasses} clear_mpx={(clearPixels / 1e6).ToString("F1", culture)} " +

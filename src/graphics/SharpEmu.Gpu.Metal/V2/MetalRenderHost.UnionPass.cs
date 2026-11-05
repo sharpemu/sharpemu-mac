@@ -33,7 +33,10 @@ namespace SharpEmu.Gpu.Metal.V2;
 // through device addresses while labels are held to the commit, which the subset join refuses
 // ("copies"), so every union pass ended at the second draw of the smaller set: two misses, the
 // set forgotten and learnt again, never a hit, and two passes more than without it each time.
-// The TBDR line's union_miss=[...] says how the passes that missed ended.
+// (The subset join now checks such a draw against the ranges binding ordered, so the draws into
+// the smaller set after the hit join as well: DepthOnlyJoin.cs, SHARPEMU_METAL_V2_JOIN_DEVICE_RANGES.)
+// The TBDR line's union_miss=[...] says how the passes that missed ended; one a commit ended
+// names the commit (flush-stream-capped, flush-labels, ...).
 // SHARPEMU_METAL_V2_UNION_PASSES=0 turns it off (and the mesh draws it lets join, too).
 internal sealed partial class MetalRenderHost
 {
@@ -496,7 +499,8 @@ internal sealed partial class MetalRenderHost
     {
         if (_openUnion is not null && _renderingActive)
         {
-            _unionEndCause ??= cause;
+            // A commit says which one it was: a capped hold, labels owed to a guest, a host wait...
+            _unionEndCause ??= cause == "flush" && _passEndFlushReason is { } reason ? "flush-" + reason : cause;
         }
     }
 

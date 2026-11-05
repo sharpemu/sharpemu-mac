@@ -18,8 +18,11 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// vertex, mesh) alternate with draws that add a sixth (R16G16B16A16Sfloat), five times a
 /// frame; the second and third draw of each run reach memory through device addresses and
 /// follow a command-processor write held to the commit, as Demon's Souls' labels are; two
-/// guest fills land between draws; sixteen Stream submissions end with the stream busy, so the coalescing limit
-/// asks for a commit mid-frame; two full-screen single-draw passes follow. Each optimization
+/// guest fills land between draws; sixteen Stream submissions end with the stream busy, one of
+/// each segment's between its second and third draw, so the coalescing limit asks for a commit
+/// mid-frame; two full-screen single-draw passes follow. The capped configurations hold such a
+/// commit for no time at all, as Demon's Souls' G-buffer outlasts the hold limit, so the commit
+/// ends the pass unless the GPU still runs earlier work. Each optimization
 /// is measured alone and all together, and the targets and the filled bytes of all-on are
 /// compared with all-off byte for byte. The targets hold incompressible noise, so a split costs
 /// its full load and store here (about 8 µs/MB on an M4) where Demon's Souls' measured ~3.5
@@ -37,6 +40,7 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
     private const ulong FillBytes = 0xC000;
     private const ulong FillBase = MetalPassRig.GuestBase + 0x10_0000;
     private const ulong LabelBase = MetalPassRig.GuestBase + 0x8000;
+    private const ulong ConstantsBase = MetalPassRig.GuestBase + 0x9000;
     private const ulong TargetBase = MetalPassRig.GuestBase + 0x100_0000;
 
     private static readonly GpuFormat[] Shared =
@@ -47,10 +51,16 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
     private static readonly GpuFormat[] Union = [.. Shared, GpuFormat.R16G16B16A16Sfloat];
     private static readonly GpuFormat[] Post = [GpuFormat.R16G16B16A16Sfloat];
 
-    private readonly record struct Config(string Name, bool Union, bool Hold, bool Fills, bool Elide);
+    private readonly record struct Config(
+        string Name, bool Union, bool Hold, bool Fills, bool Elide, bool Ranges = false, bool Busy = false, bool Capped = false);
 
     private static readonly Config Off = new("off", false, false, false, false);
-    private static readonly Config On = new("all-on", true, true, true, true);
+    private static readonly Config On = new("all-on", true, true, true, true, true, true);
+
+    // What 79c942699 had on: every pass merge but the join's device-range check and the busy-GPU hold.
+    private static readonly Config Before = new("r15", true, true, true, true);
+    private static readonly Config CappedBefore = new("capped:r15", true, true, true, true, false, false, true);
+    private static readonly Config CappedOn = On with { Name = "capped:all-on", Capped = true };
 
     private static readonly Config[] Configs =
     [
@@ -61,11 +71,18 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
         new("elide-loads", false, false, false, true),
         // Each split the others leave in place hides the one a lone switch removes, so each is
         // also measured as what all-on loses without it.
-        new("on-no-union", false, true, true, true),
-        new("on-no-hold", true, false, true, true),
-        new("on-no-fills", true, true, false, true),
-        new("on-no-elide", true, true, true, false),
+        new("join-ranges", false, false, false, false, true),
+        new("on-no-union", false, true, true, true, true, true),
+        new("on-no-hold", true, false, true, true, true, false),
+        new("on-no-fills", true, true, false, true, true, true),
+        new("on-no-elide", true, true, true, false, true, true),
+        new("on-no-ranges", true, true, true, true, false, true),
+        Before,
         On,
+        CappedBefore,
+        new("capped:no-busy", true, true, true, true, true, false, true),
+        new("capped:no-ranges", true, true, true, true, false, true, true),
+        CappedOn,
     ];
 
     private sealed record Outcome(double[] GpuMs, double PassesPerFrame, byte[][] Bytes, string Counters);
@@ -75,15 +92,50 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
     {
         if (!RequireDevice()) return;
         var off = Run(Off, warmup: 1, frames: 1);
+        var before = Run(Before, warmup: 1, frames: 1);
         var on = Run(On, warmup: 1, frames: 1);
 
         output.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"passes/frame off={off.PassesPerFrame} on={on.PassesPerFrame} {on.Counters}"));
-        Assert.True(on.PassesPerFrame < off.PassesPerFrame);
-        Assert.Equal(off.Bytes.Length, on.Bytes.Length);
-        for (var index = 0; index < off.Bytes.Length; index++)
+            $"passes/frame off={off.PassesPerFrame} before={before.PassesPerFrame} on={on.PassesPerFrame} {on.Counters}"));
+        Assert.True(on.PassesPerFrame < before.PassesPerFrame);
+        Assert.True(before.PassesPerFrame < off.PassesPerFrame);
+        AssertSameBytes(off, before);
+        AssertSameBytes(off, on);
+    }
+
+    // Demon's Souls' commits capped mid-pass, with the GPU held busy so the result does not
+    // depend on how fast it ran the frame's earlier buffers: the busy-GPU hold keeps the union
+    // pass to its six-target draw, and the join keeps the five-target draws after it.
+    [Fact]
+    public void ADsShapedFrameWithCappedCommitsComesOutTheSameWithFewerPasses()
+    {
+        if (!RequireDevice()) return;
+        var off = Run(Off, warmup: 1, frames: 1);
+        var before = Run(CappedBefore, warmup: 1, frames: 1, gpuBusy: true);
+        var noBusy = Run(CappedOn with { Busy = false }, warmup: 1, frames: 1, gpuBusy: true);
+        var on = Run(CappedOn, warmup: 1, frames: 1, gpuBusy: true);
+        var idle = Run(CappedOn, warmup: 1, frames: 1, gpuBusy: false);
+
+        output.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"passes/frame off={off.PassesPerFrame} capped-before={before.PassesPerFrame} no-busy={noBusy.PassesPerFrame} " +
+            $"on={on.PassesPerFrame} idle-gpu={idle.PassesPerFrame}\n before: {before.Counters}\n on: {on.Counters}"));
+        Assert.Contains("end_flush_by=[stream-capped:", before.Counters, StringComparison.Ordinal);
+        Assert.True(noBusy.PassesPerFrame < before.PassesPerFrame);
+        Assert.True(on.PassesPerFrame < noBusy.PassesPerFrame);
+        // A GPU with nothing left to run gets the commit at the limit, as before.
+        Assert.Equal(noBusy.PassesPerFrame, idle.PassesPerFrame);
+        AssertSameBytes(off, before);
+        AssertSameBytes(off, noBusy);
+        AssertSameBytes(off, on);
+        AssertSameBytes(off, idle);
+    }
+
+    private static void AssertSameBytes(Outcome expected, Outcome actual)
+    {
+        Assert.Equal(expected.Bytes.Length, actual.Bytes.Length);
+        for (var index = 0; index < expected.Bytes.Length; index++)
         {
-            Assert.True(off.Bytes[index].AsSpan().SequenceEqual(on.Bytes[index]), $"target {index} differs");
+            Assert.True(expected.Bytes[index].AsSpan().SequenceEqual(actual.Bytes[index]), $"target {index} differs");
         }
     }
 
@@ -120,14 +172,21 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
         }
     }
 
-    private Outcome Run(Config config, int warmup, int frames, bool keepBytes = true)
+    private Outcome Run(Config config, int warmup, int frames, bool keepBytes = true, bool? gpuBusy = null)
     {
         using var rig = new MetalPassRig(Device.Value, 160UL * 1024 * 1024);
         var host = rig.Host;
         host.UnionPasses = config.Union;
         host.HoldFlushForPass = config.Hold;
         host.DeferPassFills = config.Fills;
+        host.JoinChecksDeviceRanges = config.Ranges;
+        host.HoldFlushWhileGpuBusy = config.Busy;
+        host.AssumeGpuBusy = gpuBusy;
         host.AssumeStreamBusy = true;
+        if (config.Capped)
+        {
+            host.HoldFlushTicks = 0;
+        }
 
         var shared = new PipelineHandle[Segments];
         var sharedVertex = new PipelineHandle[Segments];
@@ -166,10 +225,14 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
         var presentTarget = rig.MakeTarget(address, Post[0], Width, Height);
 
         var five = targets.AsSpan(0, Shared.Length).ToArray();
-        var deviceAddresses = MetalPassRig.Stage(deviceAddresses: true);
+        // The draws' own constants, apart from the labels held ahead of them.
+        var deviceAddresses = MetalPassRig.Stage(deviceAddresses: true, deviceRanges: [(ConstantsBase, 0x1000)]);
         _ = host.TakeGpuBusySecondsWhenIdle();
         _ = host.TakeUnionPasses();
         _ = host.TakeHeldCommits();
+        _ = host.TakeBusyHeldCommits();
+        _ = host.TakePassEndFlushReasons();
+        _ = host.TakeDeviceRangeJoinChecks();
         _ = host.TakeDeferredFills();
         _ = host.TakeElidedLoads();
         var gpuMs = new List<double>();
@@ -185,6 +248,12 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
                     rig.Draw(shared[segment], five);
                     host.RecordCommandProcessorWrite(LabelBase, BitConverter.GetBytes((ulong)frame), "WRITE_DATA");
                     rig.Draw(sharedVertex[segment], five, deviceAddresses);
+                }
+
+                // A submission ends between the five-target draws, before the six-target one.
+                ((ICommandStreamHost)host).Flush();
+                using (host.BeginPreparation())
+                {
                     host.RecordCommandProcessorWrite(LabelBase + 8, BitConverter.GetBytes((ulong)frame), "WRITE_DATA");
                     rig.Draw(sharedMesh[segment], five, deviceAddresses);
                     if (segment is 1 or 3)
@@ -196,7 +265,7 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
                     rig.Draw(union[segment], targets);
                 }
 
-                for (var flush = 0; flush < FlushesPerSegment; flush++)
+                for (var flush = 1; flush < FlushesPerSegment; flush++)
                 {
                     ((ICommandStreamHost)host).Flush();
                 }
@@ -219,7 +288,9 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
         }
 
         var counters = string.Create(CultureInfo.InvariantCulture,
-            $"union={host.TakeUnionPasses()} union_continued={host.TakeUnionContinued()} union_miss=[{host.TakeUnionMissCauses()}] flush_hold={host.TakeHeldCommits()} fills_deferred={host.TakeDeferredFills()} load_elided={host.TakeElidedLoads()}");
+            $"union={host.TakeUnionPasses()} union_continued={host.TakeUnionContinued()} union_miss=[{host.TakeUnionMissCauses()}] " +
+            $"flush_hold={host.TakeHeldCommits()} busy={host.TakeBusyHeldCommits()} end_flush_by=[{host.TakePassEndFlushReasons()}] " +
+            $"join_device_ranges={host.TakeDeviceRangeJoinChecks()} fills_deferred={host.TakeDeferredFills()} load_elided={host.TakeElidedLoads()}");
         var bytes = Array.Empty<byte[]>();
         if (keepBytes)
         {

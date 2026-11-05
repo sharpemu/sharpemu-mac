@@ -412,6 +412,16 @@ internal static class MetalV2Diagnostics
     public static readonly int HoldFlushMaxMicroseconds =
         PositiveInt("SHARPEMU_METAL_V2_FLUSH_HOLD_PASS_US", 4000);
 
+    // SHARPEMU_METAL_V2_FLUSH_HOLD_BUSY=0 commits a held Stream flush once the hold limit above
+    // is reached, as before. Otherwise it stays held past that limit while the GPU is still
+    // running a buffer committed earlier, for at most SHARPEMU_METAL_V2_FLUSH_HOLD_BUSY_US
+    // after the first deferred flush (MetalCommandStream.cs, HoldsCommitForBusyGpu).
+    public static readonly bool HoldFlushWhileGpuBusy =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FLUSH_HOLD_BUSY"), "0", StringComparison.Ordinal);
+
+    public static readonly int HoldFlushBusyMaxMicroseconds =
+        PositiveInt("SHARPEMU_METAL_V2_FLUSH_HOLD_BUSY_US", 16000);
+
     // SHARPEMU_METAL_V2_JOIN_DEVICE_RANGES=0 refuses every depth-only and subset join of a
     // device-address draw while a label copy is held, as before. Otherwise only one with a held
     // copy over a range its program reaches that binding did not order (MetalRenderHost.DepthOnlyJoin.cs).
