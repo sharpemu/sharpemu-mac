@@ -176,7 +176,7 @@ internal sealed partial class MetalRenderHost
 
             for (var index = 0; index < stage.ImageCount && index < stage.Requests.Length; index++)
             {
-                var data = stage.Requests[index].Description.Data;
+                var data = stage.RequestAt(index).Description.Data;
                 if (data.Size != 0 && DeferredFillsTouch(data.Address, data.Size))
                 {
                     return true;

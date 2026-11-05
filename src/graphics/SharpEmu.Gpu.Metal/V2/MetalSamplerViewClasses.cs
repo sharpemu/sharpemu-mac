@@ -13,6 +13,21 @@ internal static class MetalSamplerViewClasses
     internal const byte AllInteger = 1;
     private const byte AnyNonInteger = 2;
 
+    // As below, over a stage's prepared requests (MetalStageBindings.RequestAt).
+    internal static void Resolve(List<SampledImagePair> pairs, MetalRenderHost.MetalStageBindings stage, Span<byte> classes)
+    {
+        classes.Clear();
+        if (classes.IsEmpty) return;
+        foreach (var pair in pairs)
+        {
+            if (pair.Sampler >= classes.Length || pair.Image >= stage.ImageCount) continue;
+            ref var classification = ref classes[(int)pair.Sampler];
+            if (classification == AnyNonInteger) continue;
+            classification = ViewFormatRules.IsIntegerFormat(stage.RequestAt((int)pair.Image).View.Format)
+                ? AllInteger : AnyNonInteger;
+        }
+    }
+
     internal static void Resolve(List<SampledImagePair> pairs, ReadOnlySpan<ImageRequest> images, Span<byte> classes)
     {
         classes.Clear();
