@@ -232,6 +232,13 @@ public sealed record Gen5MslCodegenOptions(
     /// emitted as before. SHARPEMU_MSL_DECODED_FORMAT_LOADS=N sets it; 0 never calls the helper.</summary>
     public int DecodedFormatLoadThreshold { get; init; } = 16;
 
+    /// <summary>Decode a BUFFER_LOAD_FORMAT_* whose format is only known on the device through
+    /// sharpemu_format_fetch (format_fetch_prelude.msl) at any count: one element load, and only the
+    /// components the destinations select converted, with the general decoder's results. Covers the
+    /// bound, non-GLC path; the whole-dword fast path stays inline. SHARPEMU_MSL_FORMAT_FETCH=0 keeps
+    /// the inline decoder and the DecodedFormatLoadThreshold helper.</summary>
+    public bool FormatFetch { get; init; } = true;
+
     /// <summary>Experimental guarded forwarding of the last 128-bit LDS write in a
     /// single-wave mesh subgroup. SHARPEMU_MSL_MESH_LDS_FORWARDING=1.</summary>
     public bool MeshLdsForwarding { get; init; }
@@ -337,6 +344,7 @@ public sealed record Gen5MslCodegenOptions(
         LaneExactUnobservedWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_LANES") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
+        FormatFetch = Environment.GetEnvironmentVariable("SHARPEMU_MSL_FORMAT_FETCH") != "0",
         DecodedFormatLoadThreshold = int.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_DECODED_FORMAT_LOADS"), out var decodedLoads)
                 ? Math.Max(decodedLoads, 0) : 16,

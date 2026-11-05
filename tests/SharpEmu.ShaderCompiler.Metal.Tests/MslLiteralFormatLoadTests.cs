@@ -38,7 +38,7 @@ public sealed class MslLiteralFormatLoadTests(ITestOutputHelper output)
 
         // A format of narrower components keeps the descriptor-table form.
         var packed = Compile(14, Identity, offset: 16);
-        Assert.DoesNotContain("sharpemu_load_words<", packed.Source, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"sharpemu_load_words<\d>\(b\d", packed.Source);
         Assert.Contains("sharpemu_gfx10_formats[(", packed.Source, StringComparison.Ordinal);
     }
 

@@ -23,7 +23,8 @@ internal enum Gen5MslPreludes
     MipStatistics = 1 << 7,
     ScalarConstants = 1 << 8,
     DecodedFormatLoads = 1 << 9,
-    All = (1 << 10) - 1,
+    FormatFetch = 1 << 10,
+    All = (1 << 11) - 1,
 }
 
 // Compiles shader requests into Metal source with argument-buffer bindings.
@@ -395,6 +396,7 @@ public static partial class Gen5MslTranslator
         private bool _usesFormatLoads;
         private int _formatBufferLoads;
         private bool _usesDecodedFormatLoads;
+        private bool _usesFormatFetch;
         private bool _usesBufferOffset;
         // A GLC load or store: the program carries coherent_load_prelude.
         private bool _usesCoherentLoads;
@@ -1421,6 +1423,11 @@ public static partial class Gen5MslTranslator
                 preludes |= Gen5MslPreludes.DecodedFormatLoads;
             }
 
+            if (_usesFormatFetch)
+            {
+                preludes |= Gen5MslPreludes.FormatFetch;
+            }
+
             if (_usesCoherentLoads)
             {
                 preludes |= Gen5MslPreludes.CoherentLoads;
@@ -1457,7 +1464,7 @@ public static partial class Gen5MslTranslator
         internal static void AppendLeadingPreludes(StringBuilder source, Gen5MslPreludes preludes)
         {
             // The decoder (format_load_prelude.msl) reads the format tables.
-            if ((preludes & (Gen5MslPreludes.FormatLoads | Gen5MslPreludes.DecodedFormatLoads)) != 0)
+            if ((preludes & (Gen5MslPreludes.FormatLoads | Gen5MslPreludes.DecodedFormatLoads | Gen5MslPreludes.FormatFetch)) != 0)
             {
                 EmitFormatLoadPrelude(source);
             }
@@ -1503,6 +1510,11 @@ public static partial class Gen5MslTranslator
             if ((preludes & Gen5MslPreludes.DecodedFormatLoads) != 0)
             {
                 source.Append(MslTemplates.Render("format_load_prelude"));
+            }
+
+            if ((preludes & Gen5MslPreludes.FormatFetch) != 0)
+            {
+                source.Append(MslTemplates.Render("format_fetch_prelude"));
             }
 
             if ((preludes & (Gen5MslPreludes.CoherentLoads | Gen5MslPreludes.PairLocks)) != 0)
@@ -2938,6 +2950,27 @@ public static partial class Gen5MslTranslator
                 Line("{");
                 _indent++;
             }
+            // The element-at-once decoder (format_fetch_prelude.msl), called at any count.
+            if (_options.FormatFetch && memory.Fetch is not null && byteAddress.Contiguous)
+            {
+                _usesFormatFetch = true;
+                var fetched = Temp("uint4", memory.Fetch(byteAddress.Base, word3, componentCount));
+                var fetchedValues = new string[componentCount];
+                for (var destination = 0; destination < fetchedValues.Length; destination++)
+                {
+                    fetchedValues[destination] = $"{fetched}[{destination}]";
+                }
+
+                StoreFormatLoadComponents(vectorData, fetchedValues, d16, numberFormat);
+                if (dwordRun || packedRun)
+                {
+                    _indent--;
+                    Line("}");
+                }
+
+                return;
+            }
+
             // A program with many of these loads calls the decoder (format_load_prelude.msl).
             if (memory.Decode is not null && byteAddress.Contiguous &&
                 _options.DecodedFormatLoadThreshold > 0 && _formatBufferLoads >= _options.DecodedFormatLoadThreshold)
@@ -3294,7 +3327,8 @@ public static partial class Gen5MslTranslator
             Func<string, string, string, string> LoadWord,
             Func<uint, string, string>? LoadWords,
             bool ZeroInvalidFormat,
-            Func<string, string, uint, string>? Decode = null);
+            Func<string, string, uint, string>? Decode = null,
+            Func<string, string, uint, string>? Fetch = null);
 
         // A GLC load reads its words through the coherent helpers (coherent_load_prelude).
         private FormatMemory BindingFormatMemory(int bindingIndex, bool glc = false)
@@ -3310,7 +3344,11 @@ public static partial class Gen5MslTranslator
                 Decode: glc
                     ? null
                     : (address, word3, count) =>
-                        $"sharpemu_format_load_decoded(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address}, {word3}, {count}u)");
+                        $"sharpemu_format_load_decoded(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address}, {word3}, {count}u)",
+                Fetch: glc
+                    ? null
+                    : (address, word3, count) =>
+                        $"sharpemu_format_fetch(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address}, {word3}, {count}u)");
         }
 
         private string LoadFormatComponent(
