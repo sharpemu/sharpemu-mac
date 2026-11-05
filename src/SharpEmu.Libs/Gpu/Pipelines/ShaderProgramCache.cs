@@ -213,6 +213,9 @@ internal sealed class ProgramSourceEntry
 
     public IReadOnlyList<ProgramPermutation> Permutations => Volatile.Read(ref _permutations);
 
+    // The permutations as an array: a foreach over the list interface allocates an enumerator, per stage per draw.
+    internal ProgramPermutation[] PermutationArray => Volatile.Read(ref _permutations);
+
     public ProgramPermutation? LastPermutation;
 
     public void AddPermutation(ProgramPermutation permutation)
@@ -1080,7 +1083,7 @@ internal sealed class ShaderProgramCache
     {
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
         {
-            foreach (var candidate in entry.Permutations)
+            foreach (var candidate in entry.PermutationArray)
             {
                 var layout = candidate.Bindings;
                 if (layout.PushDataStartDword == PushDataStart(layout, pushDataCursor) && candidate.Specialization.Equals(specialization))
