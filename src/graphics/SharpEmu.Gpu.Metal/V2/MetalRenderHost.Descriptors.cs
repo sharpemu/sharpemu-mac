@@ -446,9 +446,9 @@ internal sealed partial class MetalRenderHost
         }
 
         var shaderData = prepared.ShaderData;
-        if (packet?.ShaderData is { } decoded)
+        if (packet is { HasShaderData: true })
         {
-            Array.Copy(decoded, shaderData, decoded.Length);
+            Array.Copy(packet.ShaderData, shaderData, packet.ShaderDataCount);
         }
         else
         {
@@ -461,6 +461,11 @@ internal sealed partial class MetalRenderHost
 
         stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, shaderDwords));
         stage.WriteCallData(shaderData.AsSpan(0, shaderDwords));
+        if (packet is not null)
+        {
+            RecyclePacket(packet);
+        }
+
         return prepared;
     }
 

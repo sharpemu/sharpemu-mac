@@ -139,8 +139,9 @@ public sealed class MetalBindingPacketTests
         var packet = Build(program, snapshot, shaderBase: 0x1234_5678_9ABCUL);
         var expected = new uint[layout.ShaderDataDwordCount];
         Assert.True(MetalRenderHost.WriteStageShaderData(expected, program, layout, program.Resources!.Info, snapshot, 0x1234_5678_9ABCUL));
-        Assert.Equal(expected, packet.ShaderData);
-        Assert.Equal([12u, 10u, 15u], packet.ShaderData![..3]);
+        Assert.True(packet.HasShaderData);
+        Assert.Equal(expected, packet.ShaderData[..packet.ShaderDataCount]);
+        Assert.Equal([12u, 10u, 15u], packet.ShaderData[..3]);
         Assert.Equal([0x5678_9ABCu, 0x1234u], packet.ShaderData![4..6]);
     }
 
@@ -150,7 +151,7 @@ public sealed class MetalBindingPacketTests
     {
         var (program, _, _) = Program([], [], [0, 7]);
         var packet = Build(program, Snapshot([], [], [1, 2, 3]));
-        Assert.Null(packet.ShaderData);
+        Assert.False(packet.HasShaderData);
     }
 
     // The masks hold 64 entries: a larger stage carries its shader data alone.
@@ -163,7 +164,32 @@ public sealed class MetalBindingPacketTests
         Assert.Null(packet.MemoKeys);
         Assert.False(packet.HasMemoKey(0));
         Assert.False(packet.HasMemoKey(64));
-        Assert.Equal(7u, packet.ShaderData![0]);
+        Assert.Equal(7u, packet.ShaderData[0]);
+    }
+
+    // A recycled packet is filled again from scratch: nothing it carried for its last stage survives into the next.
+    [Fact]
+    public void ARecycledPacketCarriesOnlyWhatItsNewStageDecodes()
+    {
+        var (first, _, _) = Program([Storage(), Sampled()], [new SamplerResource()], [0, 1, 2]);
+        var used = Build(first, Snapshot([Descriptors.Texture(0x10_0000, Rgba8, 16, 16), Descriptors.Texture(0x20_0000, Rgba8, 8, 8)],
+            [Descriptors.Sampler()], [5, 6, 7]));
+        Assert.True(used.HasResolution(0) && used.HasMemoKey(1) && used.HasSampler(0));
+
+        var (second, resources, layout) = Program([Sampled()], [], [1]);
+        var snapshot = Snapshot([[1, 2, 3]], [], [8, 9]);
+        var packet = MetalRenderHost.BuildBindingPacket(second, resources, layout, snapshot, 0x40, used)!;
+        Assert.Same(used, packet);
+        Assert.Same(second, packet.Program);
+        Assert.Same(layout, packet.Layout);
+        Assert.Same(snapshot, packet.Snapshot);
+        Assert.Equal(0x40UL, packet.ShaderBase);
+        Assert.False(packet.HasMemoKey(0) || packet.HasResolution(0) || packet.HasMemoKey(1) || packet.HasSampler(0));
+        Assert.False(packet.Shared);
+        Assert.True(packet.HasShaderData);
+        var expected = new uint[layout.ShaderDataDwordCount];
+        Assert.True(MetalRenderHost.WriteStageShaderData(expected, second, layout, resources.Info, snapshot, 0x40));
+        Assert.Equal(expected, packet.ShaderData[..packet.ShaderDataCount]);
     }
 
     private static ShaderImageShape ShapeOf(ImageResource image) => MetalRenderHost.ShapeOf(image);

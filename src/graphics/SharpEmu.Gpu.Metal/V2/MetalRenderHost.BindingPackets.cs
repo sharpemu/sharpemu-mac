@@ -23,14 +23,21 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// draw's user data, a T# the builder refuses) is left out, and the worker decodes that part itself, failing there if
 /// the failure is real.
 /// </summary>
-internal sealed class MetalBindingPacket(ShaderProgramInfo program, BindingLayout layout, ResourceSnapshot snapshot, ulong shaderBase)
+internal sealed class MetalBindingPacket
 {
     public const int MaximumEntries = 64;
 
-    public readonly ShaderProgramInfo Program = program;
-    public readonly BindingLayout Layout = layout;
-    public readonly ResourceSnapshot Snapshot = snapshot;
-    public readonly ulong ShaderBase = shaderBase;
+    public MetalBindingPacket(ShaderProgramInfo program, BindingLayout layout, ResourceSnapshot snapshot, ulong shaderBase) =>
+        Reset(program, layout, snapshot, shaderBase);
+
+    // What the packet stands for. Written only by the resolving thread, before it publishes the packet on Snapshot, and
+    // again only once the worker has handed it back to the pool (MetalRenderHost.RecyclePacket).
+    public ShaderProgramInfo Program = null!;
+    public BindingLayout Layout = null!;
+    public ResourceSnapshot Snapshot = null!;
+    public ulong ShaderBase;
+
+    // Capacities may exceed the stage's counts on a recycled packet.
     public MetalRenderHost.TextureMemoKey[]? MemoKeys;
     public TextureRequestResolution[]? Resolutions;
     public SamplerDescriptorWords[]? Samplers;
@@ -39,8 +46,31 @@ internal sealed class MetalBindingPacket(ShaderProgramInfo program, BindingLayou
     public ulong MemoKeyMask;
     public ulong ResolutionMask;
     public ulong SamplerMask;
-    public uint[]? ShaderData;
+
+    // The stage's shader data, ShaderDataCount words of ShaderData, when HasShaderData.
+    public uint[] ShaderData = [];
+    public int ShaderDataCount;
+    public bool HasShaderData;
     public long BuildTicks;
+
+    // A later job found this packet on its snapshot and built none of its own (the resolving thread's reuse): the
+    // worker leaves it there for that draw rather than recycling it.
+    public volatile bool Shared;
+
+    public void Reset(ShaderProgramInfo program, BindingLayout layout, ResourceSnapshot snapshot, ulong shaderBase)
+    {
+        Program = program;
+        Layout = layout;
+        Snapshot = snapshot;
+        ShaderBase = shaderBase;
+        MemoKeyMask = 0;
+        ResolutionMask = 0;
+        SamplerMask = 0;
+        ShaderDataCount = 0;
+        HasShaderData = false;
+        BuildTicks = 0;
+        Shared = false;
+    }
 
     public bool HasMemoKey(int index) => index < MaximumEntries && (MemoKeyMask & (1UL << index)) != 0;
 
@@ -66,9 +96,22 @@ internal sealed partial class MetalRenderHost
     internal static readonly bool DispatchBindingPackets =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DISPATCH_PACKETS") != "0";
 
+    /// <summary>
+    /// The worker hands a packet it took back to a pool once PrepareBindings is done with it, after unlinking it from its
+    /// snapshot, and the resolving thread builds the next packets into pooled ones: a packet a draw stage was ~300 bytes
+    /// of the resolving thread's allocations, and the collections they caused stopped the worker too.
+    /// SHARPEMU_METAL_V2_PACKET_POOL=0 allocates every packet and leaves it on its snapshot.
+    /// </summary>
+    internal static readonly bool PacketPool =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PACKET_POOL") != "0";
+
     // Per host, for tests that compare both paths in one process.
     internal bool DrawPacketsEnabled = DrawBindingPackets;
     internal bool DispatchPacketsEnabled = DispatchBindingPackets;
+    internal bool PacketPoolEnabled = PacketPool;
+
+    private const int PacketPoolLimit = 512;
+    private readonly Stack<MetalBindingPacket> _packetPool = new();
 
     internal enum PacketRefusal
     {
@@ -101,9 +144,11 @@ internal sealed partial class MetalRenderHost
         }
 
         var kind = dispatch ? PacketDispatch : PacketDraw;
-        if (Volatile.Read(ref snapshot.BindingPacket) is MetalBindingPacket held && ReferenceEquals(held.Program, program) &&
-            ReferenceEquals(held.Layout, layout) && held.ShaderBase == stage.ShaderBase)
+        if (Volatile.Read(ref snapshot.BindingPacket) is MetalBindingPacket held && ReferenceEquals(held.Snapshot, snapshot) &&
+            ReferenceEquals(held.Program, program) && ReferenceEquals(held.Layout, layout) && held.ShaderBase == stage.ShaderBase)
         {
+            // Should the worker have recycled it meanwhile, the snapshot no longer names it and this draw decodes itself.
+            held.Shared = true;
             Interlocked.Increment(ref _packetsReused[kind]);
             return;
         }
@@ -112,7 +157,7 @@ internal sealed partial class MetalRenderHost
         MetalBindingPacket? packet;
         try
         {
-            packet = BuildBindingPacket(program, resources, layout, snapshot, stage.ShaderBase);
+            packet = BuildBindingPacket(program, resources, layout, snapshot, stage.ShaderBase, PacketPoolEnabled ? RentPacket() : null);
         }
         catch
         {
@@ -131,8 +176,10 @@ internal sealed partial class MetalRenderHost
     }
 
     // PrepareBindings' decode, from the program and snapshot alone: null when they do not match (the worker fails there).
+    // A recycled packet (reuse) is filled in place.
     internal static MetalBindingPacket? BuildBindingPacket(
-        ShaderProgramInfo program, SpecializedResourceInfo resources, BindingLayout layout, ResourceSnapshot snapshot, ulong shaderBase)
+        ShaderProgramInfo program, SpecializedResourceInfo resources, BindingLayout layout, ResourceSnapshot snapshot, ulong shaderBase,
+        MetalBindingPacket? reuse = null)
     {
         var info = resources.Info;
         if (snapshot.Images.Length != info.Images.Count || snapshot.Samplers.Length != info.Samplers.Count ||
@@ -141,7 +188,8 @@ internal sealed partial class MetalRenderHost
             return null;
         }
 
-        var packet = new MetalBindingPacket(program, layout, snapshot, shaderBase);
+        var packet = reuse ?? new MetalBindingPacket(program, layout, snapshot, shaderBase);
+        packet.Reset(program, layout, snapshot, shaderBase);
         var images = info.Images.Count <= MetalBindingPacket.MaximumEntries ? info.Images.Count : 0;
         for (var index = 0; index < images; index++)
         {
@@ -153,7 +201,7 @@ internal sealed partial class MetalRenderHost
                 // Only TryTextureMemo reads a sampled image's key; a storage image is never memoised.
                 if (words.Length >= 8)
                 {
-                    (packet.MemoKeys ??= new TextureMemoKey[images])[index] =
+                    (packet.MemoKeys is { } keys && keys.Length >= images ? keys : packet.MemoKeys = new TextureMemoKey[images])[index] =
                         new TextureMemoKey(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], shape);
                     packet.MemoKeyMask |= 1UL << index;
                 }
@@ -166,7 +214,8 @@ internal sealed partial class MetalRenderHost
                 try
                 {
                     var resolution = ImageRequestBuilders.Texture(words, shape);
-                    (packet.Resolutions ??= new TextureRequestResolution[images])[index] = resolution;
+                    (packet.Resolutions is { } held && held.Length >= images ? held : packet.Resolutions = new TextureRequestResolution[images])[index] =
+                        resolution;
                     packet.ResolutionMask |= 1UL << index;
                 }
                 catch
@@ -182,16 +231,24 @@ internal sealed partial class MetalRenderHost
             var words = snapshot.Samplers[index];
             if (words.Length >= 4)
             {
-                (packet.Samplers ??= new SamplerDescriptorWords[samplers])[index] = NativeSamplerWords(info.Samplers[index], words);
+                (packet.Samplers is { } held && held.Length >= samplers ? held : packet.Samplers = new SamplerDescriptorWords[samplers])[index] =
+                    NativeSamplerWords(info.Samplers[index], words);
                 packet.SamplerMask |= 1UL << index;
             }
         }
 
-        var shaderData = layout.ShaderDataDwordCount == 0 ? [] : new uint[checked((int)layout.ShaderDataDwordCount)];
-        if (WriteStageShaderData(shaderData, program, layout, info, snapshot, shaderBase))
+        var shaderDwords = checked((int)layout.ShaderDataDwordCount);
+        if (packet.ShaderData.Length < shaderDwords)
         {
-            packet.ShaderData = shaderData;
+            packet.ShaderData = new uint[shaderDwords];
         }
+        else
+        {
+            Array.Clear(packet.ShaderData, 0, shaderDwords);
+        }
+
+        packet.ShaderDataCount = shaderDwords;
+        packet.HasShaderData = WriteStageShaderData(packet.ShaderData, program, layout, info, snapshot, shaderBase);
 
         return packet;
     }
@@ -217,6 +274,37 @@ internal sealed partial class MetalRenderHost
         Interlocked.Increment(ref _packetsTaken[kind]);
         Interlocked.Add(ref _packetSavedTicks[kind], packet!.BuildTicks);
         return packet;
+    }
+
+    private MetalBindingPacket? RentPacket()
+    {
+        lock (_packetPool)
+        {
+            return _packetPool.TryPop(out var packet) ? packet : null;
+        }
+    }
+
+    // On the worker, once PrepareBindings is done with a packet it took. The snapshot stops naming it first, so no later
+    // take finds it while the resolving thread fills it again; the worker is the only thread that takes packets. One a
+    // later job reused stays where it is for that job's draw.
+    private void RecyclePacket(MetalBindingPacket packet)
+    {
+        if (!PacketPoolEnabled || packet.Shared)
+        {
+            return;
+        }
+
+        // Reused between the check and the unlink, the later draw finds no packet and decodes itself. The resolving thread
+        // checks for reuse and rents on one thread, so it never reads a packet it is refilling.
+        Interlocked.CompareExchange(ref packet.Snapshot.BindingPacket, null, packet);
+
+        lock (_packetPool)
+        {
+            if (_packetPool.Count < PacketPoolLimit)
+            {
+                _packetPool.Push(packet);
+            }
+        }
     }
 
     // Count when the packet stands for the stage; otherwise why it does not.

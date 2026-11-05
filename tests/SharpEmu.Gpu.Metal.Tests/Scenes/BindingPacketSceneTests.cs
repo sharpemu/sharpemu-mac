@@ -33,12 +33,13 @@ public sealed class BindingPacketSceneTests(ITestOutputHelper output) : SceneTes
         return long.Parse(counters.AsSpan(at, end - at));
     }
 
-    private (ulong Checksum, string Counters)? Run(bool packets)
+    private (ulong Checksum, string Counters)? Run(bool packets, bool pool = true)
     {
         using var rig = CreateRig();
         if (rig is null) return null;
         rig.Host.DrawPacketsEnabled = packets;
         rig.Host.DispatchPacketsEnabled = packets;
+        rig.Host.PacketPoolEnabled = pool;
         var images = Enumerable.Range(0, 8).Select(_ => rig.ColorTarget(Edge, Edge, 4)).ToArray();
         for (var index = 0; index < images.Length; index++)
         {
@@ -99,10 +100,12 @@ public sealed class BindingPacketSceneTests(ITestOutputHelper output) : SceneTes
         return (checksum, counters);
     }
 
-    [Fact]
-    public void TheSameStreamBindsTheSameWithAndWithoutPackets()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheSameStreamBindsTheSameWithAndWithoutPackets(bool pool)
     {
-        if (Run(packets: false) is not { } off || Run(packets: true) is not { } on) return;
+        if (Run(packets: false) is not { } off || Run(packets: true, pool) is not { } on) return;
         Output.WriteLine($"off: {off.Counters}");
         Output.WriteLine($"on: {on.Counters}");
         Assert.Equal(off.Checksum, on.Checksum);
