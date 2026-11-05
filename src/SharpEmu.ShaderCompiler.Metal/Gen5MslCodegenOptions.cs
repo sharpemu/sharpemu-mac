@@ -184,6 +184,12 @@ public sealed record Gen5MslCodegenOptions(
     /// first spilled mask, as before.</summary>
     public bool ExecLaneSpills { get; init; } = true;
 
+    /// <summary>Lane-local ALU writes that no masked-off lane reads back run without their
+    /// EXEC guard, outside EXEC runs (<see cref="Ir.Gen5LaneObservationAnalysis"/>), in compute,
+    /// pixel, vertex and single-wave mesh programs. SHARPEMU_MSL_UNOBSERVED_LANES=0 guards them
+    /// again.</summary>
+    public bool LaneExactUnobservedWrites { get; init; } = true;
+
     /// <summary>The unobserved-write elision for every stage but multi-wave mesh shaders.
     /// The analysis follows lanes, not simdgroups: a value an inactive lane never reads
     /// back after EXEC widens is dead in that lane whether the guest wave is one Apple
@@ -303,6 +309,7 @@ public sealed record Gen5MslCodegenOptions(
         UnobservedAluAllStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "all",
         ExecRuns = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_RUNS") != "0",
         ExecLaneSpills = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_LANE_SPILLS") != "0",
+        LaneExactUnobservedWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_LANES") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
         DecodedFormatLoadThreshold = int.TryParse(

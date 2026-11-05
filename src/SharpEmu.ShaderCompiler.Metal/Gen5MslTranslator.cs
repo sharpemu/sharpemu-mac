@@ -1848,6 +1848,7 @@ public static partial class Gen5MslTranslator
                 var instruction = instructions[index];
                 var isTerminator = index == block.EndIndex - 1;
                 var inExecRun = IsExecRunInstruction(instruction) &&
+                    !IsUnobservedAluInstruction(instruction) &&
                     !(!isTerminator && CanFuseWave64ReadLanes(instruction, instructions[index + 1]));
                 if (!inExecRun)
                 {
