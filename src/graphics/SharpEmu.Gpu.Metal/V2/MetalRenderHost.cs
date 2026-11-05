@@ -336,13 +336,14 @@ internal sealed partial class MetalRenderHost :
     public bool IsRecording => !_disposed && EnsureCommandBuffer() != 0;
 
     /// <summary>The command buffer being recorded; one is opened on demand.</summary>
-    private nint EnsureCommandBuffer()
-    {
-        if (_commandBuffer != 0)
-        {
-            return _commandBuffer;
-        }
+    // The open buffer is the common case, asked for several times a draw: it stays a field read the
+    // caller inlines. The opening path sends messages, and a method that holds a native call sets up
+    // its call frame on every entry, taken or not.
+    private nint EnsureCommandBuffer() => _commandBuffer != 0 ? _commandBuffer : OpenCommandBuffer();
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private nint OpenCommandBuffer()
+    {
         _commandBuffer = NewCommandBuffer();
         MetalMemoryTelemetry.CommandBuffers.Add();
         if (_commandBuffer == 0)

@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
@@ -127,6 +128,9 @@ internal sealed partial class MetalRenderHost
     private sealed class ArgumentPlan(Gen5MslArgumentLayout layout, int[]?[] fieldResources, int[]?[] fieldMips)
     {
         public readonly Gen5MslArgumentLayout Layout = layout;
+
+        // The layout's fields as an array: the per-draw fill walks them without interface calls.
+        public readonly MslArgumentField[] Fields = [.. layout.Fields];
         public readonly int[]?[] FieldResources = fieldResources;
 
         // Per texture element, the mip it binds of its image: a dynamic-mip storage image
@@ -154,6 +158,10 @@ internal sealed partial class MetalRenderHost
     // The same plans by layout instance: a program keeps its layout, so a draw finds its plan by
     // reference instead of comparing the layout field by field (BindingLayout.Equals).
     private readonly Dictionary<BindingLayout, ArgumentPlan> _argumentPlansByInstance = new(ReferenceEqualityComparer.Instance);
+
+    // Each stage's last layout and its plan: consecutive draws mostly keep their programs.
+    private readonly BindingLayout?[] _lastPlanLayouts = new BindingLayout?[StageCount];
+    private readonly ArgumentPlan?[] _lastPlans = new ArgumentPlan?[StageCount];
     private readonly Dictionary<(uint, uint, uint, uint, bool), (nint Handle, ulong ResourceId)> _samplers = new();
     private readonly nint[] _stageArgumentBuffers = new nint[StageCount];
     private readonly ulong[] _stageArgumentOffsets = new ulong[StageCount];
@@ -168,6 +176,12 @@ internal sealed partial class MetalRenderHost
     private nint[] _usedResources = new nint[64];
     private nuint[] _usedResourceUsage = new nuint[64];
     private int _usedResourceCount;
+
+    // An open-addressed index over _usedResources (entry = position + 1), valid where its stamp is
+    // the current draw's: a draw finds a resource it already noted without walking the list.
+    private int[] _usedResourceSlots = new int[128];
+    private uint[] _usedResourceStamps = new uint[128];
+    private uint _usedResourceEpoch = 1;
     private MetalResourcePreparation? _preparation;
     private MetalResourcePreparation? _preparationHandle;
     private int _preparedStageMask;
@@ -207,7 +221,7 @@ internal sealed partial class MetalRenderHost
             ? _preparationHandle ??= new MetalResourcePreparation(this)
             : new MetalResourcePreparation(this);
         _preparedStageMask = 0;
-        _usedResourceCount = 0;
+        ResetUsedResources();
         _bindlessDeclarations.Clear();
         Array.Clear(_stageArgumentValid);
         Array.Clear(_stageUsesDeviceAddresses);
@@ -1473,9 +1487,17 @@ internal sealed partial class MetalRenderHost
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ArgumentBufferWrite);
         var layout = stage.Program.Bindings!;
-        var plan = ArgumentPlanOf(layout);
+        var plan = _lastPlans[stageIndex];
+        if (!ReferenceEquals(_lastPlanLayouts[stageIndex], layout) || plan is null)
+        {
+            plan = ArgumentPlanOf(layout);
+            _lastPlanLayouts[stageIndex] = layout;
+            _lastPlans[stageIndex] = plan;
+        }
+
         var argumentLayout = plan.Layout;
-        if (argumentLayout.Fields.Count == 0)
+        var fields = plan.Fields;
+        if (fields.Length == 0)
         {
             _stageArgumentValid[stageIndex] = false;
             return;
@@ -1494,29 +1516,30 @@ internal sealed partial class MetalRenderHost
         var argument = _argumentScratch.AsSpan(0, argumentBytes);
         argument.Clear();
         var imageCursor = 0;
-        var fields = argumentLayout.Fields;
-        for (var fieldIndex = 0; fieldIndex < fields.Count; fieldIndex++)
+        for (var fieldIndex = 0; fieldIndex < fields.Length; fieldIndex++)
         {
             var field = fields[fieldIndex];
             var span = argument.Slice((int)field.ByteOffset, (int)field.ByteSize);
             switch (field.FieldKind)
             {
                 case MslArgumentFieldKind.BufferPointers:
-                    for (var index = 0; index < field.Count && index < stage.BufferCount; index++)
+                {
+                    var pointers = BufferFieldCount(field, stage, sizeof(ulong), span.Length);
+                    var addresses = MemoryMarshal.Cast<byte, ulong>(span)[..pointers];
+                    var buffers = stage.Buffers.AsSpan(0, pointers);
+                    for (var index = 0; index < addresses.Length; index++)
                     {
-                        BinaryPrimitives.WriteUInt64LittleEndian(
-                            span[(index * sizeof(ulong))..], stage.Buffers[index].GpuAddress);
+                        addresses[index] = buffers[index].GpuAddress;
                     }
 
                     break;
+                }
                 case MslArgumentFieldKind.BufferByteCounts:
-                    for (var index = 0; index < field.Count && index < stage.BufferCount; index++)
-                    {
-                        BinaryPrimitives.WriteUInt32LittleEndian(
-                            span[(index * sizeof(uint))..], stage.BufferLengths[index]);
-                    }
-
+                {
+                    var counts = BufferFieldCount(field, stage, sizeof(uint), span.Length);
+                    stage.BufferLengths.AsSpan(0, counts).CopyTo(MemoryMarshal.Cast<byte, uint>(span));
                     break;
+                }
                 case MslArgumentFieldKind.Textures:
                     WriteTextureField(
                         stage, field, plan.FieldResources[fieldIndex], plan.FieldMips[fieldIndex], span, ref imageCursor, stageIndex);
@@ -1583,6 +1606,10 @@ internal sealed partial class MetalRenderHost
         _stageArgumentOffsets[stageIndex] = range.Offset;
         _stageArgumentValid[stageIndex] = true;
     }
+
+    // The elements a buffer field fills: the bound buffers it has room for (little-endian host).
+    private static int BufferFieldCount(MslArgumentField field, MetalStageBindings stage, int elementBytes, int spanBytes) =>
+        Math.Min(Math.Min((int)Math.Min(field.Count, int.MaxValue), stage.BufferCount), spanBytes / elementBytes);
 
     // SHARPEMU_METAL_V2_ARGUMENT_REUSE=0 reserves and fills a ring range for every stage of every draw.
     private static readonly bool ArgumentBufferReuse =
@@ -1985,15 +2012,33 @@ internal sealed partial class MetalRenderHost
         return plan;
     }
 
+    private void ResetUsedResources()
+    {
+        _usedResourceCount = 0;
+        if (++_usedResourceEpoch == 0)
+        {
+            Array.Clear(_usedResourceStamps);
+            _usedResourceEpoch = 1;
+        }
+    }
+
+    // Each resource once, in first-use order, with the union of its usages.
     internal void NoteUsedResource(nint resource, nuint usage)
     {
-        for (var index = 0; index < _usedResourceCount; index++)
+        var slots = _usedResourceSlots;
+        var stamps = _usedResourceStamps;
+        var mask = slots.Length - 1;
+        var slot = UsedResourceHash(resource) & mask;
+        while (stamps[slot] == _usedResourceEpoch)
         {
-            if (_usedResources[index] == resource)
+            var position = slots[slot] - 1;
+            if (_usedResources[position] == resource)
             {
-                _usedResourceUsage[index] |= usage;
+                _usedResourceUsage[position] |= usage;
                 return;
             }
+
+            slot = (slot + 1) & mask;
         }
 
         if (_usedResourceCount == _usedResources.Length)
@@ -2005,6 +2050,35 @@ internal sealed partial class MetalRenderHost
         _usedResources[_usedResourceCount] = resource;
         _usedResourceUsage[_usedResourceCount] = usage;
         _usedResourceCount++;
+        stamps[slot] = _usedResourceEpoch;
+        slots[slot] = _usedResourceCount;
+        // At most half full, so a probe always reaches a free slot.
+        if (_usedResourceCount * 2 > slots.Length)
+        {
+            GrowUsedResourceIndex();
+        }
+    }
+
+    private static int UsedResourceHash(nint resource) =>
+        (int)(((ulong)resource * 0x9E3779B97F4A7C15UL) >> 33);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void GrowUsedResourceIndex()
+    {
+        _usedResourceSlots = new int[_usedResourceSlots.Length * 2];
+        _usedResourceStamps = new uint[_usedResourceSlots.Length];
+        var mask = _usedResourceSlots.Length - 1;
+        for (var position = 0; position < _usedResourceCount; position++)
+        {
+            var slot = UsedResourceHash(_usedResources[position]) & mask;
+            while (_usedResourceStamps[slot] == _usedResourceEpoch)
+            {
+                slot = (slot + 1) & mask;
+            }
+
+            _usedResourceStamps[slot] = _usedResourceEpoch;
+            _usedResourceSlots[slot] = position + 1;
+        }
     }
 
     // Argument-buffer references are indirect, so the encoder is told which textures
