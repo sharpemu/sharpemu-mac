@@ -127,7 +127,11 @@ public sealed partial class MslRuntimeFormatLoadTests(ITestOutputHelper output)
         // Without the whole-dword fast path every load takes the general decoder: inline below
         // the threshold, sharpemu_format_load_decoded at or above it.
         Gen5MslCodegenOptions Options(int threshold) =>
-            new(RuntimeDwordFormatLoads: false, ForceRegisterInitialization: true) { DecodedFormatLoadThreshold = threshold };
+            new(RuntimeDwordFormatLoads: false, ForceRegisterInitialization: true)
+            {
+                DecodedFormatLoadThreshold = threshold,
+                FormatFetch = false,
+            };
         var (inline, layout) = Compile(Fixture(components), Options(0));
         var (called, _) = Compile(Fixture(components), Options(1));
         Assert.DoesNotContain("sharpemu_format_load_decoded", inline.Source);
@@ -149,6 +153,48 @@ public sealed partial class MslRuntimeFormatLoadTests(ITestOutputHelper output)
                 inline.ArgumentLayout!, 1, out var expected, out var inlineRunError), inlineRunError);
             Assert.True(MetalNative.TryExecuteWithArgumentBuffer(calledLibrary, called.EntryPoint, data, push,
                 called.ArgumentLayout!, 1, out var actual, out var calledRunError), calledRunError);
+            Assert.True(expected.AsSpan().SequenceEqual(actual),
+                $"components={components} format={format} swizzle=0x{swizzle:X} offset={offset}");
+        }
+    }
+    [Theory]
+    [InlineData(1u, true)]
+    [InlineData(2u, true)]
+    [InlineData(3u, true)]
+    [InlineData(4u, true)]
+    [InlineData(3u, false)]
+    public void TheFetchHelperMatchesTheInlineDecoder(uint components, bool dwordRun)
+    {
+        // SHARPEMU_MSL_FORMAT_FETCH off is the inline decoder (no called helper below the
+        // threshold); on, every general decode is one sharpemu_format_fetch call.
+        Gen5MslCodegenOptions Options(bool fetch) =>
+            new(RuntimeDwordFormatLoads: dwordRun, ForceRegisterInitialization: true)
+            {
+                DecodedFormatLoadThreshold = 0,
+                FormatFetch = fetch,
+            };
+        var (inline, layout) = Compile(Fixture(components), Options(false));
+        var (fetched, _) = Compile(Fixture(components), Options(true));
+        Assert.DoesNotContain("sharpemu_format_fetch", inline.Source);
+        Assert.Contains($"sharpemu_format_fetch(b", fetched.Source);
+        Assert.Contains("static inline uint4 sharpemu_format_fetch(", fetched.Source);
+        if (!RequireDevice()) return;
+        Assert.True(MetalNative.TryCompileLibrary(inline.Source, out var inlineLibrary, out var inlineError), inlineError);
+        Assert.True(MetalNative.TryCompileLibrary(fetched.Source, out var fetchedLibrary, out var fetchedError), fetchedError);
+        // Every unified format with the identity, reversed, constant, repeated and W-reading
+        // selectors, at aligned, unaligned, end-straddling and past-the-end offsets.
+        var cases = from format in Enumerable.Range(0, 128).Select(format => (uint)format)
+                    from swizzle in new uint[] { 0xFAC, 0x977, 0x204, 0xFFF, 0x0D1, 0xE3E, 0x1C8 }
+                    from offset in new uint[] { 0, 1, 2, 33, 64, 113, 120, 122, 124, 126, 127, 128, 200 }
+                    select (format, swizzle, offset);
+        var data = Enumerable.Range(0, BufferBytes).Select(i => (byte)(i * 37 + 11)).ToArray();
+        foreach (var (format, swizzle, offset) in cases)
+        {
+            var push = Push(layout, (format << 12) | swizzle, offset);
+            Assert.True(MetalNative.TryExecuteWithArgumentBuffer(inlineLibrary, inline.EntryPoint, data, push,
+                inline.ArgumentLayout!, 1, out var expected, out var inlineRunError), inlineRunError);
+            Assert.True(MetalNative.TryExecuteWithArgumentBuffer(fetchedLibrary, fetched.EntryPoint, data, push,
+                fetched.ArgumentLayout!, 1, out var actual, out var fetchedRunError), fetchedRunError);
             Assert.True(expected.AsSpan().SequenceEqual(actual),
                 $"components={components} format={format} swizzle=0x{swizzle:X} offset={offset}");
         }

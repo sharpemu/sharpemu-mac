@@ -1,0 +1,43 @@
+// BUFFER_LOAD_FORMAT_* from a bound buffer whose descriptor word 3 is only known on the device,
+// with the general decoder's results (sharpemu_format_load_decoded) at a fraction of its cost.
+// The element's first 16 bytes are read once (sharpemu_load_words: plain loads when aligned and
+// in range, else each dword assembled with zero past the end) and every component is taken from
+// the dword it lies in, instead of one unaligned-capable sharpemu_load_word per component: no
+// unified format has a component that crosses a dword boundary relative to the element start,
+// so the bits are the ones the per-component load reads. Only the components a destination
+// selects are decoded, so an X fetch converts one component instead of four. A destination
+// selecting a memory component reads its constant when any selected component is past the
+// binding, as before.
+static inline uint4 sharpemu_format_fetch(device uint* b, uint bytes, uint addr, uint word3, uint count)
+{
+    uint entry = sharpemu_gfx10_formats[(word3 >> 12) & 0x7Fu];
+    uint dfmt = entry & 0xFFu;
+    uint nfmt = (entry >> 8) & 0xFFu;
+    uint one = sharpemu_format_one(nfmt);
+    uint4 element = sharpemu_load_words<4>(b, bytes, addr);
+    uint4 result = uint4(0u);
+    bool inBounds = true;
+    for (uint destination = 0u; destination < count; destination++)
+    {
+        uint selector = (word3 >> (destination * 3u)) & 7u;
+        uint component = (selector - 4u) & 3u;
+        uint byteOff = 0u;
+        uint bitOff = 0u;
+        uint bits = 0u;
+        sharpemu_format_layout(dfmt, component, byteOff, bitOff, bits);
+        uint componentBytes = (bitOff + bits + 7u) >> 3u;
+        bool componentInBounds = bits == 0u ||
+            (componentBytes <= bytes && (addr + byteOff) <= bytes - componentBytes);
+        uint raw = bits == 0u ? 0u : extract_bits(element[(byteOff >> 2u) & 3u], ((byteOff & 3u) << 3u) + bitOff, bits);
+        uint missing = component == 3u ? one : 0u;
+        uint value = bits == 0u ? missing : sharpemu_format_convert(raw, bits, nfmt, dfmt);
+        inBounds = inBounds && (selector < 4u || componentInBounds);
+        result[destination] = selector < 4u ? (selector == 1u ? one : 0u) : value;
+    }
+    for (uint destination = 0u; destination < count; destination++)
+    {
+        uint selector = (word3 >> (destination * 3u)) & 7u;
+        result[destination] = inBounds ? result[destination] : (selector == 1u ? one : 0u);
+    }
+    return result;
+}
