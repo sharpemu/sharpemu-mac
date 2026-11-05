@@ -1933,6 +1933,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     internal void OrderAfterDeferredCopies(ulong address, ulong size)
     {
+        // A fill the open pass holds is ordered the same way (MetalRenderHost.DeferredFills.cs).
+        LandDeferredFillsOver(address, size);
         if (_deferredLabelCopies.Count == 0 || (_computeEncoder == 0 && !LabelsAtCommit) ||
             (size != ulong.MaxValue && !DeferredLabelCopiesTouch(address, size)))
         {

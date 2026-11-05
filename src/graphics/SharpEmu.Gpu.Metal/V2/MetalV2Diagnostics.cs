@@ -403,6 +403,12 @@ internal static class MetalV2Diagnostics
     public static readonly bool HoldFlushForPass =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_FLUSH_HOLD_PASS"), "0", StringComparison.Ordinal);
 
+    // SHARPEMU_METAL_V2_DEFER_PASS_FILLS=0 ends the open render pass for every guest fill, as
+    // before. Otherwise a fill recorded in a pass lands when the pass ends, or sooner when work
+    // that may see its bytes comes (MetalRenderHost.DeferredFills.cs).
+    public static readonly bool DeferPassFills =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_PASS_FILLS"), "0", StringComparison.Ordinal);
+
     public static readonly int HoldFlushMaxMicroseconds =
         PositiveInt("SHARPEMU_METAL_V2_FLUSH_HOLD_PASS_US", 4000);
 

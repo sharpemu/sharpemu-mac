@@ -918,6 +918,14 @@ internal sealed partial class MetalRenderHost
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.RenderPassBegin);
         _joinedPipeline = null;
         _joinedVariant = null;
+        if (_deferredFills.Count != 0 && UpcomingDrawSeesDeferredFill())
+        {
+            // The draw may read or write bytes a fill the pass holds lands in: the pass ends
+            // here, which encodes the fill, and the draw begins one of its own after it.
+            _deferredFillsLandedEarly++;
+            EndEncoders(PassEndCause.Other);
+        }
+
         // Before anything else, because this runs ahead of every draw and is therefore
         // the last moment at which a waiting clear is still invisible. Whatever this
         // pass cannot perform itself is encoded below, where no encoder is open.
@@ -1352,6 +1360,8 @@ internal sealed partial class MetalRenderHost
             EndAndReleaseEncoder(_renderEncoder, render: true);
             _renderEncoder = 0;
             _passScratchMask = 0;
+            // The fills the pass held land right behind it (MetalRenderHost.DeferredFills.cs).
+            EncodeDeferredFills();
             NativeOcclusionFinish();
             PassProfileClose();
         }

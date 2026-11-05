@@ -213,6 +213,8 @@ internal sealed partial class MetalRenderHost
     {
         _requestedLaunch = null;
         _tracedIndirectArguments = argumentsAddress;
+        // The draw reads its record: a fill the open pass holds over it lands first.
+        LandDeferredFillsOver(argumentsAddress, 64);
         var entry = RequirePipelineEntry(in pipeline);
         if (entry.RectangleStates is not null && indexed)
         {
