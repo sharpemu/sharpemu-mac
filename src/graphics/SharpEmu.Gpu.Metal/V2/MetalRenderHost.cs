@@ -818,6 +818,20 @@ internal sealed partial class MetalRenderHost :
         return 0;
     }
 
+    /// <summary>
+    /// Commits, waits for the GPU to finish everything committed, and returns the GPU time
+    /// the finished submissions took since the last call (the synthetic pass benchmark).
+    /// </summary>
+    internal double TakeGpuBusySecondsWhenIdle()
+    {
+        FlushAndWaitForGpu();
+        DrainFinishedSubmissions();
+        var seconds = _gpuBusySeconds;
+        _gpuBusySeconds = 0;
+        _gpuBusySamples = 0;
+        return seconds;
+    }
+
     /// <summary>Reads and releases every submission the GPU has finished.</summary>
     private void DrainFinishedSubmissions()
     {

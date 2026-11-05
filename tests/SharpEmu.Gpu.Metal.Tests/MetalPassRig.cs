@@ -96,7 +96,16 @@ internal sealed unsafe class MetalPassRig : IDisposable
     /// A quad from x = left to x = right over the whole height, writing <paramref name="outputs"/>[i]
     /// (an MSL vector expression) to colour output i, for targets of these formats.
     /// </summary>
-    public PipelineHandle Pipeline(GpuFormat[] formats, string[] outputs, float left = -1f, float right = 1f)
+    /// When <paramref name="knownPositions"/> is set the vertex program reports its six
+    /// positions and the pixel program writes every output and cannot discard, as the
+    /// translator marks a full-screen pass whose loads may be elided.
+    /// With <paramref name="mesh"/> the quad comes from a mesh program (one threadgroup), as
+    /// the geometry engine's merged stages draw.
+    /// <paramref name="discardWhen"/>, an MSL condition on <c>in.position</c>, discards the
+    /// fragments it holds for.
+    public PipelineHandle Pipeline(
+        GpuFormat[] formats, string[] outputs, float left = -1f, float right = 1f, bool knownPositions = false, bool mesh = false,
+        string? discardWhen = null)
     {
         var id = _nextProgram;
         _nextProgram += 2;
@@ -118,6 +127,41 @@ internal sealed unsafe class MetalPassRig : IDisposable
                 return sharpemu_out;
             }
             """;
+        if (mesh)
+        {
+            vertexSource = $$"""
+                #include <metal_stdlib>
+                using namespace metal;
+                struct Gen5MsOut
+                {
+                    float4 sharpemu_position [[position]];
+                };
+
+                using Gen5Mesh = metal::mesh<Gen5MsOut, void, 6, 2, metal::topology::triangle>;
+
+                [[mesh]] void gen5_ms(Gen5Mesh sharpemu_mesh, uint sharpemu_lane [[thread_index_in_threadgroup]])
+                {
+                    if (sharpemu_lane != 0)
+                    {
+                        return;
+                    }
+
+                    const float2 corners[6] = {
+                        float2({{F(left)}}, -1.0f), float2({{F(right)}}, -1.0f), float2({{F(left)}}, 1.0f),
+                        float2({{F(left)}}, 1.0f), float2({{F(right)}}, -1.0f), float2({{F(right)}}, 1.0f) };
+                    for (uint index = 0; index < 6; index++)
+                    {
+                        Gen5MsOut sharpemu_out = {};
+                        sharpemu_out.sharpemu_position = float4(corners[index], 0.5f, 1.0f);
+                        sharpemu_mesh.set_vertex(index, sharpemu_out);
+                        sharpemu_mesh.set_index(index, index);
+                    }
+
+                    sharpemu_mesh.set_primitive_count(2);
+                }
+                """;
+        }
+
         var fields = new System.Text.StringBuilder();
         var assigns = new System.Text.StringBuilder();
         for (var index = 0; index < formats.Length; index++)
@@ -139,17 +183,38 @@ internal sealed unsafe class MetalPassRig : IDisposable
             {
             {{fields}}};
 
+            // A well-mixed hash of a pixel, for outputs that must not compress.
+            static inline uint rig_hash(float4 position, uint seed)
+            {
+                uint h = uint(position.x) * 0x9E3779B1u + uint(position.y) * 0x85EBCA77u + seed;
+                h ^= h >> 16; h *= 0x85EBCA6Bu; h ^= h >> 13; h *= 0xC2B2AE35u; h ^= h >> 16;
+                return h;
+            }
+
             fragment PixelOut fill_fs(PixelIn in [[stage_in]])
             {
+                {{(discardWhen is null ? string.Empty : $"if ({discardWhen}) discard_fragment();")}}
                 PixelOut o;
             {{assigns}}    return o;
             }
             """;
         var vertex = new ShaderProgram(id, Host.CreateShaderModule(
-            new MetalCompiledGuestShader(new Gen5MslShader(vertexSource, "gen5_vs", Gen5MslStage.Vertex, 1)),
+            new MetalCompiledGuestShader(new Gen5MslShader(
+                vertexSource, mesh ? "gen5_ms" : "gen5_vs", mesh ? Gen5MslStage.Mesh : Gen5MslStage.Vertex, 1,
+                MeshInfo: mesh ? new Gen5MslMeshInfo(32, 1, 6, 2, 3, Gen5MslMeshTopology.Triangle, 0, 0, 1, false) : null)
+            {
+                ConstantPositions = knownPositions
+                    ? [left, -1f, 0.5f, 1f, right, -1f, 0.5f, 1f, left, 1f, 0.5f, 1f,
+                       left, 1f, 0.5f, 1f, right, -1f, 0.5f, 1f, right, 1f, 0.5f, 1f]
+                    : null,
+            }),
             ShaderStage.Vertex, id, id));
         var pixel = new ShaderProgram(id + 1, Host.CreateShaderModule(
-            new MetalCompiledGuestShader(new Gen5MslShader(pixelSource, "fill_fs", Gen5MslStage.Pixel, 1)),
+            new MetalCompiledGuestShader(new Gen5MslShader(pixelSource, "fill_fs", Gen5MslStage.Pixel, 1)
+            {
+                CannotDiscard = knownPositions,
+                ColorOutputMask = knownPositions ? (1u << formats.Length) - 1 : 0,
+            }),
             ShaderStage.Pixel, id + 1, id + 1));
         var parameters = new PipelineStaticParameters
         {
