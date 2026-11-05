@@ -14,9 +14,11 @@ namespace SharpEmu.Gpu.Metal.Tests;
 
 /// <summary>
 /// A synthetic Demon's Souls-shaped frame at 1920x1080, replayed with the pass-merging work
-/// off and on. Mesh draws into five attachments (four R32Uint, one R16G16Sfloat) alternate
-/// with draws that add a sixth (R16G16B16A16Sfloat), five times a frame; two guest fills land
-/// between draws; sixteen Stream submissions end with the stream busy, so the coalescing limit
+/// off and on. Runs of three draws into five attachments (four R32Uint, one R16G16Sfloat; mesh,
+/// vertex, mesh) alternate with draws that add a sixth (R16G16B16A16Sfloat), five times a
+/// frame; the second and third draw of each run reach memory through device addresses and
+/// follow a command-processor write held to the commit, as Demon's Souls' labels are; two
+/// guest fills land between draws; sixteen Stream submissions end with the stream busy, so the coalescing limit
 /// asks for a commit mid-frame; two full-screen single-draw passes follow. Each optimization
 /// is measured alone and all together, and the targets and the filled bytes of all-on are
 /// compared with all-off byte for byte. The targets hold incompressible noise, so a split costs
@@ -34,6 +36,7 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
     private const int FlushesPerSegment = 3;
     private const ulong FillBytes = 0xC000;
     private const ulong FillBase = MetalPassRig.GuestBase + 0x10_0000;
+    private const ulong LabelBase = MetalPassRig.GuestBase + 0x8000;
     private const ulong TargetBase = MetalPassRig.GuestBase + 0x100_0000;
 
     private static readonly GpuFormat[] Shared =
@@ -127,6 +130,8 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
         host.AssumeStreamBusy = true;
 
         var shared = new PipelineHandle[Segments];
+        var sharedVertex = new PipelineHandle[Segments];
+        var sharedMesh = new PipelineHandle[Segments];
         var union = new PipelineHandle[Segments];
         for (var segment = 0; segment < Segments; segment++)
         {
@@ -137,6 +142,10 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
             // draw landed in.
             shared[segment] = rig.Pipeline(Shared, Outputs(Shared, segment * 16 + 1), mesh: true,
                 discardWhen: Pattern(segment));
+            sharedVertex[segment] = rig.Pipeline(Shared, Outputs(Shared, segment * 16 + 3),
+                discardWhen: Pattern(segment + 1));
+            sharedMesh[segment] = rig.Pipeline(Shared, Outputs(Shared, segment * 16 + 5), mesh: true,
+                discardWhen: Pattern(segment + 3));
             union[segment] = rig.Pipeline(Union, Outputs(Union, segment * 16 + 8),
                 discardWhen: Pattern(segment + 2));
         }
@@ -157,6 +166,7 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
         var presentTarget = rig.MakeTarget(address, Post[0], Width, Height);
 
         var five = targets.AsSpan(0, Shared.Length).ToArray();
+        var deviceAddresses = MetalPassRig.Stage(deviceAddresses: true);
         _ = host.TakeGpuBusySecondsWhenIdle();
         _ = host.TakeUnionPasses();
         _ = host.TakeHeldCommits();
@@ -173,6 +183,10 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
                 using (host.BeginPreparation())
                 {
                     rig.Draw(shared[segment], five);
+                    host.RecordCommandProcessorWrite(LabelBase, BitConverter.GetBytes((ulong)frame), "WRITE_DATA");
+                    rig.Draw(sharedVertex[segment], five, deviceAddresses);
+                    host.RecordCommandProcessorWrite(LabelBase + 8, BitConverter.GetBytes((ulong)frame), "WRITE_DATA");
+                    rig.Draw(sharedMesh[segment], five, deviceAddresses);
                     if (segment is 1 or 3)
                     {
                         host.FillGuestMemory(FillBase + (ulong)fill * 0x1_0000, FillBytes, 0xA1B2C3D4u + (uint)fill + (uint)frame, allowHost: false);
@@ -205,7 +219,7 @@ public sealed class MetalPassMergeBenchTests(ITestOutputHelper output)
         }
 
         var counters = string.Create(CultureInfo.InvariantCulture,
-            $"union={host.TakeUnionPasses()} flush_hold={host.TakeHeldCommits()} fills_deferred={host.TakeDeferredFills()} load_elided={host.TakeElidedLoads()}");
+            $"union={host.TakeUnionPasses()} union_continued={host.TakeUnionContinued()} union_miss=[{host.TakeUnionMissCauses()}] flush_hold={host.TakeHeldCommits()} fills_deferred={host.TakeDeferredFills()} load_elided={host.TakeElidedLoads()}");
         var bytes = Array.Empty<byte[]>();
         if (keepBytes)
         {
