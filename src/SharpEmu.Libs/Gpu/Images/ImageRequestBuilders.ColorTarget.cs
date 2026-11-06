@@ -97,7 +97,7 @@ public static partial class ImageRequestBuilders
         public ColorTargetResolution? Result;
     }
 
-    private const int TargetMemoCount = 8;
+    private const int TargetMemoCount = 16;
     private const int TargetMemoWays = 4;
 
     [ThreadStatic]
@@ -106,7 +106,10 @@ public static partial class ImageRequestBuilders
     [ThreadStatic]
     private static byte[]? _colorTargetMemoNext;
 
-    private static int TargetMemoSlot(ulong address) => (int)((address >> 12) ^ (address >> 20)) & (TargetMemoCount - 1);
+    // The top bits of a Fibonacci hash of the whole address. The bits a shift picked before stay the same for targets
+    // a multiple of 64 KB apart whose distance is a multiple of 1 MB too, or stays under it: a set of equal-sized
+    // attachments fell into one or two buckets, overran their four ways, and every draw rebuilt every request.
+    private static int TargetMemoSlot(ulong address) => (int)((address * 0x9E3779B97F4A7C15UL) >> (64 - 4));
 
     // Builds the request for a bound color target. Null when the slot carries no target.
     public static ColorTargetResolution? ColorTarget(in ColorTargetWords words, uint targetMask, uint drawLayerOffset, bool ignoreTargetMask)

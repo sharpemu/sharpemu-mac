@@ -83,6 +83,10 @@ internal sealed partial class MetalRenderHost
 
         public ShaderStageResources Stage => StageResources;
 
+        // The request of an image: a texture memo hit's own (TryTextureMemo copies none into Requests), else the one
+        // resolved into Requests.
+        public ref readonly ImageRequest RequestAt(int index) => ref MemoHits[index] is { } hit ? ref hit.Request : ref Requests[index];
+
         public void EnsureCapacity(int images, int samplers, int buffers, int shaderDwords)
         {
             if (Textures.Length < images)
@@ -376,8 +380,9 @@ internal sealed partial class MetalRenderHost
             : new TextureMemoKey(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], ShapeOf(image));
         if (_textureMemo.TryGetValue(key, out var entry) && _imageCache.TextureStampMayHold(in entry.Stamp))
         {
+            // The request stays the entry's (MetalStageBindings.RequestAt): a copy is a quarter-kilobyte of
+            // reference-holding struct per sampled binding per draw.
             prepared.Images[index] = entry.Image;
-            prepared.Requests[index] = entry.Request;
             prepared.IsStorage[index] = false;
             prepared.Textures[index] = 0;
             prepared.MemoHits[index] = entry;
@@ -447,6 +452,7 @@ internal sealed partial class MetalRenderHost
         {
             if (index == movie.Luma || index == movie.Chroma)
             {
+                prepared.MemoHits[index] = null;
                 PrepareHostMovieBinding(prepared, info.Images[index], snapshot.Images[index], index);
                 continue;
             }
@@ -461,7 +467,7 @@ internal sealed partial class MetalRenderHost
 
         // All image requests, including movie replacements and texture memo hits, are current.
         // Classify their sampler pairings once rather than scanning every pair for every sampler.
-        MetalSamplerViewClasses.Resolve(info.SampledPairs, prepared.Requests.AsSpan(0, prepared.ImageCount),
+        MetalSamplerViewClasses.Resolve(info.SampledPairs, prepared,
             prepared.SamplerViewClasses.AsSpan(0, info.Samplers.Count));
         for (var index = 0; index < info.Samplers.Count; index++)
         {

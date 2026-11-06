@@ -36,6 +36,34 @@ public sealed class ColorTargetMemoTests
         Assert.True(allocated <= 512, $"Warm equivalent targets allocated {allocated} bytes.");
     }
 
+    // Three sets of six equal-sized attachments, laid out back to back 64 KB or 8 MB apart, as a G-buffer's are: the
+    // old address hash put all of them in one or two buckets of four.
+    [Theory]
+    [InlineData(0x10000UL)]
+    [InlineData(0x800000UL)]
+    public void EighteenTargetsAnAlignedStrideApartStayMemoised(ulong stride)
+    {
+        var targets = Enumerable.Range(0, 18).Select(i => RegisterWords.Color(0x40000000UL + (ulong)i * stride, 64, 64)).ToArray();
+        foreach (var words in targets)
+        {
+            Assert.NotNull(ImageRequestBuilders.ColorTarget(words, 15, 0, false));
+        }
+
+        ulong sum = 0;
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var repeat = 0; repeat < 32; repeat++)
+        {
+            foreach (var words in targets)
+            {
+                sum += ImageRequestBuilders.ColorTarget(words, 15, 0, false)!.Value.Request.Description.MipLayout[0].Size;
+            }
+        }
+
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(sum > 0);
+        Assert.True(allocated <= 512, $"Eighteen warm targets {stride:X} bytes apart allocated {allocated} bytes.");
+    }
+
     [Fact]
     public void NativeMetadataModeIsPartOfTheMemoKey()
     {

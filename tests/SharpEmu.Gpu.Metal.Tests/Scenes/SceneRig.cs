@@ -152,6 +152,16 @@ internal sealed unsafe class SceneRig : IDisposable
     /// <summary>The relay the rig's host posts GPU-queue work through, for driving the worker's own pass.</summary>
     internal MetalGpuWorkerRelay Relay => _relay;
 
+    // One pass of the worker in an autorelease pool of its own, as MetalV2Presenter.RunWorkerStep runs it: without one,
+    // what Metal autoreleases while recording (encoders, command buffers) piles up and every new encoder costs far more
+    // than it does in game.
+    private void RunWorkerStep()
+    {
+        using var pool = MetalAutoreleasePool.Enter();
+        Host.RunPendingCommands();
+        Host.RunCommandStreamSlices(64);
+    }
+
     /// <summary>Records all queued packets without waiting for their GPU work to finish.</summary>
     public void RecordPending()
     {
@@ -164,8 +174,7 @@ internal sealed unsafe class SceneRig : IDisposable
         {
             if (DateTime.UtcNow > deadline || Volatile.Read(ref recorded) < 0)
                 throw new TimeoutException("The scene's recording barrier did not finish.");
-            Host.RunPendingCommands();
-            Host.RunCommandStreamSlices(64);
+            RunWorkerStep();
             Thread.Yield();
         } while (Volatile.Read(ref recorded) != 1 || Host.CommandThreadHasWork || _relay.HasPendingCommands);
     }
@@ -185,8 +194,7 @@ internal sealed unsafe class SceneRig : IDisposable
         {
             if (DateTime.UtcNow > deadline || Volatile.Read(ref producerDrained) < 0)
                 throw new TimeoutException("The scene's command stream did not finish its producer barrier.");
-            Host.RunPendingCommands();
-            Host.RunCommandStreamSlices(64);
+            RunWorkerStep();
             if (Host.CommandStream.HasUnblockedPending || Host.CommandThreadHasWork || _relay.HasPendingCommands)
             {
                 continue;
