@@ -59,6 +59,10 @@ public sealed class PacketCursorStack
 
     public bool MadeProgress { get; internal set; }
 
+    // The last slice stopped at a packet boundary to let a queue it woke run, not on a wait:
+    // the submission is runnable again at once (CommandStreamQueue's yield on wake).
+    public bool Yielded { get; internal set; }
+
     public int Depth => _cursors.Count;
 
     public bool IsEmpty => _cursors.Count == 0;

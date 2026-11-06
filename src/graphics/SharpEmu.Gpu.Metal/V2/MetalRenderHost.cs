@@ -336,13 +336,14 @@ internal sealed partial class MetalRenderHost :
     public bool IsRecording => !_disposed && EnsureCommandBuffer() != 0;
 
     /// <summary>The command buffer being recorded; one is opened on demand.</summary>
-    private nint EnsureCommandBuffer()
-    {
-        if (_commandBuffer != 0)
-        {
-            return _commandBuffer;
-        }
+    // The open buffer is the common case, asked for several times a draw: it stays a field read the
+    // caller inlines. The opening path sends messages, and a method that holds a native call sets up
+    // its call frame on every entry, taken or not.
+    private nint EnsureCommandBuffer() => _commandBuffer != 0 ? _commandBuffer : OpenCommandBuffer();
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private nint OpenCommandBuffer()
+    {
         _commandBuffer = NewCommandBuffer();
         MetalMemoryTelemetry.CommandBuffers.Add();
         if (_commandBuffer == 0)
@@ -569,7 +570,7 @@ internal sealed partial class MetalRenderHost :
             switch (cause)
             {
                 case PassEndCause.Transfer: _passEndTransfer++; break;
-                case PassEndCause.Flush: _passEndFlush++; break;
+                case PassEndCause.Flush: _passEndFlush++; NotePassEndFlush(); break;
                 case PassEndCause.Present: _passEndPresent++; break;
                 default: _passEndOther++; break;
             }
@@ -624,6 +625,10 @@ internal sealed partial class MetalRenderHost :
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandFlush);
         // An upload left for a pass is made before the buffer it belongs in is committed.
         _imageCache.DrainDeferredRefreshes();
+        var reason = why == MetalFlushCause.Stream && _streamCommitReason is { } streamReason
+            ? streamReason
+            : FlushReasonName(why);
+        _streamCommitReason = null;
         if (_commandBuffer == 0)
         {
             return _nextSerial;
@@ -631,7 +636,9 @@ internal sealed partial class MetalRenderHost :
 
         _flushCauses[(int)why]++;
         _landDeferredLabels = true;
+        _passEndFlushReason = reason;
         EndEncoders(cause);
+        _passEndFlushReason = null;
         EncodePendingOcclusionReductions();
         MaterializePendingClears();
         _stagedStorageCopies?.EndSubmission();
@@ -816,6 +823,20 @@ internal sealed partial class MetalRenderHost :
 
         commitTime = 0;
         return 0;
+    }
+
+    /// <summary>
+    /// Commits, waits for the GPU to finish everything committed, and returns the GPU time
+    /// the finished submissions took since the last call (the synthetic pass benchmark).
+    /// </summary>
+    internal double TakeGpuBusySecondsWhenIdle()
+    {
+        FlushAndWaitForGpu();
+        DrainFinishedSubmissions();
+        var seconds = _gpuBusySeconds;
+        _gpuBusySeconds = 0;
+        _gpuBusySamples = 0;
+        return seconds;
     }
 
     /// <summary>Reads and releases every submission the GPU has finished.</summary>
@@ -1618,7 +1639,8 @@ internal sealed partial class MetalRenderHost :
 
         // A label held for the commit over these bytes lands first, so the fill overwrites it in stream order.
         OrderAfterDeferredCopies(address, size);
-        if (TryFillInComputeEncoder(address, size, value, in range))
+        if (TryDeferFillToPassEnd(address, size, value, in range) ||
+            TryFillInComputeEncoder(address, size, value, in range))
         {
             _imageCache.InvalidateMemoryFromGpu(address, size);
             NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.Fill);
@@ -1637,37 +1659,7 @@ internal sealed partial class MetalRenderHost :
         WaitForPreviousEncoder(encoder, render: false);
         try
         {
-            var bytes = (byte)value;
-            if (value == bytes * 0x01010101u)
-            {
-                MetalNative.SendFillBuffer(
-                    encoder,
-                    SelFillBuffer,
-                    range.Buffer,
-                    new NsRange { Location = (nuint)range.Offset, Length = (nuint)range.Size },
-                    bytes);
-            }
-            else
-            {
-                // A non-uniform dword needs a pattern source; one ring page is enough
-                // and the blit repeats it across the destination.
-                var pattern = _guestMemory.Allocate(Math.Min(size, 64 * 1024), 256, out var span);
-                var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(span);
-                words.Fill(value);
-                for (var written = 0UL; written < size;)
-                {
-                    var chunk = Math.Min(pattern.Size, size - written);
-                    MetalNative.SendCopyBuffer(
-                        encoder,
-                        SelCopyBuffer,
-                        pattern.Buffer,
-                        (nuint)pattern.Offset,
-                        range.Buffer,
-                        (nuint)(range.Offset + written),
-                        (nuint)chunk);
-                    written += chunk;
-                }
-            }
+            EncodeBlitFill(encoder, range.Buffer, range.Offset, range.Size, value);
         }
         finally
         {
@@ -1682,6 +1674,41 @@ internal sealed partial class MetalRenderHost :
         _imageCache.InvalidateMemoryFromGpu(address, size);
         NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.Fill);
         Interlocked.Increment(ref _gpuFills);
+    }
+
+    // A fill of size bytes at buffer + offset, in an open blit encoder.
+    private void EncodeBlitFill(nint encoder, nint buffer, ulong offset, ulong size, uint value)
+    {
+        var bytes = (byte)value;
+        if (value == bytes * 0x01010101u)
+        {
+            MetalNative.SendFillBuffer(
+                encoder,
+                SelFillBuffer,
+                buffer,
+                new NsRange { Location = (nuint)offset, Length = (nuint)size },
+                bytes);
+            return;
+        }
+
+        // A non-uniform dword needs a pattern source; one ring page is enough
+        // and the blit repeats it across the destination.
+        var pattern = _guestMemory.Allocate(Math.Min(size, 64 * 1024), 256, out var span);
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(span);
+        words.Fill(value);
+        for (var written = 0UL; written < size;)
+        {
+            var chunk = Math.Min(pattern.Size, size - written);
+            MetalNative.SendCopyBuffer(
+                encoder,
+                SelCopyBuffer,
+                pattern.Buffer,
+                (nuint)pattern.Offset,
+                buffer,
+                (nuint)(offset + written),
+                (nuint)chunk);
+            written += chunk;
+        }
     }
 
     private void WriteGuestPattern(ulong address, ulong size, uint value)
@@ -2878,13 +2905,15 @@ internal sealed partial class MetalRenderHost :
             $"discarded_mb={(discardedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"cleared_mb={(clearedBytes / (1024.0 * 1024.0)).ToString("F1", culture)} " +
             $"end_clear={endClearCount} end_target={endTargetCount} end_transfer={endTransferCount} " +
-            $"end_compute={endComputeCount} end_flush={endFlushCount} end_present={endPresentCount} " +
+            $"end_compute={endComputeCount} end_flush={endFlushCount} end_flush_by=[{TakePassEndFlushReasons()}] end_present={endPresentCount} " +
             $"end_other={endOtherCount} end_indirect={TakeIndirectPassEnds()} {TakeExecutorPassEnds()} targetless={targetlessCount} " +
             $"clears=[{TakeClearArrivals()}] clear_passes={clearPasses} " +
             $"clear_depth={clearDepthPasses} clear_mpx={(clearPixels / 1e6).ToString("F1", culture)} " +
             $"labels_deferred={TakeDeferredLabelWrites()} label_lookup=[{TakeDeferredLabelLookupStats()}] clears_folded={foldedClears} " +
             $"clears_encoded={encodedClears} depth_joins={depthJoins} depth_join_sampled={depthJoinsSampled} depth_join_copies={depthJoinsCopies} " +
             $"subset_joins={subsetJoins} subset_join_sampled={subsetJoinsSampled}{TakeSubsetRefusals()} " +
+            $"join_device_ranges=[{FormatDeviceRangeJoinChecks()}] " +
+            $"{TakeUnionPassText()} flush_hold=[{FormatHeldCommits()}] {FormatDeferredFills()} " +
             $"transfers=[{TakeTransferCauses()}]" +
             (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +
             $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()} " +

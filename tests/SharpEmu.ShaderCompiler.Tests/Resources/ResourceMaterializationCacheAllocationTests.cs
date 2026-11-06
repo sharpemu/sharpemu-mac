@@ -116,11 +116,12 @@ public sealed class ResourceMaterializationCacheAllocationTests(ITestOutputHelpe
         Assert.Equal(0x10F00u, draws.Snapshot.Buffers[0][0]);
         Assert.Equal(0, patched);
 
-        // A draw with a base not seen before patches a copy: one snapshot, the buffer list and the V#.
+        // A draw with a base not seen before patches a copy: one snapshot, the buffer list and the V#. The snapshot's
+        // binding packet slot (ResourceSnapshot.BindingPacket) adds 8 bytes, so 168.
         var fresh = draws.Run(draws.InputsOf([0, 0, 0, 0, 0x20000, 0, 256, 0x2_0000]));
         output.WriteLine($"fresh rebased hit: {fresh} bytes");
         Assert.Equal(0x20000u, draws.Snapshot.Buffers[0][0]);
-        Assert.True(fresh <= 160, $"bytes={fresh}");
+        Assert.True(fresh <= 168, $"bytes={fresh}");
     }
 
     [Fact]

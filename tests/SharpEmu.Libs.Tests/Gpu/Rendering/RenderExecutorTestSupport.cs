@@ -612,6 +612,22 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
 
     public ComputeProgram Compute { get; set; } = RenderExecutorFixtures.ComputeProgram();
 
+    // ResolveComputeProgramAhead: what it hands back (Compute unless refused), run before it returns.
+    internal ComputePrefetchRefusal AheadRefusal { get; set; }
+
+    internal Action? BeforeComputeAhead { get; set; }
+
+    public int ComputeAheadResolutions;
+
+    public ComputeProgram? ResolveComputeProgramAhead(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY,
+        uint dimensionZ, bool indirect, out ComputePrefetchRefusal refusal)
+    {
+        BeforeComputeAhead?.Invoke();
+        Interlocked.Increment(ref ComputeAheadResolutions);
+        refusal = AheadRefusal;
+        return refusal == ComputePrefetchRefusal.None ? Compute : null;
+    }
+
     public List<string> Calls { get; } = new();
 
     public List<(VertexStageRegisters Vertex, ContextRegisters Context, UserConfigRegisters UserConfig,

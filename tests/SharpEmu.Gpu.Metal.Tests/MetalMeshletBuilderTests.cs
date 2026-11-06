@@ -42,6 +42,96 @@ public sealed class MetalMeshletBuilderTests
         return [.. indices];
     }
 
+    // The builder before its vertex table: a linear search of the current meshlet per lookup.
+    private static uint[] ReferenceWords(uint[] indices, uint maxVertices, uint maxPrimitives)
+    {
+        maxVertices = Math.Clamp(maxVertices, 3, MeshletBuilder.MaxLocalVertices);
+        maxPrimitives = Math.Clamp(maxPrimitives, 1, MeshletBuilder.MaxLocalVertices);
+        var headers = new List<uint>();
+        var vertices = new List<uint>();
+        var primitives = new List<uint>();
+        var current = new List<uint>();
+        uint vertexStart = 0, primitiveStart = 0, firstTriangle = 0, primitiveCount = 0;
+        void Flush()
+        {
+            if (primitiveCount == 0)
+            {
+                return;
+            }
+
+            headers.AddRange([vertexStart, primitiveStart, firstTriangle, (uint)current.Count | (primitiveCount << 16)]);
+            vertices.AddRange(current);
+            vertexStart += (uint)current.Count;
+            primitiveStart += primitiveCount;
+            current.Clear();
+            primitiveCount = 0;
+        }
+
+        uint Local(uint value)
+        {
+            var found = current.IndexOf(value);
+            if (found >= 0)
+            {
+                return (uint)found;
+            }
+
+            current.Add(value);
+            return (uint)current.Count - 1;
+        }
+
+        for (var triangle = 0; triangle < indices.Length / 3; triangle++)
+        {
+            var a = indices[triangle * 3];
+            var b = indices[(triangle * 3) + 1];
+            var c = indices[(triangle * 3) + 2];
+            var added = (current.Contains(a) ? 0u : 1u) + (b != a && !current.Contains(b) ? 1u : 0u) +
+                (c != a && c != b && !current.Contains(c) ? 1u : 0u);
+            if (primitiveCount == maxPrimitives || (uint)current.Count + added > maxVertices)
+            {
+                Flush();
+            }
+
+            if (primitiveCount == 0)
+            {
+                firstTriangle = (uint)triangle;
+            }
+
+            var la = Local(a);
+            var lb = Local(b);
+            var lc = Local(c);
+            primitives.Add(la | (lb << 8) | (lc << 16));
+            primitiveCount++;
+        }
+
+        Flush();
+        return [.. headers, .. vertices, .. primitives];
+    }
+
+    [Theory]
+    [InlineData(30u, 10u, 200)]
+    [InlineData(64u, 126u, 100000)]
+    [InlineData(128u, 256u, 4000)]
+    [InlineData(255u, 255u, 600)]
+    public void TheVertexTableBuildsWhatTheLinearSearchBuilt(uint maxVertices, uint maxPrimitives, int vertexRange)
+    {
+        var random = new Random(4321);
+        var scratch = new MeshletBuilder.Scratch();
+        // One scratch across builds, as the cache keeps it: each build starts from the last one's table.
+        for (var build = 0; build < 3; build++)
+        {
+            var indices = new uint[3 * 20000];
+            for (var i = 0; i < indices.Length; i++)
+            {
+                indices[i] = (uint)random.Next(0, vertexRange);
+            }
+
+            MeshletBuilder.BuildInto(indices, maxVertices, maxPrimitives, scratch);
+            var words = new uint[scratch.WordCount];
+            scratch.CopyTo(words);
+            Assert.Equal(ReferenceWords(indices, maxVertices, maxPrimitives), words);
+        }
+    }
+
     [Theory]
     [InlineData(30u, 10u)]
     [InlineData(32u, 32u)]

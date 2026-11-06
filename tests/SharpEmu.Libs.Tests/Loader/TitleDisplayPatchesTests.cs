@@ -372,6 +372,190 @@ public sealed class TitleDisplayPatchesTests
         }
     }
 
+    [Theory]
+    [InlineData("900p", 1600u, 900u)]
+    [InlineData("720p", 1280u, 720u)]
+    [InlineData("1080p", 1920u, 1080u)]
+    [InlineData("540P", 960u, 540u)]
+    [InlineData("1600x900", 1600u, 900u)]
+    [InlineData(" 1280X720 ", 1280u, 720u)]
+    public void TheSceneResolutionParsesHeightPresetsAndExplicitSizes(string text, uint width, uint height)
+    {
+        Assert.True(TitleDisplayPatches.TryParseSceneResolution(text, out var parsedWidth, out var parsedHeight));
+        Assert.Equal(width, parsedWidth);
+        Assert.Equal(height, parsedHeight);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("auto")]
+    [InlineData("100p")]
+    [InlineData("4320p")]
+    [InlineData("320x180")]
+    [InlineData("4096x2160")]
+    [InlineData("x900")]
+    [InlineData("1600x")]
+    public void TheSceneResolutionRejectsAnythingElse(string? text)
+    {
+        Assert.False(TitleDisplayPatches.TryParseSceneResolution(text, out _, out _));
+    }
+
+    [Fact]
+    public void ASceneCapShrinksOnlyTheInternalSitesOfTheAllSitesRewrite()
+    {
+        var patches = TitleDisplayPatches.BuildPatches(Sites, 1920, 1080, (1600, 900));
+
+        Assert.Equal(7, patches.Count);
+        Assert.Equal(Le32(1920), patches[0].New);
+        Assert.Equal(Le32(1080), patches[1].New);
+        Assert.Equal(Le32(1600), patches[5].New);
+        Assert.Equal(Le32(900), patches[6].New);
+
+        // A cap above the display changes nothing.
+        Assert.Equal(
+            TitleDisplayPatches.BuildPatches(Sites, 1920, 1080).Select(patch => patch.New),
+            TitleDisplayPatches.BuildPatches(Sites, 1920, 1080, (2560, 1440)).Select(patch => patch.New));
+    }
+
+    [Theory]
+    [InlineData(1920u, 1080u, 1600u, 900u, 1600u, 900u)]
+    [InlineData(1920u, 1080u, 1280u, 720u, 1280u, 720u)]
+    [InlineData(1280u, 720u, 1600u, 900u, 1280u, 720u)]
+    [InlineData(2560u, 1440u, 1600u, 900u, 1600u, 900u)]
+    public void TheDisplayModeSceneIsTheSmallestOfDisplayHdSizeAndCap(
+        uint width, uint height, uint capWidth, uint capHeight, uint sceneWidth, uint sceneHeight)
+    {
+        var profile = TitleDisplayPatches.DisplayModeFor("PPSA01342")!;
+        var patches = TitleDisplayPatches.BuildDisplayModePatches(profile, width, height, (capWidth, capHeight));
+
+        foreach (var site in profile.HdInternalSites)
+        {
+            var patch = Assert.Single(patches, patch => patch.Offset == site.Offset);
+            Assert.Equal(Le32(site.Slot == TitleDisplayPatches.Slot.Width ? sceneWidth : sceneHeight), patch.New);
+        }
+
+        foreach (var site in profile.HdBufferSites)
+        {
+            Assert.Equal(Encode(site, 1920, 1080), Assert.Single(patches, patch => patch.Offset == site.Offset).New);
+        }
+
+        Assert.DoesNotContain(patches, patch => HdOutputOffsets.Contains(patch.Offset));
+        Assert.Empty(TitleDisplayPatches.BuildDisplayModePatches(profile, 3840, 2160, (capWidth, capHeight)));
+    }
+
+    [Fact]
+    public void ApplyInDisplayModeWithA900pSceneKeepsTheHdOutputAndShrinksTheScene()
+    {
+        var profile = TitleDisplayPatches.DisplayModeFor("PPSA01342")!;
+        var sites = TitleDisplayPatches.SitesFor("PPSA01342")!;
+        var imageSize = (sites.Max(site => site.Offset) + 0x10000) & ~0xFFFFUL;
+        using var memory = new SharpEmu.Core.Memory.PhysicalVirtualMemory();
+        Assert.True(memory.TryAllocateAtOrAbove(0x200000000UL, imageSize, executable: false, 0x4000, out var imageBase));
+        ProgramHeader[] headers = [CreateLoad(0, imageSize)];
+        foreach (var site in sites.Concat(profile.HdInternalSites))
+        {
+            Assert.True(memory.TryWrite(imageBase + site.Offset, Encode(site, site.OldWidth, site.OldHeight)));
+        }
+
+        foreach (var (offset, hdValue) in HdOutputValues)
+        {
+            Assert.True(memory.TryWrite(imageBase + offset, Le32(hdValue)));
+        }
+
+        foreach (var offset in profile.DefaultModeSites)
+        {
+            Assert.True(memory.TryWrite(imageBase + offset, Le32(3)));
+        }
+
+        foreach (var site in profile.OverrideSites)
+        {
+            Assert.True(memory.TryWrite(imageBase + site.Offset, site.Old));
+        }
+
+        var previousMode = Environment.GetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable);
+        var previousScene = Environment.GetEnvironmentVariable(TitleDisplayPatches.SceneEnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, "mode");
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.SceneEnvironmentVariable, "900p");
+            Assert.True(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", 1920, 1080));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, previousMode);
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.SceneEnvironmentVariable, previousScene);
+        }
+
+        var value = new byte[4];
+        foreach (var site in profile.HdInternalSites)
+        {
+            Assert.True(memory.TryRead(imageBase + site.Offset, value));
+            Assert.Equal(Le32(site.Slot == TitleDisplayPatches.Slot.Width ? 1600u : 900u), value);
+        }
+
+        foreach (var (offset, expected) in HdOutputValues)
+        {
+            Assert.True(memory.TryRead(imageBase + offset, value));
+            Assert.Equal(Le32(expected), value);
+        }
+
+        foreach (var site in profile.HdBufferSites)
+        {
+            var expected = Encode(site, 1920, 1080);
+            var actual = new byte[expected.Length];
+            Assert.True(memory.TryRead(imageBase + site.Offset, actual));
+            Assert.Equal(expected, actual);
+        }
+    }
+
+    [Fact]
+    public void ASceneCapAloneDoesNotRedirectTheImageScaleAtA4KDisplay()
+    {
+        var sites = TitleDisplayPatches.SitesFor("PPSA01342")!;
+        var imageSize = (sites.Max(site => site.Offset) + 0x10000) & ~0xFFFFUL;
+        using var memory = new SharpEmu.Core.Memory.PhysicalVirtualMemory();
+        Assert.True(memory.TryAllocateAtOrAbove(0x200000000UL, imageSize, executable: false, 0x4000, out var imageBase));
+        ProgramHeader[] headers = [CreateLoad(0, imageSize)];
+        foreach (var site in sites)
+        {
+            Assert.True(memory.TryWrite(imageBase + site.Offset, Encode(site, site.OldWidth, site.OldHeight)));
+        }
+
+        WriteImageScaleSites(memory, imageBase);
+        var previousMode = Environment.GetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable);
+        var previousScene = Environment.GetEnvironmentVariable(TitleDisplayPatches.SceneEnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, null);
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.SceneEnvironmentVariable, "1080p");
+            Assert.True(TitleDisplayPatches.Apply(memory, headers, imageBase, "PPSA01342", 3840, 2160));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.EnvironmentVariable, previousMode);
+            Environment.SetEnvironmentVariable(TitleDisplayPatches.SceneEnvironmentVariable, previousScene);
+        }
+
+        foreach (var site in TitleDisplayPatches.ImageScaleSitesFor("PPSA01342")!)
+        {
+            var actual = new byte[site.Old.Length];
+            Assert.True(memory.TryRead(imageBase + site.Offset, actual));
+            Assert.Equal(site.Old, actual);
+        }
+
+        // The scene shrinks; the output keeps the title's 4K sizes.
+        foreach (var site in sites)
+        {
+            var expected = site.Role == TitleDisplayPatches.Role.Internal
+                ? Encode(site, Math.Min(1920u, site.OldWidth), Math.Min(1080u, site.OldHeight))
+                : Encode(site, site.OldWidth, site.OldHeight);
+            var actual = new byte[expected.Length];
+            Assert.True(memory.TryRead(imageBase + site.Offset, actual));
+            Assert.Equal(expected, actual);
+        }
+    }
+
     private static void WriteImageScaleSites(SharpEmu.Core.Memory.PhysicalVirtualMemory memory, ulong imageBase)
     {
         foreach (var site in TitleDisplayPatches.ImageScaleSitesFor("PPSA01342")!)

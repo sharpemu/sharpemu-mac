@@ -151,6 +151,11 @@ internal sealed partial class MetalRenderHost
             groups.Buffer,
             (nuint)groups.Offset,
             entry.ThreadsPerThreadgroup);
+        if (PassProfileEnabled)
+        {
+            PassProfileNoteIndirectGroups(encoder, groups.Buffer, groups.Offset);
+        }
+
         CountDraw(started);
         Interlocked.Increment(ref _threadIndirectGpuDispatches);
         ProfileWork(

@@ -112,6 +112,11 @@ internal sealed partial class ShaderPipelineCache
         return _kernelDemands.GetValue(program, _ => new KernelDemand(evaluable));
     }
 
+    // Whether WithPrediction evaluates the kernel rather than returning the program as it is.
+    private static bool WouldPredict(ComputeProgram program, KernelDemand? kernel, ShaderSource? source) =>
+        kernel is not null && source is not null && program.Available && !program.Consumed &&
+        source.Registered.Frontend?.NormalizeBufferDescriptor is null;
+
     private ComputeProgram WithPrediction(
         ComputeProgram program,
         KernelDemand? kernel,
@@ -123,8 +128,7 @@ internal sealed partial class ShaderPipelineCache
         uint dimensionZ,
         bool indirect)
     {
-        if (kernel is null || source is null || !program.Available || program.Consumed ||
-            source.Registered.Frontend?.NormalizeBufferDescriptor is not null)
+        if (!WouldPredict(program, kernel, source))
         {
             return program;
         }

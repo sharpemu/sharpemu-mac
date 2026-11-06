@@ -75,7 +75,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // The translation state belongs to the interpreting thread; the command buffer to the worker.
             _submissionsStarted++;
             _translation!.BeginSubmission(queueId, submissionId, geometrySnapshots, CommandStream.GetInterpreter(queueId));
-            _commandThread!.Post(() =>
+            // A commit and a command buffer: nothing a program resolution reads, so the draws after it do not wait
+            // for it (Demon's Souls begins ~190 submissions a frame).
+            PostOrderingToWorker(() =>
             {
                 NativeOcclusionBeginQueue(queueId);
                 CommitCoalescedIfOverdue();
@@ -94,7 +96,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     void ICommandStreamHost.Flush()
     {
-        if (PostToWorker(() => ((ICommandStreamHost)this).Flush()))
+        // A commit orders GPU work only: the resolutions of the draws after it are not held for it.
+        if (PostOrderingToWorker(() => ((ICommandStreamHost)this).Flush()))
         {
             return;
         }
@@ -116,7 +119,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         DrainDraws();
         _frameBoundaries++;
-        FlushCommandBuffer(MetalFlushCause.Stream);
+        CommitStream("stream-frame");
     }
 
     // ---- command-buffer coalescing (SHARPEMU_METAL_V2_FLUSH_COALESCE) ----
@@ -159,6 +162,169 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         !coalesce || streamIdle || submissions >= maxSubmissions || encoders >= maxEncoders ||
         wantedTicks >= maxTicks;
 
+    // ---- holding a coalesced commit for the open render pass (SHARPEMU_METAL_V2_FLUSH_HOLD_PASS) ----
+    //
+    // A commit ends the open render pass: Metal passes do not span command buffers. Demon's
+    // Souls keeps drawing into the same targets across submissions, and a commit made only
+    // because a coalescing limit was reached stored and reloaded the whole attachment set there
+    // (~0.64 ms of GPU a frame). Such a commit is held while a pass is open and made at the
+    // first commit point with none open, or once the first deferred flush is older than the
+    // hold limit. Only the limits are held: a stream with nothing runnable, labels owed to a
+    // polling guest, completions, host waits and flips commit as before.
+    //
+    // Demon's Souls records its G-buffer pass for longer than the hold limit, so nearly every
+    // flush that still ended a pass there was a capped hold (flush_hold capped 47 of end_flush
+    // 48), and the union passes those ends cut short missed (union_miss flush). The limit is
+    // there so the GPU does not run dry while the worker records: while it still runs a buffer
+    // committed earlier, holding longer leaves it no idler, so the hold lasts past the limit
+    // until that buffer completes, up to SHARPEMU_METAL_V2_FLUSH_HOLD_BUSY_US
+    // (flush_hold=[busy]; SHARPEMU_METAL_V2_FLUSH_HOLD_BUSY=0 commits at the limit again). The
+    // TBDR line's end_flush_by=[...] says which commits ended passes, and union_miss names the
+    // same causes for the union passes they ended (flush-stream-capped and so on).
+
+    /// <summary>Whether limit-reached Stream commits wait for the open pass to end.</summary>
+    internal bool HoldFlushForPass { get; set; } = MetalV2Diagnostics.HoldFlushForPass;
+
+    /// <summary>Whether a held commit outlasts the hold limit while the GPU runs earlier work.</summary>
+    internal bool HoldFlushWhileGpuBusy { get; set; } = MetalV2Diagnostics.HoldFlushWhileGpuBusy;
+
+    /// <summary>Test seam: the stream always has more runnable work (as with a command thread).</summary>
+    internal bool AssumeStreamBusy { get; set; }
+
+    /// <summary>Test seam: what the busy-GPU hold reads instead of the shared event.</summary>
+    internal bool? AssumeGpuBusy { get; set; }
+
+    /// <summary>The hold limit and the busy-GPU limit, in stopwatch ticks (settable for tests).</summary>
+    internal long HoldFlushTicks { get; set; } =
+        MetalV2Diagnostics.HoldFlushMaxMicroseconds * System.Diagnostics.Stopwatch.Frequency / 1_000_000L;
+
+    internal long HoldFlushBusyTicks { get; set; } =
+        MetalV2Diagnostics.HoldFlushBusyMaxMicroseconds * System.Diagnostics.Stopwatch.Frequency / 1_000_000L;
+
+    private long _commitsHeldForPass;
+    private long _heldCommitsCapped;
+    private long _commitsHeldForBusyGpu;
+
+    // Why the commit being made was made, when a Stream flush made it; FlushCommandBuffer takes it.
+    private string? _streamCommitReason;
+
+    // The flush that is ending encoders, for the pass-end breakdown; null outside FlushCommandBuffer.
+    private string? _passEndFlushReason;
+    private readonly Dictionary<string, long> _passEndFlushReasons = new();
+
+    private string FormatHeldCommits()
+    {
+        var (held, capped) = TakeHeldCommits();
+        return $"held:{held},capped:{capped},busy:{TakeBusyHeldCommits()}";
+    }
+
+    internal (long Held, long Capped) TakeHeldCommits() =>
+        (Interlocked.Exchange(ref _commitsHeldForPass, 0), Interlocked.Exchange(ref _heldCommitsCapped, 0));
+
+    /// <summary>Commits held past the hold limit because the GPU still ran earlier work.</summary>
+    internal long TakeBusyHeldCommits() => Interlocked.Exchange(ref _commitsHeldForBusyGpu, 0);
+
+    /// <summary>Which commits ended a render pass: reason:count, most first.</summary>
+    internal string TakePassEndFlushReasons()
+    {
+        if (_passEndFlushReasons.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var text = string.Join(",", _passEndFlushReasons.OrderByDescending(pair => pair.Value).Select(pair => $"{pair.Key}:{pair.Value}"));
+        _passEndFlushReasons.Clear();
+        return text;
+    }
+
+    // A commit is ending the open pass: counted under the reason FlushCommandBuffer was given.
+    private void NotePassEndFlush()
+    {
+        ref var count = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(
+            _passEndFlushReasons, _passEndFlushReason ?? "other", out _);
+        count++;
+    }
+
+    private static string FlushReasonName(MetalFlushCause why) => why switch
+    {
+        MetalFlushCause.Stream => "stream",
+        MetalFlushCause.Labels => "labels",
+        MetalFlushCause.Completion => "completion",
+        MetalFlushCause.Present => "present",
+        MetalFlushCause.Budget => "budget",
+        MetalFlushCause.WaitGpu => "wait-gpu",
+        MetalFlushCause.WaitUncommitted => "wait-uncommitted",
+        MetalFlushCause.Poll => "poll",
+        MetalFlushCause.Transient => "transient",
+        _ => "other",
+    };
+
+    // A Stream flush commits, for this reason.
+    private void CommitStream(string reason)
+    {
+        _streamCommitReason = reason;
+        FlushCommandBuffer(MetalFlushCause.Stream);
+    }
+
+    /// <summary>
+    /// Whether a commit a coalescing limit asks for waits for the open render pass. Pure, so the
+    /// policy is testable without a device.
+    /// </summary>
+    internal static bool HoldsCommitForPass(bool hold, bool coalesce, bool passOpen, long wantedTicks, long maxTicks) =>
+        hold && coalesce && passOpen && wantedTicks < maxTicks;
+
+    /// <summary>
+    /// Whether a commit past the hold limit still waits for the open pass because the GPU runs a
+    /// buffer committed earlier. Pure, like HoldsCommitForPass.
+    /// </summary>
+    internal static bool HoldsCommitForBusyGpu(bool holdBusy, bool gpuBusy, long wantedTicks, long busyMaxTicks) =>
+        holdBusy && gpuBusy && wantedTicks < busyMaxTicks;
+
+    private enum PassHold
+    {
+        None,     // no pass open, or holding is off: commit
+        Held,     // within the hold limit
+        HeldBusy, // past it, while the GPU runs earlier work
+        Capped,   // past every limit: commit, ending the pass
+    }
+
+    // A limit was reached with the first deferred flush this old: whether the commit waits.
+    private PassHold HoldForOpenPass(bool coalesce, long wantedTicks)
+    {
+        var passOpen = _renderEncoder != 0;
+        if (!HoldFlushForPass || !coalesce || !passOpen)
+        {
+            return PassHold.None;
+        }
+
+        if (HoldsCommitForPass(HoldFlushForPass, coalesce, passOpen, wantedTicks, HoldFlushTicks))
+        {
+            return PassHold.Held;
+        }
+
+        // Read last: past the hold limit only, and it may ask the shared event.
+        return HoldFlushWhileGpuBusy && wantedTicks < HoldFlushBusyTicks &&
+            HoldsCommitForBusyGpu(HoldFlushWhileGpuBusy, GpuRunsEarlierWork(), wantedTicks, HoldFlushBusyTicks)
+            ? PassHold.HeldBusy
+            : PassHold.Capped;
+    }
+
+    // Whether a committed buffer has not completed yet.
+    private bool GpuRunsEarlierWork() =>
+        AssumeGpuBusy ?? Volatile.Read(ref _submittedSerial) > CompletedSerial;
+
+    private void NoteHeld(PassHold hold)
+    {
+        if (hold == PassHold.Held)
+        {
+            _commitsHeldForPass++;
+        }
+        else
+        {
+            _commitsHeldForBusyGpu++;
+        }
+    }
+
     private void FlushStream()
     {
         if (_commandBuffer == 0)
@@ -175,17 +341,45 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         _coalescedSubmissions++;
         var coalesce = MetalV2Diagnostics.CoalesceFlushes;
-        // Read only when the cheaper limits leave the decision open: it takes the queue lock.
-        var commit = ShouldCommitStreamFlush(
+        var limits = ShouldCommitStreamFlush(
             coalesce, streamIdle: false, _coalescedSubmissions, _encodersInBuffer, now - _commitWantedSince,
-            MetalV2Diagnostics.CoalesceMaxSubmissions, MetalV2Diagnostics.CoalesceMaxEncoders, CoalesceMaxTicks) ||
-            // With a producer, an empty packet queue can still have many worker items
-            // behind this flush. Its ordered idle callback commits after those items;
-            // testing the producer queue here would commit each parsed submission.
-            (!UsesCommandThread && !(_commandStream?.HasUnblockedPending ?? false));
-        if (commit)
+            MetalV2Diagnostics.CoalesceMaxSubmissions, MetalV2Diagnostics.CoalesceMaxEncoders, CoalesceMaxTicks);
+        // Read only when the cheaper limits leave the decision open, or a limit would end the
+        // open pass: it takes the queue lock. With a producer, an empty packet queue can still
+        // have many worker items behind this flush. Its ordered idle callback commits after
+        // those items; testing the producer queue here would commit each parsed submission.
+        bool StreamIdle() => !UsesCommandThread && !AssumeStreamBusy && !(_commandStream?.HasUnblockedPending ?? false);
+        string? reason = null;
+        if (!limits)
         {
-            FlushCommandBuffer(MetalFlushCause.Stream);
+            reason = StreamIdle() ? "stream-idle" : null;
+        }
+        else
+        {
+            var hold = HoldForOpenPass(coalesce, now - _commitWantedSince);
+            switch (hold)
+            {
+                case PassHold.Held or PassHold.HeldBusy:
+                    reason = StreamIdle() ? "stream-idle" : null;
+                    if (reason is null)
+                    {
+                        NoteHeld(hold);
+                    }
+
+                    break;
+                case PassHold.Capped:
+                    _heldCommitsCapped++;
+                    reason = "stream-capped";
+                    break;
+                default:
+                    reason = "stream-limit";
+                    break;
+            }
+        }
+
+        if (reason is not null)
+        {
+            CommitStream(reason);
             return;
         }
 
@@ -199,7 +393,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     {
         if (_commitWantedSince != 0)
         {
-            FlushCommandBuffer(MetalFlushCause.Stream);
+            CommitStream("stream-idle");
         }
     }
 
@@ -207,11 +401,25 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // preparation: a submission start and a draw or dispatch about to prepare.
     private void CommitCoalescedIfOverdue()
     {
-        if (_commitWantedSince != 0 &&
-            System.Diagnostics.Stopwatch.GetTimestamp() - _commitWantedSince >= CoalesceMaxTicks)
+        var wanted = System.Diagnostics.Stopwatch.GetTimestamp() - _commitWantedSince;
+        if (_commitWantedSince == 0 || wanted < CoalesceMaxTicks)
         {
-            FlushCommandBuffer(MetalFlushCause.Stream);
+            return;
         }
+
+        var hold = HoldForOpenPass(MetalV2Diagnostics.CoalesceFlushes, wanted);
+        if (hold is PassHold.Held or PassHold.HeldBusy)
+        {
+            NoteHeld(hold);
+            return;
+        }
+
+        if (hold == PassHold.Capped)
+        {
+            _heldCommitsCapped++;
+        }
+
+        CommitStream(hold == PassHold.Capped ? "stream-capped" : "stream-overdue");
     }
 
     void ICommandStreamHost.FlushAndWait()
@@ -1852,6 +2060,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// </summary>
     internal void OrderAfterDeferredCopies(ulong address, ulong size)
     {
+        // A fill the open pass holds is ordered the same way (MetalRenderHost.DeferredFills.cs).
+        LandDeferredFillsOver(address, size);
         if (_deferredLabelCopies.Count == 0 || (_computeEncoder == 0 && !LabelsAtCommit) ||
             (size != ulong.MaxValue && !DeferredLabelCopiesTouch(address, size)))
         {

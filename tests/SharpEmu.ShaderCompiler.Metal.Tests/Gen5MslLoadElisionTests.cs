@@ -45,6 +45,42 @@ public sealed class Gen5MslLoadElisionTests
         Assert.Equal([-1f, -1f, 1f, 1f], positions[0..4]);
     }
 
+    [Theory]
+    [InlineData(ShaderDepthPlanes.Far)]
+    [InlineData(ShaderDepthPlanes.Far | ShaderDepthPlanes.NearAtZero)]
+    [InlineData(ShaderDepthPlanes.NearAtNegativeW)]
+    public void DepthPlanesThatKeepEveryCornerLeaveThePositionsKnown(ShaderDepthPlanes planes)
+    {
+        // Demon's Souls clips the far plane (w - z) on its full-screen passes; z = w = 1 keeps
+        // every corner on the plane, so nothing is clipped.
+        var shader = CompileVertex(PresentQuad(), new ShaderClipSpaceTransform(false, 0, 0, 0, 0, 0, 0) { DepthPlanes = planes });
+
+        Assert.Contains("sharpemu_clip_distance", shader.Source, StringComparison.Ordinal);
+        var positions = Assert.IsType<float[]>(shader.ConstantPositions);
+        Assert.Equal([-1f, 1f, 1f, 1f], positions[0..4]);
+        Assert.Equal([1f, -1f, 1f, 1f], positions[12..16]);
+    }
+
+    [Fact]
+    public void AUserPlaneThatCutsACornerLeavesThePositionsUnknown()
+    {
+        // x >= 0.5: the left corners are outside.
+        var shader = CompileVertex(
+            PresentQuad(), new ShaderClipSpaceTransform(false, 0, 0, 0, 0, 0, 0) { UserClipPlanes = [1f, 0f, 0f, -0.5f] });
+
+        Assert.Null(shader.ConstantPositions);
+    }
+
+    [Fact]
+    public void AUserPlaneThatKeepsEveryCornerLeavesThePositionsKnown()
+    {
+        // x >= -2 keeps the whole quad.
+        var shader = CompileVertex(
+            PresentQuad(), new ShaderClipSpaceTransform(false, 0, 0, 0, 0, 0, 0) { UserClipPlanes = [1f, 0f, 0f, 2f] });
+
+        Assert.NotNull(shader.ConstantPositions);
+    }
+
     [Fact]
     public void PositionReadFromMemoryIsNotConstant()
     {

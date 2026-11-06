@@ -177,6 +177,41 @@ public sealed record Gen5MslCodegenOptions(
     /// SHARPEMU_MSL_EXEC_RUNS=0 guards each write again.</summary>
     public bool ExecRuns { get; init; } = true;
 
+    /// <summary>EXEC guard elision follows a saved full EXEC that the guest parks in a VGPR
+    /// lane (V_WRITELANE_B32) and reloads (V_READLANE_B32) before restoring it, so the code
+    /// after such an if counts as running with every lane set again
+    /// (<see cref="Ir.Gen5ExecFullAnalysis"/>). SHARPEMU_MSL_EXEC_LANE_SPILLS=0 stops at the
+    /// first spilled mask, as before.</summary>
+    public bool ExecLaneSpills { get; init; } = true;
+
+    /// <summary>EXEC guard elision knows a whole-wave-mode section (S_OR_SAVEEXEC exec, -1 or
+    /// S_ORN2_SAVEEXEC exec, exec up to the move of the saved mask back into EXEC) runs with
+    /// every lane set, and the lane-exact unobserved writes count the lanes such a section wakes
+    /// as reading only what it reads and what they read once it hands EXEC back
+    /// (<see cref="Ir.Gen5LaneObservationAnalysis"/>), not every register live after its entry.
+    /// SHARPEMU_MSL_EXEC_WWM=0 treats the entry as an unknown EXEC write, as before.</summary>
+    public bool ExecWholeWave { get; init; } = true;
+
+    /// <summary>Cheaper exact wrappers around the f32 transcendentals: the denormal flush tests
+    /// the exponent field alone (a zero field is a zero or a denormal, both of which become the
+    /// zero of their sign), and V_SQRT/RSQ/LOG_F32 pick the ISA's 0xFFC00000 from the flushed
+    /// operand's sign instead of testing the result and the operand for NaN.
+    /// SHARPEMU_MSL_CHEAP_FLOAT_WRAPPERS=0 keeps the previous forms.</summary>
+    public bool CheapFloatWrappers { get; init; } = true;
+
+    /// <summary>In a one-wave wave64 compute group, an S_CBRANCH_EXECZ over a forward body that
+    /// holds only lane-local work, narrows EXEC only and leaves no live scalar value behind tests
+    /// each half's own lanes, so the S_AND_SAVEEXEC before it needs no exchange between the two
+    /// simdgroups (Gen5MslTranslator.HalfBranches.cs). SHARPEMU_MSL_HALF_BRANCHES=0 tests the
+    /// whole wave's EXEC, as before.</summary>
+    public bool HalfLocalExecBranches { get; init; } = true;
+
+    /// <summary>Lane-local ALU writes that no masked-off lane reads back run without their
+    /// EXEC guard, outside EXEC runs (<see cref="Ir.Gen5LaneObservationAnalysis"/>), in compute,
+    /// pixel, vertex and single-wave mesh programs. SHARPEMU_MSL_UNOBSERVED_LANES=0 guards them
+    /// again.</summary>
+    public bool LaneExactUnobservedWrites { get; init; } = true;
+
     /// <summary>The unobserved-write elision for every stage but multi-wave mesh shaders.
     /// The analysis follows lanes, not simdgroups: a value an inactive lane never reads
     /// back after EXEC widens is dead in that lane whether the guest wave is one Apple
@@ -196,6 +231,13 @@ public sealed record Gen5MslCodegenOptions(
     /// instead of minutes for a program with hundreds. The whole-dword fast path stays inline. Below it the program is
     /// emitted as before. SHARPEMU_MSL_DECODED_FORMAT_LOADS=N sets it; 0 never calls the helper.</summary>
     public int DecodedFormatLoadThreshold { get; init; } = 16;
+
+    /// <summary>Decode a BUFFER_LOAD_FORMAT_* whose format is only known on the device through
+    /// sharpemu_format_fetch (format_fetch_prelude.msl) at any count: one element load, and only the
+    /// components the destinations select converted, with the general decoder's results. Covers the
+    /// bound, non-GLC path; the whole-dword fast path stays inline. SHARPEMU_MSL_FORMAT_FETCH=0 keeps
+    /// the inline decoder and the DecodedFormatLoadThreshold helper.</summary>
+    public bool FormatFetch { get; init; } = true;
 
     /// <summary>Experimental guarded forwarding of the last 128-bit LDS write in a
     /// single-wave mesh subgroup. SHARPEMU_MSL_MESH_LDS_FORWARDING=1.</summary>
@@ -295,8 +337,14 @@ public sealed record Gen5MslCodegenOptions(
         UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") is "1" or "all",
         UnobservedAluAllStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "all",
         ExecRuns = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_RUNS") != "0",
+        ExecLaneSpills = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_LANE_SPILLS") != "0",
+        ExecWholeWave = Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXEC_WWM") != "0",
+        CheapFloatWrappers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_CHEAP_FLOAT_WRAPPERS") != "0",
+        HalfLocalExecBranches = Environment.GetEnvironmentVariable("SHARPEMU_MSL_HALF_BRANCHES") != "0",
+        LaneExactUnobservedWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_LANES") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
+        FormatFetch = Environment.GetEnvironmentVariable("SHARPEMU_MSL_FORMAT_FETCH") != "0",
         DecodedFormatLoadThreshold = int.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_DECODED_FORMAT_LOADS"), out var decodedLoads)
                 ? Math.Max(decodedLoads, 0) : 16,

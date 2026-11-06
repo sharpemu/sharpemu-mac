@@ -47,6 +47,10 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     {
         public Kind Kind;
         public bool IsDraw;
+        // A dispatch (EnqueueDeferredDispatch): it leaves DispatchGate where it is. OwnsLastJob: the job submitted just
+        // before it is its own, which it does not wait for before it runs.
+        public bool IsDispatch;
+        public bool OwnsLastJob;
         // Orders GPU commands and changes nothing a program resolution reads: the draws after it
         // resolve without waiting for it, as they do behind a draw.
         public bool Ungated;
@@ -110,6 +114,12 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     // for the render thread to run it.
     private readonly List<Item> _pendingRanges = new();
     private volatile int _pendingRangeCount;
+    // The ungated items of _pendingRanges, copied on every change under _writeLock, so the resolving
+    // thread asks PendingRangeHolds without the lock: it asks for every word and page a resolution
+    // reads, and the lock it shared with the command and worker threads cost Demon's Souls about
+    // 7 ms a frame in contention. A snapshot only ever holds items queued before the job that reads
+    // it, or items already written (a recycled one at worst answers held: the resolution abandons).
+    private Item[] _ungatedRanges = [];
 
     private static readonly long RetryTicks = CommandStreamQueue.AllBlockedRetryMilliseconds * Stopwatch.Frequency / 1000L;
 
@@ -168,6 +178,22 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     public bool IsProducerThread => Environment.CurrentManagedThreadId == Volatile.Read(ref _producerThreadId);
 
     public long Gate => _enqueuedNonDraw;
+
+    // _enqueuedNonDraw as of the last gated non-draw item that was not a dispatch (AgcExports.IDeferredWorkSink.DispatchGate).
+    private long _dispatchGate;
+
+    public long DispatchGate => _dispatchGate;
+
+    public long EnqueueDeferredDispatch(AgcExports.DeferredWork work, bool hasJob)
+    {
+        var item = RentAsyncItem(Kind.Deferred);
+        item.Work = work;
+        item.IsDraw = false;
+        item.IsDispatch = true;
+        item.OwnsLastJob = hasJob;
+        Enqueue(item);
+        return 0;
+    }
 
     // SHARPEMU_CTHREAD_ITEM_SITES=1: the non-draw items by kind and source, in the PERF line.
     private static readonly bool CountItemSites =
@@ -294,6 +320,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
             {
                 _pendingRanges.Add(item);
                 _pendingRangeCount = _pendingRanges.Count;
+                PublishUngatedRange(item, add: true);
             }
         }
 
@@ -317,6 +344,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
             {
                 _pendingRanges.Add(item);
                 _pendingRangeCount = _pendingRanges.Count;
+                PublishUngatedRange(item, add: true);
             }
         }
 
@@ -341,6 +369,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
             {
                 _pendingRanges.Add(item);
                 _pendingRangeCount = _pendingRanges.Count;
+                PublishUngatedRange(item, add: true);
             }
         }
 
@@ -382,6 +411,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
             {
                 _pendingRanges.Add(item);
                 _pendingRangeCount = _pendingRanges.Count;
+                PublishUngatedRange(item, add: true);
             }
         }
 
@@ -502,24 +532,52 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     /// </summary>
     public bool PendingRangeHolds(long job, ulong address, ulong size)
     {
-        if (Volatile.Read(ref _pendingRangeCount) == 0)
+        foreach (var pending in Volatile.Read(ref _ungatedRanges))
         {
-            return false;
-        }
-
-        lock (_writeLock)
-        {
-            foreach (var pending in _pendingRanges)
+            if (pending.JobsBefore <= job &&
+                address < pending.Address + pending.RangeSize && pending.Address < address + size)
             {
-                if (pending.Ungated && pending.JobsBefore <= job &&
-                    address < pending.Address + pending.RangeSize && pending.Address < address + size)
-                {
-                    return true;
-                }
+                return true;
             }
         }
 
         return false;
+    }
+
+    // Under _writeLock.
+    private void PublishUngatedRange(Item item, bool add)
+    {
+        if (!item.Ungated)
+        {
+            return;
+        }
+
+        var current = _ungatedRanges;
+        if (add)
+        {
+            var grown = new Item[current.Length + 1];
+            current.CopyTo(grown, 0);
+            grown[^1] = item;
+            Volatile.Write(ref _ungatedRanges, grown);
+            return;
+        }
+
+        var index = Array.IndexOf(current, item);
+        if (index < 0)
+        {
+            return;
+        }
+
+        if (current.Length == 1)
+        {
+            Volatile.Write(ref _ungatedRanges, []);
+            return;
+        }
+
+        var shrunk = new Item[current.Length - 1];
+        Array.Copy(current, 0, shrunk, 0, index);
+        Array.Copy(current, index + 1, shrunk, index, current.Length - index - 1);
+        Volatile.Write(ref _ungatedRanges, shrunk);
     }
 
     // Which read drained the queue, and which queued item held the bytes (SHARPEMU_CTHREAD_ITEM_SITES=1).
@@ -629,8 +687,13 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         ThrowIfFailed();
         if (!item.IsDraw && !item.Ungated)
         {
-            item.JobsBefore = _prefetch?.Submitted ?? 0;
+            item.JobsBefore = (_prefetch?.Submitted ?? 0) - (item.OwnsLastJob ? 1 : 0);
             _enqueuedNonDraw++;
+            if (!item.IsDispatch)
+            {
+                _dispatchGate = _enqueuedNonDraw;
+            }
+
             if (TraceItemKinds)
             {
                 NoteItemKind(item);
@@ -839,6 +902,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 {
                     _pendingRanges.Remove(item);
                     _pendingRangeCount = _pendingRanges.Count;
+                    PublishUngatedRange(item, add: false);
                 }
             }
 

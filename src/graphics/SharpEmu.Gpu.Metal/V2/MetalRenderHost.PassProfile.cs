@@ -58,6 +58,7 @@ internal sealed partial class MetalRenderHost
         public int Buffer;
         public int FirstSample;
         public int SampleCount;
+        public List<int>? IndirectSlots;
     }
 
     private sealed class PassSubmission
@@ -353,6 +354,78 @@ internal sealed partial class MetalRenderHost
         record.Shaders[key] = record.Shaders.TryGetValue(key, out var count) ? count + 1 : 1;
     }
 
+    // The group counts each indirect dispatch of an encoder ran with, copied by the GPU right
+    // behind the dispatch (after the barrier that orders it after the work that wrote them):
+    // what a CPU read after the fact cannot see once a later dispatch rewrote the record.
+    private const int PassProfileIndirectSlots = 16384;
+    private nint _ppIndirectCounts;
+    private int _ppIndirectNext;
+
+    private unsafe void PassProfileNoteIndirectGroups(nint encoder, nint arguments, ulong offset)
+    {
+        var record = _ppOpen;
+        if (record is null || (offset & 3) != 0)
+        {
+            return;
+        }
+
+        if (_ppIndirectCounts == 0)
+        {
+            _ppIndirectCounts = MetalNative.SendNewBuffer(
+                _device, SelOcclusionNewBuffer, (nuint)(PassProfileIndirectSlots * 16), Mtl.ResourceStorageModeShared);
+            if (_ppIndirectCounts == 0)
+            {
+                return;
+            }
+        }
+
+        var slot = _ppIndirectNext++ % PassProfileIndirectSlots;
+        (record.IndirectSlots ??= new List<int>()).Add(slot);
+        // The thread-to-group kernel with one-thread groups on the identity axes copies the
+        // three counts as they are.
+        var parameters = stackalloc uint[8];
+        parameters[0] = 1;
+        parameters[1] = 1;
+        parameters[2] = 1;
+        parameters[3] = 0;
+        parameters[4] = 1;
+        parameters[5] = 2;
+        parameters[6] = 0;
+        parameters[7] = 0;
+        MetalNative.SendVoid(encoder, SelSetComputePipelineState, ThreadDispatchPipeline());
+        _boundComputePipeline = _threadDispatchPipeline;
+        MetalNative.SendSetBuffer(encoder, SelSetComputeBuffer, arguments, (nuint)offset, 0);
+        MetalNative.SendSetBuffer(encoder, SelSetComputeBuffer, _ppIndirectCounts, (nuint)(slot * 16), 1);
+        MetalNative.SendSetBuffer(encoder, SelSetComputeBuffer, _ppIndirectCounts, (nuint)(slot * 16), 2);
+        MetalNative.SendSetBytes(encoder, SelHullSetBytes, (nint)parameters, 8 * sizeof(uint), 3);
+        MetalNative.SendDispatch(
+            encoder,
+            SelDispatchThreadgroups,
+            new MtlSize { Width = 1, Height = 1, Depth = 1 },
+            new MtlSize { Width = 1, Height = 1, Depth = 1 });
+    }
+
+    private string PassProfileIndirectGroups(PassRecord record)
+    {
+        if (record.IndirectSlots is not { Count: > 0 } slots || _ppIndirectCounts == 0)
+        {
+            return string.Empty;
+        }
+
+        var words = MetalNative.Send(_ppIndirectCounts, SelOcclusionContents);
+        var text = new System.Text.StringBuilder(" ig=[");
+        for (var index = 0; index < Math.Min(slots.Count, 8); index++)
+        {
+            var at = words + (slots[index] * 16);
+            text.Append(index == 0 ? string.Empty : ",")
+                .Append((uint)Marshal.ReadInt32(at)).Append('x')
+                .Append((uint)Marshal.ReadInt32(at + 4)).Append('x')
+                .Append((uint)Marshal.ReadInt32(at + 8));
+        }
+
+        return text.Append(slots.Count > 8 ? $",+{slots.Count - 8}]" : "]").ToString();
+    }
+
     /// <summary>A depth-only draw joined the open pass; its draw and shader are counted as any other's.</summary>
     private void PassProfileNoteJoin()
     {
@@ -374,6 +447,7 @@ internal sealed partial class MetalRenderHost
     /// <summary>Why the open encoder ended, when something outside the draw stream ended it.</summary>
     private void PassProfileNoteEnd(string cause)
     {
+        NoteUnionPassEnd(cause);
         if (_ppOpen is not null && _ppOpen.End.Length == 0)
         {
             _ppOpen.End = cause;
@@ -529,7 +603,7 @@ internal sealed partial class MetalRenderHost
                 $"us={microseconds:F0} gap_us={gap:F0} {stages}draws={record.Draws} tg={record.Groups} " +
                 $"ld_mb={record.LoadBytes / 1048576.0:F1} st_mb={record.StoreBytes / 1048576.0:F1} " +
                 $"end={(record.End.Length == 0 ? "?" : record.End)} a=[{record.Shape}] sh=[{shaders}] " +
-                $"after=[{after}] n_after={record.After?.Count ?? 0} joins={record.Joins}")).Append('\n');
+                $"after=[{after}] n_after={record.After?.Count ?? 0} joins={record.Joins}{PassProfileIndirectGroups(record)}")).Append('\n');
         }
 
         var span = lastEnd > firstStart && firstStart != ulong.MaxValue

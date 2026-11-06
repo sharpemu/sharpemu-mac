@@ -220,7 +220,7 @@ public static class Gen5LaneSpillAnalysis
     /// one-component sample into v15 drop the spills parked in v16, and a Ghost of Tsushima
     /// pixel shader then rebuilt a buffer descriptor from a lane its partial simdgroup did not
     /// have, read past a list's end marker and spun until the GPU watchdog fired.</summary>
-    private static uint VectorWriteWidth(Gen5ShaderInstruction instruction)
+    internal static uint VectorWriteWidth(Gen5ShaderInstruction instruction)
     {
         var opcode = instruction.Opcode;
         switch (instruction.Control)
@@ -305,7 +305,7 @@ public static class Gen5LaneSpillAnalysis
     /// <summary>The VGPR and lane of a V_WRITELANE_B32 / V_READLANE_B32 whose lane select
     /// is an inline or literal constant (a wave64 masks it to 0..63). A writelane also
     /// has to park a scalar or constant, which every thread holds.</summary>
-    private static bool TryGetSpillSlot(Gen5ShaderInstruction instruction, out uint vector, out uint lane)
+    internal static bool TryGetSpillSlot(Gen5ShaderInstruction instruction, out uint vector, out uint lane)
     {
         vector = 0;
         lane = 0;

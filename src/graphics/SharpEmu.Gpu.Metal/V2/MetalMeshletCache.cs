@@ -35,6 +35,15 @@ public static class MeshletBuilder
         internal readonly List<uint> PrimitiveList = [];
         internal readonly uint[] Current = new uint[MaxLocalVertices];
 
+        // The current meshlet's vertices by index value: open addressing over a table four times the
+        // most a meshlet holds, its entries current only under this meshlet's generation (a flush
+        // starts the next one instead of clearing the table).
+        internal const int TableBits = 10;
+        internal readonly uint[] TableKeys = new uint[1 << TableBits];
+        internal readonly uint[] TableLocals = new uint[1 << TableBits];
+        internal readonly uint[] TableGenerations = new uint[1 << TableBits];
+        internal uint Generation;
+
         public uint MeshletCount => (uint)(Headers.Count / 4);
 
         public uint VertexBase => MeshletCount * 4;
@@ -83,11 +92,17 @@ public static class MeshletBuilder
         var primitiveList = scratch.PrimitiveList;
 
         var current = scratch.Current;
+        var keys = scratch.TableKeys;
+        var locals = scratch.TableLocals;
+        var generations = scratch.TableGenerations;
+        const int tableMask = (1 << Scratch.TableBits) - 1;
         var currentVertices = 0u;
         var currentPrimitives = 0u;
         var meshletVertexStart = 0u;
         var meshletPrimitiveStart = 0u;
         var meshletFirstTriangle = 0u;
+        NextGeneration(scratch);
+        var generation = scratch.Generation;
 
         void Flush()
         {
@@ -109,19 +124,40 @@ public static class MeshletBuilder
             meshletPrimitiveStart += currentPrimitives;
             currentVertices = 0;
             currentPrimitives = 0;
+            NextGeneration(scratch);
+            generation = scratch.Generation;
         }
 
+        // The local index of a vertex value in the current meshlet, or uint.MaxValue.
         uint Find(uint value)
         {
-            for (var i = 0u; i < currentVertices; i++)
+            var slot = (int)((value * 0x9E3779B1u) >> (32 - Scratch.TableBits));
+            while (generations[slot] == generation)
             {
-                if (current[i] == value)
+                if (keys[slot] == value)
                 {
-                    return i;
+                    return locals[slot];
                 }
+
+                slot = (slot + 1) & tableMask;
             }
 
             return uint.MaxValue;
+        }
+
+        uint Add(uint value)
+        {
+            var slot = (int)((value * 0x9E3779B1u) >> (32 - Scratch.TableBits));
+            while (generations[slot] == generation)
+            {
+                slot = (slot + 1) & tableMask;
+            }
+
+            generations[slot] = generation;
+            keys[slot] = value;
+            locals[slot] = currentVertices;
+            current[currentVertices] = value;
+            return currentVertices++;
         }
 
         for (var triangle = 0; triangle < triangles; triangle++)
@@ -131,25 +167,16 @@ public static class MeshletBuilder
             var c = indices[(triangle * 3) + 2];
 
             // New unique vertices this triangle would add to the current meshlet.
-            var added = 0u;
-            if (Find(a) == uint.MaxValue)
-            {
-                added++;
-            }
-
-            if (b != a && Find(b) == uint.MaxValue)
-            {
-                added++;
-            }
-
-            if (c != a && c != b && Find(c) == uint.MaxValue)
-            {
-                added++;
-            }
+            var foundA = Find(a);
+            var foundB = b == a ? foundA : Find(b);
+            var foundC = c == a ? foundA : c == b ? foundB : Find(c);
+            var added = (foundA == uint.MaxValue ? 1u : 0u) + (b != a && foundB == uint.MaxValue ? 1u : 0u) +
+                (c != a && c != b && foundC == uint.MaxValue ? 1u : 0u);
 
             if (currentPrimitives == maxPrimitives || currentVertices + added > maxVertices)
             {
                 Flush();
+                foundA = foundB = foundC = uint.MaxValue;
             }
 
             if (currentPrimitives == 0)
@@ -157,26 +184,25 @@ public static class MeshletBuilder
                 meshletFirstTriangle = (uint)triangle;
             }
 
-            var la = Local(a);
-            var lb = Local(b);
-            var lc = Local(c);
+            // In order a, b, c, as each would be added: a repeated value takes the slot its first use got.
+            var la = foundA != uint.MaxValue ? foundA : Add(a);
+            var lb = b == a ? la : foundB != uint.MaxValue ? foundB : Add(b);
+            var lc = c == a ? la : c == b ? lb : foundC != uint.MaxValue ? foundC : Add(c);
             primitiveList.Add(la | (lb << 8) | (lc << 16));
             currentPrimitives++;
-
-            uint Local(uint value)
-            {
-                var found = Find(value);
-                if (found != uint.MaxValue)
-                {
-                    return found;
-                }
-
-                current[currentVertices] = value;
-                return currentVertices++;
-            }
         }
 
         Flush();
+    }
+
+    // Starts a new generation of the vertex table, clearing it only when the counter wraps.
+    private static void NextGeneration(Scratch scratch)
+    {
+        if (++scratch.Generation == 0)
+        {
+            Array.Clear(scratch.TableGenerations);
+            scratch.Generation = 1;
+        }
     }
 }
 

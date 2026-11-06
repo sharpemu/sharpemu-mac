@@ -87,7 +87,8 @@ public sealed class Gen5MslLaneMaskTests
     {
         var shader = Compile(
             "lane-mask-execz",
-            Program(VCmpGtU32To_S2, 0x00017700, skipOnExecz: true, restore: true));
+            Program(VCmpGtU32To_S2, 0x00017700, skipOnExecz: true, restore: true),
+            new Gen5MslCodegenOptions { HalfLocalExecBranches = false });
         Assert.Equal(1, Occurrences(Body(shader), "threadgroup_barrier"));
     }
 
@@ -156,13 +157,23 @@ public sealed class Gen5MslLaneMaskTests
         var compare = upper ? VCmpGtU32To_S2 : VCmpLtU32To_S2;
         // v0 > 59, v0 < 4, v0 > 63
         var operands = none ? 0x00017F00u : upper ? 0x00017700u : 0x00010900u;
-        var shader = Compile("lane-mask-exec", Program(compare, operands, skipOnExecz: skip, restore: true));
-        Assert.Equal(skip ? 1 : 0, Occurrences(Body(shader), "threadgroup_barrier"));
+        var words = Program(compare, operands, skipOnExecz: skip, restore: true);
+        var whole = Compile("lane-mask-exec", words, new Gen5MslCodegenOptions { HalfLocalExecBranches = false });
+        Assert.Equal(skip ? 1 : 0, Occurrences(Body(whole), "threadgroup_barrier"));
+        // Each half takes the EXECZ skip over the lane-local store on its own lanes, without the exchange.
+        var half = Compile("lane-mask-exec-half", words);
+        Assert.Equal(0, Occurrences(Body(half), "threadgroup_barrier"));
         if (!MetalNative.IsAvailable)
         {
             return;
         }
 
+        Run(whole, upper, none);
+        Run(half, upper, none);
+    }
+
+    private static void Run(Gen5MslShader shader, bool upper, bool none)
+    {
         Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out var libraryError), libraryError + shader.Source);
         var input = new byte[16];
         BinaryPrimitives.WriteUInt32LittleEndian(input, 0xFFFFFFFFu);

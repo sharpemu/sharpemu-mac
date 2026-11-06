@@ -98,6 +98,20 @@ public sealed class CommandStreamQueue
     private long _boundariesRetired;
     private IdleOutcome _outcome = IdleOutcome.Completed;
     private Thread? _processingThread;
+
+    // SHARPEMU_CP_YIELD_ON_WAKE=0 (on by default) lets the running slice finish its submission
+    // whatever it wakes. On: a head on another queue woken on a guest-memory wait while a slice
+    // runs makes that slice stop after its current packet, so the woken queue's work is encoded
+    // next. All queues share one Metal queue; Demon's Souls' async-compute ring waits on a value
+    // its graphics submission writes ~1,100 packets in, and the label the guest's frame waits on
+    // followed it, so before this both were encoded behind the other ~11,000 graphics packets and
+    // their GPU time (~25 ms a frame), which on the console run in parallel.
+    internal static readonly bool YieldOnWake = Environment.GetEnvironmentVariable("SHARPEMU_CP_YIELD_ON_WAKE") != "0";
+
+    // The queue of the slice running now, when it may yield (see YieldOnWake); -1 otherwise.
+    private int _yieldableQueue = -1;
+    private bool _yieldRequestedLocked;
+    public long SlicesYielded { get; private set; }
     private CommandSubmissionPreparation? _activePreparation;
     private Exception? _preparationFailure;
 
@@ -1332,6 +1346,13 @@ public sealed class CommandStreamQueue
 
             if (matches(state, head.Value.Wait))
             {
+                if (_yieldableQueue >= 0 && !_yieldRequestedLocked && head.Value.QueueId != _yieldableQueue &&
+                    head.Value.Wait.Kind == CommandWaitKind.GuestMemory && _interpreters[_yieldableQueue] is { } running)
+                {
+                    _yieldRequestedLocked = true;
+                    running.RequestYield();
+                }
+
                 head.Value.Blocked = false;
                 TargetedWakes++;
                 wokeCount++;
@@ -1458,6 +1479,12 @@ public sealed class CommandStreamQueue
 
             _processingThread = Thread.CurrentThread;
             _activePreparation = submission?.Preparation;
+            // A submission whose guest is waiting to learn whether its prefix ran keeps running to its
+            // own end or wait: its completion capture spans one slice.
+            _yieldRequestedLocked = false;
+            _yieldableQueue = YieldOnWake && submission is { Kind: CommandSubmissionKind.Graphics or CommandSubmissionKind.Compute } &&
+                submission.Preparation is not { Status: CommandSubmissionPreparation.State.Pending }
+                ? submission.QueueId : -1;
             // What this slice is about to wait for may change while it runs, and the wake
             // for it arrives at a head that is not parked yet. The generation it starts
             // from decides, at the park below, whether it missed one.
@@ -1565,7 +1592,21 @@ public sealed class CommandStreamQueue
             submission!.Preparation?.Resolve(complete ? CommandSubmissionPreparation.State.PreparedPrefix : CommandSubmissionPreparation.State.DeferredDependency,
                 completion: complete ? prefixCompletion : null);
             _activePreparation = null;
-            if (!complete)
+            _yieldableQueue = -1;
+            if (!complete && submission!.Commands.Yielded)
+            {
+                // Stopped between packets for a queue it woke; runnable again at once, behind that queue
+                // in the round-robin order (_nextQueue already points past this one).
+                if (++SlicesYielded % 2000 == 1)
+                {
+                    Console.Error.WriteLine($"[GPU][CP-YIELD] slices yielded to a woken queue: {SlicesYielded} (last q={submission.QueueId})");
+                }
+
+                _queues[submission.QueueId].AddFirst(submission);
+                _submissionCount++;
+                result = SliceResult.Progressed;
+            }
+            else if (!complete)
             {
                 // A wake that arrived while this slice ran was delivered to a head that was
                 // not parked yet, so parking now would sleep until the retry timer: the

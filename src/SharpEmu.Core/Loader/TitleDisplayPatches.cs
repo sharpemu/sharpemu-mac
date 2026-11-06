@@ -22,10 +22,23 @@ namespace SharpEmu.Core.Loader;
 /// </list>
 /// Every site is verified against the bytes the known build carries before anything is
 /// written; a different build is left untouched.
+/// <para><see cref="SceneEnvironmentVariable"/> (opt-in, unset by default) caps the internal
+/// scene size below the display, trading image quality for GPU time: the title renders its
+/// scene at that size and upscales it to the output itself, as the PS5 does from 1600x900 in
+/// Demon's Souls' HD mode 1. Only the internal-size sites change; the output, the display
+/// buffers and the UI keep their sizes. <c>900p</c>, <c>720p</c> (any <c>&lt;height&gt;p</c>,
+/// 16:9) or <c>WIDTHxHEIGHT</c>.</para>
 /// </summary>
 internal static class TitleDisplayPatches
 {
     public const string EnvironmentVariable = "SHARPEMU_TITLE_DISPLAY_PATCH";
+
+    /// <summary>Caps the internal scene size; see the class summary. Lowers image quality, so
+    /// it is off unless set.</summary>
+    public const string SceneEnvironmentVariable = "SHARPEMU_TITLE_SCENE_RESOLUTION";
+
+    private const uint MinSceneWidth = 640;
+    private const uint MinSceneHeight = 360;
 
     /// <summary>What a site encodes. 32-bit widths and heights are little-endian integers;
     /// a <see cref="Slot.WidthHeight"/> site packs width in the low and height in the high
@@ -97,6 +110,55 @@ internal static class TitleDisplayPatches
             "mode" => Strategy.DisplayMode,
             _ => Strategy.AllSites,
         };
+
+    /// <summary>The scene-size cap <see cref="SceneEnvironmentVariable"/> asks for, or null when
+    /// it is unset or not a size this accepts.</summary>
+    internal static (uint Width, uint Height)? SelectedSceneLimit =>
+        TryParseSceneResolution(Environment.GetEnvironmentVariable(SceneEnvironmentVariable), out var width, out var height)
+            ? (width, height)
+            : null;
+
+    /// <summary>Parses <c>&lt;height&gt;p</c> (16:9, width rounded to even) or
+    /// <c>WIDTHxHEIGHT</c>, between 640x360 and 3840x2160.</summary>
+    internal static bool TryParseSceneResolution(string? text, out uint width, out uint height)
+    {
+        width = 0;
+        height = 0;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        text = text.Trim();
+        if (text.EndsWith('p') || text.EndsWith('P'))
+        {
+            if (!uint.TryParse(text.AsSpan(0, text.Length - 1), out height) || height > 2160)
+            {
+                return false;
+            }
+
+            width = (uint)Math.Round(height * 16.0 / 9.0 / 2.0) * 2;
+        }
+        else
+        {
+            var separator = text.IndexOfAny(['x', 'X']);
+            if (separator <= 0 ||
+                !uint.TryParse(text.AsSpan(0, separator), out width) ||
+                !uint.TryParse(text.AsSpan(separator + 1), out height))
+            {
+                return false;
+            }
+        }
+
+        if (width < MinSceneWidth || height < MinSceneHeight || width > 3840 || height > 2160)
+        {
+            width = 0;
+            height = 0;
+            return false;
+        }
+
+        return true;
+    }
 
     // Demon's Souls (PPSA01342, v01.004.000). The video-out setup creates its "DisplayBuffer"
     // textures and registers them at 3840x2160 (immediates at the call sites and in the two
@@ -278,17 +340,27 @@ internal static class TitleDisplayPatches
             return false;
         }
 
+        var sceneLimit = SelectedSceneLimit;
+        if (sceneLimit is null && Environment.GetEnvironmentVariable(SceneEnvironmentVariable) is { Length: > 0 } sceneText)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] {SceneEnvironmentVariable}={sceneText} ignored: expected 900p, 720p or WIDTHxHEIGHT " +
+                $"between {MinSceneWidth}x{MinSceneHeight} and 3840x2160.");
+        }
+
         List<GuestBytePatcher.Patch>? patches;
         if (strategy == Strategy.DisplayMode)
         {
             var profile = DisplayModeFor(titleId);
-            patches = profile is null ? null : BuildDisplayModePatches(profile, width, height);
+            patches = profile is null ? null : BuildDisplayModePatches(profile, width, height, sceneLimit);
         }
         else
         {
             var sites = SitesFor(titleId);
-            patches = sites is null ? null : BuildPatches(sites, width, height);
-            if (patches is { Count: > 0 } && ImageScaleSitesFor(titleId) is { } imageSites)
+            patches = sites is null ? null : BuildPatches(sites, width, height, sceneLimit);
+            // The redirect follows the canvas, not a scene cap: only when the output sizes shrink.
+            if (sites is not null && BuildPatches(sites, width, height).Count > 0 &&
+                ImageScaleSitesFor(titleId) is { } imageSites)
             {
                 patches.AddRange(imageSites.Select(site => CreatePatch(site.Offset, site.Old, site.New)));
             }
@@ -315,19 +387,23 @@ internal static class TitleDisplayPatches
         }
 
         GuestBytePatcher.Apply(memory, programHeaders, imageBase, patches);
+        var sceneNote = sceneLimit is { } limit
+            ? $", scene capped at {limit.Width}x{limit.Height} by {SceneEnvironmentVariable}"
+            : string.Empty;
         if (strategy == Strategy.DisplayMode)
         {
             var profile = DisplayModeFor(titleId)!;
+            var (sceneWidth, sceneHeight) = SceneSize(width, height, profile.HdWidth, profile.HdHeight, sceneLimit);
             EngineResolution.Report(
                 "Bluepoint",
                 $"display mode {profile.ModeFor(width, height)}",
                 profile.HdWidth,
                 profile.HdHeight,
-                $"scene {Math.Min(width, profile.HdWidth)}x{Math.Min(height, profile.HdHeight)}");
+                $"scene {sceneWidth}x{sceneHeight}{sceneNote}");
         }
         else
         {
-            EngineResolution.Report("Bluepoint", "compiled display sizes", width, height, $"{patches.Count} sites");
+            EngineResolution.Report("Bluepoint", "compiled display sizes", width, height, $"{patches.Count} sites{sceneNote}");
         }
 
         Console.Error.WriteLine(strategy == Strategy.DisplayMode
@@ -342,7 +418,7 @@ internal static class TitleDisplayPatches
     /// that mode's internal scene size to the display. The output, display buffers and
     /// everything the UI lays out in are the HD size.</summary>
     internal static List<GuestBytePatcher.Patch> BuildDisplayModePatches(
-        DisplayModeProfile profile, uint width, uint height)
+        DisplayModeProfile profile, uint width, uint height, (uint Width, uint Height)? sceneLimit = null)
     {
         var patches = new List<GuestBytePatcher.Patch>();
         if (profile.ModeFor(width, height) is not { } mode)
@@ -367,10 +443,25 @@ internal static class TitleDisplayPatches
         patches.AddRange(BuildPatches(profile.HdBufferSites, profile.HdWidth, profile.HdHeight));
 
         // The scene only shrinks: a display between 1080p and 4K keeps the HD size.
-        var sceneWidth = Math.Min(width, profile.HdWidth);
-        var sceneHeight = Math.Min(height, profile.HdHeight);
+        var (sceneWidth, sceneHeight) = SceneSize(width, height, profile.HdWidth, profile.HdHeight, sceneLimit);
         patches.AddRange(BuildPatches(profile.HdInternalSites, sceneWidth, sceneHeight));
         return patches;
+    }
+
+    /// <summary>The internal scene size: the display, no larger than <paramref name="maxWidth"/>
+    /// x <paramref name="maxHeight"/> or the requested cap.</summary>
+    private static (uint Width, uint Height) SceneSize(
+        uint width, uint height, uint maxWidth, uint maxHeight, (uint Width, uint Height)? sceneLimit)
+    {
+        var sceneWidth = Math.Min(width, maxWidth);
+        var sceneHeight = Math.Min(height, maxHeight);
+        if (sceneLimit is { } limit)
+        {
+            sceneWidth = Math.Min(sceneWidth, limit.Width);
+            sceneHeight = Math.Min(sceneHeight, limit.Height);
+        }
+
+        return (sceneWidth, sceneHeight);
     }
 
     private static GuestBytePatcher.Patch CreatePatch(ulong offset, byte[] old, byte[] replacement) =>
@@ -380,13 +471,17 @@ internal static class TitleDisplayPatches
             old,
             $"0x{offset:X}={Convert.ToHexString(replacement).ToLowerInvariant()}?{Convert.ToHexString(old).ToLowerInvariant()}");
 
-    internal static List<GuestBytePatcher.Patch> BuildPatches(IReadOnlyList<Site> sites, uint width, uint height)
+    /// <summary>Output sites become <paramref name="width"/> x <paramref name="height"/>;
+    /// internal sites shrink to it, and to <paramref name="sceneLimit"/> when one is given.</summary>
+    internal static List<GuestBytePatcher.Patch> BuildPatches(
+        IReadOnlyList<Site> sites, uint width, uint height, (uint Width, uint Height)? sceneLimit = null)
     {
         var patches = new List<GuestBytePatcher.Patch>(sites.Count);
         foreach (var site in sites)
         {
-            var newWidth = site.Role == Role.Internal ? Math.Min(width, site.OldWidth) : width;
-            var newHeight = site.Role == Role.Internal ? Math.Min(height, site.OldHeight) : height;
+            var (newWidth, newHeight) = site.Role == Role.Internal
+                ? SceneSize(width, height, site.OldWidth, site.OldHeight, sceneLimit)
+                : (width, height);
             if (newWidth == site.OldWidth && newHeight == site.OldHeight)
             {
                 continue;

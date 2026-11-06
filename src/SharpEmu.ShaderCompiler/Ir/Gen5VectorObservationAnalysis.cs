@@ -41,21 +41,21 @@ public static class Gen5VectorObservationAnalysis
     private const uint ExecLow = 126;
     private const uint ExecHigh = 127;
 
-    private enum ExecEffect : byte
+    internal enum ExecEffect : byte
     {
         None,
         Narrowing,
         Widening,
     }
 
-    private readonly record struct Effect(
+    internal readonly record struct Effect(
         VectorRegisterSet Reads,
         VectorRegisterSet CrossReads,
         VectorRegisterSet Writes,
         VectorRegisterSet FullWrites,
         ExecEffect Exec);
 
-    public static Gen5VectorObservationPlan? Analyze(Gen5ShaderProgram program, bool wave32)
+    public static Gen5VectorObservationPlan? Analyze(Gen5ShaderProgram program, bool wave32, bool trackLaneSpills = false)
     {
         var instructions = program.Instructions;
         if (instructions.Count == 0)
@@ -77,7 +77,7 @@ public static class Gen5VectorObservationAnalysis
             return null;
         }
 
-        var execFull = Gen5ExecFullAnalysis.Analyze(program, wave32);
+        var execFull = Gen5ExecFullAnalysis.Analyze(program, wave32, trackLaneSpills);
         var predecessors = new List<int>[instructions.Count];
         for (var index = 0; index < instructions.Count; index++)
         {
@@ -168,7 +168,7 @@ public static class Gen5VectorObservationAnalysis
         return (live, observed);
     }
 
-    private static bool TryDescribe(Gen5ShaderInstruction instruction, out Effect effect)
+    internal static bool TryDescribe(Gen5ShaderInstruction instruction, out Effect effect)
     {
         effect = default;
         var opcode = instruction.Opcode;
@@ -400,7 +400,7 @@ public static class Gen5VectorObservationAnalysis
 
     private static bool IsExec(Gen5Operand operand) => operand is { Kind: Gen5OperandKind.ScalarRegister, Value: ExecLow };
 
-    private static int[][]? BuildSuccessors(IReadOnlyList<Gen5ShaderInstruction> instructions)
+    internal static int[][]? BuildSuccessors(IReadOnlyList<Gen5ShaderInstruction> instructions)
     {
         var indexByPc = new Dictionary<uint, int>(instructions.Count);
         for (var index = 0; index < instructions.Count; index++)

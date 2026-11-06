@@ -356,7 +356,7 @@ public sealed class SelfLoader : ISelfLoader
             GuestBytePatcher.ApplyFromEnvironment(virtualMemory, programHeaders, imageBase);
             ApplyTitleDisplayPatch(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId);
             EngineResolution.ApplyMainExecutable(virtualMemory, programHeaders, imageBase);
-            ApplyDemonsSoulsIdleNap(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId, effectiveImportStubs);
+            ApplyDemonsSoulsIdleNap(virtualMemory, programHeaders, imageBase, totalImageSize, applicationInfo.TitleId, effectiveImportStubs);
             ApplyDemonsSoulsConvars(applicationInfo.TitleId);
         }
 
@@ -709,16 +709,25 @@ public sealed class SelfLoader : ISelfLoader
     }
 
     /// <summary>Lets Demon's Souls' idle job workers sleep instead of spinning; see
-    /// <see cref="DemonsSoulsIdleNapPatch"/>. The nap's import stub joins the image's own.</summary>
+    /// <see cref="DemonsSoulsIdleNapPatch"/>. The nap's import stubs join the image's own; its
+    /// wake trampolines get a block right after the image, within rel32 reach.</summary>
     private static void ApplyDemonsSoulsIdleNap(
         IVirtualMemory virtualMemory,
         IReadOnlyList<ProgramHeader> programHeaders,
         ulong imageBase,
+        ulong imageSize,
         string? titleId,
         Dictionary<ulong, string> importStubs)
     {
         try
         {
+            Func<ulong, ulong>? allocateCode = virtualMemory is PhysicalVirtualMemory physical
+                ? size =>
+                {
+                    var imageEnd = checked(imageBase + imageSize);
+                    return physical.TryAllocateWithinRange(imageEnd, imageEnd + 0x4000_0000, size, out var address) ? address : 0;
+                }
+                : null;
             DemonsSoulsIdleNapPatch.Apply(virtualMemory, programHeaders, imageBase, titleId, nid =>
             {
                 foreach (var (address, stubNid) in CreateImportStubMapping(virtualMemory, [nid]))
@@ -728,7 +737,7 @@ public sealed class SelfLoader : ISelfLoader
                 }
 
                 return 0;
-            });
+            }, allocateCode);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {

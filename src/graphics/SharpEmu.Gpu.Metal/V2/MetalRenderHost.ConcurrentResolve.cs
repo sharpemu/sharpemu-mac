@@ -31,6 +31,36 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     bool IConcurrentResolveHost.ResolvesConcurrently => ParallelResolve;
 
+    /// <summary>
+    /// Dispatches are prefetched like draws: the resolving thread materializes a dispatch's resources and finds its
+    /// program while the worker still records the work before it, and the worker takes that program when the
+    /// dispatch runs (ParallelProgramPrefetch.TryTakeCompute) or resolves it itself as before. Demon's Souls runs
+    /// ~1000 dispatches a frame, each resolved on the worker (~10 us of materialization apiece). A resolution
+    /// that depended on something consumed, copied, predicted or frontend-handled is refused.
+    /// SHARPEMU_METAL_V2_DISPATCH_PREFETCH=0 resolves every dispatch on the worker, exactly as before.
+    /// </summary>
+    internal static readonly bool DispatchPrefetch =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DISPATCH_PREFETCH") != "0";
+
+    /// <summary>
+    /// A prefetched dispatch's resolution waits only for the non-draw items before it that are not dispatches, so in
+    /// a run of dispatches the next one resolves while the worker records the one before. The dispatches it was
+    /// resolved ahead of record their stores when they run; the take refuses it when a GPU write logged after its
+    /// resolution began covers bytes it read, retired or not (MetalGpuWriteRanges.LoggedWriteSince), or when one of
+    /// them was consumed or predicted on the CPU. SHARPEMU_METAL_V2_DISPATCH_PREFETCH_CROSS=0 holds it behind every
+    /// non-draw item before it, as a draw's resolution is.
+    /// </summary>
+    internal static readonly bool DispatchPrefetchCrossesDispatches =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DISPATCH_PREFETCH_CROSS") != "0";
+
+    bool IConcurrentResolveHost.PrefetchesDispatches => ParallelResolve && DispatchPrefetch;
+
+    bool IConcurrentResolveHost.PrefetchedDispatchesCrossDispatches => DispatchPrefetchCrossesDispatches;
+
+    bool IConcurrentResolveHost.IsStillCurrentAcrossDispatches(object assumptions) => IsConcurrentResolveStillCurrentAcrossDispatches(assumptions);
+
+    private long _writeLogRefusals;
+
     // Small unclaimed queues can resolve on the drawing thread without a worker wakeup.
     // Component gains and ordering/device checks justify the default; the Silent Hill
     // comparison was flat. Set SHARPEMU_METAL_V2_CALLER_RESOLVE=0 for the worker-only path.
@@ -130,10 +160,20 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var deferredBarriers = Interlocked.Exchange(ref _deferredBarriers, 0);
         var operandReadsKept = Interlocked.Exchange(ref _operandReadsKept, 0);
         var drained = Interlocked.Exchange(ref _drainedDraws, 0);
+        var (computeSubmitted, computeTaken, computeRefused, computeWaitMs, computeSavedMs) = prefetch.TakeComputeCounters();
+        var dispatches = $" dispatch_jobs={computeSubmitted} dispatch_taken={computeTaken} dispatch_refused=(abandoned={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Abandoned]}," +
+            $"provider={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Provider]}{FormatProviderRefusals(prefetch.TakeProviderRefusals())},inputs={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Inputs]}," +
+            $"ownership={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Ownership]},effects={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Effects]}) " +
+            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
+            $"dispatch_saved_ms={computeSavedMs.ToString("F1", culture)}";
         return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
-            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} {own}{TakeDrainCallers()}";
+            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()}{dispatches}{FormatPacketCounters()} {own}{TakeDrainCallers()}";
     }
+
+    private static string FormatProviderRefusals(long[] refused) =>
+        $"[frontend={refused[(int)ComputePrefetchRefusal.Frontend]},prediction={refused[(int)ComputePrefetchRefusal.Prediction]}," +
+        $"unavailable={refused[(int)ComputePrefetchRefusal.Unavailable]}]";
 
     internal enum ConcurrentQuery : byte
     {
@@ -147,6 +187,13 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // inside it for the rest of the resolution, with one recorded answer.
     private const ulong ConcurrentPageBytes = 4096;
 
+    // SHARPEMU_CONCURRENT_WORD_LINES=0 reads every word of a resolution on its own, as before. A resolution reads
+    // ~45 descriptor and table words a stage, mostly a few words apart, and each one cost a clean-page test and a
+    // backing read of its own (a third of the resolving thread's busy time in Demon's Souls).
+    private const int ConcurrentWordLineBytes = 256;
+    private static readonly bool ConcurrentWordLines =
+        Environment.GetEnvironmentVariable("SHARPEMU_CONCURRENT_WORD_LINES") != "0";
+
     internal sealed class ConcurrentAssumptions((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
     {
         public readonly List<(ConcurrentQuery Query, ulong Address, ulong Size, bool Owned)> Answers = new();
@@ -154,10 +201,18 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         // What the ownership answers came from: while none of it changed, they stand.
         public (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) Versions = versions;
 
+        // The GPU write log's count when the resolution began reading (MetalGpuWriteRanges.LoggedWriteSince).
+        public ulong WriteLogVersion;
+
         // The last pages found unowned, for each kind of read.
         private readonly ulong[] _cleanPages = [ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue,
             ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue];
         private int _nextCleanPage;
+
+        // The last line of a clean page read whole for word reads (TryReadGuestWordConcurrent): the words
+        // after it in the line are answered from it, under the clean-page answer already recorded.
+        public ulong WordLine = ulong.MaxValue;
+        public readonly byte[] WordLineBytes = new byte[ConcurrentWordLineBytes];
 
         // Taken again from the pool for a new resolution.
         public void Reset((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
@@ -166,6 +221,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             Versions = versions;
             Array.Fill(_cleanPages, ulong.MaxValue);
             _nextCleanPage = 0;
+            WordLine = ulong.MaxValue;
         }
 
         public bool IsCleanPage(ConcurrentQuery query, ulong page)
@@ -226,24 +282,29 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     internal void BeginConcurrentResolve()
     {
         ConcurrentAssumptions? pooled = null;
-        lock (_assumptionPool)
+        for (var slot = 0; slot < _assumptionPool.Length && pooled is null; slot++)
         {
-            _assumptionPool.TryPop(out pooled);
+            pooled = Interlocked.Exchange(ref _assumptionPool[slot], null);
         }
 
+        // Read before the versions and every guest byte: a write logged after this is one the resolution may have missed.
+        var writeLogVersion = _gpuWrites.WriteLogVersion;
         if (pooled is null)
         {
-            _concurrentAssumptions = new ConcurrentAssumptions(OwnershipVersions());
+            _concurrentAssumptions = new ConcurrentAssumptions(OwnershipVersions()) { WriteLogVersion = writeLogVersion };
             return;
         }
 
         pooled.Reset(OwnershipVersions());
+        pooled.WriteLogVersion = writeLogVersion;
         _concurrentAssumptions = pooled;
     }
 
     // Assumptions the worker has checked, for the resolving thread to fill again: one per draw
     // otherwise, each with its answer list grown from nothing (Grand Theft Auto V, ~10 MB/s).
-    private readonly Stack<ConcurrentAssumptions> _assumptionPool = new();
+    // Slots taken and filled with an exchange each: the resolving thread takes one per draw and the worker
+    // returns one per draw, and a lock both took per draw was contended on every one (Demon's Souls, ~7000 a frame).
+    private readonly ConcurrentAssumptions?[] _assumptionPool = new ConcurrentAssumptions?[MaxPooledAssumptions];
     private const int MaxPooledAssumptions = 32;
     private const int MaxPooledAnswers = 4096;
 
@@ -254,11 +315,11 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             return;
         }
 
-        lock (_assumptionPool)
+        for (var slot = 0; slot < _assumptionPool.Length; slot++)
         {
-            if (_assumptionPool.Count < MaxPooledAssumptions)
+            if (Interlocked.CompareExchange(ref _assumptionPool[slot], assumptions, null) is null)
             {
-                _assumptionPool.Push(assumptions);
+                return;
             }
         }
     }
@@ -345,6 +406,27 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         return true;
     }
 
+    // On the worker, for a dispatch's resolution that may have read guest memory before the dispatches ahead of it ran:
+    // as IsConcurrentResolveStillCurrent, and no GPU write logged since it began covers a range it read. A write those
+    // dispatches recorded may have landed and retired by now, which the ownership answers alone no longer show.
+    internal bool IsConcurrentResolveStillCurrentAcrossDispatches(object assumptionsObject)
+    {
+        var assumptions = (ConcurrentAssumptions)assumptionsObject;
+        if (assumptions.WriteLogVersion != _gpuWrites.WriteLogVersion)
+        {
+            foreach (var (_, address, size, _) in assumptions.Answers)
+            {
+                if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, address, size))
+                {
+                    Interlocked.Increment(ref _writeLogRefusals);
+                    return false;
+                }
+            }
+        }
+
+        return IsConcurrentResolveStillCurrent(assumptionsObject);
+    }
+
     // A write the command thread queued ahead of the draw being resolved, still waiting for the worker,
     // is checked first: the worker records a write's ownership before it lets go of the queued range,
     // so the range found gone means the ownership below is already there.
@@ -387,10 +469,22 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                 return false;
             }
 
+            if (CrossDrawCleanPages && IsCrossDrawClean(query, page, assumptions.Versions))
+            {
+                assumptions.Record(query, page, ConcurrentPageBytes, false);
+                assumptions.NoteCleanPage(query, page);
+                return false;
+            }
+
             if (!IsOwnedConcurrent(query, page, ConcurrentPageBytes))
             {
                 assumptions.Record(query, page, ConcurrentPageBytes, false);
                 assumptions.NoteCleanPage(query, page);
+                if (CrossDrawCleanPages)
+                {
+                    NoteCrossDrawClean(query, page, assumptions.Versions);
+                }
+
                 return false;
             }
         }
@@ -399,6 +493,63 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var owned = _lastConcurrentOwner != AbandonCause.None;
         assumptions.Record(query, address, size, owned);
         return owned;
+    }
+
+    // SHARPEMU_CONCURRENT_CROSS_CLEAN=0 tests every page of every resolution again. A page found clean stays
+    // clean while the ownership versions stand: only a new recorded GPU write, overlay entry or image change
+    // makes a clean page owned, and each of those moves a version (a write finishing only makes one clean). So
+    // a resolution that starts at the versions an earlier one found a page clean at takes that answer, after
+    // the one test that depends on the draw: the command writes queued ahead of it. Demon's Souls resolves
+    // ~7000 draws a frame out of the same few descriptor pages, each paying the full test per page.
+    private static readonly bool CrossDrawCleanPages =
+        Environment.GetEnvironmentVariable("SHARPEMU_CONCURRENT_CROSS_CLEAN") != "0";
+
+    private const int CrossCleanSlots = 512;
+
+    // Per resolving thread: the pages found clean at t_crossCleanVersions, direct-mapped by page.
+    [ThreadStatic]
+    private static ulong[]? t_crossCleanPages;
+
+    [ThreadStatic]
+    private static (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) t_crossCleanVersions;
+
+    [ThreadStatic]
+    private static MetalRenderHost? t_crossCleanHost;
+
+    private static int CrossCleanSlot(ulong page) => (int)((page / ConcurrentPageBytes) & (CrossCleanSlots - 1));
+
+    private bool IsCrossDrawClean(ConcurrentQuery query, ulong page,
+        (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
+    {
+        var pages = t_crossCleanPages;
+        if (pages is null || !ReferenceEquals(t_crossCleanHost, this) || t_crossCleanVersions != versions ||
+            pages[CrossCleanSlot(page)] != (page | (ulong)query))
+        {
+            return false;
+        }
+
+        return !PendingCommandWriteHolds(page, ConcurrentPageBytes);
+    }
+
+    private void NoteCrossDrawClean(ConcurrentQuery query, ulong page,
+        (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
+    {
+        // Kept only for an answer taken at the versions the resolution started from: one found after a
+        // version moved may not have held at them.
+        if (OwnershipVersions() != versions)
+        {
+            return;
+        }
+
+        var pages = t_crossCleanPages ??= new ulong[CrossCleanSlots];
+        if (!ReferenceEquals(t_crossCleanHost, this) || t_crossCleanVersions != versions)
+        {
+            Array.Fill(pages, ulong.MaxValue);
+            t_crossCleanVersions = versions;
+            t_crossCleanHost = this;
+        }
+
+        pages[CrossCleanSlot(page)] = page | (ulong)query;
     }
 
     // A recorded GPU write the GPU has not finished covers these bytes. The coarse bounds test first, then
@@ -426,6 +577,14 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     private bool TryReadGuestWordConcurrent(ulong address, out uint word, ConcurrentAssumptions assumptions)
     {
+        const ulong lineMask = ConcurrentWordLineBytes - 1;
+        if ((address & ~lineMask) == assumptions.WordLine && (address & 3) == 0)
+        {
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                assumptions.WordLineBytes.AsSpan((int)(address & lineMask), sizeof(uint)));
+            return true;
+        }
+
         word = 0;
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (IsOwnedRecorded(ConcurrentQuery.Word, address, sizeof(uint), assumptions))
@@ -451,6 +610,20 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             throw new GpuFatal.AbandonedWorkException($"The resolution reads GPU-owned memory: address=0x{address:X16}.");
         }
 
+        // The whole page answered clean: the rest of the line is read with this word. The line lies within the
+        // page, which an aligned line of a power of two below the page size always does.
+        var line = address & ~lineMask;
+        if (ConcurrentWordLines && (address & 3) == 0 &&
+            assumptions.IsCleanPage(ConcurrentQuery.Word, address & ~(ConcurrentPageBytes - 1)) &&
+            _backing.TryReadBacking(line, assumptions.WordLineBytes))
+        {
+            assumptions.WordLine = line;
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                assumptions.WordLineBytes.AsSpan((int)(address & lineMask), sizeof(uint)));
+            return true;
+        }
+
+        assumptions.WordLine = ulong.MaxValue;
         if (!_backing.TryReadBacking(address, bytes))
         {
             return false;

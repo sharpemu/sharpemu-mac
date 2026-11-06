@@ -124,7 +124,8 @@ internal sealed partial class MetalRenderHost
     }
 
     // Whether the draw reads a buffer a deferred copy writes. A program that reaches guest
-    // memory through device addresses names no ranges, so any waiting copy may be one it reads.
+    // memory through device addresses names no bindings, so without its ordered ranges any
+    // waiting copy may be one it reads; with them, only a copy over one of them is.
     private bool BindsDeferredCopyDestination()
     {
         foreach (var stage in _joinStages)
@@ -134,7 +135,7 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
-            if (stage.Program.UsesDeviceAddresses)
+            if (stage.Program.UsesDeviceAddresses && HeldCopiesMayReachDeviceRanges(stage))
             {
                 return true;
             }
@@ -148,6 +149,112 @@ internal sealed partial class MetalRenderHost
             }
         }
 
+        return false;
+    }
+
+    // ---- the device-address ranges a join checks the held copies against (SHARPEMU_METAL_V2_JOIN_DEVICE_RANGES) ----
+    //
+    // A join skips the encoder boundary held label copies would land at, so a draw that may read
+    // one is refused and its pass is that boundary. A device-address program binds no buffers,
+    // so every such draw was refused while any copy was held, and with labels held to the commit
+    // Demon's Souls' G-buffer always holds some: each six-to-five step began a pass again. Yet
+    // binding has already ordered every range such a program reaches against the copies held
+    // then (BindDeviceAddressRanges: a planned handle's base and extent, an unplanned one's
+    // whole space): a copy over one of them landed there, the open encoder ended first, which is
+    // all a draw continuing the pass gets as well. What a join can still skip are the copies that
+    // ordering did not cover: those held since, or all of them when copies land at encoder
+    // boundaries (bind time then orders none). Only one of those over a range the program reaches
+    // refuses the join. The TBDR line's join_device_ranges=[cleared,overlap,unordered] counts the
+    // device-address stages a join checked: let through, refused for a copy over a range, refused
+    // with no ordered ranges. SHARPEMU_METAL_V2_JOIN_DEVICE_RANGES=0 refuses them all again.
+    internal bool JoinChecksDeviceRanges { get; set; } = MetalV2Diagnostics.JoinChecksDeviceRanges;
+
+    private long _deviceRangeJoinsCleared;
+    private long _deviceRangeJoinsOverlap;
+    private long _deviceRangeJoinsUnordered;
+
+    internal (long Cleared, long Overlap, long Unordered) TakeDeviceRangeJoinChecks() =>
+        (Interlocked.Exchange(ref _deviceRangeJoinsCleared, 0),
+         Interlocked.Exchange(ref _deviceRangeJoinsOverlap, 0),
+         Interlocked.Exchange(ref _deviceRangeJoinsUnordered, 0));
+
+    private string FormatDeviceRangeJoinChecks()
+    {
+        var (cleared, overlap, unordered) = TakeDeviceRangeJoinChecks();
+        return $"cleared:{cleared},overlap:{overlap},unordered:{unordered}";
+    }
+
+    // A stage's binding starts: nothing is ordered for it yet. Called again where its ranges are
+    // ordered, so the held copies counted are those every range was ordered against.
+    internal void BeginDeviceRangeOrdering(MetalStageBindings stage)
+    {
+        stage.DeviceRangeCount = 0;
+        stage.DeviceRangesOrdered = false;
+        stage.DeviceRangesEpoch = _labelScanEpoch;
+        stage.DeviceRangesHeld = _deferredLabelCopies.Count;
+    }
+
+    /// <summary>A range the stage's device-address program reaches, ordered after the held copies over it.</summary>
+    internal void OrderDeviceRange(MetalStageBindings stage, ulong address, ulong size)
+    {
+        OrderAfterDeferredCopies(address, size);
+        if (stage.DeviceRangeCount == stage.DeviceRanges.Length)
+        {
+            Array.Resize(ref stage.DeviceRanges, Math.Max(4, stage.DeviceRanges.Length * 2));
+        }
+
+        stage.DeviceRanges[stage.DeviceRangeCount++] = (address, size);
+    }
+
+    /// <summary>Every range of the stage is ordered: the copies held since BeginDeviceRangeOrdering were checked against each.</summary>
+    internal void EndDeviceRangeOrdering(MetalStageBindings stage)
+    {
+        // Copies are only appended until they land, and landing them starts a new epoch: in the
+        // same epoch the copies held at the start were there for every range's check. Held to
+        // encoder boundaries instead, no copy was checked at all.
+        if (!LabelsAtCommit || stage.DeviceRangesEpoch != _labelScanEpoch)
+        {
+            stage.DeviceRangesEpoch = _labelScanEpoch;
+            stage.DeviceRangesHeld = 0;
+        }
+
+        stage.DeviceRangesOrdered = true;
+    }
+
+    // Whether a copy held now, and not ordered against the stage's ranges at bind time, may write
+    // bytes its device-address program reads.
+    private bool HeldCopiesMayReachDeviceRanges(MetalStageBindings stage)
+    {
+        if (!JoinChecksDeviceRanges)
+        {
+            return true;
+        }
+
+        if (!stage.DeviceRangesOrdered)
+        {
+            _deviceRangeJoinsUnordered++;
+            return true;
+        }
+
+        var copies = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies);
+        var from = stage.DeviceRangesEpoch == _labelScanEpoch ? Math.Min(stage.DeviceRangesHeld, copies.Length) : 0;
+        for (var index = from; index < copies.Length; index++)
+        {
+            var low = copies[index].GuestAddress;
+            var high = low + (ulong)copies[index].Bytes;
+            for (var range = 0; range < stage.DeviceRangeCount; range++)
+            {
+                var (address, size) = stage.DeviceRanges[range];
+                var end = size > ulong.MaxValue - address ? ulong.MaxValue : address + size;
+                if (low < end && address < high)
+                {
+                    _deviceRangeJoinsOverlap++;
+                    return true;
+                }
+            }
+        }
+
+        _deviceRangeJoinsCleared++;
         return false;
     }
 

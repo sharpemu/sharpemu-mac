@@ -22,6 +22,12 @@ public sealed class ResourceSnapshot
     public uint[]? MipStatistics { get; init; }
     public object? Origin { get; set; }
 
+    // What a host decoded from this snapshot ahead of the draws and dispatches that bind it (the Metal host's
+    // binding packet, built on the resolving thread), or null. Published whole with Volatile.Write and read with
+    // Volatile.Read; a reader checks it was built for its own program before it uses it. A copy (WithUserData)
+    // starts without one.
+    public object? BindingPacket;
+
     public static uint MipStatisticsOf(uint word5, uint word6) =>
         (word6 & MipStatisticsSlotWordMask) | ((word5 & MipStatisticsEnableWordMask) != 0 ? MipStatisticsEnabled : 0u);
 

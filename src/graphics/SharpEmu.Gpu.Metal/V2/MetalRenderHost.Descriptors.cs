@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
@@ -70,6 +71,16 @@ internal sealed partial class MetalRenderHost
         public int MovieLuma = -1;
         public int MovieChroma = -1;
 
+        // The guest ranges the device-address program was ordered against the held label copies
+        // over at bind time (an unplanned handle is the whole space), and the held copies that
+        // ordering covered: DeviceRangesHeld of the copies held in epoch DeviceRangesEpoch. Not
+        // ordered until BindDeviceAddressRanges has run for this binding (MetalRenderHost.DepthOnlyJoin.cs).
+        public (ulong Base, ulong Size)[] DeviceRanges = [];
+        public int DeviceRangeCount;
+        public bool DeviceRangesOrdered;
+        public uint DeviceRangesEpoch;
+        public int DeviceRangesHeld;
+
         public ShaderStageResources Stage => StageResources;
 
         public void EnsureCapacity(int images, int samplers, int buffers, int shaderDwords)
@@ -127,6 +138,9 @@ internal sealed partial class MetalRenderHost
     private sealed class ArgumentPlan(Gen5MslArgumentLayout layout, int[]?[] fieldResources, int[]?[] fieldMips)
     {
         public readonly Gen5MslArgumentLayout Layout = layout;
+
+        // The layout's fields as an array: the per-draw fill walks them without interface calls.
+        public readonly MslArgumentField[] Fields = [.. layout.Fields];
         public readonly int[]?[] FieldResources = fieldResources;
 
         // Per texture element, the mip it binds of its image: a dynamic-mip storage image
@@ -154,6 +168,10 @@ internal sealed partial class MetalRenderHost
     // The same plans by layout instance: a program keeps its layout, so a draw finds its plan by
     // reference instead of comparing the layout field by field (BindingLayout.Equals).
     private readonly Dictionary<BindingLayout, ArgumentPlan> _argumentPlansByInstance = new(ReferenceEqualityComparer.Instance);
+
+    // Each stage's last layout and its plan: consecutive draws mostly keep their programs.
+    private readonly BindingLayout?[] _lastPlanLayouts = new BindingLayout?[StageCount];
+    private readonly ArgumentPlan?[] _lastPlans = new ArgumentPlan?[StageCount];
     private readonly Dictionary<(uint, uint, uint, uint, bool), (nint Handle, ulong ResourceId)> _samplers = new();
     private readonly nint[] _stageArgumentBuffers = new nint[StageCount];
     private readonly ulong[] _stageArgumentOffsets = new ulong[StageCount];
@@ -168,6 +186,12 @@ internal sealed partial class MetalRenderHost
     private nint[] _usedResources = new nint[64];
     private nuint[] _usedResourceUsage = new nuint[64];
     private int _usedResourceCount;
+
+    // An open-addressed index over _usedResources (entry = position + 1), valid where its stamp is
+    // the current draw's: a draw finds a resource it already noted without walking the list.
+    private int[] _usedResourceSlots = new int[128];
+    private uint[] _usedResourceStamps = new uint[128];
+    private uint _usedResourceEpoch = 1;
     private MetalResourcePreparation? _preparation;
     private MetalResourcePreparation? _preparationHandle;
     private int _preparedStageMask;
@@ -207,7 +231,7 @@ internal sealed partial class MetalRenderHost
             ? _preparationHandle ??= new MetalResourcePreparation(this)
             : new MetalResourcePreparation(this);
         _preparedStageMask = 0;
-        _usedResourceCount = 0;
+        ResetUsedResources();
         _bindlessDeclarations.Clear();
         Array.Clear(_stageArgumentValid);
         Array.Clear(_stageUsesDeviceAddresses);
@@ -267,7 +291,7 @@ internal sealed partial class MetalRenderHost
         return program;
     }
 
-    private static ShaderImageShape ShapeOf(ImageResource image) => new(
+    internal static ShaderImageShape ShapeOf(ImageResource image) => new(
         Volume: image.Dimension == ImageDimension.Dim3D,
         Arrayed: image.Cube || image.Dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or
             ImageDimension.Dim2DMsaaArray,
@@ -338,7 +362,7 @@ internal sealed partial class MetalRenderHost
 
     // A sampled binding found in the memo with a stamp that still holds; otherwise notes the key for
     // the full resolution, which reads the owner-list counts over the request before its lookup.
-    private bool TryTextureMemo(MetalStageBindings prepared, ImageResource image, uint[] words, int index)
+    private bool TryTextureMemo(MetalStageBindings prepared, ImageResource image, uint[] words, int index, MetalBindingPacket? packet = null)
     {
         prepared.MemoHits[index] = null;
         prepared.MemoWanted[index] = false;
@@ -347,7 +371,9 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        var key = new TextureMemoKey(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], ShapeOf(image));
+        var key = packet is not null && packet.HasMemoKey(index)
+            ? packet.MemoKeys![index]
+            : new TextureMemoKey(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], ShapeOf(image));
         if (_textureMemo.TryGetValue(key, out var entry) && _imageCache.TextureStampMayHold(in entry.Stamp))
         {
             prepared.Images[index] = entry.Image;
@@ -404,12 +430,15 @@ internal sealed partial class MetalRenderHost
         }
 
         var stageIndex = StageIndexOf(program.Stage);
+        // What the resolving thread decoded of this stage already (MetalBindingPacket), when it stands for it.
+        var packet = TakeBindingPacket(in stage, program, stageIndex == StageCompute);
         var prepared = _stageBindings[stageIndex];
         prepared.StageResources = stage;
         prepared.Program = program;
         prepared.Committed = false;
-        prepared.EnsureCapacity(
-            info.Images.Count, info.Samplers.Count, info.Buffers.Count, checked((int)layout.ShaderDataDwordCount));
+        BeginDeviceRangeOrdering(prepared);
+        var shaderDwords = checked((int)layout.ShaderDataDwordCount);
+        prepared.EnsureCapacity(info.Images.Count, info.Samplers.Count, info.Buffers.Count, shaderDwords);
         _preparedStageMask |= 1 << stageIndex;
         var movie = FindHostMovieBindings(info, snapshot);
         prepared.MovieLuma = movie.Luma;
@@ -422,12 +451,12 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
-            if (TryTextureMemo(prepared, info.Images[index], snapshot.Images[index], index))
+            if (TryTextureMemo(prepared, info.Images[index], snapshot.Images[index], index, packet))
             {
                 continue;
             }
 
-            ResolveImageBinding(prepared, info.Images[index], snapshot.Images[index], index);
+            ResolveImageBinding(prepared, info.Images[index], snapshot.Images[index], index, packet);
         }
 
         // All image requests, including movie replacements and texture memo hits, are current.
@@ -438,20 +467,47 @@ internal sealed partial class MetalRenderHost
         {
             prepared.Samplers[index] = ResolveSampler(
                 prepared, info.Samplers[index], snapshot.Samplers[index], index,
-                prepared.SamplerViewClasses[index] == MetalSamplerViewClasses.AllInteger, out prepared.SamplerIds[index]);
+                prepared.SamplerViewClasses[index] == MetalSamplerViewClasses.AllInteger, out prepared.SamplerIds[index], packet);
         }
 
         var shaderData = prepared.ShaderData;
-        Array.Clear(shaderData, 0, (int)layout.ShaderDataDwordCount);
+        if (packet is { HasShaderData: true })
+        {
+            Array.Copy(packet.ShaderData, shaderData, packet.ShaderDataCount);
+        }
+        else
+        {
+            Array.Clear(shaderData, 0, shaderDwords);
+            if (!WriteStageShaderData(shaderData, program, layout, info, snapshot, stage.ShaderBase))
+            {
+                throw UserRegisterOutsideUserData(program, layout, snapshot);
+            }
+        }
+
+        stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, shaderDwords));
+        stage.WriteCallData(shaderData.AsSpan(0, shaderDwords));
+        if (packet is not null)
+        {
+            RecyclePacket(packet);
+        }
+
+        return prepared;
+    }
+
+    // The stage's shader-data words from its program, snapshot and shader base, before the dispatch thread limits and
+    // call data (ShaderStageResources.WriteDispatchThreadLimits, WriteCallData); shaderData starts cleared. False, with
+    // the words partly written, when a user register lies outside the snapshot's user data. Pure: the resolving thread
+    // runs it for a binding packet (MetalBindingPacket).
+    internal static bool WriteStageShaderData(uint[] shaderData, ShaderProgramInfo program, BindingLayout layout, ShaderResourceInfo info,
+        ResourceSnapshot snapshot, ulong shaderBase)
+    {
         for (var index = 0; index < layout.UserDataRegisters.Count; index++)
         {
             var register = layout.UserDataRegisters[index];
             var userIndex = (int)(register - program.UserDataBase);
             if (register < program.UserDataBase || userIndex >= snapshot.UserData.Length)
             {
-                throw Fatal(
-                    $"A user register is outside the draw's user data: register={register} base={program.UserDataBase} " +
-                    $"count={snapshot.UserData.Length} hash=0x{program.Hash:X16}.");
+                return false;
             }
 
             shaderData[index] = snapshot.UserData[userIndex];
@@ -459,8 +515,8 @@ internal sealed partial class MetalRenderHost
 
         if (layout.UsesShaderBase)
         {
-            shaderData[layout.ShaderBaseDword] = (uint)stage.ShaderBase;
-            shaderData[layout.ShaderBaseDword + 1] = (uint)(stage.ShaderBase >> 32);
+            shaderData[layout.ShaderBaseDword] = (uint)shaderBase;
+            shaderData[layout.ShaderBaseDword + 1] = (uint)(shaderBase >> 32);
         }
 
         if (layout.BufferWordCount != 0)
@@ -482,13 +538,26 @@ internal sealed partial class MetalRenderHost
             MipStatistics.WriteImageFields(shaderData, layout, info, snapshot.Images);
         }
 
-        stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
-        stage.WriteCallData(shaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
-        return prepared;
+        return true;
+    }
+
+    private Exception UserRegisterOutsideUserData(ShaderProgramInfo program, BindingLayout layout, ResourceSnapshot snapshot)
+    {
+        foreach (var register in layout.UserDataRegisters)
+        {
+            if (register < program.UserDataBase || (int)(register - program.UserDataBase) >= snapshot.UserData.Length)
+            {
+                return Fatal(
+                    $"A user register is outside the draw's user data: register={register} base={program.UserDataBase} " +
+                    $"count={snapshot.UserData.Length} hash=0x{program.Hash:X16}.");
+            }
+        }
+
+        return Fatal($"The shader data could not be written: hash=0x{program.Hash:X16}.");
     }
 
     // Finds the cache image of one shader image descriptor; the view follows in BindResources.
-    private void ResolveImageBinding(MetalStageBindings prepared, ImageResource image, uint[] words, int index)
+    private void ResolveImageBinding(MetalStageBindings prepared, ImageResource image, uint[] words, int index, MetalBindingPacket? packet = null)
     {
         if (words.Length < 4)
         {
@@ -497,7 +566,9 @@ internal sealed partial class MetalRenderHost
         }
 
         var storage = image.ResourceClass == MslImageResourceClass.Storage;
-        var resolution = ImageRequestBuilders.Texture(words, ShapeOf(image));
+        var resolution = packet is not null && packet.HasResolution(index)
+            ? packet.Resolutions![index]
+            : ImageRequestBuilders.Texture(words, ShapeOf(image));
         var request = resolution.Request;
         if (prepared.MemoWanted[index])
         {
@@ -561,7 +632,8 @@ internal sealed partial class MetalRenderHost
         uint[] words,
         int index,
         bool integerViews,
-        out ulong resourceId)
+        out ulong resourceId,
+        MetalBindingPacket? packet = null)
     {
         if (words.Length < 4)
         {
@@ -569,6 +641,18 @@ internal sealed partial class MetalRenderHost
                 $"A sampler descriptor is too short: sampler={index} words={words.Length} hash=0x{prepared.Program.Hash:X16}.");
         }
 
+        if (packet is not null && packet.HasSampler(index))
+        {
+            return GetSampler(in packet.Samplers![index], integerViews, out resourceId);
+        }
+
+        var descriptor = NativeSamplerWords(sampler, words);
+        return GetSampler(in descriptor, integerViews, out resourceId);
+    }
+
+    // The S# the host samples with: depth compare off unless the program compares, point filtering when it is forced.
+    internal static SamplerDescriptorWords NativeSamplerWords(SamplerResource sampler, uint[] words)
+    {
         Span<uint> native = stackalloc uint[4] { words[0], words[1], words[2], words[3] };
         if (!sampler.DepthCompare)
         {
@@ -586,8 +670,7 @@ internal sealed partial class MetalRenderHost
             }
         }
 
-        var descriptor = new SamplerDescriptorWords(native);
-        return GetSampler(in descriptor, integerViews, out resourceId);
+        return new SamplerDescriptorWords(native);
     }
 
     // The binding layout gives a dynamic-mip storage image one element per level of its
@@ -966,6 +1049,7 @@ internal sealed partial class MetalRenderHost
     {
         var unplanned = false;
         var declaredWrite = false;
+        BeginDeviceRangeOrdering(stage);
         if (snapshot.DeviceAddressRanges.Length != 0 && _singleCopy is { } singleCopy)
         {
             // Counted, and given back, only if the program got past BeforeDeviceAddressPreparation:
@@ -982,7 +1066,7 @@ internal sealed partial class MetalRenderHost
             {
                 // Nothing evaluated this handle, so the store's destination is unknown, and
                 // so is what it reads: every copy still owed lands first.
-                OrderAfterDeferredCopies(0, ulong.MaxValue);
+                OrderDeviceRange(stage, 0, ulong.MaxValue);
                 unplanned |= range.Written;
                 continue;
             }
@@ -1010,7 +1094,7 @@ internal sealed partial class MetalRenderHost
                     $"[METAL-V2][BIG-DEVICE-RANGE] stage={stage.Program.Stage} hash=0x{stage.Program.Hash:X16} h{range.Handle} " +
                     $"base=0x{range.Base:X} size=0x{size:X} planned_size=0x{range.Size:X}{(range.Written ? " written" : string.Empty)}");
             }
-            OrderAfterDeferredCopies(range.Base, size);
+            OrderDeviceRange(stage, range.Base, size);
             OrderAfterStagedStores(range.Base, size);
             var bigWritebacks = _imageCache.BigWritebacks;
             FlushGpuWrites(range.Base, size, MetalWritebackCause.StorageDescriptor, range.Written);
@@ -1034,6 +1118,7 @@ internal sealed partial class MetalRenderHost
             declaredWrite = true;
         }
 
+        EndDeviceRangeOrdering(stage);
         if (!unplanned && (!info.WritesDeviceAddresses || declaredWrite))
         {
             return;
@@ -1119,10 +1204,17 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        EnqueueBufferAtCompletion(index, address, hash, (int)Math.Min(bytes, size));
+    }
+
+    // Apart from the check above: the closure's captures would otherwise be allocated on every
+    // call, armed or not (some 15 MB a second of them on the draw path).
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void EnqueueBufferAtCompletion(int index, ulong address, ulong hash, int length)
+    {
         var serial = _tracedBuffersAtCompletion++;
         var flip = Interlocked.Read(ref _flips);
         var directory = _traceBufferAtCompletion[3];
-        var length = (int)Math.Min(bytes, size);
         _completions.Enqueue(SubmissionSerial, () =>
         {
             var contents = new byte[length];
@@ -1355,10 +1447,9 @@ internal sealed partial class MetalRenderHost
             var layout = stage.Program.Bindings!;
             if (layout.UsesPushData)
             {
-                for (var index = 0; index < layout.ShaderDataDwordCount; index++)
-                {
-                    pushData[(int)layout.PushDataStartDword + index] = stage.ShaderData[index];
-                }
+                // The count once: it is a chain of a dozen computed offsets, and was walked again for every dword.
+                var shaderDwords = (int)layout.ShaderDataDwordCount;
+                stage.ShaderData.AsSpan(0, shaderDwords).CopyTo(pushData[(int)layout.PushDataStartDword..]);
 
                 hasPushData = true;
                 if (HasGpuThreadLimits(stage))
@@ -1409,9 +1500,17 @@ internal sealed partial class MetalRenderHost
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ArgumentBufferWrite);
         var layout = stage.Program.Bindings!;
-        var plan = ArgumentPlanOf(layout);
+        var plan = _lastPlans[stageIndex];
+        if (!ReferenceEquals(_lastPlanLayouts[stageIndex], layout) || plan is null)
+        {
+            plan = ArgumentPlanOf(layout);
+            _lastPlanLayouts[stageIndex] = layout;
+            _lastPlans[stageIndex] = plan;
+        }
+
         var argumentLayout = plan.Layout;
-        if (argumentLayout.Fields.Count == 0)
+        var fields = plan.Fields;
+        if (fields.Length == 0)
         {
             _stageArgumentValid[stageIndex] = false;
             return;
@@ -1430,29 +1529,30 @@ internal sealed partial class MetalRenderHost
         var argument = _argumentScratch.AsSpan(0, argumentBytes);
         argument.Clear();
         var imageCursor = 0;
-        var fields = argumentLayout.Fields;
-        for (var fieldIndex = 0; fieldIndex < fields.Count; fieldIndex++)
+        for (var fieldIndex = 0; fieldIndex < fields.Length; fieldIndex++)
         {
             var field = fields[fieldIndex];
             var span = argument.Slice((int)field.ByteOffset, (int)field.ByteSize);
             switch (field.FieldKind)
             {
                 case MslArgumentFieldKind.BufferPointers:
-                    for (var index = 0; index < field.Count && index < stage.BufferCount; index++)
+                {
+                    var pointers = BufferFieldCount(field, stage, sizeof(ulong), span.Length);
+                    var addresses = MemoryMarshal.Cast<byte, ulong>(span)[..pointers];
+                    var buffers = stage.Buffers.AsSpan(0, pointers);
+                    for (var index = 0; index < addresses.Length; index++)
                     {
-                        BinaryPrimitives.WriteUInt64LittleEndian(
-                            span[(index * sizeof(ulong))..], stage.Buffers[index].GpuAddress);
+                        addresses[index] = buffers[index].GpuAddress;
                     }
 
                     break;
+                }
                 case MslArgumentFieldKind.BufferByteCounts:
-                    for (var index = 0; index < field.Count && index < stage.BufferCount; index++)
-                    {
-                        BinaryPrimitives.WriteUInt32LittleEndian(
-                            span[(index * sizeof(uint))..], stage.BufferLengths[index]);
-                    }
-
+                {
+                    var counts = BufferFieldCount(field, stage, sizeof(uint), span.Length);
+                    stage.BufferLengths.AsSpan(0, counts).CopyTo(MemoryMarshal.Cast<byte, uint>(span));
                     break;
+                }
                 case MslArgumentFieldKind.Textures:
                     WriteTextureField(
                         stage, field, plan.FieldResources[fieldIndex], plan.FieldMips[fieldIndex], span, ref imageCursor, stageIndex);
@@ -1519,6 +1619,10 @@ internal sealed partial class MetalRenderHost
         _stageArgumentOffsets[stageIndex] = range.Offset;
         _stageArgumentValid[stageIndex] = true;
     }
+
+    // The elements a buffer field fills: the bound buffers it has room for (little-endian host).
+    private static int BufferFieldCount(MslArgumentField field, MetalStageBindings stage, int elementBytes, int spanBytes) =>
+        Math.Min(Math.Min((int)Math.Min(field.Count, int.MaxValue), stage.BufferCount), spanBytes / elementBytes);
 
     // SHARPEMU_METAL_V2_ARGUMENT_REUSE=0 reserves and fills a ring range for every stage of every draw.
     private static readonly bool ArgumentBufferReuse =
@@ -1921,15 +2025,33 @@ internal sealed partial class MetalRenderHost
         return plan;
     }
 
+    private void ResetUsedResources()
+    {
+        _usedResourceCount = 0;
+        if (++_usedResourceEpoch == 0)
+        {
+            Array.Clear(_usedResourceStamps);
+            _usedResourceEpoch = 1;
+        }
+    }
+
+    // Each resource once, in first-use order, with the union of its usages.
     internal void NoteUsedResource(nint resource, nuint usage)
     {
-        for (var index = 0; index < _usedResourceCount; index++)
+        var slots = _usedResourceSlots;
+        var stamps = _usedResourceStamps;
+        var mask = slots.Length - 1;
+        var slot = UsedResourceHash(resource) & mask;
+        while (stamps[slot] == _usedResourceEpoch)
         {
-            if (_usedResources[index] == resource)
+            var position = slots[slot] - 1;
+            if (_usedResources[position] == resource)
             {
-                _usedResourceUsage[index] |= usage;
+                _usedResourceUsage[position] |= usage;
                 return;
             }
+
+            slot = (slot + 1) & mask;
         }
 
         if (_usedResourceCount == _usedResources.Length)
@@ -1941,6 +2063,35 @@ internal sealed partial class MetalRenderHost
         _usedResources[_usedResourceCount] = resource;
         _usedResourceUsage[_usedResourceCount] = usage;
         _usedResourceCount++;
+        stamps[slot] = _usedResourceEpoch;
+        slots[slot] = _usedResourceCount;
+        // At most half full, so a probe always reaches a free slot.
+        if (_usedResourceCount * 2 > slots.Length)
+        {
+            GrowUsedResourceIndex();
+        }
+    }
+
+    private static int UsedResourceHash(nint resource) =>
+        (int)(((ulong)resource * 0x9E3779B97F4A7C15UL) >> 33);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void GrowUsedResourceIndex()
+    {
+        _usedResourceSlots = new int[_usedResourceSlots.Length * 2];
+        _usedResourceStamps = new uint[_usedResourceSlots.Length];
+        var mask = _usedResourceSlots.Length - 1;
+        for (var position = 0; position < _usedResourceCount; position++)
+        {
+            var slot = UsedResourceHash(_usedResources[position]) & mask;
+            while (_usedResourceStamps[slot] == _usedResourceEpoch)
+            {
+                slot = (slot + 1) & mask;
+            }
+
+            _usedResourceStamps[slot] = _usedResourceEpoch;
+            _usedResourceSlots[slot] = position + 1;
+        }
     }
 
     // Argument-buffer references are indirect, so the encoder is told which textures

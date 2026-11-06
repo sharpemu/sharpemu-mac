@@ -49,6 +49,11 @@ internal sealed partial class MetalRenderHost
                 $"-meta{request.Description.Metadata.Kind}@{request.Description.Metadata.Range.Address:X}" +
                 $"+{request.Description.Metadata.Range.Size:X}-mclr{(metadataClear ? 1 : 0)}");
         }
+        if (_attachmentCount < MaxColorAttachments)
+        {
+            _attachmentImages[_attachmentCount] = imageIdentifier;
+        }
+
         RecordAttachmentSubresource(
             request.View, image.Shape, image.Description.IsVolume, color: true,
             image.Description.BytesPerBlock, image.Texture);

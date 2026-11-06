@@ -1290,7 +1290,9 @@ public sealed class MslTranslationTests
         // The untyped load takes the descriptor's format. 8_8 is not whole dwords, so it keeps
         // the table form (a whole-dword literal format loads as one run, tested separately).
         scalars[11] = (typed ? 77u : 14u) << 12;
-        var shader = CompileMaterialized(new Gen5ShaderProgram(0, [load, end]), scalars[..12]);
+        // The inline decoder is what this checks; SHARPEMU_MSL_FORMAT_FETCH calls a helper instead.
+        var shader = CompileMaterialized(new Gen5ShaderProgram(0, [load, end]), scalars[..12],
+            Gen5MslCodegenOptions.FromEnvironment with { FormatFetch = false });
 
         if (typed)
         {
@@ -1331,7 +1333,13 @@ public sealed class MslTranslationTests
         scalars[8] = 0x2000;
         scalars[10] = 256;
         scalars[11] = 14u << 12;
-        var shader = CompileMaterialized(new Gen5ShaderProgram(0, [.. instructions]), scalars);
+        // The threshold decides only with the fetch helper off; on, every load calls it.
+        var shader = CompileMaterialized(new Gen5ShaderProgram(0, [.. instructions]), scalars,
+            Gen5MslCodegenOptions.FromEnvironment with { FormatFetch = false });
+        var fetched = CompileMaterialized(new Gen5ShaderProgram(0, [.. instructions]), scalars,
+            Gen5MslCodegenOptions.FromEnvironment with { FormatFetch = true });
+        Assert.Contains("sharpemu_format_fetch(b0, ", fetched.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_format_load_decoded(", fetched.Source, StringComparison.Ordinal);
 
         Assert.Equal(called, shader.Source.Contains("sharpemu_format_load_decoded(b0, ", StringComparison.Ordinal));
         Assert.Equal(called, shader.Source.Contains("static uint4 sharpemu_format_load_decoded(", StringComparison.Ordinal));
@@ -1425,8 +1433,9 @@ public sealed class MslTranslationTests
         var shader = CompileTypedBufferAccess(opcode, registers, typedFormat: 56, typed: typed);
 
         Assert.Equal(components, CountOccurrences(shader.Source, "= sharpemu_format_d16("));
-        // D16 never takes the whole-dword run: a 32-bit channel still narrows to a half.
-        Assert.DoesNotContain("sharpemu_load_words<", shader.Source, StringComparison.Ordinal);
+        // D16 never takes the whole-dword run: a 32-bit channel still narrows to a half. (The
+        // format fetch helper's own element load is in the prelude, not at a call site.)
+        Assert.DoesNotMatch(@"sharpemu_load_words<\d>\(b\d", shader.Source);
         if (opcode.EndsWith("HiX", StringComparison.Ordinal))
             Assert.Contains("v4 = (v4 & 0x0000FFFFu) | (", shader.Source, StringComparison.Ordinal);
         if (components == 3)
@@ -1577,7 +1586,8 @@ public sealed class MslTranslationTests
         userData[11] = (9u << 28) | dstSelect;
         return CompileMaterialized(new Gen5ShaderProgram(0x1_0000_C000, [store, end]), userData);
     }
-    private static Gen5MslShader CompileMaterialized(Gen5ShaderProgram program, uint[] userData)
+    private static Gen5MslShader CompileMaterialized(Gen5ShaderProgram program, uint[] userData,
+        Gen5MslCodegenOptions? options = null)
     {
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 1, 0, (uint)userData.Length);
         var snapshot = new ResourceSnapshot();
@@ -1589,7 +1599,7 @@ public sealed class MslTranslationTests
             BindingLayout.CollectUserDataRegisters(program, 0, (uint)userData.Length), false,
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
         var request = new ShaderCompileRequest(plan, resources, layout);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options), error);
         return shader;
     }
 
