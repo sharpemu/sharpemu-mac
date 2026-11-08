@@ -115,6 +115,25 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
         Assert.Equal(expected, ReadDword(result, 0));
     }
 
+    // Early outs into a shared exit tail - one from inside a branch's arm, one from inside a loop - cross the nesting the
+    // structured form needs; the tail is copied, with the exit, to each place that jumps to it.
+    [Theory]
+    [InlineData(3u, 4u)]
+    [InlineData(5u, 64u)]
+    [InlineData(7u, 67u)]
+    [InlineData(9u, 6u)]
+    public void EarlyOutsIntoASharedExitTailAreStructuredAndRunEachPath(uint selector, uint expected)
+    {
+        var fixture = Gen5ComputeFixtures.EarlyOutTail(selector);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        Assert.DoesNotContain("switch (pc)", shader.Source, StringComparison.Ordinal);
+
+        if (SkipWithoutMetalDevice("the execution test")) return;
+
+        var result = ExecuteRequestOrThrow(fixture, new byte[16]);
+        Assert.Equal(expected, ReadDword(result, 0));
+    }
+
     // A branch whose arm can end the program has no post-dominator; the arms that go on
     // now rejoin where they meet instead of sending the shader to the dispatcher.
     [Theory]
