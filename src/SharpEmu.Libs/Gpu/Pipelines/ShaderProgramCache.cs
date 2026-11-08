@@ -344,13 +344,13 @@ internal sealed class ShaderProgramCache
             return false;
         }
 
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var started = MaterializationTally.StartTiming();
         var fast = ResourceMaterializer.RevalidateFast(stage.Resources);
         var current = fast ?? (Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes));
         var outcome = current ? MaterializationTally.Outcome.KeptRevalidated
             : fast is not null && ResourceMaterializer.LastRevalidateRefused ? MaterializationTally.Outcome.RevalidateRefused
             : MaterializationTally.Outcome.KeptStale;
-        MaterializationTally.Note(outcome, System.Diagnostics.Stopwatch.GetTimestamp() - started, stage.Resources);
+        MaterializationTally.Note(outcome, MaterializationTally.ElapsedTicks(started), stage.Resources);
         return current;
     }
 
@@ -812,7 +812,7 @@ internal sealed class ShaderProgramCache
         {
             // Failure capture needs the full walk, so a dump run bypasses the cache.
             ResourceMaterializationFailure materializationFailure;
-            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            var started = MaterializationTally.StartTiming();
             bool materialized;
             MaterializationTally.Outcome outcome;
             _host.BeginGuestWordReads();
@@ -843,7 +843,7 @@ internal sealed class ShaderProgramCache
             }
 
             MaterializationTally.Note(materialized ? outcome : MaterializationTally.Outcome.Failed,
-                System.Diagnostics.Stopwatch.GetTimestamp() - started, materialized ? snapshot : null);
+                MaterializationTally.ElapsedTicks(started), materialized ? snapshot : null);
             if (!materialized)
             {
                 // Keep the draw's pointer inputs with the failure. A later draw or a

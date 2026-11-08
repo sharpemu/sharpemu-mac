@@ -269,9 +269,38 @@ public static class RenderPhaseProfile
 
     internal static void SetOverlayCapture(bool phases, bool timeline)
     {
+        _overlayPhasesWanted = phases;
+        _overlayTimelineWanted = phases && timeline;
+        _overlaySkip = 0;
+        if (phases)
+        {
+            // Nothing read the clock while the capture was off: the first frame is charged from here.
+            Volatile.Write(ref _overlayCaptureStart, Stopwatch.GetTimestamp());
+        }
+
         _overlayTimeline = phases && timeline;
         _overlayPhases = phases;
     }
+
+    // The overlay's capture runs on one presented frame in OverlayPhaseSample: charging every scope reads the
+    // clock twice, a few hundred times a draw, and timing every frame cost Grand Theft Auto V's render thread
+    // about a quarter of its draw rate (6.3 vs 5.0 us a draw) whenever a breakdown widget was on screen. The
+    // overlay shows the last sampled frame's render breakdown for the frames between (OverlayTelemetry).
+    // SHARPEMU_OVERLAY_PHASE_SAMPLE=1 captures every frame, as before.
+    internal static readonly int OverlayPhaseSample =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_OVERLAY_PHASE_SAMPLE"), out var sample)
+            ? Math.Clamp(sample, 1, 64)
+            : 4;
+
+    private static bool _overlayPhasesWanted;
+    private static bool _overlayTimelineWanted;
+    // Render thread: presented frames left before the next captured one.
+    private static int _overlaySkip;
+    // When the capture last resumed; a charge never reaches back past it (the paused frames read no clock).
+    private static long _overlayCaptureStart;
+
+    /// <summary>The overlay wants the render breakdown but captures it on sampled frames only.</summary>
+    internal static bool OverlayPhasesSampled => _overlayPhasesWanted && OverlayPhaseSample > 1 && !Enabled;
 
     [ThreadStatic] private static Overlay.RenderSegmentBuffer? _overlaySegments;
 
@@ -602,6 +631,11 @@ public static class RenderPhaseProfile
     {
         var now = Stopwatch.GetTimestamp();
         var previous = _current;
+        if (_lastTimestamp != 0 && _lastTimestamp < _overlayCaptureStart)
+        {
+            _lastTimestamp = _overlayCaptureStart;
+        }
+
         if (_lastTimestamp != 0)
         {
             if (_threadTicks is { } threadTicks)
@@ -694,11 +728,27 @@ public static class RenderPhaseProfile
             {
                 Array.Clear(_framePhaseTicks);
             }
+
+            if (OverlayPhasesSampled)
+            {
+                // Pause for the frames until the next sample (scopes opened before keep closing normally).
+                _overlaySkip = OverlayPhaseSample - 1;
+                _overlayTimeline = false;
+                _overlayPhases = false;
+            }
         }
         else
         {
             Overlay.OverlayTelemetry.EndRenderFrame(now, null, null);
             _overlaySegments?.Clear();
+            if (_overlayPhasesWanted && --_overlaySkip <= 0)
+            {
+                // The next frame is captured from here.
+                Array.Clear(_framePhaseTicks);
+                Volatile.Write(ref _overlayCaptureStart, now);
+                _overlayTimeline = _overlayTimelineWanted;
+                _overlayPhases = true;
+            }
         }
     }
 

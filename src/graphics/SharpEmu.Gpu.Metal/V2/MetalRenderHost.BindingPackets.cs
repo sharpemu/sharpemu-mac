@@ -156,7 +156,10 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        var started = Stopwatch.GetTimestamp();
+        // The build time only feeds the saved_ms counter: timed on one build in PacketTimingSample (scaled), two
+        // clock reads per stage were a few percent of the resolving thread.
+        var timed = !CheapPacketHandOff || (++t_packetBuilds & (PacketTimingSample - 1)) == 0;
+        var started = timed ? Stopwatch.GetTimestamp() : 0;
         MetalBindingPacket? packet;
         try
         {
@@ -173,7 +176,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        packet.BuildTicks = Stopwatch.GetTimestamp() - started;
+        packet.BuildTicks = timed ? (Stopwatch.GetTimestamp() - started) * (CheapPacketHandOff ? PacketTimingSample : 1) : 0;
         Volatile.Write(ref snapshot.BindingPacket, packet);
         Interlocked.Increment(ref _packetsBuilt[kind]);
     }
@@ -270,12 +273,24 @@ internal sealed partial class MetalRenderHost
         var refusal = ClassifyPacket(packet, program, snapshot, stage.ShaderBase);
         if (refusal != PacketRefusal.Count)
         {
-            Interlocked.Increment(ref _packetRefusals[kind, (int)refusal]);
+            // The worker is the only thread that takes packets, so its counters need no interlocked adds (the report's
+            // exchange may lose a count across a window edge).
+            if (CheapPacketHandOff) _packetRefusals[kind, (int)refusal]++;
+            else Interlocked.Increment(ref _packetRefusals[kind, (int)refusal]);
             return null;
         }
 
-        Interlocked.Increment(ref _packetsTaken[kind]);
-        Interlocked.Add(ref _packetSavedTicks[kind], packet!.BuildTicks);
+        if (CheapPacketHandOff)
+        {
+            _packetsTaken[kind]++;
+            _packetSavedTicks[kind] += packet!.BuildTicks;
+        }
+        else
+        {
+            Interlocked.Increment(ref _packetsTaken[kind]);
+            Interlocked.Add(ref _packetSavedTicks[kind], packet!.BuildTicks);
+        }
+
         return packet;
     }
 
@@ -304,6 +319,21 @@ internal sealed partial class MetalRenderHost
         // checks for reuse and rents on one thread, so it never reads a packet it is refilling.
         Interlocked.CompareExchange(ref packet.Snapshot.BindingPacket, null, packet);
 
+        if (CheapPacketHandOff)
+        {
+            // Back to the pool a batch at a time: one count update and a run of enqueues while the queue's tail stays in
+            // this core's cache, instead of an interlocked add and an enqueue contending with the resolving thread's
+            // rent for every stage of every draw. The resolving thread allocates while the batch fills (at most
+            // PacketReturnBatch packets).
+            _packetReturns[_packetReturnCount++] = packet;
+            if (_packetReturnCount == PacketReturnBatch)
+            {
+                FlushPacketReturns();
+            }
+
+            return;
+        }
+
         // The count runs ahead of the queue by at most the packets in flight; the limit only bounds the pool.
         if (Interlocked.Increment(ref _packetPoolCount) <= PacketPoolLimit)
         {
@@ -313,6 +343,42 @@ internal sealed partial class MetalRenderHost
         {
             Interlocked.Decrement(ref _packetPoolCount);
         }
+    }
+
+    // SHARPEMU_METAL_V2_PACKET_HANDOFF=0 counts and returns every packet with interlocked operations, as before.
+    internal static readonly bool CheapPacketHandOff =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PACKET_HANDOFF") != "0";
+
+    private const int PacketReturnBatch = 32;
+    private const int PacketTimingSample = 16;
+    private readonly MetalBindingPacket[] _packetReturns = new MetalBindingPacket[PacketReturnBatch];
+    private int _packetReturnCount;
+
+    [ThreadStatic]
+    private static uint t_packetBuilds;
+
+    // Worker only.
+    private void FlushPacketReturns()
+    {
+        var count = _packetReturnCount;
+        _packetReturnCount = 0;
+        if (count == 0)
+        {
+            return;
+        }
+
+        var room = PacketPoolLimit - Volatile.Read(ref _packetPoolCount);
+        var keep = Math.Clamp(room, 0, count);
+        if (keep != 0)
+        {
+            Interlocked.Add(ref _packetPoolCount, keep);
+            for (var index = 0; index < keep; index++)
+            {
+                _packetPool.Enqueue(_packetReturns[index]);
+            }
+        }
+
+        Array.Clear(_packetReturns, 0, count);
     }
 
     // Count when the packet stands for the stage; otherwise why it does not.

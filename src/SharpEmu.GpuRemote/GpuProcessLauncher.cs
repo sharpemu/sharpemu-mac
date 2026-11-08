@@ -102,19 +102,42 @@ internal static unsafe class GpuProcessLauncher
     private const string Gen0SizeVariable = "DOTNET_GCgen0size";
     private const string HostGen0Size = "0x4000000";
 
+    // Server GC for the GPU host, 4 heaps: its gen0 collections (some 10 a second in Grand Theft Auto V's street,
+    // ~650 MB/s allocated) stop every host thread, the render worker with them, and a workstation collection took
+    // ~4.7 ms there (~4.5% of wall time paused). Server GC collects in parallel: 25-40 ms paused per 10 s instead of
+    // 370-510, the worker 4.92 vs 5.12 us a draw, for ~210 MB more committed heap. The guest process keeps its own
+    // GC. A DOTNET_gcServer the user set (0 = workstation) is kept, as is a heap count.
+    private const string ServerGcVariable = "DOTNET_gcServer";
+    private const string HeapCountVariable = "DOTNET_GCHeapCount";
+    private const string HostHeapCount = "4";
+
     private static List<string> EnvironmentBlock()
     {
         var block = new List<string>();
         var gen0Set = false;
+        var serverSet = false;
+        var heapCountSet = false;
         foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
         {
             block.Add($"{entry.Key}={entry.Value}");
-            gen0Set |= string.Equals(entry.Key as string, Gen0SizeVariable, StringComparison.OrdinalIgnoreCase);
+            var key = entry.Key as string;
+            gen0Set |= string.Equals(key, Gen0SizeVariable, StringComparison.OrdinalIgnoreCase);
+            serverSet |= string.Equals(key, ServerGcVariable, StringComparison.OrdinalIgnoreCase);
+            heapCountSet |= string.Equals(key, HeapCountVariable, StringComparison.OrdinalIgnoreCase);
         }
 
         if (!gen0Set)
         {
             block.Add($"{Gen0SizeVariable}={HostGen0Size}");
+        }
+
+        if (!serverSet)
+        {
+            block.Add($"{ServerGcVariable}=1");
+            if (!heapCountSet)
+            {
+                block.Add($"{HeapCountVariable}={HostHeapCount}");
+            }
         }
 
         return block;
