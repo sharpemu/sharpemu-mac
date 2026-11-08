@@ -111,6 +111,19 @@ internal sealed partial class MetalRenderHost
         return staging;
     }
 
+    // An image upload's staged source over bytes recorded or in-flight GPU work still writes
+    // (MetalImageCache.ResolveUploadSource): the GPU copies them in from the windows, behind that work.
+    void IMetalImageCacheOwner.GatherStagedRange(ulong address, in MetalGuestRange staging)
+    {
+        OrderAfterDeferredCopies(address, staging.Size);
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
+        StagedStorage.EncodeGather(context.CommandBuffer, address, staging, default, context);
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded($"gather upload source bytes=0x{staging.Size:X}");
+        }
+    }
+
     // A written range at least this large is staged by the GPU alone (StageWrittenOnGpu).
     internal const ulong WholeGatherMinBytes = 4UL * 1024 * 1024;
 
