@@ -845,6 +845,8 @@ internal sealed partial class MetalRenderHost
 
     public void BindResources(IPreparedBindings prepared)
     {
+        // A dispatch that bound a written guest view and was never encoded stored nothing through it.
+        _writtenViewRanges.Clear();
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ResourceBinding);
         var stage = (MetalStageBindings)prepared;
         var info = stage.Program.Resources!.Info;
@@ -962,7 +964,7 @@ internal sealed partial class MetalRenderHost
             var size = mappedWhole ? requested : ClampMappedSize(descriptor.Address, requested);
             var written = info.Buffers[index].Written;
             FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
-            var range = ResolveStorageBuffer(descriptor.Address, size, written);
+            var range = ResolveStorageBuffer(descriptor.Address, size, written, stage.Program.Stage == ShaderStageKind.Compute);
             // The text is built only when the trace is on: this runs per storage buffer per draw.
             if (_traceBufferUserAddress != 0)
             {

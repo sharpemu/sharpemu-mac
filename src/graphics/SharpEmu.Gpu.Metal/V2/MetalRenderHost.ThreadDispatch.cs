@@ -173,6 +173,7 @@ internal sealed partial class MetalRenderHost
             entry,
             "dispatch-indirect-threads",
             WorkShape.Threads(entry.ThreadsPerThreadgroup));
+        CommitAfterWrittenGuestViews();
         return true;
     }
 
