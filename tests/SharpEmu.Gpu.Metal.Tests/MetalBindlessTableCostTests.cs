@@ -8,6 +8,7 @@ using SharpEmu.Gpu.Metal.V2;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.ShaderCompiler.Resources;
@@ -20,8 +21,9 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// The host side of a bindless image table the size GTA V's ray-traced pass binds: every
 /// distinct descriptor resolved to a texture view, the device table of handles written, and
 /// the textures declared to an encoder. The first bind creates the textures; later binds of the
-/// same table find them and leave the device table as it is. Device work is behind the
-/// exclusive device gate.
+/// same table find them and leave the device table as it is; a new table of the same descriptors
+/// takes them from the lookup memo, and a pass after one image changed redoes that entry alone.
+/// Device work is behind the exclusive device gate.
 /// </summary>
 public sealed unsafe class MetalBindlessTableCostTests(ITestOutputHelper output)
 {
@@ -144,6 +146,149 @@ public sealed unsafe class MetalBindlessTableCostTests(ITestOutputHelper output)
             host.Dispose();
             pages.Dispose();
             MetalNative.SendVoid(queue, MetalNative.Selector("release"));
+        }
+    }
+
+    // A table the materializer makes anew for descriptors another table already resolved - a small table is a new
+    // object on every draw - takes their images and views from the lookup memo instead of looking them up again.
+    [Fact]
+    public void ANewTableOfDescriptorsAnotherTableResolvedLooksNothingUp()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig();
+        const int count = 96;
+        var first = rig.Table(count);
+        rig.Bind(first);
+        rig.Bind(first);
+        rig.Host.TakeBindlessCost();
+
+        var second = rig.Table(count);
+        rig.Bind(second);
+        Assert.Equal((1L, (long)count, 0L), Counts(rig.Host.TakeBindlessCost()));
+        Assert.Equal(rig.ResourceIds(first), rig.ResourceIds(second));
+    }
+
+    // A table whose memo missed because one of its images changed (the binding epoch moved) resolves that entry again
+    // and leaves the others as they were: their stamps still hold.
+    [Fact]
+    public void APassAfterOneImageChangedResolvesOnlyThatEntryAgain()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig();
+        const int count = 96;
+        var table = rig.Table(count);
+        rig.Bind(table);
+        rig.Bind(table);
+        rig.Bind(table);
+        rig.Host.TakeBindlessCost();
+        var skipped = rig.Host.BindlessIncrementalSkipped;
+
+        // A pass writes texture 7: its image is GPU-written now and its binding version moves, which moves the
+        // binding epoch every table memo reads.
+        rig.Host.ImageCache.GetImage(rig.Field<ResourceSlotIdentifier[]>(table, "Images")[7]).MarkGpuModified();
+        rig.Bind(table);
+        Assert.Equal((1L, (long)count, 0L), Counts(rig.Host.TakeBindlessCost()));
+        Assert.Equal(count - 1, rig.Host.BindlessIncrementalSkipped - skipped);
+        Assert.DoesNotContain(0ul, rig.ResourceIds(table));
+        // A texture a pass wrote is a hazard: declared to each encoder that reads it, the others resident only.
+        Assert.Equal([rig.Field<nint[]>(table, "Textures")[7]], rig.Field<List<nint>>(table, "Declared"));
+
+        // Nothing changed since: the table memo serves the next bind without a pass.
+        rig.Bind(table);
+        Assert.Equal(count - 1, rig.Host.BindlessIncrementalSkipped - skipped);
+    }
+
+    private bool RequireDevice()
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1")
+        {
+            return true;
+        }
+
+        output.WriteLine("Bindless table binds run on the device only behind the exclusive device gate.");
+        return false;
+    }
+
+    // A render host and one compute stage with a single sampled-image bindless table, bound as BindResources would.
+    private sealed class Rig : IDisposable
+    {
+        private readonly nint _queue;
+        private readonly Backing _backing = new();
+        private readonly PageGuard _pages = new(new AddressSpace());
+        private readonly ShaderResourceInfo _info = new();
+        private readonly object _stage;
+        private readonly MethodInfo _bind;
+
+        public Rig()
+        {
+            Assert.True(OperatingSystem.IsMacOS());
+            var device = MetalNative.MTLCreateSystemDefaultDevice();
+            Assert.NotEqual(0, device);
+            _queue = MetalNative.Send(device, MetalNative.Selector("newCommandQueue"));
+            Host = new MetalRenderHost(device, _queue, _backing, _backing, _pages, new MetalGpuWorkerRelay(static () => { }));
+            _info.Images.Add(new ImageResource
+            {
+                ResourceClass = SharpEmu.ShaderCompiler.Resources.ImageResourceClass.Sampled,
+                NumericClass = ImageNumericClass.Float,
+                Dimension = ImageDimension.Dim2D,
+                Read = true,
+                BindlessSlot = 0,
+            });
+            var layout = BindingLayout.Allocate(_info, [], false, false, false);
+            var stageType = typeof(MetalRenderHost).GetNestedType("MetalStageBindings", BindingFlags.NonPublic)!;
+            _stage = Activator.CreateInstance(stageType, nonPublic: true)!;
+            stageType.GetMethod("EnsureCapacity")!.Invoke(_stage, [1, 0, 0, 0]);
+            stageType.GetField("Program")!.SetValue(_stage, new ShaderProgramInfo { Hash = 0x9FBD, Bindings = layout });
+            stageType.GetField("ImageCount")!.SetValue(_stage, 1);
+            ((ulong[])stageType.GetField("TextureIds")!.GetValue(_stage)!)[0] = 1;
+            _bind = typeof(MetalRenderHost).GetMethod("BindBindlessImages", Members)!;
+        }
+
+        public MetalRenderHost Host { get; }
+
+        // count distinct textures, one entry each.
+        public BindlessImageTable Table(int count)
+        {
+            var descriptors = new uint[count][];
+            for (var texture = 0; texture < count; texture++)
+                descriptors[texture] = Texture(TextureBase + (ulong)texture * TextureStride);
+            return new BindlessImageTable
+            {
+                Slot = 0,
+                VariantImages = [0],
+                Descriptors = descriptors,
+                DescriptorVariants = new byte[count],
+                Entries = Enumerable.Range(0, count).ToArray(),
+                Address = GuestBase,
+            };
+        }
+
+        public void Bind(BindlessImageTable table)
+        {
+            using (Host.BeginPreparation())
+            {
+                _bind.Invoke(Host, [_stage, _info, new ResourceSnapshot { BindlessImages = [table] }]);
+            }
+        }
+
+        // The texture handles the table's device table names, entry by entry.
+        public ulong[] ResourceIds(BindlessImageTable table) => Field<ulong[]>(table, "ResourceIds").ToArray();
+
+        // A field of the table's device table.
+        public T Field<T>(BindlessImageTable table, string name)
+        {
+            var tables = (System.Collections.IDictionary)typeof(MetalRenderHost).GetField("_bindlessTables", Members)!.GetValue(Host)!;
+            var device = tables[table]!;
+            return (T)device.GetType().GetField(name)!.GetValue(device)!;
+        }
+
+        public void Dispose()
+        {
+            Host.ImageCache.StopWatching();
+            Host.Dispose();
+            _pages.Dispose();
+            _backing.Dispose();
+            MetalNative.SendVoid(_queue, MetalNative.Selector("release"));
         }
     }
 

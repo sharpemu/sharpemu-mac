@@ -2845,7 +2845,9 @@ internal sealed partial class MetalRenderHost :
                 $"binding={BindlessMemoMissBinding} image_set={BindlessMemoMissImageSet}] " +
                 $"memo_hits={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoHits} memo_changed={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoChanged} " +
                 $"memo_absent={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoAbsent} memo_unread={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoUnread} " +
-                $"memo_class={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoClassHits}");
+                $"memo_class={SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.BindlessMemoClassHits} " +
+                $"lookup_memo=[hits={BindlessLookupMemoHits} stale={BindlessLookupMemoStale} misses={BindlessLookupMemoMisses}] " +
+                $"incremental_skipped={BindlessIncrementalSkipped}");
         }
 
         WriteCopyReadTraces();

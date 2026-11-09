@@ -1380,6 +1380,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     }
 
     /// <summary>
+    /// <see cref="TextureStampMayHold"/> for a caller that skips the reacquire and checks deferred refreshes itself: the
+    /// stencil owners are as stamped too, and with <paramref name="imageSetUnchanged"/> (no image came or went since the
+    /// pass that last confirmed the stamp) no owner page can have moved.
+    /// </summary>
+    public bool StampHoldsUnlocked(in TextureMemoStamp stamp, bool imageSetUnchanged) =>
+        Volatile.Read(ref stamp.Image.BindingVersion) == stamp.ImageVersion &&
+        stamp.StencilOwners == Volatile.Read(ref _stencilOwnersVersion) &&
+        (stamp.Others is null || AliasVersion(stamp.Image, stamp.Others) == stamp.OthersVersion) &&
+        (imageSetUnchanged || _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) == stamp.PageVersions);
+
+    /// <summary>
     /// Whether a stamp still holds, read without the lock: a hint for skipping the lookup, which
     /// <see cref="TryReacquireTextureView"/> confirms under the lock.
     /// </summary>
