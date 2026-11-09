@@ -291,6 +291,32 @@ internal sealed partial class MetalImageCache
         }
     }
 
+    // The owners in one owner list that the range overlaps and this query has not seen yet.
+    private void CollectOwners(List<ResourceSlotIdentifier>? owners, ulong address, ulong size, bool pageOverlap, uint queryEpoch,
+        ref ImageQueryResults result)
+    {
+        if (owners is null)
+        {
+            return;
+        }
+
+        for (var index = 0; index < owners.Count; index++)
+        {
+            var imageIdentifier = owners[index];
+            var image = _slots.TryGet(imageIdentifier);
+            if (image is null || image.QueryEpoch == queryEpoch)
+            {
+                continue;
+            }
+
+            image.QueryEpoch = queryEpoch;
+            if (image.Overlaps(address, size, pageOverlap))
+            {
+                result.Add(imageIdentifier);
+            }
+        }
+    }
+
     // Caller holds the lock; the query epoch marks each image at most once.
     private ImageQueryResults FindImagesInRange(ulong address, ulong size, bool pageOverlap)
     {
@@ -309,25 +335,22 @@ internal sealed partial class MetalImageCache
 
         for (var page = first; page < lastExclusive; page++)
         {
-            var owners = _pageOwners.Find(page);
-            if (owners is null)
+            CollectOwners(_pageOwners.Find(page), address, size, pageOverlap, queryEpoch, ref result);
+            var fine = _pageOwners.FineMask(page);
+            if (fine != 0)
             {
-                continue;
-            }
-
-            for (var index = 0; index < owners.Count; index++)
-            {
-                var imageIdentifier = owners[index];
-                var image = _slots.TryGet(imageIdentifier);
-                if (image is null || image.QueryEpoch == queryEpoch)
+                // Only the fine pages of this owner page that the range covers and that list an owner.
+                var pageStart = page << MetalImagePageOwners.PageBits;
+                var from = (int)((Math.Max(address, pageStart) - pageStart) >> MetalImagePageOwners.FinePageBits);
+                var to = (int)((Math.Min(address + size, pageStart + (1UL << MetalImagePageOwners.PageBits)) - 1 - pageStart) >>
+                    MetalImagePageOwners.FinePageBits);
+                var bits = fine & ((2u << to) - 1) & ~((1u << from) - 1);
+                var firstFine = page << (MetalImagePageOwners.PageBits - MetalImagePageOwners.FinePageBits);
+                while (bits != 0)
                 {
-                    continue;
-                }
-
-                image.QueryEpoch = queryEpoch;
-                if (image.Overlaps(address, size, pageOverlap))
-                {
-                    result.Add(imageIdentifier);
+                    var index = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    CollectOwners(_pageOwners.FindFine(firstFine + (ulong)index), address, size, pageOverlap, queryEpoch, ref result);
                 }
             }
         }

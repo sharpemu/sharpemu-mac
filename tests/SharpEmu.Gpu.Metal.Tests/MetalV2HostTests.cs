@@ -109,7 +109,12 @@ public sealed class MetalV2HostTests
         // A range that starts in a leaf nothing was ever counted in still finds the owner.
         Assert.True(owners.MayHaveOwners(0, page + 1));
 
-        var list = owners.Find(page >> MetalImagePageOwners.PageBits);
+        // Both images are smaller than an owner page, so they are listed per fine page (or per owner page when fine
+        // pages are off).
+        List<ResourceSlotIdentifier>? Owners(ulong address) => MetalImagePageOwners.IsFine(0x1000)
+            ? owners.FindFine(address >> MetalImagePageOwners.FinePageBits)
+            : owners.Find(address >> MetalImagePageOwners.PageBits);
+        var list = Owners(page + 0x1000);
         Assert.NotNull(list);
         Assert.Contains(identifier, list!);
 
@@ -117,7 +122,8 @@ public sealed class MetalV2HostTests
         Assert.True(owners.MayHaveOwners(page + 0x1800, 8));
         owners.Remove(page, 0x4000, alias);
         Assert.False(owners.MayHaveOwners(page, page));
-        Assert.Empty(owners.Find(page >> MetalImagePageOwners.PageBits)!);
+        Assert.Empty(Owners(page + 0x1000)!);
+        Assert.Empty(Owners(page)!);
     }
 
     // The order the image cache relies on when a CPU write reads the count without the
