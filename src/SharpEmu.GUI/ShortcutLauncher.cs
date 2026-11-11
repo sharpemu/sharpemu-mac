@@ -33,6 +33,9 @@ public static class ShortcutLauncher
         private IClassicDesktopStyleApplicationLifetime? _desktop;
         private ShortcutSplashWindow? _splash;
         private Process? _process;
+        // macOS: the fork's own launcher type, which stops the emulator with SIGTERM to its process group.
+        private EmulatorProcess? _macEmulator;
+        private readonly ManualResetEventSlim _macExited = new(false);
         private volatile bool _stopping;
 
         public override void Initialize() => Styles.Add(new FluentTheme());
@@ -78,6 +81,11 @@ public static class ShortcutLauncher
             try
             {
                 var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot find the emulator executable.");
+                if (OperatingSystem.IsMacOS())
+                {
+                    StartMac(executable);
+                    return;
+                }
                 var start = new ProcessStartInfo(executable)
                 {
                     UseShellExecute = false, CreateNoWindow = true,
@@ -108,11 +116,35 @@ public static class ShortcutLauncher
                 _process.BeginOutputReadLine();
                 _process.BeginErrorReadLine();
             }
-            catch (Exception exception) when (exception is IOException or InvalidOperationException or Win32Exception)
+            catch (Exception exception) when (exception is IOException or InvalidOperationException or Win32Exception or ArgumentException)
             {
                 Console.Error.WriteLine($"[GUI][ERROR] Could not launch the shortcut: {exception.Message}");
                 Finish(3);
             }
+        }
+
+        // A running game is never SIGKILLed on macOS (IOGPU kernel panics): EmulatorProcess signals SIGTERM, lets the
+        // emulator shut down cooperatively and only escalates after its grace period.
+        private void StartMac(string executable)
+        {
+            var emulator = new EmulatorProcess();
+            emulator.OutputReceived += (line, _) =>
+            {
+                if (!_stopping && EmulatorProcess.IsWindowReadyMessage(line))
+                    Dispatcher.UIThread.Post(HideSplash);
+            };
+            emulator.Exited += code =>
+            {
+                _macExited.Set();
+                if (!_stopping)
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        if (!_stopping)
+                            Finish(code);
+                    });
+            };
+            _macEmulator = emulator;
+            emulator.Start(executable, [LaunchConfiguration.NoConsoleArgument, gamePath], AppContext.BaseDirectory);
         }
 
         private void OnOutput(object sender, DataReceivedEventArgs args)
@@ -137,6 +169,15 @@ public static class ShortcutLauncher
         private void StopProcess()
         {
             _stopping = true;
+            if (_macEmulator is { } emulator)
+            {
+                emulator.Stop();
+                // Stop escalates to SIGKILL after 5 s; stay alive that long so the cooperative exit is not cut short.
+                if (emulator.IsRunning && !_macExited.Wait(6000))
+                    Console.Error.WriteLine("[GUI][WARN] The emulator did not exit after the stop request.");
+                emulator.Dispose();
+                return;
+            }
             try
             {
                 if (_process is { HasExited: false })

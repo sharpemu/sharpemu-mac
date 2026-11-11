@@ -15,8 +15,8 @@ internal static class DesktopShortcut
 {
     public static string Create(GameEntry game, string emulatorPath, string? desktopDirectory = null)
     {
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
-            throw new PlatformNotSupportedException("Desktop shortcuts are supported on Windows and Linux.");
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+            throw new PlatformNotSupportedException("Desktop shortcuts are supported on Windows, Linux and macOS.");
         emulatorPath = Path.GetFullPath(emulatorPath);
         if (!File.Exists(emulatorPath))
             throw new FileNotFoundException("The emulator executable was not found.", emulatorPath);
@@ -31,7 +31,7 @@ internal static class DesktopShortcut
 
         var title = DisplayName(game);
         var name = SafeFileName(title);
-        var extension = OperatingSystem.IsWindows() ? ".lnk" : ".desktop";
+        var extension = OperatingSystem.IsWindows() ? ".lnk" : OperatingSystem.IsMacOS() ? ".app" : ".desktop";
         var destination = Path.Combine(desktopDirectory, name + extension);
         for (var suffix = 2; File.Exists(destination) || Directory.Exists(destination); suffix++)
             destination = Path.Combine(desktopDirectory, $"{name} ({suffix}){extension}");
@@ -40,6 +40,13 @@ internal static class DesktopShortcut
         try
         {
             ShortcutSplashCache.Prepare(game.Path, game.BackgroundPath);
+            if (OperatingSystem.IsMacOS())
+            {
+                // The bundle is built under a hidden name and renamed, so Finder never sees a half-written app.
+                WriteMacBundle(temporary, game, emulatorPath, title);
+                Directory.Move(temporary, destination);
+                return destination;
+            }
             var icon = game.CoverPath is { } cover && File.Exists(cover)
                 ? CacheIcon(cover, Path.Combine(SharpEmu.Logging.SharpEmuPaths.DataRoot, "user", "shortcut-icons"), OperatingSystem.IsWindows())
                 : OperatingSystem.IsWindows() ? emulatorPath : "applications-games";
@@ -57,6 +64,8 @@ internal static class DesktopShortcut
         finally
         {
             File.Delete(temporary);
+            if (Directory.Exists(temporary))
+                Directory.Delete(temporary, recursive: true);
         }
     }
 
@@ -69,6 +78,111 @@ internal static class DesktopShortcut
             $"Path={EscapeValue(Path.GetDirectoryName(Path.GetFullPath(emulatorPath))!)}\n" +
             $"Icon={EscapeValue(icon)}\nTerminal=false\nCategories=Game;\n";
     }
+
+    /// <summary>
+    /// macOS: a minimal application bundle whose executable is a shell script that replaces itself with the
+    /// emulator (<c>--shortcut &lt;game&gt;</c>), so the shortcut process is the emulator process.
+    /// </summary>
+    internal static void WriteMacBundle(string bundlePath, GameEntry game, string emulatorPath, string title)
+    {
+        emulatorPath = Path.GetFullPath(emulatorPath);
+        const string launcherName = "launch";
+        var contents = Path.Combine(bundlePath, "Contents");
+        var macOs = Path.Combine(contents, "MacOS");
+        Directory.CreateDirectory(macOs);
+        var launcher = Path.Combine(macOs, launcherName);
+        var command = new[] { emulatorPath }.Concat(LaunchConfiguration.ShortcutArguments(game.Path));
+        File.WriteAllText(launcher, "#!/bin/sh\nexec " + string.Join(' ', command.Select(QuoteShellArgument)) + "\n", new UTF8Encoding(false));
+        File.SetUnixFileMode(launcher, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+
+        string? iconFile = null;
+        if (game.CoverPath is { } cover && File.Exists(cover))
+        {
+            Directory.CreateDirectory(Path.Combine(contents, "Resources"));
+            iconFile = "Shortcut.icns";
+            File.WriteAllBytes(Path.Combine(contents, "Resources", iconFile), MacIcon(File.ReadAllBytes(cover)));
+        }
+        File.WriteAllText(Path.Combine(contents, "Info.plist"),
+            MacInfoPlist(game, title, launcherName, iconFile, MainBundleMinimumSystemVersion(emulatorPath)), new UTF8Encoding(false));
+    }
+
+    internal static string MacInfoPlist(GameEntry game, string title, string executable, string? iconFile, string? minimumSystemVersion)
+    {
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(game.Path)))).ToLowerInvariant()[..16];
+        var entries = new List<(string Key, string Value)>
+        {
+            ("CFBundleExecutable", executable),
+            ("CFBundleIdentifier", "io.github.sharpemu.mac.shortcut." + hash),
+            ("CFBundleName", title),
+            ("CFBundleDisplayName", title),
+            ("CFBundlePackageType", "APPL"),
+            ("CFBundleInfoDictionaryVersion", "6.0"),
+        };
+        if (iconFile is not null)
+            entries.Add(("CFBundleIconFile", iconFile));
+        if (minimumSystemVersion is not null)
+            entries.Add(("LSMinimumSystemVersion", minimumSystemVersion));
+        var builder = new StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" +
+            "<plist version=\"1.0\">\n<dict>\n");
+        foreach (var (key, value) in entries)
+            builder.Append("\t<key>").Append(XmlEscape(key)).Append("</key>\n\t<string>").Append(XmlEscape(value)).Append("</string>\n");
+        return builder.Append("</dict>\n</plist>\n").ToString();
+    }
+
+    // The emulator executable sits in Contents/MacOS of the shipped SharpEmu.app; its Info.plist names the minimum macOS.
+    private static string? MainBundleMinimumSystemVersion(string emulatorPath)
+    {
+        var plist = Path.Combine(Path.GetDirectoryName(emulatorPath)!, "..", "Info.plist");
+        if (!File.Exists(plist))
+            return null;
+        var match = Regex.Match(File.ReadAllText(plist),
+            @"<key>LSMinimumSystemVersion</key>\s*<string>\s*([0-9.]+)\s*</string>", RegexOptions.CultureInvariant);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    // ICNS: "icns", big-endian total length, then (type, length, PNG) entries. Square PNG types: ic07 128, ic08 256, ic09 512, ic10 1024.
+    internal static byte[] MacIcon(byte[] png)
+    {
+        using var source = SKBitmap.Decode(png) ?? throw new InvalidDataException("The game icon could not be decoded.");
+        var entries = new (string Type, int Size)[] { ("ic07", 128), ("ic08", 256), ("ic09", 512), ("ic10", 1024) };
+        using var output = new MemoryStream();
+        output.Write("icns\0\0\0\0"u8);
+        foreach (var (type, size) in entries)
+        {
+            var scale = Math.Min((double)size / source.Width, (double)size / source.Height);
+            var width = Math.Max(1, (int)Math.Round(source.Width * scale));
+            var height = Math.Max(1, (int)Math.Round(source.Height * scale));
+            using var resized = source.Resize(new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul),
+                new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear)) ?? throw new InvalidDataException("The game icon could not be resized.");
+            using var canvasBitmap = new SKBitmap(new SKImageInfo(size, size, SKColorType.Bgra8888, SKAlphaType.Premul));
+            using (var canvas = new SKCanvas(canvasBitmap))
+            {
+                canvas.Clear(SKColors.Transparent);
+                canvas.DrawBitmap(resized, (size - width) / 2f, (size - height) / 2f);
+            }
+            using var encoded = canvasBitmap.Encode(SKEncodedImageFormat.Png, 100);
+            var data = encoded.ToArray();
+            output.Write(Encoding.ASCII.GetBytes(type));
+            WriteBigEndian(output, data.Length + 8);
+            output.Write(data);
+        }
+        var result = output.ToArray();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(result.AsSpan(4), result.Length);
+        return result;
+    }
+
+    private static void WriteBigEndian(Stream stream, int value)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(bytes, value);
+        stream.Write(bytes);
+    }
+
+    internal static string QuoteShellArgument(string value) => "'" + value.Replace("'", "'\\''") + "'";
+
+    private static string XmlEscape(string value) => System.Security.SecurityElement.Escape(string.Concat(value.Where(character => !char.IsControl(character)))) ?? string.Empty;
 
     private static string DisplayName(GameEntry game) =>
         !game.HasMultipleVersions || string.IsNullOrWhiteSpace(game.Version) ? game.Name : $"{game.Name} (v{game.Version})";

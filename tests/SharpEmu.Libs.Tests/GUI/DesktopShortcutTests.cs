@@ -37,14 +37,23 @@ public sealed class DesktopShortcutTests : IDisposable
     public void CreateUsesNativeDesktopFilesWithoutOverwritingExistingShortcuts()
     {
         var first = DesktopShortcut.Create(_game, _emulator, _desktop);
-        var original = File.ReadAllBytes(first);
+        var original = OperatingSystem.IsMacOS() ? [] : File.ReadAllBytes(first);
         var second = DesktopShortcut.Create(_game, _emulator, _desktop);
 
         Assert.Equal(_desktop, Path.GetDirectoryName(first));
-        Assert.Equal(OperatingSystem.IsWindows() ? ".lnk" : ".desktop", Path.GetExtension(first));
+        Assert.Equal(ShortcutExtension, Path.GetExtension(first));
         Assert.Equal("Test game" + Path.GetExtension(first), Path.GetFileName(first));
-        Assert.NotEmpty(original);
         Assert.NotEqual(first, second);
+        if (OperatingSystem.IsMacOS())
+        {
+            // An application bundle: a directory, no stray temporary left next to the two shortcuts.
+            Assert.Equal("Test game (2).app", Path.GetFileName(second));
+            Assert.Equal(2, Directory.GetDirectories(_desktop).Length);
+            Assert.Empty(Directory.GetFiles(_desktop));
+            Assert.True(File.GetUnixFileMode(Path.Combine(first, "Contents", "MacOS", "launch")).HasFlag(UnixFileMode.UserExecute));
+            return;
+        }
+        Assert.NotEmpty(original);
         Assert.Equal(original, File.ReadAllBytes(first));
         Assert.Equal(2, Directory.GetFiles(_desktop).Length);
         if (OperatingSystem.IsLinux())
@@ -109,6 +118,37 @@ public sealed class DesktopShortcutTests : IDisposable
     }
 
     [Fact]
+    public void MacBundleLaunchesTheEmulatorWithQuotedArgumentsAndAValidIcon()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        var gamePath = Path.Combine(_root, "it's $HOME `x` \"q\".zar");
+        File.WriteAllText(gamePath, "game fixture");
+        var cover = Path.Combine(_root, "cover.png");
+        using (var bitmap = new SKBitmap(new SKImageInfo(300, 200, SKColorType.Bgra8888, SKAlphaType.Premul)))
+        {
+            bitmap.Erase(SKColors.CornflowerBlue);
+            using var encoded = bitmap.Encode(SKEncodedImageFormat.Png, 100);
+            File.WriteAllBytes(cover, encoded.ToArray());
+        }
+        var game = new GameEntry("A <&> game", "PPSA00001", null, gamePath, 0, cover, null);
+        var bundle = Path.Combine(_root, "Bundle.app");
+
+        DesktopShortcut.WriteMacBundle(bundle, game, _emulator, "A <&> game");
+
+        var script = File.ReadAllText(Path.Combine(bundle, "Contents", "MacOS", "launch"));
+        Assert.Equal($"#!/bin/sh\nexec '{_emulator}' '--shortcut' '{gamePath.Replace("'", "'\\''")}'\n", script);
+        var plist = File.ReadAllText(Path.Combine(bundle, "Contents", "Info.plist"));
+        Assert.Contains("<string>A &lt;&amp;&gt; game</string>", plist);
+        Assert.Contains("<key>CFBundleIconFile</key>", plist);
+        Assert.DoesNotContain("LSMinimumSystemVersion", plist); // The fixture emulator has no bundle around it.
+        var icns = File.ReadAllBytes(Path.Combine(bundle, "Contents", "Resources", "Shortcut.icns"));
+        Assert.Equal("icns", System.Text.Encoding.ASCII.GetString(icns, 0, 4));
+        Assert.Equal(icns.Length, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(icns.AsSpan(4)));
+        Assert.Equal("ic07", System.Text.Encoding.ASCII.GetString(icns, 8, 4));
+    }
+
+    [Fact]
     public void CreateRejectsAnUnavailableGame()
     {
         File.Delete(_game.Path);
@@ -136,6 +176,8 @@ public sealed class DesktopShortcutTests : IDisposable
         Assert.DoesNotContain("--window-mode", entry);
         Assert.Equal(1, entry.Split('\n').Count(line => line.StartsWith("Exec=")));
     }
+
+    private static string ShortcutExtension => OperatingSystem.IsWindows() ? ".lnk" : OperatingSystem.IsMacOS() ? ".app" : ".desktop";
 
     public void Dispose() => Directory.Delete(_root, recursive: true);
 
