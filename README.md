@@ -212,7 +212,9 @@ Upstream changes arrive in `main` through merge pull requests from a pristine
 `upstream` mirror branch, never by rewriting history. A scheduled workflow
 (`.github/workflows/upstream-sync.yml`) keeps that mirror current and opens the
 pull request; `scripts/mac/sync-upstream.sh` does the same by hand when a merge
-has conflicts.
+has conflicts. The workflow needs the repository secret `UPSTREAM_SYNC_TOKEN`
+whenever upstream changes a workflow file; the comment at the top of the workflow
+says which permissions the token needs.
 
 ## Disclaimer
 
