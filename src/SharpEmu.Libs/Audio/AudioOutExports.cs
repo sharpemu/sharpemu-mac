@@ -165,7 +165,7 @@ public static class AudioOutExports
 
             if (delay > 0)
             {
-                Thread.Sleep(TimeSpan.FromSeconds((double)delay / Stopwatch.Frequency));
+                HostBlockedTime.Sleep(TimeSpan.FromSeconds((double)delay / Stopwatch.Frequency));
             }
         }
 
@@ -733,7 +733,7 @@ public static class AudioOutExports
         }
         else
         {
-            Thread.Sleep(1);
+            HostBlockedTime.Sleep(1);
         }
 
         return 0;
@@ -753,7 +753,7 @@ public static class AudioOutExports
 
         if (pacingPort is null)
         {
-            Thread.Sleep(1);
+            HostBlockedTime.Sleep(1);
         }
         else
         {

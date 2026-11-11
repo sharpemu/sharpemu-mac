@@ -1076,11 +1076,14 @@ public static class Audio3dExports
 
     private static void DefaultWaitUntil(long targetTicks)
     {
+        var start = Stopwatch.GetTimestamp();
         while (true)
         {
-            var remaining = targetTicks - Stopwatch.GetTimestamp();
+            var now = Stopwatch.GetTimestamp();
+            var remaining = targetTicks - now;
             if (remaining <= 0)
             {
+                HostBlockedTime.Add(now - start);
                 return;
             }
 
