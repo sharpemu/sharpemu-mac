@@ -74,7 +74,10 @@ internal struct MetalRepackArguments
 // backend's GpuTiler: same arguments, same per-element addressing, no descriptor sets.
 internal sealed unsafe partial class MetalTiler : IDisposable
 {
-    private const uint KindCount = 10;
+    // One slot per TileBlockKind: the last kind bounds the tables, so a kind the shared enum gains
+    // needs its kernel in MetalTilerShaders, not a new count here (MetalImageTransferTests checks
+    // that every kind fits).
+    internal const uint KindCount = (uint)TileBlockKind.GcnThin1D + 1;
     private const uint ElementSizeCount = 5;
     private const uint VariantCount = 2;
     private const uint PipelineCount = KindCount * VariantCount * ElementSizeCount * VariantCount;
