@@ -878,7 +878,7 @@ public static partial class Gen5MslTranslator
             // no OpArrayLength equivalent, so buffer extents travel with the
             // dispatch instead of being queried in-shader.
             var preludes = ModulePreludes();
-            AppendLeadingPreludes(source, preludes);
+            AppendLeadingPreludes(source, preludes, _outOfLineDeviceAddresses);
 
             // A request binds one argument buffer per stage; its lengths replace the uniforms.
             EmitResourceStruct(source);
@@ -1461,7 +1461,7 @@ public static partial class Gen5MslTranslator
 
         // The helpers ahead of the resource struct: the unified-format decoder and the
         // device-address page table.
-        internal static void AppendLeadingPreludes(StringBuilder source, Gen5MslPreludes preludes)
+        internal static void AppendLeadingPreludes(StringBuilder source, Gen5MslPreludes preludes, bool outOfLineDeviceAddresses = false)
         {
             // The decoder (format_load_prelude.msl) reads the format tables.
             if ((preludes & (Gen5MslPreludes.FormatLoads | Gen5MslPreludes.DecodedFormatLoads | Gen5MslPreludes.FormatFetch)) != 0)
@@ -1469,7 +1469,7 @@ public static partial class Gen5MslTranslator
                 EmitFormatLoadPrelude(source);
             }
 
-            EmitResourcePrelude(source);
+            EmitResourcePrelude(source, outOfLineDeviceAddresses);
         }
 
         // The helpers after the resource struct. A pair lock reads through the coherent
