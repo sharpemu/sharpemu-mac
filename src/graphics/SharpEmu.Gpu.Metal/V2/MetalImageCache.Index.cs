@@ -157,6 +157,26 @@ internal sealed class MetalImagePageOwners
     /// <summary>Whether any image smaller than an owner page is listed inside this 1 MiB page.</summary>
     public bool HasFineOwners(ulong page) => FineMask(page) != 0;
 
+    /// <summary>
+    /// The fine pages of an owner page that <c>[address, address + size)</c> covers, as <see cref="FineMask"/> bits:
+    /// bit i for the i-th 64 KiB. A tracker page lies inside one fine page, so a page-granular query finds every
+    /// image it shares a tracker page with on these fine pages too.
+    /// </summary>
+    public static uint FineBitsCovered(ulong page, ulong address, ulong size)
+    {
+        var pageStart = page << PageBits;
+        var start = Math.Max(address, pageStart);
+        var end = Math.Min(address + size, pageStart + (1UL << PageBits));
+        if (end <= start)
+        {
+            return 0;
+        }
+
+        var from = (int)((start - pageStart) >> FinePageBits);
+        var to = (int)((end - 1 - pageStart) >> FinePageBits);
+        return ((2u << to) - 1) & ~((1u << from) - 1);
+    }
+
     private void AddFine(ulong address, ulong size, ResourceSlotIdentifier imageIdentifier, int delta)
     {
         var first = address >> FinePageBits;

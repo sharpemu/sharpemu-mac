@@ -340,11 +340,7 @@ internal sealed partial class MetalImageCache
             if (fine != 0)
             {
                 // Only the fine pages of this owner page that the range covers and that list an owner.
-                var pageStart = page << MetalImagePageOwners.PageBits;
-                var from = (int)((Math.Max(address, pageStart) - pageStart) >> MetalImagePageOwners.FinePageBits);
-                var to = (int)((Math.Min(address + size, pageStart + (1UL << MetalImagePageOwners.PageBits)) - 1 - pageStart) >>
-                    MetalImagePageOwners.FinePageBits);
-                var bits = fine & ((2u << to) - 1) & ~((1u << from) - 1);
+                var bits = fine & MetalImagePageOwners.FineBitsCovered(page, address, size);
                 var firstFine = page << (MetalImagePageOwners.PageBits - MetalImagePageOwners.FinePageBits);
                 while (bits != 0)
                 {
