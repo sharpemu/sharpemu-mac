@@ -63,9 +63,11 @@ internal static class DesktopShortcut
         }
         finally
         {
-            File.Delete(temporary);
+            // A half-written macOS bundle is a directory, which File.Delete refuses.
             if (Directory.Exists(temporary))
                 Directory.Delete(temporary, recursive: true);
+            else
+                File.Delete(temporary);
         }
     }
 
