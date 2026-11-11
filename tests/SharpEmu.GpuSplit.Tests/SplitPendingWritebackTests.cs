@@ -212,7 +212,10 @@ public sealed unsafe class SplitPendingWritebackTests
         // A recorded writeback not landed yet: the call waits for it.
         store.Render(0x6B);
         var snapshot = store.RecordWriteback()!;
-        var writer = Task.Run(() => ManagedWrite(split, slot, 3));
+        // A dedicated thread, and the landing only once its call has reached the store: a pool task
+        // on a busy host can start after the landing, when nothing is pending and no call is due.
+        var writer = Task.Factory.StartNew(() => ManagedWrite(split, slot, 3), TaskCreationOptions.LongRunning);
+        Wait.Until(() => store.PreciseCalls >= 2, "the write's call");
         Assert.False(writer.Wait(100));
         store.LandWriteback(snapshot);
         Assert.True(writer.Wait(10_000));
