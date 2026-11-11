@@ -395,6 +395,9 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 	private readonly HashSet<TlsPatchScanRange> _scannedTlsPatchRanges = [];
 
+	[ThreadStatic]
+	private static TlsPatchScanRange? _tlsWriteBatchRange;
+
 	private nint _tlsHandlerAddress;
 
 	private nint _tlsBaseAddress;
@@ -3532,6 +3535,45 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 	private unsafe TlsPatchCounts PatchTlsPatternsInRange(ulong rangeStart, ulong rangeEnd)
 	{
+		lock (ImportStubPatchGate)
+		{
+			var protections = new List<(ulong Start, ulong Size, uint Protection)>();
+			var previousBatch = _tlsWriteBatchRange;
+			try
+			{
+				var allWritable = true;
+				var cursor = rangeStart;
+				while (cursor < rangeEnd)
+				{
+					if (TryGetExecutableRegionEnd(cursor, rangeEnd, out var regionEnd))
+					{
+						uint previousProtection = 0;
+						if (VirtualProtect((void*)cursor, (nuint)(regionEnd - cursor), PAGE_EXECUTE_READWRITE, &previousProtection))
+							protections.Add((cursor, regionEnd - cursor, previousProtection));
+						else
+							allWritable = false;
+					}
+					cursor = regionEnd;
+				}
+
+				_tlsWriteBatchRange = allWritable ? new TlsPatchScanRange(rangeStart, rangeEnd) : null;
+				return ScanTlsPatternsInRange(rangeStart, rangeEnd);
+			}
+			finally
+			{
+				_tlsWriteBatchRange = previousBatch;
+				foreach (var (start, size, protection) in protections)
+				{
+					uint ignoredProtection = 0;
+					VirtualProtect((void*)start, (nuint)size, protection, &ignoredProtection);
+					FlushInstructionCache(GetCurrentProcess(), (void*)start, (nuint)size);
+				}
+			}
+		}
+	}
+
+	private unsafe TlsPatchCounts ScanTlsPatternsInRange(ulong rangeStart, ulong rangeEnd)
+	{
 		var cursor = rangeStart;
 		var counts = default(TlsPatchCounts);
 		while (cursor < rangeEnd)
@@ -3836,6 +3878,14 @@ public sealed unsafe partial class DirectExecutionBackend :
 		// otherwise race the unprotect/restore pair exactly like the import stubs.
 		lock (ImportStubPatchGate)
 		{
+			// The scan has already checked and unprotected every executable region it visits.
+			if (_tlsWriteBatchRange is { } batch && replacement.Length is >= 1 and <= 15 &&
+				(ulong)address >= batch.Start && (ulong)address < batch.End &&
+				(ulong)replacement.Length <= batch.End - (ulong)address)
+			{
+				replacement.CopyTo(new Span<byte>((void*)address, replacement.Length));
+				return true;
+			}
 			return WriteTlsInstructionLocked(address, replacement);
 		}
 	}

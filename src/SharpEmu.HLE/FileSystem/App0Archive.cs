@@ -122,10 +122,13 @@ public static class App0Archive
 
     // Opens a host path for reading: from the archive when it is under the mount and not on disk,
     // otherwise as a host file.
-    public static Stream OpenReadOrFile(string hostPath, FileShare share = FileShare.Read) =>
-        !File.Exists(hostPath) && OpenRead(hostPath) is { } archived
+    public static Stream OpenReadOrFile(string hostPath, FileShare share = FileShare.Read)
+    {
+        hostPath = GameFileOverlay.ResolveFile(hostPath);
+        return !File.Exists(hostPath) && OpenRead(hostPath) is { } archived
             ? archived
             : OpenHostFileRead(hostPath, share);
+    }
 
     // A host file opened for reading, through the overlay when it has an entry for the path.
     public static FileStream OpenHostFileRead(string hostPath, FileShare share) =>
@@ -213,6 +216,8 @@ public static class App0Archive
         var found = Directory.Exists(hostDirectory)
             ? Directory.EnumerateFiles(hostDirectory, pattern, SearchOption.AllDirectories).ToList()
             : [];
+        found.AddRange(GameFileOverlay.EnumerateFiles(hostDirectory, pattern, SearchOption.AllDirectories));
+        found = found.Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).ToList();
         var root = Root;
         if (root is null || !TryResolve(hostDirectory, out var archive, out var node) || !archive.IsDirectory(node))
         {

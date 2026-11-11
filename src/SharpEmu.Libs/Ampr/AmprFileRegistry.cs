@@ -269,6 +269,7 @@ internal static class AmprFileRegistry
                     $"[LOADER][INFO] ampr.app0_index_cache_hit root={normalizedRoot} " +
                     $"files={cachedFiles} ids={_hostPathsById.Count} " +
                     $"elapsed_ms={stopwatch.Elapsed.TotalMilliseconds:F1}");
+                RegisterModFiles(normalizedRoot);
                 return;
             }
 
@@ -282,6 +283,7 @@ internal static class AmprFileRegistry
                 // Promote v2 (rehash-on-load) to v3 (precomputed ids) so the
                 // next boot skips the Rosetta FNV storm.
                 TrySaveIndexCache(normalizedRoot, cachePathV3, cachedFiles);
+                RegisterModFiles(normalizedRoot);
                 Console.Error.WriteLine(
                     $"[LOADER][INFO] ampr.app0_index_cache_hit root={normalizedRoot} " +
                     $"files={cachedFiles} ids={_hostPathsById.Count} " +
@@ -368,6 +370,7 @@ internal static class AmprFileRegistry
             }
 
             TrySaveIndexCache(normalizedRoot, cachePathV3, relatives.Count);
+            RegisterModFiles(normalizedRoot);
             Console.Error.WriteLine(
                 $"[LOADER][INFO] ampr.app0_indexed root={normalizedRoot} " +
                 $"files={relatives.Count} ids={_hostPathsById.Count} " +
@@ -397,6 +400,13 @@ internal static class AmprFileRegistry
         Publish(FnvContinueAsciiPrefix(OffsetBasis, "app0/"u8), relative, hostPath, AliasRank.Compatibility);
         // bare relative
         Publish(OffsetBasis, relative, hostPath, AliasRank.Compatibility);
+    }
+
+    private static void RegisterModFiles(string root)
+    {
+        // Keep persistent APR caches about the base game; publish mod-only files for this session.
+        foreach (var path in GameFileOverlay.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            RegisterApp0Relative(Path.GetRelativePath(root, path).Replace('\\', '/'), path);
     }
 
     private static void Publish(uint hash, string relative, string hostPath, AliasRank rank)
