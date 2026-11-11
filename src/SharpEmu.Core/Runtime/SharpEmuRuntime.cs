@@ -566,7 +566,9 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             var repository = new GameModRepository(Path.GetFileName(_modsDirectory), Path.GetDirectoryName(_modsDirectory));
             var directories = repository.Load().Where(mod => mod.Enabled).Select(mod => mod.DirectoryPath).ToArray();
             if (directories.Length == 0) return null;
-            var overlay = new GameFileOverlay(KernelMemoryCompatExports.ResolveGuestPath("/app0"), directories);
+            var app0Root = KernelMemoryCompatExports.ResolveGuestPath("/app0");
+            // Match mod names the way this host matches the game's own names (APFS folds case by default).
+            var overlay = new GameFileOverlay(app0Root, directories, SharpEmu.Libs.Kernel.HostDirectoryIndex.FoldsCase(app0Root));
             Console.Error.WriteLine($"[MODS][INFO] Enabled mods: {string.Join(", ", directories.Select(Path.GetFileName))}");
             return overlay;
         }

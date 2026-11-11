@@ -217,7 +217,7 @@ public static class App0Archive
             ? Directory.EnumerateFiles(hostDirectory, pattern, SearchOption.AllDirectories).ToList()
             : [];
         found.AddRange(GameFileOverlay.EnumerateFiles(hostDirectory, pattern, SearchOption.AllDirectories));
-        found = found.Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).ToList();
+        found = found.Distinct(GameFileOverlay.PathComparer).ToList();
         var root = Root;
         if (root is null || !TryResolve(hostDirectory, out var archive, out var node) || !archive.IsDirectory(node))
         {

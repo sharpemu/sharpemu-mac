@@ -105,7 +105,7 @@ internal static class EngineResolution
     /// or larger than <paramref name="maxLength"/>.</summary>
     internal static byte[]? TryReadApp0File(string hostPath, int maxLength = 1 << 20)
     {
-        if (!File.Exists(hostPath) && !App0Archive.TryGetFile(hostPath, out _))
+        if (!File.Exists(GameFileOverlay.ResolveFile(hostPath)) && !App0Archive.TryGetFile(hostPath, out _))
         {
             return null;
         }
@@ -125,7 +125,9 @@ internal static class EngineResolution
     /// can only be replaced at its own length; false when it cannot.</summary>
     internal static bool TryReplaceApp0File(string hostPath, byte[] content, string reason)
     {
-        if (File.Exists(hostPath) && new FileInfo(hostPath).Length != content.Length)
+        // A mod's file when a mod replaces the path: that is the file a read serves.
+        var served = GameFileOverlay.ResolveFile(hostPath);
+        if (File.Exists(served) && new FileInfo(served).Length != content.Length)
         {
             return false;
         }
