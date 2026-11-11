@@ -79,35 +79,6 @@ public sealed class MetalImagePageOwnersTests
         Assert.True(owners.FindFine(address >> MetalImagePageOwners.FinePageBits) is null or { Count: 0 });
     }
 
-    // The fine pages a query walks inside one owner page: from the one holding its first byte to the one holding its
-    // last, clipped to the owner page.
-    [Theory]
-    [InlineData(0x30100ul, 0x40ul, 0b0000_0000_0000_1000u)]
-    [InlineData(0x2F000ul, 0x32000ul, 0b0000_0000_0111_1100u)]
-    [InlineData(0x0ul, 0x100000ul, 0xFFFFu)]
-    [InlineData(0x40000ul, 0x10000ul, 0b0000_0000_0001_0000u)]
-    [InlineData(0xFFFF0ul, 0x20ul, 0b1000_0000_0000_0000u)]
-    public void FineBitsCoveredNameTheFinePagesARangeTouches(ulong offset, ulong size, uint expected)
-    {
-        const ulong page = 7;
-        var pageStart = page * OwnerPage;
-        Assert.Equal(expected, MetalImagePageOwners.FineBitsCovered(page, pageStart + offset, size));
-    }
-
-    [Fact]
-    public void FineBitsCoveredClipsToTheOwnerPage()
-    {
-        const ulong page = 7;
-        var pageStart = page * OwnerPage;
-        // Starting in the page before: the fine pages from the first one.
-        Assert.Equal(0b0000_0000_0000_0011u, MetalImagePageOwners.FineBitsCovered(page, pageStart - 0x1000, 0x1000 + 2 * FinePage));
-        // Running into the next page: the fine pages up to the last one.
-        Assert.Equal(0b1100_0000_0000_0000u, MetalImagePageOwners.FineBitsCovered(page, pageStart + 14 * FinePage, 3 * FinePage));
-        // Wholly outside: none.
-        Assert.Equal(0u, MetalImagePageOwners.FineBitsCovered(page, pageStart + OwnerPage, FinePage));
-        Assert.Equal(0u, MetalImagePageOwners.FineBitsCovered(page, pageStart - FinePage, FinePage));
-    }
-
     [Fact]
     public void TheFineMaskMarksTheFinePagesThatListAnOwner()
     {

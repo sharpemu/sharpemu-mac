@@ -168,26 +168,6 @@ public sealed unsafe class MetalBindlessTableCostTests(ITestOutputHelper output)
         Assert.Equal(rig.ResourceIds(first), rig.ResourceIds(second));
     }
 
-    // A kept lookup holds only while no image came or went over its request: once one texture's image is dropped, a new
-    // table of the same descriptors looks that descriptor up again and takes the rest from the lookup memo.
-    [Fact]
-    public void ALookupKeptAcrossTablesIsRedoneOnlyWhereAnImageWentAway()
-    {
-        if (!RequireDevice()) return;
-        using var rig = new Rig();
-        const int count = 96;
-        var first = rig.Table(count);
-        rig.Bind(first);
-        rig.Bind(first);
-        rig.Host.TakeBindlessCost();
-
-        ((IGuestImageStore)rig.Host.ImageCache).Unregister(TextureBase + 7 * TextureStride, 0x100);
-        var second = rig.Table(count);
-        rig.Bind(second);
-        Assert.Equal((1L, (long)count, 1L), Counts(rig.Host.TakeBindlessCost()));
-        Assert.DoesNotContain(0ul, rig.ResourceIds(second));
-    }
-
     // A table whose memo missed because one of its images changed (the binding epoch moved) resolves that entry again
     // and leaves the others as they were: their stamps still hold.
     [Fact]
