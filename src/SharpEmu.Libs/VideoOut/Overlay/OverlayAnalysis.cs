@@ -156,7 +156,7 @@ public sealed class OverlayAnalyzer
     public const float StallMs = 1500f;
 
     private float[] _scratch = new float[LowsWindow + 8];
-    private readonly Dictionary<int, int> _costIndex = [];
+    private readonly Dictionary<long, int> _costIndex = [];
     private readonly List<CostEntry> _costs = [];
     private float[] _sortKeys = new float[64];
     private int[] _sortItems = new int[64];
@@ -568,7 +568,8 @@ public sealed class OverlayAnalyzer
                     continue;
                 }
 
-                var key = c.NameId * 8 + (perName ? 0 : (int)c.Lane);
+                // Kind is part of the key: an import's body (Hle) and its blocked part (Wait) stay separate rows.
+                var key = ((long)c.NameId * 8 + (perName ? 0 : (int)c.Lane)) * 16 + (int)c.Kind;
                 if (_costIndex.TryGetValue(key, out var idx))
                 {
                     var e = _costs[idx];

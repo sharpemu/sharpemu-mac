@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using SharpEmu.HLE.Host;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Libs.VideoOut.Overlay;
 using Xunit;
@@ -153,6 +154,119 @@ public sealed class OverlayTelemetryTests : IDisposable
         OverlayTelemetry.EndRenderFrame(start + 32 * Ms, null, null);
         OverlayTelemetry.BuildPendingForTests();
         Assert.DoesNotContain(OverlayTelemetry.DataSource.Capture().Frames[^1].Costs, cost => cost.NameId >= 1 << 16 && cost.NameId < 1 << 24);
+    }
+
+    private static readonly Func<int, string?> AudioNames = index => index switch
+    {
+        20 => "libSceAudioOut:sceAudioOutOutput",
+        21 => "libKernel:sceKernelWaitEventFlag",
+        _ => null,
+    };
+
+    private static (OverlaySnapshot Snapshot, FrameRecord Frame) RecordOneFrame(Action<long> calls)
+    {
+        OverlayTelemetry.DataSource.SetCaptureDemand(OverlayCaptureDemand.HleCalls);
+        OverlayTelemetry.SetHleNameResolver(AudioNames);
+        var start = Stopwatch.GetTimestamp();
+        OverlayTelemetry.EndRenderFrame(start, null, null);
+        OverlayTelemetry.BuildPendingForTests();
+        calls(start);
+        OverlayTelemetry.EndRenderFrame(start + 16 * Ms, null, null);
+        OverlayTelemetry.BuildPendingForTests();
+        var snapshot = OverlayTelemetry.DataSource.Capture();
+        return (snapshot, snapshot.Frames[^1]);
+    }
+
+    [Fact]
+    public void TimeBlockedInHostPacingIsAWaitUnderTheSameName()
+    {
+        var (snapshot, frame) = RecordOneFrame(start =>
+        {
+            var mark = OverlayTelemetry.HleBlockedMark;
+            HostBlockedTime.Add(6 * Ms);
+            OverlayTelemetry.RecordHleCall(20, start, start + 8 * Ms, mark);
+        });
+
+        Assert.Equal(2f, frame.KindMs[(int)CostKind.Hle], 2);
+        Assert.Equal(6f, frame.KindMs[(int)CostKind.Wait], 2);
+        var rows = frame.Costs.Where(cost => snapshot.NameOf(cost.NameId) == "libSceAudioOut:sceAudioOutOutput").ToArray();
+        var body = Assert.Single(rows, cost => cost.Kind == CostKind.Hle);
+        var blocked = Assert.Single(rows, cost => cost.Kind == CostKind.Wait);
+        Assert.Equal(2f, body.Milliseconds, 2);
+        Assert.Equal(6f, blocked.Milliseconds, 2);
+        Assert.Equal(1, body.Count);
+    }
+
+    [Fact]
+    public void BlockingOutsideACallIsNotChargedToTheNextCall()
+    {
+        var (snapshot, frame) = RecordOneFrame(start =>
+        {
+            HostBlockedTime.Add(6 * Ms); // e.g. a pacing sleep with timing off
+            var mark = OverlayTelemetry.HleBlockedMark;
+            OverlayTelemetry.RecordHleCall(20, start, start + 2 * Ms, mark);
+        });
+
+        Assert.Equal(2f, frame.KindMs[(int)CostKind.Hle], 2);
+        Assert.Equal(0f, frame.KindMs[(int)CostKind.Wait], 2);
+        Assert.Single(frame.Costs, cost => snapshot.NameOf(cost.NameId) == "libSceAudioOut:sceAudioOutOutput");
+    }
+
+    [Fact]
+    public void ANameClassifiedWaitStaysAWaitWhole()
+    {
+        var (snapshot, frame) = RecordOneFrame(start =>
+        {
+            var mark = OverlayTelemetry.HleBlockedMark;
+            HostBlockedTime.Add(2 * Ms);
+            OverlayTelemetry.RecordHleCall(21, start, start + 5 * Ms, mark);
+        });
+
+        Assert.Equal(0f, frame.KindMs[(int)CostKind.Hle], 2);
+        Assert.Equal(5f, frame.KindMs[(int)CostKind.Wait], 2);
+        var row = Assert.Single(frame.Costs, cost => snapshot.NameOf(cost.NameId) == "libKernel:sceKernelWaitEventFlag");
+        Assert.Equal(CostKind.Wait, row.Kind);
+        Assert.Equal(5f, row.Milliseconds, 2);
+    }
+
+    [Fact]
+    public void TheBridgeCarriesTheBlockedPartOfEachImportAndCall()
+    {
+        const int import = 4001; // touched by no other test, so the guest totals are this thread's alone
+        OverlayTelemetry.DataSource.SetCaptureDemand(OverlayCaptureDemand.HleCalls | OverlayCaptureDemand.Timeline);
+        ulong recorderId = 0;
+        var recorder = new Thread(() =>
+        {
+            recorderId = OverlayTelemetry.CurrentThreadIdForTests;
+            var start = Stopwatch.GetTimestamp();
+            var mark = OverlayTelemetry.HleBlockedMark;
+            HostBlockedTime.Add(6 * Ms);
+            OverlayTelemetry.RecordHleCall(import, start, start + 8 * Ms, mark);
+            OverlayTelemetry.RecordHleCall(import, start, start + 1 * Ms, OverlayTelemetry.HleBlockedMark);
+        });
+        recorder.Start();
+        recorder.Join();
+
+        var seen = 0;
+        var calls = new List<(long Start, long End, int Import, OverlayLane Lane)>();
+        OverlayTelemetry.RoundTripForTests(recorderId, (index, delta) =>
+        {
+            if (index != import) return;
+            seen++;
+            Assert.Equal(9f, delta.MainMs, 2);
+            Assert.Equal(6f, delta.MainBlockedMs, 2);
+            Assert.Equal(2, delta.MainCalls);
+            Assert.Equal(0f, delta.WorkerMs);
+            Assert.Equal(0f, delta.WorkerBlockedMs);
+        }, calls);
+        Assert.Equal(1, seen);
+
+        // Both calls are long; only the mostly blocked one carries the flag the timeline draws as a wait.
+        var mine = calls.Where(call => (call.Import & ~OverlayTelemetry.MostlyBlockedCall) == import).ToArray();
+        Assert.Equal(2, mine.Length);
+        Assert.All(mine, call => Assert.Equal(OverlayLane.GuestMain, call.Lane));
+        var flagged = Assert.Single(mine, call => (call.Import & OverlayTelemetry.MostlyBlockedCall) != 0);
+        Assert.Equal(8.0, (flagged.End - flagged.Start) * 1000.0 / Stopwatch.Frequency, 1);
     }
 
     [Fact]
