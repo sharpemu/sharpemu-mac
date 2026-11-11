@@ -17,7 +17,11 @@ public sealed class GuestRedZoneCacheTests : IDisposable
 {
     private const ulong SavedValue = 0x1122334455667788;
     private readonly DirectoryInfo _directory = Directory.CreateTempSubdirectory("sharpemu-redzone-cache-");
-    private static bool Supported => OperatingSystem.IsWindows() && RuntimeInformation.ProcessArchitecture == Architecture.X64;
+    // Windows, and macOS under Rosetta: the two hosts whose red zone the patcher protects.
+    private static bool Supported => (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()) &&
+        RuntimeInformation.ProcessArchitecture == Architecture.X64;
+    // ModRM of [first argument + disp]: RCX in the Windows ABI, RDI in System V.
+    private static byte FirstArgument(byte windows) => OperatingSystem.IsWindows() ? windows : (byte)(windows + 6);
     private static readonly DateTime OldStamp = new(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
     private static byte[] RipLoadFunction() =>
@@ -73,6 +77,29 @@ public sealed class GuestRedZoneCacheTests : IDisposable
         Assert.Equal(OldStamp, File.GetLastWriteTimeUtc(originalPath));
         Assert.Equal(1, result.PatchedSites);
         Assert.Equal((SavedValue ^ (changeImage ? 1UL : 0)) ^ 42, second.Execute());
+    }
+
+    // The fork's loader rewrites code before the scan (syscalls, byte patches, resolution, idle naps), some of it
+    // by environment, so a plan is only good for the loaded bytes it was derived from: the file image alone is no key.
+    [Fact]
+    public void LoadedCodeThatDiffersFromTheFileImageInvalidatesPlan()
+    {
+        if (!Supported) return;
+        var code = RipLoadFunction();
+        using var first = new Image(code);
+        Assert.Equal(1, first.Patch(_directory.FullName, code).PatchedSites);
+        var originalPath = Assert.Single(Directory.GetFiles(_directory.FullName, "*.bin"));
+        File.SetLastWriteTimeUtc(originalPath, OldStamp);
+
+        var loaded = code.ToArray();
+        loaded[2] ^= 1;
+        using var second = new Image(loaded);
+        var result = second.Patch(_directory.FullName, code);
+
+        Assert.Equal(2, Directory.GetFiles(_directory.FullName, "*.bin").Length);
+        Assert.Equal(OldStamp, File.GetLastWriteTimeUtc(originalPath));
+        Assert.Equal(1, result.PatchedSites);
+        Assert.Equal((SavedValue ^ 1) ^ 42, second.Execute());
     }
 
     [Theory]
@@ -173,7 +200,7 @@ public sealed class GuestRedZoneCacheTests : IDisposable
         [
             0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
             0x48, 0x89, 0x44, 0x24, 0xF8,
-            0x83, 0x79, 0x40, 0x00, 0x74, 0x06,
+            0x83, FirstArgument(0x79), 0x40, 0x00, 0x74, 0x06,
             0x48, 0x8B, 0x44, 0x24, 0xF8, 0xC3, 0x31, 0xC0, 0xC3,
         ];
         using var first = new Image(code);
@@ -196,7 +223,7 @@ public sealed class GuestRedZoneCacheTests : IDisposable
         [
             0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
             0x48, 0x89, 0x44, 0x24, 0xF8,
-            0x48, 0x8D, 0x91, 0x00, 0x20, 0x00, 0x00,
+            0x48, 0x8D, FirstArgument(0x91), 0x00, 0x20, 0x00, 0x00,
             0xB8, 0xFE, 0xFF, 0xFF, 0xFF, 0x21, 0x02,
             0x48, 0x8B, 0x44, 0x24, 0xF8, 0xC3, 0xEB, 0xF8,
         ];
