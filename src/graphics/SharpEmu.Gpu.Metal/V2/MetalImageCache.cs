@@ -456,7 +456,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // Comparing texel pitches skipped every such read, and the pool kept stale tiles.
     // SHARPEMU_METAL_V2_ALIAS_WRITE_SKIP_LAYOUT (on; =0 off) drops, instead of round-tripping through guest memory, the
     // contents of an image another one writes over whole through a texel layout they do not fit (see the overlap loop).
-    private static readonly bool AliasWriteSkipLayout =
+    internal bool AliasWriteSkipLayout { get; set; } =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_WRITE_SKIP_LAYOUT") != "0";
 
     private long _aliasWritesDiscarded;

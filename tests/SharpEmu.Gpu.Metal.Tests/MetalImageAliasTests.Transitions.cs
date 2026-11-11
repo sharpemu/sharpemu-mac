@@ -17,6 +17,8 @@ public sealed unsafe partial class MetalImageAliasTests
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
+        // The precise mode: the GPU-written image's bytes go out through guest memory unless a proof drops them.
+        rig.Cache.AliasWriteSkipLayout = false;
         var (source, gpu, stale) = GpuWrittenLarge(rig);
         var targetRequest = Rig.Request(ImageAddress, 128, 32, ImageRole.ColorTarget);
         var target = rig.Cache.FindImage(ref targetRequest);
@@ -53,6 +55,55 @@ public sealed unsafe partial class MetalImageAliasTests
             rig.Harness.Submit();
             rig.Harness.Begin();
             Assert.Equal(gpu, rig.ReadGuest(ImageAddress, LargeSize));
+        }
+    }
+
+    // SHARPEMU_METAL_V2_ALIAS_WRITE_SKIP_LAYOUT on (the default): the target writes over all of the
+    // GPU-written image through a texel layout its bytes do not fit, so that image's contents are dropped
+    // when the deferred refresh resolves, proof or not. Without the proof this loses the GPU-written bytes: guest
+    // memory keeps what it held before the image was drawn. That is the trade-off the switch makes - the
+    // console would read such bytes back scrambled through the other layout anyway - for not writing the
+    // image back and reloading it.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ADeferredAliasThroughAnotherLayoutIsDroppedWithoutAProofInTheDefaultMode(bool overwrite)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Cache.AliasWriteSkipLayout = true;
+        var (source, gpu, stale) = GpuWrittenLarge(rig);
+        _ = rig.Cache.TakeAliasWritesDiscarded();
+        var targetRequest = Rig.Request(ImageAddress, 128, 32, ImageRole.ColorTarget);
+        var target = rig.Cache.FindImage(ref targetRequest);
+        var writebacks = rig.Cache.Counters.Writebacks;
+        var view = rig.Cache.AcquireColorTargetView(target, targetRequest, deferRefresh: true);
+        Assert.True(rig.Cache.HasDeferredRefreshes);
+        Assert.True(source.IsGpuModified);
+        Assert.Equal(0, rig.Cache.TakeAliasWritesDiscarded());
+        rig.Cache.ResolveDeferredRefresh(view, overwritten: overwrite);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        // Without the proof the refresh takes the layout skip (an alias write discarded); with it, the proof's discard.
+        Assert.Equal(overwrite ? 0 : 1, rig.Cache.TakeAliasWritesDiscarded());
+        Assert.False(source.IsGpuModified);
+        Assert.Equal(writebacks, rig.Cache.Counters.Writebacks);
+        var transitions = rig.Cache.TakeAliasTransitions();
+        if (overwrite)
+        {
+            // The proof drops it in either mode.
+            Assert.Equal((1L, (long)LargeSize), (transitions.Discarded, transitions.DiscardedBytes));
+            Assert.Equal(stale, rig.ReadGuest(ImageAddress, LargeSize));
+        }
+        else
+        {
+            // No proof, and still no writeback: the GPU-written bytes are gone, guest memory holds the stale ones.
+            Assert.Equal(0, transitions.Discarded);
+            rig.Cache.FlushGpuWrites(ImageAddress, LargeSize, MetalWritebackCause.HostRead);
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            Assert.Equal(stale, rig.ReadGuest(ImageAddress, LargeSize));
+            Assert.NotEqual(gpu, rig.ReadGuest(ImageAddress, LargeSize));
         }
     }
 
@@ -109,15 +160,20 @@ public sealed unsafe partial class MetalImageAliasTests
     // compressible, without the shader-write and format-view usages the pass needs, and
     // keep the round trip. Prints the transfer counts and the GPU time.
     [Theory]
-    [InlineData(true, true)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(false, false)]
-    public void ATiledAliasOfAGpuWrittenImageFusesOnTheDeviceOrRoundTrips(bool fused, bool storage)
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, false, true)]
+    public void ATiledAliasOfAGpuWrittenImageFusesOnTheDeviceOrRoundTrips(bool fused, bool storage, bool skipLayout)
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
         rig.Cache.AliasTransitionsEnabled = fused;
+        rig.Cache.AliasWriteSkipLayout = skipLayout;
         const uint side = 256;
         const ulong size = side * side * 4;
         var role = storage ? ImageRole.StorageImage : ImageRole.ColorTarget;
@@ -129,8 +185,10 @@ public sealed unsafe partial class MetalImageAliasTests
         source.MarkGpuModified();
         rig.Harness.Submit();
         rig.Harness.Begin();
-        rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)size, 0xC3));
+        var stale = MetalTileOracle.Pattern((int)size, 0xC3);
+        rig.WriteGuest(ImageAddress, stale);
         _ = rig.Cache.TakeAliasTransitionText();
+        _ = rig.Cache.TakeAliasWritesDiscarded();
 
         var tiled = Rig.TiledRequest(ImageAddress, side);
         Assert.Equal(size, tiled.Description.Data.Size);
@@ -146,25 +204,42 @@ public sealed unsafe partial class MetalImageAliasTests
         rig.Harness.Begin();
         var counts = rig.Cache.Counters;
         var text = rig.Cache.TakeAliasTransitionText();
-        output.WriteLine($"alias transitions {(fused ? "on" : "off")}, {role}: uploads={counts.Uploads - uploads} " +
-            $"writebacks={counts.Writebacks - writebacks} gpu={gpu * 1000:F3} ms {text}");
+        var discarded = rig.Cache.TakeAliasWritesDiscarded();
+        output.WriteLine($"alias transitions {(fused ? "on" : "off")}, {role}, skip layout {skipLayout}: " +
+            $"uploads={counts.Uploads - uploads} writebacks={counts.Writebacks - writebacks} " +
+            $"alias_writes_discarded={discarded} gpu={gpu * 1000:F3} ms {text}");
+        var dropped = false;
         if (fused && storage)
         {
             Assert.Contains("fused:1,", text);
             Assert.Equal((0L, 0L), (counts.Uploads - uploads, counts.Writebacks - writebacks));
+            Assert.Equal(0, discarded);
+        }
+        else if (skipLayout)
+        {
+            // SHARPEMU_METAL_V2_ALIAS_WRITE_SKIP_LAYOUT on (the default): the tiled image writes over all of
+            // the linear one through a layout its texels do not fit, so the linear one's contents are dropped,
+            // not written back: the tiled one loads what guest memory held before the linear one was drawn.
+            // That is the trade-off the switch makes for skipping the round trip.
+            Assert.Contains("fused:0,", text);
+            Assert.Equal((1L, 0L), (counts.Uploads - uploads, counts.Writebacks - writebacks));
+            Assert.Equal(1, discarded);
+            dropped = true;
         }
         else
         {
             Assert.Contains("fused:0,", text);
             Assert.Equal((1L, 1L), (counts.Uploads - uploads, counts.Writebacks - writebacks));
+            Assert.Equal(0, discarded);
         }
 
-        // The tiled image's texels, retiled to guest bytes, are the bytes the linear one held.
+        // The tiled image's texels, retiled to guest bytes, are the bytes the linear one held - or, dropped,
+        // the bytes guest memory held.
         var scratch = rig.Harness.Buffer(size);
         Assert.True(rig.Harness.Transfer.EncodeTextureToGuest(rig.Harness, alias.Description, SubresourceRange.First,
             alias.Texture, new MetalGuestRange(scratch, 0, size, 0), default, 0, size));
         rig.Harness.Submit();
         rig.Harness.Begin();
-        Assert.Equal(written, rig.Harness.Read(scratch, 0, size));
+        Assert.Equal(dropped ? stale : written, rig.Harness.Read(scratch, 0, size));
     }
 }
