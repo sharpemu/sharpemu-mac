@@ -56,6 +56,45 @@ public sealed class GuestRedZoneCacheTests : IDisposable
         Assert.Equal(0xE9, second.ReadByte(15));
     }
 
+    [Fact]
+    public void AHitStampsThePlanAsUsedWithoutRewritingIt()
+    {
+        if (!Supported) return;
+        var code = RipLoadFunction();
+        using var first = new Image(code);
+        first.Patch(_directory.FullName, code);
+        var path = Assert.Single(Directory.GetFiles(_directory.FullName, "*.bin"));
+        File.SetLastWriteTimeUtc(path, OldStamp);
+        File.SetLastAccessTimeUtc(path, OldStamp);
+
+        using var second = new Image(code);
+        second.Patch(_directory.FullName, code);
+
+        Assert.Equal(OldStamp, File.GetLastWriteTimeUtc(path));
+        Assert.True(DateTime.UtcNow - File.GetLastAccessTimeUtc(path) < TimeSpan.FromMinutes(5));
+    }
+
+    [Fact]
+    public void AddingAPlanRemovesOnesNoBootHasUsedForLong()
+    {
+        if (!Supported) return;
+        var code = RipLoadFunction();
+        using var first = new Image(code);
+        first.Patch(_directory.FullName, code);
+        var stalePath = Assert.Single(Directory.GetFiles(_directory.FullName, "*.bin"));
+        var stale = DateTime.UtcNow - GuestRedZonePatcher.PatchCacheMaximumAge - TimeSpan.FromDays(1);
+        File.SetLastWriteTimeUtc(stalePath, stale);
+        File.SetLastAccessTimeUtc(stalePath, stale);
+
+        var changed = code.ToArray();
+        changed[2] ^= 1;
+        using var second = new Image(changed);
+        second.Patch(_directory.FullName, changed);
+
+        var remaining = Assert.Single(Directory.GetFiles(_directory.FullName, "*.bin"));
+        Assert.NotEqual(stalePath, remaining);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
