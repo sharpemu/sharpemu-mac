@@ -27,6 +27,7 @@ public sealed class GameFileOverlayTests : IDisposable
     {
         Directory.CreateDirectory(Root);
         Environment.SetEnvironmentVariable("SHARPEMU_APP0_DIR", Root);
+        GameFileOverlayFastPathTests.ForgetCachedApp0Root();
         Environment.SetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE", Path.Combine(_directory, "index"));
         KernelMemoryCompatExports.RegisterGuestPathMount("/app0", Root);
         KernelMemoryCompatExports.RegisterGuestPathMount("$", Root);
@@ -39,6 +40,7 @@ public sealed class GameFileOverlayTests : IDisposable
         KernelMemoryCompatExports.UnregisterGuestPathMount("/app0");
         KernelMemoryCompatExports.UnregisterGuestPathMount("$");
         Environment.SetEnvironmentVariable("SHARPEMU_APP0_DIR", _previous);
+        GameFileOverlayFastPathTests.ForgetCachedApp0Root();
         Environment.SetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE", _previousIndex);
         Directory.Delete(_directory, recursive: true);
     }
@@ -215,7 +217,9 @@ public sealed class GameFileOverlayTests : IDisposable
         memory.WriteCString(address + 0x100, "/app0/added/new.bin");
         context[CpuRegister.Rdi] = address + 0x100;
         context[CpuRegister.Rsi] = 0x2;
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED, KernelExports.KernelOpen(context));
+        // This fork reports a write open on the read-only app mount as EROFS (FreeBSD vn_open on
+        // MNT_RDONLY); upstream reports EPERM.
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_EROFS, KernelExports.KernelOpen(context));
         Assert.Equal(new byte[] { 3 }, File.ReadAllBytes(Path.Combine(Mod, "added", "new.bin")));
     }
 
