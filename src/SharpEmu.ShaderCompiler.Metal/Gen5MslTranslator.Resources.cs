@@ -148,6 +148,9 @@ public static partial class Gen5MslTranslator
         private string? _indexedImageResource;
         private bool _hasGlobalDataShare;
         private bool _hasDeviceAddressTable;
+        // CompactMemoryAccessPolicy chose the compact device-address lowering (the layout binds
+        // DescriptorBindingKind.DeviceAddressFallback): the single-dword helpers are emitted out of line.
+        private bool _outOfLineDeviceAddresses;
         private bool _hasFlattenedTable;
         private bool _hasSamplers;
         // The layout binds the mip-statistics counters (BindingLayout.MipStatisticsCount):
@@ -300,6 +303,11 @@ public static partial class Gen5MslTranslator
                         break;
                     case DescriptorBindingKind.FaultBuffer:
                         break;
+                    case DescriptorBindingKind.DeviceAddressFallback:
+                        // No field (Gen5MslArgumentLayout): MSL reads no fallback address. The
+                        // binding selects the out-of-line helpers (EmitResourcePrelude).
+                        _outOfLineDeviceAddresses = true;
+                        break;
                     case DescriptorBindingKind.FlattenedResourceTable:
                         _hasFlattenedTable = true;
                         break;
@@ -315,6 +323,11 @@ public static partial class Gen5MslTranslator
             }
 
             _hasDeviceAddressTable &= request.Bindings.Find(DescriptorBindingKind.FaultBuffer) is not null;
+            if (_outOfLineDeviceAddresses && !_hasDeviceAddressTable)
+            {
+                throw new InvalidOperationException(
+                    "the layout binds a device-address fallback without the device-address table and fault buffer");
+            }
             foreach (var memoryIndex in request.IndirectKeyMemoryIndices)
             {
                 _indirectKeyScratch[memoryIndex] = $"indirect_image_key{memoryIndex}";
@@ -386,9 +399,19 @@ public static partial class Gen5MslTranslator
 
         internal static void EmitResourcePreludeForTests(StringBuilder source) => EmitResourcePrelude(source);
 
-        private static void EmitResourcePrelude(StringBuilder source) =>
+        // The Metal form of #1138's compact device-address lowering. A single-dword device-address
+        // access calls sharpemu_load_device_dword / sharpemu_store_device_dword: one call in the MSL,
+        // but each inlined whole (range cache, granule index, binary search, reach feedback), so the
+        // pipeline compile grows with the program's device-address dwords: 1.5-5.4 s at 300 and
+        // 37-41 s at 2,000 on an M4. Out of line, the two are compiled once and called: 0.1 s and
+        // 1.7-2.7 s. A call costs at run time (a loop of eight such dwords ran 1.9 times as long), so
+        // sharpemu_resolve_device_address, which a multi-dword record resolves once, stays inline,
+        // and only the programs CompactMemoryAccessPolicy selects take this form. Below its threshold
+        // both stay static inline and the module text is unchanged.
+        private static void EmitResourcePrelude(StringBuilder source, bool outOfLineDeviceAddresses = false) =>
             source.Append(MslTemplates.Render(
                 "resource_prelude",
+                ("device_address_linkage", outOfLineDeviceAddresses ? "__attribute__((noinline)) static" : "static inline"),
                 ("address_mask", FormatULong(DeviceAddressPaging.AddressMask)),
                 ("page_bits", DeviceAddressPaging.PageBits.ToString(CultureInfo.InvariantCulture)),
                 ("page_offset_mask", FormatULong(DeviceAddressPaging.PageOffsetMask)),

@@ -127,8 +127,10 @@ public static class App0FileOverlay
 
     public static void Clear() => Entries.Clear();
 
+    // Keyed by the file a read actually opens: a mod's file when a mod replaces the path, since the
+    // substitution was computed from what a read of the path returned.
     private static string Normalize(string hostPath) =>
-        Path.TrimEndingDirectorySeparator(Path.GetFullPath(hostPath));
+        Path.TrimEndingDirectorySeparator(Path.GetFullPath(GameFileOverlay.ResolveFile(hostPath)));
 }
 
 /// <summary>A host file opened for reading whose bytes come through an <see cref="App0FileOverlay"/>

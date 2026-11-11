@@ -113,7 +113,7 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
     return nullptr;
 }
 
-static inline uint sharpemu_load_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address)
+{{device_address_linkage}} uint sharpemu_load_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address)
 {
     bool valid = false;
     device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);
@@ -142,7 +142,7 @@ static inline uint sharpemu_load_device_unaligned(device const Gen5AddressRange*
     return (low >> shift) | (shift == 0u ? 0u : (high << (32u - shift)));
 }
 
-static inline void sharpemu_store_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint value)
+{{device_address_linkage}} void sharpemu_store_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint value)
 {
     bool valid = false;
     device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address, valid);

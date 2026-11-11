@@ -152,7 +152,7 @@ jobs:
             Directory.Build.props
 
       - name: Restore solution
-        run: dotnet restore SharpEmu.slnx
+        run: dotnet restore SharpEmu.slnx -p:Configuration=Release
 
       - name: Test macOS build scripts and native guest mapping
         run: python3 -m unittest discover -s tests/scripts -v

@@ -73,7 +73,10 @@ internal static partial class GuestRedZonePatcher
         PhysicalVirtualMemory physicalMemory,
         IReadOnlyList<ProgramHeader> programHeaders,
         ulong imageBase,
-        ulong imageSize)
+        ulong imageSize,
+        ReadOnlySpan<byte> imageData = default,
+        IReadOnlyList<string>? appliedPatchIds = null,
+        string? cacheDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(memory);
         ArgumentNullException.ThrowIfNull(physicalMemory);
@@ -95,31 +98,43 @@ internal static partial class GuestRedZonePatcher
         }
 
         var hostName = OperatingSystem.IsWindows() ? "Windows" : OperatingSystem.IsMacOS() ? "macOS" : "Linux";
-
-        if (!TryDecodeFunctionStarts(memory, programHeaders, imageBase, out var functionStarts))
-        {
-            Console.Error.WriteLine($"[LOADER][WARN] {hostName} red-zone patch skipped: no usable .eh_frame_hdr table.");
-            return default;
-        }
-
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var executableBytes = ExecutableBytes(programHeaders);
         var large = executableBytes >= LargeExecutableBytes;
-        if (large)
+        var cachePath = imageData.IsEmpty
+            ? null
+            : PatchCachePath(imageData, appliedPatchIds, protectRedZone, splitVectorStores, memory, programHeaders, imageBase, cacheDirectory);
+        List<PatchSite> sites = [];
+        var scan = default(PatchResult);
+        var cached = cachePath is not null && TryReadPatchCache(cachePath, memory, programHeaders, imageBase, imageSize, out sites, out scan);
+        if (!cached)
         {
-            Console.Error.WriteLine(
-                $"[LOADER] {hostName} red-zone patch: scanning {functionStarts.Length} functions in {executableBytes >> 20} MB of code; " +
-                "a large executable takes a while before the game window opens.");
-        }
+            if (!TryDecodeFunctionStarts(memory, programHeaders, imageBase, out var functionStarts))
+            {
+                Console.Error.WriteLine($"[LOADER][WARN] {hostName} red-zone patch skipped: no usable .eh_frame_hdr table.");
+                return default;
+            }
 
-        var sites = CollectPatchSites(
-            memory, programHeaders, imageBase, functionStarts, protectRedZone, splitVectorStores, rewriteInstructions, out var scan,
-            large ? new Progress(hostName, "scan", functionStarts.Length) : null);
-        sites.Sort(static (left, right) => left.Address.CompareTo(right.Address));
+            if (large)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER] {hostName} red-zone patch: scanning {functionStarts.Length} functions in {executableBytes >> 20} MB of code; " +
+                    "a large executable takes a while before the game window opens.");
+            }
+
+            sites = CollectPatchSites(
+                memory, programHeaders, imageBase, functionStarts, protectRedZone, splitVectorStores, rewriteInstructions, out scan,
+                large ? new Progress(hostName, "scan", functionStarts.Length) : null);
+            sites.Sort(static (left, right) => left.Address.CompareTo(right.Address));
+            if (cachePath is not null)
+                WritePatchCache(cachePath, imageBase, sites, scan);
+        }
+        var cacheStatus = cachePath is null ? "off" : cached ? "hit" : "miss";
         if (sites.Count == 0)
         {
             Console.Error.WriteLine(
                 $"[LOADER] {hostName} red-zone scan: functions={scan.Functions} red_zone={scan.RedZoneFunctions} " +
-                $"sites=0 unrelocatable={scan.UnrelocatableSites}.");
+                $"sites=0 unrelocatable={scan.UnrelocatableSites} cache={cacheStatus}.");
             return scan;
         }
 
@@ -202,7 +217,8 @@ internal static partial class GuestRedZonePatcher
             $"stack_after={result.StackRefusals} too_short={result.TooShortRefusals} " +
             $"indirect_branch={result.IndirectBranchRefusals}) " +
             $"rosetta_vector_stores={result.VectorStoreCount} sha_rewrites={result.ShaInstructionCount} " +
-            $"trampolines=0x{trampolineBase:X16}+0x{result.TrampolineBytes:X}.");
+            $"trampolines=0x{trampolineBase:X16}+0x{result.TrampolineBytes:X} " +
+            $"cache={cacheStatus} ms={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F1}.");
         if (Sse4aExtractRewrite.IsRequired)
         {
             Console.Error.WriteLine(

@@ -136,6 +136,7 @@ public static partial class AmprExports
 
         public CachedHostFile(string path)
         {
+            path = GameFileOverlay.ResolveFile(path);
             // Only an archive-mounted app0 has files that are not on disk; without one, skip the
             // existence probe so an open costs no extra metadata read.
             if (App0Archive.IsMounted && !File.Exists(path) && App0Archive.OpenRead(path) is { } archived)

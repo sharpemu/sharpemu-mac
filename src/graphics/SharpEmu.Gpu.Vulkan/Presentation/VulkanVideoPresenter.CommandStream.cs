@@ -6,6 +6,7 @@ using SharpEmu.Gpu.Vulkan.Scheduling;
 
 namespace SharpEmu.Gpu.Vulkan.Presentation;
 
+using System.Buffers;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.GpuCommands;
@@ -304,10 +305,18 @@ internal static unsafe partial class VulkanVideoPresenter
                     return false;
                 }
 
-                var now = bytes.Length <= current.Length ? current[..bytes.Length] : new byte[bytes.Length];
-                if (!_guestMemory.TryRead(address, now) || !now.SequenceEqual(bytes))
+                var rented = bytes.Length > current.Length ? ArrayPool<byte>.Shared.Rent(bytes.Length) : null;
+                try
                 {
-                    return false;
+                    var now = rented is null ? current[..bytes.Length] : rented.AsSpan(0, bytes.Length);
+                    if (!_guestMemory.TryRead(address, now) || !now.SequenceEqual(bytes))
+                    {
+                        return false;
+                    }
+                }
+                finally
+                {
+                    if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
                 }
             }
 
@@ -400,7 +409,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // Items run in batches; completions are collected between them so blocked waits retry.
         private const int CommandItemBatch = 256;
 
-        private void RunCommandStreamSlices(long renderWorkDeadline)
+        private void RunCommandStreamSlices(long renderWorkDeadline, bool yieldForPresentation = false)
         {
             if (_commandThread is null)
             {
@@ -419,6 +428,14 @@ internal static unsafe partial class VulkanVideoPresenter
                     CollectCompletedGuestSubmissions(waitForOldest: false);
                 }
 
+                if (yieldForPresentation)
+                {
+                    lock (_gate)
+                    {
+                        if (HasReadyPresentationLocked()) break;
+                    }
+                }
+
                 int ran;
                 using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.CommandStream))
                 {
@@ -427,10 +444,10 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (ran == 0 || System.Diagnostics.Stopwatch.GetTimestamp() >= renderWorkDeadline)
                 {
-                    _scheduler.SubmitDeferred();
-                    return;
+                    break;
                 }
             }
+            _scheduler.SubmitDeferred();
         }
 
         private SliceResult RunCommandSlice() => _commandStream.ProcessOne();

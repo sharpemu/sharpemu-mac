@@ -743,7 +743,7 @@ internal static partial class HostDirectoryIndex
     /// Probed once per directory and memoized; an unanswerable probe reports
     /// false, which only costs the caller an extra stat on a case mismatch.
     /// </summary>
-    private static bool FoldsCase(string directory)
+    internal static bool FoldsCase(string directory)
     {
         if (OperatingSystem.IsWindows())
         {

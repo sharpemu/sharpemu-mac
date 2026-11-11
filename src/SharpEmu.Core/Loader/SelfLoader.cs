@@ -302,10 +302,12 @@ public sealed class SelfLoader : ISelfLoader
             out var importedRelocations,
             out var importedModuleNames);
         var executable = imageName ?? (clearVirtualMemory ? "eboot.bin" : string.Empty);
+        var appliedPatchIds = new List<string>();
         foreach (var patch in _activePatches.Where(patch => string.Equals(patch.Executable, executable, StringComparison.OrdinalIgnoreCase)))
         {
             if (patch.TryApply(virtualMemory, programHeaders, imageBase, out var patchError))
             {
+                appliedPatchIds.Add(patch.Id);
                 Console.Error.WriteLine($"[PATCH] Applied '{patch.Name}' to {executable} ({patch.Writes.Count} lines, {patch.AppVersion}).");
             }
             else
@@ -380,7 +382,9 @@ public sealed class SelfLoader : ISelfLoader
                 patchableMemory,
                 programHeaders,
                 imageBase,
-                totalImageSize);
+                totalImageSize,
+                imageData,
+                appliedPatchIds);
             ApplySpinLoopNap(virtualMemory, patchableMemory, programHeaders, imageBase, totalImageSize, applicationInfo.Title, spinNapArena);
         }
 

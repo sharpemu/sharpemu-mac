@@ -620,18 +620,26 @@ internal static partial class MetalV2Presenter
         }
     }
 
+    private const int MaximumDrawableCount = 3;
+
     private static void ConfigureMetalLayer(nint device, nint layer)
     {
         MetalNative.SendVoid(layer, MetalNative.Selector("setDevice:"), device);
         MetalV2Native.SendVoidValue(layer, MetalNative.Selector("setPixelFormat:"), (nuint)PixelFormatBgra8Unorm);
         MetalNative.SendVoidBool(layer, MetalNative.Selector("setOpaque:"), true);
         MetalNative.SendVoidBool(layer, MetalNative.Selector("setFramebufferOnly:"), true);
-        MetalV2Native.SendVoidValue(layer, MetalNative.Selector("setMaximumDrawableCount:"), 3);
+        MetalV2Native.SendVoidValue(layer, MetalNative.Selector("setMaximumDrawableCount:"), MaximumDrawableCount);
         var displaySync = MetalNative.Selector("setDisplaySyncEnabled:");
-        if (MetalNative.SendBool(layer, MetalNative.Selector("respondsToSelector:"), displaySync))
+        var displaySyncSupported = MetalNative.SendBool(layer, MetalNative.Selector("respondsToSelector:"), displaySync);
+        if (displaySyncSupported)
         {
             MetalNative.SendVoidBool(layer, displaySync, _videoOptions.VSync);
         }
+
+        // The Metal counterpart of the Vulkan presenter's swapchain line: what paces a present.
+        Console.Error.WriteLine(
+            $"[LOADER][INFO] Metal presentation: vsync={_videoOptions.VSync} " +
+            $"display_sync={(displaySyncSupported ? "set" : "unsupported")} drawables={MaximumDrawableCount}");
     }
 
     private static void SyncDrawableSize()

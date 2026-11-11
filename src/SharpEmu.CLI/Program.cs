@@ -58,6 +58,12 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         ConfigureManagedPluginResolution();
+        if (args is [LaunchConfiguration.ShortcutArgument, var shortcutGame])
+        {
+            try { return SharpEmu.GUI.ShortcutLauncher.Run(shortcutGame); }
+            finally { SharpEmuLog.Shutdown(); }
+        }
+
         // Apply the game file before composition or static backend settings read the environment.
         // Keep the result for RunEmulator so settings and relative paths are resolved once.
         if (args.Length > 0 &&
@@ -166,7 +172,10 @@ internal static partial class Program
 
         // The executable uses the GUI subsystem, so CLI mode has to connect
         // itself to a console before the first write.
-        EnsureCliConsole();
+        if (!args.Contains(LaunchConfiguration.NoConsoleArgument, StringComparer.OrdinalIgnoreCase))
+        {
+            EnsureCliConsole();
+        }
         UseUtf8ConsoleOutput();
         if (isMitigatedChild && _preparedLaunch?.LogFile is { Length: > 0 } earlyLogFilePath)
         {
@@ -320,6 +329,11 @@ internal static partial class Program
         Log.Info(HostSystemInfo.RuntimeIsaSummary);
 
         ebootPath = Path.GetFullPath(ebootPath);
+        runtimeOptions = runtimeOptions with
+        {
+            ModsDirectory = new SharpEmu.Core.Mods.GameModRepository(
+                PerGameSettings.KeyFor(TryReadTitleId(ebootPath), ebootPath)).DirectoryPath,
+        };
         Log.Debug($"Full path: {ebootPath}");
 
         if (!File.Exists(ebootPath))
@@ -1127,6 +1141,10 @@ internal static partial class Program
         for (var i = 0; i < args.Length; i++)
         {
             var argument = args[i];
+            if (argument.Equals(LaunchConfiguration.NoConsoleArgument, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
             if (TrySplitOption(argument, "--console", out var consoleText))
             {
                 if (!string.Equals(consoleText, "ps5", StringComparison.OrdinalIgnoreCase))
@@ -1489,6 +1507,11 @@ internal static partial class Program
             runtimeOptions = default;
             logFilePath = null;
             return false;
+        }
+        var launcher = ApplicationSettings.Load();
+        if (!HasOption(args, "--console-language") && TryParseSystemLanguage(launcher.ConsoleLanguage, out var configuredLanguage))
+        {
+            systemLanguage = configuredLanguage;
         }
         foreach (var (name, value) in configured.BuildCliEnvironment(OperatingSystem.IsMacOS(), Environment.GetEnvironmentVariable))
         {

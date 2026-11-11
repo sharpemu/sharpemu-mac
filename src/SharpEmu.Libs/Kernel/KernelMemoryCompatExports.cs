@@ -1051,7 +1051,7 @@ public static partial class KernelMemoryCompatExports
     private static int WcschrCore(CpuContext ctx, ulong address, ushort needle)
     {
         const int maxReadBytes = 4096;
-        var readBuffer = GC.AllocateUninitializedArray<byte>(maxReadBytes);
+        Span<byte> readBuffer = stackalloc byte[maxReadBytes];
         const ulong maxUnits = 1_048_576;
         for (ulong index = 0; index < maxUnits;)
         {
@@ -1069,7 +1069,7 @@ public static partial class KernelMemoryCompatExports
                 remainingBytes);
             readBytes &= ~(WideCharSize - 1);
             if (readBytes == 0 ||
-                !TryReadCompat(ctx, unitAddress, readBuffer.AsSpan(0, readBytes)))
+                !TryReadCompat(ctx, unitAddress, readBuffer[..readBytes]))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -1077,7 +1077,7 @@ public static partial class KernelMemoryCompatExports
             for (var offset = 0; offset < readBytes; offset += WideCharSize)
             {
                 var unit = BinaryPrimitives.ReadUInt16LittleEndian(
-                    readBuffer.AsSpan(offset, WideCharSize));
+                    readBuffer.Slice(offset, WideCharSize));
                 if (unit == needle)
                 {
                     ctx[CpuRegister.Rax] = unitAddress + (ulong)offset;
@@ -5382,7 +5382,7 @@ public static partial class KernelMemoryCompatExports
         if (_resolvedGuestPaths.TryGetValue(guestPath, out var memoized) &&
             string.Equals(memoized.Root, roots, StringComparison.Ordinal))
         {
-            return memoized.Path;
+            return GameFileOverlay.ResolveFile(memoized.Path);
         }
 
         var profile = FileIoProfile.Begin();
@@ -5397,7 +5397,7 @@ public static partial class KernelMemoryCompatExports
             Interlocked.Increment(ref _resolvedGuestPathCount);
         }
 
-        return resolved;
+        return GameFileOverlay.ResolveFile(resolved);
     }
 
     private static string ResolveGuestPathUncached(string guestPath)
@@ -7758,7 +7758,10 @@ public static partial class KernelMemoryCompatExports
                     ? StatSymlinkTarget(ctx, statAddress, hostPath)
                     : StatResult(TryWriteSymlinkStat(ctx, statAddress, hostPath));
             case HostDirectoryIndex.Verdict.Absent when TrustsIndexAbsence(hostPath):
-                return OrbisErrno.ENOENT;
+                // The listing covers the game image only; a mod can add a name it lacks.
+                return OverlaySuppliesAbsentPath(hostPath, out var overlayDirectory)
+                    ? StatResult(TryWriteHostPathStat(ctx, statAddress, hostPath, overlayDirectory))
+                    : OrbisErrno.ENOENT;
         }
 
         if (IsHostSymlink(hostPath))
@@ -7935,6 +7938,32 @@ public static partial class KernelMemoryCompatExports
         !_writableApp0 && !App0Archive.IsMounted && IsUnderApp0(hostPath);
 
     /// <summary>
+    /// Whether a mounted mod supplies an /app0 path the game image's listing
+    /// lacks: a mod-only directory, or a mod-only file a caller has not yet
+    /// mapped through <see cref="GameFileOverlay.ResolveFile"/>.
+    /// </summary>
+    /// <remarks>
+    /// Asked only where an index absence would otherwise be final, so a name
+    /// the image has costs nothing extra and, without a mod, this is a null check.
+    /// </remarks>
+    private static bool OverlaySuppliesAbsentPath(string hostPath, out bool isDirectory)
+    {
+        isDirectory = false;
+        if (!GameFileOverlay.IsMounted)
+        {
+            return false;
+        }
+
+        if (GameFileOverlay.IsDirectory(hostPath))
+        {
+            isDirectory = true;
+            return true;
+        }
+
+        return !ReferenceEquals(GameFileOverlay.ResolveFile(hostPath), hostPath);
+    }
+
+    /// <summary>
     /// The length of a read-only game-image file that path resolution has
     /// already measured, without asking the host again.
     /// </summary>
@@ -7951,6 +7980,13 @@ public static partial class KernelMemoryCompatExports
     {
         length = -1;
         if (string.IsNullOrEmpty(hostPath) || !TrustsIndexAbsence(hostPath))
+        {
+            return false;
+        }
+
+        // Resolution measured the image's file; a mod that replaces it serves
+        // another length, which only the mod file itself can answer.
+        if (GameFileOverlay.IsMounted && !ReferenceEquals(GameFileOverlay.ResolveFile(hostPath), hostPath))
         {
             return false;
         }
@@ -7988,6 +8024,7 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryGetAprFileSizeCore(string hostPath, out ulong size)
     {
+        hostPath = GameFileOverlay.ResolveFile(hostPath);
         size = 0;
 
         string cachePath;
@@ -8042,6 +8079,15 @@ public static partial class KernelMemoryCompatExports
                 _aprFileSizeCache.TryAdd(cachePath, size);
                 return true;
             case HostDirectoryIndex.Verdict.Absent when TrustsIndexAbsence(cachePath):
+                // The file was mapped through the overlay above; a mod-only
+                // directory is the one name the image listing cannot know.
+                if (GameFileOverlay.IsDirectory(cachePath))
+                {
+                    size = 65536;
+                    _aprFileSizeCache.TryAdd(cachePath, size);
+                    return true;
+                }
+
                 _aprMissingImagePaths.TryAdd(cachePath, 0);
                 return false;
         }
@@ -8057,7 +8103,7 @@ public static partial class KernelMemoryCompatExports
                 return true;
             }
 
-            if (!new DirectoryInfo(cachePath).Exists)
+            if (!new DirectoryInfo(cachePath).Exists && !GameFileOverlay.IsDirectory(cachePath))
             {
                 if (IsUnderApp0(cachePath))
                 {
@@ -8079,6 +8125,7 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath, bool isDirectory)
     {
+        hostPath = isDirectory ? GameFileOverlay.DirectorySource(hostPath) ?? hostPath : GameFileOverlay.ResolveFile(hostPath);
         var profile = FileIoProfile.Begin();
         var ok = TryWriteHostPathStatCore(ctx, statAddress, hostPath, isDirectory);
         FileIoProfile.End(FileIoProfile.Op.HostStat, profile, failed: !ok);
@@ -8156,7 +8203,7 @@ public static partial class KernelMemoryCompatExports
         File.Exists(hostPath) || App0Archive.TryGetFile(hostPath, out _);
 
     private static bool HostDirectoryExists(string hostPath) =>
-        Directory.Exists(hostPath) || App0Archive.IsDirectory(hostPath);
+        Directory.Exists(hostPath) || GameFileOverlay.IsDirectory(hostPath) || App0Archive.IsDirectory(hostPath);
 
     private static string OpenFileName(Stream stream) => stream switch
     {
@@ -8325,9 +8372,10 @@ public static partial class KernelMemoryCompatExports
             ? Directory.EnumerateFileSystemEntries(hostPath).Select(Path.GetFileName)
             : [];
         var children = onDisk
+            .Concat(GameFileOverlay.List(hostPath))
             .Concat(App0Archive.List(hostPath).Select(static entry => entry.Name))
             .Where(static name => !string.IsNullOrEmpty(name))
-            .Distinct(HostFsPath.Comparer)
+            .Distinct(GameFileOverlay.PathComparer)
             .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase);
 
         return new[] { ".", ".." }.Concat(children).ToArray()!;
