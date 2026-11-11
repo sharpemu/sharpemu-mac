@@ -92,6 +92,17 @@ public sealed class DemonsSoulsIdleNapPatchTests
     }
 
     [Fact]
+    public void TwoMeasurementsOfOneClockGiveTheSameThreshold()
+    {
+        // Two boots on one host wrote 500001 and 500002 ticks: a 1 GHz clock measured about 2 and 4 ppm high.
+        Assert.Equal(500_000L, DemonsSoulsIdleNapPatch.ThresholdTicks(500, 1_000_002_345));
+        Assert.Equal(500_000L, DemonsSoulsIdleNapPatch.ThresholdTicks(500, 1_000_004_711));
+        Assert.Equal(2_400_000_000UL, DemonsSoulsIdleNapPatch.StableFrequency(2_399_998_112));
+        Assert.Equal(9_999UL, DemonsSoulsIdleNapPatch.StableFrequency(9_999));
+        Assert.Equal(0UL, DemonsSoulsIdleNapPatch.StableFrequency(0));
+    }
+
+    [Fact]
     public void AbPhasesAlternateFromTheEpoch()
     {
         Assert.True(IdleNapExports.IsNapPhase(now: 5, epoch: 0, periodTicks: 10));

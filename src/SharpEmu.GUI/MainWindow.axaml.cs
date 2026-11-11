@@ -447,13 +447,14 @@ public partial class MainWindow : Window
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
         AddHandler(KeyDownEvent, OnPreviewKeyDown, RoutingStrategies.Tunnel);
         CtxLaunch.Click += (_, _) => LaunchSelected();
+        CtxCreateShortcut.Click += async (_, _) => await CreateSelectedGameShortcutAsync();
         CtxOpenFolder.Click += (_, _) => OpenSelectedGameFolder();
-        CtxCopyPath.Click += async (_, _) =>
-            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.Path);
+        CtxCopyPath.Click += async (_, _) => await CopySelectedGamePathAsync();
         CtxCopyTitleId.Click += async (_, _) =>
             await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId);
         CtxGameSettings.Click += (_, _) => OpenSelectedGameSettings();
         CtxPatches.Click += async (_, _) => await OpenSelectedGamePatchesAsync();
+        CtxMods.Click += async (_, _) => await OpenSelectedGameModsAsync();
         CtxTrophies.Click += (_, _) => OpenSelectedGameTrophies();
         InitializeTrophies();
         CtxRemove.Click += (_, _) => RemoveSelectedFromLibrary();
@@ -1265,6 +1266,7 @@ public partial class MainWindow : Window
         RefreshLocalizedChoices();
         UpdateLogFilePathText();
         RefreshUpdateText();
+        RefreshVisibleGames();
         UpdateEmptyStateTexts();
         UpdateLibraryLayoutButton();
         UpdateTitleMusicControls();
@@ -1346,9 +1348,10 @@ public partial class MainWindow : Window
         {
             // Discord does not render activities without timestamps, so the
             // browsing state carries the launcher's start time.
-            var count = _allGames.Count == 1
+            var gameCount = GameVersions.Group(_allGames).Count();
+            var count = gameCount == 1
                 ? Localization.Instance.Get("Page.GameCount.One")
-                : Localization.Instance.Format("Page.GameCount.Other", _allGames.Count);
+                : Localization.Instance.Format("Page.GameCount.Other", gameCount);
             _discord.SetPresence(
                 Localization.Instance.Get("Discord.Browsing"),
                 count,
@@ -1999,6 +2002,8 @@ public partial class MainWindow : Window
             .Concat(_allGames.Where(game => game.Cover is null && game.CoverPath is not null))
             .Distinct()
             .ToArray();
+        var shortcutArt = _allGames.Where(game => game.BackgroundPath is not null)
+            .Select(game => (game.Path, game.BackgroundPath)).ToArray();
         _ = Task.Run(() =>
         {
             // Covers first: they are cheap and the most visible, so the grid
@@ -2045,6 +2050,15 @@ public partial class MainWindow : Window
                     Console.Error.WriteLine(
                         $"[GUI][WARN] Could not load cover '{requestedCoverPath}': {exception.Message}");
                 }
+            }
+
+            // Upgrade existing thumbnail splashes to their lossless originals without blocking the UI.
+            foreach (var (path, background) in shortcutArt)
+            {
+                if (generation != _detailLoadGeneration)
+                    return;
+                if (File.Exists(ShortcutSplashCache.PathForGame(path)))
+                    ShortcutSplashCache.Prepare(path, background);
             }
 
             foreach (var game in gamesToMeasure)
@@ -2371,12 +2385,13 @@ public partial class MainWindow : Window
     private void OnGameListDoubleTapped(object? sender, TappedEventArgs e)
     {
         var item = (e.Source as Visual)?.FindAncestorOfType<ListBoxItem>(includeSelf: true);
-        if (item?.DataContext is AddFolderTile)
+        if (item?.DataContext is not GameEntry)
         {
             e.Handled = true;
             return;
         }
 
+        e.Handled = true;
         LaunchSelected();
     }
 
@@ -2420,7 +2435,7 @@ public partial class MainWindow : Window
         CtxLaunch.IsEnabled = !_isRunning;
         CtxCopyTitleId.IsEnabled = game.TitleId is not null;
         CtxGameSettings.IsEnabled = true;
-        CtxPackZar.IsEnabled = !ZArchive.IsArchivePath(game.Path);
+        CtxPackZar.IsEnabled = GameVersions.PackableForGame(_allGames, game).Count > 0;
         CtxTrophies.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
         CtxPatches.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
     }
@@ -2428,7 +2443,13 @@ public partial class MainWindow : Window
     // Packs the selected game's folder into a .zar chosen by the user, beside the folder by default.
     private async Task PackSelectedAsZarAsync()
     {
-        if (GameList.SelectedItem is not GameEntry game || ZArchive.IsArchivePath(game.Path) ||
+        if (GameList.SelectedItem is not GameEntry selected)
+        {
+            return;
+        }
+
+        var versions = GameVersions.PackableForGame(_allGames, selected);
+        if (await SelectGameVersionAsync(versions, forPacking: selected.HasMultipleVersions) is not { } game ||
             Path.GetDirectoryName(game.Path) is not { } gameFolder)
         {
             return;
@@ -2461,7 +2482,8 @@ public partial class MainWindow : Window
         var destination = ArchiveDestination(picked);
 
         // A running game may hold files in the folder open, so it is never deleted then.
-        var dialog = new ZarPackDialog(game.Name, gameFolder, destination, canDeleteSource: !_isRunning);
+        var displayName = string.IsNullOrWhiteSpace(game.Version) ? game.Name : $"{game.Name} (v{game.Version})";
+        var dialog = new ZarPackDialog(displayName, gameFolder, destination, canDeleteSource: !_isRunning);
         dialog.MuteMusicChanged += SetTitleMusicMuted;
         try
         {
@@ -2529,9 +2551,10 @@ public partial class MainWindow : Window
         }
     }
 
-    private void OpenSelectedGameFolder()
+    private async void OpenSelectedGameFolder()
     {
-        if (GameList.SelectedItem is not GameEntry game)
+        if (GameList.SelectedItem is not GameEntry selected ||
+            await SelectGameVersionAsync(selected) is not { } game)
         {
             return;
         }
@@ -2575,6 +2598,15 @@ public partial class MainWindow : Window
         await Clipboard.SetTextAsync(text);
     }
 
+    private async Task CopySelectedGamePathAsync()
+    {
+        if (GameList.SelectedItem is GameEntry selected &&
+            await SelectGameVersionAsync(selected) is { } game)
+        {
+            await CopyToClipboardAsync(game.Path);
+        }
+    }
+
     private void RemoveSelectedFromLibrary()
     {
         if (GameList.SelectedItem is not GameEntry game)
@@ -2582,14 +2614,17 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!_settings.ExcludedGames.Contains(game.Path, GameLibraryPath.Comparer))
+        var versions = GameVersions.ForGame(_allGames, game);
+        foreach (var version in versions)
         {
-            _settings.ExcludedGames.Add(game.Path);
-            _settings.Save();
+            if (!_settings.ExcludedGames.Contains(version.Path, GameLibraryPath.Comparer))
+            {
+                _settings.ExcludedGames.Add(version.Path);
+            }
         }
 
-        _allGames.RemoveAll(g =>
-            string.Equals(g.Path, game.Path, GameLibraryPath.Comparison));
+        _settings.Save();
+        _allGames.RemoveAll(candidate => GameVersions.SameGame(candidate, game));
         GameList.SelectedItem = null;
         RefreshVisibleGames();
     }
@@ -2601,20 +2636,28 @@ public partial class MainWindow : Window
         var selectedPath = selectedBefore?.Path;
         var desired = new List<GameEntry>(_allGames.Count);
 
-        foreach (var game in _allGames)
+        foreach (var versions in GameVersions.Group(_allGames))
         {
-            if (query.Length == 0 ||
+            foreach (var version in versions)
+            {
+                version.SetVersionCount(versions.Count);
+            }
+
+            if (query.Length == 0 || versions.Any(game =>
                 game.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                 game.Path.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                (game.TitleId?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))
+                (game.TitleId?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false)))
             {
-                desired.Add(game);
+                desired.Add(versions.FirstOrDefault(game => ReferenceEquals(game, selectedBefore)) ?? versions[0]);
             }
         }
 
         GameLibraryReconciler.ReconcileVisibleGames(_visibleGames, desired);
 
-        var selectedAfter = ResolveLibrarySelection(_visibleGames, selectedPath);
+        var selectedAfter = selectedBefore is null
+            ? ResolveLibrarySelection(_visibleGames, selectedPath)
+            : _visibleGames.FirstOrDefault(game => GameVersions.SameGame(game, selectedBefore))
+                ?? ResolveLibrarySelection(_visibleGames, selectedPath);
         if (!ReferenceEquals(GameList.SelectedItem, selectedAfter))
         {
             GameList.SelectedItem = selectedAfter;
@@ -2865,16 +2908,35 @@ public partial class MainWindow : Window
         }
     }
 
-    private void LaunchSelected()
+    private async void LaunchSelected()
     {
         if (GameList.SelectedItem is AddFolderTile)
         {
             StartAddFolderFromTile();
         }
-        else if (GameList.SelectedItem is GameEntry game)
+        else if (!_isRunning && GameList.SelectedItem is GameEntry selected &&
+                 await SelectGameVersionAsync(selected) is { } game)
         {
             Launch(game.Path, game.Name, game.TitleId);
         }
+    }
+
+    private Task<GameEntry?> SelectGameVersionAsync(GameEntry game) =>
+        SelectGameVersionAsync(GameVersions.ForGame(_allGames, game));
+
+    private async Task<GameEntry?> SelectGameVersionAsync(IReadOnlyList<GameEntry> versions, bool forPacking = false)
+    {
+        if (_isClosing || Sheets.Top is not null || versions.Count == 0)
+        {
+            return null;
+        }
+
+        var chosen = versions.Count == 1 && !forPacking
+            ? versions[0]
+            : await Sheets.ShowAsync(new GameVersionDialog(versions, forPacking)) as GameEntry;
+        return !_isClosing && chosen is not null
+            ? _allGames.FirstOrDefault(game => game.Path.Equals(chosen.Path, GameLibraryPath.Comparison))
+            : null;
     }
 
     private void Launch(
@@ -3081,8 +3143,7 @@ public partial class MainWindow : Window
     private void OnEmulatorOutput(string line, bool isError)
     {
         _pendingLines.Enqueue((line, isError));
-        if (line.Contains("[LOADER][INFO]", StringComparison.Ordinal) &&
-            line.Contains(" window ready:", StringComparison.Ordinal))
+        if (EmulatorProcess.IsWindowReadyMessage(line))
         {
             Dispatcher.UIThread.Post(OnGameWindowShown);
         }

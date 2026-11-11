@@ -112,6 +112,11 @@ public sealed class Gen5MslArgumentLayout
                     Add(binding.Kind, MslArgumentFieldKind.Pointer, "fault_bits", 1, ResourceBytes);
                     Add(binding.Kind, MslArgumentFieldKind.Word, "fault_word_count", 1, WordBytes);
                     break;
+                case DescriptorBindingKind.DeviceAddressFallback:
+                    // No field: an MSL access the range table does not map resolves to no pointer and
+                    // reads zero or drops its store, so no fallback address is read. The binding only
+                    // selects the out-of-line device-address helpers (Gen5MslTranslator.EmitResourcePrelude).
+                    break;
                 case DescriptorBindingKind.FlattenedResourceTable:
                     Add(binding.Kind, MslArgumentFieldKind.Pointer, "flattened_table", 1, ResourceBytes);
                     Add(binding.Kind, MslArgumentFieldKind.Word, "flattened_table_words", 1, WordBytes);

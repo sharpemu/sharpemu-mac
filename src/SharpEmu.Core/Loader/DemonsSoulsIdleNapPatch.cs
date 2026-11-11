@@ -283,7 +283,21 @@ internal static class DemonsSoulsIdleNapPatch
     }
 
     internal static long ThresholdTicks(uint idleMicroseconds, ulong tscFrequency) =>
-        (long)UInt128.Min((UInt128)idleMicroseconds * tscFrequency / 1_000_000, int.MaxValue);
+        (long)UInt128.Min((UInt128)idleMicroseconds * StableFrequency(tscFrequency) / 1_000_000, int.MaxValue);
+
+    /// <summary>The frequency rounded to four significant digits. It is measured at startup and comes out
+    /// a few parts per million different each run, and the threshold derived from it is written into the
+    /// image's code, which the red-zone plan cache keys on: unrounded, no two boots share a plan.</summary>
+    internal static ulong StableFrequency(ulong measured)
+    {
+        var step = 1UL;
+        for (var value = measured; value >= 10_000; value /= 10)
+        {
+            step *= 10;
+        }
+
+        return (measured + step / 2) / step * step;
+    }
 
     internal static List<GuestBytePatcher.Patch> BuildPatches(
         long thresholdTicks,

@@ -64,6 +64,16 @@ into a `.zar` (`src/SharpEmu.GUI/ZarPackDialog.axaml.cs`).
 
 Game patches are described in [Game patches](../patches.md).
 
+Mods are described in [Game mods](../mods.md). On macOS a mod's file names are
+matched the way the game volume matches the game's own: without regard to case
+on a case-insensitive volume (the APFS default), exactly on a case-sensitive one.
+
+**Create shortcut** in a game's context menu puts `<game name>.app` on the
+Desktop: a small application bundle with the game's cover as its icon, whose
+launcher starts SharpEmu with `--shortcut <game path>`. The shortcut holds the
+absolute paths of SharpEmu and of the game, so it stops working when either is
+moved; delete it and create it again.
+
 ## Input
 
 Keyboard input reaches the game only while the SharpEmu window has focus.
@@ -142,6 +152,9 @@ SharpEmu writes everything under one data root:
 | `user/logs/` | Logs, traces, crash dumps and shader and frame dumps (`SHARPEMU_LOG_DIR` moves it) |
 | `user/savedata/<title ID>/` | Save data (`SHARPEMU_SAVEDATA_DIR` moves it) |
 | `user/patches/` | Game patches |
+| `user/mods/<title ID>/` | Game mods, one folder each, and which are enabled |
+| `user/redzone_cache/` | Red-zone patch plans, one per executable as loaded; safe to delete |
+| `user/game-art/shortcut-splashes/` | Splash images shown while a shortcut starts its game |
 | `user/zar-cache/` | Unpacked parts of `.zar` archives |
 | `user/pipeline_cache/<title ID>/metal-v2/` | Metal shader and pipeline caches |
 | `user/shader_seeds/<title ID>.seed` | Shader seed written by learn mode |
