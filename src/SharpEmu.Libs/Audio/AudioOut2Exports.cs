@@ -283,7 +283,7 @@ public static class AudioOut2Exports
             var delay = timestamp - Stopwatch.GetTimestamp();
             if (delay > 0)
             {
-                Thread.Sleep(TimeSpan.FromSeconds((double)delay / Stopwatch.Frequency));
+                HostBlockedTime.Sleep(TimeSpan.FromSeconds((double)delay / Stopwatch.Frequency));
             }
         }
 
@@ -1548,7 +1548,7 @@ public static class AudioOut2Exports
                Stopwatch.GetTimestamp() < deadline &&
                !HostSessionControl.IsShutdownRequested)
         {
-            Thread.Sleep((int)Math.Clamp(Math.Ceiling(queued - limit), 1, 50));
+            HostBlockedTime.Sleep((int)Math.Clamp(Math.Ceiling(queued - limit), 1, 50));
         }
     }
 
