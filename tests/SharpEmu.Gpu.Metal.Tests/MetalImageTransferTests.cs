@@ -24,6 +24,8 @@ public sealed partial class MetalImageTransferTests(ITestOutputHelper output)
         var variants = 0;
         foreach (var kind in Enum.GetValues<TileBlockKind>())
         {
+            // A kind past the tiler's pipeline tables has a kernel but no pipeline: its first transfer is fatal.
+            Assert.True((uint)kind < MetalTiler.KindCount, $"{kind} has no MetalTiler pipeline slot.");
             foreach (var direction in Enum.GetValues<MetalTileDirection>())
             {
                 var source = MetalTilerShaders.CreateBlockCopyLibrary(kind, direction);
@@ -152,7 +154,7 @@ public sealed partial class MetalImageTransferTests(ITestOutputHelper output)
         }
 
         output.WriteLine($"tiler cases={cases}");
-        Assert.Equal(44 + 39 + 9 + 15, cases);
+        Assert.Equal(44 + 39 + 9 + 15 + 10, cases);
         Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
     }
 

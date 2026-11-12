@@ -218,6 +218,8 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests(ITestOutputHelper ou
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
         host.LabelsAtCommit = false;
+        // The fill after the boundary is a blit, not a dispatch in a compute encoder opened for it.
+        host.CopiesShareCompute = false;
         Assert.True(host.DefersCopiesInCompute);
 
         _ = host.EnsureComputeEncoder();
@@ -515,6 +517,8 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests(ITestOutputHelper ou
         var host = rig.Host;
         // The encoder-boundary mode, where copies land at the next boundary rather than the commit.
         host.LabelsAtCommit = false;
+        // The fill is a blit, so no compute encoder is open for the label to wait for.
+        host.CopiesShareCompute = false;
         const ulong filled = GuestBase + 0x10000;
         _ = host.TakeLabelBarriers();
 
@@ -550,7 +554,9 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests(ITestOutputHelper ou
         // The encoder-boundary mode, where copies land at the next boundary rather than the commit.
         host.LabelsAtCommit = false;
 
-        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.Write64, 1, WindowedLabel, 3));
+        // A label the guest asked to be written back for the CPU: one with no cache action orders behind a
+        // device-only event instead (SHARPEMU_METAL_V2_LABEL_BARRIER_BY_CACHE_ACTION).
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.WriteBack64, 1, WindowedLabel, 3));
         Assert.Equal(1L, host.TakeLabelBarriers());
         Assert.NotEqual(0, host.LabelBarrierEvent);
         Assert.True(MetalNative.SendBool(

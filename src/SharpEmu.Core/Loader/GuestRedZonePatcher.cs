@@ -127,7 +127,14 @@ internal static partial class GuestRedZonePatcher
                 large ? new Progress(hostName, "scan", functionStarts.Length) : null);
             sites.Sort(static (left, right) => left.Address.CompareTo(right.Address));
             if (cachePath is not null)
+            {
                 WritePatchCache(cachePath, imageBase, sites, scan);
+                PrunePatchCache(cachePath);
+            }
+        }
+        else
+        {
+            MarkPatchCacheUsed(cachePath!);
         }
         var cacheStatus = cachePath is null ? "off" : cached ? "hit" : "miss";
         if (sites.Count == 0)

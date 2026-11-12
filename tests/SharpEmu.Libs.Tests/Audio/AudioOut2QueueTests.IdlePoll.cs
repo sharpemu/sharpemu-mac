@@ -24,8 +24,13 @@ public sealed partial class AudioOut2QueueTests
     private static readonly bool IdleWaitDisabled =
         Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_IDLE_WAIT") == "0";
 
+    // FedMilliseconds: from the end of the first refill to the last poll. LateRefills / LateMilliseconds:
+    // refills that came more than QueueDepth-1 grains after the poll before them, and the time past that
+    // cushion. A refill leaves the queue full, so only such a gap can let it run dry, and the clock
+    // loses at most the time past the cushion.
     private readonly record struct PollRun(
-        long Iterations, long Pushes, long EmptyPolls, uint MaxLevel, long WallMilliseconds, long ThreadCpuNanoseconds);
+        long Iterations, long Pushes, long EmptyPolls, uint MaxLevel, long WallMilliseconds, long ThreadCpuNanoseconds,
+        double FedMilliseconds, long LateRefills, double LateMilliseconds);
 
     // Wwise's audio thread: read the queue level, render and push as many grains as are available
     // (Advance, then a non-blocking Push), then wait on an event flag with a zero timeout.
@@ -47,13 +52,15 @@ public sealed partial class AudioOut2QueueTests
         var thread = new Thread(() =>
         {
             var ctx = new CpuContext(_memory, Generation.Gen5) { FsBase = PollFsBase };
-            long iterations = 0, pushes = 0, emptyPolls = 0;
+            long iterations = 0, pushes = 0, emptyPolls = 0, lateRefills = 0, lateTicks = 0, previousPollAt = 0, firstFedAt = 0;
             uint maxLevel = 0;
+            var cushionTicks = (long)Math.Ceiling(Stopwatch.Frequency * (double)grainSamples / 48000) * (queueDepth - 1);
             var cpuStart = OperatingSystem.IsMacOS() ? DarwinThreadCpuClock.Nanoseconds() : 0;
             var stopwatch = Stopwatch.StartNew();
             while (stopwatch.ElapsedMilliseconds < milliseconds)
             {
                 iterations++;
+                var pollAt = Stopwatch.GetTimestamp();
                 ctx[CpuRegister.Rdi] = context;
                 ctx[CpuRegister.Rsi] = PollLevelAddress;
                 ctx[CpuRegister.Rdx] = PollAvailableAddress;
@@ -76,6 +83,24 @@ public sealed partial class AudioOut2QueueTests
                     pushes++;
                 }
 
+                // The previous refill (or full read) left the queue full no earlier than its poll.
+                var fedAt = Stopwatch.GetTimestamp();
+                if (previousPollAt == 0)
+                {
+                    firstFedAt = fedAt;
+                }
+                else
+                {
+                    var late = fedAt - previousPollAt - cushionTicks;
+                    if (late > 0)
+                    {
+                        lateRefills++;
+                        lateTicks += late;
+                    }
+                }
+
+                previousPollAt = pollAt;
+
                 Assert.True(ctx.TryWriteUInt32(PollTimeoutSlot, 0));
                 ctx[CpuRegister.Rdi] = flag;
                 ctx[CpuRegister.Rsi] = 1;
@@ -87,7 +112,8 @@ public sealed partial class AudioOut2QueueTests
             }
 
             var cpuEnd = OperatingSystem.IsMacOS() ? DarwinThreadCpuClock.Nanoseconds() : 0;
-            run = new PollRun(iterations, pushes, emptyPolls, maxLevel, stopwatch.ElapsedMilliseconds, (long)(cpuEnd - cpuStart));
+            run = new PollRun(iterations, pushes, emptyPolls, maxLevel, stopwatch.ElapsedMilliseconds, (long)(cpuEnd - cpuStart),
+                (previousPollAt - firstFedAt) * 1000.0 / Stopwatch.Frequency, lateRefills, lateTicks * 1000.0 / Stopwatch.Frequency);
         }) { IsBackground = true };
         thread.Start();
         Assert.True(thread.Join(TimeSpan.FromSeconds(30)));
@@ -105,14 +131,25 @@ public sealed partial class AudioOut2QueueTests
         // 0x200 samples: 10.7 ms grains, four slots.
         var run = RunWwiseAudioThread(queueDepth: 4, grainSamples: 0x200, milliseconds: 200);
 
-        var grainPeriods = run.WallMilliseconds / (0x200 * 1000.0 / 48000);
+        var grainMilliseconds = 0x200 * 1000.0 / 48000;
+        var grainPeriods = run.WallMilliseconds / grainMilliseconds;
+        var summary = $"{run.Pushes} pushes, {run.Iterations} polls, {run.EmptyPolls} empty, " +
+            $"{run.LateRefills} late refills ({run.LateMilliseconds:F1} ms), fed {run.FedMilliseconds:F1} of {run.WallMilliseconds} ms";
         // About one poll per grain period; a zero-timeout poll loop makes hundreds of thousands.
-        Assert.True(run.Iterations <= 2 * grainPeriods + 8, $"{run.Iterations} polls in {run.WallMilliseconds} ms");
-        // The queue is kept fed: the four slots, then a grain per grain period.
-        Assert.True(run.Pushes >= 4 + grainPeriods - 3, $"{run.Pushes} pushes");
-        Assert.True(run.Pushes <= 4 + grainPeriods + 2, $"{run.Pushes} pushes");
+        Assert.True(run.Iterations <= 2 * grainPeriods + 8, summary);
+        // The wait wakes as a slot frees, a grain or less after the poll: a refill comes later than
+        // the three grains still queued only when the host held this thread off the CPU. A wait that
+        // oversleeps (to the 50 ms cap, or until the queue is empty) makes every refill late.
+        Assert.True(run.LateRefills * 4 <= run.Iterations, summary);
+        // The queue is kept fed: the four slots, then a grain per grain period from the first refill to
+        // the last poll (which leaves three or more queued), less the time the host held this thread
+        // past the queued grains (the clock restarts when the queue runs dry). A grain of slack for
+        // the clock's rounding. Not the wall time: the last wait ends it with no refill after it.
+        Assert.True(run.Pushes >= 4 + (run.FedMilliseconds - run.LateMilliseconds) / grainMilliseconds - 2, summary);
+        Assert.True(run.Pushes <= 4 + grainPeriods + 2, summary);
         Assert.Equal(4u, run.MaxLevel);
-        Assert.True(run.EmptyPolls <= 1, $"{run.EmptyPolls} polls found the queue empty");
+        // Only a late refill can find the queue empty.
+        Assert.True(run.EmptyPolls <= run.LateRefills + 1, summary);
     }
 
     [Fact]

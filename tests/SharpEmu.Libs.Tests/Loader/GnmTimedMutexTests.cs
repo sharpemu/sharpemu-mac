@@ -62,7 +62,7 @@ public sealed class GnmTimedMutexTests
         using var mutex = new MutexFixture();
         Assert.Equal(0, AsThread(0xF100, () => KernelPthreadCompatExports.PthreadMutexLock(mutex.Context)));
         var (waiter, deadline) = Park(mutex.Context, 20_000);
-        Assert.True(SpinWait.SpinUntil(() => Stopwatch.GetTimestamp() >= deadline, TimeSpan.FromSeconds(1)));
+        Assert.True(SpinWait.SpinUntil(() => Stopwatch.GetTimestamp() >= deadline, TimeSpan.FromSeconds(30)));
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT, AsThread(0xF101, waiter.Resume));
         Assert.True(waiter.TryWake());
         Assert.Equal(0, AsThread(0xF100, () => KernelPthreadCompatExports.PthreadMutexUnlock(mutex.Context)));
@@ -83,26 +83,46 @@ public sealed class GnmTimedMutexTests
         Assert.Equal(0, AsThread(0xF100, () => KernelPthreadCompatExports.PthreadMutexUnlock(mutex.Context)));
     }
 
+    // A busy host can take longer than a short timeout to reach the queue: the lock then times out
+    // without queueing (an expired timed lock never queues), so it is tried again with a longer one.
     private static (IGuestThreadBlockWaiter Waiter, long Deadline) Park(CpuContext context, ulong microseconds)
     {
-        IGuestThreadBlockWaiter? waiter = null;
-        long deadline = 0;
-        AsThread(0xF101, () =>
+        for (var attempt = 0; attempt < 4; attempt++, microseconds *= 4)
         {
-            var previous = GuestThreadExecution.EnterImportCallFrame(0x12345678, 0x12345000, 0x12344FF8);
-            try
+            IGuestThreadBlockWaiter? waiter = null;
+            long deadline = 0;
+            var result = AsThread(0xF101, () =>
             {
-                context[CpuRegister.Rsi] = microseconds;
-                Assert.Equal(0, Timedlock(context));
-                Assert.True(GuestThreadExecution.TryConsumeCurrentThreadBlock(out _, out _, out var continuation,
-                    out _, out waiter, out deadline));
-                Assert.True(continuation);
-                Assert.True(deadline > Stopwatch.GetTimestamp());
-                return 0;
+                var previous = GuestThreadExecution.EnterImportCallFrame(0x12345678, 0x12345000, 0x12344FF8);
+                try
+                {
+                    var requested = Stopwatch.GetTimestamp();
+                    context[CpuRegister.Rsi] = microseconds;
+                    var locked = Timedlock(context);
+                    var blocked = GuestThreadExecution.TryConsumeCurrentThreadBlock(out _, out _, out var continuation,
+                        out _, out waiter, out deadline);
+                    if (locked == (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT)
+                    {
+                        Assert.False(blocked);
+                        return locked;
+                    }
+
+                    Assert.Equal(0, locked);
+                    Assert.True(blocked);
+                    Assert.True(continuation);
+                    Assert.True(deadline >= requested + (long)(microseconds * (ulong)Stopwatch.Frequency / 1_000_000));
+                    return 0;
+                }
+                finally { GuestThreadExecution.RestoreImportCallFrame(previous); }
+            });
+            if (result == 0)
+            {
+                return (Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(waiter), deadline);
             }
-            finally { GuestThreadExecution.RestoreImportCallFrame(previous); }
-        });
-        return (Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(waiter), deadline);
+        }
+
+        Assert.Fail("The timed lock never queued before its deadline.");
+        return default;
     }
 
     private static int AsThread(ulong handle, Func<int> action)

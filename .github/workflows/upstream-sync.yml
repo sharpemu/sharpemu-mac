@@ -12,6 +12,15 @@
 # pushed, and committing conflict markers would be worse than failing, so the
 # job updates the mirror, reports the conflicting files and fails. A human then
 # runs scripts/mac/sync-upstream.sh locally and finishes the merge.
+#
+# Credentials. GitHub refuses a push made with the job's own GITHUB_TOKEN when
+# the pushed commits change a file under .github/workflows, and upstream changes
+# its workflows regularly; a pull request opened with that token also starts no
+# CI run. So the job uses the repository secret UPSTREAM_SYNC_TOKEN when it is
+# set: a fine-grained personal access token for this repository with read and
+# write access to Contents, Pull requests and Workflows. Without the secret the
+# job still syncs ranges that leave workflows alone, and for one that does not
+# it stops before pushing and says what it needs.
 name: Upstream sync
 
 on:
@@ -46,14 +55,47 @@ jobs:
           # Full history: the fast-forward and merge-base checks below need it,
           # and a shallow clone cannot merge an unrelated upstream history.
           fetch-depth: 0
+          # The pushes below go out with the checkout's credentials.
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
 
       - name: Sync upstream mirror and prepare merge branch
         id: sync
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          HAS_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN != '' }}
         run: |
           set -euo pipefail
+
+          # Called with the commits about to be pushed, as rev-list arguments,
+          # and the ref they go to. With the job's own token GitHub rejects
+          # such a push if any of them changes a workflow file; say so here,
+          # with what to do, instead of leaving a raw "remote rejected".
+          require_workflow_permission() {
+            local target="$1"
+            shift
+            if [ "${HAS_SYNC_TOKEN}" = "true" ]; then
+              return 0
+            fi
+            local touching
+            touching="$(git log --format='%h %s' "$@" -- .github/workflows | head -n 20)"
+            if [ -z "${touching}" ]; then
+              return 0
+            fi
+            {
+              echo "### Upstream sync needs a token"
+              echo
+              echo "Pushing \`${target}\` would change files under \`.github/workflows\`, which the job's own token may not do. Commits that touch them:"
+              echo
+              echo '```'
+              echo "${touching}"
+              echo '```'
+              echo
+              echo "Either add the repository secret \`UPSTREAM_SYNC_TOKEN\` (a fine-grained personal access token for this repository with read and write access to Contents, Pull requests and Workflows), or run \`scripts/mac/sync-upstream.sh\` locally and push the result."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Pushing ${target} changes workflow files and the UPSTREAM_SYNC_TOKEN secret is not set; see the job summary."
+            exit 1
+          }
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -74,6 +116,9 @@ jobs:
               echo "::error::upstream/main (${fetched_short}) is not a descendant of the upstream mirror branch; upstream rewrote history. Resolve by hand."
               exit 1
             fi
+            require_workflow_permission upstream "origin/upstream..${fetched}"
+          else
+            require_workflow_permission upstream "${fetched}"
           fi
           git push origin "${fetched}:refs/heads/upstream"
 
@@ -116,6 +161,7 @@ jobs:
             exit 1
           fi
 
+          require_workflow_permission "${sync_branch}" "origin/main..HEAD"
           git push origin "HEAD:refs/heads/${sync_branch}"
           {
             echo "has-work=true"
@@ -128,7 +174,8 @@ jobs:
         if: steps.sync.outputs.has-work == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # With the sync token the pull request starts CI; with the job's own it does not.
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           SYNC_BRANCH: ${{ steps.sync.outputs.sync-branch }}
           FETCHED_SHORT: ${{ steps.sync.outputs.fetched-short }}
           NEW_COMMITS: ${{ steps.sync.outputs.new-commits }}
