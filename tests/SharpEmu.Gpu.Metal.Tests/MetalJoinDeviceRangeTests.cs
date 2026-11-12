@@ -64,8 +64,6 @@ public sealed class MetalJoinDeviceRangeTests(ITestOutputHelper output)
         var host = rig.Host;
         host.UnionPasses = false;
         host.LabelsAtCommit = labelsAtCommit;
-        // The copy is held in the open pass, which is what the join has to order against.
-        host.DeferLabelWrites = true;
         host.JoinChecksDeviceRanges = check;
         var two = new[] { GpuFormat.R8G8B8A8Unorm, GpuFormat.R8G8B8A8Unorm };
         var one = new[] { GpuFormat.R8G8B8A8Unorm };

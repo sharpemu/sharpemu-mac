@@ -1017,7 +1017,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // never be read on the CPU for label replay before that producer has executed.
         if ((sourceIsFinal || deferStableGpuResult) &&
             (LabelsAtCommit ||
-             (DeferLabelWrites && _renderEncoder != 0) ||
+             (MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
              (DefersCopiesInCompute && _computeEncoder != 0)))
         {
             // Held to the commit, the copies need a command buffer to land in.
@@ -1729,10 +1729,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABELS_AT_COMMIT") != "0";
 
     internal bool LabelsAtCommit { get; set; } = DefaultLabelsAtCommit;
-
-    // Whether a label or command-processor copy recorded inside an open render pass waits for the pass end
-    // (MetalV2Diagnostics.DeferLabelWrites).
-    internal bool DeferLabelWrites { get; set; } = MetalV2Diagnostics.DeferLabelWrites;
 
     // Set by whatever needs the held copies in the stream now; the next encode lands them.
     private bool _landDeferredLabels;
