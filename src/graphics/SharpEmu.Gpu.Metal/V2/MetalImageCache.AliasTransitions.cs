@@ -45,7 +45,7 @@ internal sealed partial class MetalImageCache
             $"alias_transition_refused=[{refusals}] alias_cpu_read_runs={readRuns} " +
             $"alias_cpu_read_requested_mib={Mb(readBytes)} " +
             $"consumer_runs=[published:{consumers.Runs},skipped:{consumers.AlreadyPublished},gpu_writes_kept:{consumers.GpuWritesKept}] " +
-            $"consumer_run_mib={Mb(consumers.RunBytes)}";
+            $"consumer_run_mib={Mb(consumers.RunBytes)} upload_gathers={TakeUploadGathers()}";
     }
 
     // The pass replaces every visible texel of this image. Refuse when an alias owns any

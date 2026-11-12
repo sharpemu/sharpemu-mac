@@ -33,6 +33,25 @@ public static class MaterializationTally
 
     private static ThreadCounter[] Create() => Enumerable.Range(0, (int)Outcome.Count).Select(_ => new ThreadCounter()).ToArray();
 
+    // The timings only feed the report: one call in TimingSample reads the clock and its ticks count TimingSample
+    // times (the call counts stay exact). Two clock reads per stage per draw were a few percent of the resolving
+    // thread. SHARPEMU_MATERIALIZATION_TIMING_SAMPLE=1 times every call.
+    public static readonly int TimingSample =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_MATERIALIZATION_TIMING_SAMPLE"), out var sample)
+            ? (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Clamp(sample, 1, 1024))
+            : 16;
+
+    [ThreadStatic]
+    private static uint t_timingCalls;
+
+    /// <summary>The timestamp to time this call from, or 0 when this call is not sampled.</summary>
+    public static long StartTiming() =>
+        TimingSample == 1 || (++t_timingCalls & (uint)(TimingSample - 1)) == 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+
+    /// <summary>The scaled ticks since <paramref name="started"/> (from <see cref="StartTiming"/>), or 0.</summary>
+    public static long ElapsedTicks(long started) =>
+        started == 0 ? 0 : (System.Diagnostics.Stopwatch.GetTimestamp() - started) * TimingSample;
+
     public static void Note(Outcome outcome, long ticks, ResourceSnapshot? snapshot)
     {
         var index = (int)outcome;

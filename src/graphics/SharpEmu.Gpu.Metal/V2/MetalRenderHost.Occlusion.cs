@@ -55,9 +55,12 @@ internal sealed partial class MetalRenderHost
         // A shared buffer's contents pointer holds for the buffer's life: one message send at creation, not one per dump.
         internal readonly nint CountsContents = MetalNative.Send(counts, SelOcclusionContents);
         internal ulong Serial;
-        internal int Slot, Queue;
+        internal int Slot;
         internal int VisibilityMode = -1, VisibilitySlot = -1;
         internal bool CountedDraw, HasSnapshot;
+        // The queue whose running count each run of slots adds to, from its first slot on: one entry unless the
+        // pass went on across a queue switch (NativeOcclusionBeginQueue).
+        internal readonly List<(int FirstSlot, int Queue)> Segments = [];
     }
 
     private readonly List<OcclusionBatch> _oqBatches = [];
@@ -118,10 +121,32 @@ internal sealed partial class MetalRenderHost
         if ((uint)queue >= CommandStreamQueue.QueueCount) throw Fatal($"Invalid occlusion queue {queue}.");
     }
 
+    // SHARPEMU_METAL_V2_OCCLUSION_QUEUE_KEEPS_PASS=0 ends the open pass at every queue switch again.
+    internal bool OcclusionQueueKeepsPass { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_OCCLUSION_QUEUE_KEEPS_PASS") != "0";
+
+    private long _oqQueueSwitchesKept;
+
+    internal long OcclusionQueueSwitchesKept => _oqQueueSwitchesKept;
+
     private void NativeOcclusionBeginQueue(int queue)
     {
         if (NativeOcclusionEnabled) ValidateOcclusionQueue(queue);
         if (!NativeOcclusionEnabled || _oqQueue == queue) return;
+        // Each queue keeps its own running count, and a pass's slots add to the count of the queue they were
+        // counted for. At a switch the open pass goes on in a new slot that adds to the new queue's count, so
+        // the pass is not ended: Ghost of Tsushima alternates queues between submissions that draw into the
+        // same targets, and ending the pass at each switch stored and reloaded them (~25 times a frame).
+        if (OcclusionQueueKeepsPass && _oqOpen is { } open && open.Slot + 1 < OcclusionIntervalCapacity)
+        {
+            open.Slot++;
+            InitializeOcclusionSlot(open);
+            open.Segments.Add((open.Slot, queue));
+            _oqQueue = queue;
+            _oqQueueSwitchesKept++;
+            return;
+        }
+
         EndRendering();
         _oqQueue = queue;
     }
@@ -170,7 +195,8 @@ internal sealed partial class MetalRenderHost
             _oqBatches.Add(batch);
         }
         batch.Serial = SubmissionSerial;
-        batch.Queue = _oqQueue;
+        batch.Segments.Clear();
+        batch.Segments.Add((0, _oqQueue));
         batch.Slot = 0;
         batch.VisibilityMode = batch.VisibilitySlot = -1;
         batch.CountedDraw = batch.HasSnapshot = false;
@@ -233,12 +259,23 @@ internal sealed partial class MetalRenderHost
     private unsafe void EncodeOcclusionReduction(nint encoder, OcclusionBatch batch, uint length)
     {
         MetalNative.SendVoid(encoder, SelOcclusionPipeline, _oqPipeline);
-        MetalNative.SendSetBuffer(encoder, SelOcclusionBuffer, batch.Counts, 0, 0);
-        MetalNative.SendSetBuffer(encoder, SelOcclusionBuffer, batch.Results, 0, 1);
-        MetalNative.SendSetBuffer(encoder, SelOcclusionBuffer, _oqBank, (nuint)(batch.Queue * sizeof(ulong)), 2);
-        MetalNative.SendSetBytes(encoder, SelOcclusionBytes, (nint)(&length), sizeof(uint), 3);
-        MetalNative.SendDispatch(encoder, SelOcclusionDispatch,
-            new MtlSize { Width = 1, Height = 1, Depth = 1 }, new MtlSize { Width = 1, Height = 1, Depth = 1 });
+        // One prefix sum per run of slots, each carried from and into its own queue's count; the encoder is
+        // serial, so a later run of the same queue starts from the count the earlier one left.
+        var segments = batch.Segments;
+        for (var index = 0; index < segments.Count; index++)
+        {
+            var first = (uint)segments[index].FirstSlot;
+            if (first >= length) break;
+            var end = index + 1 < segments.Count ? Math.Min((uint)segments[index + 1].FirstSlot, length) : length;
+            var count = end - first;
+            MetalNative.SendSetBuffer(encoder, SelOcclusionBuffer, batch.Counts, (nuint)(first * sizeof(ulong)), 0);
+            MetalNative.SendSetBuffer(encoder, SelOcclusionBuffer, batch.Results, (nuint)(first * sizeof(ulong)), 1);
+            MetalNative.SendSetBuffer(encoder, SelOcclusionBuffer, _oqBank, (nuint)(segments[index].Queue * sizeof(ulong)), 2);
+            MetalNative.SendSetBytes(encoder, SelOcclusionBytes, (nint)(&count), sizeof(uint), 3);
+            MetalNative.SendDispatch(encoder, SelOcclusionDispatch,
+                new MtlSize { Width = 1, Height = 1, Depth = 1 }, new MtlSize { Width = 1, Height = 1, Depth = 1 });
+        }
+
         _oqReductions++;
     }
 

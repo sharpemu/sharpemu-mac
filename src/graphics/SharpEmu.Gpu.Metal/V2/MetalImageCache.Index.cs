@@ -126,6 +126,87 @@ internal sealed class MetalImagePageOwners
     // so a lock-free reader that finds it may keep reading it.
     private readonly int[]?[] _liveOwners = new int[]?[1 << CountRootBits];
 
+    // Images smaller than an owner page are listed per 64 KiB fine page instead (SHARPEMU_METAL_V2_IMAGE_FINE_PAGES=0 lists
+    // every image per 1 MiB page, as before): Ghost of Tsushima's texture pool packs hundreds of small images into each
+    // 1 MiB page, and a lookup there walked all of them; a large image, listed per 1 MiB page, is still walked once per
+    // page of a large range. _fineMasks marks, per 1 MiB page, which of its sixteen fine pages list an owner, so a range -
+    // a render target's, say, over pages a few small images share - walks only those. Versions stay per 1 MiB page.
+    public static readonly bool FinePagesEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_IMAGE_FINE_PAGES") != "0";
+    public const int FinePageBits = CountPageBits;
+    private const int FineSecondLevelBits = AddressSpaceBits - FirstLevelBits - FinePageBits;
+    private const int FineBucketEntries = 1 << FineSecondLevelBits;
+    private const ulong FineMaxBytes = 1UL << PageBits;
+    private const int FinePagesPerPage = 1 << (PageBits - FinePageBits);
+    private readonly List<ResourceSlotIdentifier>?[]?[] _fineFirstLevel =
+        new List<ResourceSlotIdentifier>?[]?[1 << FirstLevelBits];
+    private readonly ushort[]?[] _fineMasks = new ushort[]?[1 << FirstLevelBits];
+
+    public static bool IsFine(ulong size) => FinePagesEnabled && size < FineMaxBytes;
+
+    /// <summary>The fine owners listed over a 64 KiB page (images smaller than an owner page).</summary>
+    public List<ResourceSlotIdentifier>? FindFine(ulong finePage) =>
+        finePage < (1UL << (AddressSpaceBits - FinePageBits)) && _fineFirstLevel[finePage >> FineSecondLevelBits] is { } bucket
+            ? bucket[finePage & (FineBucketEntries - 1)]
+            : null;
+
+    /// <summary>Which fine pages of this 1 MiB page list an image smaller than an owner page: bit i, the i-th 64 KiB.</summary>
+    public ushort FineMask(ulong page) =>
+        IsValidPage(page) && _fineMasks[page >> SecondLevelBits] is { } bucket ? bucket[page & (BucketEntries - 1)] : (ushort)0;
+
+    /// <summary>Whether any image smaller than an owner page is listed inside this 1 MiB page.</summary>
+    public bool HasFineOwners(ulong page) => FineMask(page) != 0;
+
+    /// <summary>
+    /// The fine pages of an owner page that <c>[address, address + size)</c> covers, as <see cref="FineMask"/> bits:
+    /// bit i for the i-th 64 KiB. A tracker page lies inside one fine page, so a page-granular query finds every
+    /// image it shares a tracker page with on these fine pages too.
+    /// </summary>
+    public static uint FineBitsCovered(ulong page, ulong address, ulong size)
+    {
+        var pageStart = page << PageBits;
+        var start = Math.Max(address, pageStart);
+        var end = Math.Min(address + size, pageStart + (1UL << PageBits));
+        if (end <= start)
+        {
+            return 0;
+        }
+
+        var from = (int)((start - pageStart) >> FinePageBits);
+        var to = (int)((end - 1 - pageStart) >> FinePageBits);
+        return ((2u << to) - 1) & ~((1u << from) - 1);
+    }
+
+    private void AddFine(ulong address, ulong size, ResourceSlotIdentifier imageIdentifier, int delta)
+    {
+        var first = address >> FinePageBits;
+        var last = (address + size - 1) >> FinePageBits;
+        for (var finePage = first; finePage <= last; finePage++)
+        {
+            ref var bucket = ref _fineFirstLevel[finePage >> FineSecondLevelBits];
+            var page = finePage >> (PageBits - FinePageBits);
+            ref var masks = ref _fineMasks[page >> SecondLevelBits];
+            var bit = (ushort)(1 << (int)(finePage & (FinePagesPerPage - 1)));
+            if (delta > 0)
+            {
+                bucket ??= new List<ResourceSlotIdentifier>?[FineBucketEntries];
+                (bucket[finePage & (FineBucketEntries - 1)] ??= new List<ResourceSlotIdentifier>(4)).Add(imageIdentifier);
+                masks ??= new ushort[BucketEntries];
+                masks[page & (BucketEntries - 1)] |= bit;
+            }
+            else if (bucket?[finePage & (FineBucketEntries - 1)] is { } owners && owners.Remove(imageIdentifier) &&
+                owners.Count == 0 && masks is not null)
+            {
+                masks[page & (BucketEntries - 1)] &= (ushort)~bit;
+            }
+        }
+
+        for (var page = address >> PageBits; page <= (address + size - 1) >> PageBits; page++)
+        {
+            BumpVersion(page);
+        }
+    }
+
     public static bool IsValidPage(ulong page) => page < PageCount;
 
     public List<ResourceSlotIdentifier>? Find(ulong page) =>
@@ -146,6 +227,12 @@ internal sealed class MetalImagePageOwners
         }
 
         AdjustLiveOwners(address, size, 1);
+        if (IsFine(size))
+        {
+            AddFine(address, size, imageIdentifier, 1);
+            return;
+        }
+
         for (var page = first; page < lastExclusive; page++)
         {
             GetOrCreate(page).Add(imageIdentifier);
@@ -164,10 +251,17 @@ internal sealed class MetalImagePageOwners
             return;
         }
 
-        for (var page = first; page < lastExclusive; page++)
+        if (IsFine(size))
         {
-            Find(page)?.Remove(imageIdentifier);
-            BumpVersion(page);
+            AddFine(address, size, imageIdentifier, -1);
+        }
+        else
+        {
+            for (var page = first; page < lastExclusive; page++)
+            {
+                Find(page)?.Remove(imageIdentifier);
+                BumpVersion(page);
+            }
         }
 
         AdjustLiveOwners(address, size, -1);

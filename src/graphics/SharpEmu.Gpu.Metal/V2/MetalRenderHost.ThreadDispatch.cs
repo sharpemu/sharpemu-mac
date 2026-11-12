@@ -11,8 +11,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// With DISPATCH_INITIATOR.USE_THREAD_DIMENSIONS the guest record holds thread counts, which
 /// Metal's indirect dispatch cannot take. Reading them on the CPU waits for the GPU work that
 /// wrote them (GTA V's ray-traced passes size theirs from a compute pass the same frame, a
-/// ~40 ms wait a frame). Instead a one-thread kernel on the dispatch's own (serial) compute
-/// encoder reads the record and writes the group counts - rounded up per axis as
+/// ~40 ms wait a frame). Instead a one-thread kernel on the dispatch's own compute encoder,
+/// ordered as the guest dispatch would be and with a barrier between it and the dispatch when
+/// the encoder is concurrent, reads the record and writes the group counts - rounded up per axis as
 /// RenderExecutor.GroupsFromThreads, placed on the pipeline's physical axes - for
 /// dispatchThreadgroupsWithIndirectBuffer, and the thread counts as the program's thread
 /// limits, which mask the threads of the last group past them.
@@ -124,6 +125,10 @@ internal sealed partial class MetalRenderHost
         parameters[6] = (uint)shift;
         parameters[7] = limits.IsValid ? 1u : 0u;
 
+        // The kernel reads counts earlier work may have written: it takes the guest dispatch's
+        // ordering (a concurrent encoder runs nothing in order unless a barrier says so). The
+        // recorder passes no overlap hint for this path, so a barrier still owed is recorded.
+        OrderGuestDispatch(encoder);
         MetalNative.SendVoid(encoder, SelSetComputePipelineState, ThreadDispatchPipeline());
         _boundComputePipeline = _threadDispatchPipeline;
         MetalNative.SendSetBuffer(encoder, SelSetComputeBuffer, range.Buffer, (nuint)range.Offset, 0);
@@ -141,8 +146,14 @@ internal sealed partial class MetalRenderHost
             new MtlSize { Width = 1, Height = 1, Depth = 1 },
             new MtlSize { Width = 1, Height = 1, Depth = 1 });
 
-        // The encoder is serial: the dispatch below starts once the kernel's stores are done.
-        // Its slots 0-3 are rebound by the stage bindings.
+        // The dispatch below reads the kernel's group counts and thread limits. A serial encoder
+        // starts it once the kernel's stores are done; a concurrent one (DispatchOverlap) only
+        // past a barrier. Its slots 0-3 are rebound by the stage bindings.
+        if (_computeEncoderConcurrent)
+        {
+            MetalV2Native.SendMemoryBarrierScope(encoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers);
+        }
+
         EnsureComputePipelineState(encoder, entry);
         ApplyStageBindings(graphics: false);
         MetalV2Native.SendDispatchIndirect(
@@ -162,6 +173,7 @@ internal sealed partial class MetalRenderHost
             entry,
             "dispatch-indirect-threads",
             WorkShape.Threads(entry.ThreadsPerThreadgroup));
+        CommitAfterWrittenGuestViews();
         return true;
     }
 

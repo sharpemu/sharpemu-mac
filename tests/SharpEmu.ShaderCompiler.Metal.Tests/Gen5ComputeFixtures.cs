@@ -245,6 +245,41 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 16);
 
+    // Early outs into one exit tail, the shape Ghost of Tsushima's clustered-light pixel shader has: B1 (inside the
+    // branch B0 can skip) and the body of loop L both jump to X, a short block that ends the program, while every other
+    // path leaves L for J. Nothing post-dominates B0 and L has two exits, so the arms of B0 used to meet L twice and the
+    // shader ran from the dispatcher. s0 = 3 skips to L (4), 5 leaves through X from B1 (64), 7 leaves through X from
+    // L's second trip (67) and 9 runs B2 and all of L (6).
+    public static Gen5ComputeFixture EarlyOutTail(uint selector) => new(
+        $"early-out-tail-{selector}",
+        [
+            0xBE800380 | selector,  // 0x00 s_mov_b32 s0, selector
+            0xBE810380,             // 0x04 s_mov_b32 s1, 0
+            0xBE820380,             // 0x08 s_mov_b32 s2, 0
+            0xBF068300,             // 0x0C B0: s_cmp_eq_u32 s0, 3
+            0xBF850003,             // 0x10 s_cbranch_scc1 L
+            0xBF068500,             // 0x14 B1: s_cmp_eq_u32 s0, 5
+            0xBF85000D,             // 0x18 s_cbranch_scc1 X
+            0x80018201,             // 0x1C B2: s_add_u32 s1, s1, 2
+            0x80028102,             // 0x20 L: s_add_u32 s2, s2, 1
+            0xBF068700,             // 0x24 s_cmp_eq_u32 s0, 7
+            0xBF840002,             // 0x28 s_cbranch_scc0 N
+            0xBF068202,             // 0x2C s_cmp_eq_u32 s2, 2
+            0xBF850007,             // 0x30 s_cbranch_scc1 X
+            0x80018101,             // 0x34 N: s_add_u32 s1, s1, 1
+            0xBF0A8402,             // 0x38 s_cmp_lt_u32 s2, 4
+            0xBF85FFF8,             // 0x3C s_cbranch_scc1 L
+            0x7E020201,             // 0x40 J: v_mov_b32 v1, s1
+            0xE0700000, 0x80020100, // 0x44 buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000,             // 0x4C s_endpgm
+            0x8001C001,             // 0x50 X: s_add_u32 s1, s1, 64
+            0x7E020201,             // 0x54 v_mov_b32 v1, s1
+            0xE0700000, 0x80020100, // 0x58 buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000,             // 0x60 s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 16);
+
     // LDS round trip: write a literal through workgroup-shared memory, barrier,
     // read it back, and store it to buffer 0.
     public static readonly Gen5ComputeFixture Lds = new(

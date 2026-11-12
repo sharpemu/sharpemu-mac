@@ -98,6 +98,16 @@ public static partial class Gen5MslTranslator
         private static readonly bool RelaxedStructureRetry =
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_RELAXED_STRUCTURE") != "0";
 
+        // SHARPEMU_MSL_EXIT_TAILS=0 skips the third attempt (see TryBuildStructuredBodyCore), so a program only it
+        // structures runs from the dispatcher instead.
+        private static readonly bool ExitTailRetry =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_EXIT_TAILS") != "0";
+
+        /// <summary>Set for the third attempt: short blocks that end the program and are reached from several places are
+        /// written out again, followed by the program's exit, wherever an edge reaches them.</summary>
+        private bool _duplicateExitTails;
+        private bool[]? _exitTails;
+
         private bool TryBuildStructuredBody(IReadOnlyList<ShaderBlock> blocks, out string body)
         {
             var built = TryBuildStructuredBody(blocks, out StringBuilder? text);
@@ -146,6 +156,30 @@ public static partial class Gen5MslTranslator
             try
             {
                 var built = TryAssembleStructuredBody(blocks, out body);
+                if (!built && ExitTailRetry && _stage != Gen5MslStage.Mesh)
+                {
+                    // Early outs - a branch from inside nested ifs or a loop to a short block that ends the program - cross
+                    // the nesting the first two attempts need. The third copies such a block, with the exit, to each place
+                    // that jumps to it, and builds dominance and loops as if those edges were not there.
+                    var relaxedFailure = _structureFailure;
+                    _structureFailure = null;
+                    _duplicateExitTails = true;
+                    try
+                    {
+                        built = TryAssembleStructuredBody(blocks, out body);
+                    }
+                    finally
+                    {
+                        _duplicateExitTails = false;
+                        _exitTails = null;
+                    }
+
+                    if (!built)
+                    {
+                        _structureFailure = $"{relaxedFailure ?? "unrecorded shape"} (exit tails: {_structureFailure ?? "unrecorded shape"})";
+                    }
+                }
+
                 if (!built)
                 {
                     _structureFailure = $"{_structureFailure ?? "unrecorded shape"} (first attempt: {strictFailure ?? "unrecorded shape"})";
@@ -172,6 +206,32 @@ public static partial class Gen5MslTranslator
                 _successors[index] = terminator.Kind == TerminatorKind.CondJump
                     ? [terminator.TrueTarget, terminator.FalseTarget]
                     : [terminator.TrueTarget];
+            }
+
+            if (_duplicateExitTails)
+            {
+                _exitTails = FindExitTails(count);
+                if (_exitTails is null)
+                {
+                    return false;
+                }
+
+                // An edge into a tail ends the program, so it never has to rejoin anything: it leaves the graph that
+                // dominance, post-dominance and loops are built from (a block left with no way on goes to the exit).
+                // The emitter still writes the branch, and the arrival copies the tail (TryEnterBlock).
+                for (var index = 0; index < count; index++)
+                {
+                    var successors = _successors[index];
+                    successors.RemoveAll(successor => successor >= 0 && _exitTails[successor]);
+                    if (successors.Count == 0)
+                    {
+                        successors.Add(ExitTarget);
+                    }
+                    else if (successors.Count == 2 && successors[0] == successors[1])
+                    {
+                        successors.RemoveAt(1);
+                    }
+                }
             }
 
             _idom = Dominators(count);
@@ -500,6 +560,35 @@ public static partial class Gen5MslTranslator
             return true;
         }
 
+        // Short blocks that end the program (straight to the exit) and that more than one block jumps to; null when none.
+        private bool[]? FindExitTails(int count)
+        {
+            var predecessors = new int[count];
+            for (var index = 0; index < count; index++)
+            {
+                foreach (var successor in _successors[index])
+                {
+                    if (successor >= 0)
+                    {
+                        predecessors[successor]++;
+                    }
+                }
+            }
+
+            bool[]? tails = null;
+            for (var index = 1; index < count; index++)
+            {
+                var terminator = _blockTerminators[index];
+                if (predecessors[index] >= 2 && terminator.Kind == TerminatorKind.Jump && terminator.TrueTarget == ExitTarget &&
+                    _blockText[index].Length <= MaxDuplicatedLatchChars)
+                {
+                    (tails ??= new bool[count])[index] = true;
+                }
+            }
+
+            return tails;
+        }
+
         /// <summary>Resolves arriving at <paramref name="node"/> from the statement
         /// just emitted. A back edge to the enclosing loop's header is a continue and
         /// the edge that leaves it is a break; an edge to an outer loop's header or exit,
@@ -509,6 +598,15 @@ public static partial class Gen5MslTranslator
         /// block itself should now be emitted inline.</summary>
         private bool TryEnterBlock(StringBuilder text, int node, int indent)
         {
+            if (_exitTails is { } tails && node >= 0 && tails[node])
+            {
+                AppendIndented(text, Gen5MslDump.Enabled ? $"{{ // exit tail {node}" : "{", indent);
+                AppendBlockText(text, _blockText[node], indent + 1);
+                AppendExit(text, indent + 1);
+                AppendIndented(text, "}", indent);
+                return false;
+            }
+
             var innermost = _openLoops.Count != 0 ? _openLoops[^1] : null;
             if (innermost is not null && node == innermost.Header)
             {

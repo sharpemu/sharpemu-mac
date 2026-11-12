@@ -2146,6 +2146,7 @@ internal sealed partial class MetalRenderHost
             "dispatch",
             WorkShape.Groups(groupsX, groupsY, groupsZ, entry.ThreadsPerThreadgroup));
         TraceDispatchGds();
+        CommitAfterWrittenGuestViews();
     }
 
     // SHARPEMU_METAL_V2_TRACE_INDIRECT_DISPATCH=<hash>[,<hash>...]: the group counts those programs'
@@ -2238,6 +2239,7 @@ internal sealed partial class MetalRenderHost
             entry,
             "dispatch-indirect",
             WorkShape.Threads(entry.ThreadsPerThreadgroup));
+        CommitAfterWrittenGuestViews();
         return true;
     }
 

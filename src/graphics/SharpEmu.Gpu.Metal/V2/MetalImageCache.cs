@@ -44,6 +44,12 @@ internal interface IMetalImageCacheOwner
     // are not settled yet.
     bool HasPendingGpuWrite(ulong address, ulong size);
 
+    // Copies the guest bytes of a range into its staged (ring) copy on the GPU, behind the work still
+    // writing them, so a transfer reading the staged copy next sees what that work leaves there.
+    void GatherStagedRange(ulong address, in MetalGuestRange staging)
+    {
+    }
+
     // HasPendingGpuWrite for each of pending.Length adjacent slices of sliceSize bytes from
     // address, marking the ones that are pending; true when any is.
     bool MarkPendingGpuWrites(ulong address, ulong sliceSize, Span<bool> pending)
@@ -1372,6 +1378,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             _pageOwners.VersionSum(start, end - start), _stencilOwnersVersion,
             aliases, aliases is null ? 0 : AliasVersion(image, aliases));
     }
+
+    /// <summary>
+    /// <see cref="TextureStampMayHold"/> for a caller that skips the reacquire and checks deferred refreshes itself: the
+    /// stencil owners are as stamped too, and with <paramref name="imageSetUnchanged"/> (no image came or went since the
+    /// pass that last confirmed the stamp) no owner page can have moved.
+    /// </summary>
+    public bool StampHoldsUnlocked(in TextureMemoStamp stamp, bool imageSetUnchanged) =>
+        Volatile.Read(ref stamp.Image.BindingVersion) == stamp.ImageVersion &&
+        stamp.StencilOwners == Volatile.Read(ref _stencilOwnersVersion) &&
+        (stamp.Others is null || AliasVersion(stamp.Image, stamp.Others) == stamp.OthersVersion) &&
+        (imageSetUnchanged || _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) == stamp.PageVersions);
 
     /// <summary>
     /// Whether a stamp still holds, read without the lock: a hint for skipping the lookup, which
@@ -2770,13 +2787,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
         var residentSize = residentEnd - residentStart;
         var whole = residentSize <= TransferPieceBytes
-            ? _guestMemory.Resolve(description.Data.Address + residentStart, residentSize)
+            ? ResolveUploadSource(description.Data.Address + residentStart, residentSize)
             : default;
         bool moved;
         if (whole.IsValid && whole.Size >= residentSize)
         {
             var stencil = description.HasStencil
-                ? _guestMemory.Resolve(description.Stencil.Address, description.Stencil.Size)
+                ? ResolveUploadSource(description.Stencil.Address, description.Stencil.Size)
                 : default;
             moved = EncodeUpload(
                 context, in description, ResidentRange(image), whole, stencil, image.Texture,
@@ -2835,7 +2852,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // ends are where its levels' transfers start and stop, so cutting there loses none.
         start = Math.Max(start, residentStart);
         end = Math.Min(end, residentEnd);
-        var source = _guestMemory.Resolve(description.Data.Address + start, end - start);
+        var source = ResolveUploadSource(description.Data.Address + start, end - start);
         if (!source.IsValid || source.Size < end - start)
         {
             return false;
@@ -2938,6 +2955,40 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // Moves an image that is too large to map or stage whole, a run of layers at a time.
     // Layers that are not one window-resident span are cut into the runs that are, so an
     // image whose guest range crosses a window edge still lands whole.
+    // SHARPEMU_METAL_V2_UPLOAD_GATHER=0 lets an upload read a staged range as the CPU copied it, pending GPU writes or not.
+    private static readonly bool UploadGatherEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_UPLOAD_GATHER") != "0";
+
+    private long _uploadGathers;
+
+    /// <summary>Uploads whose staged source the GPU gathered behind pending writes, since the last call.</summary>
+    public long TakeUploadGathers() => Interlocked.Exchange(ref _uploadGathers, 0);
+
+    // The GPU view of guest bytes an upload reads. A range one window covers is read in place, after
+    // everything recorded before it. Any other range is staged: the CPU copies what guest memory holds
+    // right now, which misses whatever recorded or in-flight GPU work has yet to store there - the retile
+    // of the alias an image was just handed over from, above all. Those staged bytes are gathered again
+    // on the GPU, behind that work. Black Myth: Wukong's sky capture hands its six faces between 1- to
+    // 6-layer images through guest memory; whenever a window edge cut their range (it moves with the
+    // command buffers), a face came back as whatever the transient memory held before - stale bytes
+    // read as half floats, NaN and Inf that the sky light and Lumen's history then kept, tinting the
+    // characters of the Erlang cinematic white, purple, red, green or blue in about half the runs.
+    private MetalGuestRange ResolveUploadSource(ulong address, ulong size, bool whole = false)
+    {
+        var source = _guestMemory.Resolve(address, size, whole);
+        if (UploadGatherEnabled && source.IsValid && !_guestMemory.IsInPlace(source))
+        {
+            var staged = Math.Min(size, source.Size);
+            if (_owner.HasPendingGpuWrite(address, staged))
+            {
+                _owner.GatherStagedRange(address, source with { Size = staged });
+                _uploadGathers++;
+            }
+        }
+
+        return source;
+    }
+
     private bool UploadInPieces(IMetalSubmissionContext context, MetalCachedImage image)
     {
         ref readonly var description = ref image.Description;
@@ -2956,7 +3007,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             var stencil = description.HasStencil
-                ? _guestMemory.Resolve(description.Stencil.Address, description.Stencil.Size)
+                ? ResolveUploadSource(description.Stencil.Address, description.Stencil.Size)
                 : default;
             return EncodeUpload(
                 context, in description, ResidentRange(image), source, stencil, image.Texture,
@@ -2979,7 +3030,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             // A piece past the run size - a single layer that large - is past what the
             // ring stages whole, so only a window may carry it in one transfer.
             var piece = pieceSize <= TransferPieceBytes
-                ? _guestMemory.Resolve(description.Data.Address + pieceBase, pieceSize)
+                ? ResolveUploadSource(description.Data.Address + pieceBase, pieceSize)
                 : _guestMemory.ResolveWritable(description.Data.Address + pieceBase, pieceSize);
             if (!piece.IsValid || piece.Size < pieceSize)
             {
@@ -2990,7 +3041,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             var stencilPiece = description.HasStencil && stencilLayerBytes != 0
-                ? _guestMemory.Resolve(
+                ? ResolveUploadSource(
                     description.Stencil.Address + (stencilLayerBytes * first), stencilLayerBytes * count)
                 : default;
             var range = new SubresourceRange(0, description.Resources.Levels, first, count);
@@ -3414,7 +3465,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             // Staged whole: a run past the ring's cap is one subresource the transfer cannot
             // cut (PlanUploadRuns), and a prefix of it would be refused as too short.
             var source = run.Staged
-                ? _guestMemory.Resolve(address + run.Offset, run.Size, whole: true)
+                ? ResolveUploadSource(address + run.Offset, run.Size, whole: true)
                 : _guestMemory.ResolveWritable(address + run.Offset, run.Size);
             if (!source.IsValid || source.Size < run.Size)
             {
@@ -3423,7 +3474,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             var stencil = stencilLayerBytes != 0 && layerBytes != 0
-                ? _guestMemory.Resolve(
+                ? ResolveUploadSource(
                     description.Stencil.Address + (stencilLayerBytes * (run.Offset / layerBytes)),
                     stencilLayerBytes * Math.Max(1UL, run.Size / layerBytes))
                 : default;

@@ -122,6 +122,41 @@ public sealed class OverlayTelemetryTests : IDisposable
     }
 
     [Fact]
+    public void FramesBetweenCapturedOnesShowTheLastCapturedRenderBreakdown()
+    {
+        RenderPhaseProfile.SetOverlayCapture(true, true);
+        Assert.True(RenderPhaseProfile.OverlayPhaseSample == 1 || RenderPhaseProfile.OverlayPhasesSampled);
+        var start = Stopwatch.GetTimestamp();
+        OverlayTelemetry.EndRenderFrame(start, new long[(int)RenderPhaseProfile.Phase.Count], null);
+
+        var phases = new long[(int)RenderPhaseProfile.Phase.Count];
+        phases[(int)RenderPhaseProfile.Phase.CommandDrawTranslation] = 6 * Ms;
+        phases[(int)RenderPhaseProfile.Phase.FrameSlotWait] = 8 * Ms;
+        var segments = new RenderSegmentBuffer();
+        segments.Append((int)RenderPhaseProfile.Phase.CommandDrawTranslation, start, start + 6 * Ms);
+        segments.Append((int)RenderPhaseProfile.Phase.FrameSlotWait, start + 6 * Ms, start + 14 * Ms);
+        OverlayTelemetry.EndRenderFrame(start + 16 * Ms, phases, segments);
+        // A frame the render thread did not capture (RenderPhaseProfile.OverlayPhaseSample), shorter than the captured one.
+        OverlayTelemetry.EndRenderFrame(start + 26 * Ms, null, null);
+        OverlayTelemetry.BuildPendingForTests();
+
+        var frame = OverlayTelemetry.DataSource.Capture().Frames[^1];
+        Assert.Equal(10f, frame.FrameMs, 2);
+        if (RenderPhaseProfile.OverlayPhaseSample == 1)
+        {
+            return;
+        }
+
+        // 6 ms busy and 8 ms waiting in a 16 ms frame, scaled to this 10 ms one.
+        Assert.Equal(6f * 10f / 14f, frame.RenderBusyMs, 2);
+        Assert.Equal(8f * 10f / 14f, frame.RenderWaitMs, 2);
+        Assert.Contains(frame.Costs, cost => cost.NameId == (int)RenderPhaseProfile.Phase.CommandDrawTranslation);
+        var render = frame.Segments.Where(segment => segment.Lane == OverlayLane.Render).ToArray();
+        Assert.Equal(2, render.Length);
+        Assert.All(render, segment => Assert.True(segment.EndMs <= frame.FrameMs + 0.001f));
+    }
+
+    [Fact]
     public void HleCallsBecomeCostsWithWaitsSeparated()
     {
         OverlayTelemetry.DataSource.SetCaptureDemand(OverlayCaptureDemand.HleCalls);

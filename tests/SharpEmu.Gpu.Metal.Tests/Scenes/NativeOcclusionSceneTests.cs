@@ -258,6 +258,44 @@ public sealed class NativeOcclusionSceneTests(ITestOutputHelper output) : SceneT
         Assert.Equal(0UL, reset);
     }
 
+    // A pass that goes on across a switch to another queue and back (SHARPEMU_METAL_V2_OCCLUSION_QUEUE_KEEPS_PASS) adds
+    // each draw to the count of the queue it was drawn on, as ending the pass at each switch did.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void APassAcrossAQueueSwitchKeepsEachQueuesCount(bool keepPass)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        rig.Host.NativeOcclusionEnabled = true;
+        rig.Host.OcclusionQueueKeepsPass = keepPass;
+        var graphicsQuery = Query(rig);
+        var computeQuery = Query(rig);
+        var target = rig.ColorTarget(Size, Size);
+        var state = new SceneState(Size, Size).ColorTarget(0, target, Size, Size);
+        state.Context[Cx.DbCountControl] = 1u << 8;
+        var first = new ScenePm4();
+        Dump(first, graphicsQuery);
+        rig.DrawMesh(first, state, SceneDraws.Quad(0.1f, 1, 0, 0));
+        var compute = new ScenePm4();
+        Dump(compute, computeQuery);
+        Dump(compute, computeQuery + 8);
+        var second = new ScenePm4();
+        rig.DrawMesh(second, state, SceneDraws.Quad(0.1f, 1, 0, 0));
+        Dump(second, graphicsQuery + 8);
+        var keptBefore = rig.Host.OcclusionQueueSwitchesKept;
+        rig.Enqueue(first.ToArray());
+        rig.Enqueue(compute.ToArray(), queue: 0x20);
+        rig.Enqueue(second.ToArray());
+        rig.Drain();
+        Assert.Equal(2UL * Size * Size, Delta(rig, graphicsQuery));
+        Assert.Equal(0UL, Delta(rig, computeQuery));
+        Assert.True(rig.Host.TryReadOcclusionCounter(0, out var graphicsCount));
+        Assert.Equal(2UL * Size * Size, graphicsCount);
+        if (keepPass) Assert.True(rig.Host.OcclusionQueueSwitchesKept - keptBefore >= 2);
+        else Assert.Equal(keptBefore, rig.Host.OcclusionQueueSwitchesKept);
+    }
+
     [Fact]
     public void MoreThanOneBatchOfDumpsPreservesEverySnapshot()
     {

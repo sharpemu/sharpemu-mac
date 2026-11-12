@@ -60,6 +60,8 @@ internal sealed partial class MetalRenderHost
         public bool Written;
         public nint[] Textures = [];
         public ulong[] ResourceIds = [];
+        // Each entry's classification by the pass that last resolved it: declared to encoders, or resident only.
+        public bool[] DeclaredFlags = [];
         public long DeclaredEncoder = -1;
         // The textures declared to each encoder: those some pass writes, or all without a residency set.
         public readonly List<nint> Declared = [];
@@ -234,7 +236,8 @@ internal sealed partial class MetalRenderHost
     }
 
     // One full pass over a table's entries: each descriptor's image (looked up again only when the image set
-    // changed over it), its view, and whether a pass may write it (declared) or it only needs residency.
+    // changed over it), its view, and whether a pass may write it (declared) or it only needs residency. An entry
+    // whose own stamp still holds is left as the last pass left it (BindlessEntryUnchanged).
     private void ResolveBindlessEntries(
         MetalStageBindings stage, ShaderResourceInfo info, BindlessImageTable table, BindlessDeviceTable device, int count)
     {
@@ -258,76 +261,33 @@ internal sealed partial class MetalRenderHost
                 if (changes.Count != 0 && changes[^1].End == ulong.MaxValue) BindlessWideChanges++;
             }
         }
+
+        var unchanged = 0;
         for (var index = 0; index < count; index++)
         {
-            ResourceSlotIdentifier identifier;
-            ImageRequest request;
-            long pagesBefore;
-            var lookedUp = false;
-            if (device.Images[index].IsValid &&
-                (reuse || (changes is not null && !OverlapsAny(changes, device.Requests[index].Description.Data))))
-            {
-                identifier = device.Images[index];
-                request = device.Requests[index];
-                pagesBefore = 0;
-            }
-            else
-            {
-                lookedUp = true;
-                if (!device.Images[index].IsValid) BindlessInvalidEntries++;
-                var variant = table.DescriptorVariants[index];
-                if (variant >= table.VariantImages.Length || table.VariantImages[variant] >= (uint)info.Images.Count)
-                {
-                    throw Fatal(
-                        $"A bindless descriptor names an unknown variant: slot={table.Slot} descriptor={index} " +
-                        $"variant={variant} hash=0x{stage.Program.Hash:X16}.");
-                }
-
-                var image = info.Images[(int)table.VariantImages[variant]];
-                var resolution = ResolveBindlessTexture(table.Descriptors[index], ShapeOf(image));
-                request = resolution.Request;
-                pagesBefore = _imageCache.RequestPageVersions(in request);
-                identifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
-                _bindlessLookups++;
-                resolution = resolution with { Request = request };
-                identifier = ImageRequestBuilders.ValidateTextureOwner(
-                    _imageCache.GetImage(identifier).Description, ResourceSlotIdentifier.Invalid, identifier, resolution);
-                // A DCC surface's lookup materializes a clear the GPU may have left since.
-                device.Images[index] = request.Description.Metadata.Kind == MetadataKind.Dcc
-                    ? ResourceSlotIdentifier.Invalid
-                    : identifier;
-                device.Requests[index] = request;
-                if (TraceBindlessHash == stage.Program.Hash)
-                {
-                    ref readonly var described = ref request.Description;
-                    Console.Error.WriteLine(
-                        $"[METAL-V2][BINDLESS] hash=0x{stage.Program.Hash:X16} slot={table.Slot} entry={index} variant={variant} " +
-                        $"format={described.PixelFormat} guest={described.GuestFormat} tile={described.TileMode} " +
-                        $"extent={described.Extent.Width}x{described.Extent.Height}x{described.Extent.Depth} " +
-                        $"at=0x{described.Data.Address:X}+0x{described.Data.Size:X} T#=[{string.Join(",", table.Descriptors[index].Select(word => word.ToString("X8")))}]");
-                }
-            }
-
-            var textureRequest = request with { Role = ImageRole.Texture };
             nint texture;
-            if (!lookedUp && device.Textures[index] != 0 && device.Stamps[index] is { } stamp &&
-                _imageCache.TryReacquireTextureView(identifier, in textureRequest, in stamp))
+            if (BindlessIncremental && BindlessEntryUnchanged(device, index, reuse, changes))
             {
-                texture = device.Textures[index];
-            }
-            else
-            {
-                if (!lookedUp)
-                    pagesBefore = _imageCache.RequestPageVersions(in request);
-                texture = _imageCache.AcquireTextureViewForMemo(
-                    identifier, textureRequest, pagesBefore, out device.ResourceIds[index], out device.Stamps[index]);
+                // Its view, its residency and its classification are as the last pass left them.
+                unchanged++;
+                if (device.DeclaredFlags[index])
+                {
+                    texture = device.Textures[index];
+                    device.Declared.Add(texture);
+                    declaredSignature = (declaredSignature ^ (ulong)texture) * 0x100000001B3UL;
+                }
+
+                continue;
             }
 
-            device.Textures[index] = texture;
+            var identifier = ResolveBindlessEntry(stage, info, table, device, index, imageSet, reuse, changes);
+            texture = device.Textures[index];
             // A texture a pass can write (an attachment or a storage image, or one the GPU has written) is a hazard.
             var cached = residency is null ? null : _imageCache.GetImage(identifier);
-            if (cached is null || cached.IsGpuModified ||
-                (cached.Shape.Usage & (Mtl.TextureUsageRenderTarget | Mtl.TextureUsageShaderWrite)) != 0)
+            var declared = cached is null || cached.IsGpuModified ||
+                (cached.Shape.Usage & (Mtl.TextureUsageRenderTarget | Mtl.TextureUsageShaderWrite)) != 0;
+            device.DeclaredFlags[index] = declared;
+            if (declared)
             {
                 device.Declared.Add(texture);
                 declaredSignature = (declaredSignature ^ (ulong)texture) * 0x100000001B3UL;
@@ -336,6 +296,13 @@ internal sealed partial class MetalRenderHost
             {
                 residency!.Add(texture);
             }
+        }
+
+        if (unchanged != 0)
+        {
+            // What reacquiring the unchanged entries would have done: stamp their images as this submission's.
+            _imageCache.NoteMemoisedTextureUses(device.Stamps);
+            BindlessIncrementalSkipped += unchanged;
         }
 
         residency?.Commit();
@@ -349,6 +316,241 @@ internal sealed partial class MetalRenderHost
 
         // Images this pass added or dropped are changes after the version it started from.
         device.ResolvedImageSet = imageSet;
+    }
+
+    // An entry the pass cannot leave as it is: its image (kept, from the lookup memo, or looked up) and its view
+    // (reacquired while its stamp holds, acquired otherwise). Out of the pass's loop, which mostly skips entries, so
+    // that loop stays small whatever the JIT makes of this.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private ResourceSlotIdentifier ResolveBindlessEntry(MetalStageBindings stage, ShaderResourceInfo info, BindlessImageTable table,
+        BindlessDeviceTable device, int index, long imageSet, bool reuse, List<(ulong Start, ulong End)>? changes)
+    {
+        ResourceSlotIdentifier identifier;
+        ImageRequest request;
+        long pagesBefore;
+        var lookedUp = false;
+        BindlessLookup? memo = null;
+        if (device.Images[index].IsValid &&
+            (reuse || (changes is not null && !OverlapsAny(changes, device.Requests[index].Description.Data))))
+        {
+            identifier = device.Images[index];
+            request = device.Requests[index];
+            pagesBefore = 0;
+        }
+        else
+        {
+            if (!device.Images[index].IsValid) BindlessInvalidEntries++;
+            var variant = table.DescriptorVariants[index];
+            if (variant >= table.VariantImages.Length || table.VariantImages[variant] >= (uint)info.Images.Count)
+            {
+                throw Fatal(
+                    $"A bindless descriptor names an unknown variant: slot={table.Slot} descriptor={index} " +
+                    $"variant={variant} hash=0x{stage.Program.Hash:X16}.");
+            }
+
+            var image = info.Images[(int)table.VariantImages[variant]];
+            var shape = ShapeOf(image);
+            var words = table.Descriptors[index];
+            if (BindlessLookupMemo && TryBindlessLookupMemo(words, in shape, imageSet, out memo))
+            {
+                // Another table looked the same descriptor up, and no image came or went over it since.
+                identifier = memo!.Image;
+                request = memo.Request;
+                pagesBefore = 0;
+                device.Images[index] = identifier;
+                device.Requests[index] = request;
+                if (memo.Texture != 0 && memo.Stamp is not null)
+                {
+                    device.Textures[index] = memo.Texture;
+                    device.ResourceIds[index] = memo.ResourceId;
+                    device.Stamps[index] = memo.Stamp;
+                }
+            }
+            else
+            {
+                lookedUp = true;
+                var resolution = ResolveBindlessTexture(words, shape);
+                request = resolution.Request;
+                pagesBefore = _imageCache.RequestPageVersions(in request);
+                identifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
+                _bindlessLookups++;
+                resolution = resolution with { Request = request };
+                identifier = ImageRequestBuilders.ValidateTextureOwner(
+                    _imageCache.GetImage(identifier).Description, ResourceSlotIdentifier.Invalid, identifier, resolution);
+                // A DCC surface's lookup materializes a clear the GPU may have left since.
+                device.Images[index] = request.Description.Metadata.Kind == MetadataKind.Dcc
+                    ? ResourceSlotIdentifier.Invalid
+                    : identifier;
+                device.Requests[index] = request;
+                if (BindlessLookupMemo)
+                {
+                    memo = NoteBindlessLookup(words, in shape, identifier, in request, imageSet);
+                }
+            }
+
+            if (TraceBindlessHash == stage.Program.Hash)
+            {
+                ref readonly var described = ref request.Description;
+                Console.Error.WriteLine(
+                    $"[METAL-V2][BINDLESS] hash=0x{stage.Program.Hash:X16} slot={table.Slot} entry={index} variant={variant} " +
+                    $"format={described.PixelFormat} guest={described.GuestFormat} tile={described.TileMode} " +
+                    $"extent={described.Extent.Width}x{described.Extent.Height}x{described.Extent.Depth} " +
+                    $"at=0x{described.Data.Address:X}+0x{described.Data.Size:X} T#=[{string.Join(",", table.Descriptors[index].Select(word => word.ToString("X8")))}]");
+            }
+        }
+
+        var textureRequest = request with { Role = ImageRole.Texture };
+        nint texture;
+        if (!lookedUp && device.Textures[index] != 0 && device.Stamps[index] is { } stamp &&
+            _imageCache.TryReacquireTextureView(identifier, in textureRequest, in stamp))
+        {
+            texture = device.Textures[index];
+        }
+        else
+        {
+            if (!lookedUp)
+                pagesBefore = _imageCache.RequestPageVersions(in request);
+            texture = _imageCache.AcquireTextureViewForMemo(
+                identifier, textureRequest, pagesBefore, out device.ResourceIds[index], out device.Stamps[index]);
+            if (memo is not null)
+            {
+                memo.Texture = texture;
+                memo.ResourceId = device.ResourceIds[index];
+                memo.Stamp = device.Stamps[index];
+            }
+        }
+
+        device.Textures[index] = texture;
+        return identifier;
+    }
+
+    // A pass over a table whose memo missed - the binding epoch moved, so some image somewhere changed - redoes only the
+    // entries whose own stamp no longer holds. Ghost of Tsushima's big material tables almost always hold one image
+    // that changed, and walked every entry again: ~3 M entries per 2 s. An unchanged entry's image is reused (no image
+    // came or went over its request), its stamp holds - read without the lock, as the table memo reads its epochs - and
+    // a change to its image's GPU-written state would have moved the binding version, so its view, its residency and
+    // its classification stand; its image is stamped as this submission's with the rest of the table's.
+    // SHARPEMU_METAL_V2_BINDLESS_INCREMENTAL=0 resolves every entry of such a pass again.
+    private static readonly bool BindlessIncremental =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINDLESS_INCREMENTAL") != "0";
+
+    internal long BindlessIncrementalSkipped;
+
+    private bool BindlessEntryUnchanged(BindlessDeviceTable device, int index, bool reuse, List<(ulong Start, ulong End)>? changes) =>
+        device.Images[index].IsValid && device.Textures[index] != 0 && device.Stamps[index].HasValue &&
+        (reuse || (changes is not null && !OverlapsAny(changes, device.Requests[index].Description.Data))) &&
+        !_imageCache.HasDeferredRefreshes &&
+        _imageCache.StampHoldsUnlocked(in Nullable.GetValueRefOrDefaultRef(in device.Stamps[index]), imageSetUnchanged: reuse);
+
+    // Each descriptor's lookup - its image, its request, the view and the stamp of its last acquire - kept across tables
+    // by its words and shape. A table the materializer makes anew (a small one, rebuilt every draw, or a large one it
+    // no longer keeps) otherwise looks up and acquires every entry again: Ghost of Tsushima's world makes ~1,500 new
+    // tables per 2 s and, moving, ~1 M lookups. A kept lookup holds while no image was added or dropped over its
+    // request since (the test a table's own entries pass); its stamp is checked by the reacquire as any entry's is.
+    // SHARPEMU_METAL_V2_BINDLESS_LOOKUP_MEMO=0 looks every new table's descriptors up again.
+    private static readonly bool BindlessLookupMemo =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINDLESS_LOOKUP_MEMO") != "0";
+
+    private sealed class BindlessLookup
+    {
+        public ResourceSlotIdentifier Image;
+        public ImageRequest Request;
+        public long ImageSet;
+        public nint Texture;
+        public ulong ResourceId;
+        public MetalImageCache.TextureMemoStamp? Stamp;
+    }
+
+    private readonly Dictionary<TextureMemoKey, BindlessLookup> _bindlessLookupMemo = new();
+    private readonly List<(ulong Start, ulong End)>[] _lookupChanges = [new(), new(), new(), new()];
+    private readonly long[] _lookupChangesSince = [-1, -1, -1, -1];
+    private long _lookupChangesUntil = -1;
+    private int _lookupChangesNext;
+    internal long BindlessLookupMemoHits, BindlessLookupMemoMisses, BindlessLookupMemoStale;
+
+    private static TextureMemoKey BindlessLookupKey(uint[] words, in ShaderImageShape shape) =>
+        new(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], shape);
+
+    private bool TryBindlessLookupMemo(uint[] words, in ShaderImageShape shape, long imageSet, out BindlessLookup? memo)
+    {
+        if (words.Length < 8 || !_bindlessLookupMemo.TryGetValue(BindlessLookupKey(words, in shape), out memo) || !memo.Image.IsValid)
+        {
+            BindlessLookupMemoMisses++;
+            memo = null;
+            return false;
+        }
+
+        if (memo.ImageSet != imageSet)
+        {
+            var changes = memo.ImageSet < imageSet ? LookupChangesSince(memo.ImageSet, imageSet) : null;
+            if (changes is null || OverlapsAny(changes, memo.Request.Description.Data))
+            {
+                BindlessLookupMemoStale++;
+                memo = null;
+                return false;
+            }
+
+            memo.ImageSet = imageSet;
+        }
+
+        BindlessLookupMemoHits++;
+        return true;
+    }
+
+    private BindlessLookup? NoteBindlessLookup(
+        uint[] words, in ShaderImageShape shape, ResourceSlotIdentifier image, in ImageRequest request, long imageSet)
+    {
+        // A DCC surface's lookup is repeated on every bind (it materializes a clear the GPU may have left since).
+        if (words.Length < 8 || !image.IsValid || request.Description.Metadata.Kind == MetadataKind.Dcc)
+        {
+            return null;
+        }
+
+        var key = BindlessLookupKey(words, in shape);
+        if (!_bindlessLookupMemo.TryGetValue(key, out var memo))
+        {
+            if (_bindlessLookupMemo.Count >= BindlessResolutionLimit)
+            {
+                _bindlessLookupMemo.Clear();
+            }
+
+            _bindlessLookupMemo[key] = memo = new BindlessLookup();
+        }
+
+        memo.Image = image;
+        memo.Request = request;
+        memo.ImageSet = imageSet;
+        memo.Texture = 0;
+        memo.Stamp = null;
+        return memo;
+    }
+
+    // The image-set changes from a version up to the current one, kept for the few versions one pass meets.
+    private List<(ulong Start, ulong End)>? LookupChangesSince(long since, long until)
+    {
+        if (_lookupChangesUntil != until)
+        {
+            Array.Fill(_lookupChangesSince, -1);
+            _lookupChangesUntil = until;
+        }
+
+        for (var slot = 0; slot < _lookupChangesSince.Length; slot++)
+        {
+            if (_lookupChangesSince[slot] == since)
+            {
+                return _lookupChanges[slot];
+            }
+        }
+
+        var next = _lookupChangesNext++ & (_lookupChanges.Length - 1);
+        if (!_imageCache.CollectImageSetChanges(since, until, _lookupChanges[next]))
+        {
+            _lookupChangesSince[next] = -1;
+            return null;
+        }
+
+        _lookupChangesSince[next] = since;
+        return _lookupChanges[next];
     }
 
     // SHARPEMU_METAL_V2_BINDLESS_TABLE_MEMO=0 walks every entry of a bindless table on every bind again.
@@ -573,6 +775,7 @@ internal sealed partial class MetalRenderHost
             device.Images = new ResourceSlotIdentifier[count];
             device.Requests = new ImageRequest[count];
             device.Stamps = new MetalImageCache.TextureMemoStamp?[count];
+            device.DeclaredFlags = new bool[count];
             device.ResolvedImageSet = -1;
         }
 

@@ -588,14 +588,18 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     private void Resolve(Job job)
     {
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        // resolve_ms only: sampled like the materialization timings (MaterializationTally.StartTiming).
+        var started = SharpEmu.ShaderCompiler.Resources.MaterializationTally.StartTiming();
         try
         {
             ResolveCore(job);
         }
         finally
         {
-            Interlocked.Add(ref _resolveTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            if (started != 0)
+            {
+                Interlocked.Add(ref _resolveTicks, SharpEmu.ShaderCompiler.Resources.MaterializationTally.ElapsedTicks(started));
+            }
         }
     }
 

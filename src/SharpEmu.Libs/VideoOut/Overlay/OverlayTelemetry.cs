@@ -607,6 +607,12 @@ public static partial class OverlayTelemetry
         private static int[] _hleWorkerCounts = new int[512];
         private static readonly List<int> HleTouched = new(256);
         private static readonly List<CostSample> CostScratch = new(256);
+        // The last captured frame's render lane, standing for the frames between samples (RenderPhaseProfile.OverlayPhaseSample).
+        private static readonly List<CostSample> SampledRenderCosts = new(256);
+        private static readonly List<TimelineSegment> SampledRenderSegments = new(1024);
+        private static readonly float[] SampledRenderKindMs = new float[(int)CostKind.Count];
+        private static float _sampledRenderBusy, _sampledRenderWait;
+        private static bool _hasSampledRender;
         private static readonly List<TimelineSegment> SegmentScratch = new(1024);
         private static readonly List<ThreadSample> ThreadSampleScratch = new(128);
         private static readonly List<(long Start, long End, int Import)> LongCallScratch = new(128);
@@ -636,6 +642,9 @@ public static partial class OverlayTelemetry
             _guestMainId = 0;
             _busiestWorkerId = 0;
             RemoteCalls.Clear();
+            _hasSampledRender = false;
+            SampledRenderCosts.Clear();
+            SampledRenderSegments.Clear();
         }
 
         /// <summary>
@@ -713,8 +722,11 @@ public static partial class OverlayTelemetry
 
             // ---- render thread ----
             float renderBusy = 0, renderWait = 0;
+            var sampledRender = false;
             if (raw.HasPhases)
             {
+                Array.Clear(SampledRenderKindMs);
+                SampledRenderCosts.Clear();
                 for (var phase = 0; phase < raw.PhaseTicks.Length; phase++)
                 {
                     var ticks = raw.PhaseTicks[phase];
@@ -724,11 +736,43 @@ public static partial class OverlayTelemetry
                     if (kind == CostKind.Wait) renderWait += ms;
                     else renderBusy += ms;
                     kindMs[(int)kind] += ms;
+                    SampledRenderKindMs[(int)kind] += ms;
                     if (ms >= 0.005f)
                     {
-                        CostScratch.Add(new CostSample(phase, kind, OverlayLane.Render, ms, 1));
+                        var sample = new CostSample(phase, kind, OverlayLane.Render, ms, 1);
+                        CostScratch.Add(sample);
+                        SampledRenderCosts.Add(sample);
                     }
                 }
+
+                _sampledRenderBusy = renderBusy;
+                _sampledRenderWait = renderWait;
+                _hasSampledRender = true;
+            }
+            else if (_hasSampledRender && RenderPhaseProfile.OverlayPhasesSampled)
+            {
+                // A frame between two captured ones: the last captured frame's render breakdown stands for it,
+                // scaled down to this frame when that one was longer.
+                var total = _sampledRenderBusy + _sampledRenderWait;
+                var scale = total > frameMs && total > 0 ? frameMs / total : 1f;
+                for (var kind = 0; kind < SampledRenderKindMs.Length; kind++)
+                {
+                    kindMs[kind] += SampledRenderKindMs[kind] * scale;
+                }
+
+                foreach (var sample in SampledRenderCosts)
+                {
+                    CostScratch.Add(sample with { Milliseconds = sample.Milliseconds * scale });
+                }
+
+                renderBusy = _sampledRenderBusy * scale;
+                renderWait = _sampledRenderWait * scale;
+                sampledRender = true;
+            }
+
+            if (raw.HasPhases)
+            {
+                SampledRenderSegments.Clear();
             }
 
             for (var index = 0; index < raw.SegmentCount && index < MaxSegmentsPerLane; index++)
@@ -737,8 +781,25 @@ public static partial class OverlayTelemetry
                 var segmentEnd = Relative(raw.SegmentEnd[index]);
                 if (segmentEnd > segmentStart)
                 {
-                    SegmentScratch.Add(new TimelineSegment(segmentStart, segmentEnd, OverlayLane.Render,
-                        (CostKind)raw.SegmentKind[index], raw.SegmentPhase[index]));
+                    var segment = new TimelineSegment(segmentStart, segmentEnd, OverlayLane.Render,
+                        (CostKind)raw.SegmentKind[index], raw.SegmentPhase[index]);
+                    SegmentScratch.Add(segment);
+                    if (raw.HasPhases)
+                    {
+                        SampledRenderSegments.Add(segment);
+                    }
+                }
+            }
+
+            if (sampledRender)
+            {
+                // Positions are from the captured frame's start, clipped to this frame.
+                foreach (var segment in SampledRenderSegments)
+                {
+                    if (segment.StartMs < frameMs)
+                    {
+                        SegmentScratch.Add(segment with { EndMs = Math.Min(segment.EndMs, frameMs) });
+                    }
                 }
             }
 
@@ -796,7 +857,7 @@ public static partial class OverlayTelemetry
             }
 
             _busiestWorkerId = busiestWorkerId;
-            if (!raw.HasPhases)
+            if (!raw.HasPhases && !sampledRender)
             {
                 renderBusy = Math.Min(renderThreadCpu, frameMs);
                 renderWait = Math.Max(0, frameMs - renderBusy);

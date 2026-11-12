@@ -20,7 +20,7 @@ internal sealed partial class MetalRenderHost
     /// range, otherwise a staged copy that sees the GPU's earlier writes and whose stores
     /// reach guest memory (<see cref="MetalStagedStorage"/>).
     /// </summary>
-    internal MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written)
+    internal MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written, bool computeStage = false)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageDeferredLabels);
         OrderAfterDeferredCopies(address, size);
@@ -42,6 +42,11 @@ internal sealed partial class MetalRenderHost
         if (!written && TryBindGuestView(address, size, out var view))
         {
             return view;
+        }
+
+        if (written && TryBindWrittenGuestView(address, size, computeStage, out var writtenView))
+        {
+            return writtenView;
         }
 
         if (MetalStagedRangeCache.Eligible(size) && _stagedRanges is not null)
@@ -109,6 +114,19 @@ internal sealed partial class MetalRenderHost
 
         staged.Add(address, size, staging, pristine, written);
         return staging;
+    }
+
+    // An image upload's staged source over bytes recorded or in-flight GPU work still writes
+    // (MetalImageCache.ResolveUploadSource): the GPU copies them in from the windows, behind that work.
+    void IMetalImageCacheOwner.GatherStagedRange(ulong address, in MetalGuestRange staging)
+    {
+        OrderAfterDeferredCopies(address, staging.Size);
+        var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
+        StagedStorage.EncodeGather(context.CommandBuffer, address, staging, default, context);
+        if (context.WantsEncodedLabels)
+        {
+            context.ProfileEncoded($"gather upload source bytes=0x{staging.Size:X}");
+        }
     }
 
     // A written range at least this large is staged by the GPU alone (StageWrittenOnGpu).
@@ -232,6 +250,7 @@ internal sealed partial class MetalRenderHost
             $"guest_views_released={v.Released} guest_view_binds={v.Binds} guest_view_bind_mb={v.BindBytes / (1024 * 1024)} " +
             $"guest_view_unmapped={v.Invalidated} guest_view_refused={v.CreateFailures} guest_view_unbacked={v.Unbacked} " +
             $"guest_view_refused_writes={Interlocked.Read(ref _guestViewRefusedWrites)} " +
+            WrittenGuestViewCounters() + " " +
             $"oversized_staged={_guestMemory.OversizedStaged} oversized_prefix={_guestMemory.OversizedInPlace} " +
             $"gpu_staged={Interlocked.Read(ref _wholeGathers)} gpu_staged_mb={Interlocked.Read(ref _wholeGatherBytes) / (1024 * 1024)} " +
             $"pristine_cpu_mb={Interlocked.Read(ref _cpuPristineBytes) / (1024 * 1024)} " +
