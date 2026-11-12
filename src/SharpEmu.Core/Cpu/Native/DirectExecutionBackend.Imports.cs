@@ -102,11 +102,13 @@ public sealed partial class DirectExecutionBackend
 			SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.NoteGuestThread();
 			if (SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.IsHleTimingActive)
 			{
+				// The blocked mark splits time spent in host pacing (audio) off as a wait.
+				var blockedMark = SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.HleBlockedMark;
 				var started = System.Diagnostics.Stopwatch.GetTimestamp();
 				var timedResult = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
 				directExecutionBackend.ClearActiveImportIndex();
 				SharpEmu.Libs.VideoOut.Overlay.OverlayTelemetry.RecordHleCall(
-					importIndex, started, System.Diagnostics.Stopwatch.GetTimestamp());
+					importIndex, started, System.Diagnostics.Stopwatch.GetTimestamp(), blockedMark);
 				CompleteImportContextTransfer(threadState, transferStubAddress);
 				return timedResult;
 			}

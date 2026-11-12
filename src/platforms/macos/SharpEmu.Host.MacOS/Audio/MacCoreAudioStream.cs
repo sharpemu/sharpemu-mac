@@ -234,7 +234,7 @@ internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
                 var drainMilliseconds = (queued - _maximumQueuedFrames) / framesPerMillisecond;
                 var remainingMilliseconds =
                     (deadline - Stopwatch.GetTimestamp()) * 1_000.0 / Stopwatch.Frequency;
-                Thread.Sleep((int)Math.Clamp(
+                HostBlockedTime.Sleep((int)Math.Clamp(
                     Math.Ceiling(Math.Min(drainMilliseconds, remainingMilliseconds)),
                     1,
                     MaximumWaitMilliseconds));
@@ -455,7 +455,7 @@ internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
         var offset = written * _renderChannels;
         while (offset < samples.Length && Stopwatch.GetTimestamp() < deadline)
         {
-            Thread.Sleep(1);
+            HostBlockedTime.Sleep(1);
             offset += _ring.Write(samples[offset..]) * _renderChannels;
         }
     }

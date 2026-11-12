@@ -19,10 +19,22 @@ namespace SharpEmu.Libs.VideoOut.Overlay;
 // host's frames.
 public static partial class OverlayTelemetry
 {
+    /// <summary>One import's growth on the split guest since the previous read; blocked is part of the ms.</summary>
+    internal readonly record struct ImportDelta(
+        float MainMs, float MainBlockedMs, int MainCalls, float WorkerMs, float WorkerBlockedMs, int WorkerCalls);
+
+    /// <summary>Test hook: see <see cref="Bridge.RoundTripForTests"/>.</summary>
+    internal static void RoundTripForTests(ulong mainThreadId, Action<int, ImportDelta> visit,
+        List<(long Start, long End, int Import, OverlayLane Lane)> calls) =>
+        Bridge.RoundTripForTests(mainThreadId, visit, calls);
+
+    /// <summary>Test hook: the calling thread's id as the overlay records it.</summary>
+    internal static ulong CurrentThreadIdForTests => OsThreadId();
+
     private static class Bridge
     {
         private const uint Magic = 0x424F4553; // "SEOB"
-        private const int LayoutVersion = 2;
+        private const int LayoutVersion = 3;
         internal const int MaxImports = 8192;
         private const int MaxThreads = 512;
         private const int NameBytes = 96;
@@ -44,10 +56,13 @@ public static partial class OverlayTelemetry
         private const int CallWriteOffset = 72;      // calls ever written to the ring
         private const int HeaderBytes = 128;
         private const int ThreadsOffset = HeaderBytes;
-        // Per import: main-thread ticks (100 ns), main calls, worker ticks, worker calls.
+        // Per import: main-thread ticks (100 ns), main calls, worker ticks, worker calls, and the part
+        // of the main and worker ticks blocked in host pacing (100 ns).
+        private const int ImportFields = 6;
         private const int ImportsOffset = ThreadsOffset + MaxThreads * sizeof(ulong);
-        private const int NamesOffset = ImportsOffset + MaxImports * 4 * sizeof(long);
-        // Long calls (>= 100 µs) of the two timed threads: start ns, end ns, import, lane.
+        private const int NamesOffset = ImportsOffset + MaxImports * ImportFields * sizeof(long);
+        // Long calls (>= 100 µs) of the two timed threads: start ns, end ns, import (with
+        // MostlyBlockedCall set when the call was mostly blocked), lane.
         private const int CallEntries = 4096;
         private const int CallBytes = 24;
         private const int CallsOffset = NamesOffset + MaxImports * NameBytes;
@@ -137,9 +152,11 @@ public static partial class OverlayTelemetry
             public readonly bool[] Named = new bool[MaxImports];
             public readonly long[] MainTicks = new long[MaxImports];
             public readonly long[] MainCounts = new long[MaxImports];
+            public readonly long[] MainBlocked = new long[MaxImports];
             public readonly long[] WorkerTicks = new long[MaxImports];
             public readonly long[] WorkerCounts = new long[MaxImports];
-            public readonly Dictionary<HleThreadSlots, (long[] Ticks, int[] Counts)> Previous = [];
+            public readonly long[] WorkerBlocked = new long[MaxImports];
+            public readonly Dictionary<HleThreadSlots, (long[] Ticks, int[] Counts, long[] Blocked)> Previous = [];
             public readonly List<(long Start, long End, int Import)> Calls = new(256);
             public long CallsWritten;
             public int ImportCount;
@@ -178,11 +195,12 @@ public static partial class OverlayTelemetry
                 var length = Math.Min(arrays.Ticks.Length, MaxImports);
                 if (!state.Previous.TryGetValue(slot, out var previous) || previous.Ticks.Length < length)
                 {
-                    var grown = (new long[length], new int[length]);
+                    var grown = (new long[length], new int[length], new long[length]);
                     if (previous.Ticks is not null)
                     {
                         Array.Copy(previous.Ticks, grown.Item1, previous.Ticks.Length);
                         Array.Copy(previous.Counts, grown.Item2, previous.Counts.Length);
+                        Array.Copy(previous.Blocked, grown.Item3, previous.Blocked.Length);
                     }
 
                     previous = grown;
@@ -192,16 +210,20 @@ public static partial class OverlayTelemetry
                 var isMain = slot.ThreadId == mainId && mainId != 0;
                 var ticksBucket = isMain ? state.MainTicks : state.WorkerTicks;
                 var countsBucket = isMain ? state.MainCounts : state.WorkerCounts;
+                var blockedBucket = isMain ? state.MainBlocked : state.WorkerBlocked;
                 for (var index = 0; index < length; index++)
                 {
                     var ticks = arrays.Ticks[index];
                     var delta = ticks - previous.Ticks[index];
                     if (delta <= 0) continue;
                     var count = arrays.Counts[index];
+                    var blocked = arrays.Blocked[index];
                     ticksBucket[index] += delta;
                     countsBucket[index] += count - previous.Counts[index];
+                    blockedBucket[index] += Math.Clamp(blocked - previous.Blocked[index], 0, delta);
                     previous.Ticks[index] = ticks;
                     previous.Counts[index] = count;
+                    previous.Blocked[index] = blocked;
                     state.ImportCount = Math.Max(state.ImportCount, index + 1);
                 }
 
@@ -234,10 +256,14 @@ public static partial class OverlayTelemetry
                 }
 
                 // Ticks are converted to 100 ns units so the two processes' Stopwatch frequencies never matter.
-                Volatile.Write(ref imports[index * 4], (long)(state.MainTicks[index] * ticksTo100ns));
-                Volatile.Write(ref imports[index * 4 + 1], state.MainCounts[index]);
-                Volatile.Write(ref imports[index * 4 + 2], (long)(state.WorkerTicks[index] * ticksTo100ns));
-                Volatile.Write(ref imports[index * 4 + 3], state.WorkerCounts[index]);
+                var fields = imports + index * ImportFields;
+                // Blocked last: a reader racing this write sees blocked time a frame late, never ahead of its call.
+                Volatile.Write(ref fields[0], (long)(state.MainTicks[index] * ticksTo100ns));
+                Volatile.Write(ref fields[1], state.MainCounts[index]);
+                Volatile.Write(ref fields[2], (long)(state.WorkerTicks[index] * ticksTo100ns));
+                Volatile.Write(ref fields[3], state.WorkerCounts[index]);
+                Volatile.Write(ref fields[4], (long)(state.MainBlocked[index] * ticksTo100ns));
+                Volatile.Write(ref fields[5], (long)(state.WorkerBlocked[index] * ticksTo100ns));
             }
 
             Volatile.Write(ref *(int*)(basePointer + ImportCountOffset), state.ImportCount);
@@ -269,7 +295,7 @@ public static partial class OverlayTelemetry
 
         private static int _openedFor;
         private static long _lastOpenAttempt;
-        private static readonly long[] PreviousImport = new long[MaxImports * 4];
+        private static readonly long[] PreviousImport = new long[MaxImports * ImportFields];
         private static long _callsRead;
         private static long _previousGcPauseTicks = -1;
         private static readonly int[] PreviousGenerations = new int[3];
@@ -357,16 +383,22 @@ public static partial class OverlayTelemetry
         internal static unsafe void TakeCalls(List<(long Start, long End, int Import, OverlayLane Lane)> into)
         {
             if (_base == null) return;
-            var written = Volatile.Read(ref *(long*)(_base + CallWriteOffset));
-            if (written - _callsRead > CallEntries)
+            TakeCalls(_base, ref _callsRead, into);
+        }
+
+        private static unsafe void TakeCalls(byte* basePointer, ref long callsRead,
+            List<(long Start, long End, int Import, OverlayLane Lane)> into)
+        {
+            var written = Volatile.Read(ref *(long*)(basePointer + CallWriteOffset));
+            if (written - callsRead > CallEntries)
             {
                 // The reader fell a whole ring behind; the oldest entries are already overwritten.
-                _callsRead = written - CallEntries;
+                callsRead = written - CallEntries;
             }
 
-            for (; _callsRead < written; _callsRead++)
+            for (; callsRead < written; callsRead++)
             {
-                var entry = _base + CallsOffset + (_callsRead % CallEntries) * CallBytes;
+                var entry = basePointer + CallsOffset + (callsRead % CallEntries) * CallBytes;
                 var lane = *(int*)(entry + 20) == 0 ? OverlayLane.GuestMain : OverlayLane.GuestWorkers;
                 into.Add((FromNanoseconds(*(long*)entry), FromNanoseconds(*(long*)(entry + 8)), *(int*)(entry + 16), lane));
             }
@@ -406,22 +438,24 @@ public static partial class OverlayTelemetry
             return (pauseMs, collections, highest);
         }
 
-        /// <summary>
-        /// Calls <paramref name="visit"/> with (import, main ms, main calls, worker ms, worker calls)
-        /// for each import that moved since the previous call.
-        /// </summary>
-        internal static unsafe void TakeImportDeltas(Action<int, float, int, float, int> visit)
+        /// <summary>Calls <paramref name="visit"/> for each import that moved since the previous call.</summary>
+        internal static unsafe void TakeImportDeltas(Action<int, ImportDelta> visit)
         {
             if (_base == null) return;
-            var count = Math.Min(Volatile.Read(ref *(int*)(_base + ImportCountOffset)), MaxImports);
-            var imports = (long*)(_base + ImportsOffset);
-            Span<long> delta = stackalloc long[4];
+            TakeImportDeltas(_base, visit);
+        }
+
+        private static unsafe void TakeImportDeltas(byte* basePointer, Action<int, ImportDelta> visit)
+        {
+            var count = Math.Min(Volatile.Read(ref *(int*)(basePointer + ImportCountOffset)), MaxImports);
+            var imports = (long*)(basePointer + ImportsOffset);
+            Span<long> delta = stackalloc long[ImportFields];
             for (var index = 0; index < count; index++)
             {
                 var moved = false;
-                for (var field = 0; field < 4; field++)
+                for (var field = 0; field < ImportFields; field++)
                 {
-                    var at = index * 4 + field;
+                    var at = index * ImportFields + field;
                     var value = Volatile.Read(ref imports[at]);
                     delta[field] = Math.Max(0, value - PreviousImport[at]);
                     moved |= value != PreviousImport[at];
@@ -430,8 +464,35 @@ public static partial class OverlayTelemetry
 
                 if (moved && (delta[0] > 0 || delta[2] > 0))
                 {
-                    visit(index, delta[0] / 10_000f, (int)delta[1], delta[2] / 10_000f, (int)delta[3]);
+                    visit(index, new ImportDelta(
+                        delta[0] / 10_000f, Math.Min(delta[4], delta[0]) / 10_000f, (int)delta[1],
+                        delta[2] / 10_000f, Math.Min(delta[5], delta[2]) / 10_000f, (int)delta[3]));
                 }
+            }
+        }
+
+        /// <summary>
+        /// Tests: publishes this process's HLE totals and long calls the way the guest does into a
+        /// private buffer and reads them back the way the GPU host does, without a mapping file or
+        /// the publisher thread.
+        /// </summary>
+        internal static unsafe void RoundTripForTests(ulong mainThreadId, Action<int, ImportDelta> visit,
+            List<(long Start, long End, int Import, OverlayLane Lane)> calls)
+        {
+            var buffer = (byte*)System.Runtime.InteropServices.NativeMemory.AllocZeroed((nuint)TotalBytes);
+            try
+            {
+                *(ulong*)(buffer + MainThreadOffset) = mainThreadId;
+                Array.Clear(PreviousImport);
+                PublishGuest(buffer, new GuestState());
+                TakeImportDeltas(buffer, visit);
+                long callsRead = 0;
+                TakeCalls(buffer, ref callsRead, calls);
+            }
+            finally
+            {
+                System.Runtime.InteropServices.NativeMemory.Free(buffer);
+                Array.Clear(PreviousImport);
             }
         }
 

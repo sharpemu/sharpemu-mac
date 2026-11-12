@@ -4,6 +4,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Libs.VideoOut.Overlay;
 
@@ -31,6 +32,9 @@ public static partial class OverlayTelemetry
 
     // An HLE call at least this long is placed on the guest-main timeline lane.
     private static readonly long LongCallTicks = Stopwatch.Frequency / 10_000; // 100 µs
+    // Set on a long call's import index (here and in the bridge's call ring) when more than half
+    // of the call was blocked in host pacing; the timeline then draws it as a wait.
+    internal const int MostlyBlockedCall = 1 << 30;
     private static readonly long IdleAfterTicks = Stopwatch.Frequency * 2;
     private const int MaxHleCostsPerFrame = 64;
     private const int MaxSegmentsPerLane = 512;
@@ -159,10 +163,28 @@ public static partial class OverlayTelemetry
         }
     }
 
-    /// <summary>Charges one HLE call (Stopwatch ticks, gateway entry to exit) to the calling thread.</summary>
+    /// <summary>
+    /// The calling thread's blocked-time mark (<see cref="HostBlockedTime.Total"/>); the gateway reads it
+    /// before a timed call and passes it to <see cref="RecordHleCall(int, long, long, long)"/>.
+    /// </summary>
+    public static long HleBlockedMark
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => HostBlockedTime.Total;
+    }
+
+    /// <summary>Charges one HLE call that never blocks in host pacing.</summary>
+    internal static void RecordHleCall(int importIndex, long startTicks, long endTicks) =>
+        RecordHleCall(importIndex, startTicks, endTicks, HostBlockedTime.Total);
+
+    /// <summary>
+    /// Charges one HLE call (Stopwatch ticks, gateway entry to exit) to the calling thread. The time the
+    /// thread spent blocked in host pacing since <paramref name="blockedMark"/> (read with
+    /// <see cref="HleBlockedMark"/> at entry) is kept apart from the body, so it counts as a wait.
+    /// </summary>
     /// <remarks>Only call while <see cref="HleTimingActive"/>; the gateway checks the switch.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void RecordHleCall(int importIndex, long startTicks, long endTicks)
+    public static void RecordHleCall(int importIndex, long startTicks, long endTicks, long blockedMark)
     {
         var slots = _hleSlots ?? RegisterHleThread();
         var arrays = slots.Arrays;
@@ -179,9 +201,17 @@ public static partial class OverlayTelemetry
         var elapsed = endTicks - startTicks;
         arrays.Ticks[importIndex] += elapsed;
         arrays.Counts[importIndex]++;
+        // The mark only grows on this thread, so the difference is this call's blocking alone.
+        var blocked = HostBlockedTime.Total - blockedMark;
+        if (blocked != 0)
+        {
+            blocked = Math.Min(blocked, elapsed);
+            arrays.Blocked[importIndex] += blocked;
+        }
+
         if (elapsed >= LongCallTicks && TimelineActive)
         {
-            slots.AppendLongCall(importIndex, startTicks, endTicks);
+            slots.AppendLongCall(blocked * 2 > elapsed ? importIndex | MostlyBlockedCall : importIndex, startTicks, endTicks);
         }
     }
 
@@ -568,9 +598,12 @@ public static partial class OverlayTelemetry
         private static ulong _busiestWorkerId;
 
         // HLE.
+        // Per import: whole-call ticks, the part of them blocked in host pacing, and calls.
         private static long[] _hleMainTicks = new long[512];
+        private static long[] _hleMainBlocked = new long[512];
         private static int[] _hleMainCounts = new int[512];
         private static long[] _hleWorkerTicks = new long[512];
+        private static long[] _hleWorkerBlocked = new long[512];
         private static int[] _hleWorkerCounts = new int[512];
         private static readonly List<int> HleTouched = new(256);
         private static readonly List<CostSample> CostScratch = new(256);
@@ -1034,10 +1067,7 @@ public static partial class OverlayTelemetry
             // Drop what the previous frame accumulated but did not turn into costs.
             foreach (var stale in HleTouched)
             {
-                _hleMainTicks[stale] = 0;
-                _hleMainCounts[stale] = 0;
-                _hleWorkerTicks[stale] = 0;
-                _hleWorkerCounts[stale] = 0;
+                ClearHle(stale);
             }
 
             HleTouched.Clear();
@@ -1048,17 +1078,29 @@ public static partial class OverlayTelemetry
                 // The split: the guest's gateway totals, split by the guest into the main thread
                 // this process picked and every other guest thread.
                 var ticksPerMs = frequency / 1000.0;
-                Bridge.TakeImportDeltas((index, mainMs, mainCalls, workerMs, workerCalls) =>
+                Bridge.TakeImportDeltas((index, delta) =>
                 {
-                    var ms = mainMs + workerMs;
-                    if (IsWaitImport(index)) wait += ms; else body += ms;
+                    var ms = delta.MainMs + delta.WorkerMs;
+                    var blockedMs = delta.MainBlockedMs + delta.WorkerBlockedMs;
+                    if (IsWaitImport(index))
+                    {
+                        wait += ms;
+                    }
+                    else
+                    {
+                        body += ms - blockedMs;
+                        wait += blockedMs;
+                    }
+
                     if (!HleTimingActive) return;
                     EnsureHleCapacity(index);
                     if (_hleMainTicks[index] == 0 && _hleWorkerTicks[index] == 0) HleTouched.Add(index);
-                    _hleMainTicks[index] += (long)(mainMs * ticksPerMs);
-                    _hleMainCounts[index] += mainCalls;
-                    _hleWorkerTicks[index] += (long)(workerMs * ticksPerMs);
-                    _hleWorkerCounts[index] += workerCalls;
+                    _hleMainTicks[index] += (long)(delta.MainMs * ticksPerMs);
+                    _hleMainBlocked[index] += (long)(delta.MainBlockedMs * ticksPerMs);
+                    _hleMainCounts[index] += delta.MainCalls;
+                    _hleWorkerTicks[index] += (long)(delta.WorkerMs * ticksPerMs);
+                    _hleWorkerBlocked[index] += (long)(delta.WorkerBlockedMs * ticksPerMs);
+                    _hleWorkerCounts[index] += delta.WorkerCalls;
                 });
             }
 
@@ -1074,23 +1116,38 @@ public static partial class OverlayTelemetry
                     if (deltaTicks == 0) continue;
                     var count = arrays.Counts[index];
                     var deltaCount = count - slots.PreviousCounts[index];
+                    var blocked = arrays.Blocked[index];
+                    var deltaBlocked = blocked - slots.PreviousBlocked[index];
                     slots.PreviousTicks[index] = ticks;
                     slots.PreviousCounts[index] = count;
+                    slots.PreviousBlocked[index] = blocked;
                     if (deltaTicks < 0) continue;
+                    deltaBlocked = Math.Clamp(deltaBlocked, 0, deltaTicks);
                     var ms = (float)(deltaTicks * 1000.0 / frequency);
-                    if (IsWaitImport(index)) wait += ms; else body += ms;
+                    if (IsWaitImport(index))
+                    {
+                        wait += ms;
+                    }
+                    else
+                    {
+                        var blockedMs = (float)(deltaBlocked * 1000.0 / frequency);
+                        body += ms - blockedMs;
+                        wait += blockedMs;
+                    }
+
                     if (!HleTimingActive) continue;
                     EnsureHleCapacity(index);
+                    if (_hleMainTicks[index] == 0 && _hleWorkerTicks[index] == 0) HleTouched.Add(index);
                     if (isMain)
                     {
-                        if (_hleMainTicks[index] == 0 && _hleWorkerTicks[index] == 0) HleTouched.Add(index);
                         _hleMainTicks[index] += deltaTicks;
+                        _hleMainBlocked[index] += deltaBlocked;
                         _hleMainCounts[index] += deltaCount;
                     }
                     else
                     {
-                        if (_hleMainTicks[index] == 0 && _hleWorkerTicks[index] == 0) HleTouched.Add(index);
                         _hleWorkerTicks[index] += deltaTicks;
+                        _hleWorkerBlocked[index] += deltaBlocked;
                         _hleWorkerCounts[index] += deltaCount;
                     }
                 }
@@ -1104,9 +1161,51 @@ public static partial class OverlayTelemetry
             if (index < _hleMainTicks.Length) return;
             var size = Math.Max(index + 1, _hleMainTicks.Length * 2);
             Array.Resize(ref _hleMainTicks, size);
+            Array.Resize(ref _hleMainBlocked, size);
             Array.Resize(ref _hleMainCounts, size);
             Array.Resize(ref _hleWorkerTicks, size);
+            Array.Resize(ref _hleWorkerBlocked, size);
             Array.Resize(ref _hleWorkerCounts, size);
+        }
+
+        private static void ClearHle(int index)
+        {
+            _hleMainTicks[index] = 0;
+            _hleMainBlocked[index] = 0;
+            _hleMainCounts[index] = 0;
+            _hleWorkerTicks[index] = 0;
+            _hleWorkerBlocked[index] = 0;
+            _hleWorkerCounts[index] = 0;
+        }
+
+        /// <summary>
+        /// One import's cost rows on one lane: a name-classified wait is a wait whole; otherwise the
+        /// part blocked in host pacing is a wait row and the rest the HLE body row, under the same name.
+        /// </summary>
+        private static void AddHleCost(int nameId, bool waitImport, OverlayLane lane, long ticks, long blocked, int count,
+            double frequency)
+        {
+            if (ticks <= 0)
+            {
+                return;
+            }
+
+            if (waitImport)
+            {
+                CostScratch.Add(new CostSample(nameId, CostKind.Wait, lane, (float)(ticks * 1000.0 / frequency), count));
+                return;
+            }
+
+            blocked = Math.Clamp(blocked, 0, ticks);
+            if (ticks > blocked)
+            {
+                CostScratch.Add(new CostSample(nameId, CostKind.Hle, lane, (float)((ticks - blocked) * 1000.0 / frequency), count));
+            }
+
+            if (blocked > 0)
+            {
+                CostScratch.Add(new CostSample(nameId, CostKind.Wait, lane, (float)(blocked * 1000.0 / frequency), count));
+            }
         }
 
         private static void AddHleCosts()
@@ -1116,23 +1215,12 @@ public static partial class OverlayTelemetry
             foreach (var index in HleTouched)
             {
                 var nameId = HleNameBase + index;
-                var kind = IsWaitImport(index) ? CostKind.Wait : CostKind.Hle;
-                if (_hleMainTicks[index] > 0)
-                {
-                    CostScratch.Add(new CostSample(nameId, kind, OverlayLane.GuestMain,
-                        (float)(_hleMainTicks[index] * 1000.0 / frequency), _hleMainCounts[index]));
-                }
-
-                if (_hleWorkerTicks[index] > 0)
-                {
-                    CostScratch.Add(new CostSample(nameId, kind, OverlayLane.GuestWorkers,
-                        (float)(_hleWorkerTicks[index] * 1000.0 / frequency), _hleWorkerCounts[index]));
-                }
-
-                _hleMainTicks[index] = 0;
-                _hleMainCounts[index] = 0;
-                _hleWorkerTicks[index] = 0;
-                _hleWorkerCounts[index] = 0;
+                var waitImport = IsWaitImport(index);
+                AddHleCost(nameId, waitImport, OverlayLane.GuestMain, _hleMainTicks[index], _hleMainBlocked[index],
+                    _hleMainCounts[index], frequency);
+                AddHleCost(nameId, waitImport, OverlayLane.GuestWorkers, _hleWorkerTicks[index], _hleWorkerBlocked[index],
+                    _hleWorkerCounts[index], frequency);
+                ClearHle(index);
             }
 
             var added = CostScratch.Count - first;
@@ -1237,8 +1325,10 @@ public static partial class OverlayTelemetry
             }
 
             var cursor = 0f;
-            foreach (var (callStart, callEnd, import) in calls)
+            foreach (var (callStart, callEnd, flaggedImport) in calls)
             {
+                var mostlyBlocked = (flaggedImport & MostlyBlockedCall) != 0;
+                var import = flaggedImport & ~MostlyBlockedCall;
                 var from = relative(callStart);
                 var to = relative(callEnd);
                 if (from > cursor)
@@ -1249,7 +1339,7 @@ public static partial class OverlayTelemetry
                 if (to > from)
                 {
                     SegmentScratch.Add(new TimelineSegment(from, to, lane,
-                        IsWaitImport(import) ? CostKind.Wait : CostKind.Hle, HleNameBase + import));
+                        mostlyBlocked || IsWaitImport(import) ? CostKind.Wait : CostKind.Hle, HleNameBase + import));
                 }
 
                 cursor = Math.Max(cursor, to);
@@ -1336,6 +1426,8 @@ public static partial class OverlayTelemetry
         {
             public readonly long[] Ticks = new long[size];
             public readonly int[] Counts = new int[size];
+            // The part of Ticks the thread spent blocked in host pacing.
+            public readonly long[] Blocked = new long[size];
         }
 
         public readonly ulong ThreadId = threadId;
@@ -1343,6 +1435,7 @@ public static partial class OverlayTelemetry
         // Builder-owned.
         public long[] PreviousTicks = [];
         public int[] PreviousCounts = [];
+        public long[] PreviousBlocked = [];
 
         private readonly object _longCallGate = new();
         private readonly (long Start, long End, int Import)[] _longCalls = new (long, long, int)[256];
@@ -1354,6 +1447,7 @@ public static partial class OverlayTelemetry
             var next = new Storage(Math.Max(index + 1, current.Ticks.Length * 2));
             Array.Copy(current.Ticks, next.Ticks, current.Ticks.Length);
             Array.Copy(current.Counts, next.Counts, current.Counts.Length);
+            Array.Copy(current.Blocked, next.Blocked, current.Blocked.Length);
             Volatile.Write(ref Arrays, next);
             return next;
         }
@@ -1363,6 +1457,7 @@ public static partial class OverlayTelemetry
             if (PreviousTicks.Length >= length) return;
             Array.Resize(ref PreviousTicks, length);
             Array.Resize(ref PreviousCounts, length);
+            Array.Resize(ref PreviousBlocked, length);
         }
 
         public void AppendLongCall(int import, long start, long end)
