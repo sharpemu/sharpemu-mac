@@ -228,6 +228,15 @@ internal sealed class MetalMeshletCache
         OverBudget,
     }
 
+    /// <summary>Why a build ran: the key was never seen (or its history was cleared), the bytes hash
+    /// to a value the key has not had in its last <see cref="HashHistoryDepth"/> builds, or to one it has.</summary>
+    public enum BuildReason
+    {
+        New,
+        Changed,
+        Recurring,
+    }
+
     public readonly record struct Meshlets(nint Buffer, uint Count, uint VertexBase, uint PrimitiveBase);
 
     private readonly record struct Key(
@@ -247,8 +256,46 @@ internal sealed class MetalMeshletCache
         public ulong LastUsedTick;
     }
 
+    // The hashes each key was built from, newest last, kept past the entry's removal so a rebuild
+    // can tell content the key had before from content it never had. Diagnostic only.
+    private sealed class HashRing
+    {
+        private readonly ulong[] _hashes = new ulong[HashHistoryDepth];
+        private int _count;
+        private int _next;
+
+        public bool Contains(ulong hash)
+        {
+            for (var i = 0; i < _count; i++)
+            {
+                if (_hashes[i] == hash)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public void Add(ulong hash)
+        {
+            _hashes[_next] = hash;
+            _next = (_next + 1) % HashHistoryDepth;
+            _count = Math.Min(_count + 1, HashHistoryDepth);
+        }
+    }
+
+    private const int HashHistoryDepth = 8;
+    private const int HashHistoryKeyLimit = 4096;
+    private const int TraceLineLimit = 200;
+
     private static readonly bool Disabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESHLETS") == "0";
+
+    // SHARPEMU_METAL_MESHLET_TRACE=1 prints one [METAL-V2][MESHLET] build line per build, the first
+    // TraceLineLimit of them: address, index count and width, reason, old and new hash, serial.
+    private static readonly bool TraceBuilds =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESHLET_TRACE") == "1";
 
     private readonly MetalGuestMemory _guestMemory;
     private readonly ICpuMemory _memory;
@@ -258,6 +305,8 @@ internal sealed class MetalMeshletCache
     private readonly System.IO.Hashing.XxHash3 _hasher = new();
     private uint[] _indices = [];
     private readonly List<(nint Buffer, ulong Serial)> _retired = [];
+    private readonly Dictionary<Key, HashRing> _history = [];
+    private int _traceLines;
     private ulong _bytes;
     private ulong _tick;
 
@@ -267,6 +316,13 @@ internal sealed class MetalMeshletCache
     private long _hashTicks;
     private long _builds;
     private long _validationsSkipped;
+    private readonly long[] _buildsBy = new long[Enum.GetValues<BuildReason>().Length];
+    private long _hashBytes;
+    private long _buildBytes;
+    private long _readTicks;
+    private long _builderTicks;
+    private long _allocTicks;
+    private long _evictions;
 
     public MetalMeshletCache(MetalGuestMemory guestMemory, ICpuMemory memory)
     {
@@ -318,7 +374,9 @@ internal sealed class MetalMeshletCache
         }
 
         _hashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - hashStarted;
+        _hashBytes += (long)rangeBytes;
 
+        var oldHash = 0UL;
         if (_entries.TryGetValue(key, out var entry))
         {
             if (entry.Hash == hash)
@@ -330,6 +388,7 @@ internal sealed class MetalMeshletCache
                 return true;
             }
 
+            oldHash = entry.Hash;
             Remove(key, entry);
         }
 
@@ -367,8 +426,10 @@ internal sealed class MetalMeshletCache
             }
         }
 
+        var readDone = System.Diagnostics.Stopwatch.GetTimestamp();
         var built = _scratch;
         MeshletBuilder.BuildInto(indices, maxVertices, maxPrimitives, built);
+        var builderDone = System.Diagnostics.Stopwatch.GetTimestamp();
         var wordCount = built.WordCount;
         var size = (ulong)wordCount * sizeof(uint);
         if (!MakeRoom(size, completedSerial))
@@ -398,12 +459,62 @@ internal sealed class MetalMeshletCache
         _entries[key] = entry;
         _bytes += size;
         Touch(entry, submissionSerial);
-        _buildTicks += System.Diagnostics.Stopwatch.GetTimestamp() - buildStarted;
+        var buildDone = System.Diagnostics.Stopwatch.GetTimestamp();
+        _buildTicks += buildDone - buildStarted;
+        _readTicks += readDone - buildStarted;
+        _builderTicks += builderDone - readDone;
+        _allocTicks += buildDone - builderDone;
+        _buildBytes += (long)rangeBytes;
+        NoteBuild(key, hash, oldHash, submissionSerial);
         _builds++;
         _draws++;
         meshlets = new Meshlets(buffer, entry.Count, entry.VertexBase, entry.PrimitiveBase);
         return true;
     }
+
+    // Counts the build by reason (and traces it) against the key's hash history.
+    private void NoteBuild(Key key, ulong hash, ulong oldHash, ulong serial)
+    {
+        BuildReason reason;
+        if (!_history.TryGetValue(key, out var ring))
+        {
+            if (_history.Count >= HashHistoryKeyLimit)
+            {
+                _history.Clear();
+            }
+
+            ring = new HashRing();
+            _history[key] = ring;
+            reason = BuildReason.New;
+        }
+        else
+        {
+            reason = ring.Contains(hash) ? BuildReason.Recurring : BuildReason.Changed;
+        }
+
+        if (reason != BuildReason.Recurring)
+        {
+            ring.Add(hash);
+        }
+
+        _buildsBy[(int)reason]++;
+        if (TraceBuilds && _traceLines < TraceLineLimit)
+        {
+            _traceLines++;
+            Console.Error.WriteLine(
+                $"[METAL-V2][MESHLET] build address=0x{key.Address:X} count={key.IndexCount} bits={(key.Index32 ? 32 : 16)} " +
+                $"reason={reason.ToString().ToLowerInvariant()} old_hash=0x{oldHash:X16} new_hash=0x{hash:X16} serial={serial}");
+        }
+    }
+
+    /// <summary>Builds counted in this window for <paramref name="reason"/>.</summary>
+    internal long Builds(BuildReason reason) => _buildsBy[(int)reason];
+
+    /// <summary>Entries evicted for room in this window.</summary>
+    internal long Evictions => _evictions;
+
+    /// <summary>Live entries.</summary>
+    internal int EntryCount => _entries.Count;
 
     private void Touch(Entry entry, ulong serial)
     {
@@ -461,6 +572,7 @@ internal sealed class MetalMeshletCache
             }
 
             Remove(victimKey!.Value, victim);
+            _evictions++;
         }
 
         return true;
@@ -496,13 +608,27 @@ internal sealed class MetalMeshletCache
             $"meshlet_draws={_draws} meshlet_validations_skipped={_validationsSkipped} meshlet_builds={_builds} meshlet_mb={_bytes / (1024 * 1024)} " +
             $"meshlet_build_ms={(_buildTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"meshlet_hash_ms={(_hashTicks * 1000.0 / frequency).ToString("F1", culture)} " +
-            $"meshlet_fallbacks={string.Join('/', _fallbacks)}";
+            $"meshlet_fallbacks={string.Join('/', _fallbacks)} " +
+            $"meshlet_builds_by=[new={_buildsBy[(int)BuildReason.New]} changed={_buildsBy[(int)BuildReason.Changed]} " +
+            $"recurring={_buildsBy[(int)BuildReason.Recurring]}] " +
+            $"meshlet_hash_kb={_hashBytes / 1024} meshlet_build_kb={_buildBytes / 1024} " +
+            $"meshlet_build_split_ms=[read={Ms(_readTicks)} build={Ms(_builderTicks)} alloc={Ms(_allocTicks)}] " +
+            $"meshlet_entries={_entries.Count} meshlet_evictions={_evictions}";
         _draws = 0;
         _builds = 0;
         _validationsSkipped = 0;
         _buildTicks = 0;
         _hashTicks = 0;
         Array.Clear(_fallbacks);
+        Array.Clear(_buildsBy);
+        _hashBytes = 0;
+        _buildBytes = 0;
+        _readTicks = 0;
+        _builderTicks = 0;
+        _allocTicks = 0;
+        _evictions = 0;
         return text;
+
+        string Ms(long ticks) => (ticks * 1000.0 / frequency).ToString("F2", culture);
     }
 }
