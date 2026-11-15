@@ -2140,7 +2140,7 @@ internal sealed partial class MetalRenderHost
             OrderAfterDeferredCopies(0, ulong.MaxValue, LabelLandCause.Persistent);
         }
 
-        var encoder = EnsureComputeEncoder();
+        var encoder = EncodeStagedLabelReads(EnsureComputeEncoder());
         var entry = _pendingComputePipeline ?? throw Fatal("A dispatch has no bound Metal compute pipeline state.");
         if (entry.PersistentThreads && PersistentThreadGroups != 0 && groupsY <= 1 && groupsZ <= 1 &&
             groupsX > PersistentThreadGroups)
@@ -2244,7 +2244,7 @@ internal sealed partial class MetalRenderHost
         OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint), LabelLandCause.Indirect);
         TraceIndirectDispatch(argumentsAddress);
         var started = DrawTimingStart();
-        var encoder = EnsureComputeEncoder();
+        var encoder = EncodeStagedLabelReads(EnsureComputeEncoder());
         var entry = _pendingComputePipeline ??
             throw Fatal("An indirect dispatch has no bound Metal compute pipeline state.");
         EnsureComputePipelineState(encoder, entry);

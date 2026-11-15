@@ -48,7 +48,18 @@ internal sealed partial class MetalRenderHost
         inPlaceAlias = 0;
         inPlaceWindow = null;
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageDeferredLabels);
-        OrderAfterDeferredCopies(address, size, written ? LabelLandCause.BindWritten : LabelLandCause.BindRead);
+        // A read of held label copies gets a view the dispatch fills with them, the copies left held
+        // (MetalRenderHost.LabelStagedReads.cs); not in place, so no read-binding memo keeps it.
+        var untouched = false;
+        if (!written && TryStageLabelRead(address, size, computeStage, out var labelView, out untouched))
+        {
+            return labelView;
+        }
+
+        if (!untouched)
+        {
+            OrderAfterDeferredCopies(address, size, written ? LabelLandCause.BindWritten : LabelLandCause.BindRead);
+        }
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageSharedLookup);
         var staged = StagedStorage;
         if (staged.TryShare(address, size, written, out var shared))

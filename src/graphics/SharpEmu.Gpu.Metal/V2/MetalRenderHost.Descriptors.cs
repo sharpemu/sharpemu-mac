@@ -936,6 +936,8 @@ internal sealed partial class MetalRenderHost
         var info = stage.Program.Resources!.Info;
         var snapshot = stage.StageResources.Resources;
         NoteBindShape(stage, snapshot);
+        // A staged label read checks the stage's other bindings for writes over it (MetalRenderHost.LabelStagedReads.cs).
+        BeginLabelStagedStage(stage.Program.Stage == ShaderStageKind.Compute ? stage : null);
         for (var index = 0; index < stage.ImageCount; index++)
         {
             if (index == stage.MovieLuma || index == stage.MovieChroma)
@@ -2222,6 +2224,12 @@ internal sealed partial class MetalRenderHost
     // the draw touches. The guest windows live in the residency set instead.
     private void ApplyStageBindings(bool graphics)
     {
+        if (!graphics && _labelStagedPending.Count != 0)
+        {
+            // Every compute dispatch path fills them first (EncodeStagedLabelReads); one that does not would read the ring.
+            throw Fatal("A dispatch binds staged label reads that were never filled.");
+        }
+
         if (graphics)
         {
             // A mesh pipeline has no vertex stage: the primitive shader's resources
