@@ -13,6 +13,11 @@ public static partial class AgcExports
 
     private const uint CbSetShRegisterRangeMarker = 0x6875000D;
 
+    // SHARPEMU_AGC_COALESCE=0 emits CbSetShRegistersDirect's runs one allocation and write at a
+    // time again. Not readonly so the differential test can compare both paths in one process.
+    internal static bool CoalesceShRegisterRuns =
+        Environment.GetEnvironmentVariable("SHARPEMU_AGC_COALESCE") != "0";
+
     [SysAbiExport(
         Nid = "UZbQjYAwwXM",
         ExportName = "sceAgcCbSetShRegistersDirect",
@@ -75,9 +80,57 @@ public static partial class AgcExports
                 }
             }
 
+            var count = (int)registerCount;
+            // Every run's packet lands at the next cursor position, so when the buffer already has
+            // room for all of them they are one reservation, one state read and one write (cursor
+            // and packets together). Without that room the runs go one at a time below, each
+            // reaching the buffer's full callback with its own size, exactly as before.
+            if (CoalesceShRegisterRuns)
+            {
+                uint totalDwords = 0;
+                var runCount = 0;
+                for (var start = 0; start < count; runCount++)
+                {
+                    var end = start + 1;
+                    while (end < count && registers[end].Offset == registers[end - 1].Offset + 1) end++;
+                    totalDwords += (uint)(end - start) + 2; // at most 3 x 4096 dwords
+                    start = end;
+                }
+
+                if (TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, totalDwords, out var batchAddress, out var nextCursor))
+                {
+                    runs = runCount;
+                    if (profile)
+                    {
+                        sourceOverlap = batchAddress < registersAddress + registerCount * 8UL &&
+                            registersAddress < batchAddress + totalDwords * 4UL;
+                    }
+
+                    packet = System.Buffers.ArrayPool<uint>.Shared.Rent((int)totalDwords);
+                    var cursor = 0;
+                    for (var start = 0; start < count;)
+                    {
+                        var end = start + 1;
+                        while (end < count && registers[end].Offset == registers[end - 1].Offset + 1) end++;
+                        packet[cursor++] = Pm4((uint)(end - start) + 2, ItSetShReg, 0);
+                        packet[cursor++] = registers[start].Offset & 0xFFFFu;
+                        for (var index = start; index < end; index++) packet[cursor++] = registers[index].Value;
+                        start = end;
+                    }
+
+                    if (!TryCommitCommandDwords(ctx, commandBufferAddress, nextCursor, batchAddress, packet.AsSpan(0, cursor)))
+                    {
+                        outcome = Diagnostics.HleCallShapeProfile.ShRegistersOutcome.WriteFailed;
+                        return ReturnPointer(ctx, 0);
+                    }
+
+                    outcome = Diagnostics.HleCallShapeProfile.ShRegistersOutcome.Written;
+                    return ReturnPointer(ctx, batchAddress);
+                }
+            }
+
             ulong firstCommandAddress = 0;
             var startIndex = 0;
-            var count = (int)registerCount;
             while (startIndex < count)
             {
                 var endIndex = startIndex + 1;
