@@ -708,6 +708,57 @@ public sealed unsafe partial class DirectExecutionBackend
 			}
 		}
 
+		// One AgcModifierSgprSlot into r10d, r11d the temporary (AgcExports.IndexIndirectRegisterLocations).
+		void EmitModifierSlot(SharpEmu.Libs.Agc.AgcModifierSgprSlot slot)
+		{
+			if (slot.EnableMask == 0 || slot.FieldShift is < -1 or > 27 || slot.ShiftLeft is < 0 or > 31)
+			{
+				throw new ArgumentException("Unsupported modifier slot.", nameof(spec));
+			}
+
+			var source = (byte)slot.Register;
+			var rex = (byte)(0x40 | (source >= 8 ? 0x04 : 0) | 0x01);
+			// test reg32, mask / jz disabled
+			if (source >= 8)
+			{
+				Emit(0x41);
+			}
+
+			Emit(0xF7, (byte)(0xC0 | (source & 7))); EmitImm32(slot.EnableMask);
+			Emit(0x74, 0);
+			var disabledFixup = code.Count - 1;
+			if (slot.FieldShift < 0)
+			{
+				Emit(0x41, 0xBA); EmitImm32(1);                                                 // mov r10d, 1
+			}
+			else
+			{
+				Emit(rex, 0x89, (byte)(0xC0 | ((source & 7) << 3) | 3));                       // mov r11d, reg32
+				Emit(0x41, 0xC1, 0xEB, 29);                                                     // shr r11d, 29      the stage
+				Emit(0x41, 0xBA); EmitImm32(0x28);                                              // mov r10d, 0x28    stages 3 and 5
+				Emit(0x45, 0x0F, 0xA3, 0xDA);                                                   // bt r10d, r11d
+				Emit(0x45, 0x19, 0xD2);                                                         // sbb r10d, r10d    -1 for stages 3 and 5
+				Emit(0x41, 0x81, 0xE2); EmitImm32(0x80);                                        // and r10d, 0x80
+				Emit(0x41, 0x81, 0xC2); EmitImm32(0x8C);                                        // add r10d, 0x8C    the stage's base
+				Emit(rex, 0x89, (byte)(0xC0 | ((source & 7) << 3) | 3));                       // mov r11d, reg32
+				if (slot.FieldShift != 0)
+				{
+					Emit(0x41, 0xC1, 0xEB, checked((byte)slot.FieldShift));                     // shr r11d, n
+				}
+
+				Emit(0x41, 0x83, 0xE3, 0x1F);                                                   // and r11d, 0x1F
+				Emit(0x45, 0x01, 0xDA);                                                         // add r10d, r11d
+			}
+
+			Emit(0xEB, 0x06);                                                                   // jmp done
+			code[disabledFixup] = checked((byte)(code.Count - (disabledFixup + 1)));
+			Emit(0x41, 0xBA); EmitImm32(slot.Disabled);                                         // disabled: mov r10d, imm32
+			if (slot.ShiftLeft != 0)
+			{
+				Emit(0x41, 0xC1, 0xE2, checked((byte)slot.ShiftLeft));                          // done: shl r10d, n
+			}
+		}
+
 		for (var index = 0; index < spec.Words.Length; index++)
 		{
 			var word = spec.Words[index];
@@ -755,7 +806,42 @@ public sealed unsafe partial class DirectExecutionBackend
 					Emit(0x41, 0xF7, 0xC3); EmitImm32(1);                                       // test r11d, 1
 					Emit(0x74, 0x03);                                                           // jz +3
 					Emit(0x45, 0x31, 0xD2);                                                     // xor r10d, r10d
+					if (word.Constant != 0)
+					{
+						Emit(0x41, 0x81, 0xCA); EmitImm32(word.Constant);                       // or r10d, imm32
+					}
+
 					break;
+				}
+
+				case SharpEmu.Libs.Agc.AgcPacketStubWordKind.ModifierSgprSlots:
+				{
+					// Each slot is computed into r10d (r11d the temporary) and stored, or ORed, into
+					// the packet dword itself: the stage base needs both scratch registers.
+					if (word.Slots.Length == 0)
+					{
+						throw new ArgumentException("A modifier-slot word needs a slot.", nameof(spec));
+					}
+
+					for (var slotIndex = 0; slotIndex < word.Slots.Length; slotIndex++)
+					{
+						EmitModifierSlot(word.Slots[slotIndex]);
+						if (slotIndex == 0)
+						{
+							Emit(0x44, 0x89, 0x50, displacement);                               // mov [rax+disp], r10d
+						}
+						else
+						{
+							Emit(0x44, 0x09, 0x50, displacement);                               // or [rax+disp], r10d
+						}
+					}
+
+					if (word.Constant != 0)
+					{
+						Emit(0x81, 0x48, displacement); EmitImm32(word.Constant);               // or dword [rax+disp], imm32
+					}
+
+					continue;
 				}
 
 				default:

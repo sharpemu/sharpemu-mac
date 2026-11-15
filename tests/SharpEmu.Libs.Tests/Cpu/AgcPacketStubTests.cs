@@ -29,7 +29,30 @@ public sealed unsafe class AgcPacketStubTests
         {
             "pFLArOT53+w", "LHFXRrlTPD8", "w4-d0n60hdo", "-HOOCn0JY48", "ZvwO9euwYzc", "hvUfkUIQcOE", "tSBxhAPyytQ",
             "8N2tmT3jmC8", "GIIW2J37e70", "l4fM9K-Lyks", "Yw0jKSqop+E", "B+aG9DUnTKA", "q88lQ+GP5Yk", "k3GhuSNmBLU",
+            IndexIndirectNid, DrawIndirectNid,
         }.Select(nid => new object[] { nid });
+
+    // sceAgcDcbDrawIndexIndirect / sceAgcDcbDrawIndirect: rdx is a draw modifier whose slots the stub decodes.
+    private const string IndexIndirectNid = "t1vNu082-jM";
+    private const string DrawIndirectNid = "1q1titRBL6o";
+
+    // A draw modifier that covers every branch of the slot decode on purpose: stages 3 and 5 against
+    // the others, each of bits 0, 1 and 2, bit 8 (the initiator) and bit 32 (which clears it), with
+    // random fields and high bits.
+    private static ulong DrawModifier(System.Random random)
+    {
+        var low = (uint)random.NextInt64(0, 1L << 32);
+        var stage = random.Next(4) switch { 0 => 3u, 1 => 5u, _ => (uint)random.Next(8) };
+        low = (low & 0x1FFF_FFF8u) | (stage << 29) | (uint)random.Next(8);
+        var high = random.Next(4) switch
+        {
+            0 => 0u,
+            1 => 1u,
+            2 => (uint)random.NextInt64(0, 1L << 32) & ~1u,
+            _ => (uint)random.NextInt64(0, 1L << 32),
+        };
+        return ((ulong)high << 32) | low;
+    }
 
     [Theory]
     [MemberData(nameof(Nids))]
@@ -68,6 +91,10 @@ public sealed unsafe class AgcPacketStubTests
                 _ => -64,
             };
             var arguments = new[] { Pick(), Pick(), Pick(), Pick() };
+            if (nid is IndexIndirectNid or DrawIndirectNid && random.Next(4) != 0)
+            {
+                arguments[1] = DrawModifier(random);
+            }
             var nullBuffer = random.Next(25) == 0;
 
             using var managedBlock = new Block();
@@ -450,13 +477,54 @@ public sealed unsafe class AgcPacketStubTests
         Assert.False(DirectExecutionBackend.IsAgcStubAllowed("Ikfdt-rIqCE", packetStubsEnabled: true, patchStubsEnabled: true, all));
     }
 
+    // The stub's slot decode is AgcExports.IndexIndirectRegisterLocations, which the exports use:
+    // the packet's two location dwords for every modifier, stage and flag combination.
+    [Fact]
+    public void TheIndirectDrawStubsEncodeTheExportsRegisterLocations()
+    {
+        if (!OperatingSystem.IsMacOS() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
+        var random = new System.Random(0x1D1C);
+        foreach (var nid in new[] { IndexIndirectNid, DrawIndirectNid })
+        {
+            Assert.True(AgcExports.TryGetPacketStubSpec(nid, out var spec));
+            using var harness = new StubHarness(spec);
+            using var block = new Block();
+            for (var iteration = 0; iteration < 4000; iteration++)
+            {
+                var modifier = DrawModifier(random);
+                block.Reset(0, 0x700, iteration);
+                block.Rebase();
+                var rax = harness.Call((ulong)block.Pointer, 0x40, modifier, 0, 0);
+                Assert.Equal((ulong)(block.Pointer + PacketOffset), rax);
+                var packet = (uint*)(block.Pointer + PacketOffset);
+                var locations = nid == IndexIndirectNid
+                    ? AgcExports.IndexIndirectRegisterLocations(modifier)
+                    : AgcExports.DrawIndirectRegisterLocations(modifier);
+                Assert.Equal(0x40u, packet[1]);
+                Assert.Equal(locations, packet[2] | ((ulong)packet[3] << 32));
+                Assert.Equal(AgcExports.IndirectDrawInitiator(modifier), packet[4]);
+            }
+        }
+    }
+
     [Fact]
     public void EveryStubbedBuilderIsAlsoALeafBuilder()
     {
         foreach (var nid in Nids().Select(row => (string)row[0]))
         {
-            Assert.True(DirectExecutionBackend.IsAgcBuilderLeafImport(nid), nid);
             Assert.Equal(DirectExecutionBackend.GuestFastPathStub.AgcPacket, DirectExecutionBackend.ClassifyGuestFastPathStub(nid));
+            // sceAgcDcbDrawIndirect is stubbed but not a leaf builder: its export logs every refusal,
+            // a leaf's decline included, so it stays on the full path when the stub declines.
+            if (nid == DrawIndirectNid)
+            {
+                continue;
+            }
+
+            Assert.True(DirectExecutionBackend.IsAgcBuilderLeafImport(nid), nid);
         }
 
         Assert.True(DirectExecutionBackend.IsAgcBuilderLeafImport("n2fD4A+pb+g"));
