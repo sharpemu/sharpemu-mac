@@ -169,6 +169,12 @@ public static partial class AgcExports
     /// <summary>The most values a variable-length packet stub copies; a larger packet is the export's.</summary>
     public const int RangeStubMaxValues = 64;
 
+    /// <summary>
+    /// The most values sceAgcCbSetShRegisterRangeDirect reserves for a null source (the packet's
+    /// count field limit, <c>TryGetCbSetShRegisterRangeDirectLayout</c>); the stub copies nothing then.
+    /// </summary>
+    public const int RangeStubMaxReservedValues = 0x3FFF;
+
     public const int RegistersStubMaxRegisters = 32;
 
     private const string CbSetShRegisterRangeDirectNid = "n2fD4A+pb+g";
@@ -204,6 +210,17 @@ public static partial class AgcExports
     /// <summary>The native stub for a register-indirect patcher import, when it has one.</summary>
     public static bool TryGetRegIndirectPatchStub(string nid, out AgcRegIndirectPatchStubSpec spec) =>
         RegIndirectPatchStubSpecs.TryGetValue(nid, out spec);
+
+    private const string GetDataPacketPayloadAddressNid = "V++UgBtQhn0";
+
+    /// <summary>The header bits sceAgcGetDataPacketPayloadAddress tests for a type-0 packet (its count field).</summary>
+    public const uint PayloadAddressCountMask = 0x3FFF_0000u;
+
+    /// <summary>
+    /// Whether <paramref name="nid"/> is sceAgcGetDataPacketPayloadAddress, whose native stub
+    /// (EmitGuestAgcPayloadAddressStub) answers the export's success path.
+    /// </summary>
+    public static bool TryGetPayloadAddressStub(string nid) => nid == GetDataPacketPayloadAddressNid;
 
     /// <summary>The variable-length packet stub for a builder import, when it has one.</summary>
     public static bool TryGetVariablePacketStub(string nid, out AgcVariablePacketStub kind)
