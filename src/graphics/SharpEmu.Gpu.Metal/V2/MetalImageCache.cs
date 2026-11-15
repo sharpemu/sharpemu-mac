@@ -2147,8 +2147,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             context.ProfileEncoded(ProfileLabel("alias-on-device", in image.Description));
         }
-        // The target now holds what the source holds, so it owes guest memory no upload.
+        // The target now holds what the source holds, so it owes guest memory no upload - and what it had
+        // published is not its content any more (the source still owes these bytes).
         image.RefreshComplete();
+        image.ForgetPublished(0, image.Description.Data.Size);
         image.NotePublishedFrom(other);
         _deviceAliasPublishes++;
         return true;
@@ -2916,7 +2918,22 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
             // The run's ends widen outward to cuts of the whole chain; the resident run's own
             // ends are where its levels' transfers start and stop, so cutting there loses none.
+            var staleRun = runs[index];
             runs[index] = (Math.Max(start, residentStart), Math.Min(end, residentEnd));
+            // A GPU-written image owns the bytes around its stale run. Where the widened run reaches bytes guest
+            // memory was never given (not published, not stale), the reload puts older bytes over them: counted
+            // and warned about, since nothing here can reload less than a whole block row.
+            if (image.IsGpuModified && runs[index] != staleRun &&
+                !GuestHoldsImageBytes(image, runs[index].Start, runs[index].End, staleRun.Start, staleRun.End))
+            {
+                Interlocked.Increment(ref _aliasRunWidened);
+                MetalV2Diagnostics.WarnOnce(
+                    $"alias-run-widened:{description.PixelFormat}:{description.Extent.Width}x{description.Extent.Height}",
+                    "A GPU-written image reloads a stale run widened over bytes only its texture holds: " +
+                    $"{description.PixelFormat} {description.Extent.Width}x{description.Extent.Height} " +
+                    $"0x{description.Data.Address:X16}+0x{description.Data.Size:X} " +
+                    $"stale=0x{staleRun.Start:X}..0x{staleRun.End:X} reload=0x{runs[index].Start:X}..0x{runs[index].End:X}.");
+            }
         }
 
         var cause = image.DirtyCause;
@@ -2974,6 +2991,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // layers only the texture holds - so the half rule, a cost rule, would only keep the stale layers.
     // TryRefreshDirtyRun and TryNarrowReloadRun both ask this, so they give one answer.
     // With run sets every GPU-written image goes the same way: a whole refresh is forbidden for any of them.
+    private long _aliasRunWidened;
+
     private bool NarrowRefreshPastHalf(MetalCachedImage image) =>
         image.IsGpuModified && (image.RunCapacity > 1 || (LayerDeferEnabled && image.Description.IsLayered));
 

@@ -70,7 +70,7 @@ internal sealed partial class MetalImageCache
     {
         var runs = _runStats.Take();
         return $"alias_runs=[sets_max:{runs.SetsMax},merged:{runs.Merged},refresh_over_half:{runs.RefreshOverHalf}," +
-            $"unpublished:{runs.Unpublished}]";
+            $"unpublished:{runs.Unpublished}] alias_run_widened={Interlocked.Exchange(ref _aliasRunWidened, 0)}";
     }
 
     // Every byte of [runStart, runEnd) is one guest memory holds for the image: inside a published run, or inside a
