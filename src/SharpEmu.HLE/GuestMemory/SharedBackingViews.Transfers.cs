@@ -60,7 +60,7 @@ public sealed unsafe partial class SharedBackingViews
         // a lifetime-pinned receipt retrying through one) free to make progress meanwhile;
         // those see the reservation already and wait only if they overlap it.
         var spin = new SpinWait();
-        while (Volatile.Read(ref _activeAccesses) != 0) spin.SpinOnce();
+        while (ActiveAliasAccesses() != 0) spin.SpinOnce();
         lease = new CopyLease(this, index, AliasBase + sourceOffset, AliasBase + destinationOffset);
         return true;
     }

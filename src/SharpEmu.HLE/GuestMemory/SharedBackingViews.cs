@@ -54,8 +54,11 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     // in shared memory, for a process that replicates the views. Changed under _lock (SetViewLocked/RemoveViewAtLocked).
     private readonly GuestViewTable? _viewTable;
 
-    // Single-view accesses in flight; Dispose waits for them before releasing the alias.
+    // Single-view (alias) accesses in flight; Dispose waits for them before releasing the alias.
     // A copy reservation also waits for these: they touch the alias without checking it.
+    // They count on the backing's per-thread stripes (HostBackingObject.AliasStripes), which
+    // also stand in for the backing's own access count; this scalar counts them only with
+    // SHARPEMU_ACCESS_STRIPES=0, where each also takes the backing's shared access count.
     private int _activeAccesses;
     // Lifetime pins that never touch bytes outside the locked, reservation-checked paths
     // (those paths, ordinary-write receipts, unlocked copies). Dispose waits for them too;
@@ -1471,8 +1474,10 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
                     throw new InvalidOperationException("Backing view cleanup is quarantined.", _cleanupFailure);
                 views = new List<ViewRecord>(_views.Values);
             }
+            // The flags above before the counts below: an entrant increments, then re-reads them.
+            Interlocked.MemoryBarrier();
             var start = System.Diagnostics.Stopwatch.GetTimestamp();
-            while (Volatile.Read(ref _activeAccesses) != 0 || Volatile.Read(ref _lifetimeAccesses) != 0)
+            while (ActiveAliasAccesses() != 0 || Volatile.Read(ref _lifetimeAccesses) != 0)
             {
                 if (System.Diagnostics.Stopwatch.GetElapsedTime(start) >= TimeSpan.FromSeconds(2))
                     throw new TimeoutException("Backing alias accesses did not drain; storage remains owned.");
@@ -1617,7 +1622,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     }
 
     // Resolves an access that lies inside one view to its alias address and registers
-    // it as in flight; the caller must decrement _activeAccesses when done. Anything
+    // it as in flight; the caller must ExitAliasAccess when done. Anything
     // else (spanning views, unmapped, disposed) is left to the locked path.
     private bool TryAccessSingleView(ulong address, ulong size, out ulong target)
     {
@@ -1637,9 +1642,24 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
     // An alias access touches backing bytes without checking copy reservations, so it is
     // refused while an unlocked copy is reserved, and a reservation waits for admitted ones.
+    //
+    // With stripes, one increment of the calling thread's stripe (a full fence) registers the
+    // access for every drainer, and every flag is re-read after it: the copy reservation
+    // (_copyAccessBlocked, set by Interlocked.Exchange before it sums), Dispose (_disposeRequested
+    // and _disposed, set before it sums) and the backing's Close (re-checked inside
+    // HostBackingObject.TryEnterAliasAccess). Either the drainer sees the stripe or the entrant
+    // sees the flag and backs out.
     public bool TryEnterAliasAccess()
     {
         if (Volatile.Read(ref _copyAccessBlocked) != 0) return false;
+        if (_backing?.AliasStripes is not null)
+        {
+            if (Volatile.Read(ref _disposed) || Volatile.Read(ref _disposeRequested) || !_backing.TryEnterAliasAccess()) return false;
+            if (Volatile.Read(ref _copyAccessBlocked) == 0 && !Volatile.Read(ref _disposed) && !Volatile.Read(ref _disposeRequested)) return true;
+            _backing.ExitAliasAccess();
+            return false;
+        }
+
         Interlocked.Increment(ref _activeAccesses);
         // Register before the gate check so a reservation waits for admitted access.
         if (Volatile.Read(ref _copyAccessBlocked) == 0 && TryEnterBackingAccess()) return true;
@@ -1649,9 +1669,20 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
     public void ExitAliasAccess()
     {
+        if (_backing?.AliasStripes is not null)
+        {
+            _backing.ExitAliasAccess();
+            return;
+        }
+
         _backing!.ExitAccess();
         Interlocked.Decrement(ref _activeAccesses);
     }
+
+    // Alias accesses in flight, for the drainers (copy reservation, Dispose); they set their
+    // flag with a full fence first. A negative stripe sum is fatal (HostAccessStripes.Sum).
+    private long ActiveAliasAccesses() =>
+        (_backing?.AliasStripes?.Sum(HostBackingObject.AliasLane) ?? 0) + Volatile.Read(ref _activeAccesses);
 
     // Keeps the alias alive without admitting a lock-free byte access: the locked paths
     // (which wait for overlapping reservations first and never wait while pinned), receipts
