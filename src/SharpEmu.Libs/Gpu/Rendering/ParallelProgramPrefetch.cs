@@ -407,7 +407,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     // The resolving thread's idle time in its queue wait and its wakes from it, its time spinning and sleeping on job
     // gates, the bytes it allocated per job (sampled every AllocationSamplePeriod jobs), and its CPU time.
-    private long _idleTicks, _gateTicks, _idleWakes, _sampledBytes, _sampledJobs, _resolverJobs;
+    private long _idleTicks, _gateTicks, _idleWakes, _idleSpinTakes, _sampledBytes, _sampledJobs, _resolverJobs;
+
+    // SHARPEMU_RESOLVER_IDLE_SPIN=0: the idle worker sleeps at once, as before.
+    private static readonly bool IdleSpin = SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOLVER_IDLE_SPIN");
+    private const int IdleSpins = 32;
+
+    private bool WorkReadyHint() => Volatile.Read(ref _stopping) || (_queue.Count != 0 && !Volatile.Read(ref _running));
     private const int AllocationSamplePeriod = 64;
     private ulong _resolverThreadId;
     private long _lastResolverCpu = -1;
@@ -425,6 +431,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             $"queued={Interlocked.Exchange(ref _unresolvedQueued, 0)}) resolver_jobs={Interlocked.Exchange(ref _resolverJobs, 0)} " +
             $"resolver_idle_ms={Milliseconds(Interlocked.Exchange(ref _idleTicks, 0)).ToString("F1", culture)} " +
             $"gate_sleep_ms={Milliseconds(Interlocked.Exchange(ref _gateTicks, 0)).ToString("F1", culture)} idle_wakes={Interlocked.Exchange(ref _idleWakes, 0)} " +
+            $"idle_spin_takes={Interlocked.Exchange(ref _idleSpinTakes, 0)} " +
             $"alloc_b_per_job={(sampledJobs == 0 ? 0 : sampledBytes / (double)sampledJobs).ToString("F0", culture)} " +
             $"resolver_cpu_ms={cpuMs.ToString("F1", culture)}";
     }
@@ -592,6 +599,30 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 if ((_queue.Count == 0 || _running) && !_stopping)
                 {
                     var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                    if (IdleSpin)
+                    {
+                        // The next draw is usually submitted within microseconds: spin a little before sleeping, which
+                        // costs the submitter a kernel wake per job. The checks outside the lock are hints only.
+                        Monitor.Exit(_lock);
+                        try
+                        {
+                            var spinner = new SpinWait();
+                            for (var spin = 0; spin < IdleSpins && !WorkReadyHint(); spin++)
+                            {
+                                spinner.SpinOnce(sleep1Threshold: -1);
+                            }
+                        }
+                        finally
+                        {
+                            Monitor.Enter(_lock);
+                        }
+
+                        if ((_queue.Count != 0 && !_running) || _stopping)
+                        {
+                            _idleSpinTakes++;
+                        }
+                    }
+
                     while ((_queue.Count == 0 || _running) && !_stopping)
                     {
                         _idleForJobs = true;
