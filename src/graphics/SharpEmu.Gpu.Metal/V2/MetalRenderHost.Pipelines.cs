@@ -2078,6 +2078,41 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
+    public bool ComparesGuestWords => true;
+
+    // A program evaluation's recorded reads compared where they lie (IShaderPipelineHost.TryCompareGuestWords): off the
+    // worker, each range takes the ownership test a word read of it takes, recorded as that read records it
+    // (TryCompareGuestWordsConcurrent); on the worker, TryCompareResidentGuestBytes's refusals, under which a word read
+    // would read every byte straight from memory.
+    public bool TryCompareGuestWords(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<byte> recorded)
+    {
+        var count = addresses.Length;
+        if (lengths.Length != count)
+        {
+            return false;
+        }
+
+        if (count == 0)
+        {
+            return recorded.IsEmpty;
+        }
+
+        if (_concurrentAssumptions is { } assumptions)
+        {
+            return TryCompareGuestWordsConcurrent(addresses, lengths, recorded, assumptions);
+        }
+
+        Span<int> offsets = count <= 128 ? stackalloc int[count] : new int[count];
+        var offset = 0;
+        for (var index = 0; index < count; index++)
+        {
+            offsets[index] = offset;
+            offset += Math.Max(lengths[index], 0);
+        }
+
+        return offset == recorded.Length && TryCompareResidentGuestBytes(addresses, lengths, offsets, recorded);
+    }
+
     private Func<ulong, bool>? _dataWritePending;
 
     // A data-only table word the GPU may still be writing: the shader is re-planned to load

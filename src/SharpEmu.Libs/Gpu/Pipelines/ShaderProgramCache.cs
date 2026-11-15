@@ -361,7 +361,16 @@ internal sealed class ShaderProgramCache
         }
 
         var started = MaterializationTally.StartTiming();
-        var fast = ResourceMaterializer.RevalidateFast(stage.Resources);
+        bool? fast;
+        try
+        {
+            fast = ResourceMaterializer.RevalidateFast(stage.Resources);
+        }
+        catch (ResourceMaterializer.ReadProofMismatchException mismatch)
+        {
+            throw GpuFatal.Fatal(mismatch.Message);
+        }
+
         var current = fast ?? (Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes));
         var outcome = current ? MaterializationTally.Outcome.KeptRevalidated
             : fast is not null && ResourceMaterializer.LastRevalidateRefused ? MaterializationTally.Outcome.RevalidateRefused
@@ -383,7 +392,17 @@ internal sealed class ShaderProgramCache
         }
 
         var started = MaterializationTally.StartTiming();
-        var fast = ResourceMaterializer.RevalidateOrRebuildFast(stage.Resources, out var snapshot);
+        ResourceMaterializer.FastRevalidation fast;
+        ResourceSnapshot? snapshot;
+        try
+        {
+            fast = ResourceMaterializer.RevalidateOrRebuildFast(stage.Resources, out snapshot);
+        }
+        catch (ResourceMaterializer.ReadProofMismatchException mismatch)
+        {
+            throw GpuFatal.Fatal(mismatch.Message);
+        }
+
         if (fast == ResourceMaterializer.FastRevalidation.NotFast)
         {
             // A cached materialization: revalidated as before, never rebuilt here.
@@ -422,6 +441,7 @@ internal sealed class ShaderProgramCache
     private readonly ResidentGuestBytesReader _readResidentGuestBytes;
     private readonly ResidentGuestBytesReader? _prefetchResidentGuestBytes;
     private readonly ResidentGuestBytesComparer? _compareResidentGuestBytes;
+    private readonly GuestWordsComparer? _compareGuestWords;
 
     // The functions the call tables name, decoded once while their code stays the same.
     private readonly ShaderFunctionCache _functions;
@@ -446,6 +466,7 @@ internal sealed class ShaderProgramCache
         _readResidentGuestBytes = ReadResidentGuestBytes;
         _prefetchResidentGuestBytes = PrefetchEnabled ? _readResidentGuestBytes : null;
         _compareResidentGuestBytes = ResourceMaterializationCache.InPlaceValidateEnabled ? CompareResidentGuestBytes : null;
+        _compareGuestWords = host.ComparesGuestWords ? CompareGuestWords : null;
         _dataWritePending = host.DataWritePending;
         _functions = new ShaderFunctionCache(_readResidentGuestBytes);
     }
@@ -480,6 +501,11 @@ internal sealed class ShaderProgramCache
     private bool CompareResidentGuestBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets,
         ReadOnlySpan<byte> recorded) =>
         ReadLog is null && _host.TryCompareResidentGuestBytes(addresses, lengths, offsets, recorded);
+
+    // A revalidation's proof of its reads (ResourceMaterializer.ReadProofs): refused while lookups log or trace what they
+    // read, since a proved evaluation reads nothing word by word.
+    private bool CompareGuestWords(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<byte> recorded) =>
+        !TracesLookups && _host.TryCompareGuestWords(addresses, lengths, recorded);
 
     private readonly Func<ulong, bool>? _dataWritePending;
     private ResourceRuntimeInputs? _inputs;
@@ -838,6 +864,7 @@ internal sealed class ShaderProgramCache
                 : null,
             ReadResidentMemory = _prefetchResidentGuestBytes,
             CompareResidentMemory = _compareResidentGuestBytes,
+            CompareGuestWords = _compareGuestWords,
             DataWritePending = _dataWritePending,
             NullsOffClassLoopRecords = NullsOffClassLoopRecords,
         };
