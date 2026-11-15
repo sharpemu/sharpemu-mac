@@ -257,6 +257,9 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
         var rounds = Setting("ROUNDS", 40);
         var warm = Setting("WARM", 150);
         var only = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_VARIATION");
+        // _REBIND=n: every nth draw of a pass writes its targets and depth state again with the values they hold (no
+        // flush), as a title's material binds do; 0 (the default) writes them only at a pass's first draw.
+        var rebind = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_REBIND"), out var rebindEvery) && rebindEvery > 0 ? rebindEvery : 0;
         using var rig = CreateRig();
         Assert.NotNull(rig);
 
@@ -332,7 +335,8 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             var vertexProgram = vertexPrograms[(draw / 3) % vertexPrograms.Length];
             var pixelProgram = pixelPrograms[attachments - 5][(draw / 2) % 4];
             SceneState state;
-            if (fullState)
+            var rebound = !fullState && rebind != 0 && draw % rebind == rebind - 1;
+            if (fullState || rebound)
             {
                 state = new SceneState(TargetSize, TargetSize)
                     .DepthTarget(depths[set], TargetSize, TargetSize, zFormat: 3)
@@ -343,7 +347,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 state.Context[Cx.CbTargetMask] = mask;
                 state.Context[Cx.CbShaderMask] = mask;
                 state.Context[Cx.SpiShaderColFormat] = 0x99999999u & mask;
-                pm4.Event(ScenePm4.EventCsPartialFlush);
+                if (!rebound) pm4.Event(ScenePm4.EventCsPartialFlush);
             }
             else
             {
@@ -388,7 +392,8 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 var vertexProgram = vertexPrograms[(draw / 3) % vertexPrograms.Length];
                 var pixelProgram = pixelPrograms[attachments - 5][(draw / 2) % 4];
                 SceneState state;
-                if (draw % passLength == 0)
+                var rebound = draw % passLength != 0 && rebind != 0 && draw % rebind == rebind - 1;
+                if (draw % passLength == 0 || rebound)
                 {
                     state = new SceneState(TargetSize, TargetSize)
                         .DepthTarget(depths[set], TargetSize, TargetSize, zFormat: 3)
@@ -399,7 +404,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                     state.Context[Cx.CbTargetMask] = mask;
                     state.Context[Cx.CbShaderMask] = mask;
                     state.Context[Cx.SpiShaderColFormat] = 0x99999999u & mask;
-                    pm4.Event(ScenePm4.EventCsPartialFlush);
+                    if (!rebound) pm4.Event(ScenePm4.EventCsPartialFlush);
                 }
                 else
                 {
@@ -659,11 +664,13 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             var phaseTotals = new Dictionary<string, double>();
             long allocated = 0;
             long allAllocated = 0;
+            long passes = 0;
             var collections = 0;
             for (var round = 0; round < warm + rounds; round++)
             {
                 if (round == warm)
                 {
+                    _ = SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport();
                     _ = PrefetchCounters.Invoke(rig.Host, null);
                     _ = KeptProgramsReport.Invoke(null, null);
                 }
@@ -709,6 +716,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 var roundAll = GC.GetTotalAllocatedBytes(precise: false) - allBefore;
                 var roundCollections = GC.CollectionCount(0) - collectionsBefore;
                 rig.Drain();
+                passes = (long)RenderPasses.GetValue(rig.Host)!;
                 var counters = rig.Host.ReadAndResetPerfCounters();
                 if (round < warm) continue;
                 wall.Add(elapsed * 1e6 / Stopwatch.Frequency / items);
@@ -727,6 +735,8 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             }
 
             var prefetch = (string)PrefetchCounters.Invoke(rig.Host, null)!;
+            // The recorder's target reuse over the measured rounds, and the render passes of the last one.
+            var inPlace = SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport();
             // The compute kept programs of the measured rounds; the graphics ones and the resolve memo are in the prefetch counters.
             var kept = (string)KeptProgramsReport.Invoke(null, null)!;
             // Read-only bindings answered from the one before (MetalReadBindingMemo) over every round, warm-up included.
@@ -774,6 +784,8 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 counters = prefetch,
                 kept,
                 bindings,
+                inPlace,
+                passesLastRound = passes,
                 phaseMicroseconds = phaseTotals.Where(pair => pair.Value / rounds >= 0.005)
                     .OrderByDescending(pair => pair.Value).ToDictionary(pair => pair.Key, pair => Math.Round(pair.Value / rounds, 3)),
             });
