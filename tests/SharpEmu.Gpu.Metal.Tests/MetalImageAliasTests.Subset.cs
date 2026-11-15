@@ -219,10 +219,17 @@ public sealed unsafe partial class MetalImageAliasTests
         }
     }
 
-    // The source already stale inside the run (a one-layer alias took its layer 2): copying it would carry its old
-    // bytes there, so the array is refused (the alias, a subset itself, may still be copied). Same bytes either way.
-    [Fact]
-    public void ASourceStaleInsideTheSubsetIsRefused()
+    // The source already stale inside the run (a one-layer alias took its layer 2, or 0): copying it would carry its
+    // old bytes there, so the array is refused. The alias, a subset itself, may still be copied - unless the array,
+    // which this sync reaches after it, would mark the reader stale over the copy again, or what the copy leaves
+    // stale on the new 8-layer reader (7 of 8 layers) would be reloaded whole, over the copy. Same bytes either way,
+    // with run sets on (a cut from the middle of the reader's stale run is two runs) and off.
+    [Theory]
+    [InlineData(2u, true)]
+    [InlineData(2u, false)]
+    [InlineData(0u, true)]
+    [InlineData(0u, false)]
+    public void ASourceStaleInsideTheSubsetIsRefused(uint aliasLayer, bool runSets)
     {
         if (!RequireDevice()) return;
         var outcomes = new List<(byte[] Second, byte[] Guest, long Copies)>();
@@ -230,6 +237,7 @@ public sealed unsafe partial class MetalImageAliasTests
         {
             using var rig = new Rig(Device.Value);
             rig.Cache.AliasSubsetDeviceEnabled = subset;
+            rig.Cache.AliasRunSetsEnabled = runSets;
             var first = SubsetArray(ImageAddress, 9, GuestTileMode.Standard64KB, ImageRole.StorageImage);
             var size = first.Description.Data.Size;
             var layer = LayerBytes(GuestTileMode.Standard64KB);
@@ -238,12 +246,12 @@ public sealed unsafe partial class MetalImageAliasTests
             rig.Harness.Submit();
             rig.Harness.Begin();
             rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)size, 0xC3));
-            rig.Acquire(SubsetArray(ImageAddress + 2 * layer, 1, GuestTileMode.Standard64KB, ImageRole.StorageImage));
+            rig.Acquire(SubsetArray(ImageAddress + aliasLayer * layer, 1, GuestTileMode.Standard64KB, ImageRole.StorageImage));
             rig.Harness.Submit();
             rig.Harness.Begin();
             Assert.True(firstImage.IsGpuModified);
             Assert.True(firstImage.IsCpuDirty);
-            Assert.Equal((2 * layer, 3 * layer), (firstImage.DirtyStart, firstImage.DirtyEnd));
+            Assert.Equal((aliasLayer * layer, (aliasLayer + 1) * layer), (firstImage.DirtyStart, firstImage.DirtyEnd));
             var copies = rig.Cache.AliasSubsetCounters.Copies;
             var second = rig.Cache.GetImage(rig.Acquire(
                 SubsetArray(ImageAddress, 8, GuestTileMode.Standard64KB, ImageRole.Texture)));

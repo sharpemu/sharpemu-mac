@@ -132,12 +132,12 @@ public sealed unsafe class MetalDeferredRefreshTests(ITestOutputHelper output)
 
     public static TheoryData<uint[], int, int> LayerOrders => new()
     {
-        // order, uploads on (round one + round two), layers dropped on
+        // order, uploads on (round one + round two), layers dropped on; run sets on (SHARPEMU_METAL_V2_ALIAS_RUN_SETS)
         { new uint[] { 0, 1, 2, 3 }, 0, 8 },
         { new uint[] { 3, 2, 1, 0 }, 0, 8 },
-        // The first clear cuts the middle: the whole array is uploaded, the rest are not stale any more.
-        { new uint[] { 2, 0, 3, 1 }, 2, 0 },
-        { new uint[] { 1, 2, 3, 0 }, 2, 0 },
+        // The first clear cuts the middle: two stale runs are left (run sets), and the later clears drop them.
+        { new uint[] { 2, 0, 3, 1 }, 0, 8 },
+        { new uint[] { 1, 2, 3, 0 }, 0, 8 },
         // Layers 2 and 3 are never cleared: they are uploaded when the array is read, and only then.
         { new uint[] { 0, 1 }, 2, 4 },
     };

@@ -594,14 +594,16 @@ public sealed unsafe partial class MetalImageAliasTests(ITestOutputHelper output
         Assert.Equal(0x2000UL + SmallSize, image.DirtyEnd);
     }
 
-    // A run past half of the GPU-written image cannot be handed over narrowly - its reload
-    // would be a whole one - so the image is written back whole and gives up ownership,
-    // as before.
+    // With run sets off, a run past half of the GPU-written image cannot be handed over
+    // narrowly - its reload would be a whole one - so the image is written back whole and
+    // gives up ownership, as before. (With them on it is reloaded alone:
+    // MetalImageAliasTests.RunSets.)
     [Fact]
     public void AnAliasRunPastHalfTheImageIsWrittenBackWhole()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
+        rig.Cache.AliasRunSetsEnabled = false;
         var (image, written, _) = GpuWrittenLarge(rig);
         const uint rows = 36;
         const ulong offset = 0x1000;

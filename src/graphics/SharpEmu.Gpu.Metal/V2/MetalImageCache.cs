@@ -600,8 +600,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     other.Description.Data.Address + other.Description.Data.Size);
                 var sharedSize = sharedEnd > sharedStart ? sharedEnd - sharedStart : 0;
                 var (otherStart, otherEnd) = other.OverlapWithin(sharedStart, sharedSize);
-                if (other.IsCpuDirty && otherEnd > otherStart &&
-                    otherStart >= other.DirtyStart && otherEnd <= other.DirtyEnd)
+                if (otherEnd > otherStart && other.IsStaleOver(otherStart, otherEnd))
                 {
                     // The other image already gave these bytes up to a write through an
                     // alias and owns only the rest: its texture is stale here, so it has
@@ -1235,18 +1234,28 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // is certain to be a narrow one: an image dirty over the run while it stays
     // GPU-modified must never be refreshed whole, since that would replace bytes only its
     // texture holds. A run already stale on the image is refused for the same reason
-    // when it lies outside the stale interval, which one interval cannot hold apart.
+    // when it lies outside the stale interval, which one interval cannot hold apart. With
+    // run sets (MetalImageCache.RunSets) it is refused only when the set is full, which the
+    // caller's whole writeback then merges by publishing; and a run past half of the image
+    // is reloaded alone like any other (NarrowRefreshPastHalf).
     private bool TryHandOverAliasRun(
         MetalCachedImage other, ulong start, ulong end, out MetalAliasFallbackReason declined)
     {
+        var runSets = other.RunCapacity > 1;
         declined = !SubRangeTransfersEnabled ? MetalAliasFallbackReason.SubRangeDisabled
             : end <= start ? MetalAliasFallbackReason.EmptyRun
             : other.Description.HasStencil ? MetalAliasFallbackReason.Stencil
             : start == 0 && end >= other.Description.Data.Size ? MetalAliasFallbackReason.RunIsWholeOther
-            : end - start > other.Description.Data.Size / 2 ? MetalAliasFallbackReason.RunPastHalf
-            : other.IsCpuDirty && (start < other.DirtyStart || end > other.DirtyEnd)
+            : !runSets && end - start > other.Description.Data.Size / 2 ? MetalAliasFallbackReason.RunPastHalf
+            : runSets && !other.CanAddStaleRun(start, end) ? MetalAliasFallbackReason.RunSetFull
+            : !runSets && other.IsCpuDirty && (start < other.DirtyStart || end > other.DirtyEnd)
                 ? MetalAliasFallbackReason.OtherDirtyOutsideRun
             : MetalAliasFallbackReason.None;
+        if (declined == MetalAliasFallbackReason.RunSetFull)
+        {
+            _runStats.NoteMerged();
+        }
+
         if (declined != MetalAliasFallbackReason.None)
         {
             return false;
@@ -1268,12 +1277,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // them - a refresh of the merged interval would replace those bytes with the guest's.
     // The run it holds is refreshed first instead. That is safe here: an alias still
     // owing those bytes overlaps this image too, so this same loop publishes it and marks
-    // the run stale again.
+    // the run stale again. With run sets only a full set is refreshed first.
     private void MarkAliasRunDirty(MetalCachedImage image, ulong start, ulong end)
     {
         if (image.IsGpuModified && image.IsCpuDirty && end > start &&
-            (start > image.DirtyEnd || end < image.DirtyStart))
+            (image.RunCapacity > 1
+                ? !image.CanAddStaleRun(start, end)
+                : start > image.DirtyEnd || end < image.DirtyStart))
         {
+            if (image.RunCapacity > 1)
+            {
+                _runStats.NoteMerged();
+            }
+
             RefreshFromGuest(image);
         }
 
@@ -2217,7 +2233,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
-        if (image.IsCpuDirty && aligned < image.DirtyEnd && alignedEnd > image.DirtyStart)
+        if (image.IsCpuDirty && image.StaleOverlaps(aligned, alignedEnd))
         {
             RefreshBeforeWriteback(image);
         }
@@ -2500,6 +2516,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             LevelsChangedFrame = _idleClock.Frames,
             Sparse = sparse,
         };
+        AdmitRunSets(image);
         if (windowView)
         {
             image.MarkWindowLinearView();
@@ -2856,6 +2873,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // the run is most of the image, cannot be aligned or cannot be mapped - the whole
     // image is then refreshed as before, because a partial refresh that loses bytes would
     // leave the texture disagreeing with guest memory for good.
+    // With run sets an image may be stale over several runs: each is refreshed alone, every
+    // one planned before any is encoded, and the half rule counts them all.
     private bool TryRefreshDirtyRun(MetalCachedImage image)
     {
         ref readonly var description = ref image.Description;
@@ -2863,47 +2882,77 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // held from its BASE_LEVEL the coarser levels' run.
         var residentStart = image.ResidentStart;
         var residentEnd = image.ResidentEnd;
-        var dirtyStart = Math.Max(image.DirtyStart, residentStart);
-        var dirtyEnd = Math.Min(image.DirtyEnd, residentEnd);
-        if (!SubRangeTransfersEnabled || description.HasStencil ||
-            dirtyEnd <= dirtyStart ||
-            (dirtyEnd - dirtyStart > (residentEnd - residentStart) / 2 && !NarrowRefreshPastHalf(image)))
+        if (!SubRangeTransfersEnabled || description.HasStencil)
         {
             return false;
         }
 
-        if (!TryCoveringRun(in description, dirtyStart, dirtyEnd, out var start, out var end))
+        Span<(ulong Start, ulong End)> runs = stackalloc (ulong, ulong)[MetalCachedImage.MaxRuns];
+        var count = 0;
+        ulong stale = 0;
+        foreach (var run in image.StaleRuns)
+        {
+            var dirtyStart = Math.Max(run.Start, residentStart);
+            var dirtyEnd = Math.Min(run.End, residentEnd);
+            if (dirtyEnd > dirtyStart)
+            {
+                runs[count++] = (dirtyStart, dirtyEnd);
+                stale += dirtyEnd - dirtyStart;
+            }
+        }
+
+        var overHalf = stale > (residentEnd - residentStart) / 2;
+        if (count == 0 || (overHalf && !NarrowRefreshPastHalf(image)))
         {
             return false;
         }
 
-        // The run's ends widen outward to cuts of the whole chain; the resident run's own
-        // ends are where its levels' transfers start and stop, so cutting there loses none.
-        start = Math.Max(start, residentStart);
-        end = Math.Min(end, residentEnd);
-        var source = ResolveUploadSource(description.Data.Address + start, end - start);
-        if (!source.IsValid || source.Size < end - start)
+        for (var index = 0; index < count; index++)
         {
-            return false;
+            if (!TryCoveringRun(in description, runs[index].Start, runs[index].End, out var start, out var end))
+            {
+                return false;
+            }
+
+            // The run's ends widen outward to cuts of the whole chain; the resident run's own
+            // ends are where its levels' transfers start and stop, so cutting there loses none.
+            runs[index] = (Math.Max(start, residentStart), Math.Min(end, residentEnd));
         }
 
-        PrepareSparseUpload(image, start, end);
-        _owner.LandHeldCopies(description.Data.Address + start, end - start);
-        var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
-        if (!EncodeUpload(
-                context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,
-                image.FirstLevel))
+        var cause = image.DirtyCause;
+        foreach (var (start, end) in runs[..count])
         {
-            // Nothing reached the texture; the whole refresh decides what becomes of the image.
-            return false;
-        }
+            var source = ResolveUploadSource(description.Data.Address + start, end - start);
+            if (!source.IsValid || source.Size < end - start)
+            {
+                return false;
+            }
 
-        _uploadCauses[(int)image.DirtyCause]++;
-        _partialUploads++;
-        _partialUploadBytesSaved += (long)(residentEnd - residentStart - (end - start));
-        if (context.WantsEncodedLabels)
-        {
-            context.ProfileEncoded(ProfileLabel("upload-run", in description));
+            PrepareSparseUpload(image, start, end);
+            _owner.LandHeldCopies(description.Data.Address + start, end - start);
+            var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
+            if (!EncodeUpload(
+                    context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,
+                    image.FirstLevel))
+            {
+                // Nothing of this run reached the texture; the whole refresh decides what becomes of the image.
+                return false;
+            }
+
+            _uploadCauses[(int)cause]++;
+            _partialUploads++;
+            _partialUploadBytesSaved += (long)(residentEnd - residentStart - (end - start));
+            if (context.WantsEncodedLabels)
+            {
+                context.ProfileEncoded(ProfileLabel("upload-run", in description));
+            }
+
+            if (image.FirstLevel == 0)
+            {
+                image.RefreshComplete(start, end);
+            }
+
+            Interlocked.Increment(ref _uploads);
         }
 
         if (image.FirstLevel != 0)
@@ -2911,12 +2960,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             // What is still dirty lies outside the levels the texture holds.
             image.RefreshComplete();
         }
-        else
+
+        if (overHalf)
         {
-            image.RefreshComplete(start, end);
+            _runStats.NoteRefreshOverHalf();
         }
 
-        Interlocked.Increment(ref _uploads);
         return true;
     }
 
@@ -2924,8 +2973,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // layers its passes have not overwritten yet): the whole refresh is no option there - it would replace the
     // layers only the texture holds - so the half rule, a cost rule, would only keep the stale layers.
     // TryRefreshDirtyRun and TryNarrowReloadRun both ask this, so they give one answer.
+    // With run sets every GPU-written image goes the same way: a whole refresh is forbidden for any of them.
     private bool NarrowRefreshPastHalf(MetalCachedImage image) =>
-        LayerDeferEnabled && image.IsGpuModified && image.Description.IsLayered;
+        image.IsGpuModified && (image.RunCapacity > 1 || (LayerDeferEnabled && image.Description.IsLayered));
 
     // Whether TryRefreshDirtyRun, given [start, end) as the image's whole stale interval, reloads exactly that run
     // and nothing past it: sub-range transfers on, the half rule met, a covering run that does not widen, and guest
@@ -3148,9 +3198,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
-        var (cause, start, end) = (image.DirtyCause, image.DirtyStart, image.DirtyEnd);
+        var cause = image.DirtyCause;
+        Span<(ulong Start, ulong End)> runs = stackalloc (ulong, ulong)[MetalCachedImage.MaxRuns];
+        var count = image.StaleRuns.Length;
+        image.StaleRuns.CopyTo(runs);
         RefreshFromGuest(image);
-        image.MarkCpuDirty(cause, start, end);
+        foreach (var (start, end) in runs[..count])
+        {
+            image.MarkCpuDirty(cause, start, end);
+        }
     }
 
     // Retiles a GPU-written image back into guest memory; afterwards guest memory and

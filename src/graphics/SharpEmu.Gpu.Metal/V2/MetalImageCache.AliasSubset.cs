@@ -71,13 +71,30 @@ internal sealed partial class MetalImageCache
         var targetEnd = targetStart + layers * stride;
         var otherInside = sourceStart == 0 && sourceEnd == other.Description.Data.Size;
         if (sourceStart != otherStart || sourceEnd != otherEnd ||
-            (other.IsCpuDirty && other.DirtyStart < sourceEnd && other.DirtyEnd > sourceStart) ||
-            !CopyLeavesRunCurrent(image, targetStart, targetEnd) ||
+            (other.IsCpuDirty && other.StaleOverlaps(sourceStart, sourceEnd)) ||
+            // Whether marking the run current leaves none of it stale: a refresh of what stays stale would put the
+            // guest's older bytes back over the copy.
+            !image.CanCutStale(targetStart, targetEnd) ||
             // A write leaves the other image stale over the run and GPU-modified for the rest; one stale interval
-            // cannot hold the run apart from one it already has, and widening it would cover bytes only its texture holds.
+            // cannot hold the run apart from one it already has, and widening it would cover bytes only its texture
+            // holds. Run sets hold it apart while the set has room.
             (takesGpuOwnership && !otherInside && other.IsCpuDirty &&
-             (other.DirtyEnd < sourceStart || other.DirtyStart > sourceEnd)))
+             (other.RunCapacity > 1
+                 ? !other.CanAddStaleRun(sourceStart, sourceEnd)
+                 : other.DirtyEnd < sourceStart || other.DirtyStart > sourceEnd)))
         {
+            return false;
+        }
+
+        if (LaterOwnerOverlaps(image, other))
+        {
+            RefuseAliasTransition("subset-later-owner");
+            return false;
+        }
+
+        if (!RestReloadsAround(image, targetStart, targetEnd))
+        {
+            RefuseAliasTransition("subset-rest-reload");
             return false;
         }
 
@@ -86,9 +103,7 @@ internal sealed partial class MetalImageCache
             // The other image stays GPU-modified and stale over the run, and only TryRefreshDirtyRun reloads a stale run
             // of such an image (a whole refresh would replace bytes only its texture holds). Unless that reload is
             // certain to make exactly this run, its next use would keep its older texels there (alias_run_refresh_refused).
-            var (staleStart, staleEnd) = other.IsCpuDirty
-                ? (Math.Min(other.DirtyStart, sourceStart), Math.Max(other.DirtyEnd, sourceEnd))
-                : (sourceStart, sourceEnd);
+            var (staleStart, staleEnd) = other.MergedStaleRun(sourceStart, sourceEnd);
             if (!CanReloadRunExactly(other, staleStart, staleEnd))
             {
                 RefuseAliasTransition("subset-stale-run-inexact");
@@ -141,18 +156,78 @@ internal sealed partial class MetalImageCache
         return true;
     }
 
-    // Whether marking [start, end) refreshed leaves none of it stale: one stale interval cannot lose its middle
-    // (MetalCachedImage.RefreshComplete), and a refresh of what stays stale would put the guest's older bytes back
-    // over the copy.
-    private static bool CopyLeavesRunCurrent(MetalCachedImage image, ulong start, ulong end)
+    // Whether an alias this sync has not reached yet still owes bytes it shares with this image: on its own turn it
+    // publishes them and marks this image stale over all it shares with it (MarkAliasRunDirty). Over the run, the
+    // reload would replace the copy with guest bytes the source has not given guest memory; anywhere else, it can
+    // tip what is left stale past the narrow refresh (RestReloadsAround). One that has nothing to give (stale over all
+    // it shares) is skipped by the sync, and one already reached marked this image before the copy, which the copy's
+    // cut then clears. Caller holds the lock, inside SynchronizeAliases.
+    private bool LaterOwnerOverlaps(MetalCachedImage image, MetalCachedImage other)
+    {
+        var address = image.Description.Data.Address;
+        var size = image.Description.Data.Size;
+        foreach (var identifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            if (_slots.TryGet(identifier) is not { } owner || owner == image || owner == other ||
+                !owner.IsGpuModified || !owner.Overlaps(address, size) || _syncedScratch.Contains(owner))
+            {
+                continue;
+            }
+
+            var (shareStart, shareEnd) = owner.OverlapWithin(address, size);
+            if (shareEnd > shareStart && owner.IsStaleOver(shareStart, shareEnd))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    // Whether what stays stale on this image once [start, end) is marked current is reloaded without touching the
+    // run: by TryRefreshDirtyRun, each run alone (the half rule met, as the image is now), over a covering run that
+    // does not reach into the copied one, read in place. Otherwise the reload is a whole one, and it would put guest
+    // bytes - which do not have the source's yet - over the copy.
+    private bool RestReloadsAround(MetalCachedImage image, ulong start, ulong end)
     {
         if (!image.IsCpuDirty)
         {
             return true;
         }
 
-        var (dirtyStart, dirtyEnd) = (image.DirtyStart, image.DirtyEnd);
-        return dirtyEnd <= start || dirtyStart >= end || start <= dirtyStart || end >= dirtyEnd;
+        Span<(ulong Start, ulong End)> left = stackalloc (ulong, ulong)[MetalCachedImage.MaxRuns + 1];
+        var count = MetalCachedImage.SubtractRun(image.StaleRuns, start, end, left);
+        ulong stale = 0;
+        foreach (var run in left[..count])
+        {
+            stale += run.End - run.Start;
+        }
+
+        if (count == 0)
+        {
+            return true;
+        }
+
+        ref readonly var description = ref image.Description;
+        if (!SubRangeTransfersEnabled || description.HasStencil ||
+            (stale > description.Data.Size / 2 && !NarrowRefreshPastHalf(image)))
+        {
+            return false;
+        }
+
+        foreach (var run in left[..count])
+        {
+            if (!TryCoveringRun(in description, run.Start, run.End, out var runStart, out var runEnd) ||
+                (runStart < end && runEnd > start) ||
+                !_guestMemory.TryResolveInPlace(description.Data.Address + runStart, runEnd - runStart, out _))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     // Verify mode: what the round trip would have published (the source's run, retiled) and what the copy put in the

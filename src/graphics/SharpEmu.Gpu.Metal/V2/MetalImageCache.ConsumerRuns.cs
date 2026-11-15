@@ -63,7 +63,7 @@ internal sealed partial class MetalImageCache
             // Stale over these bytes already: guest memory, or the alias this same loop
             // publishes, holds the newer copy, so the image has nothing of them to give.
             // Anything else keeps the whole writeback, which reloads the stale run first.
-            if (start < image.DirtyStart || end > image.DirtyEnd ||
+            if (!image.IsStaleOver(start, end) ||
                 (written && !CanKeepGpuOwnership(image, start, end)))
             {
                 return false;
@@ -172,18 +172,20 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
-        // One stale interval: a write apart from the one already stale would merge the
-        // bytes between them, which only the texture holds.
+        // A write apart from the runs already stale must not merge into them over the bytes
+        // between, which only the texture holds: with one interval that is any write apart,
+        // with run sets one the full set has no room for.
         var (staleStart, staleEnd) = (start, end);
         if (image.IsCpuDirty)
         {
-            if (start > image.DirtyEnd || end < image.DirtyStart)
+            if (image.RunCapacity > 1
+                    ? !image.CanAddStaleRun(start, end)
+                    : start > image.DirtyEnd || end < image.DirtyStart)
             {
                 return false;
             }
 
-            staleStart = Math.Min(staleStart, image.DirtyStart);
-            staleEnd = Math.Max(staleEnd, image.DirtyEnd);
+            (staleStart, staleEnd) = image.MergedStaleRun(start, end);
         }
 
         return TryNarrowReloadRun(image, staleStart, staleEnd, out var runStart, out var runEnd) &&
@@ -208,31 +210,5 @@ internal sealed partial class MetalImageCache
 
         var source = _guestMemory.Resolve(description.Data.Address + runStart, runEnd - runStart);
         return source.IsValid && source.Size >= runEnd - runStart;
-    }
-
-    // Every byte of [runStart, runEnd) is one guest memory holds for the image: inside the
-    // published run, or inside the stale interval, where guest memory is the newer copy.
-    private static bool GuestHoldsImageBytes(
-        MetalCachedImage image, ulong runStart, ulong runEnd, ulong staleStart, ulong staleEnd)
-    {
-        if (runStart >= staleStart && runEnd <= staleEnd)
-        {
-            return true;
-        }
-
-        var (publishedStart, publishedEnd) = (image.PublishedStart, image.PublishedEnd);
-        if (publishedEnd <= publishedStart)
-        {
-            return false;
-        }
-
-        if (publishedStart <= staleEnd && staleStart <= publishedEnd)
-        {
-            // Touching or overlapping: together one interval.
-            publishedStart = Math.Min(publishedStart, staleStart);
-            publishedEnd = Math.Max(publishedEnd, staleEnd);
-        }
-
-        return runStart >= publishedStart && runEnd <= publishedEnd;
     }
 }
