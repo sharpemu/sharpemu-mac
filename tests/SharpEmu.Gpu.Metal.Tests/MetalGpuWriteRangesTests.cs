@@ -712,4 +712,45 @@ public sealed class MetalGpuWriteRangesTests
             cleanMemo = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_WRITE_CLEAN_MEMO") != "0", rounds },
             new JsonSerializerOptions { WriteIndented = true }));
     }
+    // The line mask a resolution answers the words of an owned line from (MetalRenderHost.ConcurrentLineMasks): for every
+    // whole-word range of a line, a set bit exactly where TryPendingSerialSnapshot finds a pending write, over records
+    // and labels at byte offsets that do not fall on word boundaries, completed and pending serials, and an unbounded write.
+    [Fact]
+    public void ALineMaskAnswersEveryWholeWordRangeAsThePendingSnapshotDoes()
+    {
+        var random = new Random(7);
+        for (var trial = 0; trial < 40; trial++)
+        {
+            var ranges = new MetalGpuWriteRanges();
+            const ulong Base = 0x40_0000;
+            for (var write = 0; write < 1 + trial % 6; write++)
+            {
+                var start = Base + (ulong)random.Next(0, 0x400);
+                var size = (ulong)random.Next(1, trial % 3 == 0 ? 8 : 0x180);
+                var origin = random.Next(4) == 0 ? MetalGpuWriteOrigin.EndOfPipeLabel : MetalGpuWriteOrigin.StorageBuffer;
+                ranges.Note(start, size, serial: (ulong)random.Next(1, 6), origin);
+            }
+
+            if (trial == 39)
+            {
+                ranges.NoteUnbounded(serial: 9);
+            }
+
+            var completed = (ulong)random.Next(0, 4);
+            for (var line = Base; line < Base + 0x600; line += 256)
+            {
+                Assert.True(ranges.TryPendingWordMask(line, completed, out var mask, out var stamp));
+                Assert.Equal(ranges.MutationStamp, stamp);
+                for (var first = 0; first < 64; first++)
+                for (var words = 1; first + words <= 64; words += 1 + words / 4)
+                {
+                    var address = line + (ulong)first * 4;
+                    var size = (ulong)words * 4;
+                    Assert.True(ranges.TryPendingSerialSnapshot(address, size, completed, out var pending));
+                    var bits = (words == 64 ? ulong.MaxValue : (1UL << words) - 1) << first;
+                    Assert.True((pending != 0) == ((mask & bits) != 0), $"trial {trial} line 0x{line:X} words {first}+{words}");
+                }
+            }
+        }
+    }
 }

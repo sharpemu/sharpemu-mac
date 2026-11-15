@@ -603,6 +603,80 @@ internal sealed class MetalGpuWriteRanges
     }
 
     /// <summary>
+    /// <see cref="TryPendingSerialSnapshot"/> for every 4-byte word of the 256-byte line at <paramref name="line"/>
+    /// at once: bit k of <paramref name="mask"/> is set when a write that has not completed by
+    /// <paramref name="completed"/> overlaps bytes [line + 4k, line + 4k + 4). For a 4-byte-aligned range of whole
+    /// words inside the line, <c>TryPendingSerialSnapshot(range) pending != 0</c> exactly when one of its words' bits
+    /// is set (both are byte-overlap tests over the same records and the same serial). <paramref name="stamp"/> is the
+    /// (even) <see cref="MutationStamp"/> the records were read at: while it stands, the records and so the mask are the
+    /// same. False when the worker changed the records meanwhile.
+    /// </summary>
+    public bool TryPendingWordMask(ulong line, ulong completed, out ulong mask, out int stamp)
+    {
+        const ulong LineBytes = 256;
+        mask = 0;
+        stamp = Volatile.Read(ref _mutation);
+        if ((stamp & 1) != 0 || line > ulong.MaxValue - LineBytes)
+        {
+            return false;
+        }
+
+        try
+        {
+            var end = line + LineBytes;
+            if (_unboundedSerial > completed)
+            {
+                mask = ulong.MaxValue;
+            }
+            else
+            {
+                var records = _records;
+                var count = Volatile.Read(ref _wideRecordCount) == 0 &&
+                    !HashedMayCover(_bucketHashCounts, line >> RecordBucketShift, (end - 1) >> RecordBucketShift, MaxRecordBucketLookups)
+                    ? 0
+                    : Math.Min(_count, records.Length);
+                for (var index = 0; index < count; index++)
+                {
+                    var record = records[index];
+                    if (record.Serial > completed && record.End > line && record.Start < end)
+                    {
+                        mask |= LineWordBits(line, record.Start, record.End);
+                    }
+                }
+
+                var labels = _labels;
+                var labelCount = HashedMayCover(_labelPageHashCounts, line >> LabelPageShift, (end - 1) >> LabelPageShift, MaxLabelPageLookups)
+                    ? Math.Min(_labelCount, labels.Length)
+                    : 0;
+                for (var index = 0; index < labelCount; index++)
+                {
+                    var label = labels[index];
+                    if (label.Serial > completed && label.End > line && label.Start < end)
+                    {
+                        mask |= LineWordBits(line, label.Start, label.End);
+                    }
+                }
+            }
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return false;
+        }
+
+        Interlocked.MemoryBarrier();
+        return Volatile.Read(ref _mutation) == stamp;
+    }
+
+    // The words of the 256-byte line at `line` that bytes [start, end) overlap (end > line, start < line + 256).
+    private static ulong LineWordBits(ulong line, ulong start, ulong end)
+    {
+        var first = (int)((Math.Max(start, line) - line) >> 2);
+        var last = (int)((Math.Min(end, line + 256) - 1 - line) >> 2);
+        var span = last - first + 1;
+        return (span >= 64 ? ulong.MaxValue : (1UL << span) - 1) << first;
+    }
+
+    /// <summary>
     /// <see cref="LatestSequence"/> read from another thread, like <see cref="TryPendingSerialSnapshot"/>:
     /// false when the worker changed the records meanwhile (the answer is then unknown).
     /// </summary>

@@ -214,6 +214,65 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     internal bool ConcurrentScopedSerial { get; set; } = ConcurrentScopedSerialDefault;
 
+    // SHARPEMU_CONCURRENT_LINE_MASKS=0 tests every word read in an owned line of an owned page on its own, as before;
+    // =verify answers each such word both ways and fails (fatal, mask_verify_failed) where they differ.
+    //
+    // With it on (and ConcurrentScopedSerial, which fixes the completed serial for the resolution), the line's test
+    // (ConcurrentLineOwner) takes each owner apart instead of stopping at the first: queued command writes, GPU-modified
+    // images, the two overlays, and the pending GPU writes as a mask of the line's 64 words read from the write
+    // records at one mutation stamp. A line only GPU writes own keeps that mask, and a word in it is answered from the
+    // mask instead of its own ConcurrentOwner: GpuWrite where its bits are set, None elsewhere, recorded exactly as the
+    // word's own test is (same query, range and answer), so the worker re-checks the same answers at the take.
+    // Demon's Souls' draws read ~20 words a job out of lines a pending copy writes (~167k word tests a frame, each a
+    // walk of the write records).
+    //
+    // Why the mask's answer is the word's own test's answer at the time of the read: what the worker (and the command
+    // thread) can change while the resolver reads, and what tells the resolver it did:
+    //   - queued command writes ahead of the job (PendingCommandWriteHolds): only ever released for a job, never added
+    //     (a range queued after the job was submitted is not ahead of it), so none over the line then means none over
+    //     the word now;
+    //   - GPU-modified images and the two overlays: anything that makes bytes newly owned moves OwnershipVersions (the
+    //     argument CrossDrawCleanPages rests on); the versions are read before the line's tests and compared at the
+    //     word, so none over the line then means none over the word now;
+    //   - the write records: every change (a write noted, records retired, folded or cleared, and the bounds MayCover
+    //     reads) happens inside one mutation of MetalGpuWriteRanges; the mask is read between two equal even stamps and
+    //     the stamp is compared at the word, so the records the word's own walk would read are the mask's records, and
+    //     the serial is the same scoped serial.
+    // A word whose line moved a version or the stamp, an unaligned word, or a line some other owner holds, takes its own
+    // test as before (mask_stale, mask_refused). The answer is recorded at the word as before, so the take's re-check
+    // (IsConcurrentResolveStillCurrent) is unchanged.
+    internal enum LineMaskMode : byte
+    {
+        Off,
+        On,
+        Verify,
+    }
+
+    private static readonly LineMaskMode ConcurrentLineMasksDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_CONCURRENT_LINE_MASKS") switch
+        {
+            "0" => LineMaskMode.Off,
+            "verify" => LineMaskMode.Verify,
+            _ => LineMaskMode.On,
+        };
+
+    internal LineMaskMode ConcurrentLineMasks { get; set; } = ConcurrentLineMasksDefault;
+
+    private long _lineMaskVerifyFailed;
+
+    /// <summary>
+    /// What a line test found for each owner (ConcurrentLineOwner): usable when only pending GPU writes own bytes of
+    /// the line, and then their words (<see cref="Mask"/>) as of write-record stamp <see cref="Stamp"/> and the
+    /// ownership versions <see cref="Versions"/> read before any of the line's tests.
+    /// </summary>
+    internal struct LineSummary
+    {
+        public bool Usable;
+        public int Stamp;
+        public ulong Mask;
+        public (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) Versions;
+    }
+
     // What an ownership test costs, counted where it runs (a resolution, a re-check) and added to the host's
     // totals once per resolution or re-check, for the PERF line: owner_tests=(...).
     internal enum OwnerTestCounter
@@ -225,9 +284,19 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         ImageLock,
         SerialRead,
         OverlayCall,
+        // Words of an owned line answered from its mask (ConcurrentLineMasks); words of a masked line that took
+        // their own test because a version or the record stamp moved (stale) or the word is unaligned (refused,
+        // with the words of lines some other owner holds); words verified both ways.
+        MaskWord,
+        MaskStale,
+        MaskRefused,
+        MaskVerified,
+        // Words a pending copy writes, answered from the copy line (TryReadGuestWordConcurrent).
+        CopyLineWord,
     }
 
-    private static readonly string[] OwnerTestCounterNames = ["page", "line", "word", "recheck", "image_locks", "serial_reads", "overlay_calls"];
+    private static readonly string[] OwnerTestCounterNames =
+        ["page", "line", "word", "recheck", "image_locks", "serial_reads", "overlay_calls", "mask_words", "mask_stale", "mask_refused", "mask_verified", "copy_line_words"];
 
     private readonly long[] _ownerTests = new long[OwnerTestCounterNames.Length];
 
@@ -297,7 +366,8 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                 .Append(Interlocked.Exchange(ref _ownerTests[index], 0));
         }
 
-        return builder.Append(')').ToString();
+        // Not reset: one is a bug.
+        return builder.Append(",mask_verify_failed=").Append(Interlocked.Read(ref _lineMaskVerifyFailed)).Append(')').ToString();
     }
 
     internal sealed class ConcurrentAssumptions(
@@ -333,6 +403,17 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         public ulong WordLine = ulong.MaxValue;
         public readonly byte[] WordLineBytes = new byte[ConcurrentWordLineBytes];
 
+        // The line of the last word read through a pending copy with its owner from a line mask, and the words of it
+        // (CopyLineWords) read through the same copy then (FillCopyLine), with the stamp and versions they stand for.
+        public ulong CopyLine = ulong.MaxValue;
+        public ulong CopyLineWords;
+        public int CopyLineStamp;
+        public (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) CopyLineVersions;
+        public readonly byte[] CopyLineBytes = new byte[ConcurrentWordLineBytes];
+
+        // The ring slot whose mask answered IsOwnedRecorded's last test, or -1.
+        public int LastMaskSlot = -1;
+
         // Taken again from the pool for a new resolution.
         public void Reset((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
         {
@@ -345,6 +426,8 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             Array.Fill(_lines, ulong.MaxValue);
             _nextLine = 0;
             WordLine = ulong.MaxValue;
+            CopyLine = ulong.MaxValue;
+            LastMaskSlot = -1;
             ForgetSerial();
         }
 
@@ -356,25 +439,42 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             _nextOwnedPage = (_nextOwnedPage + 1) & (_ownedPages.Length - 1);
         }
 
+        // Beside each line, what its test found per owner (ConcurrentLineMasks); not usable when not taken.
+        private readonly LineSummary[] _lineSummaries = new LineSummary[8];
+
         // Null when the line has not been tested in this resolution (or has left the ring).
         public bool? LineOwned(ConcurrentQuery query, ulong line)
         {
+            var slot = FindLine(query, line);
+            return slot < 0 ? null : LineIsOwned(slot);
+        }
+
+        // The line's slot in the ring, or -1.
+        public int FindLine(ConcurrentQuery query, ulong line)
+        {
             var key = line | (ulong)query;
-            foreach (var entry in _lines)
+            for (var slot = 0; slot < _lines.Length; slot++)
             {
-                if ((entry & ~LineOwnedBit) == key)
+                if ((_lines[slot] & ~LineOwnedBit) == key)
                 {
-                    return (entry & LineOwnedBit) != 0;
+                    return slot;
                 }
             }
 
-            return null;
+            return -1;
         }
 
-        public void NoteLine(ConcurrentQuery query, ulong line, bool owned)
+        public bool LineIsOwned(int slot) => (_lines[slot] & LineOwnedBit) != 0;
+
+        public ref readonly LineSummary Summary(int slot) => ref _lineSummaries[slot];
+
+        public int NoteLine(ConcurrentQuery query, ulong line, bool owned, in LineSummary summary = default)
         {
-            _lines[_nextLine] = line | (ulong)query | (owned ? LineOwnedBit : 0);
+            var slot = _nextLine;
+            _lines[slot] = line | (ulong)query | (owned ? LineOwnedBit : 0);
+            _lineSummaries[slot] = summary;
             _nextLine = (_nextLine + 1) & (_lines.Length - 1);
+            return slot;
         }
 
         public bool IsCleanPage(ConcurrentQuery query, ulong page)
@@ -489,6 +589,12 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     {
         var assumptions = _concurrentAssumptions ?? throw new InvalidOperationException("No concurrent resolution is open.");
         _concurrentAssumptions = null;
+        var copyLineWords = assumptions.Counters[(int)OwnerTestCounter.CopyLineWord];
+        if (copyLineWords != 0)
+        {
+            Interlocked.Add(ref _concurrentCopyReads, copyLineWords);
+        }
+
         FlushOwnerTests(assumptions);
         return assumptions;
     }
@@ -678,6 +784,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // otherwise for the range itself.
     private bool IsOwnedRecorded(ConcurrentQuery query, ulong address, ulong size, ConcurrentAssumptions assumptions)
     {
+        assumptions.LastMaskSlot = -1;
         var page = address & ~(ConcurrentPageBytes - 1);
         var withinPage = size != 0 && size <= ConcurrentPageBytes && address - page <= ConcurrentPageBytes - size;
         if (withinPage)
@@ -725,21 +832,38 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             var line = address & ~((ulong)ConcurrentWordLineBytes - 1);
             if (ownedLines && size <= ConcurrentWordLineBytes && address - line <= ConcurrentWordLineBytes - size)
             {
-                var lineOwned = assumptions.LineOwned(query, line);
-                if (lineOwned is null)
+                var slot = assumptions.FindLine(query, line);
+                bool lineOwned;
+                if (slot < 0)
                 {
                     assumptions.Count(OwnerTestCounter.Line);
-                    lineOwned = ConcurrentOwner(line, ConcurrentWordLineBytes, assumptions) != AbandonCause.None;
-                    assumptions.NoteLine(query, line, lineOwned.Value);
-                    if (!lineOwned.Value)
+                    LineSummary summary = default;
+                    lineOwned = ConcurrentLineMasks != LineMaskMode.Off && assumptions.Scoped
+                        ? ConcurrentLineOwner(line, assumptions, out summary)
+                        : ConcurrentOwner(line, ConcurrentWordLineBytes, assumptions) != AbandonCause.None;
+                    slot = assumptions.NoteLine(query, line, lineOwned, summary);
+                    if (!lineOwned)
                     {
                         assumptions.Record(query, line, ConcurrentWordLineBytes, false);
                     }
                 }
+                else
+                {
+                    lineOwned = assumptions.LineIsOwned(slot);
+                }
 
-                if (!lineOwned.Value)
+                if (!lineOwned)
                 {
                     return false;
+                }
+
+                if (TryLineMaskOwner(assumptions, slot, line, address, size, out var maskOwner))
+                {
+                    _lastConcurrentOwner = maskOwner;
+                    assumptions.LastMaskSlot = slot;
+                    var maskOwned = maskOwner != AbandonCause.None;
+                    assumptions.Record(query, address, size, maskOwned);
+                    return maskOwned;
                 }
             }
         }
@@ -749,6 +873,132 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var owned = _lastConcurrentOwner != AbandonCause.None;
         assumptions.Record(query, address, size, owned);
         return owned;
+    }
+
+    // ConcurrentOwner(line, 256) != None, with each owner tested (ConcurrentLineMasks): the same tests in the same
+    // order, the pending GPU writes as a word mask, and the overlays asked even when a GPU write already owns the line.
+    // The summary is usable when the mask is known and nothing but GPU writes owns bytes of the line.
+    private bool ConcurrentLineOwner(ulong line, ConcurrentOwnerScope scope, out LineSummary summary)
+    {
+        const ulong size = ConcurrentWordLineBytes;
+        summary = default;
+        // Read before any test below: a change after this that could make a word of the line owned moves one of them.
+        var versions = OwnershipVersions();
+        if (PendingCommandWriteHolds(line, size))
+        {
+            return true;
+        }
+
+        if (_imageCache.MayOwn(line, size))
+        {
+            scope.Count(OwnerTestCounter.ImageLock);
+            if (_imageCache.HasGpuModifiedImageBytes(line, size))
+            {
+                return true;
+            }
+        }
+
+        // MayCover reads bounds the records' mutations change, so an even stamp read before it stands for its answer too.
+        ulong mask = 0;
+        var stamp = _gpuWrites.MutationStamp;
+        var known = (stamp & 1) == 0;
+        if (_gpuWrites.MayCover(line, size))
+        {
+            var completed = scope.Serial();
+            known = false;
+            for (var attempt = 0; attempt < 4 && !known; attempt++)
+            {
+                known = _gpuWrites.TryPendingWordMask(line, completed, out mask, out stamp);
+                if (!known)
+                {
+                    Thread.SpinWait(8);
+                }
+            }
+
+            if (!known)
+            {
+                // IsGpuWritePendingConcurrent's answer when the records keep changing: pending.
+                return true;
+            }
+        }
+
+        var cp = false;
+        if (_cpOverlay.Count != 0)
+        {
+            scope.Count(OwnerTestCounter.OverlayCall);
+            cp = _cpOverlay.Coverage(line, size, scope.Serial) != MetalOverlayCoverage.None;
+        }
+
+        var label = false;
+        if (_labelOverlay.Count != 0)
+        {
+            scope.Count(OwnerTestCounter.OverlayCall);
+            label = _labelOverlay.Coverage(line, size, scope.Serial) != MetalOverlayCoverage.None;
+        }
+
+        summary = new LineSummary { Usable = known && !cp && !label, Stamp = stamp, Mask = mask, Versions = versions };
+        return mask != 0 || cp || label;
+    }
+
+    // The owner of a word of a line tested with ConcurrentLineOwner, from its mask, while the versions and the record
+    // stamp the mask was taken at stand (see ConcurrentLineMasks). False: the word takes its own test.
+    private bool TryLineMaskOwner(ConcurrentAssumptions assumptions, int slot, ulong line, ulong address, ulong size, out AbandonCause owner)
+    {
+        owner = AbandonCause.None;
+        var mode = ConcurrentLineMasks;
+        if (mode == LineMaskMode.Off)
+        {
+            return false;
+        }
+
+        ref readonly var summary = ref assumptions.Summary(slot);
+        if (!summary.Usable || ((address | size) & 3) != 0)
+        {
+            assumptions.Count(OwnerTestCounter.MaskRefused);
+            return false;
+        }
+
+        if (_gpuWrites.MutationStamp != summary.Stamp || OwnershipVersions() != summary.Versions)
+        {
+            assumptions.Count(OwnerTestCounter.MaskStale);
+            return false;
+        }
+
+        // Inside the line (IsOwnedRecorded's test), whole words: bits first .. first + words - 1.
+        var first = (int)((address - line) >> 2);
+        var words = (int)(size >> 2);
+        var bits = (words >= 64 ? ulong.MaxValue : (1UL << words) - 1) << first;
+        owner = (summary.Mask & bits) != 0 ? AbandonCause.GpuWrite : AbandonCause.None;
+        assumptions.Count(OwnerTestCounter.MaskWord);
+        if (mode == LineMaskMode.Verify)
+        {
+            VerifyLineMaskOwner(assumptions, summary, address, size, owner);
+        }
+
+        return true;
+    }
+
+    // SHARPEMU_CONCURRENT_LINE_MASKS=verify: the word's own test as well. Only a difference while the versions and the
+    // stamp still stand is a wrong answer (one moved, both answers may be right at their times).
+    private void VerifyLineMaskOwner(ConcurrentAssumptions assumptions, in LineSummary summary, ulong address, ulong size, AbandonCause maskOwner)
+    {
+        var own = ConcurrentOwner(address, size, assumptions);
+        if (_gpuWrites.MutationStamp != summary.Stamp || OwnershipVersions() != summary.Versions)
+        {
+            return;
+        }
+
+        if (own == maskOwner)
+        {
+            assumptions.Count(OwnerTestCounter.MaskVerified);
+            return;
+        }
+
+        Interlocked.Increment(ref _lineMaskVerifyFailed);
+        var message = $"[METAL-V2][LINE_MASK] verify mismatch address=0x{address:X16} size={size} mask=0x{summary.Mask:X16} " +
+            $"mask_owner={maskOwner} own_owner={own}.";
+        Console.Error.WriteLine(message);
+        throw GpuFatal.Fatal(message);
     }
 
     // SHARPEMU_CONCURRENT_CROSS_CLEAN=0 tests every page of every resolution again. A page found clean stays
@@ -841,6 +1091,28 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             return true;
         }
 
+        if ((address & ~lineMask) == assumptions.CopyLine && (address & 3) == 0 &&
+            ((assumptions.CopyLineWords >> (int)((address & lineMask) >> 2)) & 1) != 0)
+        {
+            var copied = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                assumptions.CopyLineBytes.AsSpan((int)(address & lineMask), sizeof(uint)));
+            assumptions.Count(OwnerTestCounter.CopyLineWord);
+            if (ConcurrentLineMasks != LineMaskMode.Verify)
+            {
+                word = copied;
+                return true;
+            }
+
+            return VerifyCopyLineWord(address, copied, out word, assumptions);
+        }
+
+        return TryReadGuestWordConcurrentTested(address, out word, assumptions);
+    }
+
+    // A word read with its own ownership test (or its line's mask), and through a pending copy where one writes it.
+    private bool TryReadGuestWordConcurrentTested(ulong address, out uint word, ConcurrentAssumptions assumptions)
+    {
+        const ulong lineMask = ConcurrentWordLineBytes - 1;
         word = 0;
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (IsOwnedRecorded(ConcurrentQuery.Word, address, sizeof(uint), assumptions))
@@ -850,11 +1122,17 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             var owner = _lastConcurrentOwner;
             if (owner == AbandonCause.GpuWrite)
             {
+                var maskSlot = assumptions.LastMaskSlot;
                 var answers = assumptions.Answers.Count;
                 if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions))
                 {
                     assumptions.Forget(ConcurrentQuery.Word, address, sizeof(uint), answers);
                     word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+                    if (maskSlot >= 0 && (address & 3) == 0)
+                    {
+                        FillCopyLine(assumptions, maskSlot, address & ~lineMask);
+                    }
+
                     return true;
                 }
 
