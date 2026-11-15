@@ -366,7 +366,17 @@ public static partial class ResourceMaterializer
     public static string TakeFastReport() => FormattableString.Invariant(
         $"fast_materializations={_fastMaterializations.Take()} fast_specialization_hits={_fastSpecializationHits.Take()} fast_statistics_hits={_fastStatisticsHits.Take()}");
 
-    private sealed record FastOrigin(ShaderResourcePlan Plan, ResourceRuntimeInputs Inputs);
+    // The plan a fast snapshot came from and the draw inputs it was evaluated with. The inputs object is refilled for
+    // every lookup (ShaderProgramCache), so the draw's own user data, shader base and compute state are kept beside it:
+    // revalidating with whatever the object held last evaluated another stage's or another draw's words.
+    private sealed record FastOrigin(ShaderResourcePlan Plan, ResourceRuntimeInputs Inputs, IReadOnlyList<uint> UserData, ulong ShaderBase,
+        ComputeSelectorState? ComputeState)
+    {
+        public FastOrigin(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+            : this(plan, inputs, inputs.UserData, inputs.ShaderBase, inputs.ComputeState)
+        {
+        }
+    }
 
     [ThreadStatic]
     private static MaterializationTally.Outcome _lastFastOutcome;
@@ -394,15 +404,33 @@ public static partial class ResourceMaterializer
             return false;
         }
 
+        var inputs = TakeRevalidationInputs(origin.Inputs);
+        inputs.UserData = origin.UserData;
+        inputs.ShaderBase = origin.ShaderBase;
+        inputs.ComputeState = origin.ComputeState;
         var output = TakeOutput();
         try
         {
-            return EvaluateInto(plan, origin.Inputs, output) && SameAsOutput(plan, snapshot, output);
+            return EvaluateInto(plan, inputs, output) && SameAsOutput(plan, snapshot, output);
         }
         finally
         {
             _programOutput = output;
+            inputs.UserData = [];
+            _revalidationInputs = inputs;
         }
+    }
+
+    // A copy of an origin's readers for its draw's own values, one per thread and reader set; taken out of its slot while
+    // in use, like the output (a guest read can revalidate another draw on this thread).
+    [ThreadStatic]
+    private static ResourceRuntimeInputs? _revalidationInputs;
+
+    private static ResourceRuntimeInputs TakeRevalidationInputs(ResourceRuntimeInputs readers)
+    {
+        var inputs = _revalidationInputs;
+        _revalidationInputs = null;
+        return inputs is not null && inputs.SameReaders(readers) ? inputs : readers.CopyReaders();
     }
 
     [ThreadStatic]

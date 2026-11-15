@@ -217,7 +217,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         {
             while (_outstanding != 0)
             {
+                _waiters++;
                 Monitor.Wait(_lock);
+                _waiters--;
             }
         }
     }
@@ -251,7 +253,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         {
             while (_finished < count)
             {
+                _waiters++;
                 Monitor.Wait(_lock);
+                _waiters--;
             }
         }
     }
@@ -265,7 +269,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             _paused = true;
             while (_running)
             {
+                _waiters++;
                 Monitor.Wait(_lock);
+                _waiters--;
             }
         }
     }
@@ -420,7 +426,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         {
             while (job.State == 0)
             {
+                _waiters++;
                 Monitor.Wait(_lock);
+                _waiters--;
             }
         }
     }
@@ -490,6 +498,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         (Interlocked.Exchange(ref _callerResolves, 0),
             Interlocked.Exchange(ref _callerResolveTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
 
+    // Threads in a Monitor.Wait on _lock for a finished job, the queue to drain, the worker to stop, or the worker's own gate
+    // or pause (under _lock). FinishJob wakes only when one waits: a pulse per job was a kernel call per draw for nobody.
+    private int _waiters;
+
     private void FinishJob(bool worker)
     {
         lock (_lock)
@@ -498,7 +510,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             _finished++;
             _running = false;
             if (worker) _workerClaimed = false;
-            Monitor.PulseAll(_lock);
+            // The worker idle in Run waits for _running to fall after a caller's resolution as well as for jobs.
+            if (_waiters != 0 || _idleForJobs)
+            {
+                Monitor.PulseAll(_lock);
+            }
         }
     }
 
@@ -551,7 +567,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                     }
 
                     _waitingOnPause = _paused;
+                    _waiters++;
                     Monitor.Wait(_lock, 50);
+                    _waiters--;
                     _waitingOnPause = false;
                 }
 
@@ -613,11 +631,12 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     {
         _concurrent.BeginConcurrentResolve();
         _resolvingJob = job.Index + 1;
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             if (job.Compute is { } compute)
             {
+                // Only a dispatch's job keeps its resolving time (dispatch_saved_ms); a draw's read the clock for nothing.
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
                 job.ComputeResult = _executor.ResolveComputeProgramAhead(job.Banks, compute.DispatchInitiator, compute.GroupsX,
                     compute.GroupsY, compute.GroupsZ, compute.Indirect, out job.ComputeRefusal);
                 job.Assumptions = _concurrent.EndConcurrentResolve();
