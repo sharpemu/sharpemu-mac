@@ -209,7 +209,8 @@ public static class MeshletBuilder
 /// <summary>
 /// Meshlets of the indexed triangle-list draws a non-GS mesh pipeline runs, built once per
 /// index range and validated against the guest bytes on every use: an index buffer the guest
-/// rewrites in place hashes differently and is rebuilt. Entries live in shared Metal buffers
+/// rewrites in place hashes differently and is rebuilt, unless one of the few versions the
+/// range kept has that full-range hash. Entries live in shared Metal buffers
 /// the residency set names, under a byte budget with least-recently-used eviction of entries
 /// no in-flight submission can still read.
 /// </summary>
@@ -242,8 +243,10 @@ internal sealed class MetalMeshletCache
     private readonly record struct Key(
         ulong Address, uint IndexCount, bool Index32, uint MaxVertices, uint MaxPrimitives);
 
+    // One built version of a key's index range.
     private sealed class Entry
     {
+        public required Key Key;
         public required nint Buffer;
         public required nint Contents;
         public required ulong Bytes;
@@ -255,6 +258,18 @@ internal sealed class MetalMeshletCache
         public ulong LastUsedSerial;
         public ulong LastUsedTick;
     }
+
+    // The versions a key holds: content that cycles through a few index patterns at one range
+    // (meshes taking turns in a transient slot) finds its earlier meshlets again by full-range
+    // hash instead of rebuilding them. Validated is the version the last hash matched or built,
+    // the one the same-submission skip hands back.
+    private sealed class Slot
+    {
+        public readonly List<Entry> Versions = new(MaxVersionsPerKey);
+        public Entry? Validated;
+    }
+
+    private const int MaxVersionsPerKey = 4;
 
     // The hashes each key was built from, newest last, kept past the entry's removal so a rebuild
     // can tell content the key had before from content it never had. Diagnostic only.
@@ -297,9 +312,15 @@ internal sealed class MetalMeshletCache
     private static readonly bool TraceBuilds =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESHLET_TRACE") == "1";
 
+    // SHARPEMU_METAL_MESHLET_VERSIONS=0 keeps one version per key, replaced on every change.
+    private static readonly int DefaultMaxVersions =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_MESHLET_VERSIONS") ? MaxVersionsPerKey : 1;
+
     private readonly MetalGuestMemory _guestMemory;
     private readonly ICpuMemory _memory;
-    private readonly Dictionary<Key, Entry> _entries = [];
+    private readonly Dictionary<Key, Slot> _slots = [];
+    private readonly int _maxVersions;
+    private int _versionCount;
     private readonly byte[] _chunk = new byte[HashChunkBytes];
     private readonly MeshletBuilder.Scratch _scratch = new();
     private readonly System.IO.Hashing.XxHash3 _hasher = new();
@@ -323,11 +344,14 @@ internal sealed class MetalMeshletCache
     private long _builderTicks;
     private long _allocTicks;
     private long _evictions;
+    private long _versionHits;
 
-    public MetalMeshletCache(MetalGuestMemory guestMemory, ICpuMemory memory)
+    /// <param name="maxVersions">Versions kept per key, 1 to 4; the env setting when null.</param>
+    public MetalMeshletCache(MetalGuestMemory guestMemory, ICpuMemory memory, int? maxVersions = null)
     {
         _guestMemory = guestMemory;
         _memory = memory;
+        _maxVersions = Math.Clamp(maxVersions ?? DefaultMaxVersions, 1, MaxVersionsPerKey);
     }
 
     public static bool IsDisabled => Disabled;
@@ -357,7 +381,8 @@ internal sealed class MetalMeshletCache
         // does not rewrite an index range between the draws one command buffer records, and
         // hashing the bytes on every use was the cost that mattered (tens of milliseconds a
         // frame on the worker). Ranges the GPU writes never get here.
-        if (_entries.TryGetValue(key, out var validated) && validated.ValidatedSerial == submissionSerial)
+        _slots.TryGetValue(key, out var slot);
+        if (slot?.Validated is { } validated && validated.ValidatedSerial == submissionSerial)
         {
             Touch(validated, submissionSerial);
             meshlets = new Meshlets(validated.Buffer, validated.Count, validated.VertexBase, validated.PrimitiveBase);
@@ -376,20 +401,46 @@ internal sealed class MetalMeshletCache
         _hashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - hashStarted;
         _hashBytes += (long)rangeBytes;
 
+        // Only a version built from bytes with this full-range hash is handed back.
         var oldHash = 0UL;
-        if (_entries.TryGetValue(key, out var entry))
+        if (slot is not null)
         {
-            if (entry.Hash == hash)
+            foreach (var version in slot.Versions)
             {
-                entry.ValidatedSerial = submissionSerial;
-                Touch(entry, submissionSerial);
-                meshlets = new Meshlets(entry.Buffer, entry.Count, entry.VertexBase, entry.PrimitiveBase);
+                if (version.Hash != hash)
+                {
+                    continue;
+                }
+
+                if (version != slot.Validated)
+                {
+                    // A hit one version per key would have rebuilt.
+                    _versionHits++;
+                }
+
+                slot.Validated = version;
+                version.ValidatedSerial = submissionSerial;
+                Touch(version, submissionSerial);
+                meshlets = new Meshlets(version.Buffer, version.Count, version.VertexBase, version.PrimitiveBase);
                 _draws++;
                 return true;
             }
 
-            oldHash = entry.Hash;
-            Remove(key, entry);
+            oldHash = slot.Validated?.Hash ?? 0;
+            if (slot.Versions.Count >= _maxVersions)
+            {
+                // The least recently used version makes way; it is released once its last use completes.
+                var oldest = slot.Versions[0];
+                foreach (var version in slot.Versions)
+                {
+                    if (version.LastUsedTick < oldest.LastUsedTick)
+                    {
+                        oldest = version;
+                    }
+                }
+
+                Remove(oldest);
+            }
         }
 
         var buildStarted = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -445,8 +496,9 @@ internal sealed class MetalMeshletCache
             built.CopyTo(new Span<uint>((void*)contents, wordCount));
         }
 
-        entry = new Entry
+        var entry = new Entry
         {
+            Key = key,
             Buffer = buffer,
             Contents = contents,
             Bytes = size,
@@ -456,7 +508,16 @@ internal sealed class MetalMeshletCache
             PrimitiveBase = built.PrimitiveBase,
             ValidatedSerial = submissionSerial,
         };
-        _entries[key] = entry;
+        // MakeRoom may have evicted the key's last version, so the slot is looked up again.
+        if (!_slots.TryGetValue(key, out slot))
+        {
+            slot = new Slot();
+            _slots[key] = slot;
+        }
+
+        slot.Versions.Add(entry);
+        slot.Validated = entry;
+        _versionCount++;
         _bytes += size;
         Touch(entry, submissionSerial);
         var buildDone = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -513,8 +574,17 @@ internal sealed class MetalMeshletCache
     /// <summary>Entries evicted for room in this window.</summary>
     internal long Evictions => _evictions;
 
-    /// <summary>Live entries.</summary>
-    internal int EntryCount => _entries.Count;
+    /// <summary>Keys with at least one live version.</summary>
+    internal int EntryCount => _slots.Count;
+
+    /// <summary>Live versions over all keys.</summary>
+    internal int VersionCount => _versionCount;
+
+    /// <summary>Hits in this window on a version other than the key's last validated one.</summary>
+    internal long VersionHits => _versionHits;
+
+    /// <summary>Buffers removed from the cache and waiting for their last use to complete.</summary>
+    internal int RetiredCount => _retired.Count;
 
     private void Touch(Entry entry, ulong serial)
     {
@@ -555,14 +625,15 @@ internal sealed class MetalMeshletCache
 
         while (_bytes + size > BudgetBytes)
         {
-            Key? victimKey = null;
             Entry? victim = null;
-            foreach (var (key, entry) in _entries)
+            foreach (var slot in _slots.Values)
             {
-                if (entry.LastUsedSerial <= completedSerial && (victim is null || entry.LastUsedTick < victim.LastUsedTick))
+                foreach (var entry in slot.Versions)
                 {
-                    victimKey = key;
-                    victim = entry;
+                    if (entry.LastUsedSerial <= completedSerial && (victim is null || entry.LastUsedTick < victim.LastUsedTick))
+                    {
+                        victim = entry;
+                    }
                 }
             }
 
@@ -571,7 +642,7 @@ internal sealed class MetalMeshletCache
                 return false;
             }
 
-            Remove(victimKey!.Value, victim);
+            Remove(victim);
             _evictions++;
         }
 
@@ -580,9 +651,21 @@ internal sealed class MetalMeshletCache
 
     // The buffer may still be bound by recorded work, so it is released only once the
     // serial it was last used under has completed.
-    private void Remove(Key key, Entry entry)
+    private void Remove(Entry entry)
     {
-        _entries.Remove(key);
+        var slot = _slots[entry.Key];
+        slot.Versions.Remove(entry);
+        if (slot.Validated == entry)
+        {
+            slot.Validated = null;
+        }
+
+        if (slot.Versions.Count == 0)
+        {
+            _slots.Remove(entry.Key);
+        }
+
+        _versionCount--;
         _bytes -= entry.Bytes;
         _retired.Add((entry.Buffer, entry.LastUsedSerial));
     }
@@ -613,7 +696,8 @@ internal sealed class MetalMeshletCache
             $"recurring={_buildsBy[(int)BuildReason.Recurring]}] " +
             $"meshlet_hash_kb={_hashBytes / 1024} meshlet_build_kb={_buildBytes / 1024} " +
             $"meshlet_build_split_ms=[read={Ms(_readTicks)} build={Ms(_builderTicks)} alloc={Ms(_allocTicks)}] " +
-            $"meshlet_entries={_entries.Count} meshlet_evictions={_evictions}";
+            $"meshlet_entries={_slots.Count} meshlet_evictions={_evictions} " +
+            $"meshlet_version_hits={_versionHits} meshlet_versions={_versionCount}";
         _draws = 0;
         _builds = 0;
         _validationsSkipped = 0;
@@ -627,6 +711,7 @@ internal sealed class MetalMeshletCache
         _builderTicks = 0;
         _allocTicks = 0;
         _evictions = 0;
+        _versionHits = 0;
         return text;
 
         string Ms(long ticks) => (ticks * 1000.0 / frequency).ToString("F2", culture);
