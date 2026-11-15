@@ -346,10 +346,7 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
-        // An empty interval on a dirty image is a new one, stale over all of it.
-        var (dirtyStart, dirtyEnd) = image.DirtyEnd > image.DirtyStart
-            ? (image.DirtyStart, image.DirtyEnd)
-            : (0UL, image.Description.Data.Size);
+        var (dirtyStart, dirtyEnd) = (image.DirtyStart, image.DirtyEnd);
         var (start, end) = (dirtyStart, dirtyEnd);
         var overlaps = viewStart < dirtyEnd && viewEnd > dirtyStart;
         if (overlaps)

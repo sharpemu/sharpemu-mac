@@ -71,7 +71,7 @@ internal sealed partial class MetalImageCache
         var targetEnd = targetStart + layers * stride;
         var otherInside = sourceStart == 0 && sourceEnd == other.Description.Data.Size;
         if (sourceStart != otherStart || sourceEnd != otherEnd ||
-            (other.IsCpuDirty && (other.DirtyEnd <= other.DirtyStart || (other.DirtyStart < sourceEnd && other.DirtyEnd > sourceStart))) ||
+            (other.IsCpuDirty && other.DirtyStart < sourceEnd && other.DirtyEnd > sourceStart) ||
             !CopyLeavesRunCurrent(image, targetStart, targetEnd) ||
             // A write leaves the other image stale over the run and GPU-modified for the rest; one stale interval
             // cannot hold the run apart from one it already has, and widening it would cover bytes only its texture holds.
@@ -99,13 +99,7 @@ internal sealed partial class MetalImageCache
             EncodeAliasSubsetCheck(context, image, other, targetStart, sourceStart, sourceEnd - sourceStart);
         }
 
-        // The texture changed whether or not it was stale there; then it is current over the run. A new image is
-        // stale over an empty interval, which means all of it: that is named first, or the cut would clear it all.
-        if (image.IsCpuDirty && image.DirtyEnd <= image.DirtyStart)
-        {
-            image.MarkCpuDirty(image.DirtyCause, 0, image.Description.Data.Size);
-        }
-
+        // The texture changed whether or not it was stale there; then it is current over the run.
         image.NoteContentChanged();
         image.RefreshComplete(targetStart, targetEnd);
         if (takesGpuOwnership)
@@ -132,7 +126,6 @@ internal sealed partial class MetalImageCache
     // Whether marking [start, end) refreshed leaves none of it stale: one stale interval cannot lose its middle
     // (MetalCachedImage.RefreshComplete), and a refresh of what stays stale would put the guest's older bytes back
     // over the copy.
-    // An empty stale interval on a dirty image is a new one, stale over all of it.
     private static bool CopyLeavesRunCurrent(MetalCachedImage image, ulong start, ulong end)
     {
         if (!image.IsCpuDirty)
@@ -140,9 +133,7 @@ internal sealed partial class MetalImageCache
             return true;
         }
 
-        var (dirtyStart, dirtyEnd) = image.DirtyEnd > image.DirtyStart
-            ? (image.DirtyStart, image.DirtyEnd)
-            : (0UL, image.Description.Data.Size);
+        var (dirtyStart, dirtyEnd) = (image.DirtyStart, image.DirtyEnd);
         return dirtyEnd <= start || dirtyStart >= end || start <= dirtyStart || end >= dirtyEnd;
     }
 

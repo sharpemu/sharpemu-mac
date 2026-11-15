@@ -163,8 +163,14 @@ internal sealed class MetalCachedImage : IDisposable
         Texture = texture;
         ResidentEnd = description.Data.Size;
         // A newly created image starts with the guest's bytes as its contents, so the
-        // first use uploads unless the GPU takes ownership first.
+        // first use uploads unless the GPU takes ownership first. Stale over all of it, said
+        // as such: an empty interval would let the next run widen it to that run alone.
         _cpuDirty = !ImageDescription.IsEmptyRange(description.Data);
+        if (_cpuDirty)
+        {
+            DirtyEnd = description.Data.Size;
+        }
+
         NoteContentChanged();
     }
 

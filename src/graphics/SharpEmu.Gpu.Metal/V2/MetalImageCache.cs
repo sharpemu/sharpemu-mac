@@ -2780,11 +2780,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         ref readonly var description = ref image.Description;
         // A texture held from its BASE_LEVEL reads only the coarser levels' bytes; guest
-        // memory changing anywhere else changes nothing it holds. (An empty interval is a
-        // new image, dirty over all of it.)
+        // memory changing anywhere else changes nothing it holds.
         var residentStart = image.ResidentStart;
         var residentEnd = image.ResidentEnd;
-        if (image.FirstLevel != 0 && image.DirtyEnd > image.DirtyStart &&
+        if (image.FirstLevel != 0 &&
             (image.DirtyEnd <= residentStart || image.DirtyStart >= residentEnd))
         {
             image.RefreshComplete();
