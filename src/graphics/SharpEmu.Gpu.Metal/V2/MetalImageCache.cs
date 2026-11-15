@@ -2861,6 +2861,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         _uploadCauses[(int)image.DirtyCause]++;
+        NoteUploadForTrace(image, image.DirtyCause, residentEnd - residentStart, run: false);
         if (context.WantsEncodedLabels)
         {
             context.ProfileEncoded(ProfileLabel("upload", in description));
@@ -2957,6 +2958,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             _uploadCauses[(int)cause]++;
+            NoteUploadForTrace(image, cause, end - start, run: true);
             _partialUploads++;
             _partialUploadBytesSaved += (long)(residentEnd - residentStart - (end - start));
             if (context.WantsEncodedLabels)
