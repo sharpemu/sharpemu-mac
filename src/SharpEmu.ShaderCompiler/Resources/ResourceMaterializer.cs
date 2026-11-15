@@ -403,13 +403,17 @@ public static partial class ResourceMaterializer
         }
     }
 
-    // SHARPEMU_RESOURCE_READ_PROOF: off (default: every revalidation evaluates the program word by word), 1 or on,
+    // SHARPEMU_RESOURCE_READ_PROOF: on (default), 0 or off (every revalidation evaluates the program word by word),
     // verify (a proved revalidation also evaluates in full and stops when the snapshot is not current).
     //
-    // Off by default since 2026-11-15: a Demon's Souls verify run found one proof that held before and after a full
-    // evaluation that did not give the snapshot ("[SHADER][READ_PROOF] verify mismatch", plan 0x4DFFC096614D79ED, vertex
-    // stage, 8 ranges, 156 bytes; about one in 200,000 proved revalidations), not yet explained, and in that game the
-    // proofs bought no resolver time (as many origins change or are recorded again as are proved).
+    // On by default again since 2026-11-15. The verify mismatches that had turned it off (plans 0x4DFFC096614D79ED,
+    // 0xB3AB9F05FA5AFAA8, 0x8B94AE10B80DDFCD in Demon's Souls) were resolutions ahead of the GPU worker whose reads
+    // straddled a GPU write the worker recorded meanwhile: the full evaluation read a line answered clean before the
+    // write, the proof compared it through the write's copy after it. The draw needs the value after the write; the take
+    // now refuses every such resolution (the GPU write log, MetalRenderHost.IsConcurrentResolveStillCurrent) and verify
+    // counts it as verify_superseded. Evidence: long in-world verify run (LOOKAHEAD, READ_PROOF and RESOLVE_MEMO all
+    // =verify, 419 s) with verify_failed=0, 862 superseded, 15.5M verified, no fatal; proofs worth ~5 ms a frame there
+    // (median 86.5 ms off vs 81.0 ms on).
     //
     // A fast snapshot's revalidation evaluates its program again with the snapshot's own user data, shader base and
     // readers and compares the words it emits with the snapshot. The evaluation that made the snapshot (or last found it
@@ -428,9 +432,9 @@ public static partial class ResourceMaterializer
 
     internal static ReadProofMode ParseReadProofMode(string? value) => value?.Trim().ToLowerInvariant() switch
     {
-        "1" or "on" => ReadProofMode.On,
+        "0" or "off" => ReadProofMode.Off,
         "verify" => ReadProofMode.Verify,
-        _ => ReadProofMode.Off,
+        _ => ReadProofMode.On,
     };
 
     internal static ReadProofMode ReadProofs { get; set; } = ParseReadProofMode(Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_READ_PROOF"));
