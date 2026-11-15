@@ -397,10 +397,9 @@ public static partial class ResourceMaterializer
             return null;
         }
 
-        var plan = origin.Plan;
-        _lastRevalidateRefused = origin.Inputs.TablePhase is not null;
-        if (_lastRevalidateRefused)
+        if (origin.Inputs.TablePhase is not null)
         {
+            _lastRevalidateRefused = true;
             return false;
         }
 
@@ -408,6 +407,28 @@ public static partial class ResourceMaterializer
         inputs.UserData = origin.UserData;
         inputs.ShaderBase = origin.ShaderBase;
         inputs.ComputeState = origin.ComputeState;
+        try
+        {
+            return Revalidate(origin.Plan, snapshot, inputs);
+        }
+        finally
+        {
+            inputs.UserData = [];
+            _revalidationInputs = inputs;
+        }
+    }
+
+    // Whether the plan evaluates to the snapshot's words again for these inputs (a draw's user data, shader base and
+    // readers), read as a materialization reads them; a reader wrapper that tells table words apart (TablePhase) is
+    // refused (LastRevalidateRefused).
+    public static bool Revalidate(ShaderResourcePlan plan, ResourceSnapshot snapshot, ResourceRuntimeInputs inputs)
+    {
+        _lastRevalidateRefused = inputs.TablePhase is not null || plan.MaterializationProgram is null;
+        if (_lastRevalidateRefused)
+        {
+            return false;
+        }
+
         var output = TakeOutput();
         try
         {
@@ -416,8 +437,6 @@ public static partial class ResourceMaterializer
         finally
         {
             _programOutput = output;
-            inputs.UserData = [];
-            _revalidationInputs = inputs;
         }
     }
 

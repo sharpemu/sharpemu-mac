@@ -66,4 +66,30 @@ public sealed class FastOriginRevalidationTests
         Assert.True(ResourceMaterializer.RevalidateFast(kept));
         Assert.False(ResourceMaterializer.RevalidateFast(other));
     }
+
+    [Fact]
+    public void ExplicitInputsRevalidateWithTheirOwnUserDataAndShaderBase()
+    {
+        var plan = PointerPlan();
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[16] };
+        uint[] descriptor = [0x8000, 0x10 << 16, 64, 0x24FAC];
+        descriptor.CopyTo(memory.Words, 0);
+        descriptor.CopyTo(memory.Words, 8);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.MaterializeFast(plan, Inputs([0x1000, 0, 0, 0], memory.Read), ref snapshot, ref specialization, out _));
+
+        // Equal words through another pointer revalidate; a changed word or an unreadable one does not.
+        Assert.True(ResourceMaterializer.Revalidate(plan, snapshot, Inputs([0x1020, 0, 0, 0], memory.Read)));
+        memory.Words[9] = 0x20 << 16;
+        Assert.False(ResourceMaterializer.Revalidate(plan, snapshot, Inputs([0x1020, 0, 0, 0], memory.Read)));
+        Assert.True(ResourceMaterializer.Revalidate(plan, snapshot, Inputs([0x1000, 0, 0, 0], memory.Read)));
+        Assert.False(ResourceMaterializer.Revalidate(plan, snapshot, Inputs([0x4000, 0, 0, 0], memory.Read)));
+        Assert.False(ResourceMaterializer.LastRevalidateRefused);
+
+        // A reader wrapper that splits the table phase is refused, never guessed.
+        var phased = new ResourceRuntimeInputs { UserData = new uint[] { 0x1000, 0, 0, 0 }, ReadMemory = memory.Read, TablePhase = _ => { } };
+        Assert.False(ResourceMaterializer.Revalidate(plan, snapshot, phased));
+        Assert.True(ResourceMaterializer.LastRevalidateRefused);
+    }
 }
