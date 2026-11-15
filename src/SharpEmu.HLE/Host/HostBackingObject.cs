@@ -15,6 +15,14 @@ public sealed class HostBackingObject : IDisposable
     private HostBackingReleaseResult _lastRelease;
     private bool _isDisposed;
     private HostManagedWriteIntervals? _managedWrites;
+    // Alias accesses (SharedBackingViews' lock-free single-view reads and writes) count here,
+    // each thread on its own cache line, instead of on _accessState, which every thread shares.
+    // Null with SHARPEMU_ACCESS_STRIPES=0: alias accesses then take TryEnterAccess.
+    private readonly HostAccessStripes? _aliasStripes = AccessStripesEnabled ? new HostAccessStripes() : null;
+    internal const int AliasLane = 0;
+    internal static readonly bool AccessStripesEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_ACCESS_STRIPES") != "0";
+    internal HostAccessStripes? AliasStripes => _aliasStripes;
 
     // Optional ordinary bookkeeping only. No wait or callback during enrollment;
     // a concurrent first copy may allocate a discarded candidate, while warmed
@@ -154,7 +162,9 @@ public sealed class HostBackingObject : IDisposable
     public bool HasOwnedLifetime => _ownedRelease is not null;
     public bool IsClosing => HasOwnedLifetime && (Volatile.Read(ref _accessState) & ClosingBit) != 0;
     /// <summary>Count observation including briefly rejected entry bookkeeping; not native access authority.</summary>
-    public int ActiveAccesses => HasOwnedLifetime ? (int)Volatile.Read(ref _accessState) : 0;
+    public int ActiveAccesses => HasOwnedLifetime ? (int)Volatile.Read(ref _accessState) + (int)AliasAccesses : 0;
+    // Signed sum of the alias stripes; fatal when negative (an exit without an enter).
+    private long AliasAccesses => _aliasStripes?.Sum(AliasLane) ?? 0;
     public HostBackingReleaseResult LastRelease { get { lock (Gate) return _lastRelease; } }
 
     /// <summary>
@@ -190,6 +200,30 @@ public sealed class HostBackingObject : IDisposable
             Interlocked.Increment(ref _accessState);
             throw new InvalidOperationException("Unbalanced backing access exit.");
         }
+    }
+
+    /// <summary>
+    /// <see cref="TryEnterAccess"/> for an alias access, counted on the calling thread's stripe.
+    /// Same admission against <see cref="CloseAccess"/>: the stripe increment is a full fence
+    /// before the closing re-check, and the drain sets the closing bit with a full fence before
+    /// it sums the stripes, so either the entrant sees Close or the drain sees the entrant.
+    /// Every success must <see cref="ExitAliasAccess"/> exactly once, after the final access.
+    /// </summary>
+    internal bool TryEnterAliasAccess()
+    {
+        if (_aliasStripes is not { } stripes) return TryEnterAccess();
+        // A legacy (not owned) lifetime has no drain here; its stripes count for the views' drains.
+        if (HasOwnedLifetime ? !CanStartAccessEntry() : IsDisposed) return false;
+        var cell = stripes.Enter(AliasLane);
+        if (HasOwnedLifetime ? CanStartAccessEntry() : !IsDisposed) return true;
+        stripes.ExitCell(cell);
+        return false;
+    }
+
+    internal void ExitAliasAccess()
+    {
+        if (_aliasStripes is not { } stripes) { ExitAccess(); return; }
+        stripes.Exit(AliasLane);
     }
 
     /// <summary>Revokes new ordinary alias/descriptor accesses; never reopens admission.</summary>
