@@ -377,7 +377,80 @@ public static partial class ResourceMaterializer
             : this(plan, inputs, inputs.UserData, inputs.ShaderBase, inputs.ComputeState, specialization)
         {
         }
+
+        private MaterializationProgram.ReadProof? _proof;
+
+        // What an evaluation of this origin's own draw values that emitted the snapshot's words read (ReadProof, set by
+        // AttachProof and NoteRevalidation only): the origin's user data, shader base and readers are the ones it was
+        // recorded with. Read and replaced from any thread.
+        public MaterializationProgram.ReadProof? Proof
+        {
+            get => Volatile.Read(ref _proof);
+            set => Volatile.Write(ref _proof, value);
+        }
     }
+
+    // SHARPEMU_RESOURCE_READ_PROOF: on (default), 0 (every revalidation evaluates the program word by word, as before),
+    // verify (a proved revalidation also evaluates in full and stops when the snapshot is not current).
+    //
+    // A fast snapshot's revalidation evaluates its program again with the snapshot's own user data, shader base and
+    // readers and compares the words it emits with the snapshot. The evaluation that made the snapshot (or last found it
+    // current) records what it read (MaterializationProgram.ReadProof); with it on, the revalidation compares those words
+    // where they lie (ResourceRuntimeInputs.CompareGuestWords: the ownership tests a word read makes, recorded as it
+    // records them, then the bytes), reads its unreadable words again and evaluates the branches' active sources, and
+    // when all are as recorded the snapshot is current without evaluating the program, emitting its words or comparing
+    // them (TryProve). Any refusal or difference evaluates in full, which records a new proof. Demon's Souls revalidates
+    // ~5000 kept stages a frame through the resolve memo, each reading ~45-100 descriptor words one by one.
+    internal enum ReadProofMode
+    {
+        Off,
+        On,
+        Verify,
+    }
+
+    internal static ReadProofMode ParseReadProofMode(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "0" or "off" => ReadProofMode.Off,
+        "verify" => ReadProofMode.Verify,
+        _ => ReadProofMode.On,
+    };
+
+    internal static ReadProofMode ReadProofs { get; set; } = ParseReadProofMode(Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_READ_PROOF"));
+
+    // A verify-mode proof whose replay differs from the full evaluation (the full one compared its words again first).
+    public sealed class ReadProofMismatchException(string message) : InvalidOperationException(message);
+
+    private static readonly ThreadCounter _proofHits = new();
+    private static readonly ThreadCounter _proofNone = new();
+    private static readonly ThreadCounter _proofNoComparer = new();
+    private static readonly ThreadCounter _proofNormalized = new();
+    private static readonly ThreadCounter _proofRefusedCurrent = new();
+    private static readonly ThreadCounter _proofChanged = new();
+    private static readonly ThreadCounter _proofRecorded = new();
+    private static readonly ThreadCounter _proofTorn = new();
+    private static readonly ThreadCounter _proofUnmatched = new();
+    private static readonly ThreadCounter _proofVerified = new();
+    private static readonly ThreadCounter _proofVerifyRaced = new();
+    private static long _proofVerifyFailed;
+
+    // The read_proof=(...) part of the prefetch counters: revalidations proved current (hits); revalidations evaluated in
+    // full because the origin had no proof (none), there was no comparer (no_comparer) or the plan normalizes images
+    // through the host (normalized), or because the proof did not hold and the words then evaluated to the snapshot
+    // (refused: owned or unreadable words, or changes the output does not show) or not (changed); proofs recorded,
+    // refused (torn: one address read as two values) and not kept (unmatched: a snapshot that differs from the words
+    // its evaluation emitted); verify counts.
+    public static string TakeReadProofReport() => FormattableString.Invariant(
+        $"read_proof=(mode={ReadProofs.ToString().ToLowerInvariant()},hits={_proofHits.Take()},none={_proofNone.Take()},") +
+        FormattableString.Invariant($"no_comparer={_proofNoComparer.Take()},normalized={_proofNormalized.Take()},refused={_proofRefusedCurrent.Take()},changed={_proofChanged.Take()},") +
+        FormattableString.Invariant($"recorded={_proofRecorded.Take()},torn={_proofTorn.Take()},unmatched={_proofUnmatched.Take()},verified={_proofVerified.Take()},") +
+        FormattableString.Invariant($"verify_raced={_proofVerifyRaced.Take()},verify_failed={Interlocked.Read(ref _proofVerifyFailed)})");
+
+    // The proof a fast snapshot's origin holds (tests).
+    internal static MaterializationProgram.ReadProof? ReadProofOf(ResourceSnapshot snapshot) => (snapshot.Origin as FastOrigin)?.Proof;
+
+    // The test seam for verify: puts a proof on a fast snapshot's origin as if its evaluation had recorded it.
+    internal static void SetReadProofForTest(ResourceSnapshot snapshot, MaterializationProgram.ReadProof? proof) =>
+        ((FastOrigin)snapshot.Origin!).Proof = proof;
 
     // RevalidateOrRebuildFast's answer.
     public enum FastRevalidation
@@ -439,13 +512,21 @@ public static partial class ResourceMaterializer
         var output = TakeOutput();
         try
         {
-            if (!EvaluateInto(plan, inputs, output))
+            var path = TryProve(plan, snapshot, origin, inputs, output);
+            if (path == ProofPath.Proved)
+            {
+                return FastRevalidation.Current;
+            }
+
+            if (!EvaluateInto(plan, inputs, output, Records(path), out var proof, origin.Proof))
             {
                 _lastRebuildRefusal = RebuildRefusal.Evaluate;
                 return FastRevalidation.Stale;
             }
 
-            if (SameAsOutput(plan, snapshot, output))
+            var same = SameAsOutput(plan, snapshot, output);
+            NoteRevalidation(origin, proof, path, same);
+            if (same)
             {
                 return FastRevalidation.Current;
             }
@@ -473,6 +554,9 @@ public static partial class ResourceMaterializer
                 _lastRebuildRefusal = RebuildRefusal.Specialization;
                 return FastRevalidation.Stale;
             }
+
+            // The rebuilt snapshot's origin has this origin's draw values and readers: the reads just made are its own.
+            AttachProof(plan, next, output, proof);
 
             rebuilt = next;
             return FastRevalidation.Rebuilt;
@@ -516,13 +600,200 @@ public static partial class ResourceMaterializer
         inputs.ComputeState = origin.ComputeState;
         try
         {
-            return Revalidate(origin.Plan, snapshot, inputs);
+            var plan = origin.Plan;
+            _lastRevalidateRefused = plan.MaterializationProgram is null;
+            if (_lastRevalidateRefused)
+            {
+                return false;
+            }
+
+            var output = TakeOutput();
+            try
+            {
+                var path = TryProve(plan, snapshot, origin, inputs, output);
+                if (path == ProofPath.Proved)
+                {
+                    return true;
+                }
+
+                if (!EvaluateInto(plan, inputs, output, Records(path), out var proof, origin.Proof))
+                {
+                    return false;
+                }
+
+                var same = SameAsOutput(plan, snapshot, output);
+                NoteRevalidation(origin, proof, path, same);
+                return same;
+            }
+            finally
+            {
+                _programOutput = output;
+            }
         }
         finally
         {
             inputs.UserData = [];
             _revalidationInputs = inputs;
         }
+    }
+
+    // How a revalidation went (TryProve).
+    private enum ProofPath
+    {
+        // SHARPEMU_RESOURCE_READ_PROOF=0: evaluated in full, nothing recorded.
+        Off,
+        // The origin holds no proof: evaluated in full, recorded.
+        None,
+        // No comparer, or the plan normalizes image descriptors through a host: evaluated in full, nothing recorded.
+        NoComparer,
+        Normalized,
+        // The proof stands: the snapshot is current, nothing evaluated.
+        Proved,
+        // A word compared unequal or owned, an unreadable word read, or the active sources differ: evaluated in full.
+        Refused,
+    }
+
+    // Whether the origin's proof shows its snapshot current without evaluating its program (ReadProofMode). The proof is
+    // only ever held by an origin whose snapshot matched the words that proof's evaluation emitted (AttachProof), and it
+    // was recorded with the origin's own user data, shader base, compute state and readers (the inputs here), so while
+    // its words compare equal (through the ownership tests a word read makes, recorded as that read records them), its
+    // unreadable words still read nothing, and the branches leave the same sources active, a full evaluation would emit
+    // the same words and SameAsOutput would answer true again (MaterializationProgram.ReadProof). Verify also evaluates
+    // in full and stops on a snapshot that is not current while the proof still compares equal.
+    private static ProofPath TryProve(ShaderResourcePlan plan, ResourceSnapshot snapshot, FastOrigin origin, ResourceRuntimeInputs inputs,
+        MaterializationProgram.Output output)
+    {
+        var mode = ReadProofs;
+        if (mode == ReadProofMode.Off)
+        {
+            return ProofPath.Off;
+        }
+
+        // A host image normalizer may answer from more than the words (ShaderProgramCache.ImageNormalizer).
+        if (plan.NormalizeImageDescriptor is not null)
+        {
+            return ProofPath.Normalized;
+        }
+
+        if (inputs.CompareGuestWords is not { } compare)
+        {
+            return ProofPath.NoComparer;
+        }
+
+        if (origin.Proof is not { } proof)
+        {
+            return ProofPath.None;
+        }
+
+        if (!Holds(plan, proof, inputs, compare))
+        {
+            return ProofPath.Refused;
+        }
+
+        _proofHits.Increment();
+        if (mode == ReadProofMode.Verify)
+        {
+            VerifyProof(plan, snapshot, proof, inputs, output);
+        }
+
+        return ProofPath.Proved;
+    }
+
+    // Whether the evaluation a path leads to records a proof: only where one could be taken next time.
+    private static bool Records(ProofPath path) => path is ProofPath.None or ProofPath.Refused;
+
+    private static bool Holds(ShaderResourcePlan plan, MaterializationProgram.ReadProof proof, ResourceRuntimeInputs inputs, GuestWordsComparer compare)
+    {
+        if (!ReferenceEquals(proof.Program, plan.MaterializationProgram) || !compare(proof.Addresses, proof.Lengths, proof.Bytes))
+        {
+            return false;
+        }
+
+        foreach (var address in proof.Unreadable)
+        {
+            if (inputs.ReadMemory is { } read && read(address, out _))
+            {
+                return false;
+            }
+        }
+
+        return plan.ResourceBranches.Count == 0 ||
+            RuntimeValueEvaluator.EvaluateActiveSources(plan, inputs).AsSpan().SequenceEqual(proof.ActiveSources);
+    }
+
+    // After a full revalidation: counted by why it was not proved, and its proof kept on the origin when its words were
+    // the snapshot's (a rebuild hands it to the rebuilt snapshot's origin instead, AttachProof).
+    private static void NoteRevalidation(FastOrigin origin, MaterializationProgram.ReadProof? proof, ProofPath path, bool same)
+    {
+        switch (path)
+        {
+            case ProofPath.Off:
+                return;
+            case ProofPath.None:
+                _proofNone.Increment();
+                break;
+            case ProofPath.NoComparer:
+                _proofNoComparer.Increment();
+                break;
+            case ProofPath.Normalized:
+                _proofNormalized.Increment();
+                break;
+            default:
+                (same ? _proofRefusedCurrent : _proofChanged).Increment();
+                break;
+        }
+
+        if (same)
+        {
+            origin.Proof = proof;
+        }
+    }
+
+    // A proof recorded by the evaluation that emitted output, kept on the origin of the snapshot materialized from it with
+    // the same draw values and readers only when the snapshot matches those words (unmatched otherwise, never expected).
+    private static void AttachProof(ShaderResourcePlan plan, ResourceSnapshot snapshot, MaterializationProgram.Output output,
+        MaterializationProgram.ReadProof? proof)
+    {
+        if (proof is null || snapshot.Origin is not FastOrigin origin)
+        {
+            return;
+        }
+
+        if (!SameAsOutput(plan, snapshot, output))
+        {
+            _proofUnmatched.Increment();
+            return;
+        }
+
+        origin.Proof = proof;
+    }
+
+    [ThreadStatic]
+    private static MaterializationProgram.Output? _verifyOutput;
+
+    // Verify: a proved snapshot against a full evaluation of the same inputs. Not current while the proof's words still
+    // compare equal is a wrong proof (counted, then thrown for the host's fatal); after they changed, a race with a guest
+    // write (verify_raced).
+    private static void VerifyProof(ShaderResourcePlan plan, ResourceSnapshot snapshot, MaterializationProgram.ReadProof proof,
+        ResourceRuntimeInputs inputs, MaterializationProgram.Output output)
+    {
+        if (EvaluateInto(plan, inputs, output) && SameAsOutput(plan, snapshot, output))
+        {
+            _proofVerified.Increment();
+            return;
+        }
+
+        if (!Holds(plan, proof, inputs, inputs.CompareGuestWords!))
+        {
+            _proofVerifyRaced.Increment();
+            return;
+        }
+
+        Interlocked.Increment(ref _proofVerifyFailed);
+        var message = $"[SHADER][READ_PROOF] verify mismatch: proved current but evaluates otherwise plan=0x{plan.Hash:X16} stage={plan.Stage} " +
+            $"ranges={proof.Addresses.Length} bytes={proof.Bytes.Length} unreadable={proof.Unreadable.Length}.";
+        Console.Error.WriteLine(message);
+        throw new ReadProofMismatchException(message);
     }
 
     // Whether the plan evaluates to the snapshot's words again for these inputs (a draw's user data, shader base and
@@ -572,13 +843,32 @@ public static partial class ResourceMaterializer
 
     // The program's words as a full materialization would read them: written ranges in the table
     // and unusable image descriptors as zeros.
-    private static bool EvaluateInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, MaterializationProgram.Output output)
+    private static bool EvaluateInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, MaterializationProgram.Output output) =>
+        EvaluateInto(plan, inputs, output, record: false, out _);
+
+    // With record, the proof of the evaluation's reads (null when refused, counted); previous, the proof it may keep or
+    // share ranges with (MaterializationProgram.ReadProof.Build).
+    private static bool EvaluateInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, MaterializationProgram.Output output, bool record,
+        out MaterializationProgram.ReadProof? proof, MaterializationProgram.ReadProof? previous = null)
     {
-        if (!plan.MaterializationProgram!.TryRunInto(plan, inputs, checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount), output))
+        if (!plan.MaterializationProgram!.TryRunInto(plan, inputs, checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount), output,
+                record, previous, out proof))
         {
+            proof = null;
             return false;
         }
 
+        if (record)
+        {
+            (proof is null ? _proofTorn : _proofRecorded).Increment();
+        }
+
+        return FinishOutput(plan, output);
+    }
+
+    // The written ranges in the table, normalized descriptors and unusable images cleared, as EvaluateInto leaves them.
+    private static bool FinishOutput(ShaderResourcePlan plan, MaterializationProgram.Output output)
+    {
         var table = output.TableWords;
         foreach (var range in output.RangeValues)
         {
@@ -718,7 +1008,8 @@ public static partial class ResourceMaterializer
         var output = TakeOutput();
         try
         {
-            if (!EvaluateInto(plan, inputs, output))
+            var record = ReadProofs != ReadProofMode.Off && plan.NormalizeImageDescriptor is null && inputs.CompareGuestWords is not null;
+            if (!EvaluateInto(plan, inputs, output, record, out var proof))
             {
                 _programFallbacks.Increment();
                 return MaterializeFastFromSnapshot(plan, inputs, ref snapshot, ref specialization, out failure);
@@ -727,7 +1018,15 @@ public static partial class ResourceMaterializer
             _programRuns.Increment();
             _fastMaterializations.Increment();
             _lastFastOutcome = MaterializationTally.Outcome.FastMiss;
-            return MaterializeFromOutput(plan, inputs, output, ref snapshot, ref specialization, out failure);
+            if (!MaterializeFromOutput(plan, inputs, output, ref snapshot, ref specialization, out failure))
+            {
+                return false;
+            }
+
+            // The snapshot's origin holds these inputs' draw values and readers: the reads just made are its own.
+            AttachProof(plan, snapshot, output, proof);
+
+            return true;
         }
         finally
         {

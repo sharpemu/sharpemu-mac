@@ -8,6 +8,13 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // Reads one dword of guest memory; false when the address cannot be read.
 public delegate bool GuestWordReader(ulong address, out uint word);
 
+// Whether every range of guest memory still holds the recorded bytes (consecutive, range after range), each range found
+// as a word read through ReadMemory would find it: true only when every range passes the ownership tests that read makes
+// (recorded as that read records them) and its bytes, where that read would take them, are equal; false when one
+// differs, or is owned where that read would refuse, or the host cannot tell. A proof of a program evaluation's reads
+// (MaterializationProgram.ReadProof); the ranges are runs of whole words, each inside one 256-byte line.
+public delegate bool GuestWordsComparer(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<byte> recorded);
+
 // What one draw supplies to materialise a plan: its user data, the shader base and
 // the two memory readers. The clean reader refuses memory the GPU may still own.
 public sealed class ResourceRuntimeInputs
@@ -29,6 +36,8 @@ public sealed class ResourceRuntimeInputs
 
     // Compares recorded ranges in place on a hit; null leaves a hit reading every range back.
     public ResidentGuestBytesComparer? CompareResidentMemory { get; init; }
+    // Compares a program evaluation's recorded reads (GuestWordsComparer); null proves nothing, every evaluation reads.
+    public GuestWordsComparer? CompareGuestWords { get; init; }
 
     public bool ReadsClean { get; init; }
 
@@ -51,6 +60,7 @@ public sealed class ResourceRuntimeInputs
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
         CompareResidentMemory = CompareResidentMemory,
+        CompareGuestWords = CompareGuestWords,
         ReadsClean = ReadsClean,
         DataWritePending = DataWritePending,
         NullsOffClassLoopRecords = NullsOffClassLoopRecords,
@@ -61,6 +71,7 @@ public sealed class ResourceRuntimeInputs
         ReferenceEquals(ReadMemory, other.ReadMemory) && ReferenceEquals(ReadCleanMemory, other.ReadCleanMemory) &&
         ReferenceEquals(TraceImageCandidate, other.TraceImageCandidate) && ReferenceEquals(TablePhase, other.TablePhase) &&
         ReferenceEquals(ReadResidentMemory, other.ReadResidentMemory) && ReferenceEquals(CompareResidentMemory, other.CompareResidentMemory) &&
+        ReferenceEquals(CompareGuestWords, other.CompareGuestWords) &&
         ReadsClean == other.ReadsClean && ReferenceEquals(DataWritePending, other.DataWritePending) &&
         NullsOffClassLoopRecords == other.NullsOffClassLoopRecords;
 
@@ -75,6 +86,7 @@ public sealed class ResourceRuntimeInputs
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
         CompareResidentMemory = CompareResidentMemory,
+        CompareGuestWords = CompareGuestWords,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
         DataWritePending = DataWritePending,
         NullsOffClassLoopRecords = NullsOffClassLoopRecords,
@@ -115,6 +127,7 @@ public sealed class ResourceRuntimeInputs
             TablePhase = TablePhase,
             ReadResidentMemory = ReadResidentMemory,
             CompareResidentMemory = CompareResidentMemory,
+            CompareGuestWords = CompareGuestWords,
             ReadsClean = ReadsClean,
             DataWritePending = DataWritePending,
             NullsOffClassLoopRecords = NullsOffClassLoopRecords,
