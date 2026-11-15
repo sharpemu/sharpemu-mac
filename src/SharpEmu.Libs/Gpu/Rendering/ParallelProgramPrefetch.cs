@@ -46,6 +46,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         internal long LastCollectGate;
         // =verify: the program cache state the resolution ended under (IShaderPipelineProvider.DescribeProgramState).
         internal string? ResolveState;
+        // The program cache stamp the resolution began under (IShaderPipelineProvider.ProgramState): a take under
+        // another one is refused, since a lookup made now may find a replaced entry (replanned).
+        internal ProgramStateStamp ProgramState;
     }
 
     /// <summary>
@@ -107,11 +110,16 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         Ownership,
         // A collector call it was resolved ahead of did something a resolution may have read (NoteCollect).
         CollectEffects,
+        // The program cache replaced an entry, learned a device load or changed the vertex tables since the
+        // resolution began (Job.ProgramState); counted for every job, looked ahead or not (replanned=).
+        Replanned,
         Count,
     }
 
-    private static readonly string[] DrawLookaheadRefusalNames = ["abandoned", "inputs", "effects", "ownership", "gc_effects"];
+    private static readonly string[] DrawLookaheadRefusalNames = ["abandoned", "inputs", "effects", "ownership", "gc_effects", "replanned"];
     private long _lookaheadJobs, _lookaheadTaken, _lookaheadVerified;
+    // Draw jobs of any kind refused because the program cache moved since they began (DrawLookaheadRefusal.Replanned).
+    private long _replannedRefusals;
     private readonly long[] _lookaheadRefusals = new long[(int)DrawLookaheadRefusal.Count];
 
     // The subset of the look-aheads above that began before a collector call ran (over_gc), and the collector calls
@@ -167,7 +175,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
         return builder.Append("),verified=").Append(verified)
             .Append(",gc=(jobs=").Append(collect.Jobs).Append(",taken=").Append(collect.Taken).Append(",refused=").Append(collect.Refused)
-            .Append(",calls=").Append(collect.Calls).Append(",effects=").Append(collect.Effects).Append("))").ToString();
+            .Append(",calls=").Append(collect.Calls).Append(",effects=").Append(collect.Effects)
+            .Append("),replanned_all=").Append(Interlocked.Exchange(ref _replannedRefusals, 0)).Append(')').ToString();
     }
 
     // The kind of a gated non-draw item, as the command thread queues it (NoteGateItem): what the draws after it wait for.
@@ -604,6 +613,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
 
         var refusal = !job.Inputs.Equals(inputs) ? DrawLookaheadRefusal.Inputs
+            : job.ProgramState != _executor.ProgramState ? DrawLookaheadRefusal.Replanned
             : !lookedAhead ? (_concurrent.IsStillCurrent(job.Assumptions!) ? DrawLookaheadRefusal.Count : DrawLookaheadRefusal.Ownership)
             // A collector call or a dispatch that ran after the resolution began (gate above ExecutedAtStart) noted an effect.
             : Volatile.Read(ref _lastCollectEffect) >= job.ExecutedAtStart ? DrawLookaheadRefusal.CollectEffects
@@ -620,6 +630,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 {
                     Interlocked.Increment(ref _collectLookaheadRefused);
                 }
+            }
+
+            if (refusal == DrawLookaheadRefusal.Replanned)
+            {
+                Interlocked.Increment(ref _replannedRefusals);
             }
 
             Interlocked.Increment(ref _refusedCount);
@@ -1137,6 +1152,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
             job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, WorkerScratch.Enabled ? _fatal : _host.Fatal, job.Indexed,
                 job.StartInstanceUserData);
+            job.ProgramState = _executor.ProgramState;
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);
             if (LookaheadMode == DrawLookaheadMode.Verify)
             {

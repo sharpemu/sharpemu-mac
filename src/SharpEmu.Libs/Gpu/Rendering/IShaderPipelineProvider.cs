@@ -168,6 +168,11 @@ public interface IShaderPipelineProvider
     // learned device loads, header registrations...), for the look-ahead verify's fatal (ParallelProgramPrefetch).
     string DescribeProgramState() => string.Empty;
 
+    // The part of that state that decides which program entry a lookup finds: it moves when an entry is replaced
+    // (a re-plan) or refused, when a device data load is learned and when the vertex tables change. A resolution made
+    // under another stamp may hold the entry a lookup made now would not find (ParallelProgramPrefetch refuses it).
+    ProgramStateStamp ProgramState => default;
+
     // Optional capture of rejected stage inputs; it never admits or executes the draw.
     void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context) { }
 
@@ -337,3 +342,6 @@ public interface IShaderPipelineProvider
         return null;
     }
 }
+
+/// <summary>See <see cref="IShaderPipelineProvider.ProgramState"/>.</summary>
+public readonly record struct ProgramStateStamp(long ContentEpoch, long DeviceData, long Tables);

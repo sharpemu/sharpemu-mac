@@ -341,6 +341,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
     }
 
+    public ProgramStateStamp ProgramState => new(_programs.ContentEpoch, DeviceDataLoads.Generation, _vertexTables.Generation);
+
     public string DescribeProgramState() =>
         $"content_epoch={_programs.ContentEpoch} device_data={DeviceDataLoads.Generation} " +
         $"registrations={ShaderHeaderRegistry.Registrations} tables={_vertexTables.Generation} linked={_programs.LinkedLookups}";

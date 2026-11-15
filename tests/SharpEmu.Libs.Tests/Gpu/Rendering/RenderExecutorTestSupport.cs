@@ -586,6 +586,9 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     internal Action<VertexStageRegisters>? BeforeGraphicsResolve { get; set; }
     public GraphicsPrograms Graphics { get; set; } = RenderExecutorFixtures.Programs();
 
+    // What the program cache's stamp reads (IShaderPipelineProvider.ProgramState); a test moves it as a re-plan does.
+    public ProgramStateStamp ProgramState { get; set; }
+
     // What a resolution with the pixel stage off returns, when it differs from Graphics.
     public GraphicsPrograms? GraphicsWithoutPixel { get; set; }
 

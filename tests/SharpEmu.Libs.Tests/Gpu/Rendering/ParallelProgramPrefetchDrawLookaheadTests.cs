@@ -121,6 +121,28 @@ public sealed class ParallelProgramPrefetchDrawLookaheadTests : IDisposable
         Assert.Equal(1, _prefetch.TakeCounters().Refused);
     }
 
+    // The program cache replaced an entry after the resolution began: a lookup made now may find another program, so
+    // the job is refused whether it looked ahead or not, and one resolved under the new stamp is taken.
+    [Fact]
+    public void AJobResolvedBeforeTheProgramCacheMovedIsRefused()
+    {
+        var banks = Banks().Snapshot();
+        var ahead = Resolved(banks, gate: 0, fullGate: 1);
+        _prefetch.AdvanceGate(1);
+        _pipelines.ProgramState = new ProgramStateStamp(ContentEpoch: 1, DeviceData: 0, Tables: 0);
+        Assert.False(Take(banks, ahead));
+        Assert.Equal(1, Counters().Refused[(int)ParallelProgramPrefetch.DrawLookaheadRefusal.Replanned]);
+        Assert.Equal(0, _concurrent.CrossChecks);
+
+        var inOrder = Resolved(banks, gate: 1, fullGate: 1);
+        _pipelines.ProgramState = new ProgramStateStamp(ContentEpoch: 1, DeviceData: 1, Tables: 0);
+        Assert.False(Take(banks, inOrder));
+        Assert.Equal(2, _prefetch.TakeCounters().Refused);
+
+        var current = Resolved(banks, gate: 1, fullGate: 1);
+        Assert.True(Take(banks, current));
+    }
+
     [Fact]
     public void ADispatchThatDidMoreThanEncodeRefusesTheDrawsResolvedAheadOfItOnly()
     {
