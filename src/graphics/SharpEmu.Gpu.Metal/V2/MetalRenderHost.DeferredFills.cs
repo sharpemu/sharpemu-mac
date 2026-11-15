@@ -64,6 +64,8 @@ internal sealed partial class MetalRenderHost
         }
 
         _deferredFills.Add(new DeferredFill(address, size, value, range.Buffer, range.Offset));
+        _deferredFillLow = Math.Min(_deferredFillLow, address);
+        _deferredFillHigh = Math.Max(_deferredFillHigh, address + size);
         _transferCauses[(int)MetalTransferCause.GuestFill]++;
         _fillsDeferred++;
         NoteRecordedWork();
@@ -74,6 +76,15 @@ internal sealed partial class MetalRenderHost
 
         return true;
     }
+
+    // The guest bytes the waiting fills span, low to high (MetalReadBindingMemoV2 tests a range against it first).
+    private ulong _deferredFillLow = ulong.MaxValue;
+    private ulong _deferredFillHigh;
+
+    /// <summary>Whether a waiting fill lands in these guest bytes: the span first, then each fill.</summary>
+    private bool DeferredFillsOver(ulong address, ulong size) =>
+        _deferredFills.Count != 0 && address < _deferredFillHigh && _deferredFillLow < address + size &&
+        DeferredFillsTouch(address, size);
 
     private bool DeferredFillsTouch(ulong address, ulong size)
     {
@@ -226,6 +237,8 @@ internal sealed partial class MetalRenderHost
             }
 
             _deferredFills.Clear();
+            _deferredFillLow = ulong.MaxValue;
+            _deferredFillHigh = 0;
         }
         finally
         {

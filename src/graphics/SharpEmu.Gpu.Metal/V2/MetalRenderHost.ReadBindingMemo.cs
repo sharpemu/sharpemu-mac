@@ -58,6 +58,9 @@ internal sealed partial class MetalRenderHost
     /// <summary>The v2 memo and its counters (tests).</summary>
     internal MetalReadBindingMemoV2 ReadBindingMemoV2 => _readBindingMemoV2;
 
+    /// <summary>The held label copy class the last binding touched, -1 for none (tests).</summary>
+    internal int LabelTouchClass => _labelTouchClass;
+
     // The entry the last v2 hit answered from (the verify mode reads its claims).
     private int _readBindingHitIndex = -1;
 

@@ -13,12 +13,20 @@ internal sealed partial class MetalRenderHost
 
     private MetalStagedStorage StagedStorage => _stagedStorageCopies ??= new MetalStagedStorage(_guestMemory, _stagedRanges);
 
-    /// <summary>Tests: a staged copy of these bytes, written by a recorded dispatch, to be written back at the encoder end.</summary>
-    internal void StageRecordedStoresForTest(ulong address, ulong size)
+    /// <summary>
+    /// Tests: a staged copy of these bytes, written by a recorded dispatch, to be written back at the encoder end; not
+    /// armed (<paramref name="armed"/> false), a copy whose dispatch is still being bound, which TryShare answers with.
+    /// </summary>
+    internal MetalGuestRange StageRecordedStoresForTest(ulong address, ulong size, bool armed = true)
     {
         var staging = _guestMemory.Stage(address, size);
         StagedStorage.Add(address, size, staging, _guestMemory.Stage(address, size), written: true);
-        StagedStorage.Arm();
+        if (armed)
+        {
+            StagedStorage.Arm();
+        }
+
+        return staging;
     }
 
     private bool _encodingStagedStores;

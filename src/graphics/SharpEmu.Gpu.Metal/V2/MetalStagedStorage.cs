@@ -111,6 +111,51 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
 
     public int Count => _copies.Count;
 
+    // The bytes the listed copies span, low to high: wider than they are after a copy leaves the list, until
+    // EndSubmission or Forget measures it again.
+    private ulong _spanLow = ulong.MaxValue;
+    private ulong _spanHigh;
+
+    private void Widen(MetalStagedRangeCache.Entry copy)
+    {
+        _spanLow = Math.Min(_spanLow, copy.Address);
+        _spanHigh = Math.Max(_spanHigh, copy.Address + copy.Size);
+    }
+
+    private void MeasureSpan()
+    {
+        _spanLow = ulong.MaxValue;
+        _spanHigh = 0;
+        foreach (var copy in _copies)
+        {
+            Widen(copy);
+        }
+    }
+
+    /// <summary>
+    /// Whether a read-only binding of exactly these bytes would be answered by a copy (<see cref="TryShare"/>) or
+    /// ordered after recorded stores (<see cref="HasRecordedStoresOver"/>). False means neither would act; true may
+    /// also be a copy TryShare would pass over as stale (MetalReadBindingMemoV2 misses on it).
+    /// </summary>
+    public bool MayConcern(ulong address, ulong size)
+    {
+        if (_copies.Count == 0 || address >= _spanHigh || address + size <= _spanLow)
+        {
+            return false;
+        }
+
+        foreach (var copy in _copies)
+        {
+            if ((copy.Address == address && copy.Size == size && !copy.Removed) ||
+                (copy.Dirty && copy.Armed && Overlaps(copy, address, size)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>The copy an earlier binding of exactly this range made, which this one shares.</summary>
     public bool TryShare(ulong address, ulong size, bool written, out MetalGuestRange staging)
     {
@@ -157,6 +202,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
         {
             entry.InList = true;
             _copies.Add(entry);
+            Widen(entry);
         }
 
         if (written)
@@ -204,8 +250,9 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
     /// Keeps a staged copy for the later bindings of the same range. The pristine range
     /// holds the same bytes as the copy before any shader stores into it.
     /// </summary>
-    public void Add(ulong address, ulong size, MetalGuestRange staging, MetalGuestRange pristine, bool written) =>
-        _copies.Add(new MetalStagedRangeCache.Entry
+    public void Add(ulong address, ulong size, MetalGuestRange staging, MetalGuestRange pristine, bool written)
+    {
+        var copy = new MetalStagedRangeCache.Entry
         {
             Address = address,
             Size = size,
@@ -213,7 +260,10 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
             Pristine = pristine,
             Dirty = written,
             InList = true,
-        });
+        };
+        _copies.Add(copy);
+        Widen(copy);
+    }
 
     /// <summary>The draw or dispatch the copies were bound for has been recorded.</summary>
     public void Arm()
@@ -253,6 +303,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
         if (kept != _copies.Count)
         {
             _copies.RemoveRange(kept, _copies.Count - kept);
+            MeasureSpan();
         }
     }
 
@@ -287,6 +338,7 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
             copy.InList = false;
             return true;
         });
+        MeasureSpan();
     }
 
     /// <summary>

@@ -85,8 +85,10 @@ public sealed unsafe partial class MetalClearFoldingTests
         AssertMisses(host, () => BindRead(host), before with { Offset = before.Offset + 0x1000 });
     }
 
+    // P4: a staged copy listed for other bytes leaves the binding to hit (v1: any listed copy refused it); one with
+    // recorded stores over the range makes it miss: the chain ends the encoders to write them back first.
     [Fact]
-    public void AReadOnlyBindingMissesWhileAStagedCopyIsBound()
+    public void AReadOnlyBindingHitsBesideAStagedCopyAndMissesUnderItsRecordedStores()
     {
         if (!RequireDevice()) return;
         using var rig = MemoRig();
@@ -97,7 +99,73 @@ public sealed unsafe partial class MetalClearFoldingTests
         const ulong edge = GuestBase + 0x200000;
         rig.ViewBoundary = edge;
         Assert.True(host.ResolveStorageBuffer(edge - 0x80, 0x100, written: true).IsValid);
+        var pending = host.ReadBindingMemoV2.HitsWithPending;
+        AssertHits(host, () => BindRead(host), before);
+        Assert.Equal(pending + 1, host.ReadBindingMemoV2.HitsWithPending);
+
+        host.StageRecordedStoresForTest(MemoBuffer + 0x40, 0x40);
+        AssertMissesBy(host, static memo => memo.RefusedStaged, () => BindRead(host));
+    }
+
+    // R1: the v1 memo refuses every binding while any staged copy is listed.
+    [Fact]
+    public void AV1ReadOnlyBindingMissesWhileAStagedCopyIsBound()
+    {
+        if (!RequireDevice()) return;
+        using var rig = MemoRig();
+        var host = rig.Host;
+        host.ReadBindingMemoRanges = false;
+        var before = BindTwiceAndHit(host);
+
+        const ulong edge = GuestBase + 0x200000;
+        rig.ViewBoundary = edge;
+        Assert.True(host.ResolveStorageBuffer(edge - 0x80, 0x100, written: true).IsValid);
         AssertMisses(host, () => BindRead(host), before);
+    }
+
+    // P5: a staged copy of exactly the range, its dispatch still being bound, is what the chain answers with.
+    [Fact]
+    public void AReadOnlyBindingMissesWhileAStagedCopyOfExactlyItsRangeIsListed()
+    {
+        if (!RequireDevice()) return;
+        using var rig = MemoRig();
+        var host = rig.Host;
+        var before = BindTwiceAndHit(host);
+
+        var staging = host.StageRecordedStoresForTest(MemoBuffer, MemoBufferBytes, armed: false);
+        var shared = AssertMissesBy(host, static memo => memo.RefusedStaged, () => BindRead(host));
+        Assert.Equal(new BufferBinding((ulong)staging.Buffer, staging.Offset), shared);
+        Assert.NotEqual(before, shared);
+    }
+
+    // P3: a fill the open pass holds over the range makes the binding miss (the chain ends the pass to land it); one
+    // elsewhere stays held and the binding hits.
+    [Fact]
+    public void AReadOnlyBindingMissesUnderADeferredFillAndHitsBesideOne()
+    {
+        if (!RequireDevice()) return;
+        using var rig = MemoRig();
+        var host = rig.Host;
+        host.DeferPassFills = true;
+        using (host.BeginPreparation())
+        {
+            var target = rig.Target(TargetAddress);
+            var attachment = ((IRenderHost)host).AcquireColorAttachment(in target);
+            host.BeginRendering(Rig.PassOver(attachment.View));
+            var before = BindTwiceAndHit(host);
+
+            host.FillGuestMemory(MemoBuffer + 0x10000, 0x100, 0x5A5A5A5Au, allowHost: false);
+            Assert.True(host.DeferredFillCount > 0, "the fill was not held by the pass");
+            AssertHits(host, () => BindRead(host), before);
+            Assert.True(host.DeferredFillCount > 0, "the hit landed the fill");
+
+            host.FillGuestMemory(MemoBuffer + 0x80, 0x40, 0xA5A5A5A5u, allowHost: false);
+            AssertMissesBy(host, static memo => memo.RefusedFill, () => BindRead(host));
+            Assert.Equal(0, host.DeferredFillCount);
+            host.EndRendering();
+        }
+
+        host.FlushAndWaitForGpu();
     }
 
     [Fact]
@@ -120,12 +188,49 @@ public sealed unsafe partial class MetalClearFoldingTests
         }
     }
 
+    // P1: a label copy held to the commit over the range makes the binding miss (the chain lands it first); one held
+    // over other bytes stays held and the binding hits. P6: a hit forgets which held copy a binding last touched, as
+    // the chain does.
     [Fact]
-    public void AReadOnlyBindingMissesWhileADeferredLabelCopyIsHeld()
+    public void AReadOnlyBindingMissesUnderAHeldLabelCopyAndHitsBesideOne()
     {
         if (!RequireDevice()) return;
         using var rig = MemoRig();
         var host = rig.Host;
+        Assert.True(host.LabelsAtCommit);
+        using (host.BeginPreparation())
+        {
+            var target = rig.Target(TargetAddress);
+            var attachment = ((IRenderHost)host).AcquireColorAttachment(in target);
+            host.BeginRendering(Rig.PassOver(attachment.View));
+            var before = BindTwiceAndHit(host);
+            var other = BindTwiceAndHit(host, MemoBuffer + 0x20000, 0x40);
+
+            host.RecordCommandProcessorWrite(MemoBuffer + 0x10000, BitConverter.GetBytes(0xC0FFEE22u), "WRITE_DATA");
+            Assert.True(host.DeferredLabelCopyCount > 0, "the write was not held as a label copy");
+            AssertHits(host, () => BindRead(host), before);
+            Assert.True(host.DeferredLabelCopyCount > 0, "the hit landed the label copy");
+
+            host.RecordCommandProcessorWrite(MemoBuffer + 0x10, BitConverter.GetBytes(0xC0FFEE11u), "WRITE_DATA");
+            AssertMissesBy(host, static memo => memo.RefusedLabel, () => BindRead(host));
+            Assert.Equal(0, host.DeferredLabelCopyCount);
+            Assert.NotEqual(-1, host.LabelTouchClass);
+            AssertHits(host, () => BindRead(host, MemoBuffer + 0x20000, 0x40), other);
+            Assert.Equal(-1, host.LabelTouchClass);
+            host.EndRendering();
+        }
+
+        host.FlushAndWaitForGpu();
+    }
+
+    // R1: the v1 memo refuses every binding while any label copy is held.
+    [Fact]
+    public void AV1ReadOnlyBindingMissesWhileADeferredLabelCopyIsHeld()
+    {
+        if (!RequireDevice()) return;
+        using var rig = MemoRig();
+        var host = rig.Host;
+        host.ReadBindingMemoRanges = false;
         using (host.BeginPreparation())
         {
             var target = rig.Target(TargetAddress);
@@ -133,9 +238,35 @@ public sealed unsafe partial class MetalClearFoldingTests
             host.BeginRendering(Rig.PassOver(attachment.View));
             var before = BindTwiceAndHit(host);
 
-            host.RecordCommandProcessorWrite(MemoBuffer + 0x10, BitConverter.GetBytes(0xC0FFEE11u), "WRITE_DATA");
+            host.RecordCommandProcessorWrite(MemoBuffer + 0x10000, BitConverter.GetBytes(0xC0FFEE11u), "WRITE_DATA");
             Assert.True(host.DeferredLabelCopyCount > 0, "the write was not held as a label copy");
             AssertMisses(host, () => BindRead(host), before);
+            host.EndRendering();
+        }
+
+        host.FlushAndWaitForGpu();
+    }
+
+    // P2: with copies held only to the end of the open encoder and no compute encoder open, a draw's binding needs
+    // nothing ordered (beginning a pass ends the compute encoder): even over the range it hits.
+    [Fact]
+    public void AReadOnlyBindingHitsOverALabelCopyHeldToARenderEncoderEnd()
+    {
+        if (!RequireDevice()) return;
+        using var rig = MemoRig();
+        var host = rig.Host;
+        host.LabelsAtCommit = false;
+        using (host.BeginPreparation())
+        {
+            var target = rig.Target(TargetAddress);
+            var attachment = ((IRenderHost)host).AcquireColorAttachment(in target);
+            host.BeginRendering(Rig.PassOver(attachment.View));
+            var before = BindTwiceAndHit(host);
+
+            host.RecordCommandProcessorWrite(MemoBuffer + 0x10, BitConverter.GetBytes(0xC0FFEE33u), "WRITE_DATA");
+            Assert.True(host.DeferredLabelCopyCount > 0, "the write was not held as a label copy");
+            AssertHits(host, () => BindRead(host), before);
+            Assert.True(host.DeferredLabelCopyCount > 0);
             host.EndRendering();
         }
 

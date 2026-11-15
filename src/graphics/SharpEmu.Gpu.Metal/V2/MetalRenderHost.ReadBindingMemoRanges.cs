@@ -14,9 +14,11 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// <item>The window cuts: the window object the range was placed in is still in the partition (a cut move, a cut back
 /// to granules and a renewal all retire the windows they replace) and still has the buffer the entry holds; a window's
 /// bounds never change, so the range still fits it.</item>
+/// <item>Deferred fills, held label copies and staged copies: the hit misses only when one is over the range, which is
+/// exactly when the chain would land or order it, or answer with the staged copy (a span test first, so the common
+/// case costs no walk).</item>
 /// </list>
-/// The single-copy trap version and the image stamps are still read whole, as in v1, and so is the v1 refusal while any
-/// fill, label copy or staged copy is pending.
+/// The single-copy trap version and the image stamps are still read whole, as in v1.
 /// </summary>
 internal sealed partial class MetalRenderHost
 {
@@ -34,21 +36,6 @@ internal sealed partial class MetalRenderHost
         if (!ReadBindingTracesOff)
         {
             return MissReadBinding(ref memo.RefusedTrace);
-        }
-
-        if (_deferredFills.Count != 0)
-        {
-            return MissReadBinding(ref memo.RefusedFill);
-        }
-
-        if (_deferredLabelCopies.Count != 0)
-        {
-            return MissReadBinding(ref memo.RefusedLabel);
-        }
-
-        if (_stagedStorageCopies is { Count: > 0 })
-        {
-            return MissReadBinding(ref memo.RefusedStaged);
         }
 
         if (!_backing.TryResolveBackingAliasSpan(address, size, out var alias))
@@ -100,6 +87,27 @@ internal sealed partial class MetalRenderHost
             return MissReadBinding(ref memo.MissImageGpuModified);
         }
 
+        // Work the chain would land or order first, or a staged copy it would answer with: only over this range.
+        // OrderAfterDeferredCopies always forgets which held copy a binding last touched.
+        var fills = _deferredFills.Count != 0;
+        if (fills && DeferredFillsOver(address, size))
+        {
+            return MissReadBinding(ref memo.RefusedFill);
+        }
+
+        _labelTouchClass = -1;
+        var labels = _deferredLabelCopies.Count != 0;
+        if (labels && (_computeEncoder != 0 || LabelsAtCommit) && DeferredLabelCopiesTouch(address, size))
+        {
+            return MissReadBinding(ref memo.RefusedLabel);
+        }
+
+        var staged = _stagedStorageCopies is { Count: > 0 };
+        if (staged && _stagedStorageCopies!.MayConcern(address, size))
+        {
+            return MissReadBinding(ref memo.RefusedStaged);
+        }
+
         if (!_guestMemory.UseWindowForHit(window, out var touched))
         {
             return MissReadBinding(ref memo.MissWindowRetired);
@@ -114,6 +122,7 @@ internal sealed partial class MetalRenderHost
             side.Serial = _submissionSerial;
         }
 
+        memo.HitsWithPending += fills || labels || staged ? 1 : 0;
         _readBindingHitIndex = index;
         range = new MetalGuestRange(entry.Buffer, entry.Offset, size, entry.GpuAddress);
         return true;
