@@ -256,6 +256,40 @@ internal sealed partial class MetalGuestMemory
         }
     }
 
+    /// <summary>Whether single-copy textures are on: holes and stale windows can lie under a window.</summary>
+    internal bool SingleCopyActive => _singleCopy is not null;
+
+    /// <summary>
+    /// Whether resolving a range that translates to <paramref name="alias"/> in place, through
+    /// <paramref name="window"/> holding <paramref name="buffer"/>, would restore, fill and renew nothing now, and give
+    /// that window: it is still in the partition with that buffer, it is not stale, no hole lies in the range's chunks
+    /// and no chunk of it is released. <paramref name="trapVersion"/> is the trap version this holds at (read under the
+    /// same lock). Stricter than the resolve (a hole it would not fill, a stale window whose stale bytes are elsewhere,
+    /// both answer false), so a false answer only costs the full path (MetalReadBindingMemoV2).
+    /// </summary>
+    internal bool RevalidateInPlace(MetalWindowPartition.Window window, nint buffer, ulong alias, ulong size, out long trapVersion)
+    {
+        var offset = alias - _aliasBase;
+        lock (_windowLock)
+        {
+            trapVersion = _trapVersion;
+            if (window.Retired || window.Buffer != buffer || _staleWindows.ContainsKey(window) || size == 0 ||
+                (_singleCopy is { } state && state.AnyReleased(offset, size)))
+            {
+                return false;
+            }
+
+            if (_holes is not { } holes || _holeCount == 0)
+            {
+                return true;
+            }
+
+            var first = (int)(offset / _chunkBytes);
+            var last = (int)Math.Min((offset + size - 1) / _chunkBytes, (ulong)holes.Length - 1);
+            return first > last || holes.AsSpan(first, last - first + 1).IndexOfAnyExcept((byte)0) < 0;
+        }
+    }
+
     internal bool TryTakeSingleCopyPunched(out (int Chunk, ulong Serial) punched) => _punched.TryDequeue(out punched);
 
     /// <summary>Whether the GPU alias maps the dummy over a chunk now.</summary>

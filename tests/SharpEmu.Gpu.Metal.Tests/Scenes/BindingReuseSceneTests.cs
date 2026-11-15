@@ -169,19 +169,22 @@ public sealed class BindingReuseSceneTests(ITestOutputHelper output) : SceneTest
         output.WriteLine($"graphics binding reuse={reuse} attempted={rig.Host.GraphicsBindingAttempts} skipped={rig.Host.GraphicsBindingSkipped}");
     }
 
-    // Draws of one mesh read its vertex buffer through the same read-only storage binding: within a command buffer
-    // the binding after the first is answered from it (MetalReadBindingMemo), a new command buffer looks it up in
-    // full first, and every draw renders the texture it binds either way.
+    // Draws of one mesh read its vertex buffer through the same read-only storage binding: the binding after the
+    // first is answered from it (MetalReadBindingMemoV2), in the next command buffer too; the v1 memo
+    // (ranges: false, MetalReadBindingMemo) looks it up in full first in a new command buffer. Every draw renders the
+    // texture it binds either way.
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void DrawsOfOneMeshReuseTheirReadOnlyVertexBindingAndRenderAsWithout(bool memo)
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void DrawsOfOneMeshReuseTheirReadOnlyVertexBindingAndRenderAsWithout(bool memo, bool ranges)
     {
         using var rig = CreateRig();
         if (rig is null) return;
         var host = rig.Host;
         host.ReadBindingMemoEnabled = memo;
         host.ReadBindingMemoVerify = memo;
+        host.ReadBindingMemoRanges = ranges;
         const uint red = 0xFF0000FF;
         const uint green = 0xFF00FF00;
         const uint width = 16;
@@ -235,12 +238,20 @@ public sealed class BindingReuseSceneTests(ITestOutputHelper output) : SceneTest
         rig.Submit(again);
         AssertColour("next command buffer", Pixel(6), red);
         var afterSecond = host.ReadBindingMemoCounts;
-        output.WriteLine($"memo={memo}: first {afterFirst}, second {afterSecond}");
+        output.WriteLine($"memo={memo} ranges={ranges}: first {afterFirst}, second {afterSecond}");
         if (memo)
         {
             Assert.True(afterFirst.Hits > hits, "no draw's vertex binding was answered from the one before");
             Assert.Equal(afterFirst.Hits - hits, afterFirst.Verified);
-            Assert.True(afterSecond.Misses > afterFirst.Misses, "the new command buffer's first binding did not miss");
+            if (ranges)
+            {
+                Assert.True(afterSecond.Hits > afterFirst.Hits, "the new command buffer's binding was not answered from the one before");
+                Assert.Equal(afterSecond.Hits - hits, afterSecond.Verified);
+            }
+            else
+            {
+                Assert.True(afterSecond.Misses > afterFirst.Misses, "the new command buffer's first binding did not miss");
+            }
         }
         else
         {

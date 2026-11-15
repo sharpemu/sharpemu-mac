@@ -1074,10 +1074,10 @@ internal sealed partial class MetalRenderHost
             var size = mappedWhole ? requested : ClampMappedSize(descriptor.Address, requested);
             var memoStamp = !written && mappedWhole && ReadBindingMemoEnabled ? ReadBindingStamp() : default;
             var flushFoundImage = _imageCache.FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
-            var range = ResolveStorageBuffer(descriptor.Address, size, written, computeStage, out var inPlaceAlias);
+            var range = ResolveStorageBuffer(descriptor.Address, size, written, computeStage, out var inPlaceAlias, out var inPlaceWindow);
             if (!written && mappedWhole && ReadBindingMemoEnabled)
             {
-                StoreReadBinding(descriptor.Address, size, computeStage, memoStamp, flushFoundImage, inPlaceAlias, range);
+                StoreReadBinding(descriptor.Address, size, computeStage, memoStamp, flushFoundImage, inPlaceAlias, inPlaceWindow, range);
             }
 
             // The text is built only when the trace is on: this runs per storage buffer per draw.

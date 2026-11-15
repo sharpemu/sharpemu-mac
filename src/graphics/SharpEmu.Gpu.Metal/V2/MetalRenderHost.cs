@@ -2581,9 +2581,10 @@ internal sealed partial class MetalRenderHost :
         // holds the GPU's writes still in flight in this command buffer - whole, however
         // large, up to the largest window.
         var inPlaceAlias = 0UL;
+        MetalWindowPartition.Window? inPlaceWindow = null;
         var range = isWritten
             ? _guestMemory.Resolve(address, size, whole: true)
-            : ResolveStorageBuffer(address, size, written: false, computeStage: false, out inPlaceAlias);
+            : ResolveStorageBuffer(address, size, written: false, computeStage: false, out inPlaceAlias, out inPlaceWindow);
 
         if (!range.IsValid)
         {
@@ -2592,7 +2593,7 @@ internal sealed partial class MetalRenderHost :
 
         if (!isWritten && ReadBindingMemoEnabled)
         {
-            StoreReadBinding(address, size, computeStage: false, memoStamp, flushFoundImage, inPlaceAlias, range);
+            StoreReadBinding(address, size, computeStage: false, memoStamp, flushFoundImage, inPlaceAlias, inPlaceWindow, range);
         }
 
         TraceRingBinding(address, size, isWritten, range);

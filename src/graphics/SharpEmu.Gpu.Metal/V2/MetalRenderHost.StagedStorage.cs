@@ -13,12 +13,20 @@ internal sealed partial class MetalRenderHost
 
     private MetalStagedStorage StagedStorage => _stagedStorageCopies ??= new MetalStagedStorage(_guestMemory, _stagedRanges);
 
-    /// <summary>Tests: a staged copy of these bytes, written by a recorded dispatch, to be written back at the encoder end.</summary>
-    internal void StageRecordedStoresForTest(ulong address, ulong size)
+    /// <summary>
+    /// Tests: a staged copy of these bytes, written by a recorded dispatch, to be written back at the encoder end; not
+    /// armed (<paramref name="armed"/> false), a copy whose dispatch is still being bound, which TryShare answers with.
+    /// </summary>
+    internal MetalGuestRange StageRecordedStoresForTest(ulong address, ulong size, bool armed = true)
     {
         var staging = _guestMemory.Stage(address, size);
         StagedStorage.Add(address, size, staging, _guestMemory.Stage(address, size), written: true);
-        StagedStorage.Arm();
+        if (armed)
+        {
+            StagedStorage.Arm();
+        }
+
+        return staging;
     }
 
     private bool _encodingStagedStores;
@@ -29,13 +37,16 @@ internal sealed partial class MetalRenderHost
     /// reach guest memory (<see cref="MetalStagedStorage"/>).
     /// </summary>
     internal MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written, bool computeStage = false) =>
-        ResolveStorageBuffer(address, size, written, computeStage, out _);
+        ResolveStorageBuffer(address, size, written, computeStage, out _, out _);
 
     // inPlaceAlias: the backing alias MetalGuestMemory.TryResolveInPlace placed the range by when the range is its
-    // window, else 0 (MetalReadBindingMemo).
-    private MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written, bool computeStage, out ulong inPlaceAlias)
+    // window, else 0; inPlaceWindow: that window, else null (MetalReadBindingMemo, MetalReadBindingMemoV2).
+    private MetalGuestRange ResolveStorageBuffer(
+        ulong address, ulong size, bool written, bool computeStage, out ulong inPlaceAlias,
+        out MetalWindowPartition.Window? inPlaceWindow)
     {
         inPlaceAlias = 0;
+        inPlaceWindow = null;
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageDeferredLabels);
         OrderAfterDeferredCopies(address, size, written ? LabelLandCause.BindWritten : LabelLandCause.BindRead);
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageSharedLookup);
@@ -48,9 +59,10 @@ internal sealed partial class MetalRenderHost
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageStoreOrder);
         OrderAfterStagedStores(address, size);
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageBufferResolve);
-        if (_guestMemory.TryResolveInPlace(address, size, out var window, out var alias))
+        if (_guestMemory.TryResolveInPlace(address, size, out var window, out var alias, out var placedIn))
         {
             inPlaceAlias = alias;
+            inPlaceWindow = placedIn;
             return window;
         }
 

@@ -732,12 +732,22 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         TryResolveInPlace(gpuVa, size, out range, out _);
 
     /// <summary><see cref="TryResolveInPlace(ulong, ulong, out MetalGuestRange)"/>, with the backing alias the range was placed by.</summary>
-    public bool TryResolveInPlace(ulong gpuVa, ulong size, out MetalGuestRange range, out ulong alias)
+    public bool TryResolveInPlace(ulong gpuVa, ulong size, out MetalGuestRange range, out ulong alias) =>
+        TryResolveInPlace(gpuVa, size, out range, out alias, out _);
+
+    /// <summary>
+    /// <see cref="TryResolveInPlace(ulong, ulong, out MetalGuestRange, out ulong)"/>, with the window the range was
+    /// placed in (MetalReadBindingMemoV2 checks it is still in the partition).
+    /// </summary>
+    internal bool TryResolveInPlace(
+        ulong gpuVa, ulong size, out MetalGuestRange range, out ulong alias, out MetalWindowPartition.Window? window)
     {
         range = default;
         alias = 0;
-        if (StageEverything || !TryResolveWindow(gpuVa, size, out range, out alias))
+        window = null;
+        if (StageEverything || !TryResolveWindow(gpuVa, size, out range, out alias, out window))
         {
+            window = null;
             return false;
         }
 
@@ -754,6 +764,9 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     /// </summary>
     internal (ulong Serial, long Partition, long Trap) InPlaceStamp =>
         (Volatile.Read(ref _submissionSerial), _partition.Version, Volatile.Read(ref _trapVersion));
+
+    /// <summary>The single-copy trap version (holes and stale windows), read without the window lock on the worker.</summary>
+    internal long TrapVersionNow => Volatile.Read(ref _trapVersion);
 
     /// <summary>
     /// Whether <see cref="TryResolveInPlace"/> of a range that translates to <paramref name="alias"/>, resolved in
@@ -1112,9 +1125,10 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     internal (long Hits, long Misses) WindowMemoCounts =>
         (Volatile.Read(ref _windowMemoHits), Volatile.Read(ref _windowMemoMisses));
 
-    private bool TryResolveWindowFromMemo(ulong offset, ulong size, out MetalGuestRange resolved)
+    private bool TryResolveWindowFromMemo(ulong offset, ulong size, out MetalGuestRange resolved, out MetalWindowPartition.Window? used)
     {
         resolved = default;
+        used = null;
         if (Trap is not null || (_singleCopy is { } singleCopy && singleCopy.AnyReleased(offset, size)))
         {
             return false;
@@ -1136,6 +1150,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
             var windowOffset = offset - entry.Window.Start;
             resolved = new MetalGuestRange(entry.Buffer, windowOffset, size, entry.Window.GpuAddress + windowOffset);
+            used = entry.Window;
             Interlocked.Increment(ref _windowMemoHits);
             return true;
         }
@@ -1174,12 +1189,16 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved, bool warn = true) =>
         TryResolveWindow(gpuVa, size, out resolved, out _, warn);
 
-    private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved, out ulong alias, bool warn = true)
+    private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved, out ulong alias, bool warn = true) =>
+        TryResolveWindow(gpuVa, size, out resolved, out alias, out _, warn);
+
+    private bool TryResolveWindow(
+        ulong gpuVa, ulong size, out MetalGuestRange resolved, out ulong alias, out MetalWindowPartition.Window? used, bool warn = true)
     {
-        var ok = TryResolveWindowCore(gpuVa, size, out resolved, out alias, warn, WindowMemoEnabled);
+        var ok = TryResolveWindowCore(gpuVa, size, out resolved, out alias, out used, warn, WindowMemoEnabled);
         if (WindowMemoVerify && WindowMemoEnabled)
         {
-            var fullOk = TryResolveWindowCore(gpuVa, size, out var full, out _, warn: false, useMemo: false);
+            var fullOk = TryResolveWindowCore(gpuVa, size, out var full, out _, out _, warn: false, useMemo: false);
             if (ok != fullOk || (ok && resolved != full))
             {
                 throw GpuFatal.Fatal(
@@ -1191,11 +1210,82 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         return ok;
     }
 
-    private bool TryResolveWindowCore(ulong gpuVa, ulong size, out MetalGuestRange resolved, out ulong alias, bool warn, bool useMemo)
+    // Caller holds _windowLock: the window is used by the submission being recorded. Its buffer exists, it counts as
+    // used now (idle cut-back), and it is pinned: no cut that would replace it moves before the next submission.
+    private void UseWindowLocked(MetalWindowPartition.Window window)
+    {
+        EnsureBuffer(window);
+        window.LastUsedSerial = _submissionSerial;
+        _pinnedWindows.Add(window.Id);
+    }
+
+    // On the worker, after UseWindowLocked: the window is resident for this submission.
+    private void NoteTouched(MetalWindowPartition.Window window)
+    {
+        if (_touchedWindows.Add(window.Id))
+        {
+            if (ResidentAppendEnabled && !_residentDirty && _residencySet == 0 && window.Buffer != 0)
+            {
+                // A first touch adds one buffer to a list that is otherwise current: put it on the end
+                // (ResidentVersion holds, ResidentBuffers grows) instead of rebuilding every window's
+                // entry, which a submission touching a few hundred windows did a few hundred times.
+                Append(ref _submissionResidentBuffers, ref _submissionResidentCount, window.Buffer);
+            }
+            else
+            {
+                _residentDirty = true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// What resolving a range in place did per submission, for a range a read-only binding memo answers from this
+    /// window (MetalReadBindingMemoV2): the window is pinned, counts as used and is touched (resident). Free when this
+    /// submission already pinned and touched it - a pinned window is never replaced before the next submission, so
+    /// its id is still its own - otherwise once under the window lock. False when the window has left the partition;
+    /// <paramref name="touched"/> says the lock was taken. On the worker.
+    /// </summary>
+    internal bool UseWindowForHit(MetalWindowPartition.Window window, out bool touched)
+    {
+        touched = false;
+        if (_touchedWindows.Contains(window.Id) && _pinnedWindows.Contains(window.Id))
+        {
+            return true;
+        }
+
+        lock (_windowLock)
+        {
+            if (window.Retired)
+            {
+                return false;
+            }
+
+            UseWindowLocked(window);
+        }
+
+        NoteTouched(window);
+        touched = true;
+        return true;
+    }
+
+    /// <summary>Whether the window is in the partition, pinned and touched by the submission being recorded.</summary>
+    internal bool WindowUsedThisSubmission(MetalWindowPartition.Window window)
+    {
+        lock (_windowLock)
+        {
+            return !window.Retired && _touchedWindows.Contains(window.Id) && _pinnedWindows.Contains(window.Id) &&
+                ReferenceEquals(_partition.ById(window.Id), window);
+        }
+    }
+
+    private bool TryResolveWindowCore(
+        ulong gpuVa, ulong size, out MetalGuestRange resolved, out ulong alias, out MetalWindowPartition.Window? used, bool warn,
+        bool useMemo)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.GuestWindowResolve);
         resolved = default;
         alias = 0;
+        used = null;
         if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa)
         {
             return false;
@@ -1217,7 +1307,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         var offset = alias - _aliasBase;
         if (useMemo)
         {
-            if (TryResolveWindowFromMemo(offset, size, out resolved))
+            if (TryResolveWindowFromMemo(offset, size, out resolved, out used))
             {
                 return true;
             }
@@ -1270,30 +1360,15 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
                 return false;
             }
 
-            EnsureBuffer(window);
-            window.LastUsedSerial = _submissionSerial;
-            _pinnedWindows.Add(window.Id);
+            UseWindowLocked(window);
             if (useMemo)
             {
                 PublishWindowMemoLocked(window, offset, size);
             }
         }
 
-        if (_touchedWindows.Add(window.Id))
-        {
-            if (ResidentAppendEnabled && !_residentDirty && _residencySet == 0 && window.Buffer != 0)
-            {
-                // A first touch adds one buffer to a list that is otherwise current: put it on the end
-                // (ResidentVersion holds, ResidentBuffers grows) instead of rebuilding every window's
-                // entry, which a submission touching a few hundred windows did a few hundred times.
-                Append(ref _submissionResidentBuffers, ref _submissionResidentCount, window.Buffer);
-            }
-            else
-            {
-                _residentDirty = true;
-            }
-        }
-
+        NoteTouched(window);
+        used = window;
         var windowOffset = offset - window.Start;
         resolved = new MetalGuestRange(window.Buffer, windowOffset, size, window.GpuAddress + windowOffset);
         // Mappings are page-granular on both sides, so a page-aligned guest address has to
