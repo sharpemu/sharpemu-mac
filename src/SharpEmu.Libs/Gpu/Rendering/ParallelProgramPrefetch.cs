@@ -131,7 +131,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     }
 
     private static readonly string[] DrawLookaheadRefusalNames = ["abandoned", "inputs", "effects", "ownership", "gc_effects", "replanned"];
-    private long _lookaheadJobs, _lookaheadTaken, _lookaheadVerified;
+    private long _lookaheadJobs, _lookaheadTaken, _lookaheadVerified, _lookaheadVerifyRaced;
     // Draw jobs of any kind refused because the program cache moved since they began (DrawLookaheadRefusal.Replanned).
     private long _replannedRefusals;
     private readonly long[] _lookaheadRefusals = new long[(int)DrawLookaheadRefusal.Count];
@@ -187,7 +187,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             builder.Append(index == 0 ? string.Empty : ",").Append(DrawLookaheadRefusalNames[index]).Append('=').Append(refused[index]);
         }
 
-        return builder.Append("),verified=").Append(verified)
+        return builder.Append("),verified=").Append(verified).Append(",verify_raced=").Append(Interlocked.Exchange(ref _lookaheadVerifyRaced, 0))
             .Append(",gc=(jobs=").Append(collect.Jobs).Append(",taken=").Append(collect.Taken).Append(",refused=").Append(collect.Refused)
             .Append(",calls=").Append(collect.Calls).Append(",effects=").Append(collect.Effects)
             .Append("),replanned_all=").Append(Interlocked.Exchange(ref _replannedRefusals, 0))
@@ -644,7 +644,14 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             : Volatile.Read(ref _lastDispatchEffect) >= job.ExecutedAtStart ? DrawLookaheadRefusal.Effects
             : !_concurrent.IsStillCurrentAcrossDispatches(job.Assumptions!) ? DrawLookaheadRefusal.Ownership
             : DrawLookaheadRefusal.Count;
-        ReleaseAssumptions(job);
+        // =verify keeps a taken look-ahead's assumptions to its comparison (VerifyLookahead): a difference whose answers
+        // changed after the take is a race, not a hole.
+        var verifies = refusal == DrawLookaheadRefusal.Count && lookedAhead && LookaheadMode == DrawLookaheadMode.Verify;
+        if (!verifies)
+        {
+            ReleaseAssumptions(job);
+        }
+
         if (refusal != DrawLookaheadRefusal.Count)
         {
             if (lookedAhead)
@@ -675,9 +682,16 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 Interlocked.Increment(ref _collectLookaheadTaken);
             }
 
-            if (LookaheadMode == DrawLookaheadMode.Verify)
+            if (verifies)
             {
-                programs = VerifyLookahead(job, banks, in inputs);
+                try
+                {
+                    programs = VerifyLookahead(job, banks, in inputs);
+                }
+                finally
+                {
+                    ReleaseAssumptions(job);
+                }
             }
         }
 
@@ -824,6 +838,16 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         Interlocked.Increment(ref _lookaheadVerified);
         if (SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Difference(job.Programs!, resolved) is { } difference)
         {
+            // The take's answers no longer hold (an owned answer turned clean: a recorded GPU write completed between
+            // the take and this resolution, and a refused clean read is answered now): both resolutions are right for
+            // their moment, the worker's is the later one. Counted, not fatal; a difference under answers that still
+            // hold is a hole and stops below.
+            if (job.Assumptions is { } assumptions && !_concurrent.IsStillCurrentAcrossDispatches(assumptions))
+            {
+                Interlocked.Increment(ref _lookaheadVerifyRaced);
+                return resolved;
+            }
+
             // What the next verify run needs to tell a hole in the take check from a resolution that differs whatever ran
             // before it: every differing group, both resolutions' programs, whether the worker resolves the same again,
             // the items looked over (a dispatch's program hash) and the effects noted, and the program cache state the

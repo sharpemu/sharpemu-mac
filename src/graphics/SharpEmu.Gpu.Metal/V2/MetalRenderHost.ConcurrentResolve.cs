@@ -64,6 +64,8 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     bool IConcurrentResolveHost.IsStillCurrentAcrossDispatches(object assumptions) => IsConcurrentResolveStillCurrentAcrossDispatches(assumptions);
 
     private long _writeLogRefusals;
+    // Takes refused because an owned answer (a refused clean or resident read) is clean now.
+    private long _ownedNowCleanRefusals;
 
     // Small unclaimed queues can resolve on the drawing thread without a worker wakeup.
     // Component gains and ordering/device checks justify the default; the Silent Hill
@@ -168,7 +170,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var dispatches = $" dispatch_jobs={computeSubmitted} dispatch_taken={computeTaken} dispatch_refused=(abandoned={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Abandoned]}," +
             $"provider={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Provider]}{FormatProviderRefusals(prefetch.TakeProviderRefusals())},inputs={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Inputs]}," +
             $"ownership={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Ownership]},effects={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Effects]}) " +
-            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
+            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} owned_now_clean_refusals={Interlocked.Exchange(ref _ownedNowCleanRefusals, 0)} dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
             $"dispatch_saved_ms={computeSavedMs.ToString("F1", culture)}";
         return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) abandoned_verify={GpuFatal.TakeSpeculativeVerifyFailures()} taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
@@ -434,11 +436,18 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         // The ring slot whose mask answered IsOwnedRecorded's last test, or -1.
         public int LastMaskSlot = -1;
 
+        // An owned answer was recorded: a clean or resident read the resolution let refuse (a resource branch then keeps
+        // both paths). Its owner can go away with no version moving (the GPU completes a recorded write before the worker
+        // retires it), so IsConcurrentResolveStillCurrent re-tests every answer instead of trusting equal versions. Not
+        // cleared by Forget: a stale flag only costs the re-test.
+        public bool ReliesOnOwned;
+
         // Taken again from the pool for a new resolution.
         public void Reset((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
         {
             Answers.Clear();
             CopiedThrough.Clear();
+            ReliesOnOwned = false;
             Versions = versions;
             Array.Fill(_cleanPages, ulong.MaxValue);
             _nextCleanPage = 0;
@@ -545,6 +554,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                 }
             }
 
+            ReliesOnOwned |= owned;
             Answers.Add((query, address, size, owned));
         }
     }
@@ -676,7 +686,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     internal bool IsConcurrentResolveStillCurrent(object assumptionsObject)
     {
         var assumptions = (ConcurrentAssumptions)assumptionsObject;
-        if (assumptions.Versions == OwnershipVersions())
+        if (!assumptions.ReliesOnOwned && assumptions.Versions == OwnershipVersions())
         {
             return true;
         }
@@ -699,6 +709,12 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                 scope.Count(OwnerTestCounter.Recheck);
                 if ((ConcurrentOwner(address, size, scope) != AbandonCause.None) != owned)
                 {
+                    if (owned)
+                    {
+                        // A refused read would now be answered: the resolution kept what a read now prunes.
+                        Interlocked.Increment(ref _ownedNowCleanRefusals);
+                    }
+
                     return false;
                 }
             }
