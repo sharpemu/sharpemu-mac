@@ -569,6 +569,7 @@ internal sealed partial class MetalRenderHost :
         WaitUncommitted, // a wait targeted the submission being recorded
         Poll,            // a guest poll with a pending write
         Transient,       // transient staging over budget
+        GpuDry,          // the GPU finished everything committed and the open buffer held enough to split
         Other,
     }
 
@@ -733,6 +734,7 @@ internal sealed partial class MetalRenderHost :
         _previousSerial = serial;
         _commandBuffer = 0;
         _recordedCommands = 0;
+        _gpuDryRecordSince = 0;
         // Whatever cause committed it, a deferred Stream flush is now satisfied.
         _encodersInBuffer = 0;
         _commitWantedSince = 0;
@@ -2958,7 +2960,7 @@ internal sealed partial class MetalRenderHost :
             $"clears_encoded={encodedClears} depth_joins={depthJoins} depth_join_sampled={depthJoinsSampled} depth_join_copies={depthJoinsCopies} " +
             $"subset_joins={subsetJoins} subset_join_sampled={subsetJoinsSampled}{TakeSubsetRefusals()} " +
             $"join_device_ranges=[{FormatDeviceRangeJoinChecks()}] " +
-            $"{TakeUnionPassText()} flush_hold=[{FormatHeldCommits()}] {FormatDeferredFills()} " +
+            $"{TakeUnionPassText()} flush_hold=[{FormatHeldCommits()}] {FormatGpuDryCommits()} {FormatDeferredFills()} " +
             $"transfers=[{TakeTransferCauses()}] {TakePreludeText()}" +
             (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +
             $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()} " +
