@@ -259,6 +259,9 @@ internal sealed partial class MetalRenderHost
     // pays it again. Counted as the descriptor is built, from the real pixel size.
     private long _loadBytes;
     private long _storeBytes;
+
+    // The open pass's attachment bytes (NoteAttachmentTraffic), 0 with none open: the commit-when-dry bar.
+    private long _openPassAttachmentBytes;
     private long _clearedBytes;
     private long _passesEmpty;
     private long _discardedBytes;
@@ -314,8 +317,10 @@ internal sealed partial class MetalRenderHost
     private static long AttachmentBytes(in RenderingState state, uint texelBytes) =>
         MetalPassStores.AttachmentBytes(state.Width, state.Height, state.Samples, texelBytes);
 
-    private void NoteAttachmentTraffic(in RenderingState state)
+    // Returns the pass's attachment bytes: what ending it early stores, and resuming it loads, once more.
+    private long NoteAttachmentTraffic(in RenderingState state)
     {
+        long attached = 0;
         for (var index = 0; index < state.ColorAttachmentCount; index++)
         {
             var bytes = AttachmentBytes(
@@ -336,6 +341,7 @@ internal sealed partial class MetalRenderHost
             }
 
             _storeBytes += bytes;
+            attached += bytes;
         }
 
         ref readonly var depthStencil = ref state.DepthStencilAttachment;
@@ -352,6 +358,7 @@ internal sealed partial class MetalRenderHost
             }
 
             _storeBytes += bytes;
+            attached += bytes;
         }
 
         if (depthStencil.HasStencil && depthStencil.View.Handle != 0)
@@ -369,7 +376,9 @@ internal sealed partial class MetalRenderHost
             }
 
             _storeBytes += bytes;
+            attached += bytes;
         }
+        return attached;
     }
 
     internal (long Clear, long Target, long Transfer, long Compute, long Flush, long Present, long Other,
@@ -1245,7 +1254,7 @@ internal sealed partial class MetalRenderHost
         _renderPasses++;
         var loadBefore = _loadBytes;
         var storeBefore = _storeBytes;
-        NoteAttachmentTraffic(in opening);
+        _openPassAttachmentBytes = NoteAttachmentTraffic(in opening);
         if (PassProfileEnabled)
         {
             PassProfileDescribe(in opening, _loadBytes - loadBefore, _storeBytes - storeBefore);
@@ -1368,6 +1377,7 @@ internal sealed partial class MetalRenderHost
             OcclusionAuditClose();
             EndAndReleaseEncoder(_renderEncoder, render: true);
             _renderEncoder = 0;
+            _openPassAttachmentBytes = 0;
             _passScratchMask = 0;
             // The fills the pass held land right behind it (MetalRenderHost.DeferredFills.cs).
             EncodeDeferredFills();

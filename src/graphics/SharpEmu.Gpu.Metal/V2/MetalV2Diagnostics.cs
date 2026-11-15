@@ -422,6 +422,26 @@ internal static class MetalV2Diagnostics
     public static readonly int HoldFlushBusyMaxMicroseconds =
         PositiveInt("SHARPEMU_METAL_V2_FLUSH_HOLD_BUSY_US", 16000);
 
+    // SHARPEMU_METAL_V2_COMMIT_WHEN_GPU_DRY=0 leaves the open buffer to the stream's own flushes
+    // and limits. On, a draw or dispatch about to prepare commits it once the GPU has finished
+    // everything committed and the buffer holds enough to be worth a split, ending an open render
+    // pass if one is (MetalCommandStream.cs, GpuDryVerdict). The bars: at least
+    // SHARPEMU_METAL_V2_GPU_DRY_MIN_COMMANDS draws and dispatches since the last commit, and at least
+    // SHARPEMU_METAL_V2_GPU_DRY_MIN_US of recording plus SHARPEMU_METAL_V2_GPU_DRY_SPLIT_PCT percent of
+    // what splitting the open pass costs the GPU, estimated as its attachment bytes stored and loaded
+    // once more at SHARPEMU_METAL_V2_GPU_DRY_SPLIT_US_PER_MB microseconds per MB (Demon's Souls: a
+    // 16 MB target loaded and stored in ~0.5 ms, so the 68 MB G-buffer set ~1.6 ms a split).
+    public static readonly bool CommitWhenGpuDry =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMIT_WHEN_GPU_DRY"), "0", StringComparison.Ordinal);
+
+    public static readonly int GpuDryMinCommands = PositiveInt("SHARPEMU_METAL_V2_GPU_DRY_MIN_COMMANDS", 64);
+
+    public static readonly int GpuDryMinMicroseconds = PositiveInt("SHARPEMU_METAL_V2_GPU_DRY_MIN_US", 500);
+
+    public static readonly int GpuDrySplitMicrosecondsPerMb = PositiveInt("SHARPEMU_METAL_V2_GPU_DRY_SPLIT_US_PER_MB", 12);
+
+    public static readonly int GpuDrySplitPercent = PositiveInt("SHARPEMU_METAL_V2_GPU_DRY_SPLIT_PCT", 200);
+
     // SHARPEMU_METAL_V2_JOIN_DEVICE_RANGES=0 refuses every depth-only and subset join of a
     // device-address draw while a label copy is held, as before. Otherwise only one with a held
     // copy over a range its program reaches that binding did not order (MetalRenderHost.DepthOnlyJoin.cs).

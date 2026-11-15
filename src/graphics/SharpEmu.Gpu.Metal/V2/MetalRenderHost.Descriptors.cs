@@ -226,6 +226,9 @@ internal sealed partial class MetalRenderHost
             {
                 CommitCoalescedIfOverdue();
             }
+
+            // Inside a render pass too, like the Budget commit above, when the bars say the split pays.
+            CommitIfGpuDry();
         }
 
         _ = EnsureCommandBuffer();

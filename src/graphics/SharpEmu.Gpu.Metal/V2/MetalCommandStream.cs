@@ -258,6 +258,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         MetalFlushCause.WaitUncommitted => "wait-uncommitted",
         MetalFlushCause.Poll => "poll",
         MetalFlushCause.Transient => "transient",
+        MetalFlushCause.GpuDry => "gpu-dry",
         _ => "other",
     };
 
@@ -422,6 +423,170 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         CommitStream(hold == PassHold.Capped ? "stream-capped" : "stream-overdue");
+    }
+
+    // ---- committing when the GPU has run dry (SHARPEMU_METAL_V2_COMMIT_WHEN_GPU_DRY) ----
+    //
+    // A commit is wanted only once the guest flushes, so between two guest flushes the open buffer
+    // just grows, even with the GPU idle. Demon's Souls records its G-buffer pass from ~14 to ~33 ms
+    // into the frame and the guest flushes inside it rarely: the GPU finished the depth prepass at
+    // 18.4 ms and sat idle until 23.1 with ~4 ms of G-buffer draws recorded, and again from 31.8 to
+    // 33.9, and from the G-buffer on it works without a gap up to the label that releases the next
+    // frame, so that idle time is frame time. So a draw or dispatch about to prepare (where the
+    // Budget commit already ends an open pass) commits the open buffer when the GPU has finished
+    // everything committed and the buffer holds enough work to pay for the split: the open pass,
+    // ended there, resumes in the next buffer with its attachments loaded, as after a capped commit.
+    //
+    // The bars (GpuDryVerdict): a floor of draws and dispatches since the last commit, so a dry GPU
+    // does not turn into a command buffer every few draws; and recording time since the buffer's
+    // first command (the proxy for the GPU work it holds: in that trace the first G-buffer part took
+    // 8.4 ms to record and 8.7 ms of GPU) of at least a floor plus a share of what the split costs,
+    // the open pass's attachment bytes stored and loaded once more at a GPU rate per MB. With the
+    // defaults a 1024x1024 depth-only pass splits after ~0.7 ms of recording, the 68 MB G-buffer set
+    // after ~3.8 ms. A commit held because the GPU is busy is untouched (the GPU is not dry then);
+    // one held for the open pass within the hold limit is made here once the bars are met.
+    //
+    // The dry test reads the completion hint, which the completion handler keeps current; with no
+    // handler bound (completions polled), the shared event itself at most every 50 microseconds while
+    // the hint shows work in flight, so a draw never pays a native call on its own.
+
+    internal enum GpuDryVerdict
+    {
+        Commit,
+        TooFewCommands,
+        TooLittleForSplit,
+    }
+
+    /// <summary>
+    /// Whether a buffer the GPU waits for is committed now, given what it recorded since the last
+    /// commit and the bytes the open pass would store and reload. Pure, so testable without a device.
+    /// </summary>
+    internal static GpuDryVerdict GpuDryVerdictFor(
+        long commands, long recordedTicks, long passAttachmentBytes,
+        long minCommands, long minTicks, long splitTicksPerMb, int splitPercent)
+    {
+        if (commands < minCommands)
+        {
+            return GpuDryVerdict.TooFewCommands;
+        }
+
+        // Ending the pass stores its attachments and resuming it loads them: twice the bytes.
+        var splitTicks = 2.0 * passAttachmentBytes / 1_000_000.0 * splitTicksPerMb * splitPercent / 100.0;
+        return recordedTicks >= minTicks + splitTicks ? GpuDryVerdict.Commit : GpuDryVerdict.TooLittleForSplit;
+    }
+
+    /// <summary>Whether the worker commits the open buffer for a GPU that has run dry.</summary>
+    internal bool CommitWhenGpuDry { get; set; } = MetalV2Diagnostics.CommitWhenGpuDry;
+
+    internal long GpuDryMinCommands { get; set; } = MetalV2Diagnostics.GpuDryMinCommands;
+
+    internal long GpuDryMinTicks { get; set; } =
+        MetalV2Diagnostics.GpuDryMinMicroseconds * System.Diagnostics.Stopwatch.Frequency / 1_000_000L;
+
+    internal long GpuDrySplitTicksPerMb { get; set; } =
+        MetalV2Diagnostics.GpuDrySplitMicrosecondsPerMb * System.Diagnostics.Stopwatch.Frequency / 1_000_000L;
+
+    internal int GpuDrySplitPercent { get; set; } = MetalV2Diagnostics.GpuDrySplitPercent;
+
+    private static readonly long GpuDryPollTicks = System.Diagnostics.Stopwatch.Frequency / 20_000;
+
+    // When the open buffer's recording began (the preparation after its first command); 0 when not yet.
+    private long _gpuDryRecordSince;
+    private long _gpuDryPolledTicks;
+    private long _gpuDryCommits;
+    private long _gpuDryRefusedCommands;
+    private long _gpuDryRefusedSplit;
+
+    // The dry spell (submitted serial + 1) each bar last refused, so a refusal counts once per spell.
+    private ulong _gpuDryCommandsRefusedSpell;
+    private ulong _gpuDrySplitRefusedSpell;
+
+    internal (long Commits, long RefusedCommands, long RefusedSplit) TakeGpuDryCommits() =>
+        (Interlocked.Exchange(ref _gpuDryCommits, 0), Interlocked.Exchange(ref _gpuDryRefusedCommands, 0),
+         Interlocked.Exchange(ref _gpuDryRefusedSplit, 0));
+
+    private string FormatGpuDryCommits()
+    {
+        var (commits, commands, split) = TakeGpuDryCommits();
+        return $"gpu_dry=[commits:{commits},refused_commands:{commands},refused_split:{split}]";
+    }
+
+    // Whether everything committed has completed, reading the shared event at most every GpuDryPollTicks.
+    private bool GpuRanDry(long now, ulong submitted)
+    {
+        if (AssumeGpuBusy is { } busy)
+        {
+            return !busy;
+        }
+
+        if (_completions is not { } completions)
+        {
+            return false;
+        }
+
+        if (completions.CompletedHint >= submitted)
+        {
+            return true;
+        }
+
+        // Every committed buffer carries the completion handler when one is bound, and the handler
+        // publishes the event's value to the hint: the hint is then as current as a read would be.
+        if (completions.WantsCompletionHandler || now - _gpuDryPolledTicks < GpuDryPollTicks)
+        {
+            return false;
+        }
+
+        _gpuDryPolledTicks = now;
+        return ReadCompletedSerial(useCompletedSnapshot: false) >= submitted;
+    }
+
+    // A draw or dispatch is about to prepare: commits the open buffer if the GPU waits for it.
+    private void CommitIfGpuDry()
+    {
+        if (!CommitWhenGpuDry || _commandBuffer == 0 || _recordedCommands == 0)
+        {
+            return;
+        }
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_gpuDryRecordSince == 0)
+        {
+            _gpuDryRecordSince = now;
+            return;
+        }
+
+        var submitted = Volatile.Read(ref _submittedSerial);
+        if (!GpuRanDry(now, submitted))
+        {
+            return;
+        }
+
+        var verdict = GpuDryVerdictFor(
+            _recordedCommands, now - _gpuDryRecordSince, _renderEncoder != 0 ? _openPassAttachmentBytes : 0,
+            GpuDryMinCommands, GpuDryMinTicks, GpuDrySplitTicksPerMb, GpuDrySplitPercent);
+        var spell = submitted + 1;
+        switch (verdict)
+        {
+            case GpuDryVerdict.TooFewCommands:
+                if (_gpuDryCommandsRefusedSpell != spell)
+                {
+                    _gpuDryCommandsRefusedSpell = spell;
+                    _gpuDryRefusedCommands++;
+                }
+
+                return;
+            case GpuDryVerdict.TooLittleForSplit:
+                if (_gpuDrySplitRefusedSpell != spell)
+                {
+                    _gpuDrySplitRefusedSpell = spell;
+                    _gpuDryRefusedSplit++;
+                }
+
+                return;
+        }
+
+        _gpuDryCommits++;
+        FlushCommandBuffer(MetalFlushCause.GpuDry);
     }
 
     void ICommandStreamHost.FlushAndWait()
