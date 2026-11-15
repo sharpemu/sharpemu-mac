@@ -208,6 +208,33 @@ internal sealed class MetalGpuWriteRanges
     }
 
     /// <summary>
+    /// <see cref="LoggedWriteSince"/> off the worker: the log read between two equal even
+    /// <see cref="MutationStamp"/> values (every log write happens inside a mutation); null when the worker changed it
+    /// meanwhile.
+    /// </summary>
+    public bool? TryLoggedWriteSinceSnapshot(ulong version, ulong address, ulong size)
+    {
+        var before = Volatile.Read(ref _mutation);
+        if ((before & 1) != 0)
+        {
+            return null;
+        }
+
+        bool logged;
+        try
+        {
+            logged = LoggedWriteSince(version, address, size);
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return null;
+        }
+
+        Interlocked.MemoryBarrier();
+        return Volatile.Read(ref _mutation) == before ? logged : null;
+    }
+
+    /// <summary>
     /// Recorded work in <paramref name="serial"/> stores into this range. Returns the
     /// write's sequence (see <see cref="LatestSequence"/>), or zero when nothing was recorded.
     /// </summary>

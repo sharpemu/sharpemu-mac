@@ -776,6 +776,16 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         // Named before anything is read again: the words that differ, their addresses, and both permutation keys.
         var stages = GraphicsProgramsComparer.DescribeStages(memoPrograms, full);
+        // Ahead of the worker, reads that straddle a GPU write recorded since the resolution began (the hit's proof
+        // compared through the write, the full resolution read a line answered clean before it): the take refuses this
+        // resolution (IShaderPipelineHost.ConcurrentReadsSuperseded latches it), whichever programs it hands out.
+        if (_host.ConcurrentReadsSuperseded())
+        {
+            GraphicsResolveMemo.NoteVerifyRaced(ResolveMemoVerifyRace.Superseded);
+            ReportResolveMemoRace(entry, difference, "recheck=superseded", stages);
+            return full;
+        }
+
         if (TryTakeResolveMemo(memo, entry, flags.PixelActive, out _, allowRebuild: false) is { } miss)
         {
             GraphicsResolveMemo.NoteVerifyRaced(ResolveMemoVerifyRace.Changed);

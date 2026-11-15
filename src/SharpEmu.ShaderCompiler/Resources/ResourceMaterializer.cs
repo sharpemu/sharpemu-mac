@@ -466,6 +466,7 @@ public static partial class ResourceMaterializer
     private static readonly ThreadCounter _proofUnmatched = new();
     private static readonly ThreadCounter _proofVerified = new();
     private static readonly ThreadCounter _proofVerifyRaced = new();
+    private static readonly ThreadCounter _proofVerifySuperseded = new();
     private static readonly ThreadCounter _proofBackoffs = new();
     private static readonly ThreadCounter _proofBackedOff = new();
     private static long _proofVerifyFailed;
@@ -475,13 +476,14 @@ public static partial class ResourceMaterializer
     // through the host (normalized), or because the proof did not hold and the words then evaluated to the snapshot
     // (refused: owned or unreadable words, or changes the output does not show) or not (changed); proofs recorded,
     // refused (torn: one address read as two values) and not kept (unmatched: a snapshot that differs from the words
-    // its evaluation emitted); verify counts; origins that entered the back-off (backoffs) and revalidations that skipped
+    // its evaluation emitted); verify counts (verify_superseded: a difference in a resolution the take refuses, its reads
+    // straddling a GPU write recorded since it began); origins that entered the back-off (backoffs) and revalidations that skipped
     // their proof in it (backed_off).
     public static string TakeReadProofReport() => FormattableString.Invariant(
         $"read_proof=(mode={ReadProofs.ToString().ToLowerInvariant()},hits={_proofHits.Take()},none={_proofNone.Take()},") +
         FormattableString.Invariant($"no_comparer={_proofNoComparer.Take()},normalized={_proofNormalized.Take()},refused={_proofRefusedCurrent.Take()},changed={_proofChanged.Take()},") +
         FormattableString.Invariant($"recorded={_proofRecorded.Take()},torn={_proofTorn.Take()},unmatched={_proofUnmatched.Take()},verified={_proofVerified.Take()},") +
-        FormattableString.Invariant($"verify_raced={_proofVerifyRaced.Take()},verify_failed={Interlocked.Read(ref _proofVerifyFailed)},") +
+        FormattableString.Invariant($"verify_raced={_proofVerifyRaced.Take()},verify_superseded={_proofVerifySuperseded.Take()},verify_failed={Interlocked.Read(ref _proofVerifyFailed)},") +
         FormattableString.Invariant($"backoff={(ReadProofBackoff ? "on" : "off")},backoffs={_proofBackoffs.Take()},backed_off={_proofBackedOff.Take()})");
 
     // The proof a fast snapshot's origin holds (tests).
@@ -954,6 +956,15 @@ public static partial class ResourceMaterializer
         if (evaluated && SameAsOutput(plan, snapshot, output))
         {
             _proofVerified.Increment();
+            return;
+        }
+
+        // A resolution ahead of the GPU worker whose reads straddle a GPU write recorded since it began (a line answered
+        // clean and read from memory before the write, compared through the write's copy after it): the take refuses it,
+        // and the draw sees the bytes after the write, which the proof's compare read (ResourceRuntimeInputs.ReadsSuperseded).
+        if (inputs.ReadsSuperseded is { } superseded && superseded())
+        {
+            _proofVerifySuperseded.Increment();
             return;
         }
 

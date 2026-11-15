@@ -170,6 +170,11 @@ public interface IShaderPipelineHost
     // For an error report: why a clean read of the dword can fail (mapping and GPU ownership).
     string DescribeCleanRead(ulong address) => "";
 
+    // On a thread resolving ahead of the GPU worker: a GPU write recorded since this resolution began covers memory it
+    // read, and the worker's take will refuse the resolution (latched). For a verify to tell a resolution whose readers
+    // straddle that write from a wrong answer. False on the worker.
+    bool ConcurrentReadsSuperseded() => false;
+
     // Copies guest bytes the CPU already holds, without synchronizing. False when the GPU
     // may own the range (or, for a clean read, when a clean word read would be refused);
     // the resource cache then re-materializes instead of trusting a stale copy.

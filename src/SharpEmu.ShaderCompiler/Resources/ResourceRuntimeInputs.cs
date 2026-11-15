@@ -39,6 +39,11 @@ public sealed class ResourceRuntimeInputs
     // Compares a program evaluation's recorded reads (GuestWordsComparer); null proves nothing, every evaluation reads.
     public GuestWordsComparer? CompareGuestWords { get; init; }
 
+    // On a thread resolving ahead of the GPU worker: whether a GPU write recorded since this resolution began covers memory
+    // it read, so the worker's take refuses it (the host latches the answer). A read-proof verify difference in such a
+    // resolution is between a reader that answered before that write and one after it, not a wrong proof. Null: never.
+    public Func<bool>? ReadsSuperseded { get; init; }
+
     public bool ReadsClean { get; init; }
 
     // Whether recorded GPU work may still write the dword at this address, asked without
@@ -61,6 +66,7 @@ public sealed class ResourceRuntimeInputs
         ReadResidentMemory = ReadResidentMemory,
         CompareResidentMemory = CompareResidentMemory,
         CompareGuestWords = CompareGuestWords,
+        ReadsSuperseded = ReadsSuperseded,
         ReadsClean = ReadsClean,
         DataWritePending = DataWritePending,
         NullsOffClassLoopRecords = NullsOffClassLoopRecords,
@@ -71,7 +77,7 @@ public sealed class ResourceRuntimeInputs
         ReferenceEquals(ReadMemory, other.ReadMemory) && ReferenceEquals(ReadCleanMemory, other.ReadCleanMemory) &&
         ReferenceEquals(TraceImageCandidate, other.TraceImageCandidate) && ReferenceEquals(TablePhase, other.TablePhase) &&
         ReferenceEquals(ReadResidentMemory, other.ReadResidentMemory) && ReferenceEquals(CompareResidentMemory, other.CompareResidentMemory) &&
-        ReferenceEquals(CompareGuestWords, other.CompareGuestWords) &&
+        ReferenceEquals(CompareGuestWords, other.CompareGuestWords) && ReferenceEquals(ReadsSuperseded, other.ReadsSuperseded) &&
         ReadsClean == other.ReadsClean && ReferenceEquals(DataWritePending, other.DataWritePending) &&
         NullsOffClassLoopRecords == other.NullsOffClassLoopRecords;
 
@@ -87,6 +93,7 @@ public sealed class ResourceRuntimeInputs
         ReadResidentMemory = ReadResidentMemory,
         CompareResidentMemory = CompareResidentMemory,
         CompareGuestWords = CompareGuestWords,
+        ReadsSuperseded = ReadsSuperseded,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
         DataWritePending = DataWritePending,
         NullsOffClassLoopRecords = NullsOffClassLoopRecords,
@@ -128,6 +135,7 @@ public sealed class ResourceRuntimeInputs
             ReadResidentMemory = ReadResidentMemory,
             CompareResidentMemory = CompareResidentMemory,
             CompareGuestWords = CompareGuestWords,
+            ReadsSuperseded = ReadsSuperseded,
             ReadsClean = ReadsClean,
             DataWritePending = DataWritePending,
             NullsOffClassLoopRecords = NullsOffClassLoopRecords,

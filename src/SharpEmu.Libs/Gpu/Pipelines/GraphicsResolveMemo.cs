@@ -436,16 +436,19 @@ internal sealed class GraphicsResolveMemo
         "key_miss=(" + Take(_keyMisses, "new", "user_data_only", "regs_only") + ")," +
         "uncacheable_by=(" + Take(_uncacheable, "frontend", "mesh", "tess", "calls", "unavailable", "tables", "trace", "origin", "key", "changed") + ")," +
         FormattableString.Invariant($"evictions={_evictions.Take()},entries={_entries.Total},verify_checked={_verifyChecked.Take()},") +
-        "verify_raced=(" + Take(_verifyRaced, "changed", "came_and_went") + ")," +
+        "verify_raced=(" + Take(_verifyRaced, "changed", "came_and_went", "superseded") + ")," +
         FormattableString.Invariant($"verify_failed={Interlocked.Read(ref _verifyFailed)})");
 }
 
 // How a verify difference turned out to be a race (ShaderPipelineCache.VerifyResolveMemo): the hit's revalidation misses
-// when made again (its words changed since), or it still holds and a second full resolution agrees with the hit.
+// when made again (its words changed since), or it still holds and a second full resolution agrees with the hit, or the
+// resolution's reads straddle a GPU write recorded since it began (superseded: the take refuses it).
 internal enum ResolveMemoVerifyRace
 {
     Changed,
     CameAndWent,
+    // Ahead of the worker, a GPU write recorded since the resolution began covers what it read: the take refuses it.
+    Superseded,
     Count,
 }
 

@@ -272,7 +272,7 @@ public sealed partial class KeptStageInputsTests
     {
         var failed = VerifyFailedCount();
         var (hit, third, report) = VerifyWithDescriptorReads(read => read >= 5);
-        Assert.Contains("verify_raced=(changed=1,came_and_went=0)", report);
+        Assert.Contains("verify_raced=(changed=1,came_and_went=0,superseded=0)", report);
         Assert.Equal(failed, VerifyFailedCount());
         Assert.NotSame(hit, third);
         Assert.Contains(third.PixelInput.Stage.Resources.Buffers, words => words[0] == unchecked((uint)(StreamBase + 0x100)));
@@ -284,7 +284,7 @@ public sealed partial class KeptStageInputsTests
     {
         var failed = VerifyFailedCount();
         var (hit, third, report) = VerifyWithDescriptorReads(read => read == 5);
-        Assert.Contains("verify_raced=(changed=0,came_and_went=1)", report);
+        Assert.Contains("verify_raced=(changed=0,came_and_went=1,superseded=0)", report);
         Assert.Equal(failed, VerifyFailedCount());
         Assert.Same(hit, third);
     }

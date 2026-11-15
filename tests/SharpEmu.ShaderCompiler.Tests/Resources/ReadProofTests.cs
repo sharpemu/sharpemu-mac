@@ -287,6 +287,33 @@ public sealed class ReadProofTests
         Assert.Equal(1, Counter(ResourceMaterializer.TakeReadProofReport(), "verified"));
     }
 
+    // A resolution whose reads straddle a GPU write recorded since it began (the host's ReadsSuperseded, which also makes
+    // the take refuse it): a verify difference there is counted as superseded, not a wrong proof; otherwise it still stops.
+    [Fact]
+    public void VerifyCountsADifferenceInASupersededResolutionWithoutStopping()
+    {
+        var (plan, memory, comparer, _) = Setup();
+        var superseded = false;
+        var inputs = new ResourceRuntimeInputs { ReadMemory = memory.Read, CompareGuestWords = comparer.Compare, ReadsSuperseded = () => superseded };
+        inputs.UserData = new uint[] { 0x1000, 0, 0, 0 };
+        var kept = WithMode(ResourceMaterializer.ReadProofMode.On, () => Materialize(plan, inputs));
+        inputs.UserData = new uint[] { 0x1020, 0, 0, 0 };
+        var other = WithMode(ResourceMaterializer.ReadProofMode.On, () => Materialize(plan, inputs));
+        memory.Words[0] = 0x9000;
+        ResourceMaterializer.SetReadProofForTest(kept, ResourceMaterializer.ReadProofOf(other));
+
+        _ = ResourceMaterializer.TakeReadProofReport();
+        Assert.Throws<ResourceMaterializer.ReadProofMismatchException>(() =>
+            WithMode(ResourceMaterializer.ReadProofMode.Verify, () => ResourceMaterializer.RevalidateFast(kept)));
+        var failed = Counter(ResourceMaterializer.TakeReadProofReport(), "verify_failed");
+
+        superseded = true;
+        Assert.True(WithMode(ResourceMaterializer.ReadProofMode.Verify, () => ResourceMaterializer.RevalidateFast(kept)));
+        var report = ResourceMaterializer.TakeReadProofReport();
+        Assert.Equal(1, Counter(report, "verify_superseded"));
+        Assert.Equal(failed, Counter(report, "verify_failed"));
+    }
+
     // The proof's words: sorted, repeats folded, runs of consecutive words split where they leave a 256-byte line; one
     // address read as two values refuses the proof.
     [Fact]

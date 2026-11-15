@@ -65,4 +65,73 @@ public sealed unsafe partial class MetalClearFoldingTests
             concurrent.ReleaseAssumptions(assumptions);
         }
     }
+
+    // A clean read, then a GPU write over it recorded by the worker while the resolution is still open (an item ahead of
+    // the draw), then the write completes: the answer is clean again at the take, but the bytes the resolution read are
+    // the ones from before the write. The take refuses it while the write is pending and after it completed.
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void ACleanReadIsNotCurrentOnceAWriteRecordedAfterItCompletes(bool resident, bool verifies)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        rig.WriteBacking32(PredicateWord, 0x1111_1111);
+
+        var concurrent = (IConcurrentResolveHost)host;
+        concurrent.BeginConcurrentResolve();
+        object assumptions;
+        try
+        {
+            uint word;
+            if (resident)
+            {
+                Span<byte> bytes = stackalloc byte[sizeof(uint)];
+                Assert.True(host.TryReadResidentGuestBytes(PredicateWord, bytes, clean: true));
+                word = BitConverter.ToUInt32(bytes);
+            }
+            else
+            {
+                Assert.True(host.TryReadCleanGuestWord(PredicateWord, out word));
+            }
+
+            Assert.Equal(0x1111_1111u, word);
+            Assert.False(host.ConcurrentReadsSuperseded());
+            host.NoteGuestMemoryWrite(PredicateWord, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
+            if (verifies)
+            {
+                // A verify in this resolution finds its reads straddling the write, and latches the take's refusal.
+                Assert.True(host.ConcurrentReadsSuperseded());
+            }
+        }
+        finally
+        {
+            assumptions = concurrent.EndConcurrentResolve();
+        }
+
+        try
+        {
+            Assert.False(((MetalRenderHost.ConcurrentAssumptions)assumptions).ReliesOnOwned, "relies on owned");
+            Assert.Equal(verifies, ((MetalRenderHost.ConcurrentAssumptions)assumptions).Superseded);
+            Assert.False(concurrent.IsStillCurrent(assumptions), "current while the write is pending");
+            Assert.False(concurrent.IsStillCurrentAcrossDispatches(assumptions), "current across dispatches while the write is pending");
+
+            var serial = host.FlushCommandBuffer();
+            var deadline = Environment.TickCount64 + 10_000;
+            while (host.CompletedSerial < serial && Environment.TickCount64 < deadline)
+            {
+                Thread.Sleep(1);
+            }
+
+            Assert.True(host.CompletedSerial >= serial);
+            Assert.False(concurrent.IsStillCurrentAcrossDispatches(assumptions), "current across dispatches after the write completed");
+            Assert.False(concurrent.IsStillCurrent(assumptions), "current after the write completed");
+        }
+        finally
+        {
+            concurrent.ReleaseAssumptions(assumptions);
+        }
+    }
 }

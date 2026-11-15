@@ -52,7 +52,8 @@ public sealed unsafe partial class MetalClearFoldingTests
         host.NoteGuestMemoryWrite(KernelSource + 0x10, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
         // The store landed and its record retired: the page is unowned again.
         ((MetalGpuWriteRanges)GpuWritesOfHost.GetValue(host)!).Clear(ulong.MaxValue);
-        Assert.True(concurrent.IsStillCurrent(assumptions));
+        // Every take tests the log: a write the worker recorded after the resolution began is ahead of its draw too.
+        Assert.False(concurrent.IsStillCurrent(assumptions));
         Assert.False(concurrent.IsStillCurrentAcrossDispatches(assumptions));
         concurrent.ReleaseAssumptions(assumptions);
     }

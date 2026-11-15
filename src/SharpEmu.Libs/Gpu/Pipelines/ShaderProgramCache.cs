@@ -455,6 +455,7 @@ internal sealed class ShaderProgramCache
     private readonly ResidentGuestBytesReader? _prefetchResidentGuestBytes;
     private readonly ResidentGuestBytesComparer? _compareResidentGuestBytes;
     private readonly GuestWordsComparer? _compareGuestWords;
+    private readonly Func<bool>? _readsSuperseded;
 
     // The functions the call tables name, decoded once while their code stays the same.
     private readonly ShaderFunctionCache _functions;
@@ -480,6 +481,7 @@ internal sealed class ShaderProgramCache
         _prefetchResidentGuestBytes = PrefetchEnabled ? _readResidentGuestBytes : null;
         _compareResidentGuestBytes = ResourceMaterializationCache.InPlaceValidateEnabled ? CompareResidentGuestBytes : null;
         _compareGuestWords = host.ComparesGuestWords ? CompareGuestWords : null;
+        _readsSuperseded = host.ComparesGuestWords ? host.ConcurrentReadsSuperseded : null;
         _dataWritePending = host.DataWritePending;
         _functions = new ShaderFunctionCache(_readResidentGuestBytes);
     }
@@ -878,6 +880,7 @@ internal sealed class ShaderProgramCache
             ReadResidentMemory = _prefetchResidentGuestBytes,
             CompareResidentMemory = _compareResidentGuestBytes,
             CompareGuestWords = _compareGuestWords,
+            ReadsSuperseded = _readsSuperseded,
             DataWritePending = _dataWritePending,
             NullsOffClassLoopRecords = NullsOffClassLoopRecords,
         };

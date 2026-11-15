@@ -64,6 +64,8 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     bool IConcurrentResolveHost.IsStillCurrentAcrossDispatches(object assumptions) => IsConcurrentResolveStillCurrentAcrossDispatches(assumptions);
 
     private long _writeLogRefusals;
+    // Verify differences excused because a GPU write logged since the resolution began covers what it read.
+    private long _supersededVerifies;
     // Takes refused because an owned answer (a refused clean or resident read) is clean now.
     private long _ownedNowCleanRefusals;
 
@@ -170,7 +172,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var dispatches = $" dispatch_jobs={computeSubmitted} dispatch_taken={computeTaken} dispatch_refused=(abandoned={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Abandoned]}," +
             $"provider={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Provider]}{FormatProviderRefusals(prefetch.TakeProviderRefusals())},inputs={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Inputs]}," +
             $"ownership={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Ownership]},effects={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Effects]}) " +
-            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} owned_now_clean_refusals={Interlocked.Exchange(ref _ownedNowCleanRefusals, 0)} dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
+            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} superseded_verifies={Interlocked.Exchange(ref _supersededVerifies, 0)} owned_now_clean_refusals={Interlocked.Exchange(ref _ownedNowCleanRefusals, 0)} dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
             $"dispatch_saved_ms={computeSavedMs.ToString("F1", culture)}";
         return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) abandoned_verify={GpuFatal.TakeSpeculativeVerifyFailures()} taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
@@ -442,12 +444,17 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         // cleared by Forget: a stale flag only costs the re-test.
         public bool ReliesOnOwned;
 
+        // A verify on the resolving thread found a GPU write logged since the resolution began over what it read and
+        // excused a difference for it (ConcurrentReadsSuperseded): the take refuses the resolution whatever it finds.
+        public bool Superseded;
+
         // Taken again from the pool for a new resolution.
         public void Reset((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
         {
             Answers.Clear();
             CopiedThrough.Clear();
             ReliesOnOwned = false;
+            Superseded = false;
             Versions = versions;
             Array.Fill(_cleanPages, ulong.MaxValue);
             _nextCleanPage = 0;
@@ -682,10 +689,21 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         return builder.ToString();
     }
 
-    // On the worker: the answers a resolution relied on still hold.
+    // On the worker: the answers a resolution relied on still hold, and no GPU write logged since it began covers a
+    // range it read or a destination it read through a pending copy. Every write the worker records while a resolution
+    // is open belongs to an item ahead of the draw (the worker takes the draw only after them), so the draw sees it;
+    // once that write has completed its record is gone and a clean answer read before it is clean again (the bytes it
+    // read are not), which only the log still shows (ACleanReadIsNotCurrentOnceAWriteRecordedAfterItCompletes).
     internal bool IsConcurrentResolveStillCurrent(object assumptionsObject)
     {
         var assumptions = (ConcurrentAssumptions)assumptionsObject;
+        if (assumptions.Superseded ||
+            (assumptions.WriteLogVersion != _gpuWrites.WriteLogVersion && LoggedWriteCoversRead(assumptions)))
+        {
+            Interlocked.Increment(ref _writeLogRefusals);
+            return false;
+        }
+
         if (!assumptions.ReliesOnOwned && assumptions.Versions == OwnershipVersions())
         {
             return true;
@@ -739,31 +757,98 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // nor a destination it read through a pending copy. A write those dispatches recorded may have landed and retired by
     // now, which the ownership answers alone no longer show; and one over a copied destination, whose owned answer the
     // copy read dropped, makes it the destination's latest write instead of the copy.
-    internal bool IsConcurrentResolveStillCurrentAcrossDispatches(object assumptionsObject)
+    // The write log is tested by IsConcurrentResolveStillCurrent for every take.
+    internal bool IsConcurrentResolveStillCurrentAcrossDispatches(object assumptionsObject) =>
+        IsConcurrentResolveStillCurrent(assumptionsObject);
+
+    // On a resolving thread ahead of the worker, for a verify that found two readers of one resolution disagreeing: a
+    // GPU write logged since the resolution began covers what it read, so its reads straddle that write (an answer
+    // cached before it, a fresh test or a copy read after it) and the take refuses it (latched: Superseded). The worker
+    // records such a write only for an item ahead of the draw, so the value the draw needs is the one after the write.
+    // False on the worker, and when the log could not be read whole.
+    public bool ConcurrentReadsSuperseded()
     {
-        var assumptions = (ConcurrentAssumptions)assumptionsObject;
-        if (assumptions.WriteLogVersion != _gpuWrites.WriteLogVersion)
+        if (_concurrentAssumptions is not { } assumptions)
         {
-            foreach (var (_, address, size, _) in assumptions.Answers)
+            return false;
+        }
+
+        if (assumptions.Superseded)
+        {
+            return true;
+        }
+
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            if (TryLoggedWriteCoversRead(assumptions) is { } covers)
             {
-                if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, address, size))
+                assumptions.Superseded = covers;
+                if (covers)
                 {
-                    Interlocked.Increment(ref _writeLogRefusals);
-                    return false;
+                    Interlocked.Increment(ref _supersededVerifies);
                 }
+
+                return covers;
             }
 
-            foreach (var (start, end) in assumptions.CopiedThrough)
+            Thread.SpinWait(8);
+        }
+
+        return false;
+    }
+
+    private bool? TryLoggedWriteCoversRead(ConcurrentAssumptions assumptions)
+    {
+        foreach (var (_, address, size, _) in assumptions.Answers)
+        {
+            if (_gpuWrites.TryLoggedWriteSinceSnapshot(assumptions.WriteLogVersion, address, size) is not { } logged)
             {
-                if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, start, end - start))
-                {
-                    Interlocked.Increment(ref _writeLogRefusals);
-                    return false;
-                }
+                return null;
+            }
+
+            if (logged)
+            {
+                return true;
             }
         }
 
-        return IsConcurrentResolveStillCurrent(assumptionsObject);
+        foreach (var (start, end) in assumptions.CopiedThrough)
+        {
+            if (_gpuWrites.TryLoggedWriteSinceSnapshot(assumptions.WriteLogVersion, start, end - start) is not { } logged)
+            {
+                return null;
+            }
+
+            if (logged)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // On the worker, which logs: whether a GPU write logged since the resolution began covers a range it answered or read
+    // through a copy.
+    private bool LoggedWriteCoversRead(ConcurrentAssumptions assumptions)
+    {
+        foreach (var (_, address, size, _) in assumptions.Answers)
+        {
+            if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, address, size))
+            {
+                return true;
+            }
+        }
+
+        foreach (var (start, end) in assumptions.CopiedThrough)
+        {
+            if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, start, end - start))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // A write the command thread queued ahead of the draw being resolved, still waiting for the worker,

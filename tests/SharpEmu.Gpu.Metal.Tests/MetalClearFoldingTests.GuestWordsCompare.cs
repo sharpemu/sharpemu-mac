@@ -173,10 +173,11 @@ public sealed unsafe partial class MetalClearFoldingTests
         Assert.False(changed.Equal);
         concurrent.ReleaseAssumptions(changed.Assumptions);
 
-        // A write recorded after the copy over a compared word comes from stream items after the draw, so the take
-        // accepts a compare made before it exactly as it accepts a word read through the copy made then
-        // (TryReadThroughPendingCopyConcurrent); a compare made after it refuses, the copy no longer the range's latest
-        // write, with no owned answer left behind.
+        // A write over a compared word recorded after the resolution began is one the worker recorded for an item ahead
+        // of the draw (it takes the draw only after them), the word's latest write, not the copy: the take refuses a
+        // compare made before it exactly as it refuses a word read through the copy made then (the write log over the
+        // copied-through range); a compare made after it refuses, the copy no longer the range's latest write, with no
+        // owned answer left behind.
         copied[4] ^= 1;
         recorded = [.. copied, .. recorded.AsSpan(32)];
         var before = CompareConcurrent(rig, ranges, recorded);
@@ -194,8 +195,8 @@ public sealed unsafe partial class MetalClearFoldingTests
         }
 
         rig.Host.NoteGuestMemoryWrite(CopyDestination + 0x18, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
-        Assert.True(concurrent.IsStillCurrent(read));
-        Assert.True(concurrent.IsStillCurrent(before.Assumptions));
+        Assert.False(concurrent.IsStillCurrent(read));
+        Assert.False(concurrent.IsStillCurrent(before.Assumptions));
         concurrent.ReleaseAssumptions(read);
         concurrent.ReleaseAssumptions(before.Assumptions);
         var after = CompareConcurrent(rig, ranges, recorded);
