@@ -616,7 +616,10 @@ public static partial class AgcExports
         ExportName = "sceAgcCreatePrimState",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
-    public static int CreatePrimState(CpuContext ctx)
+    public static int CreatePrimState(CpuContext ctx) => CreatePrimStateCore(ctx, PrimStateFastEnabled);
+
+    // batched: try TryCreatePrimStateBatched before the field-by-field path (tests run both).
+    internal static int CreatePrimStateCore(CpuContext ctx, bool batched)
     {
         var cxRegistersAddress = ctx[CpuRegister.Rdi];
         var ucRegistersAddress = ctx[CpuRegister.Rsi];
@@ -633,6 +636,15 @@ public static partial class AgcExports
         if (geometryShaderAddress == 0)
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (batched &&
+            TryCreatePrimStateBatched(ctx, cxRegistersAddress, ucRegistersAddress, hullShaderAddress, geometryShaderAddress, primitiveType, out var batchedShaderType))
+        {
+            TraceAgc(
+                $"agc.create_prim_state cx=0x{cxRegistersAddress:X16} uc=0x{ucRegistersAddress:X16} hull=0x{hullShaderAddress:X16} gs=0x{geometryShaderAddress:X16} type={batchedShaderType} prim=0x{primitiveType:X8}");
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         if (!TryReadByte(ctx, geometryShaderAddress + ShaderTypeOffset, out var shaderType) || !IsEsGeometryShaderType(shaderType) ||
@@ -819,6 +831,135 @@ public static partial class AgcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // SHARPEMU_AGC_PRIMSTATE_FAST=0 keeps sceAgcCreatePrimState on its field-by-field reads and writes.
+    internal static readonly bool PrimStateFastEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_AGC_PRIMSTATE_FAST") != "0";
+
+    // The shader header bytes CreatePrimState reads: the specials pointer (0x28) through the type byte (0x5A).
+    private const int PrimStateHeaderBytes = (int)(ShaderTypeOffset + 1 - ShaderSpecialsOffset);
+
+    // The specials bytes it reads: GE_CNTL (0x00) through GE_USER_VGPR_EN (0x28), as (offset, value) pairs.
+    private const int PrimStateSpecialsBytes = (int)(ShaderSpecialGeUserVgprEnOffset + 8);
+
+    /// <summary>
+    /// sceAgcCreatePrimState's success path in one read of each shader header and specials block
+    /// and one guest write of both register blocks. False - with nothing written, or with nothing
+    /// written that the field-by-field path does not write again in the same order - whenever that
+    /// path could answer differently: a read it would not make fails, a shader is not the type it
+    /// takes, a specials pointer is null, a destination overlaps anything read (that path reads
+    /// some fields after writing others), or the write fails. The field-by-field path then runs
+    /// and owns every partial write and MEMORY_FAULT/INVALID_ARGUMENT answer.
+    /// </summary>
+    internal static bool TryCreatePrimStateBatched(
+        CpuContext ctx,
+        ulong cxRegistersAddress,
+        ulong ucRegistersAddress,
+        ulong hullShaderAddress,
+        ulong geometryShaderAddress,
+        uint primitiveType,
+        out byte shaderType)
+    {
+        shaderType = 0;
+        Span<byte> header = stackalloc byte[PrimStateHeaderBytes];
+        if (!ctx.Memory.TryRead(geometryShaderAddress + ShaderSpecialsOffset, header))
+        {
+            return false;
+        }
+
+        shaderType = header[(int)(ShaderTypeOffset - ShaderSpecialsOffset)];
+        var specialsAddress = BinaryPrimitives.ReadUInt64LittleEndian(header);
+        if (!IsEsGeometryShaderType(shaderType) || specialsAddress == 0)
+        {
+            return false;
+        }
+
+        ulong hullSpecialsAddress = 0;
+        if (hullShaderAddress != 0)
+        {
+            if (!ctx.Memory.TryRead(hullShaderAddress + ShaderSpecialsOffset, header) ||
+                header[(int)(ShaderTypeOffset - ShaderSpecialsOffset)] != HsShaderType)
+            {
+                return false;
+            }
+
+            hullSpecialsAddress = BinaryPrimitives.ReadUInt64LittleEndian(header);
+            if (hullSpecialsAddress == 0)
+            {
+                return false;
+            }
+        }
+
+        Span<byte> specials = stackalloc byte[PrimStateSpecialsBytes];
+        Span<byte> hullSpecials = stackalloc byte[PrimStateSpecialsBytes];
+        if (!ctx.Memory.TryRead(specialsAddress, specials) ||
+            (hullSpecialsAddress != 0 && !ctx.Memory.TryRead(hullSpecialsAddress, hullSpecials)))
+        {
+            return false;
+        }
+
+        // Every range read above, against both destinations.
+        bool OverlapsRead(ulong address, ulong length) =>
+            !IsSeparate(address, length, geometryShaderAddress + ShaderSpecialsOffset, PrimStateHeaderBytes) ||
+            !IsSeparate(address, length, specialsAddress, PrimStateSpecialsBytes) ||
+            (hullShaderAddress != 0 &&
+             (!IsSeparate(address, length, hullShaderAddress + ShaderSpecialsOffset, PrimStateHeaderBytes) ||
+              !IsSeparate(address, length, hullSpecialsAddress, PrimStateSpecialsBytes)));
+        const int CxBytes = 16;
+        const int UcBytes = 24;
+        if ((cxRegistersAddress != 0 && OverlapsRead(cxRegistersAddress, CxBytes)) ||
+            (ucRegistersAddress != 0 && OverlapsRead(ucRegistersAddress, UcBytes)))
+        {
+            return false;
+        }
+
+        uint Field(ReadOnlySpan<byte> block, ulong offset) => BinaryPrimitives.ReadUInt32LittleEndian(block[(int)offset..]);
+        Span<uint> cx = stackalloc uint[CxBytes / sizeof(uint)];
+        cx[0] = Field(specials, ShaderSpecialVgtShaderStagesEnOffset);
+        var stagesValue = Field(specials, ShaderSpecialVgtShaderStagesEnOffset + 4);
+        if ((stagesValue & VgtShaderStagesGsEnableBit) != 0)
+        {
+            cx[2] = Field(specials, ShaderSpecialVgtGsOutPrimTypeOffset);
+            cx[3] = Field(specials, ShaderSpecialVgtGsOutPrimTypeOffset + 4);
+        }
+        else
+        {
+            cx[2] = VgtGsOutPrimType;
+            cx[3] = AgcPrimitiveHelpers.PrimitiveTypeToGsOut(primitiveType);
+        }
+
+        if (hullSpecialsAddress != 0)
+        {
+            stagesValue |= Field(hullSpecials, ShaderSpecialVgtShaderStagesEnOffset + 4);
+            if ((stagesValue & VgtShaderStagesGsEnableBit) == 0)
+            {
+                cx[2] = Field(hullSpecials, ShaderSpecialVgtGsOutPrimTypeOffset);
+                cx[3] = Field(hullSpecials, ShaderSpecialVgtGsOutPrimTypeOffset + 4);
+            }
+        }
+
+        cx[1] = stagesValue;
+        Span<uint> uc = stackalloc uint[UcBytes / sizeof(uint)];
+        ReadOnlySpan<byte> vgprSource = hullSpecialsAddress != 0 ? hullSpecials : specials;
+        uc[0] = Field(specials, ShaderSpecialGeCntlOffset);
+        uc[1] = Field(specials, ShaderSpecialGeCntlOffset + 4);
+        uc[2] = Field(vgprSource, ShaderSpecialGeUserVgprEnOffset);
+        uc[3] = Field(vgprSource, ShaderSpecialGeUserVgprEnOffset + 4);
+        uc[4] = VgtPrimitiveType;
+        uc[5] = primitiveType;
+
+        var cxBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(cx);
+        var ucBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(uc);
+        // cx before uc, as the field-by-field path writes them.
+        return cxRegistersAddress == 0 ? ctx.Memory.TryWrite(ucRegistersAddress, ucBytes)
+            : ucRegistersAddress == 0 ? ctx.Memory.TryWrite(cxRegistersAddress, cxBytes)
+            : ctx.Memory.TryWritePair(cxRegistersAddress, cxBytes, ucRegistersAddress, ucBytes);
+    }
+
+    // Whether [a, a + aLength) and [b, b + bLength) are disjoint and neither wraps.
+    private static bool IsSeparate(ulong a, ulong aLength, ulong b, ulong bLength) =>
+        a <= ulong.MaxValue - aLength && b <= ulong.MaxValue - bLength &&
+        (a + aLength <= b || b + bLength <= a);
+
     private static bool TryCreatePrimCxState(
         CpuContext ctx,
         ulong destinationAddress,
@@ -988,9 +1129,16 @@ public static partial class AgcExports
         // and pack the hardware CNTL word (location in bits [4:0], Flat at 0x400).
         uint inputSemanticsCount = 0;
         ulong inputSemanticsAddress = 0;
+        // Each shader's two header fields are one read (the separate reads answer when it fails).
+        Span<byte> header = stackalloc byte[(int)(ShaderNumInputSemanticsOffset + sizeof(uint) - ShaderInputSemanticsOffset)];
         if (pixelShaderAddress != 0)
         {
-            if (!TryReadUInt64(ctx, pixelShaderAddress + ShaderInputSemanticsOffset, out inputSemanticsAddress) ||
+            if (ctx.Memory.TryRead(pixelShaderAddress + ShaderInputSemanticsOffset, header))
+            {
+                inputSemanticsAddress = BinaryPrimitives.ReadUInt64LittleEndian(header);
+                inputSemanticsCount = BinaryPrimitives.ReadUInt32LittleEndian(header[(int)(ShaderNumInputSemanticsOffset - ShaderInputSemanticsOffset)..]);
+            }
+            else if (!TryReadUInt64(ctx, pixelShaderAddress + ShaderInputSemanticsOffset, out inputSemanticsAddress) ||
                 !TryReadUInt32(ctx, pixelShaderAddress + ShaderNumInputSemanticsOffset, out inputSemanticsCount))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -1024,8 +1172,16 @@ public static partial class AgcExports
         }
 
         // NumOutputSemantics is a u16 at header +0x56.
-        if (!TryReadUInt64(ctx, geometryShaderAddress + ShaderOutputSemanticsOffset, out var outputSemanticsAddress) ||
-            !TryReadUInt16(ctx, geometryShaderAddress + ShaderNumOutputSemanticsOffset, out var outputSemanticsCount))
+        ulong outputSemanticsAddress;
+        ushort outputSemanticsCount;
+        var geometryHeader = header[..(int)(ShaderNumOutputSemanticsOffset + sizeof(ushort) - ShaderOutputSemanticsOffset)];
+        if (ctx.Memory.TryRead(geometryShaderAddress + ShaderOutputSemanticsOffset, geometryHeader))
+        {
+            outputSemanticsAddress = BinaryPrimitives.ReadUInt64LittleEndian(geometryHeader);
+            outputSemanticsCount = BinaryPrimitives.ReadUInt16LittleEndian(geometryHeader[(int)(ShaderNumOutputSemanticsOffset - ShaderOutputSemanticsOffset)..]);
+        }
+        else if (!TryReadUInt64(ctx, geometryShaderAddress + ShaderOutputSemanticsOffset, out outputSemanticsAddress) ||
+            !TryReadUInt16(ctx, geometryShaderAddress + ShaderNumOutputSemanticsOffset, out outputSemanticsCount))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }

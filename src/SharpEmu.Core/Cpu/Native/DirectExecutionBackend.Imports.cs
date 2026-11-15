@@ -2198,6 +2198,7 @@ public sealed partial class DirectExecutionBackend
 			"ob5xAW4ln-0" or // strchr
 			"9yDWMxEFdJU" or // strrchr
 			"V++UgBtQhn0" or // sceAgcGetDataPacketPayloadAddress
+			"D9sr1xGUriE" or // sceAgcCreatePrimState: register arguments, guest reads and writes only
 			// Per-frame polls a title runs on every input and playback tick.
 			"h8uongcBNVs" or // sceSystemGestureGetTouchEventsCount
 			"n88vx3C5nW8" or // gettimeofday

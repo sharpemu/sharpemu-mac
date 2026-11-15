@@ -142,6 +142,36 @@ internal static unsafe class AgcBuilderBenches
             c[CpuRegister.Rdi] = cb; c[CpuRegister.Rsi] = 1; AgcExports.DcbSetNumInstances(c);
             c[CpuRegister.Rdi] = cb; c[CpuRegister.Rsi] = 3; c[CpuRegister.Rdx] = 0x9_0000_0000; c[CpuRegister.Rcx] = 0; AgcExports.DcbDrawIndex(c);
         }, 400);
+        // DrawIndexIndirect with every register slot selected (bits 0-2, stage 5) and bit 32 clear.
+        Bench("c7", "DcbDrawIndexIndirect", c => { c[CpuRegister.Rdi] = cb; c[CpuRegister.Rsi] = 0x40; c[CpuRegister.Rdx] = 0xA008_4A07; AgcExports.DcbDrawIndexIndirect(c); }, 4000);
+
+        // CreatePrimState(cx, uc, hs, gs, prim) over a GS and an HS whose specials select the GS
+        // output primitive, as a tessellated draw's state does; nothing in the command buffer.
+        var shaders = address + 0x20_0000;
+        var gsHeader = shaders;
+        var hsHeader = shaders + 0x100;
+        var gsSpecials = shaders + 0x200;
+        var hsSpecials = shaders + 0x300;
+        var primCx = shaders + 0x400;
+        var primUc = shaders + 0x500;
+        var header = new byte[0x60];
+        BitConverter.TryWriteBytes(header.AsSpan(0x28), gsSpecials);
+        header[0x5A] = 2;
+        memory.TryWrite(gsHeader, header);
+        BitConverter.TryWriteBytes(header.AsSpan(0x28), hsSpecials);
+        header[0x5A] = 3;
+        memory.TryWrite(hsHeader, header);
+        var specials = new byte[0x30];
+        for (var index = 0; index < specials.Length; index += 4) BitConverter.TryWriteBytes(specials.AsSpan(index), 0x100u + (uint)index);
+        BitConverter.TryWriteBytes(specials.AsSpan(0x0C), 0x24u);
+        memory.TryWrite(gsSpecials, specials);
+        BitConverter.TryWriteBytes(specials.AsSpan(0x0C), 0x08u);
+        memory.TryWrite(hsSpecials, specials);
+        Harness.Measure("c8", "CreatePrimState (GS + HS, cx and uc)", 1, 1, i =>
+        {
+            ctx[CpuRegister.Rdi] = primCx; ctx[CpuRegister.Rsi] = primUc; ctx[CpuRegister.Rdx] = hsHeader; ctx[CpuRegister.Rcx] = gsHeader; ctx[CpuRegister.R8] = 0x11;
+            AgcExports.CreatePrimState(ctx);
+        }, unit: "call");
         if (sink == long.MinValue) Console.WriteLine(sink);
         GuestGpuMemoryHook.Attach(null);
     }

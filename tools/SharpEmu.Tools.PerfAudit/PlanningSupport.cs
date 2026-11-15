@@ -244,7 +244,6 @@ internal sealed class RecordingRenderHost : IRenderHost
         return new ColorAttachmentAcquisition(
             target.Image,
             new GpuImageHandle(0x1000 + target.Image.Index),
-            ColorLayout,
             ImageSamples.TryGetValue(address, out var samples) ? samples : target.Resolution.Samples,
             metadataClear,
             clearValue);
@@ -425,6 +424,11 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public bool TryDispatchIndirect(ulong argumentsAddress) => false;
 
+    public bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical) => false;
+
+    public void TransitionDepthAttachment(in DepthAttachmentState depth, GpuImageAspect writeAspects) =>
+        Calls.Add($"transition_depth {writeAspects}");
+
     public void ShaderWriteBarrier(GpuPipelineStage sourceStages) => Calls.Add($"write_barrier {sourceStages}");
 
     public void ShaderWriteHazardBarrier() => Calls.Add("write_hazard_barrier");
@@ -571,6 +575,20 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     public List<ColorComponentMap[]> ExportMappings { get; } = new();
 
     public GraphicsPrograms GetGraphicsPrograms(
+        RegisterBanks banks,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        bool triangleList,
+        int startInstanceUserData)
+    {
+        Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
+        return Graphics;
+    }
+
+    public GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
         ShaderInterfaceRegisters shaderInterface,
@@ -711,7 +729,7 @@ internal static class RenderExecutorFixtures
         context.ColorTargets[0] = RegisterWords.Color(ColorBase, 64, 64);
         context.RenderTargetMask = 0xF;
         context.ShaderInterface.ColorShaderMask = 0xF;
-        context.ScreenViewport.Viewports[0] = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = -32, YOffset = 32, ZScale = 0.5f, ZOffset = 0.5f, MaxDepth = 1 };
+        context.ScreenViewport.Primary = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = -32, YOffset = 32, ZScale = 0.5f, ZOffset = 0.5f, MaxDepth = 1 };
         if (withDepth)
         {
             context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64);
