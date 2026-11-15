@@ -181,6 +181,15 @@ public interface IShaderPipelineHost
     bool TryCompareResidentGuestBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets,
         ReadOnlySpan<byte> recorded) => false;
 
+    // A program evaluation's recorded reads (SharpEmu.ShaderCompiler.Resources.GuestWordsComparer): true only when each
+    // range of whole words passes the ownership tests a TryReadGuestWord of its words makes, recorded as those reads record
+    // theirs, and holds the recorded bytes where those reads would find them (memory as it lies, or the pending copy that
+    // writes the range); false when one differs, is owned otherwise, or the host cannot tell.
+    bool TryCompareGuestWords(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<byte> recorded) => false;
+
+    // Whether TryCompareGuestWords can answer true; without it evaluations record no read proofs.
+    bool ComparesGuestWords => false;
+
     // Whether recorded GPU work may still write this dword, answered without waiting. A
     // host that returns a delegate lets a shader whose data-only table words the GPU writes
     // be re-planned to load them on the device (DeviceDataLoads); null keeps them flattened.

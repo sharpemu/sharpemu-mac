@@ -107,7 +107,7 @@ internal sealed class MaterializationProgram
     [ThreadStatic]
     private static Scratch? _scratch;
 
-    private sealed class Scratch
+    internal sealed class Scratch
     {
         public ulong[] Values = new ulong[256];
         public bool[] Valid = new bool[256];
@@ -118,6 +118,27 @@ internal sealed class MaterializationProgram
         public byte[] Bytes = new byte[1024];
         public readonly ReadOrder Order = new();
         public int Count;
+
+        // While an evaluation records what it reads (ReadProof): each word read from memory, and each address whose
+        // read found none.
+        public bool Recording;
+        public ulong[] ReadAddresses = new ulong[64];
+        public uint[] ReadWords = new uint[64];
+        public int ReadCount;
+        public readonly List<ulong> Unreadable = [];
+
+        public void NoteRead(ulong address, uint word)
+        {
+            if (ReadCount == ReadAddresses.Length)
+            {
+                Array.Resize(ref ReadAddresses, ReadCount * 2);
+                Array.Resize(ref ReadWords, ReadCount * 2);
+            }
+
+            ReadAddresses[ReadCount] = address;
+            ReadWords[ReadCount] = word;
+            ReadCount++;
+        }
 
         public void Ensure(int registers)
         {
@@ -500,20 +521,206 @@ internal sealed class MaterializationProgram
         public ReadOnlySpan<DeviceAddressRange> RangeValues => Ranges.AsSpan(0, RangeCount);
     }
 
-    internal bool TryRunInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Output output)
+    internal bool TryRunInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Output output) =>
+        TryRunInto(plan, inputs, additionalTableWords, output, record: false, previous: null, out _);
+
+    // With record, also what the evaluation read (null when one address read as two values): previous itself when it
+    // holds exactly that, or a proof sharing its ranges when only their bytes differ.
+    internal bool TryRunInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Output output, bool record,
+        ReadProof? previous, out ReadProof? proof)
     {
+        proof = null;
         var activeSources = plan.ResourceBranches.Count != 0 ? RuntimeValueEvaluator.EvaluateActiveSources(plan, inputs) : [];
         var scratch = _scratch ?? new Scratch();
         _scratch = null;
         try
         {
+            scratch.Recording = record;
+            scratch.ReadCount = 0;
+            scratch.Unreadable.Clear();
             Evaluate(inputs, scratch);
-            return Emit(plan, additionalTableWords, scratch, activeSources, output);
+            scratch.Recording = false;
+            if (!Emit(plan, additionalTableWords, scratch, activeSources, output))
+            {
+                return false;
+            }
+
+            if (record)
+            {
+                proof = ReadProof.Build(this, scratch, activeSources, previous);
+            }
+
+            return true;
         }
         finally
         {
+            scratch.Recording = false;
             _scratch = scratch;
         }
+    }
+
+    /// <summary>
+    /// What one evaluation of a program read, as the proof that another evaluation with the same user data, shader base,
+    /// compute state and readers emits the same words. Every read's address is a function of the registers of the levels
+    /// before it, and those of the first read level of the user data, shader base and constants alone; so while those
+    /// are the same, every word read from memory still holds the value it was read as, and every read that found no
+    /// memory finds none again, every read is at the same address with the same outcome, level by level, and every
+    /// register comes out the same. The words emitted are a function of the registers and the active sources
+    /// (<see cref="ActiveSources"/>, which the caller evaluates again). A caller compares the words
+    /// (<see cref="Addresses"/>, <see cref="Lengths"/>, <see cref="Bytes"/>) through the ownership tests a word read
+    /// makes, recorded as that read records them, and reads <see cref="Unreadable"/> again. Immutable once built.
+    /// </summary>
+    internal sealed class ReadProof
+    {
+        // Words of one range lie in one 256-byte line, the unit the concurrent ownership tests answer for.
+        internal const int LineBytes = 256;
+
+        public required MaterializationProgram Program;
+        // The words read from memory, in address order, as runs of consecutive words within a line, and their bytes, run
+        // after run.
+        public required ulong[] Addresses;
+        public required int[] Lengths;
+        public required byte[] Bytes;
+        // Addresses whose read found no memory.
+        public required ulong[] Unreadable;
+        // The sources the plan's branches left active (empty without branches).
+        public required bool[] ActiveSources;
+
+        internal static ReadProof? Build(MaterializationProgram program, Scratch scratch, bool[] activeSources, ReadProof? previous = null)
+        {
+            var count = scratch.ReadCount;
+            var addresses = scratch.ReadAddresses;
+            var words = scratch.ReadWords;
+            Array.Sort(addresses, words, 0, count);
+            var unique = 0;
+            var ranges = 0;
+            for (var index = 0; index < count; index++)
+            {
+                if (unique != 0 && addresses[unique - 1] == addresses[index])
+                {
+                    // One address read as two values in the same evaluation (the guest wrote it meanwhile): no proof.
+                    if (words[unique - 1] != words[index])
+                    {
+                        return null;
+                    }
+
+                    continue;
+                }
+
+                if (unique == 0 || !Continues(addresses[unique - 1], addresses[index]))
+                {
+                    ranges++;
+                }
+
+                addresses[unique] = addresses[index];
+                words[unique] = words[index];
+                unique++;
+            }
+
+            // A revalidation that read in full mostly reads what the proof before it did (its compare was refused) or the
+            // same words with other values (a words miss): kept, or its ranges shared, rather than allocated again.
+            var sameRanges = previous is not null && ReferenceEquals(previous.Program, program) && previous.Addresses.Length == ranges &&
+                previous.Bytes.Length == unique * sizeof(uint) && SameRanges(previous, addresses, unique);
+            var sameBytes = sameRanges && SameWords(previous!.Bytes, words, unique);
+            var sameRest = previous is not null && previous.ActiveSources.AsSpan().SequenceEqual(activeSources) &&
+                previous.Unreadable.AsSpan().SequenceEqual(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(scratch.Unreadable));
+            if (sameBytes && sameRest)
+            {
+                return previous;
+            }
+
+            ulong[] starts;
+            int[] lengths;
+            if (sameRanges)
+            {
+                starts = previous!.Addresses;
+                lengths = previous.Lengths;
+            }
+            else
+            {
+                starts = new ulong[ranges];
+                lengths = new int[ranges];
+                var range = -1;
+                for (var index = 0; index < unique; index++)
+                {
+                    if (index == 0 || !Continues(addresses[index - 1], addresses[index]))
+                    {
+                        starts[++range] = addresses[index];
+                    }
+
+                    lengths[range] += sizeof(uint);
+                }
+            }
+
+            byte[] bytes;
+            if (sameBytes)
+            {
+                bytes = previous!.Bytes;
+            }
+            else
+            {
+                bytes = new byte[unique * sizeof(uint)];
+                System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.AsSpan(0, unique)).CopyTo(bytes);
+                if (!BitConverter.IsLittleEndian)
+                {
+                    for (var index = 0; index < unique; index++)
+                    {
+                        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), words[index]);
+                    }
+                }
+            }
+
+            return new ReadProof
+            {
+                Program = program, Addresses = starts, Lengths = lengths, Bytes = bytes,
+                Unreadable = scratch.Unreadable.Count == 0 ? [] : sameRest ? previous!.Unreadable : [.. scratch.Unreadable],
+                ActiveSources = activeSources,
+            };
+        }
+
+        // Whether the unique sorted addresses form exactly the proof's ranges.
+        private static bool SameRanges(ReadProof proof, ulong[] addresses, int unique)
+        {
+            var index = 0;
+            for (var range = 0; range < proof.Addresses.Length; range++)
+            {
+                var start = proof.Addresses[range];
+                var words = proof.Lengths[range] / sizeof(uint);
+                if (index + words > unique || addresses[index] != start || (index != 0 && Continues(addresses[index - 1], start)))
+                {
+                    return false;
+                }
+
+                for (var word = 1; word < words; word++)
+                {
+                    if (addresses[index + word] != start + (ulong)(word * sizeof(uint)))
+                    {
+                        return false;
+                    }
+                }
+
+                index += words;
+            }
+
+            return index == unique;
+        }
+
+        private static bool SameWords(byte[] bytes, uint[] words, int unique)
+        {
+            for (var index = 0; index < unique; index++)
+            {
+                if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint))) != words[index])
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // Whether a word at next extends the run whose last word is at previous: the next word, in the same line.
+        private static bool Continues(ulong previous, ulong next) =>
+            next - previous == sizeof(uint) && (next & ~(ulong)(LineBytes - 1)) == (previous & ~(ulong)(LineBytes - 1));
     }
 
     private void Evaluate(ResourceRuntimeInputs inputs, Scratch scratch)
@@ -784,8 +991,13 @@ internal sealed class MaterializationProgram
                     for (var index = start; index < end; index++)
                     {
                         var target = reads[order[index]].Target;
-                        values[target] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(offsets[index] - offsets[start])..]);
+                        var word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(offsets[index] - offsets[start])..]);
+                        values[target] = word;
                         valid[target] = true;
+                        if (scratch.Recording)
+                        {
+                            scratch.NoteRead(runFirst + (ulong)(offsets[index] - offsets[start]), word);
+                        }
                     }
 
                     start = end;
@@ -796,7 +1008,7 @@ internal sealed class MaterializationProgram
             for (var index = start; index < end; index++)
             {
                 ref readonly var read = ref reads[order[index]];
-                ReadWord(inputs, lowest + (ulong)(offsets[index] - origin), baseAddress, read.Absolute, read.Target, values, valid);
+                ReadWord(inputs, lowest + (ulong)(offsets[index] - origin), baseAddress, read.Absolute, read.Target, scratch);
             }
 
             start = end;
@@ -874,7 +1086,7 @@ internal sealed class MaterializationProgram
 
             for (var index = start; index < end; index++)
             {
-                ReadWord(inputs, addresses[index], bases[index], absolute[index], targets[index], values, valid);
+                ReadWord(inputs, addresses[index], bases[index], absolute[index], targets[index], scratch);
             }
 
             start = end;
@@ -1048,23 +1260,39 @@ internal sealed class MaterializationProgram
         for (var index = start; index < end; index++)
         {
             var target = scratch.Targets[index];
-            scratch.Values[target] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(addresses[index] - first)..]);
+            var word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(addresses[index] - first)..]);
+            scratch.Values[target] = word;
             scratch.Valid[target] = true;
+            if (scratch.Recording)
+            {
+                scratch.NoteRead(addresses[index], word);
+            }
         }
 
         return true;
     }
 
-    private static void ReadWord(ResourceRuntimeInputs inputs, ulong address, ulong baseAddress, bool absolute, int target, ulong[] values, bool[] valid)
+    private static void ReadWord(ResourceRuntimeInputs inputs, ulong address, ulong baseAddress, bool absolute, int target, Scratch scratch)
     {
+        var values = scratch.Values;
+        var valid = scratch.Valid;
         if (inputs.ReadMemory is not null && inputs.ReadMemory(address, out var word))
         {
             values[target] = word;
             valid[target] = true;
+            if (scratch.Recording)
+            {
+                scratch.NoteRead(address, word);
+            }
+
             return;
         }
 
         values[target] = 0;
         valid[target] = (baseAddress & ~3ul) == 0 || (absolute && inputs.ReadMemory is not null && !inputs.ReadsClean);
+        if (scratch.Recording)
+        {
+            scratch.Unreadable.Add(address);
+        }
     }
 }

@@ -851,7 +851,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     /// </summary>
     public static string TakeGraphicsResolveReport() =>
         FormattableString.Invariant($"graphics_kept={_graphicsKept.Take()} graphics_resolved={_graphicsResolved.Take()} ") +
-        GraphicsResolveMemo.TakeReport();
+        GraphicsResolveMemo.TakeReport() + " " + ResourceMaterializer.TakeReadProofReport();
 
     // Besides upstream's register stamps, the fork's resolution reads the host viewport transform (dynamic
     // viewport registers, compared resolved), the depth aspects and triangle-list assembly (per-vertex pixel

@@ -1269,4 +1269,126 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
         return true;
     }
+
+    // TryCompareGuestWords off the worker. Each range (whole words in one line) takes IsOwnedRecorded as a word read of
+    // it does (query Word: its page, its line, or the line's mask, recorded the same way), so the take's re-check
+    // (IsConcurrentResolveStillCurrent) tests every word compared here as it would the words read. A range a GPU write
+    // owns is read through the pending copy that writes all of it, as TryReadGuestWordConcurrentTested reads each of its
+    // words (TryReadThroughPendingCopyConcurrent: that copy the latest write over the range, its source owned by
+    // nothing, the source's answers recorded, the range's owned answer dropped), and compared there: any word of the
+    // range read alone finds that same copy, since a later write over it would be the range's latest. Any other owned
+    // range refuses the compare, its owned answer dropped: the caller then reads the words itself, recording their own
+    // answers. Then the other ranges' bytes, where they lie.
+    private bool TryCompareGuestWordsConcurrent(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<byte> recorded,
+        ConcurrentAssumptions assumptions)
+    {
+        if (_backing.SingleCopy is { ReleasedChunks: > 0 })
+        {
+            return false;
+        }
+
+        var count = addresses.Length;
+        var offset = 0;
+        // Ranges answered through a copy (at most 64), left out of the backing compare below.
+        ulong throughCopies = 0;
+        Span<byte> through = stackalloc byte[MaterializationProgramLineBytes];
+        for (var index = 0; index < count; index++)
+        {
+            var address = addresses[index];
+            var length = lengths[index];
+            if (length <= 0 || length > MaterializationProgramLineBytes || ((address | (ulong)length) & 3) != 0 || offset > recorded.Length - length ||
+                ulong.MaxValue - address < (ulong)length)
+            {
+                return false;
+            }
+
+            var answers = assumptions.Answers.Count;
+            if (IsOwnedRecorded(ConcurrentQuery.Word, address, (ulong)length, assumptions))
+            {
+                var owned = assumptions.Answers.Count > answers;
+                if (_lastConcurrentOwner == AbandonCause.GpuWrite && index < 64)
+                {
+                    var before = assumptions.Answers.Count;
+                    var bytes = through[..length];
+                    if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions))
+                    {
+                        if (owned)
+                        {
+                            assumptions.Forget(ConcurrentQuery.Word, address, (ulong)length, before);
+                        }
+
+                        if (!bytes.SequenceEqual(recorded.Slice(offset, length)))
+                        {
+                            return false;
+                        }
+
+                        throughCopies |= 1UL << index;
+                        offset += length;
+                        continue;
+                    }
+                }
+
+                if (owned)
+                {
+                    assumptions.Forget(ConcurrentQuery.Word, address, (ulong)length, assumptions.Answers.Count);
+                }
+
+                return false;
+            }
+
+            offset += length;
+        }
+
+        return offset == recorded.Length && SameBackingBytes(addresses, lengths, recorded, throughCopies);
+    }
+
+    // Whether each range's backing bytes are the recorded ones (range after range, the ranges skip names left out):
+    // compared where they lie through the backing's alias when it has one, else read out a range at a time.
+    private unsafe bool SameBackingBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<byte> recorded, ulong skip = 0)
+    {
+        var aliased = _backing.TryEnterBackingAliasAccess();
+        try
+        {
+            Span<byte> read = stackalloc byte[MaterializationProgramLineBytes];
+            var offset = 0;
+            for (var index = 0; index < addresses.Length; index++)
+            {
+                var length = lengths[index];
+                var expected = recorded.Slice(offset, length);
+                offset += length;
+                if (index < 64 && ((skip >> index) & 1) != 0)
+                {
+                    continue;
+                }
+
+                if (aliased && _backing.TryResolveBackingAlias(addresses[index], (ulong)length, out var alias))
+                {
+                    if (!new ReadOnlySpan<byte>((void*)alias, length).SequenceEqual(expected))
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                var bytes = length <= read.Length ? read[..length] : new byte[length];
+                if (!_backing.TryReadBacking(addresses[index], bytes) || !bytes.SequenceEqual(expected))
+                {
+                    return false;
+                }
+            }
+        }
+        finally
+        {
+            if (aliased)
+            {
+                _backing.ExitBackingAliasAccess();
+            }
+        }
+
+        return true;
+    }
+
+    // The longest range a read proof compares (MaterializationProgram.ReadProof.LineBytes).
+    private const int MaterializationProgramLineBytes = 256;
 }
