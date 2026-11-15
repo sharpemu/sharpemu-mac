@@ -1879,28 +1879,35 @@ internal sealed partial class MetalRenderHost
         word = 0;
         if (_concurrentAssumptions is { } assumptions)
         {
-            Span<byte> concurrent = stackalloc byte[sizeof(uint)];
-            if (!TryReadResidentGuestBytesConcurrent(address, concurrent, assumptions))
-            {
-                return false;
-            }
-
-            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(concurrent);
-            return true;
+            return TryReadCleanGuestWordConcurrent(address, out word, assumptions);
         }
 
-        // A recorded GPU write still landing in the word owns it as an image does: the backing still holds the bytes
-        // from before the write, which the GPU will not see. Refused, as the resident reader below and the resolving
-        // thread's test (ConcurrentOwner) refuse it, so a clean answer is the same on every thread; a resource branch's
-        // predicate read here otherwise kept one path on the worker and both on the resolver.
-        if (_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)) ||
-            (_gpuWrites.MayCover(address, sizeof(uint)) && _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0))
+        if (_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
         {
             return false;
         }
 
+        // A recorded GPU write still landing in the word is ahead of the draw being resolved, which on the GPU reads the
+        // word after it: read through the write's copy, or after waiting for it (TryReadGuestCore), the value the draw
+        // sees. Neither the stale backing (one resource branch kept on the worker, both on the resolver: bd5c2009a) nor a
+        // refusal (both paths kept: the path the shader does not take had its descriptor read from whatever that memory
+        // held, floats in Demon's Souls, which fataled as an invalid image) is that value. The resolving thread reads it
+        // through the copy as well, or abandons (TryReadCleanGuestWordConcurrent).
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
-        if (!_backing.TryReadBacking(address, bytes))
+        if (_gpuWrites.MayCover(address, sizeof(uint)) && _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0)
+        {
+            if (!CleanReadsLanded)
+            {
+                return false;
+            }
+
+            Interlocked.Increment(ref _cleanReadsLanded);
+            if (!TryReadGuestCore(address, bytes))
+            {
+                return false;
+            }
+        }
+        else if (!_backing.TryReadBacking(address, bytes))
         {
             return false;
         }

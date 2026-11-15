@@ -250,6 +250,16 @@ public static partial class ImageRequestBuilders
         }
 
         var resolution = BuildTexture(key, shape, shaderHash, imageIndex);
+        // The image cache stops on such a request (ImageDescription.Validate); name the shader, the slot and the words
+        // here, where they are known (Demon's Souls r44: DCC metadata at 0x3F8000002000, float bits read as a T#).
+        if (resolution.Request.Description.Metadata is { Kind: MetadataKind.Dcc } metadata &&
+            (metadata.Range.Address == 0 || metadata.Range.Address >= TrackerLayout.SpaceBytes))
+        {
+            Console.Error.WriteLine(
+                $"[GPU][IMAGE] texture with invalid DCC metadata: shaderHash=0x{shaderHash:X16} image={imageIndex} " +
+                $"metadata=0x{metadata.Range.Address:X16} words={string.Join(",", key.ToArray().Select(word => word.ToString("X8")))}.");
+        }
+
         if (cache.Count >= TextureCacheLimit)
         {
             cache.Clear();

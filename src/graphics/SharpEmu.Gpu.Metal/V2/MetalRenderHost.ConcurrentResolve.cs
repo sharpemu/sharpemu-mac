@@ -64,6 +64,13 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     bool IConcurrentResolveHost.IsStillCurrentAcrossDispatches(object assumptions) => IsConcurrentResolveStillCurrentAcrossDispatches(assumptions);
 
     private long _writeLogRefusals;
+    // Clean word reads under a pending recorded GPU write: on the worker answered with the landed value (through the copy
+    // or after a wait); on a resolving thread answered through the copy, or the resolution abandoned.
+    private long _cleanReadsLanded;
+    // SHARPEMU_CLEAN_READ_LANDED=0: such a clean read is refused on both threads again (bd5c2009a).
+    internal static bool CleanReadsLanded { get; set; } = Environment.GetEnvironmentVariable("SHARPEMU_CLEAN_READ_LANDED") != "0";
+    private long _cleanReadsCopied;
+    private long _cleanReadsAbandoned;
     // Verify differences excused because a GPU write logged since the resolution began covers what it read.
     private long _supersededVerifies;
     // Takes refused because an owned answer (a refused clean or resident read) is clean now.
@@ -172,7 +179,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var dispatches = $" dispatch_jobs={computeSubmitted} dispatch_taken={computeTaken} dispatch_refused=(abandoned={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Abandoned]}," +
             $"provider={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Provider]}{FormatProviderRefusals(prefetch.TakeProviderRefusals())},inputs={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Inputs]}," +
             $"ownership={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Ownership]},effects={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Effects]}) " +
-            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} superseded_verifies={Interlocked.Exchange(ref _supersededVerifies, 0)} owned_now_clean_refusals={Interlocked.Exchange(ref _ownedNowCleanRefusals, 0)} dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
+            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} superseded_verifies={Interlocked.Exchange(ref _supersededVerifies, 0)} owned_now_clean_refusals={Interlocked.Exchange(ref _ownedNowCleanRefusals, 0)} clean_under_write=(landed={Interlocked.Exchange(ref _cleanReadsLanded, 0)},copied={Interlocked.Exchange(ref _cleanReadsCopied, 0)},abandoned={Interlocked.Exchange(ref _cleanReadsAbandoned, 0)}) dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
             $"dispatch_saved_ms={computeSavedMs.ToString("F1", culture)}";
         return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) abandoned_verify={GpuFatal.TakeSpeculativeVerifyFailures()} taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
@@ -1376,6 +1383,47 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             Interlocked.Increment(ref _abandonCauses[(int)AbandonCause.Code]);
             throw new GpuFatal.AbandonedWorkException($"The resolution reads shader code the GPU may write: address=0x{address:X16}.");
         }
+    }
+
+    // TryReadCleanGuestWord off the worker. A word a pending recorded GPU write owns is the worker's to read after that
+    // write (it reads through the copy or waits): read through the copy here too (its source's answers recorded, the
+    // word's owned answer dropped, as TryReadGuestWordConcurrentTested does), else the resolution is abandoned, so a
+    // resource branch's predicate never keeps both paths here where the worker keeps one. Any other owner (an image,
+    // an overlay) refuses the read as before.
+    private bool TryReadCleanGuestWordConcurrent(ulong address, out uint word, ConcurrentAssumptions assumptions)
+    {
+        word = 0;
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        if (!IsOwnedRecorded(ConcurrentQuery.Resident, address, sizeof(uint), assumptions))
+        {
+            if (!_backing.TryReadBacking(address, bytes))
+            {
+                return false;
+            }
+
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            return true;
+        }
+
+        var owner = _lastConcurrentOwner;
+        if (owner != AbandonCause.GpuWrite || !CleanReadsLanded)
+        {
+            return false;
+        }
+
+        var answers = assumptions.Answers.Count;
+        if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions))
+        {
+            assumptions.Forget(ConcurrentQuery.Resident, address, sizeof(uint), answers);
+            Interlocked.Increment(ref _cleanReadsCopied);
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            return true;
+        }
+
+        _lastConcurrentOwner = owner;
+        Interlocked.Increment(ref _cleanReadsAbandoned);
+        NoteAbandonCause(address, sizeof(uint));
+        throw new GpuFatal.AbandonedWorkException($"The resolution reads a clean word a pending GPU write owns: address=0x{address:X16}.");
     }
 
     // The clean and resident readers refuse owned bytes on the worker too, so off it they refuse
