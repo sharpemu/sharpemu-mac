@@ -368,7 +368,7 @@ internal sealed class ShaderProgramCache
         }
         catch (ResourceMaterializer.ReadProofMismatchException mismatch)
         {
-            throw GpuFatal.VerifyFailed(mismatch.Message);
+            throw GpuFatal.VerifyFailed(DescribeMismatch(mismatch));
         }
 
         var current = fast ?? (Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes));
@@ -377,6 +377,19 @@ internal sealed class ShaderProgramCache
             : MaterializationTally.Outcome.KeptStale;
         MaterializationTally.Note(outcome, MaterializationTally.ElapsedTicks(started), stage.Resources);
         return current;
+    }
+
+    // A read-proof verify mismatch with what the host says of the differing word's address, printed with it.
+    private string DescribeMismatch(ResourceMaterializer.ReadProofMismatchException mismatch)
+    {
+        if (mismatch.Address is not { } address)
+        {
+            return mismatch.Message;
+        }
+
+        var host = $"[SHADER][READ_PROOF] mismatch word 0x{address:X}: {_host.DescribeCleanRead(address)}";
+        Console.Error.WriteLine(host);
+        return mismatch.Message + " " + host;
     }
 
     // Revalidate; and with rebuild, a fast stage whose own draw values evaluate to other descriptor words gets the stage
@@ -400,7 +413,7 @@ internal sealed class ShaderProgramCache
         }
         catch (ResourceMaterializer.ReadProofMismatchException mismatch)
         {
-            throw GpuFatal.VerifyFailed(mismatch.Message);
+            throw GpuFatal.VerifyFailed(DescribeMismatch(mismatch));
         }
 
         if (fast == ResourceMaterializer.FastRevalidation.NotFast)

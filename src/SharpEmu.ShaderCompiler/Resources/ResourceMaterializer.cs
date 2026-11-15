@@ -449,7 +449,11 @@ public static partial class ResourceMaterializer
     internal const int BackoffRevalidations = 16;
 
     // A verify-mode proof whose replay differs from the full evaluation (the full one compared its words again first).
-    public sealed class ReadProofMismatchException(string message) : InvalidOperationException(message);
+    public sealed class ReadProofMismatchException(string message, ulong? address = null) : InvalidOperationException(message)
+    {
+        // The guest address of the first differing flattened-table word, when one differs and its address evaluates.
+        public ulong? Address { get; } = address;
+    }
 
     private static readonly ThreadCounter _proofHits = new();
     private static readonly ThreadCounter _proofNone = new();
@@ -939,6 +943,7 @@ public static partial class ResourceMaterializer
     [ThreadStatic]
     private static MaterializationProgram.Output? _verifyOutput;
 
+
     // Verify: a proved snapshot against a full evaluation of the same inputs. Not current while the proof's words still
     // compare equal is a wrong proof (counted, then thrown for the host's fatal); after they changed, a race with a guest
     // write (verify_raced).
@@ -954,6 +959,31 @@ public static partial class ResourceMaterializer
 
         // Taken before the proof is compared again, which reads (and on a resolving thread records) the words anew.
         var first = evaluated ? OutputDifference(plan, snapshot, output) : "refused";
+        // Where the first differing table word lies, and what the evaluation's word reader answers for it now.
+        ulong? at = null;
+        var atRead = "none";
+        if (evaluated && output.TableWords is { } tableWords)
+        {
+            var known = snapshot.FlattenedResourceTable;
+            for (var slot = 0; slot < Math.Min(known.Length, tableWords.Length); slot++)
+            {
+                if (known[slot] == tableWords[slot]) continue;
+                try
+                {
+                    at = RuntimeValueEvaluator.TableWordAddress(plan, inputs, slot);
+                    atRead = at is { } address && inputs.ReadMemory is { } reader
+                        ? reader(address, out var word) ? FormattableString.Invariant($"0x{word:X8}") : "refused"
+                        : "no_address";
+                }
+                catch (Exception exception)
+                {
+                    atRead = "threw " + exception.GetType().Name;
+                }
+
+                break;
+            }
+        }
+
         if (!Holds(plan, proof, inputs, inputs.CompareGuestWords!))
         {
             _proofVerifyRaced.Increment();
@@ -977,9 +1007,10 @@ public static partial class ResourceMaterializer
         var thread = Thread.CurrentThread;
         var message = $"[SHADER][READ_PROOF] verify mismatch: proved current but evaluates otherwise plan=0x{plan.Hash:X16} stage={plan.Stage} " +
             $"ranges={proof.Addresses.Length} bytes={proof.Bytes.Length} unreadable={proof.Unreadable.Length} " +
-            $"first={first} again={again} branches={plan.ResourceBranches.Count} thread={thread.Name ?? thread.ManagedThreadId.ToString(System.Globalization.CultureInfo.InvariantCulture)}.";
+            $"first={first} again={again} branches={plan.ResourceBranches.Count} thread={thread.Name ?? thread.ManagedThreadId.ToString(System.Globalization.CultureInfo.InvariantCulture)} " +
+            $"at={(at is { } a ? FormattableString.Invariant($"0x{a:X}") : "unknown")} word_reader_now={atRead}.";
         Console.Error.WriteLine(message);
-        throw new ReadProofMismatchException(message);
+        throw new ReadProofMismatchException(message, at);
     }
 
     // Whether the plan evaluates to the snapshot's words again for these inputs (a draw's user data, shader base and

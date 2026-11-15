@@ -818,6 +818,50 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         return AbandonCause.None;
     }
 
+    // For an error report (a read-proof verify mismatch): how each reader of this thread answers the word now. Off the
+    // worker: the resolution's word line and copy line caches, its clean-page answer, the word read as a resolution
+    // reads it, the pending copy's source; then the owner, the backing and the host's range state.
+    public string DescribeCleanRead(ulong address)
+    {
+        var builder = new System.Text.StringBuilder();
+        const ulong lineMask = ConcurrentWordLineBytes - 1;
+        var line = address & ~lineMask;
+        var offset = (int)(address & lineMask);
+        if (_concurrentAssumptions is { } assumptions && (address & 3) == 0)
+        {
+            builder.Append(FormattableString.Invariant($"word_line={(assumptions.WordLine == line ? $"0x{System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(assumptions.WordLineBytes.AsSpan(offset)):X8}" : "other")} "));
+            var copyBit = ((assumptions.CopyLineWords >> (offset >> 2)) & 1) != 0;
+            builder.Append(FormattableString.Invariant($"copy_line={(assumptions.CopyLine == line ? copyBit ? $"0x{System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(assumptions.CopyLineBytes.AsSpan(offset)):X8}" : "line_no_bit" : "other")} "));
+            builder.Append($"clean_page={assumptions.IsCleanPage(ConcurrentQuery.Word, address & ~(ConcurrentPageBytes - 1))} ");
+            try
+            {
+                var savedLine = assumptions.WordLine;
+                var savedCopy = assumptions.CopyLine;
+                assumptions.WordLine = ulong.MaxValue;
+                assumptions.CopyLine = ulong.MaxValue;
+                builder.Append(TryReadGuestWordConcurrentTested(address, out var tested, assumptions)
+                    ? FormattableString.Invariant($"tested_read=0x{tested:X8} ") : "tested_read=refused ");
+                assumptions.WordLine = savedLine;
+                assumptions.CopyLine = savedCopy;
+            }
+            catch (GpuFatal.AbandonedWorkException)
+            {
+                builder.Append("tested_read=abandoned ");
+            }
+
+            Span<byte> through = stackalloc byte[sizeof(uint)];
+            builder.Append(TryReadThroughPendingCopyConcurrent(address, through, assumptions)
+                ? FormattableString.Invariant($"pending_copy=0x{System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(through):X8} ") : "pending_copy=none ");
+        }
+        else
+        {
+            builder.Append("thread=worker ");
+        }
+
+        builder.Append(DescribeGuestRangeForDiagnostics(address, sizeof(uint)));
+        return builder.ToString();
+    }
+
     // Diagnostics (DescribeGuestRangeForDiagnostics): the first owner the resolving thread's test names, any thread.
     private string ConcurrentOwnerForDiagnostics(ulong address, ulong size) =>
         ConcurrentOwner(address, size, scope: null) is var cause && cause == AbandonCause.None ? "none" : AbandonCauseNames[(int)cause];
