@@ -420,13 +420,19 @@ internal sealed class MetalCachedImage : IDisposable
             _lastAccessTick = value;
             if (SharpEmu.Logging.MemoryTelemetry.Enabled)
             {
-                LastAccessTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                LastAccessTimestamp = Volatile.Read(ref AccessClock);
             }
         }
     }
 
     /// <summary>Stopwatch ticks of the last use; kept only with SHARPEMU_LOG_MEMORY=1 (idle-age census).</summary>
     public long LastAccessTimestamp;
+
+    // The time a use is stamped with: read once per collection (MetalImageCache.Collect, at the end of every guest
+    // submission), not per use. Every texture binding and attachment sets LastAccessTick, and a clock read there
+    // was ~1.7% of Demon's Souls' GPU worker in every SHARPEMU_LOG_MEMORY=1 run; the census buckets idle images by
+    // a second, ten and sixty, which one submission's lag does not move.
+    internal static long AccessClock = System.Diagnostics.Stopwatch.GetTimestamp();
 
     // The submission serial of the command buffer that last wrote the image, so a
     // writeback knows whether the GPU work it depends on has been recorded.

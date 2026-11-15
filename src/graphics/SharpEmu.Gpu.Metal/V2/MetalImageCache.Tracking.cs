@@ -615,6 +615,11 @@ internal sealed partial class MetalImageCache
     {
         using var held = _lock.Hold();
         _collectionTick++;
+        if (SharpEmu.Logging.MemoryTelemetry.Enabled)
+        {
+            Volatile.Write(ref MetalCachedImage.AccessClock, System.Diagnostics.Stopwatch.GetTimestamp());
+        }
+
         DrainRetiredImages();
         PruneFencedWritebacks();
         var now = _clock();
