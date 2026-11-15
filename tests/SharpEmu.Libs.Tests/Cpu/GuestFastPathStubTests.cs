@@ -221,6 +221,96 @@ public sealed unsafe class GuestFastPathStubTests
         Assert.Equal(0x1111UL, harness.Call(KeyBase + 2));
     }
 
+    // scePthreadGetthreadid answers the id the managed export published for the self handle bound
+    // here, and nothing else: every bind, rebind, forget, unbind and release takes it back.
+    [Fact]
+    public void ThreadIdStub_AnswersOnlyTheIdPublishedForTheBoundHandle()
+    {
+        if (!CanRunStubs())
+        {
+            return;
+        }
+
+        using var harness = new StubHarness(DirectExecutionBackend.GuestFastPathStub.PthreadGetthreadid);
+        var first = NewHandle();
+        var second = NewHandle();
+
+        // Nothing bound: the export answers (and publishes nothing for a handle that is not bound).
+        Assert.Equal(RaxSentinel, harness.Call(0));
+        GuestFastPath.PublishThreadUniqueId(first, 41);
+        Assert.Equal(RaxSentinel, harness.Call(0));
+
+        // Bound, but the export has not answered yet.
+        harness.Bind(first);
+        Assert.Equal(RaxSentinel, harness.Call(0));
+        GuestFastPath.PublishThreadUniqueId(first, 41);
+        Assert.Equal(41UL, harness.Call(0));
+        // Another handle's id never lands in this block.
+        GuestFastPath.PublishThreadUniqueId(second, 42);
+        Assert.Equal(41UL, harness.Call(0));
+
+        // Rebinding clears the id until the export answers for the new handle, both ways.
+        harness.Bind(second);
+        Assert.Equal(RaxSentinel, harness.Call(0));
+        GuestFastPath.PublishThreadUniqueId(second, 42);
+        Assert.Equal(42UL, harness.Call(0));
+        harness.Bind(first);
+        Assert.Equal(RaxSentinel, harness.Call(0));
+        GuestFastPath.PublishThreadUniqueId(first, 41);
+        Assert.Equal(41UL, harness.Call(0));
+
+        // A scheduler that forgot its threads, an unbind and a thread exit all take it back.
+        GuestFastPath.ForgetPublishedSelves();
+        Assert.Equal(RaxSentinel, harness.Call(0));
+        harness.Bind(first);
+        GuestFastPath.PublishThreadUniqueId(first, 41);
+        GuestFastPath.UnbindCurrentThread();
+        Assert.Equal(RaxSentinel, harness.Call(0));
+        harness.Bind(first);
+        GuestFastPath.PublishThreadUniqueId(first, 41);
+        GuestFastPath.ReleaseThread(first);
+        Assert.Equal(RaxSentinel, harness.Call(0));
+
+        // A host self published after a forget never inherits a guest thread's id.
+        harness.Bind(first);
+        GuestFastPath.PublishThreadUniqueId(first, 41);
+        harness.Bind(0);
+        GuestFastPath.PublishHostSelf(second);
+        Assert.Equal(RaxSentinel, harness.Call(0));
+    }
+
+    // The export publishes the id it answers for a bound guest thread, and the stub then answers
+    // exactly that; leaving the guest thread takes it back.
+    [Fact]
+    public void ThreadIdStub_AnswersWhatTheExportAnsweredForTheBoundGuestThread()
+    {
+        if (!CanRunStubs())
+        {
+            return;
+        }
+
+        using var harness = new StubHarness(DirectExecutionBackend.GuestFastPathStub.PthreadGetthreadid);
+        var handle = NewHandle();
+        var previous = GuestThreadExecution.EnterGuestThread(handle);
+        try
+        {
+            Assert.Equal(RaxSentinel, harness.Call(0));
+            var ctx = new CpuContext(new FakeCpuMemory(0x1_0000_0000, 0x1000), Generation.Gen5);
+            Assert.Equal(0, SharpEmu.Libs.Kernel.KernelPthreadCompatExports.PthreadGetthreadid(ctx));
+            var id = ctx[CpuRegister.Rax];
+            Assert.NotEqual(0UL, id);
+            Assert.Equal(id, harness.Call(0));
+            SharpEmu.Libs.Kernel.KernelPthreadCompatExports.PosixPthreadGetthreadidNp(ctx);
+            Assert.Equal(id, ctx[CpuRegister.Rax]);
+        }
+        finally
+        {
+            GuestThreadExecution.RestoreGuestThread(previous);
+        }
+
+        Assert.Equal(RaxSentinel, harness.Call(0));
+    }
+
     /// <summary>
     /// Measures the per-call cost the stubs replace. The managed gateway costs
     /// ~2.9 us/call as measured in-game with SHARPEMU_PERF_HLE=1; the stub must

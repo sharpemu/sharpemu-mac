@@ -48,6 +48,14 @@ public static unsafe class GuestFastPath
     /// <summary>Byte offset of the pthread_self fast-path hit counter.</summary>
     public const int BlockSelfHitsOffset = 16;
 
+    /// <summary>
+    /// Byte offset of the unique thread id scePthreadGetthreadid answers for the self handle at
+    /// <see cref="BlockSelfHandleOffset"/>. Zero until the managed export has answered for that
+    /// handle (<see cref="PublishThreadUniqueId"/>), and cleared whenever the self handle is, so
+    /// the native stub never answers for a handle the id was not published with.
+    /// </summary>
+    public const int BlockThreadUniqueIdOffset = 24;
+
     /// <summary>Byte offset of the pthread_getspecific fast-path hit counter.</summary>
     public const int BlockGetspecificHitsOffset = 32;
 
@@ -115,6 +123,7 @@ public static unsafe class GuestFastPath
         if (block != 0)
         {
             *(ulong*)(block + BlockSelfHandleOffset) = 0;
+            *(ulong*)(block + BlockThreadUniqueIdOffset) = 0;
             *(nint*)(block + BlockTlsValuesOffset) = 0;
         }
     }
@@ -139,8 +148,9 @@ public static unsafe class GuestFastPath
         }
 
         // Clear the self handle first so a stub can never answer with a handle
-        // that no longer owns this host thread.
+        // that no longer owns this host thread, and its thread id with it.
         *(ulong*)(block + BlockSelfHandleOffset) = 0;
+        *(ulong*)(block + BlockThreadUniqueIdOffset) = 0;
         var tlsHandle = guestThreadHandle != 0 ? guestThreadHandle : _hostThreadHandle;
         *(nint*)(block + BlockTlsValuesOffset) = tlsHandle == 0 ? 0 : GetOrCreateTable(tlsHandle);
         *(ulong*)(block + BlockSelfHandleOffset) = guestThreadHandle;
@@ -171,7 +181,26 @@ public static unsafe class GuestFastPath
             return;
         }
 
+        // An id a racing ForgetPublishedSelves left behind belongs to the handle it cleared.
+        *(ulong*)(block + BlockThreadUniqueIdOffset) = 0;
         *(ulong*)(block + BlockSelfHandleOffset) = hostThreadHandle;
+    }
+
+    /// <summary>
+    /// Lets the native scePthreadGetthreadid stub answer <paramref name="uniqueId"/> on the calling
+    /// host thread while <paramref name="threadHandle"/> is the self handle its block publishes.
+    /// The id is a function of the handle (KernelPthreadState never reassigns one), and every
+    /// path that clears or replaces the self handle clears the id first.
+    /// </summary>
+    public static void PublishThreadUniqueId(ulong threadHandle, ulong uniqueId)
+    {
+        var block = _block;
+        if (block == 0 || threadHandle == 0 || *(ulong*)(block + BlockSelfHandleOffset) != threadHandle)
+        {
+            return;
+        }
+
+        *(ulong*)(block + BlockThreadUniqueIdOffset) = uniqueId;
     }
 
     /// <summary>
@@ -209,6 +238,7 @@ public static unsafe class GuestFastPath
         if (block != 0)
         {
             *(ulong*)(block + BlockSelfHandleOffset) = 0;
+            *(ulong*)(block + BlockThreadUniqueIdOffset) = 0;
             *(nint*)(block + BlockTlsValuesOffset) = 0;
         }
     }
@@ -226,6 +256,7 @@ public static unsafe class GuestFastPath
             foreach (var block in Blocks)
             {
                 Volatile.Write(ref *(ulong*)(block + BlockSelfHandleOffset), 0);
+                Volatile.Write(ref *(ulong*)(block + BlockThreadUniqueIdOffset), 0);
             }
         }
     }
@@ -437,6 +468,7 @@ public static unsafe class GuestFastPath
         if (block != 0 && *(ulong*)(block + BlockSelfHandleOffset) == threadHandle)
         {
             *(ulong*)(block + BlockSelfHandleOffset) = 0;
+            *(ulong*)(block + BlockThreadUniqueIdOffset) = 0;
             *(nint*)(block + BlockTlsValuesOffset) = 0;
         }
         else if (block != 0 && _hostThreadHandle == threadHandle)

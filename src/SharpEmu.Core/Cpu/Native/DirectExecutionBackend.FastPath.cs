@@ -43,6 +43,12 @@ public sealed unsafe partial class DirectExecutionBackend
 		ProcessTimeMicroseconds,
 
 		/// <summary>
+		/// scePthreadGetthreadid / pthread_getthreadid_np: the unique id the managed export published
+		/// for the self handle bound to this host thread (GuestFastPath.BlockThreadUniqueIdOffset).
+		/// </summary>
+		PthreadGetthreadid,
+
+		/// <summary>
 		/// An sceAgc command builder that appends one fixed-shape packet (see <see cref="SharpEmu.Libs.Agc.AgcPacketStubSpec"/>):
 		/// the stub stores the dwords and the cursor itself, as the title's own code does.
 		/// </summary>
@@ -77,6 +83,10 @@ public sealed unsafe partial class DirectExecutionBackend
 	// scePthreadSelf / pthread_self.
 	private const string PthreadSelfNid = "aI+OeCz8xrQ";
 	private const string PosixPthreadSelfNid = "EotR8a3ASf4";
+
+	// scePthreadGetthreadid / pthread_getthreadid_np.
+	private const string PthreadGetthreadidNid = "EI-5-jlq2dE";
+	private const string PosixPthreadGetthreadidNid = "3eqs37G74-s";
 
 	// scePthreadGetspecific / pthread_getspecific.
 	private const string PthreadGetspecificNid = "eoht7mQOCmo";
@@ -233,6 +243,7 @@ public sealed unsafe partial class DirectExecutionBackend
 	{
 		PthreadSelfNid or PosixPthreadSelfNid => GuestFastPathStub.PthreadSelf,
 		PthreadGetspecificNid or PosixPthreadGetspecificNid => GuestFastPathStub.PthreadGetspecific,
+		PthreadGetthreadidNid or PosixPthreadGetthreadidNid => GuestFastPathStub.PthreadGetthreadid,
 		MemcpyNid or MemmoveNid => GuestFastPathStub.MemoryCopy,
 		MemsetNid => GuestFastPathStub.MemorySet,
 		ClockGettimeNid or KernelClockGettimeNid => GuestFastPathStub.ClockGettime,
@@ -292,7 +303,9 @@ public sealed unsafe partial class DirectExecutionBackend
 		var kind = ClassifyGuestFastPathStub(nid);
 		if (kind == GuestFastPathStub.None ||
 			// The write watch inspects every managed guest write, which a native copy never reaches.
-			(kind is GuestFastPathStub.MemoryCopy or GuestFastPathStub.MemorySet && (!GuestMemoryCopyStubEnabled || GuestWriteWatch.Armed)))
+			(kind is GuestFastPathStub.MemoryCopy or GuestFastPathStub.MemorySet && (!GuestMemoryCopyStubEnabled || GuestWriteWatch.Armed)) ||
+			// SHARPEMU_HLE_FAST_THREADID=0 keeps the thread-id query on the managed export.
+			(kind == GuestFastPathStub.PthreadGetthreadid && !SharpEmu.Libs.Kernel.KernelPthreadState.FastThreadIdEnabled))
 		{
 			return false;
 		}
@@ -457,6 +470,18 @@ public sealed unsafe partial class DirectExecutionBackend
 				Emit(0x48, 0xFF, 0x40, checked((byte)GuestFastPath.BlockSelfHitsOffset));
 				// mov rax, [rax + SelfHandleOffset]
 				Emit(0x48, 0x8B, 0x40, checked((byte)GuestFastPath.BlockSelfHandleOffset));
+				break;
+
+			case GuestFastPathStub.PthreadGetthreadid:
+				// cmp qword [rax + SelfHandleOffset], 0 / je slow: nothing bound here.
+				Emit(0x48, 0x83, 0x78, checked((byte)GuestFastPath.BlockSelfHandleOffset), 0x00);
+				EmitJumpToSlowPath();
+				// cmp qword [rax + ThreadUniqueIdOffset], 0 / je slow: the export has not
+				// answered for this handle yet (it publishes the id when it does).
+				Emit(0x48, 0x83, 0x78, checked((byte)GuestFastPath.BlockThreadUniqueIdOffset), 0x00);
+				EmitJumpToSlowPath();
+				// mov rax, [rax + ThreadUniqueIdOffset]
+				Emit(0x48, 0x8B, 0x40, checked((byte)GuestFastPath.BlockThreadUniqueIdOffset));
 				break;
 
 			case GuestFastPathStub.PthreadGetspecific:
