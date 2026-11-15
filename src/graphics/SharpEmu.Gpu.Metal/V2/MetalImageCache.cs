@@ -526,10 +526,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>Alias syncs that kept this image's newer contents instead of publishing an older alias.</summary>
     public long TakeAliasNewerKept() => Interlocked.Exchange(ref _aliasNewerKept, 0);
 
+    // role names the use for the alias trace: rt, rt-overwrite, rt-load, depth, depth-read, storage, texture, other.
     private void SynchronizeAliases(
-        ResourceSlotIdentifier imageIdentifier, bool takesGpuOwnership, bool keepsDepthPlane = false)
+        ResourceSlotIdentifier imageIdentifier, bool takesGpuOwnership, bool keepsDepthPlane = false,
+        string role = "other")
     {
         var image = _slots[imageIdentifier];
+        _aliasSyncRole = role;
         var address = image.Description.Data.Address;
         var size = image.Description.Data.Size;
         if (takesGpuOwnership)
@@ -562,6 +565,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         var alone = true;
         _syncedScratch.Clear();
+        var writtenBefore = _writebackBytes;
         foreach (var otherIdentifier in FindImagesInRange(address, size, pageOverlap: false))
         {
             if (otherIdentifier == imageIdentifier ||
@@ -589,6 +593,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 // 19 MiB target used to cost a full retile of one and a full detile of
                 // the other, every time the pair was used.
                 ReportAliasPair(image, other);
+                _aliasTraceMark = _writebackBytes;
                 var sharedStart = Math.Max(image.Description.Data.Address, other.Description.Data.Address);
                 var sharedEnd = Math.Min(
                     image.Description.Data.Address + image.Description.Data.Size,
@@ -628,6 +633,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     continue;
                 }
 
+                if ((image.Description.Data.Address != other.Description.Data.Address ||
+                     image.Description.Data.Size != other.Description.Data.Size) &&
+                    TryPublishAliasLayerSubset(image, other, takesGpuOwnership, otherStart, otherEnd))
+                {
+                    // Whole layers laid out alike: a slice copy is what the round trip would leave in this
+                    // texture (MetalImageCache.AliasSubset), and it settled the other image's ownership by use.
+                    _aliasPublishes++;
+                    NoteAliasPublication("device-subset", image, other, otherOwedGuestMemory, otherStart, otherEnd);
+                    continue;
+                }
+
                 var reusesBefore = _deviceAliasReuses;
                 if (TryPublishAliasOnDevice(image, other))
                 {
@@ -661,8 +677,6 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     continue;
                 }
 
-                _aliasRoundTrip++;
-                _aliasRoundTripBytes += (long)sharedSize;
                 var (dirtyStart, dirtyEnd) = image.OverlapWithin(sharedStart, sharedSize);
                 var declined = MetalAliasFallbackReason.None;
                 if (takesGpuOwnership && TryHandOverAliasRun(other, otherStart, otherEnd, out declined))
@@ -674,6 +688,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     MarkAliasRunDirty(image, dirtyStart, dirtyEnd);
                     _aliasPublishes++;
                     _aliasNarrowWrites++;
+                    NoteAliasRoundTrip(whole: false, sharedSize);
                     NoteAliasPublication("narrow-write", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     continue;
                 }
@@ -687,6 +702,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     // image does not reload it. Guest memory there is stale until this image's own write is published.
                     other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite, otherStart, otherEnd);
                     _aliasWritesDiscarded++;
+                    _aliasLayoutSkips++;
                     continue;
                 }
 
@@ -700,6 +716,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     // going out through guest memory and back in. The trailing ownership step below still
                     // runs for it.
                     _aliasWritesDiscarded++;
+                    _aliasLayoutSkips++;
                 }
                 else if (takesGpuOwnership)
                 {
@@ -709,11 +726,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     // follows to replace with the stale guest bytes.
                     NoteAliasFallback(write: true, declined, image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+                    NoteAliasRoundTrip(whole: true, sharedSize);
                     NoteAliasPublication("whole-write", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                 }
                 else
                 {
                     var whole = PublishAliasRange(other, sharedStart, sharedSize);
+                    NoteAliasRoundTrip(whole != MetalAliasFallbackReason.None, sharedSize);
                     if (whole != MetalAliasFallbackReason.None)
                     {
                         NoteAliasFallback(write: false, whole, image, other, otherOwedGuestMemory, otherStart, otherEnd);
@@ -765,6 +784,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
         }
 
+        _aliasMovedWritebackBytes += _writebackBytes - writtenBefore;
         image.AlonePageVersions = alone ? pageVersions : -1;
         RecordSync(image, alone, pageVersions, kind);
     }
@@ -1422,7 +1442,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             EnsureStorageUsageLocked(image);
             EnsureSparseBacked(image);
             WatchImage(imageIdentifier);
-            SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
+            SynchronizeAliases(imageIdentifier, takesGpuOwnership: true, role: "storage");
             RefreshFromGuest(image);
             image.Uses.Storage = true;
             image.MarkGpuModified();
@@ -1452,7 +1472,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             WatchImage(imageIdentifier);
-            SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
+            SynchronizeAliases(imageIdentifier, takesGpuOwnership: false, role: "texture");
             RefreshFromGuest(image);
             image.Uses.Texture = true;
             image.NoteUse(_owner.CurrentSerial);
@@ -1750,7 +1770,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var stencil = request.Description.HasStencil
             ? ImageStencilPlane(in image.Description, in request.Description)
             : default;
-        SynchronizeAliases(imageIdentifier, takesGpuOwnership: writes, keepsDepthPlane: stencilOnly);
+        SynchronizeAliases(
+            imageIdentifier, takesGpuOwnership: writes, keepsDepthPlane: stencilOnly, role: writes ? "depth" : "depth-read");
         // Only a target the pass writes can be one it clears. The refresh reads the
         // stencil plane from where the image has it, so a request that moves the plane
         // refreshes now, before the description changes.
@@ -2777,8 +2798,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             // Stale over a run an alias took while the texture still owns the rest: a
             // whole upload would replace bytes guest memory was never given. The run
-            // stays stale rather than costing them.
-            MetalV2Diagnostics.InfoOnce(
+            // stays stale rather than costing them - which serves the texture's older
+            // bytes there, so it is counted (alias_run_refresh_refused) and warned about.
+            Interlocked.Increment(ref _aliasRunRefreshRefused);
+            MetalV2Diagnostics.WarnOnce(
                 $"alias-run-refresh:{description.PixelFormat}:{description.Extent.Width}x{description.Extent.Height}",
                 "A GPU-written image stale over an alias run could not reload just that run, so it keeps " +
                 $"its texture there: {description.PixelFormat} {description.Extent.Width}x{description.Extent.Height} " +

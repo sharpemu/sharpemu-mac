@@ -248,7 +248,7 @@ internal sealed partial class MetalImageCache
         var image = entry.Image;
         if (entry.AliasesPending && (!overwritten || !TryDiscardOverwrittenAliases(entry.Identifier)))
         {
-            SynchronizeAliases(entry.Identifier, takesGpuOwnership: true);
+            SynchronizeAliases(entry.Identifier, takesGpuOwnership: true, role: overwritten ? "rt-overwrite" : "rt-load");
         }
         if (overwritten && image.IsCpuDirty)
         {

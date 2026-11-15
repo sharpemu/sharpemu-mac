@@ -89,7 +89,7 @@ internal sealed partial class MetalImageCache
         var because = write ? $"reason={reason}" : $"reason=ReadUse detail={reason}";
         Console.Error.WriteLine(
             $"[METAL-V2][ALIAS-TRACE] decline use={(write ? "write" : "read")} {because} " +
-            AliasPairText(image, other, otherGpuModified, runStart, runEnd));
+            AliasPairText(image, other, otherGpuModified, runStart, runEnd) + AliasUseText());
     }
 
     // Logs an alias publication with the trace on. Caller holds the lock.
@@ -105,8 +105,15 @@ internal sealed partial class MetalImageCache
 
         Console.Error.WriteLine(
             $"[METAL-V2][ALIAS-TRACE] publish kind={kind} " +
-            AliasPairText(image, other, otherGpuModified, runStart, runEnd));
+            AliasPairText(image, other, otherGpuModified, runStart, runEnd) + AliasUseText());
     }
+
+    // The requester's use (rt-overwrite is a colour target whose pass is proven to overwrite it; rt-load one whose
+    // pass loads or is not proven), and the guest bytes written back for this pair so far in this sync step.
+    private string _aliasSyncRole = "other";
+    private long _aliasTraceMark;
+
+    private string AliasUseText() => $" role={_aliasSyncRole} moved_wb=0x{_writebackBytes - _aliasTraceMark:X}";
 
     // gpu_mod is the requester's and the other image's state when the alias was found,
     // before any writeback cleared it.

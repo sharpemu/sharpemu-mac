@@ -155,6 +155,19 @@ internal interface IMetalImageTransfer
         in ImageDescription sourceDescription, nint sourceTexture,
         in ImageDescription targetDescription, nint targetTexture);
 
+    // Whether target layers [targetFirstLayer, + layers) lie on exactly the guest bytes, and texels, of source layers
+    // [sourceFirstLayer, + layers) (MetalImageTransfer.LayerSubset). False keeps the round trip through guest memory.
+    bool TryMatchLayerSubset(in ImageDescription source, in ImageDescription target,
+        out uint sourceFirstLayer, out uint targetFirstLayer, out uint layers)
+    {
+        sourceFirstLayer = targetFirstLayer = layers = 0;
+        return false;
+    }
+
+    // Copies whole level-0 slices between two textures of one format and extent; false with nothing encoded otherwise.
+    bool TryEncodeLayerSubsetCopy(IMetalSubmissionContext context, nint sourceTexture, uint sourceFirstLayer,
+        nint targetTexture, uint targetFirstLayer, uint layers, uint width, uint height) => false;
+
     bool HasDenseAliasCoverage(in ImageDescription description) => false;
 
     bool CanDiscardAliasForOverwrite(in ImageDescription target, in ImageDescription source) => false;
