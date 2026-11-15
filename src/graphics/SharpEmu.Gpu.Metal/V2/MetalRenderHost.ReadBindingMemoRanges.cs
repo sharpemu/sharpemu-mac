@@ -17,8 +17,12 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// <item>Deferred fills, held label copies and staged copies: the hit misses only when one is over the range, which is
 /// exactly when the chain would land or order it, or answer with the staged copy (a span test first, so the common
 /// case costs no walk).</item>
+/// <item>Images: the flush finds nothing when no image owns a page of the range (checked live), or when the images
+/// overlapping it are the ones the entry was stored with - none added or dropped over the range since (the image-set
+/// change ring, up to MetalImageCache.ImageSetWalkCap changes back) - and none of them is GPU-modified now (up to two
+/// held by the entry, checked live). An image's guest range never changes in place.</item>
 /// </list>
-/// The single-copy trap version and the image stamps are still read whole, as in v1.
+/// The single-copy trap version is still read whole, as in v1.
 /// </summary>
 internal sealed partial class MetalRenderHost
 {
@@ -77,14 +81,33 @@ internal sealed partial class MetalRenderHost
             return MissReadBinding(ref memo.MissTrap);
         }
 
-        if (entry.ImageSet != _imageCache.ImageSetVersion)
+        // The image flush would find no GPU-modified image over the range: none can own its pages, or the images over
+        // it are those the entry was stored with (none added or dropped over it since) and none is GPU-modified now.
+        if (entry.Tier == MetalReadBindingMemoV2.ImageTier.NoOwnerPages)
         {
-            return MissReadBinding(ref memo.MissImageSet);
+            if (_imageCache.MayOwn(address, size))
+            {
+                return MissReadBinding(ref memo.MissImagePages);
+            }
         }
-
-        if (side.GpuModified != _imageCache.Epochs.GpuModified)
+        else
         {
-            return MissReadBinding(ref memo.MissImageGpuModified);
+            if (entry.ImageSet != _imageCache.ImageSetVersion)
+            {
+                if (!_imageCache.ImageSetUnchangedOver(entry.ImageSet, address, size, out var now))
+                {
+                    return MissReadBinding(ref memo.MissImageSet);
+                }
+
+                entry.ImageSet = now;
+                memo.RevalidatedImageSet++;
+            }
+
+            if (entry.Tier == MetalReadBindingMemoV2.ImageTier.Held &&
+                (side.Image0!.IsGpuModified || (side.Image1?.IsGpuModified ?? false)))
+            {
+                return MissReadBinding(ref memo.MissImageGpuModified);
+            }
         }
 
         // Work the chain would land or order first, or a staged copy it would answer with: only over this range.
@@ -165,6 +188,25 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        // What the flush answered by: no owner pages (checked live), or the images over the range now, listed with the
+        // version they hold at; more than two are not kept.
+        var tier = MetalReadBindingMemoV2.ImageTier.NoOwnerPages;
+        MetalCachedImage? first = null;
+        MetalCachedImage? second = null;
+        var count = 0;
+        var imageSet = 0L;
+        if (_imageCache.MayOwn(address, size))
+        {
+            _imageCache.ListOverlapping(address, size, out first, out second, out count, out imageSet);
+            if (count > 2)
+            {
+                memo.StoreSkipImageMany++;
+                return;
+            }
+
+            tier = count == 0 ? MetalReadBindingMemoV2.ImageTier.NoImage : MetalReadBindingMemoV2.ImageTier.Held;
+        }
+
         var index = memo.Insert(address, (uint)size, computeStage);
         ref var entry = ref memo.At(index);
         entry.Alias = inPlaceAlias;
@@ -172,11 +214,14 @@ internal sealed partial class MetalRenderHost
         entry.Buffer = range.Buffer;
         entry.Offset = range.Offset;
         entry.GpuAddress = range.GpuAddress;
-        entry.ImageSet = before.ImageSet;
+        entry.Tier = tier;
+        entry.HeldImages = (byte)count;
+        entry.ImageSet = imageSet;
         ref var side = ref memo.SideAt(index);
         side.Trap = before.Trap;
-        side.GpuModified = before.GpuModified;
         side.Serial = _submissionSerial;
+        side.Image0 = first;
+        side.Image1 = second;
     }
 
     // =verify, before the full chain runs behind a v2 hit: the hit pinned and touched its window (the chain would
@@ -196,6 +241,25 @@ internal sealed partial class MetalRenderHost
             throw Fatal(
                 $"A memoised read-only binding did not pin and touch its window for this command buffer: address=0x{address:X16} " +
                 $"size=0x{size:X} window={window.Id} retired={window.Retired} memo={memo}.");
+        }
+
+        // The images it answered by: none owns a page, or exactly the images it holds are over the range.
+        var side = _readBindingMemoV2.SideAt(index);
+        var mayOwn = _imageCache.MayOwn(address, size);
+        _imageCache.ListOverlapping(address, size, out var first, out var second, out var count, out _);
+        var holds = entry.Tier switch
+        {
+            MetalReadBindingMemoV2.ImageTier.NoOwnerPages => !mayOwn,
+            MetalReadBindingMemoV2.ImageTier.NoImage => count == 0,
+            _ => count == entry.HeldImages &&
+                (ReferenceEquals(first, side.Image0) || ReferenceEquals(first, side.Image1)) &&
+                (count == 1 || ReferenceEquals(second, side.Image0) || ReferenceEquals(second, side.Image1)),
+        };
+        if (!holds)
+        {
+            throw Fatal(
+                $"A memoised read-only binding's images moved under it: address=0x{address:X16} size=0x{size:X} " +
+                $"tier={entry.Tier} held={entry.HeldImages} may_own={mayOwn} overlapping={count}.");
         }
     }
 

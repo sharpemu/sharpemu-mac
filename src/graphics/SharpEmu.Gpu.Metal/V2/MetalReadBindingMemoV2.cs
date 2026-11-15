@@ -55,9 +55,6 @@ internal sealed class MetalReadBindingMemoV2
         // The submission the entry last answered in (hits_new_cb).
         public ulong Serial;
 
-        // The image cache's GPU-modified epoch the entry was stored at.
-        public long GpuModified;
-
         // Tier Held: the images over the range.
         public MetalCachedImage? Image0;
         public MetalCachedImage? Image1;

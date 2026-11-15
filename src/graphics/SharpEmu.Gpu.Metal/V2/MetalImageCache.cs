@@ -402,6 +402,76 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
     }
 
+    // How many image-set changes a read-only binding memo entry is checked across before it just misses.
+    internal const int ImageSetWalkCap = 16;
+
+    /// <summary>
+    /// Whether no image added or dropped after version <paramref name="since"/> overlaps the guest bytes
+    /// [<paramref name="address"/>, +<paramref name="size"/>) - which then have the same images over them as at
+    /// <paramref name="since"/> - and the version that holds for (<paramref name="now"/>). False when one does, when
+    /// more than <see cref="ImageSetWalkCap"/> changes were made since, or when the ring no longer holds them all
+    /// (MetalReadBindingMemoV2).
+    /// </summary>
+    public bool ImageSetUnchangedOver(long since, ulong address, ulong size, out long now)
+    {
+        lock (_imageSetChangeGate)
+        {
+            now = Volatile.Read(ref _imageSetVersion);
+            if (since < 0 || now < since || now - since > ImageSetWalkCap)
+            {
+                return false;
+            }
+
+            var end = size > ulong.MaxValue - address ? ulong.MaxValue : address + size;
+            for (var version = since + 1; version <= now; version++)
+            {
+                var change = _imageSetChanges[version % ImageSetChangeCount];
+                if (change.Version != version || (change.Start < end && address < change.End))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The images whose guest bytes overlap the range - those FlushGpuWrites would look at - up to two of them, how
+    /// many there are, and the image-set version they are listed at (read under the lock that adds and drops images).
+    /// </summary>
+    public void ListOverlapping(
+        ulong address, ulong size, out MetalCachedImage? first, out MetalCachedImage? second, out int count, out long version)
+    {
+        first = second = null;
+        count = 0;
+        using var held = _lock.Hold();
+        version = ImageSetVersion;
+        if (!IsValidRange(address, size))
+        {
+            return;
+        }
+
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            if (_slots.TryGet(imageIdentifier) is not { } image || !image.Overlaps(address, size))
+            {
+                continue;
+            }
+
+            if (count == 0)
+            {
+                first = image;
+            }
+            else if (count == 1)
+            {
+                second = image;
+            }
+
+            count++;
+        }
+    }
+
     /// <summary>
     /// The guest ranges of the images added or dropped after version <paramref name="since"/> up to
     /// <paramref name="until"/>, sorted by start and merged; false when they are no longer all known.

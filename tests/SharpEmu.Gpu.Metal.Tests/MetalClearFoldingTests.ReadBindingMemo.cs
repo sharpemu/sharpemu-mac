@@ -168,6 +168,8 @@ public sealed unsafe partial class MetalClearFoldingTests
         host.FlushAndWaitForGpu();
     }
 
+    // I2: an image over the range going GPU-modified makes the binding miss (the flush would write it back); another
+    // image going GPU-modified leaves it. I4: images added elsewhere leave it too.
     [Fact]
     public void AReadOnlyBindingMissesOnceAnImageOverItGoesGpuModified()
     {
@@ -176,16 +178,110 @@ public sealed unsafe partial class MetalClearFoldingTests
         var host = rig.Host;
         var request = Rig.Request(TargetAddress, ImageRole.Texture);
         var image = host.ImageCache.FindImage(ref request);
+        var otherRequest = Rig.Request(OtherAddress, ImageRole.Texture);
+        var other = host.ImageCache.FindImage(ref otherRequest);
         var before = BindTwiceAndHit(host, TargetAddress + 0x40, 0x40);
+
+        var epoch = host.ImageCache.Epochs.GpuModified;
+        host.ImageCache.MarkGpuWritten(other);
+        Assert.NotEqual(epoch, host.ImageCache.Epochs.GpuModified);
+        AssertHits(host, () => BindRead(host, TargetAddress + 0x40, 0x40), before);
+
+        var far = Rig.Request(GuestBase + 0x300000, ImageRole.Texture);
+        host.ImageCache.FindImage(ref far);
+        AssertHits(host, () => BindRead(host, TargetAddress + 0x40, 0x40), before);
 
         host.ImageCache.MarkGpuWritten(image);
         Assert.True(host.ImageCache.HasGpuModifiedImageBytes(TargetAddress + 0x40, 0x40));
-        AssertMisses(host, () => BindRead(host, TargetAddress + 0x40, 0x40), before);
+        AssertMissesBy(host, static memo => memo.MissImageGpuModified, () => BindRead(host, TargetAddress + 0x40, 0x40));
         // While the image owns the bytes, the flush finds it each time: nothing is kept for the range.
         if (host.ImageCache.HasGpuModifiedImageBytes(TargetAddress + 0x40, 0x40))
         {
             AssertMisses(host, () => BindRead(host, TargetAddress + 0x40, 0x40), before);
         }
+    }
+
+    // R1: the v1 memo stamps the GPU-modified epoch: another image going GPU-modified makes it miss.
+    [Fact]
+    public void AV1ReadOnlyBindingMissesOnceAnyImageGoesGpuModified()
+    {
+        if (!RequireDevice()) return;
+        using var rig = MemoRig();
+        var host = rig.Host;
+        host.ReadBindingMemoRanges = false;
+        var otherRequest = Rig.Request(OtherAddress, ImageRole.Texture);
+        var other = host.ImageCache.FindImage(ref otherRequest);
+        var before = BindTwiceAndHit(host);
+
+        host.ImageCache.MarkGpuWritten(other);
+        AssertMisses(host, () => BindRead(host), before);
+    }
+
+    // I1: a range no image owns a page of; an image made elsewhere leaves it, one made over it makes it miss.
+    [Fact]
+    public void AReadOnlyBindingMissesOnceAnImageIsMadeOverItsPages()
+    {
+        if (!RequireDevice()) return;
+        using var rig = MemoRig();
+        var host = rig.Host;
+        Assert.False(host.ImageCache.MayOwn(MemoBuffer, MemoBufferBytes));
+        var before = BindTwiceAndHit(host);
+
+        var elsewhere = Rig.Request(OtherAddress, ImageRole.Texture);
+        host.ImageCache.FindImage(ref elsewhere);
+        AssertHits(host, () => BindRead(host), before);
+
+        var over = Rig.Request(MemoBuffer, ImageRole.Texture);
+        host.ImageCache.FindImage(ref over);
+        AssertMissesBy(host, static memo => memo.MissImagePages, () => BindRead(host));
+        AssertHits(host, () => BindRead(host), before);
+    }
+
+    // I3: a range on an image's pages that no image overlaps: an image added on far pages is checked off against the
+    // range and it hits; one added over the range makes it miss.
+    [Fact]
+    public void AReadOnlyBindingBesideAnImageMissesOnlyOnceAnImageIsMadeOverIt()
+    {
+        if (!RequireDevice()) return;
+        using var rig = MemoRig();
+        var host = rig.Host;
+        var request = Rig.Request(TargetAddress, ImageRole.Texture);
+        host.ImageCache.FindImage(ref request);
+        const ulong beside = TargetAddress + 0x800;
+        Assert.True(host.ImageCache.MayOwn(beside, 0x40));
+        var before = BindTwiceAndHit(host, beside, 0x40);
+
+        var revalidated = host.ReadBindingMemoV2.RevalidatedImageSet;
+        var far = Rig.Request(GuestBase + 0x300000, ImageRole.Texture);
+        host.ImageCache.FindImage(ref far);
+        AssertHits(host, () => BindRead(host, beside, 0x40), before);
+        Assert.Equal(revalidated + 1, host.ReadBindingMemoV2.RevalidatedImageSet);
+
+        var over = Rig.Request(beside, ImageRole.Texture);
+        host.ImageCache.FindImage(ref over);
+        AssertMissesBy(host, static memo => memo.MissImageSet, () => BindRead(host, beside, 0x40));
+        AssertHits(host, () => BindRead(host, beside, 0x40), before);
+    }
+
+    // I5: more image-set changes since the entry was checked than a hit walks: it misses once, then hits again.
+    [Fact]
+    public void AReadOnlyBindingMissesOnceTooManyImagesChangedSinceItWasChecked()
+    {
+        if (!RequireDevice()) return;
+        using var rig = MemoRig();
+        var host = rig.Host;
+        var request = Rig.Request(TargetAddress, ImageRole.Texture);
+        host.ImageCache.FindImage(ref request);
+        var before = BindTwiceAndHit(host, TargetAddress + 0x40, 0x40);
+
+        for (var image = 0; image <= MetalImageCache.ImageSetWalkCap; image++)
+        {
+            var far = Rig.Request(GuestBase + 0x300000 + ((ulong)image * 0x1000), ImageRole.Texture);
+            host.ImageCache.FindImage(ref far);
+        }
+
+        AssertMissesBy(host, static memo => memo.MissImageSet, () => BindRead(host, TargetAddress + 0x40, 0x40));
+        AssertHits(host, () => BindRead(host, TargetAddress + 0x40, 0x40), before);
     }
 
     // P1: a label copy held to the commit over the range makes the binding miss (the chain lands it first); one held
