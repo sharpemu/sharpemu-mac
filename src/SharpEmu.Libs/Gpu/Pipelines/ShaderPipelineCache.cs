@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.IO.Hashing;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.Diagnostics;
@@ -381,6 +382,19 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
     }
 
+    // For tests: whether this cache's memo keeps only rebuilds whose words repeat (GraphicsResolveMemo.HoldChurn).
+    internal bool ResolveMemoHoldChurn
+    {
+        get => _resolveMemo?.HoldChurn ?? false;
+        set
+        {
+            lock (_resolveGate)
+            {
+                if (_resolveMemo is { } memo) memo.HoldChurn = value;
+            }
+        }
+    }
+
     // Shadow mode: counts whether the memo would have the draw's key; true when it has not and the key is to be stored
     // once the draw resolved.
     private bool ShadowResolveMemo(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
@@ -437,7 +451,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             fillSerial = memo.FillSerial;
             if (memo.Find() is { } entry)
             {
-                if (TryTakeResolveMemo(memo, entry, flags.PixelActive, out var rebuilt) is not { } miss)
+                if (TryTakeResolveMemo(memo, entry, flags.PixelActive, out var taken, out var fingerprint, out var rebuilt) is not { } miss)
                 {
                     if (rebuilt)
                     {
@@ -451,8 +465,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     }
 
                     return memo.Mode == ResolveMemoMode.Verify
-                        ? VerifyResolveMemo(memo, entry, banks, targetExportMapping, flags)
-                        : entry.Programs!;
+                        ? VerifyResolveMemo(memo, entry, taken!, fingerprint, banks, targetExportMapping, flags)
+                        : taken!;
                 }
 
                 GraphicsResolveMemo.NoteMiss(miss);
@@ -492,10 +506,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // device data loads unchanged, the same header record and code identity at each stage's address, the same vertex
     // table words and pixel input semantics, and each stage's descriptor words evaluating to its snapshot (the reads
     // the full resolution records are made here as well).
-    // allowRebuild false (verify's re-check): a words miss is a miss, and the entry is left as it is.
-    private ResolveMemoMiss? TryTakeResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, bool pixelActive, out bool rebuilt,
-        bool allowRebuild = true)
+    // taken: the programs to hand out (the entry's, or rebuilt from them), with their verify fingerprint. held (verify's
+    // re-check): the programs a take handed out, revalidated in place of the entry's. allowRebuild false (that re-check): a
+    // words miss is a miss, and the entry is left as it is.
+    private ResolveMemoMiss? TryTakeResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, bool pixelActive,
+        out GraphicsPrograms? taken, out ulong fingerprint, out bool rebuilt, bool allowRebuild = true, GraphicsPrograms? held = null)
     {
+        taken = null;
+        fingerprint = 0;
         rebuilt = false;
         if (entry.ContentEpoch != _programs.ContentEpoch || entry.TablesGeneration != _vertexTables.Generation)
         {
@@ -546,7 +564,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         // changed takes the snapshot its full resolution would materialize now from this same evaluation: everything else
         // that resolution reads is the entry's (checked above or in the key), so it would pick the entry's programs again
         // as long as the words keep their specialization (RevalidateOrRebuild refuses otherwise).
-        var programs = entry.Programs!;
+        var programs = held ?? entry.Programs!;
         var pixelStage = programs.PixelInput.Stage;
         var vertexStage = programs.VertexInput.Stage;
         var rebuild = allowRebuild && memo.Rebuild;
@@ -564,15 +582,57 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return ResolveMemoMiss.Words;
         }
 
-        if (stageRebuilt)
+        if (!stageRebuilt)
         {
-            entry.Programs = WithStages(programs, vertexStage, pixelActive ? pixelStage : null);
-            entry.Fingerprint = memo.Mode == ResolveMemoMode.Verify ? GraphicsProgramsComparer.Fingerprint(entry.Programs) : 0;
-            rebuilt = true;
+            taken = programs;
+            fingerprint = entry.Fingerprint;
+            return null;
         }
 
+        taken = WithStages(programs, vertexStage, pixelActive ? pixelStage : null);
+        fingerprint = memo.Mode == ResolveMemoMode.Verify ? GraphicsProgramsComparer.Fingerprint(taken) : 0;
+        rebuilt = true;
+        // GraphicsResolveMemo.DefaultHoldChurn: kept only when the entry's last rebuild evaluated the same words.
+        var signature = memo.HoldChurn ? RebuildSignature(taken, pixelActive) : 0;
+        if (memo.HoldChurn && signature != entry.RebuildSignature)
+        {
+            entry.RebuildSignature = signature;
+            GraphicsResolveMemo.NoteRebuildHeld();
+            return null;
+        }
+
+        entry.Programs = taken;
+        entry.Fingerprint = fingerprint;
+        entry.RebuildSignature = signature;
         return null;
     }
+
+    // What a rebuild evaluated, for telling a draw whose words keep moving from one whose words settled (HoldChurn): every
+    // word of each stage's snapshot a rebuild materializes from its evaluation. A collision only keeps a correct rebuild.
+    private static ulong RebuildSignature(GraphicsPrograms programs, bool pixelActive)
+    {
+        var hash = SignStage(0x9E3779B97F4A7C15UL, programs.VertexInput.Stage.Resources);
+        return pixelActive ? SignStage(hash, programs.PixelInput.Stage.Resources) : hash;
+    }
+
+    private static ulong SignStage(ulong hash, ResourceSnapshot snapshot)
+    {
+        foreach (var words in snapshot.Buffers) hash = SignWords(hash, words);
+        foreach (var words in snapshot.Images) hash = SignWords(hash, words);
+        foreach (var words in snapshot.Samplers) hash = SignWords(hash, words);
+        hash = SignWords(hash, snapshot.FlattenedResourceTable);
+        hash = SignWords(hash, snapshot.MipStatistics);
+        foreach (var range in snapshot.DeviceAddressRanges)
+        {
+            hash = (hash ^ range.Base) * 0x100000001B3UL;
+            hash = (hash ^ range.Size ^ ((ulong)range.Handle << 32) ^ (range.Planned ? 1UL : 0) ^ (range.Written ? 2UL : 0)) * 0x100000001B3UL;
+        }
+
+        return hash;
+    }
+
+    private static ulong SignWords(ulong hash, uint[]? words) =>
+        words is null ? hash * 31 + 1 : XxHash3.HashToUInt64(MemoryMarshal.AsBytes(words.AsSpan()), (long)(hash + (ulong)words.Length));
 
     // False when the stage's words no longer evaluate to its snapshot and it was not rebuilt (refusals counted).
     private bool RevalidateMemoStage(ref ShaderStageResources stage, bool rebuild, ref bool rebuilt)
@@ -760,16 +820,16 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // (raced). Only a hit that still revalidates while a second full resolution still differs from it is a mismatch, and
     // a result written since it was kept always is; either stops emulation (on a speculative thread the work is
     // abandoned and counted, GpuFatal.VerifyFailed).
-    private GraphicsPrograms VerifyResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, RegisterBanks banks,
-        ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    // memoPrograms: what the take hands out (the entry's, or a rebuild kept or not), fingerprint: theirs when taken.
+    private GraphicsPrograms VerifyResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, GraphicsPrograms memoPrograms,
+        ulong fingerprint, RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
     {
-        var memoPrograms = entry.Programs!;
         var full = ResolveFull(banks, targetExportMapping, flags);
         GraphicsResolveMemo.NoteVerified();
         var difference = GraphicsProgramsComparer.Difference(memoPrograms, full);
         if (difference is null)
         {
-            if (GraphicsProgramsComparer.Fingerprint(memoPrograms) == entry.Fingerprint)
+            if (GraphicsProgramsComparer.Fingerprint(memoPrograms) == fingerprint)
             {
                 return memoPrograms;
             }
@@ -789,7 +849,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return full;
         }
 
-        if (TryTakeResolveMemo(memo, entry, flags.PixelActive, out _, allowRebuild: false) is { } miss)
+        if (TryTakeResolveMemo(memo, entry, flags.PixelActive, out _, out _, out _, allowRebuild: false, held: memoPrograms) is { } miss)
         {
             GraphicsResolveMemo.NoteVerifyRaced(ResolveMemoVerifyRace.Changed);
             ReportResolveMemoRace(entry, difference, $"recheck=miss:{miss.ToString().ToLowerInvariant()}", stages);

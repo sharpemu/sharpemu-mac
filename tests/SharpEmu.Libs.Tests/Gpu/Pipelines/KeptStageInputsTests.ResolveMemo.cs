@@ -86,6 +86,7 @@ public sealed partial class KeptStageInputsTests
     public void ResolveMemo_MissesWhenAStagesDescriptorWordChanges()
     {
         var cache = MemoCache();
+        cache.ResolveMemoHoldChurn = false;
         UseLoadingPixelProgram(Descriptor);
         var first = Programs(cache, pixelActive: true);
         Assert.Same(first, Programs(cache, pixelActive: true));
@@ -104,6 +105,7 @@ public sealed partial class KeptStageInputsTests
     {
         var cache = MemoCache();
         Assert.True(cache.ResolveMemoRebuild);
+        cache.ResolveMemoHoldChurn = false;
         UseLoadingPixelProgram(Descriptor);
         var first = Programs(cache, pixelActive: true);
         var firstBuffers = first.PixelInput.Stage.Resources.Buffers.Select(words => words.ToArray()).ToArray();
@@ -128,6 +130,46 @@ public sealed partial class KeptStageInputsTests
         // The rebuilt entry is the one the next draw takes.
         Assert.Same(rebuilt, Programs(cache, pixelActive: true));
         Assert.Contains("hits=1,", Report());
+    }
+
+    // With the churn hold (default), a rebuild is handed out without the entry keeping it until a rebuild evaluates the
+    // same words as the one before it: a draw whose words move on every take leaves the memo pointing at what it kept,
+    // and words that settle are kept on their second rebuild and hit after that. Verify finds every take exact.
+    [Fact]
+    public void ResolveMemo_KeepsARebuildOnlyOnceItsWordsRepeat()
+    {
+        var cache = MemoCache();
+        Assert.True(cache.ResolveMemoHoldChurn);
+        UseLoadingPixelProgram(Descriptor);
+        var first = Programs(cache, pixelActive: true);
+        Report();
+        _guest.WriteWords(Descriptor, PipelineTestGuest.BufferDescriptor(StreamBase + 0x100, 16, 4, Format32x4Float));
+        var moved = Programs(cache, pixelActive: true);
+        _guest.WriteWords(Descriptor, PipelineTestGuest.BufferDescriptor(StreamBase + 0x200, 16, 4, Format32x4Float));
+        var movedAgain = Programs(cache, pixelActive: true);
+        var report = Report();
+        Assert.Contains("words_rebuilt=2,", report);
+        Assert.Contains("rebuilt_not_kept=2,", report);
+        Assert.Contains("verify_checked=2,", report);
+        Assert.Contains("verify_failed=0)", report);
+        Assert.Contains(moved.PixelInput.Stage.Resources.Buffers, words => words[0] == unchecked((uint)(StreamBase + 0x100)));
+        Assert.Contains(movedAgain.PixelInput.Stage.Resources.Buffers, words => words[0] == unchecked((uint)(StreamBase + 0x200)));
+
+        // The same words again: rebuilt from the kept programs once more, and this time kept.
+        var settled = Programs(cache, pixelActive: true);
+        report = Report();
+        Assert.NotSame(movedAgain, settled);
+        Assert.Contains("words_rebuilt=1,", report);
+        Assert.Contains("rebuilt_not_kept=0,", report);
+        Assert.Same(settled, Programs(cache, pixelActive: true));
+        Assert.Contains("hits=1,", Report());
+
+        // Back to the first words: the kept rebuild no longer holds, and the first programs are as they were.
+        _guest.WriteWords(Descriptor, PipelineTestGuest.BufferDescriptor(StreamBase, 16, 4, Format32x4Float));
+        var back = Programs(cache, pixelActive: true);
+        Assert.NotSame(settled, back);
+        Assert.Equal(first.PixelInput.Stage.Resources.Buffers, back.PixelInput.Stage.Resources.Buffers);
+        Assert.Contains("verify_failed=0)", Report());
     }
 
     // Words that specialize the program otherwise (another stride) may pick another permutation: not rebuilt, resolved in
