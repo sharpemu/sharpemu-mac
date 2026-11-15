@@ -386,7 +386,7 @@ internal sealed class GraphicsResolveMemo
     private static string Take(ThreadCounter[] counters, params string[] names) =>
         string.Join(",", names.Select((name, index) => FormattableString.Invariant($"{name}={counters[index].Take()}")));
 
-    // The resolve_memo=(...) part of [PERF][KEPT_PROGRAMS]; entries counts every live memo.
+    // The resolve_memo=(...) part of the prefetch counters (ShaderPipelineCache.TakeGraphicsResolveReport); entries counts every live memo.
     public static string TakeReport() => FormattableString.Invariant(
         $"resolve_memo=(mode={DefaultMode.ToString().ToLowerInvariant()},hits={_hits.Take()},would_hit={_shadowWouldHit.Take()},") +
         "miss_by=(" + Take(_misses, "new", "epoch", "header", "identity", "tables", "semantics", "words", "generation") + ")," +

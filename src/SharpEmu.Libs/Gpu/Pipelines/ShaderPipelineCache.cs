@@ -745,8 +745,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private static readonly ThreadCounter _computeResolved = new();
 
     public static string TakeKeptProgramsReport() =>
-        FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] graphics_kept={_graphicsKept.Take()} graphics_resolved={_graphicsResolved.Take()} ") +
-        FormattableString.Invariant($"compute_kept={_computeKept.Take()} compute_rebound={_computeRebound.Take()} compute_resolved={_computeResolved.Take()} ") +
+        FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] compute_kept={_computeKept.Take()} compute_rebound={_computeRebound.Take()} compute_resolved={_computeResolved.Take()}");
+
+    /// <summary>
+    /// How graphics resolutions were answered since the last call, for the backend's always-on counter line (the
+    /// prefetch report): by the draw's own kept programs, by a full resolution, and what the resolve memo did.
+    /// </summary>
+    public static string TakeGraphicsResolveReport() =>
+        FormattableString.Invariant($"graphics_kept={_graphicsKept.Take()} graphics_resolved={_graphicsResolved.Take()} ") +
         GraphicsResolveMemo.TakeReport();
 
     // Besides upstream's register stamps, the fork's resolution reads the host viewport transform (dynamic

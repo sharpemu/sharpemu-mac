@@ -433,7 +433,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             $"gate_sleep_ms={Milliseconds(Interlocked.Exchange(ref _gateTicks, 0)).ToString("F1", culture)} idle_wakes={Interlocked.Exchange(ref _idleWakes, 0)} " +
             $"idle_spin_takes={Interlocked.Exchange(ref _idleSpinTakes, 0)} " +
             $"alloc_b_per_job={(sampledJobs == 0 ? 0 : sampledBytes / (double)sampledJobs).ToString("F0", culture)} " +
-            $"resolver_cpu_ms={cpuMs.ToString("F1", culture)}";
+            $"resolver_cpu_ms={cpuMs.ToString("F1", culture)} " +
+            SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeGraphicsResolveReport();
     }
 
     // The resolving thread's CPU time (user and system), or -1 where it cannot be read.

@@ -656,7 +656,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             }
 
             var prefetch = (string)PrefetchCounters.Invoke(rig.Host, null)!;
-            // The kept programs and resolve memo of the measured rounds ([PERF][KEPT_PROGRAMS]).
+            // The compute kept programs of the measured rounds; the graphics ones and the resolve memo are in the prefetch counters.
             var kept = (string)KeptProgramsReport.Invoke(null, null)!;
             // Read-only bindings answered from the one before (MetalReadBindingMemo) over every round, warm-up included.
             var bindings = (string)ReadBindingCounters.Invoke(rig.Host, null)!;
