@@ -136,6 +136,41 @@ public sealed unsafe partial class MetalClearFoldingTests
         concurrent.ReleaseAssumptions(assumptions);
     }
 
+    // A range that starts in a clean line and runs on into the written one is in no single line: the clean
+    // line it starts in says nothing for it.
+    [Theory]
+    [InlineData(0x300, true)]
+    [InlineData(0x300, false)]
+    [InlineData(0x108, true)]
+    [InlineData(0x108, false)]
+    public void ARangeLeavingItsCleanLineForAWrittenOneIsRefused(int length, bool ownedLines)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.ConcurrentOwnedLines = ownedLines;
+        WriteOwnedPage(rig);
+        var concurrent = (IConcurrentResolveHost)host;
+
+        concurrent.BeginConcurrentResolve();
+        object assumptions;
+        try
+        {
+            // The page is found owned and the line before the write clean, first.
+            Assert.True(host.TryReadGuestWord(OwnedPageWrite - 0x100, out var word));
+            Assert.Equal(OwnedPageWord(OwnedPageWrite - 0x100), word);
+            Assert.False(host.TryReadResidentGuestBytes(OwnedPageWrite - 0x100, new byte[length], clean: false));
+            // Inside the clean line the same reader answers.
+            Assert.True(host.TryReadResidentGuestBytes(OwnedPageWrite - 0x100, new byte[0x100], clean: false));
+        }
+        finally
+        {
+            assumptions = concurrent.EndConcurrentResolve();
+        }
+
+        concurrent.ReleaseAssumptions(assumptions);
+    }
+
     [Fact]
     public void TheWordsOfAnOwnedLineAreTestedOneByOneAndAnOwnedWordAbandons()
     {

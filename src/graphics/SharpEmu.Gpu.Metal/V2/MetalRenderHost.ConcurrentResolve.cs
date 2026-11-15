@@ -721,8 +721,9 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
             // In an owned page, the read's line first. Every test is an overlap test, so a clean line is clean for
             // every range inside it; its answer is recorded like a clean page's and checked again at the take.
+            // A range longer than a line, or one that leaves its line, is in no single line: tested as itself.
             var line = address & ~((ulong)ConcurrentWordLineBytes - 1);
-            if (ownedLines && address - line <= ConcurrentWordLineBytes - size)
+            if (ownedLines && size <= ConcurrentWordLineBytes && address - line <= ConcurrentWordLineBytes - size)
             {
                 var lineOwned = assumptions.LineOwned(query, line);
                 if (lineOwned is null)
