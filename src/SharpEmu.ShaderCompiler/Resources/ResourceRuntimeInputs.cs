@@ -42,6 +42,28 @@ public sealed class ResourceRuntimeInputs
     // materialization reports the table as incompatible.
     public bool NullsOffClassLoopRecords { get; init; }
 
+    // The same readers and settings with no draw values, for a caller that fills them per use.
+    public ResourceRuntimeInputs CopyReaders() => new()
+    {
+        ReadMemory = ReadMemory,
+        ReadCleanMemory = ReadCleanMemory,
+        TraceImageCandidate = TraceImageCandidate,
+        TablePhase = TablePhase,
+        ReadResidentMemory = ReadResidentMemory,
+        CompareResidentMemory = CompareResidentMemory,
+        ReadsClean = ReadsClean,
+        DataWritePending = DataWritePending,
+        NullsOffClassLoopRecords = NullsOffClassLoopRecords,
+    };
+
+    // Whether a copy of these readers (CopyReaders) reads exactly as other does.
+    public bool SameReaders(ResourceRuntimeInputs other) =>
+        ReferenceEquals(ReadMemory, other.ReadMemory) && ReferenceEquals(ReadCleanMemory, other.ReadCleanMemory) &&
+        ReferenceEquals(TraceImageCandidate, other.TraceImageCandidate) && ReferenceEquals(TablePhase, other.TablePhase) &&
+        ReferenceEquals(ReadResidentMemory, other.ReadResidentMemory) && ReferenceEquals(CompareResidentMemory, other.CompareResidentMemory) &&
+        ReadsClean == other.ReadsClean && ReferenceEquals(DataWritePending, other.DataWritePending) &&
+        NullsOffClassLoopRecords == other.NullsOffClassLoopRecords;
+
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
         UserData = UserData,

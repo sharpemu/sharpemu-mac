@@ -205,6 +205,10 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
     private static readonly MethodInfo PrefetchCounters =
         typeof(MetalRenderHost).GetMethod("FormatPrefetchCounters", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
+    private static readonly MethodInfo KeptProgramsReport =
+        typeof(SharpEmu.Libs.Gpu.Rendering.GraphicsPrograms).Assembly.GetType("SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache")!
+            .GetMethod("TakeKeptProgramsReport", BindingFlags.Static | BindingFlags.Public)!;
+
     private static readonly MethodInfo ReadBindingCounters =
         typeof(MetalRenderHost).GetMethod("TakeReadBindingCounters", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
@@ -596,7 +600,11 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             var collections = 0;
             for (var round = 0; round < warm + rounds; round++)
             {
-                if (round == warm) _ = PrefetchCounters.Invoke(rig.Host, null);
+                if (round == warm)
+                {
+                    _ = PrefetchCounters.Invoke(rig.Host, null);
+                    _ = KeptProgramsReport.Invoke(null, null);
+                }
                 RenderPasses.SetValue(rig.Host, 0L);
                 var before = profiling ? phases.Select(phase => PhaseTicks(phase)).ToArray() : null;
                 if (gameStreams is null) rig.Host.CommandStream.EnqueueGraphics(streamAddress, (uint)words.Length, ++submissionId, null);
@@ -648,6 +656,8 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             }
 
             var prefetch = (string)PrefetchCounters.Invoke(rig.Host, null)!;
+            // The kept programs and resolve memo of the measured rounds ([PERF][KEPT_PROGRAMS]).
+            var kept = (string)KeptProgramsReport.Invoke(null, null)!;
             // Read-only bindings answered from the one before (MetalReadBindingMemo) over every round, warm-up included.
             var bindings = (string)ReadBindingCounters.Invoke(rig.Host, null)!;
             var checksum = 0xCBF29CE484222325UL;
@@ -691,6 +701,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 gen0CollectionsPerThousandItems = collections * 1000.0 / (rounds * items),
                 checksum = $"{checksum:X16}",
                 counters = prefetch,
+                kept,
                 bindings,
                 phaseMicroseconds = phaseTotals.Where(pair => pair.Value / rounds >= 0.005)
                     .OrderByDescending(pair => pair.Value).ToDictionary(pair => pair.Key, pair => Math.Round(pair.Value / rounds, 3)),

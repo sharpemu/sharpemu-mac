@@ -310,15 +310,23 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            var flags = new KeptGraphicsFlags(pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, startInstanceUserData);
+            if (_resolveMemo is { Mode: ResolveMemoMode.On or ResolveMemoMode.Verify } memo)
+            {
+                // The memo replaces the kept programs of the last draw: it holds them too.
+                return ResolveThroughMemo(memo, banks, targetExportMapping, flags);
+            }
+
             var stamps = new KeptGraphicsStamps(
                 banks.Stamp(RegisterStamp.ShaderPrograms), banks.Stamp(RegisterStamp.VertexUserData), banks.Stamp(RegisterStamp.PixelUserData),
                 banks.Stamp(RegisterStamp.ColorTargets, RegisterStamp.ShaderInterface), ShaderHeaderRegistry.Registrations);
-            var flags = new KeptGraphicsFlags(pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, startInstanceUserData);
+            var shadowMiss = ShadowResolveMemo(banks, targetExportMapping, flags);
             ClaimKeptPrograms();
             var kept = _keptGraphics ??= new KeptGraphicsPrograms();
             if (TryKeepGraphicsPrograms(context, kept, stamps, flags, targetExportMapping, out var keptPrograms))
             {
                 _graphicsKept.Increment();
+                if (shadowMiss) _resolveMemo!.Store();
                 return keptPrograms;
             }
 
@@ -328,8 +336,334 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 depthAspectBound, stencilAspectBound, triangleList, mesh: null, startInstanceUserData: startInstanceUserData,
                 nativeTessellation: true);
             KeepGraphicsPrograms(kept, programs, context, stamps, flags, targetExportMapping);
+            if (shadowMiss) _resolveMemo!.Store();
             return programs;
         }
+    }
+
+    // The resolve memo of this cache (GraphicsResolveMemo), or null with it off; SHARPEMU_DRAW_REUSE=0 turns it off too.
+    private GraphicsResolveMemo? _resolveMemo = DrawReuseDisabled || GraphicsResolveMemo.DefaultMode == ResolveMemoMode.Off
+        ? null
+        : new GraphicsResolveMemo(GraphicsResolveMemo.DefaultMode, GraphicsResolveMemo.DefaultCapacity);
+
+    // For tests: the memo's mode on this cache, with a fresh memo.
+    internal ResolveMemoMode ResolveMemoMode
+    {
+        get => _resolveMemo?.Mode ?? ResolveMemoMode.Off;
+        set
+        {
+            lock (_resolveGate)
+            {
+                _resolveMemo = value == ResolveMemoMode.Off ? null : new GraphicsResolveMemo(value, GraphicsResolveMemo.DefaultCapacity);
+            }
+        }
+    }
+
+    // Shadow mode: counts whether the memo would have the draw's key; true when it has not and the key is to be stored
+    // once the draw resolved.
+    private bool ShadowResolveMemo(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    {
+        if (_resolveMemo is not { Mode: ResolveMemoMode.Shadow } memo)
+        {
+            return false;
+        }
+
+        if (_registry.HasFrontend)
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Frontend);
+            return false;
+        }
+
+        if (!memo.Fill(banks, targetExportMapping, flags, new PixelOutputBlendBits(PixelOutputBlend(banks.Context))))
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Key);
+            return false;
+        }
+
+        if (memo.Find() is not null)
+        {
+            GraphicsResolveMemo.NoteShadowHit();
+            return false;
+        }
+
+        GraphicsResolveMemo.NoteKeyMiss(memo.ClassifyMiss());
+        return true;
+    }
+
+    // A draw through the memo (on or verify): the programs of an entry with its key whose guest reads still give the
+    // same answer, else a full resolution kept for the draws that follow.
+    private GraphicsPrograms ResolveThroughMemo(GraphicsResolveMemo memo, RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        in KeptGraphicsFlags flags)
+    {
+        var cacheable = false;
+        var fillSerial = 0L;
+        if (_registry.HasFrontend)
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Frontend);
+        }
+        else if (_programs.TracesLookups)
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Trace);
+        }
+        else if (!memo.Fill(banks, targetExportMapping, flags, new PixelOutputBlendBits(PixelOutputBlend(banks.Context))))
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Key);
+        }
+        else
+        {
+            cacheable = true;
+            fillSerial = memo.FillSerial;
+            if (memo.Find() is { } entry)
+            {
+                if (TryTakeResolveMemo(entry, flags.PixelActive) is not { } miss)
+                {
+                    GraphicsResolveMemo.NoteHit();
+                    if (memo.Mode == ResolveMemoMode.Verify)
+                    {
+                        VerifyResolveMemo(entry, banks, targetExportMapping, flags);
+                    }
+
+                    return entry.Programs!;
+                }
+
+                GraphicsResolveMemo.NoteMiss(miss);
+            }
+            else
+            {
+                GraphicsResolveMemo.NoteMiss(ResolveMemoMiss.New);
+                GraphicsResolveMemo.NoteKeyMiss(memo.ClassifyMiss());
+            }
+        }
+
+        _graphicsResolved.Increment();
+        var deviceDataGeneration = DeviceDataLoads.Generation;
+        var contentEpoch = _programs.ContentEpoch;
+        var linkedLookups = _programs.LinkedLookups;
+        var tablesGeneration = _vertexTables.Generation;
+        var programs = ResolveFull(banks, targetExportMapping, flags);
+        if (cacheable && memo.FillSerial != fillSerial)
+        {
+            // The memo holds another draw's key now: this result has no key to be stored under.
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Changed);
+        }
+        else if (cacheable)
+        {
+            StoreResolveMemo(memo, banks, programs, flags.PixelActive, deviceDataGeneration, contentEpoch, linkedLookups, tablesGeneration);
+        }
+
+        return programs;
+    }
+
+    private GraphicsPrograms ResolveFull(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags) =>
+        ResolveGraphicsProgramsCore(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface, banks.Context, targetExportMapping,
+            flags.PixelActive, flags.DepthBound, flags.DepthAspectBound, flags.StencilAspectBound, flags.TriangleList, mesh: null,
+            startInstanceUserData: flags.StartInstanceUserData, nativeTessellation: true);
+
+    // Null when every guest read the entry's resolution made still gives the same answer: the program cache and the
+    // device data loads unchanged, the same header record and code identity at each stage's address, the same vertex
+    // table words and pixel input semantics, and each stage's descriptor words evaluating to its snapshot (the reads
+    // the full resolution records are made here as well).
+    private ResolveMemoMiss? TryTakeResolveMemo(GraphicsResolveMemo.Entry entry, bool pixelActive)
+    {
+        if (entry.ContentEpoch != _programs.ContentEpoch || entry.TablesGeneration != _vertexTables.Generation)
+        {
+            return ResolveMemoMiss.Epoch;
+        }
+
+        if (entry.DeviceDataGeneration != DeviceDataLoads.Generation)
+        {
+            return ResolveMemoMiss.Generation;
+        }
+
+        if (!ReferenceEquals(_registry.Require(entry.VertexAddress, "vertex"), entry.VertexShader))
+        {
+            return ResolveMemoMiss.Header;
+        }
+
+        if (HashOf(entry.VertexShader!, entry.VertexAddress, "vertex") != entry.VertexHash)
+        {
+            return ResolveMemoMiss.Identity;
+        }
+
+        if (pixelActive)
+        {
+            if (!ReferenceEquals(_registry.Require(entry.PixelAddress, "pixel"), entry.PixelShader))
+            {
+                return ResolveMemoMiss.Header;
+            }
+
+            if (HashOf(entry.PixelShader!, entry.PixelAddress, "pixel") != entry.PixelHash)
+            {
+                return ResolveMemoMiss.Identity;
+            }
+        }
+
+        if (entry.TableWords is { } words && !VertexInputResolver.SameTableWords(_context, words, entry.AttributeTable, entry.BufferTable,
+                _vertexTableScratch ??= new uint[VertexTableWords.MaxWords]))
+        {
+            return ResolveMemoMiss.Tables;
+        }
+
+        if (pixelActive &&
+            PixelStageInputResolver.CustomInterpolationMask(_context, entry.PixelShader!, entry.PixelSemanticCount) != entry.PixelCustomMask)
+        {
+            return ResolveMemoMiss.Semantics;
+        }
+
+        var programs = entry.Programs!;
+        if ((pixelActive && !RevalidateMemoStage(programs.PixelInput.Stage)) || !RevalidateMemoStage(programs.VertexInput.Stage))
+        {
+            return ResolveMemoMiss.Words;
+        }
+
+        // A load learned while the words were read.
+        return entry.DeviceDataGeneration != DeviceDataLoads.Generation ? ResolveMemoMiss.Generation : null;
+    }
+
+    private bool RevalidateMemoStage(in ShaderStageResources stage)
+    {
+        _host.BeginGuestWordReads();
+        try
+        {
+            return _programs.Revalidate(stage);
+        }
+        finally
+        {
+            _host.EndGuestWordReads();
+        }
+    }
+
+    // Keeps a full resolution under the filled key, with what a hit re-checks, when it can be repeated from them: one
+    // vertex and pixel program pair with no tessellation, mesh or shader calls, nothing changed while it resolved, and
+    // vertex tables read back to the inputs it decoded (the guest may have written them since).
+    private void StoreResolveMemo(GraphicsResolveMemo memo, RegisterBanks banks, GraphicsPrograms programs, bool pixelActive,
+        int deviceDataGeneration, long contentEpoch, long linkedLookups, long tablesGeneration)
+    {
+        var cause = !programs.Available ? ResolveMemoUncacheable.Unavailable
+            : programs.MeshInput is not null ? ResolveMemoUncacheable.Mesh
+            : programs.Tessellation is not null || programs.VertexInput.Tessellation is not null ? ResolveMemoUncacheable.Tessellation
+            : _programs.LinkedLookups != linkedLookups || HasCalls(programs.VertexInput.Stage) || HasCalls(programs.PixelInput.Stage)
+                ? ResolveMemoUncacheable.Calls
+            : DeviceDataLoads.Generation != deviceDataGeneration || _programs.ContentEpoch != contentEpoch ||
+              _vertexTables.Generation != tablesGeneration ? ResolveMemoUncacheable.Changed
+            : programs.VertexInput.Stage.Program is null || programs.VertexInput.Stage.Resources.Origin is null ||
+              (pixelActive && (programs.PixelInput.Stage.Program is null || programs.PixelInput.Stage.Resources.Origin is null))
+                ? ResolveMemoUncacheable.Origin
+            : (ResolveMemoUncacheable?)null;
+        var vertexSource = _lastSources[(int)ShaderStage.Vertex];
+        var pixelSource = pixelActive ? _lastSources[(int)ShaderStage.Pixel] : null;
+        if (cause is null && (vertexSource is null || vertexSource.Address != banks.Shader.Vertex.ExportAddress ||
+            (pixelActive && (pixelSource is null || pixelSource.Address != banks.Shader.Pixel.Address))))
+        {
+            cause = ResolveMemoUncacheable.Changed;
+        }
+
+        VertexTableWords? tableWords = null;
+        ulong attributeTable = 0, bufferTable = 0;
+        if (cause is null && !TryReadMemoTables(vertexSource!, programs.VertexInput, out tableWords, out attributeTable, out bufferTable))
+        {
+            cause = ResolveMemoUncacheable.Tables;
+        }
+
+        if (cause is { } refused)
+        {
+            GraphicsResolveMemo.NoteUncacheable(refused);
+            return;
+        }
+
+        var entry = memo.Store();
+        entry.Programs = programs;
+        entry.VertexShader = vertexSource!.Registered;
+        entry.VertexAddress = vertexSource.Address;
+        entry.VertexHash = vertexSource.Hash;
+        entry.TableWords = tableWords;
+        entry.AttributeTable = attributeTable;
+        entry.BufferTable = bufferTable;
+        if (pixelSource is not null)
+        {
+            entry.PixelShader = pixelSource.Registered;
+            entry.PixelAddress = pixelSource.Address;
+            entry.PixelHash = pixelSource.Hash;
+            entry.PixelSemanticCount = Math.Min(Math.Min(pixelSource.Registered.InputSemanticsCount, programs.PixelInput.InputCount),
+                (uint)PixelInputInfo.InterpolatorCount);
+            entry.PixelCustomMask = programs.PixelInput.CustomInterpolationMask;
+        }
+
+        entry.ContentEpoch = contentEpoch;
+        entry.DeviceDataGeneration = deviceDataGeneration;
+        entry.TablesGeneration = tablesGeneration;
+        entry.Fingerprint = memo.Mode == ResolveMemoMode.Verify ? GraphicsProgramsComparer.Fingerprint(programs) : 0;
+    }
+
+    private static bool HasCalls(in ShaderStageResources stage) =>
+        stage.CallArguments is { Length: > 0 } || stage.CallTargets is { Length: > 0 } || stage.CallRecords is { Length: > 0 } ||
+        stage.CallRecordRanges is { Length: > 0 };
+
+    // The vertex table words the draw's inputs decode from, read again now: false when they cannot be compared later
+    // (static attributes, more inputs than a table holds, a table not read whole) or no longer decode to the draw's
+    // attributes and buffers. Null words when the program reads no tables.
+    private bool TryReadMemoTables(ShaderSource source, VertexInputInfo resolved, out VertexTableWords? words, out ulong attributeTable,
+        out ulong bufferTable)
+    {
+        words = null;
+        attributeTable = bufferTable = 0;
+        if (!_vertexTables.TryGet(source.Registered, source.Hash, out var metadata) || metadata is null)
+        {
+            return false;
+        }
+
+        if (!VertexInputResolver.ReadsTables(metadata))
+        {
+            return resolved.Attributes.Length == 0 && resolved.Buffers.Length == 0;
+        }
+
+        if (metadata.InputSemantics.Length > VertexInputInfo.MaxBuffers)
+        {
+            return false;
+        }
+
+        foreach (var word in metadata.InputSemantics)
+        {
+            var semantic = new ShaderInputSemantic(word);
+            if (semantic.StaticBufferIndex || semantic.StaticAttribute)
+            {
+                return false;
+            }
+        }
+
+        attributeTable = VertexInputResolver.ReadTablePointer(source.UserData, metadata.VertexAttributeRegister);
+        bufferTable = VertexInputResolver.ReadTablePointer(source.UserData, metadata.VertexBufferRegister);
+        if (attributeTable == 0 || bufferTable == 0)
+        {
+            return false;
+        }
+
+        var decoded = VertexInputResolver.ResolveVertexInputs(_context, source.Registered, metadata, source.UserData, resolved.PositionExportControl,
+            resolved.ClipSpace, out words);
+        return words is { WholeSpans: true } &&
+            decoded.Attributes.AsSpan().SequenceEqual(resolved.Attributes) && decoded.Buffers.AsSpan().SequenceEqual(resolved.Buffers);
+    }
+
+    // Verify: the hit's programs against a full resolution of the same draw, and against what they were when kept; any
+    // difference stops emulation.
+    private void VerifyResolveMemo(GraphicsResolveMemo.Entry entry, RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        in KeptGraphicsFlags flags)
+    {
+        var memoPrograms = entry.Programs!;
+        var full = ResolveFull(banks, targetExportMapping, flags);
+        var difference = GraphicsProgramsComparer.Difference(memoPrograms, full) ??
+            (GraphicsProgramsComparer.Fingerprint(memoPrograms) != entry.Fingerprint ? "written_since_kept" : null);
+        GraphicsResolveMemo.NoteVerified();
+        if (difference is null)
+        {
+            return;
+        }
+
+        GraphicsResolveMemo.NoteVerifyFailed();
+        var message = $"[GPU][RESOLVE_MEMO] verify mismatch field={difference} vs=0x{entry.VertexAddress:X16} ps=0x{entry.PixelAddress:X16} " +
+            $"key_hash=0x{entry.Hash:X16}.";
+        Console.Error.WriteLine(message);
+        throw GpuFatal.Fatal(message);
     }
 
     // The interface's earlier forms, for callers holding only the four inputs.
@@ -412,7 +746,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     public static string TakeKeptProgramsReport() =>
         FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] graphics_kept={_graphicsKept.Take()} graphics_resolved={_graphicsResolved.Take()} ") +
-        FormattableString.Invariant($"compute_kept={_computeKept.Take()} compute_rebound={_computeRebound.Take()} compute_resolved={_computeResolved.Take()}");
+        FormattableString.Invariant($"compute_kept={_computeKept.Take()} compute_rebound={_computeRebound.Take()} compute_resolved={_computeResolved.Take()} ") +
+        GraphicsResolveMemo.TakeReport();
 
     // Besides upstream's register stamps, the fork's resolution reads the host viewport transform (dynamic
     // viewport registers, compared resolved), the depth aspects and triangle-list assembly (per-vertex pixel
@@ -725,6 +1060,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
             return new GraphicsPrograms { Available = false };
         }
+        if (ResolveMemoMode is ResolveMemoMode.On or ResolveMemoMode.Verify)
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Mesh);
+        }
+
         return GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
             depthAspectBound: depthBound, stencilAspectBound: false, triangleList: false, mesh);
     }

@@ -217,7 +217,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         {
             while (_outstanding != 0)
             {
+                _waiters++;
                 Monitor.Wait(_lock);
+                _waiters--;
             }
         }
     }
@@ -251,7 +253,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         {
             while (_finished < count)
             {
+                _waiters++;
                 Monitor.Wait(_lock);
+                _waiters--;
             }
         }
     }
@@ -265,7 +269,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             _paused = true;
             while (_running)
             {
+                _waiters++;
                 Monitor.Wait(_lock);
+                _waiters--;
             }
         }
     }
@@ -298,6 +304,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         // well-prefetched burst is one, and two clock reads per draw were measurable.
         if (job.State == 0)
         {
+            NoteUnresolvedTake(job);
             var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             // Caller work is reported separately, not disguised as a shorter resolver wait.
             // Keep long queues out of the claim routine's lock/finally frame.
@@ -387,6 +394,70 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         return true;
     }
 
+    // Why a draw's job was not resolved when its draw took it: still gated on the work before it, the resolving
+    // thread busy with another job, or queued behind others with its gate open (takes_unresolved).
+    private long _unresolvedGated, _unresolvedBusy, _unresolvedQueued;
+
+    private void NoteUnresolvedTake(Job job)
+    {
+        if (job.Gate > Volatile.Read(ref _executedGate)) Interlocked.Increment(ref _unresolvedGated);
+        else if (Volatile.Read(ref _running)) Interlocked.Increment(ref _unresolvedBusy);
+        else Interlocked.Increment(ref _unresolvedQueued);
+    }
+
+    // The resolving thread's idle time in its queue wait and its wakes from it, its time spinning and sleeping on job
+    // gates, the bytes it allocated per job (sampled every AllocationSamplePeriod jobs), and its CPU time.
+    private long _idleTicks, _gateTicks, _idleWakes, _idleSpinTakes, _sampledBytes, _sampledJobs, _resolverJobs;
+
+    // SHARPEMU_RESOLVER_IDLE_SPIN=0: the idle worker sleeps at once, as before.
+    private static readonly bool IdleSpin = SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOLVER_IDLE_SPIN");
+    private const int IdleSpins = 32;
+
+    private bool WorkReadyHint() => Volatile.Read(ref _stopping) || (_queue.Count != 0 && !Volatile.Read(ref _running));
+    private const int AllocationSamplePeriod = 64;
+    private ulong _resolverThreadId;
+    private long _lastResolverCpu = -1;
+
+    public string TakeResolverReport()
+    {
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        static double Milliseconds(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        var sampledJobs = Interlocked.Exchange(ref _sampledJobs, 0);
+        var sampledBytes = Interlocked.Exchange(ref _sampledBytes, 0);
+        var cpu = ResolverCpuNanoseconds();
+        var lastCpu = Interlocked.Exchange(ref _lastResolverCpu, cpu);
+        var cpuMs = cpu < 0 || lastCpu < 0 ? -1.0 : (cpu - lastCpu) / 1e6;
+        return $"takes_unresolved=(busy={Interlocked.Exchange(ref _unresolvedBusy, 0)},gated={Interlocked.Exchange(ref _unresolvedGated, 0)}," +
+            $"queued={Interlocked.Exchange(ref _unresolvedQueued, 0)}) resolver_jobs={Interlocked.Exchange(ref _resolverJobs, 0)} " +
+            $"resolver_idle_ms={Milliseconds(Interlocked.Exchange(ref _idleTicks, 0)).ToString("F1", culture)} " +
+            $"gate_sleep_ms={Milliseconds(Interlocked.Exchange(ref _gateTicks, 0)).ToString("F1", culture)} idle_wakes={Interlocked.Exchange(ref _idleWakes, 0)} " +
+            $"idle_spin_takes={Interlocked.Exchange(ref _idleSpinTakes, 0)} " +
+            $"alloc_b_per_job={(sampledJobs == 0 ? 0 : sampledBytes / (double)sampledJobs).ToString("F0", culture)} " +
+            $"resolver_cpu_ms={cpuMs.ToString("F1", culture)}";
+    }
+
+    // The resolving thread's CPU time (user and system), or -1 where it cannot be read.
+    private long ResolverCpuNanoseconds()
+    {
+        var thread = Volatile.Read(ref _resolverThreadId);
+        if (thread == 0 || !OperatingSystem.IsMacOS())
+            return -1;
+        Span<ulong> info = stackalloc ulong[ThreadInfoBytes / sizeof(ulong)];
+        return ProcessThreadInfo(Environment.ProcessId, ThreadId64Info, thread, ref info[0], ThreadInfoBytes) == ThreadInfoBytes
+            ? (long)(info[0] + info[1])
+            : -1;
+    }
+
+    // PROC_PIDTHREADID64INFO fills a proc_threadinfo: user and system time first, 112 bytes in all.
+    private const int ThreadId64Info = 15;
+    private const int ThreadInfoBytes = 112;
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "pthread_threadid_np")]
+    private static extern int PthreadThreadId(nint thread, out ulong id);
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "proc_pidinfo")]
+    private static extern int ProcessThreadInfo(int pid, int flavor, ulong argument, ref ulong buffer, int size);
+
     // The job is finished with: nothing reads its assumptions again.
     private void ReleaseAssumptions(Job job)
     {
@@ -420,7 +491,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         {
             while (job.State == 0)
             {
+                _waiters++;
                 Monitor.Wait(_lock);
+                _waiters--;
             }
         }
     }
@@ -490,6 +563,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         (Interlocked.Exchange(ref _callerResolves, 0),
             Interlocked.Exchange(ref _callerResolveTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
 
+    // Threads in a Monitor.Wait on _lock for a finished job, the queue to drain, the worker to stop, or the worker's own gate
+    // or pause (under _lock). FinishJob wakes only when one waits: a pulse per job was a kernel call per draw for nobody.
+    private int _waiters;
+
     private void FinishJob(bool worker)
     {
         lock (_lock)
@@ -498,23 +575,63 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             _finished++;
             _running = false;
             if (worker) _workerClaimed = false;
-            Monitor.PulseAll(_lock);
+            // The worker idle in Run waits for _running to fall after a caller's resolution as well as for jobs.
+            if (_waiters != 0 || _idleForJobs)
+            {
+                Monitor.PulseAll(_lock);
+            }
         }
     }
 
     private void Run()
     {
         GpuFatal.ThrowOnFatal = true;
+        if (OperatingSystem.IsMacOS() && PthreadThreadId(0, out var threadId) == 0)
+        {
+            Volatile.Write(ref _resolverThreadId, threadId);
+        }
+
         while (true)
         {
             Job job;
             lock (_lock)
             {
-                while ((_queue.Count == 0 || _running) && !_stopping)
+                if ((_queue.Count == 0 || _running) && !_stopping)
                 {
-                    _idleForJobs = true;
-                    Monitor.Wait(_lock);
-                    _idleForJobs = false;
+                    var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                    if (IdleSpin)
+                    {
+                        // The next draw is usually submitted within microseconds: spin a little before sleeping, which
+                        // costs the submitter a kernel wake per job. The checks outside the lock are hints only.
+                        Monitor.Exit(_lock);
+                        try
+                        {
+                            var spinner = new SpinWait();
+                            for (var spin = 0; spin < IdleSpins && !WorkReadyHint(); spin++)
+                            {
+                                spinner.SpinOnce(sleep1Threshold: -1);
+                            }
+                        }
+                        finally
+                        {
+                            Monitor.Enter(_lock);
+                        }
+
+                        if ((_queue.Count != 0 && !_running) || _stopping)
+                        {
+                            _idleSpinTakes++;
+                        }
+                    }
+
+                    while ((_queue.Count == 0 || _running) && !_stopping)
+                    {
+                        _idleForJobs = true;
+                        Monitor.Wait(_lock);
+                        _idleForJobs = false;
+                        _idleWakes++;
+                    }
+
+                    Interlocked.Add(ref _idleTicks, System.Diagnostics.Stopwatch.GetTimestamp() - idleStarted);
                 }
 
                 if (_stopping)
@@ -524,6 +641,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
                 job = _queue.Peek();
                 _workerClaimed = true;
+                var gateStarted = job.Gate > Volatile.Read(ref _executedGate) || _paused ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 if (job.Gate > Volatile.Read(ref _executedGate))
                 {
                     // The gate usually opens within a few items: spin before sleeping.
@@ -551,11 +669,18 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                     }
 
                     _waitingOnPause = _paused;
+                    _waiters++;
                     Monitor.Wait(_lock, 50);
+                    _waiters--;
                     _waitingOnPause = false;
                 }
 
                 Volatile.Write(ref _sleepingOnGate, long.MaxValue);
+                if (gateStarted != 0)
+                {
+                    Interlocked.Add(ref _gateTicks, System.Diagnostics.Stopwatch.GetTimestamp() - gateStarted);
+                }
+
                 if (_stopping)
                 {
                     return;
@@ -572,11 +697,22 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 _running = true;
             }
 
+            var sampled = (++_resolverJobs & (AllocationSamplePeriod - 1)) == 0;
+            var allocatedBefore = sampled ? GC.GetAllocatedBytesForCurrentThread() : 0;
             try
             {
                 Resolve(job);
             }
-            finally { FinishJob(worker: true); }
+            finally
+            {
+                if (sampled)
+                {
+                    Interlocked.Add(ref _sampledBytes, GC.GetAllocatedBytesForCurrentThread() - allocatedBefore);
+                    Interlocked.Increment(ref _sampledJobs);
+                }
+
+                FinishJob(worker: true);
+            }
         }
     }
 
@@ -613,11 +749,12 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     {
         _concurrent.BeginConcurrentResolve();
         _resolvingJob = job.Index + 1;
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             if (job.Compute is { } compute)
             {
+                // Only a dispatch's job keeps its resolving time (dispatch_saved_ms); a draw's read the clock for nothing.
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
                 job.ComputeResult = _executor.ResolveComputeProgramAhead(job.Banks, compute.DispatchInitiator, compute.GroupsX,
                     compute.GroupsY, compute.GroupsZ, compute.Indirect, out job.ComputeRefusal);
                 job.Assumptions = _concurrent.EndConcurrentResolve();
