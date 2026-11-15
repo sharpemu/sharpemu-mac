@@ -248,6 +248,10 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public DrawScopeToken DrawScope => Scope;
 
+    public bool WideTargetReuse { get; set; }
+
+    public bool ReusesTargetsAcrossPrograms => WideTargetReuse;
+
     public void KeepDepthAttachment(in DepthAttachmentState depth) => Calls.Add($"keep_depth {depth.Image.Index}");
 
     public ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target)

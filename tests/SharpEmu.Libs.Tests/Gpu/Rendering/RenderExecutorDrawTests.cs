@@ -133,6 +133,100 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
     }
 
+    private const uint TargetStampBits =
+        (1u << (int)RegisterStamp.ColorTargets) | (1u << (int)RegisterStamp.DepthTargets) | (1u << (int)RegisterStamp.ShaderInterface);
+
+    // A material or program bind writes the target registers again with the values they held: the draw keeps the
+    // targets' version, so it is given the previous draw's acquisitions (RenderExecutor.ResolveTargetLayout).
+    [Fact]
+    public void TargetRegistersWrittenAgainWithTheirValuesKeepTheAcquisitions()
+    {
+        _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
+        _host.Scope = new DrawScopeToken(1, 1, 1);
+        _host.WideTargetReuse = true;
+        var banks = Banks(withDepth: true);
+        _executor.DrawIndexed(7, banks, Indexed(6));
+        Assert.Contains(_host.Calls, call => call.StartsWith("acquire_depth", StringComparison.Ordinal));
+        _host.Calls.Clear();
+        banks.Context.ColorTargets[0] = banks.Context.ColorTargets[0] with { };
+        banks.Context.DepthTarget = banks.Context.DepthTarget with { };
+        banks.MarkWritten(TargetStampBits);
+        _executor.DrawIndexed(8, banks, Indexed(6));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("find_image", StringComparison.Ordinal) ||
+            call.StartsWith("acquire_color", StringComparison.Ordinal) || call.StartsWith("acquire_depth", StringComparison.Ordinal));
+        AssertOrder("bind_target", "prepare_bindings Vertex", "commit Graphics", "begin_rendering", "draw_indexed 6 1 0 0 0");
+    }
+
+    // Each change a target acquisition reads, written under the same stamps: the draw acquires its targets again.
+    [Theory]
+    [InlineData("color-address")]
+    [InlineData("target-mask")]
+    [InlineData("depth-control")]
+    [InlineData("depth-clear-negative-zero")]
+    [InlineData("depth-bounds")]
+    [InlineData("stencil-mask")]
+    [InlineData("pixel-stage")]
+    public void ATargetRegisterWrittenWithAnotherValueAcquiresTheTargetsAgain(string change)
+    {
+        _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
+        _host.Scope = new DrawScopeToken(1, 1, 1);
+        _host.WideTargetReuse = true;
+        var banks = Banks(withDepth: true);
+        _executor.DrawIndexed(7, banks, Indexed(6));
+        _host.Calls.Clear();
+        var context = banks.Context;
+        switch (change)
+        {
+            case "color-address":
+                context.ColorTargets[0] = context.ColorTargets[0] with { BaseAddress = context.ColorTargets[0].BaseAddress + 0x1_0000 };
+                break;
+            case "target-mask":
+                context.RenderTargetMask = 0x7;
+                break;
+            case "depth-control":
+                context.DepthTarget = context.DepthTarget with { DepthControl = context.DepthTarget.DepthControl ^ 0x4u };
+                break;
+            case "depth-clear-negative-zero":
+                context.DepthClearValue = -0f;
+                break;
+            case "depth-bounds":
+                context.DepthBoundsMax = 0.5f;
+                break;
+            case "stencil-mask":
+                context.StencilMask = context.StencilMask with { WriteMask = 0x0F };
+                break;
+            case "pixel-stage":
+                context.ShaderInterface.ColorShaderMask = 0;
+                break;
+        }
+
+        banks.MarkWritten(TargetStampBits);
+        _executor.DrawIndexed(8, banks, Indexed(6));
+
+        Assert.Contains(_host.Calls, call => call.StartsWith("acquire_depth", StringComparison.Ordinal) ||
+            call.StartsWith("acquire_color", StringComparison.Ordinal));
+    }
+
+    // The values hold but the pass does not: the scope token still decides.
+    [Fact]
+    public void TargetRegistersWrittenAgainWithTheirValuesInAnotherScopeAcquireAgain()
+    {
+        _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
+        _host.Scope = new DrawScopeToken(1, 1, 1);
+        _host.WideTargetReuse = true;
+        var banks = Banks(withDepth: true);
+        _executor.DrawIndexed(7, banks, Indexed(6));
+        foreach (var scope in new[] { new DrawScopeToken(2, 1, 1), new DrawScopeToken(2, 2, 1), new DrawScopeToken(2, 2, 2), default })
+        {
+            _host.Scope = scope;
+            _host.Calls.Clear();
+            banks.MarkWritten(TargetStampBits);
+            _executor.DrawIndexed(8, banks, Indexed(6));
+            Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
+        }
+    }
+
     [Fact]
     public void ADrawAfterATwoTargetDrawBindsOnlyItsOwnTarget()
     {
@@ -1393,7 +1487,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
-    public void TargetLayout_IsKeptUntilAContextRegisterIsWritten()
+    public void TargetLayout_IsKeptUntilATargetRegisterChangesValue()
     {
         var banks = Banks(withDepth: true);
         _executor.DrawIndexed(1, banks, Indexed(3));
@@ -1403,9 +1497,15 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Equal(resolved, TargetLayoutVersion());
         Assert.Equal(2, _host.Calls.Count(static call => call.StartsWith("begin_rendering 64x64x1 colors=1", StringComparison.Ordinal)));
 
+        // Written again with the values they held: the same targets (TargetInputs).
         banks.MarkWritten(RegisterStamps.ContextBits);
         _executor.DrawIndexed(1, banks, Indexed(3));
-        Assert.Equal(resolved + 1, TargetLayoutVersion());
+        Assert.Equal(resolved, TargetLayoutVersion());
+
+        banks.Context.DepthClearValue = 0.25f;
+        banks.MarkWritten(RegisterStamps.ContextBits);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        Assert.True(TargetLayoutVersion() > resolved);
     }
 
     private uint TargetLayoutVersion() =>
