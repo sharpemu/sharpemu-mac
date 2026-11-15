@@ -1378,6 +1378,7 @@ internal sealed partial class MetalRenderHost :
         {
             _stagedStorageCopies?.Forget(address, size);
             _stagedRanges?.OnGpuWrite(address, size, origin);
+            NoteLabelStagedReadsWrite(address, size);
         }
 
         if (_guard is not null && size != 0)
@@ -1446,6 +1447,7 @@ internal sealed partial class MetalRenderHost :
         _gpuWrites.NoteUnbounded(SubmissionSerial);
         _cpOverlay.Clear();
         _labelOverlay.Clear();
+        ForgetLabelStagedReads();
     }
 
     void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu(MetalWaitReason.ImageCache);

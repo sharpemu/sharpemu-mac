@@ -79,6 +79,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // for it (Demon's Souls begins ~190 submissions a frame).
             PostOrderingToWorker(() =>
             {
+                NoteLabelStagedReadsSubmission();
                 NativeOcclusionBeginQueue(queueId);
                 CommitCoalescedIfOverdue();
                 _ = EnsureCommandBuffer();
@@ -87,6 +88,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         DrainDraws();
+        NoteLabelStagedReadsSubmission();
         NativeOcclusionBeginQueue(queueId);
         _submissionsStarted++;
         CommitCoalescedIfOverdue();
@@ -1010,6 +1012,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         bool noteAsOneRange = false)
     {
         ulong serial;
+        foreach (ref readonly var copy in copies)
+        {
+            // A staged label read over the same window bytes through another guest address is filled again.
+            NoteLabelStagedReadsCopy(in copy);
+        }
+
         // A copy whose source later work in the same encoder may still change (the GDS a
         // pixel or compute shader appends to) cannot wait for the boundary: it would copy
         // what that later work left there.

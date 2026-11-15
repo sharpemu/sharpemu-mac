@@ -18,6 +18,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 ///                labels, and the rest (GDS stores, occlusion dumps).
 /// label_force_by the first held copy a forcing range overlapped, and label_force_range that range's size.
 /// label_in_encoder_refused why a landing with a compute encoder open did not fold into it.
+/// label_staged   read-only compute bindings answered by a staged view instead of a landing (binds), views filled before
+///                a dispatch (fills), fills skipped as still exact (reuse), KiB filled, and =verify checks and failures;
+///                label_staged_refused why a binding over held copies landed them instead (MetalRenderHost.LabelStagedReads.cs).
 /// </remarks>
 internal sealed partial class MetalRenderHost
 {
@@ -200,6 +203,7 @@ internal sealed partial class MetalRenderHost
         Append(text, "label_force_by", LabelForceByNames, _labelForceBy);
         Append(text, "label_force_range", LabelForceRangeNames, _labelForceRange);
         Append(text, "label_in_encoder_refused", LabelRefusedNames, _labelInEncoderRefused);
+        AppendLabelStagedCounters(text);
         return text.ToString();
 
         static void Append(System.Text.StringBuilder text, string field, string[] names, long[] counts)
