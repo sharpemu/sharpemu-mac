@@ -24,6 +24,9 @@ internal sealed partial class MetalImageCache
     private long _aliasMovedWritebackBytes, _aliasMovedBlitBytes;
     private long _aliasRunRefreshRefused;
 
+    /// <summary>Test hook: GPU-written images that kept older texels over a stale run they could not reload alone.</summary>
+    internal long AliasRunRefreshRefused => Interlocked.Read(ref _aliasRunRefreshRefused);
+
     private void NoteAliasRoundTrip(bool whole, ulong sharedSize)
     {
         _aliasRoundTrip++;

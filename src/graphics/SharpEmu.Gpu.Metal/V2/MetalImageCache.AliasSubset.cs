@@ -81,6 +81,21 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        if (takesGpuOwnership && !otherInside)
+        {
+            // The other image stays GPU-modified and stale over the run, and only TryRefreshDirtyRun reloads a stale run
+            // of such an image (a whole refresh would replace bytes only its texture holds). Unless that reload is
+            // certain to make exactly this run, its next use would keep its older texels there (alias_run_refresh_refused).
+            var (staleStart, staleEnd) = other.IsCpuDirty
+                ? (Math.Min(other.DirtyStart, sourceStart), Math.Max(other.DirtyEnd, sourceEnd))
+                : (sourceStart, sourceEnd);
+            if (!CanReloadRunExactly(other, staleStart, staleEnd))
+            {
+                RefuseAliasTransition("subset-stale-run-inexact");
+                return false;
+            }
+        }
+
         EnsureSparseBacked(image);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, image.Texture);
         if (!_transfer.TryEncodeLayerSubsetCopy(
@@ -99,9 +114,12 @@ internal sealed partial class MetalImageCache
             EncodeAliasSubsetCheck(context, image, other, targetStart, sourceStart, sourceEnd - sourceStart);
         }
 
-        // The texture changed whether or not it was stale there; then it is current over the run.
+        // The texture changed whether or not it was stale there; then it is current over the run. It now holds the
+        // other image's bytes there, which guest memory does not (the other still owes them): a run this image had
+        // published is no longer its bytes in guest memory, and would let a later hand-over or consumer skip them.
         image.NoteContentChanged();
         image.RefreshComplete(targetStart, targetEnd);
+        image.ForgetPublished(targetStart, targetEnd);
         if (takesGpuOwnership)
         {
             if (otherInside)

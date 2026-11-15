@@ -2865,13 +2865,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var residentEnd = image.ResidentEnd;
         var dirtyStart = Math.Max(image.DirtyStart, residentStart);
         var dirtyEnd = Math.Min(image.DirtyEnd, residentEnd);
-        // Past half the run still goes alone for a GPU-written array (layered deferral leaves one stale over the
-        // layers its passes have not overwritten yet): the whole refresh is no option there - it would replace the
-        // layers only the texture holds - so the half rule, a cost rule, would only keep the stale layers.
-        var pastHalfAllowed = LayerDeferEnabled && image.IsGpuModified && description.IsLayered;
         if (!SubRangeTransfersEnabled || description.HasStencil ||
             dirtyEnd <= dirtyStart ||
-            (dirtyEnd - dirtyStart > (residentEnd - residentStart) / 2 && !pastHalfAllowed))
+            (dirtyEnd - dirtyStart > (residentEnd - residentStart) / 2 && !NarrowRefreshPastHalf(image)))
         {
             return false;
         }
@@ -2922,6 +2918,27 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         Interlocked.Increment(ref _uploads);
         return true;
+    }
+
+    // Past half a stale run still goes alone for a GPU-written array (layered deferral leaves one stale over the
+    // layers its passes have not overwritten yet): the whole refresh is no option there - it would replace the
+    // layers only the texture holds - so the half rule, a cost rule, would only keep the stale layers.
+    // TryRefreshDirtyRun and TryNarrowReloadRun both ask this, so they give one answer.
+    private bool NarrowRefreshPastHalf(MetalCachedImage image) =>
+        LayerDeferEnabled && image.IsGpuModified && image.Description.IsLayered;
+
+    // Whether TryRefreshDirtyRun, given [start, end) as the image's whole stale interval, reloads exactly that run
+    // and nothing past it: sub-range transfers on, the half rule met, a covering run that does not widen, and guest
+    // bytes it reads in place. A GPU-written image left stale over a run that fails this would keep its older texels.
+    private bool CanReloadRunExactly(MetalCachedImage image, ulong start, ulong end)
+    {
+        ref readonly var description = ref image.Description;
+        var resident = image.ResidentEnd - image.ResidentStart;
+        return end > start && SubRangeTransfersEnabled && !description.HasStencil && image.FirstLevel == 0 &&
+            (end - start <= resident / 2 || NarrowRefreshPastHalf(image)) &&
+            TryCoveringRun(in description, start, end, out var runStart, out var runEnd) &&
+            runStart == start && runEnd == end &&
+            _guestMemory.TryResolveInPlace(description.Data.Address + start, end - start, out _);
     }
 
     // The run a restricted transfer may be given for a dirty range. The plan's own

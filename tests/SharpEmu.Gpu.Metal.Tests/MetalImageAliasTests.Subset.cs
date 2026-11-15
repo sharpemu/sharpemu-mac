@@ -58,16 +58,19 @@ public sealed unsafe partial class MetalImageAliasTests
         return rig.Harness.Read(buffer, 0, size);
     }
 
-    private sealed record SubsetOutcome(byte[] First, byte[] Second, byte[] Guest, long Copies, long Writebacks, string Text);
+    private sealed record SubsetOutcome(
+        byte[] First, byte[] Second, byte[] Guest, long Copies, long Writebacks, string Text, long RefreshRefused = 0);
 
     // The first array is written by the GPU (its texture holds `written`, guest memory something else), then the
     // second is acquired with the given role. Then both are read back and every GPU write is flushed.
     private static SubsetOutcome RunSubset(
-        bool subset, ImageRequest first, ImageRequest second, ImageRole secondRole, bool verify = false)
+        bool subset, ImageRequest first, ImageRequest second, ImageRole secondRole, bool verify = false,
+        bool layerDefer = true)
     {
         using var rig = new Rig(Device.Value);
         rig.Cache.AliasSubsetDeviceEnabled = subset;
         rig.Cache.AliasSubsetVerify = verify;
+        rig.Cache.LayerDeferEnabled = layerDefer;
         var start = Math.Min(first.Description.Data.Address, second.Description.Data.Address);
         var end = Math.Max(first.Description.Data.End, second.Description.Data.End);
         var span = end - start;
@@ -105,7 +108,8 @@ public sealed unsafe partial class MetalImageAliasTests
         rig.Cache.FlushGpuWrites(start, span, MetalWritebackCause.HostRead);
         rig.Harness.Submit();
         rig.Harness.Begin();
-        return new SubsetOutcome(firstBytes, secondBytes, rig.ReadGuest(start, span), copies, writebacks, text);
+        return new SubsetOutcome(
+            firstBytes, secondBytes, rig.ReadGuest(start, span), copies, writebacks, text, rig.Cache.AliasRunRefreshRefused);
     }
 
     private static void AssertSameOutcome(SubsetOutcome on, SubsetOutcome off)
@@ -257,6 +261,87 @@ public sealed unsafe partial class MetalImageAliasTests
         Assert.True(outcomes[0].Copies <= 1);
         Assert.Equal(0, outcomes[1].Copies);
         Assert.Equal(outcomes[1].Second, outcomes[0].Second);
+        Assert.Equal(outcomes[1].Guest, outcomes[0].Guest);
+    }
+
+    // A write through 8 of 9 layers (Demon's Souls' 64 of 72) leaves the 9-layer array GPU-modified and stale over
+    // the 8 - past half, which with layered deferral off only a whole refresh would reload, and that is no option for a
+    // GPU-written image. The copy is refused unless that reload is certain; nothing keeps older texels
+    // (alias_run_refresh_refused), and the bytes are those of the path with every switch off.
+    [Theory]
+    [InlineData(GuestTileMode.RenderTarget)]
+    [InlineData(GuestTileMode.Standard64KB)]
+    public void ASubsetWriteLeavesTheArrayStaleOnlyOverARunItReloadsExactly(GuestTileMode tile)
+    {
+        if (!RequireDevice()) return;
+        var first = SubsetArray(ImageAddress, 9, tile, ImageRole.StorageImage);
+        var second = SubsetArray(ImageAddress, 8, tile, ImageRole.StorageImage);
+        var on = RunSubset(subset: true, first, second, ImageRole.StorageImage, layerDefer: false);
+        var off = RunSubset(subset: false, first, second, ImageRole.StorageImage, layerDefer: false);
+        output.WriteLine($"{tile}: on copies={on.Copies} refused={on.RefreshRefused}\n on: {on.Text}\n off: {off.Text}");
+        Assert.Equal(0, on.RefreshRefused);
+        Assert.Equal(0, off.RefreshRefused);
+        AssertSameOutcome(on, off);
+    }
+
+    // A copy into an array the GPU wrote, which had published a run (a CPU read of its first layer): the texture now
+    // holds the source's newer bytes there, which guest memory does not, so the run is not published any more. Then
+    // everything is read back and flushed: the same bytes as the round trip.
+    [Fact]
+    public void ACopyIntoAPublishedRunForgetsThePublication()
+    {
+        if (!RequireDevice()) return;
+        var outcomes = new List<(byte[] First, byte[] Guest, long Copies, bool Published)>();
+        foreach (var subset in new[] { true, false })
+        {
+            using var rig = new Rig(Device.Value);
+            rig.Cache.AliasSubsetDeviceEnabled = subset;
+            var tile = GuestTileMode.Standard64KB;
+            var first = SubsetArray(ImageAddress, 9, tile, ImageRole.StorageImage);
+            var size = first.Description.Data.Size;
+            var layer = LayerBytes(tile);
+            rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)size, 0x5A));
+            var firstImage = rig.Cache.GetImage(rig.Acquire(first));
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            rig.WriteGuest(ImageAddress, MetalTileOracle.Pattern((int)size, 0xC3));
+            rig.Cache.FlushGpuWrites(ImageAddress, layer, MetalWritebackCause.HostRead);
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            Assert.True(firstImage.IsGpuModified);
+            Assert.True(firstImage.IsPublished(0, layer));
+
+            // The 8-layer array takes its layers and its texture is then written, as a dispatch into it would.
+            var second = rig.Cache.GetImage(rig.Acquire(SubsetArray(ImageAddress, 8, tile, ImageRole.StorageImage)));
+            Assert.True(second.IsGpuModified);
+            var drawn = MetalTileOracle.Pattern((int)second.Description.Data.Size, 0x77);
+            Assert.True(rig.Harness.Transfer.EncodeGuestToTexture(
+                rig.Harness, second.Description, new SubresourceRange(0, 1, 0, second.Description.TransferLayers),
+                new MetalGuestRange(rig.Harness.Buffer(drawn), 0, (ulong)drawn.Length, 0), default, second.Texture,
+                0, (ulong)drawn.Length));
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+
+            var copies = rig.Cache.AliasSubsetCounters.Copies;
+            rig.Acquire(first with { Role = ImageRole.Texture });
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            copies = rig.Cache.AliasSubsetCounters.Copies - copies;
+            var published = firstImage.IsGpuModified && firstImage.IsPublished(0, layer);
+            var firstBytes = ReadLayers(rig, firstImage);
+            rig.Cache.FlushGpuWrites(ImageAddress, size, MetalWritebackCause.HostRead);
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            outcomes.Add((firstBytes, rig.ReadGuest(ImageAddress, size), copies, published));
+            Assert.Equal(0, rig.Cache.AliasRunRefreshRefused);
+        }
+
+        output.WriteLine($"on: copies={outcomes[0].Copies} published={outcomes[0].Published}; " +
+            $"off: copies={outcomes[1].Copies} published={outcomes[1].Published}");
+        Assert.True(outcomes[0].Copies >= 1);
+        // Guest memory holds layer 0 as the first array had it, not as the copy left its texture.
+        Assert.False(outcomes[0].Published);
+        Assert.Equal(outcomes[1].First, outcomes[0].First);
         Assert.Equal(outcomes[1].Guest, outcomes[0].Guest);
     }
 }

@@ -191,13 +191,16 @@ internal sealed partial class MetalImageCache
     }
 
     // The run TryRefreshDirtyRun reloads for a stale interval, when it reloads just that run:
-    // the same conditions, in the same order, so the answer here is the answer there.
+    // the same conditions, in the same order, so the answer here is the answer there. The
+    // image is run-shaped (IsRunShaped: no stencil, the whole chain resident), so the half
+    // rule there, over the resident bytes, is this one over all of them.
     private bool TryNarrowReloadRun(MetalCachedImage image, ulong staleStart, ulong staleEnd,
         out ulong runStart, out ulong runEnd)
     {
         runStart = runEnd = 0;
         ref readonly var description = ref image.Description;
-        if (staleEnd <= staleStart || staleEnd - staleStart > description.Data.Size / 2 ||
+        if (staleEnd <= staleStart ||
+            (staleEnd - staleStart > description.Data.Size / 2 && !NarrowRefreshPastHalf(image)) ||
             !TryCoveringRun(in description, staleStart, staleEnd, out runStart, out runEnd))
         {
             return false;

@@ -818,6 +818,43 @@ internal sealed class MetalCachedImage : IDisposable
     public bool IsPublished(ulong start, ulong end) =>
         PublishedEnd > PublishedStart && start >= PublishedStart && end <= PublishedEnd;
 
+    /// <summary>
+    /// The texture got bytes over <c>[start, end)</c> guest memory does not hold (a copy from an alias that still
+    /// owes them): what was published there is not this image's any more. A cut from the middle keeps the longer
+    /// side; forgetting a run only costs publishing it again.
+    /// </summary>
+    public void ForgetPublished(ulong start, ulong end)
+    {
+        if (PublishedEnd <= PublishedStart || end <= PublishedStart || start >= PublishedEnd)
+        {
+            return;
+        }
+
+        if (start <= PublishedStart && end >= PublishedEnd)
+        {
+            PublishedStart = PublishedEnd = 0;
+        }
+        else if (start <= PublishedStart)
+        {
+            PublishedStart = end;
+        }
+        else if (end >= PublishedEnd)
+        {
+            PublishedEnd = start;
+        }
+        else if (start - PublishedStart >= PublishedEnd - end)
+        {
+            PublishedEnd = start;
+        }
+        else
+        {
+            PublishedStart = end;
+        }
+
+        BindingVersion++;
+        Epochs?.NoteBindingChanged();
+    }
+
     public void ClearGpuModified()
     {
         var wasModified = _gpuModified;
