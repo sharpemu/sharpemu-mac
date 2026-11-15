@@ -220,11 +220,14 @@ internal static class MetalV2Diagnostics
 
     // SHARPEMU_METAL_V2_HOST_KERNEL_COPY: what the host does with a recognised copy or fill
     // kernel the image paths refuse whose destination already holds its result
-    // (MetalRenderHost.KernelFills). 0 (the default) runs it as the dispatch it is; identical
-    // consumes it and writes nothing; verify runs it and, once it completes, checks that the
-    // destination still holds what was there, reporting each kernel that would have been
-    // consumed wrongly. write (host writes of the changed pages) needs a ledger of the GPU's
-    // reads that does not exist yet, so it runs as 0.
+    // (MetalRenderHost.KernelFills). identical (the default) consumes it and writes nothing:
+    // a kernel is only compared when no recorded GPU write, overlay or image covers either
+    // side, so memory is what the dispatch would have read and written; 0 runs it as the
+    // dispatch it is; verify runs it and, once it completes, checks that the destination still
+    // holds what was there, reporting each kernel that would have been consumed wrongly. write
+    // (host writes of the changed pages) needs a ledger of the GPU's reads that does not exist
+    // yet, so it runs as 0. Demon's Souls: ~41% of its ~200 table copies per frame are
+    // identical; a verify run checked 169k of them with no mismatch.
     public static readonly MetalHostKernelCopyMode HostKernelCopy =
         ParseHostKernelCopy(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_HOST_KERNEL_COPY"));
 
@@ -240,9 +243,9 @@ internal static class MetalV2Diagnostics
     {
         switch (text)
         {
-            case null or "" or "0":
+            case "0":
                 return MetalHostKernelCopyMode.Off;
-            case "identical":
+            case null or "" or "identical":
                 return MetalHostKernelCopyMode.Identical;
             case "verify":
                 return MetalHostKernelCopyMode.Verify;
