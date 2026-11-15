@@ -136,6 +136,11 @@ public interface IProgramPrefetch
     void NoteDispatchEffect()
     {
     }
+
+    // The dispatch running now resolved this program (the look-ahead verify names the dispatches a draw looked over).
+    void NoteDispatchProgram(ComputeProgram program)
+    {
+    }
 }
 
 public sealed partial class RenderExecutor
@@ -176,6 +181,8 @@ public sealed partial class RenderExecutor
         inputs.StartInstanceUserData = startInstanceUserData;
         return inputs;
     }
+
+    public string DescribeProgramState() => _pipelines.DescribeProgramState();
 
     // The programs of a draw with these banks and inputs, as ResolveShaderPrograms resolves them.
     public GraphicsPrograms ResolveGraphicsPrograms(RegisterBanks banks, in GraphicsProgramInputs inputs)

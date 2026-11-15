@@ -143,6 +143,7 @@ public sealed partial class RenderExecutor
             }
         }
 
+        Prefetch?.NoteDispatchProgram(computeProgram);
         if (computeProgram.Consumed || computeProgram.ImageCopy is not null || computeProgram.KnownWrite is not null)
         {
             // What this dispatch does may not show in the ownership answers of a dispatch resolved ahead of it.

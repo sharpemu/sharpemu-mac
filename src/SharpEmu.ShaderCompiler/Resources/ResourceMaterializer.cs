@@ -856,21 +856,39 @@ public static partial class ResourceMaterializer
     private static void VerifyProof(ShaderResourcePlan plan, ResourceSnapshot snapshot, MaterializationProgram.ReadProof proof,
         ResourceRuntimeInputs inputs, MaterializationProgram.Output output)
     {
-        if (EvaluateInto(plan, inputs, output) && SameAsOutput(plan, snapshot, output))
+        var evaluated = EvaluateInto(plan, inputs, output);
+        if (evaluated && SameAsOutput(plan, snapshot, output))
         {
             _proofVerified.Increment();
             return;
         }
 
+        // Taken before the proof is compared again, which reads (and on a resolving thread records) the words anew.
+        var first = evaluated ? OutputDifference(plan, snapshot, output) : "refused";
         if (!Holds(plan, proof, inputs, inputs.CompareGuestWords!))
         {
             _proofVerifyRaced.Increment();
             return;
         }
 
+        // A second evaluation tells a difference that keeps (the proof misses something the evaluation reads) from one that
+        // came and went (a refusal or a read the evaluation made of state that moved meanwhile).
+        string again;
+        try
+        {
+            again = !EvaluateInto(plan, inputs, output) ? "refused" : SameAsOutput(plan, snapshot, output) ? "current" : OutputDifference(plan, snapshot, output);
+        }
+        catch (Exception exception)
+        {
+            // An abandoned read on a resolving thread: reported with the mismatch, which is thrown below either way.
+            again = "threw " + exception.GetType().Name;
+        }
+
         Interlocked.Increment(ref _proofVerifyFailed);
+        var thread = Thread.CurrentThread;
         var message = $"[SHADER][READ_PROOF] verify mismatch: proved current but evaluates otherwise plan=0x{plan.Hash:X16} stage={plan.Stage} " +
-            $"ranges={proof.Addresses.Length} bytes={proof.Bytes.Length} unreadable={proof.Unreadable.Length}.";
+            $"ranges={proof.Addresses.Length} bytes={proof.Bytes.Length} unreadable={proof.Unreadable.Length} " +
+            $"first={first} again={again} branches={plan.ResourceBranches.Count} thread={thread.Name ?? thread.ManagedThreadId.ToString(System.Globalization.CultureInfo.InvariantCulture)}.";
         Console.Error.WriteLine(message);
         throw new ReadProofMismatchException(message);
     }
@@ -1043,6 +1061,70 @@ public static partial class ResourceMaterializer
         }
 
         return true;
+    }
+
+    // The first place SameAsOutput finds the output differ from the snapshot, with both words, for the verify's message.
+    private static string OutputDifference(ShaderResourcePlan plan, ResourceSnapshot snapshot, MaterializationProgram.Output output)
+    {
+        static string Words(string what, int index, ReadOnlySpan<uint> known, ReadOnlySpan<uint> evaluated)
+        {
+            var length = Math.Min(known.Length, evaluated.Length);
+            for (var word = 0; word < length; word++)
+            {
+                if (known[word] != evaluated[word])
+                {
+                    return FormattableString.Invariant($"{what}[{index}].word{word} snapshot=0x{known[word]:X8} evaluated=0x{evaluated[word]:X8}");
+                }
+            }
+
+            return FormattableString.Invariant($"{what}[{index}] words snapshot={known.Length} evaluated={evaluated.Length}");
+        }
+
+        var info = plan.Info;
+        if (snapshot.Buffers.Length != info.Buffers.Count || snapshot.Images.Length != info.Images.Count || snapshot.Samplers.Length < info.Samplers.Count)
+        {
+            return "shape";
+        }
+
+        if (!snapshot.FlattenedResourceTable.AsSpan().SequenceEqual(output.TableWords))
+        {
+            return Words("table", 0, snapshot.FlattenedResourceTable, output.TableWords);
+        }
+
+        if (!snapshot.DeviceAddressRanges.AsSpan().SequenceEqual(output.RangeValues))
+        {
+            return "ranges";
+        }
+
+        for (var index = 0; index < info.Buffers.Count; index++)
+        {
+            var words = output.Source(index);
+            var cleared = words.Length == 4 && (words[3] >> 30) != 0;
+            if (cleared ? snapshot.Buffers[index].AsSpan().ContainsAnyExcept(0u) : !snapshot.Buffers[index].AsSpan().SequenceEqual(words))
+            {
+                return cleared ? FormattableString.Invariant($"buffer[{index}] cleared") : Words("buffer", index, snapshot.Buffers[index], words);
+            }
+        }
+
+        for (var index = 0; index < info.Images.Count; index++)
+        {
+            var words = output.Source(info.Buffers.Count + index);
+            if (!snapshot.Images[index].AsSpan().SequenceEqual(words))
+            {
+                return Words("image", index, snapshot.Images[index], words) + (snapshot.MipStatistics is null ? string.Empty : " (statistics)");
+            }
+        }
+
+        for (var index = 0; index < info.Samplers.Count; index++)
+        {
+            var words = output.Source(info.Buffers.Count + info.Images.Count + index);
+            if (!snapshot.Samplers[index].AsSpan().SequenceEqual(words))
+            {
+                return Words("sampler", index, snapshot.Samplers[index], words);
+            }
+        }
+
+        return "other";
     }
 
     private static bool SameUnlessStatistics(ReadOnlySpan<uint> key, ReadOnlySpan<uint> current)

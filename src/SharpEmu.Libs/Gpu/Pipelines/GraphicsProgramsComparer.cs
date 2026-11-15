@@ -26,6 +26,40 @@ internal static class GraphicsProgramsComparer
         return VertexDifference(memo.VertexInput, full.VertexInput) ?? PixelDifference(memo.PixelInput, full.PixelInput);
     }
 
+    // Every group that differs, for a fatal that has to name more than the first field: the top-level fields one by one,
+    // then the first difference within the vertex input and within the pixel input. Empty when none does.
+    public static string Differences(GraphicsPrograms memo, GraphicsPrograms full)
+    {
+        var differences = new List<string>();
+        if (memo.Available != full.Available) differences.Add("available");
+        if (memo.Vertex != full.Vertex) differences.Add("vertex_program");
+        if (memo.Pixel != full.Pixel) differences.Add("pixel_program");
+        if (!ReferenceEquals(memo.MeshInput, full.MeshInput) && memo.MeshInput != full.MeshInput) differences.Add("mesh_input");
+        if (memo.Tessellation is not null || full.Tessellation is not null) differences.Add("tessellation");
+        if (memo.SolidClear != full.SolidClear) differences.Add("solid_clear");
+        if (memo.DisableBlending != full.DisableBlending) differences.Add("disable_blending");
+        if (memo.DropUnwrittenColorTargets != full.DropUnwrittenColorTargets) differences.Add("drop_unwritten");
+        if (memo.PositionStream != full.PositionStream) differences.Add("position_stream");
+        if (VertexDifference(memo.VertexInput, full.VertexInput) is { } vertex) differences.Add(vertex);
+        if (PixelDifference(memo.PixelInput, full.PixelInput) is { } pixel) differences.Add(pixel);
+        return string.Join(",", differences);
+    }
+
+    // The identities of a resolution's programs and stages, for the same fatal: each program's id and module, and each
+    // stage's compiled program hash, shader base and resource counts.
+    public static string Describe(GraphicsPrograms programs)
+    {
+        static string Stage(in ShaderStageResources stage) => stage.Program is not { } program
+            ? "none"
+            : $"hash=0x{program.Hash:X16} base=0x{stage.ShaderBase:X} buffers={stage.Resources.Buffers.Length} " +
+              $"images={stage.Resources.Images.Length} samplers={stage.Resources.Samplers.Length} table={stage.Resources.FlattenedResourceTable.Length}";
+
+        return $"available={programs.Available} vs=0x{programs.Vertex.Id:X}/0x{programs.Vertex.Module:X} " +
+            $"ps=0x{programs.Pixel.Id:X}/0x{programs.Pixel.Module:X} drop_unwritten={programs.DropUnwrittenColorTargets} " +
+            $"vertex_stage=[{Stage(programs.VertexInput.Stage)}] pixel_stage=[{Stage(programs.PixelInput.Stage)}] " +
+            $"pixel_inputs={programs.PixelInput.InputCount} custom=0x{programs.PixelInput.CustomInterpolationMask:X}";
+    }
+
     private static string? VertexDifference(VertexInputInfo memo, VertexInputInfo full)
     {
         if (memo.Tessellation is not null || full.Tessellation is not null) return "vertex.tessellation";

@@ -268,8 +268,16 @@ public sealed class ReadProofTests
         ResourceMaterializer.SetReadProofForTest(kept, ResourceMaterializer.ReadProofOf(other));
 
         Assert.True(WithMode(ResourceMaterializer.ReadProofMode.On, () => ResourceMaterializer.RevalidateFast(kept)));
-        Assert.Throws<ResourceMaterializer.ReadProofMismatchException>(() =>
+        var mismatch = Assert.Throws<ResourceMaterializer.ReadProofMismatchException>(() =>
             WithMode(ResourceMaterializer.ReadProofMode.Verify, () => ResourceMaterializer.RevalidateFast(kept)));
+        // It names where the evaluation differs, and that a second evaluation differs the same way (a lasting difference,
+        // not a read that raced a write).
+        Assert.Contains("first=", mismatch.Message);
+        Assert.DoesNotContain("first=refused", mismatch.Message);
+        Assert.Contains("snapshot=0x", mismatch.Message);
+        Assert.DoesNotContain("again=current", mismatch.Message);
+        Assert.DoesNotContain("again=refused", mismatch.Message);
+        Assert.Contains("thread=", mismatch.Message);
         Assert.Throws<ResourceMaterializer.ReadProofMismatchException>(() =>
             WithMode(ResourceMaterializer.ReadProofMode.Verify, () => ResourceMaterializer.RevalidateOrRebuildFast(kept, out _)));
 

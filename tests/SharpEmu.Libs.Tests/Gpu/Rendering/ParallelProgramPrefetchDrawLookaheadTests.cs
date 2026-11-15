@@ -179,11 +179,20 @@ public sealed class ParallelProgramPrefetchDrawLookaheadTests : IDisposable
         Assert.Equal(1, Counters().Verified);
 
         // The host wrongly stands for a resolution the dispatch changed: the provider now resolves other programs.
+        _prefetch.NoteGateItem(2, ParallelProgramPrefetch.GateItemKind.Dispatch);
         job = Resolved(banks, gate: 1, fullGate: 2);
         _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
         _prefetch.AdvanceGate(2);
-        Assert.Throws<RenderExecutorFatalException>(() => Take(banks, job));
+        var fatal = Assert.Throws<RenderExecutorFatalException>(() => Take(banks, job));
         Assert.Equal(1, Counters().Verified);
+        // The fatal names every differing group, both resolutions, whether the worker resolves the same again, and the
+        // items the resolution looked over, so a verify run's failure can be told apart without another run.
+        Assert.Contains("differences=[vertex.buffers,", fatal.Message);
+        Assert.Contains("ahead=[available=True", fatal.Message);
+        Assert.Contains("worker=[available=True", fatal.Message);
+        Assert.Contains("worker_again=same", fatal.Message);
+        Assert.Contains("looked_over=[2:dispatch=0x0000000000000000]", fatal.Message);
+        Assert.Contains("last_dispatch_effect=-1", fatal.Message);
     }
 
     // A gated item other than a dispatch (here an interrupt) still holds the resolution of the draw after it, while the

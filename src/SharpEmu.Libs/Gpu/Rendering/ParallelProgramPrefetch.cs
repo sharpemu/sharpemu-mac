@@ -44,6 +44,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         // The gate number of the last collector call (GateItemKind.Collect) queued before the job: above ExecutedAtStart,
         // the resolution looked ahead of it (draw_lookahead over_gc).
         internal long LastCollectGate;
+        // =verify: the program cache state the resolution ended under (IShaderPipelineProvider.DescribeProgramState).
+        internal string? ResolveState;
     }
 
     /// <summary>
@@ -326,6 +328,41 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private long _lastDispatchEffect = -1;
 
     public void NoteDispatchEffect() => Volatile.Write(ref _lastDispatchEffect, Volatile.Read(ref _executedGate));
+
+    // =verify: the compute program hash of each dispatch by the gate number it brings the count to (the worker runs item
+    // _executedGate + 1), so a fatal names the dispatches a draw looked over. Written and read on the worker only.
+    private readonly ulong[] _gateDispatchHashes = new ulong[GateKindRing];
+
+    public void NoteDispatchProgram(ComputeProgram program)
+    {
+        if (LookaheadMode == DrawLookaheadMode.Verify)
+        {
+            _gateDispatchHashes[(Volatile.Read(ref _executedGate) + 1) & (GateKindRing - 1)] = program.Input.Stage.Program?.Hash ?? 0;
+        }
+    }
+
+    // The gated items a resolution that began after `executedAtStart` of them ran looked over, up to the draw's full gate:
+    // each one's kind, and a dispatch's program hash when the worker resolved one for it.
+    private string DescribeLookedOver(long executedAtStart, long fullGate)
+    {
+        var builder = new System.Text.StringBuilder();
+        for (var gate = executedAtStart + 1; gate <= fullGate && gate <= executedAtStart + 16; gate++)
+        {
+            var kind = GateKindOf(gate);
+            builder.Append(builder.Length == 0 ? string.Empty : ",").Append(gate).Append(':').Append(GateItemKindNames[(int)kind]);
+            if (kind == GateItemKind.Dispatch)
+            {
+                builder.Append("=0x").Append(_gateDispatchHashes[gate & (GateKindRing - 1)].ToString("X16"));
+            }
+        }
+
+        if (fullGate > executedAtStart + 16)
+        {
+            builder.Append(",...");
+        }
+
+        return builder.ToString();
+    }
 
     // The kind of each gated non-draw item by its gate number, for the counters below. A job's gate is never more than the
     // command thread's queue depth (at most 4096 items) behind the newest, so a ring twice that holds every gate in use.
@@ -616,8 +653,22 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         Interlocked.Increment(ref _lookaheadVerified);
         if (SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Difference(job.Programs!, resolved) is { } difference)
         {
+            // What the next verify run needs to tell a hole in the take check from a resolution that differs whatever ran
+            // before it: every differing group, both resolutions' programs, whether the worker resolves the same again,
+            // the items looked over (a dispatch's program hash) and the effects noted, and the program cache state the
+            // look-ahead resolution ended under against the state now.
+            var again = _executor.ResolveGraphicsPrograms(banks, in inputs);
+            var stable = SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Difference(resolved, again) is { } againDifference
+                ? "differs again: " + againDifference
+                : "same";
             throw _fatal($"A draw's programs resolved ahead of the dispatches or collector calls before it differ from the worker's: {difference} " +
-                $"(job {job.Index}, gate {job.Gate}, full gate {job.FullGate}, executed at start {job.ExecutedAtStart}, last collector call {job.LastCollectGate}).");
+                $"(job {job.Index}, gate {job.Gate}, full gate {job.FullGate}, executed at start {job.ExecutedAtStart}, last collector call {job.LastCollectGate}). " +
+                $"differences=[{SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Differences(job.Programs!, resolved)}] " +
+                $"ahead=[{SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Describe(job.Programs!)}] " +
+                $"worker=[{SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Describe(resolved)}] worker_again={stable} " +
+                $"looked_over=[{DescribeLookedOver(job.ExecutedAtStart, job.FullGate)}] " +
+                $"last_dispatch_effect={Volatile.Read(ref _lastDispatchEffect)} last_collect_effect={Volatile.Read(ref _lastCollectEffect)} " +
+                $"state_ahead=[{job.ResolveState}] state_now=[{_executor.DescribeProgramState()}].");
         }
 
         return resolved;
@@ -1086,6 +1137,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, WorkerScratch.Enabled ? _fatal : _host.Fatal, job.Indexed,
                 job.StartInstanceUserData);
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);
+            if (LookaheadMode == DrawLookaheadMode.Verify)
+            {
+                job.ResolveState = _executor.DescribeProgramState();
+            }
+
             job.Assumptions = _concurrent.EndConcurrentResolve();
             if (job.Programs is { Available: true } programs)
             {

@@ -164,6 +164,10 @@ public interface IShaderPipelineProvider
     // executor then stops skipping culling primitive-shader draws; see IGuestGpuBackend.
     bool SupportsPrimitiveShaderMeshPipelines => false;
 
+    // The cache-wide state a draw's resolution depends on beyond its registers and guest reads (program cache epoch,
+    // learned device loads, header registrations...), for the look-ahead verify's fatal (ParallelProgramPrefetch).
+    string DescribeProgramState() => string.Empty;
+
     // Optional capture of rejected stage inputs; it never admits or executes the draw.
     void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context) { }
 

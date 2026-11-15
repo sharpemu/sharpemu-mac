@@ -341,6 +341,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
     }
 
+    public string DescribeProgramState() =>
+        $"content_epoch={_programs.ContentEpoch} device_data={DeviceDataLoads.Generation} " +
+        $"registrations={ShaderHeaderRegistry.Registrations} tables={_vertexTables.Generation} linked={_programs.LinkedLookups}";
+
     // The resolve memo of this cache (GraphicsResolveMemo), or null with it off; SHARPEMU_DRAW_REUSE=0 turns it off too.
     private GraphicsResolveMemo? _resolveMemo = DrawReuseDisabled || GraphicsResolveMemo.DefaultMode == ResolveMemoMode.Off
         ? null
