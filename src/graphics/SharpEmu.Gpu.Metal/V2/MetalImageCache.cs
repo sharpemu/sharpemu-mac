@@ -1912,20 +1912,23 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// memory. Called before a buffer binding, an incompatible image request or a
     /// host read can observe the bytes. <paramref name="written"/> says the consumer also
     /// writes them, and is followed by <see cref="InvalidateMemoryFromGpu"/> over the range.
+    /// True when a GPU-modified image overlapped the range (it was published or written back).
     /// </summary>
-    public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause, bool written = false)
+    public bool FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause, bool written = false)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.GpuWriteFlush);
         if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
         {
-            return;
+            return false;
         }
 
+        var found = false;
         using var held = _lock.Hold();
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
         {
             if (_slots.TryGet(imageIdentifier) is { } image && image.GpuOverlaps(address, size))
             {
+                found = true;
                 if (TryPublishConsumerRunLocked(image, address, size, cause, written))
                 {
                     continue;
@@ -1934,6 +1937,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 WriteBackToGuest(image, cause);
             }
         }
+
+        return found;
     }
 
     /// <summary>A GPU shader or transfer wrote these guest bytes: the images reload.</summary>

@@ -2546,19 +2546,37 @@ internal sealed partial class MetalRenderHost :
 
     public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
     {
+        // A read the binding before it answered, while that answer stands (MetalRenderHost.ReadBindingMemo.cs).
+        if (!isWritten && TryReadBindingMemo(address, size, computeStage: false, out var memo))
+        {
+            if (ReadBindingMemoVerify)
+            {
+                VerifyReadBinding(address, size, computeStage: false, MetalWritebackCause.BufferBinding, memo);
+            }
+
+            return new BufferBinding((ulong)memo.Buffer, memo.Offset);
+        }
+
+        var memoStamp = !isWritten && ReadBindingMemoEnabled ? ReadBindingStamp() : default;
         // A buffer binding sees guest memory, so any image that owns these bytes
         // publishes them first; a written binding also invalidates those images.
-        FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding, isWritten);
+        var flushFoundImage = _imageCache.FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding, isWritten);
         // A read takes the storage path: its window, a guest view, or a staged copy that
         // holds the GPU's writes still in flight in this command buffer - whole, however
         // large, up to the largest window.
+        var inPlaceAlias = 0UL;
         var range = isWritten
             ? _guestMemory.Resolve(address, size, whole: true)
-            : ResolveStorageBuffer(address, size, written: false);
+            : ResolveStorageBuffer(address, size, written: false, computeStage: false, out inPlaceAlias);
 
         if (!range.IsValid)
         {
             return NullBuffer;
+        }
+
+        if (!isWritten && ReadBindingMemoEnabled)
+        {
+            StoreReadBinding(address, size, computeStage: false, memoStamp, flushFoundImage, inPlaceAlias, range);
         }
 
         TraceRingBinding(address, size, isWritten, range);
@@ -2736,6 +2754,9 @@ internal sealed partial class MetalRenderHost :
             // Sampled bindings the texture memo answered, those whose stamp failed between the preparation
             // and the bind, lookups made in full, results memoised, and entries held.
             $"texture_memo=({TakeTextureMemoCounters()}) {FormatGraphicsBindingCounters()} " +
+            // Read-only bindings answered from the one before (hits), looked up and not (misses), kept, and checked
+            // against the full path under =verify; then how often a draw's binding inputs repeat (bind_shape).
+            $"{TakeReadBindingCounters()} " +
             // Modules and pipeline states resident against made, and what the bound released.
             $"{DescribeShaderCache()} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +

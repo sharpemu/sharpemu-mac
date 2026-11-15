@@ -851,6 +851,7 @@ internal sealed partial class MetalRenderHost
         var stage = (MetalStageBindings)prepared;
         var info = stage.Program.Resources!.Info;
         var snapshot = stage.StageResources.Resources;
+        NoteBindShape(stage, snapshot);
         for (var index = 0; index < stage.ImageCount; index++)
         {
             if (index == stage.MovieLuma || index == stage.MovieChroma)
@@ -939,6 +940,30 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
+            var written = info.Buffers[index].Written;
+            var computeStage = stage.Program.Stage == ShaderStageKind.Compute;
+            if (written)
+            {
+                _writtenBufferBinds++;
+            }
+            else
+            {
+                _readOnlyBufferBinds++;
+                // A range bound read-only before, whose binding still stands (MetalRenderHost.ReadBindingMemo.cs):
+                // mapped whole, nothing to flush or order, the same window.
+                if (TryReadBindingMemo(descriptor.Address, requested, computeStage, out var memo))
+                {
+                    if (ReadBindingMemoVerify)
+                    {
+                        VerifyReadBinding(descriptor.Address, requested, computeStage, MetalWritebackCause.StorageDescriptor, memo);
+                    }
+
+                    stage.Buffers[index] = memo;
+                    stage.BufferLengths[index] = BoundBufferBytes(requested, memo);
+                    continue;
+                }
+            }
+
             // A range mapped whole - nearly every binding - is answered by one query; ClampMappedSize
             // asks again from its first byte only for a range that runs past its mapping.
             bool readable;
@@ -962,9 +987,14 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = mappedWhole ? requested : ClampMappedSize(descriptor.Address, requested);
-            var written = info.Buffers[index].Written;
-            FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
-            var range = ResolveStorageBuffer(descriptor.Address, size, written, stage.Program.Stage == ShaderStageKind.Compute);
+            var memoStamp = !written && mappedWhole && ReadBindingMemoEnabled ? ReadBindingStamp() : default;
+            var flushFoundImage = _imageCache.FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
+            var range = ResolveStorageBuffer(descriptor.Address, size, written, computeStage, out var inPlaceAlias);
+            if (!written && mappedWhole && ReadBindingMemoEnabled)
+            {
+                StoreReadBinding(descriptor.Address, size, computeStage, memoStamp, flushFoundImage, inPlaceAlias, range);
+            }
+
             // The text is built only when the trace is on: this runs per storage buffer per draw.
             if (_traceBufferUserAddress != 0)
             {
@@ -1738,6 +1768,7 @@ internal sealed partial class MetalRenderHost
             var dummy = TinyPassDummyTexture(texture, resource);
             if (dummy != 0)
             {
+                _tinyPassDummies++;
                 BinaryPrimitives.WriteUInt64LittleEndian(
                     span[(index * sizeof(ulong))..], MetalNative.SendGpuResourceId(dummy, SelGpuResourceId));
                 NoteUsedResource(dummy, Mtl.ResourceUsageRead);
