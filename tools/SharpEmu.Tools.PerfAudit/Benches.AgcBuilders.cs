@@ -24,7 +24,7 @@ internal static unsafe class AgcBuilderBenches
     private const ulong Dwords = 0x8000;
 
     // The guest process's image store minus the transport: the interest filter of RemoteImageStore.
-    private sealed class FilterStore(SplitSharedState state) : IGuestImageStore
+    internal sealed class FilterStore(SplitSharedState state) : IGuestImageStore
     {
         public long Landed;
         public bool MarkCpuWrite(ulong address, ulong size) => false;

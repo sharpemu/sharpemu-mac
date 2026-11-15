@@ -28,6 +28,7 @@ if (On("misc")) MiscBenches.Run();
 if (On("w8")) W8Benches.Run();
 if (filter.Split(',').Contains("xlate")) TranslatorBenches.Run();
 if (filter.Split(',').Contains("agc")) AgcBuilderBenches.Run();
+if (filter.Split(',').Contains("contend")) ContentionBenches.Run(args);
 if (filter.Split(',').Contains("gword")) MetalRawBenches.GpuWordWait();
 if (filter.Split(',').Contains("wranges")) WriteRangeBenches.Run();
 if (filter.Split(',').Contains("labels")) LabelFilterBenches.Run();
