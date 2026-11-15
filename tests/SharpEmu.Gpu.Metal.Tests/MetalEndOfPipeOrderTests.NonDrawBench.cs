@@ -162,21 +162,27 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests
             var selRelease = MetalNative.Selector("release");
             var group = new MtlSize { Width = 1, Height = 1, Depth = 1 };
             var threads = new MtlSize { Width = 64, Height = 1, Depth = 1 };
-            string[] cases = ["none", "split", "split_blit", "device_event", "shared_event", "in_encoder"];
+            // split_nofence leaves the fence out (Metal's own hazard tracking still orders the two encoders over the
+            // tracked buffer); split_untracked also takes an untracked buffer, so nothing orders them: what a split
+            // costs once the fence chain is taken away.
+            var untracked = MetalNative.SendNewBuffer(device, selNewBuffer, 4096, 1 << 8);
+            string[] cases = ["none", "split", "split_nofence", "split_untracked", "split_blit", "device_event", "shared_event", "in_encoder"];
+            var fenced = true;
+            var target = words;
             var samples = cases.ToDictionary(name => name, _ => new List<double>());
 
             nint OpenCompute(nint commandBuffer)
             {
                 var encoder = MetalNative.Send(commandBuffer, selCompute);
-                MetalNative.SendVoid(encoder, selWaitFence, fence);
+                if (fenced) MetalNative.SendVoid(encoder, selWaitFence, fence);
                 MetalNative.SendVoid(encoder, selPipeline, tick);
-                MetalNative.SendSetBuffer(encoder, selSetBuffer, words, 0, 0);
+                MetalNative.SendSetBuffer(encoder, selSetBuffer, target, 0, 0);
                 return encoder;
             }
 
             void EndCompute(nint encoder)
             {
-                MetalNative.SendVoid(encoder, selUpdateFence, fence);
+                if (fenced) MetalNative.SendVoid(encoder, selUpdateFence, fence);
                 MetalNative.SendVoid(encoder, selEnd);
             }
 
@@ -202,6 +208,8 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests
                         _ => 0,
                     };
                     var value = 0UL;
+                    fenced = name is not ("split_nofence" or "split_untracked");
+                    target = name == "split_untracked" ? untracked : words;
                     var encoder = OpenCompute(commandBuffer);
                     for (var pair = 0; pair < pairs; pair++)
                     {
@@ -229,7 +237,7 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests
                                     SharpEmu.Gpu.Metal.V2.MetalV2Native.SendEventValue(commandBuffer, selWait, @event, value);
                                 }
 
-                                if (name != "split")
+                                if (name is not ("split" or "split_nofence" or "split_untracked"))
                                 {
                                     Blit(commandBuffer);
                                 }
@@ -269,7 +277,7 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests
             File.WriteAllText(path, JsonSerializer.Serialize(new {
                 architecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(), pairs,
                 rounds = rounds - warmup, results }, new JsonSerializerOptions { WriteIndented = true }));
-            foreach (var handle in new[] { words, staging, labels, fence, tick, copy, queue }) MetalNative.SendVoid(handle, selRelease);
+            foreach (var handle in new[] { words, untracked, staging, labels, fence, tick, copy, queue }) MetalNative.SendVoid(handle, selRelease);
         }
         finally
         {
