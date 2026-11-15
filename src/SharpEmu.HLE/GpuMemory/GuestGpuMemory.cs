@@ -261,8 +261,10 @@ public sealed class GuestGpuMemory : IDisposable
     // in that order, as they do from two calls.
     public void MarkCpuWriteLanded(ulong firstAddress, ulong firstSize, ulong secondAddress, ulong secondSize)
     {
-        var firstCovered = firstSize != 0 && Covers(firstAddress, firstSize);
-        var secondCovered = secondSize != 0 && Covers(secondAddress, secondSize);
+        // CoversWrites, as the single-write overload and the pre-write MarkCpuWrite test: a range
+        // only a lazy registration covers is announced before it lands, so it must be after too.
+        var firstCovered = firstSize != 0 && CoversWrites(firstAddress, firstSize);
+        var secondCovered = secondSize != 0 && CoversWrites(secondAddress, secondSize);
         if (!firstCovered && !secondCovered)
         {
             return;
