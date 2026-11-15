@@ -314,11 +314,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 banks.Stamp(RegisterStamp.ShaderPrograms), banks.Stamp(RegisterStamp.VertexUserData), banks.Stamp(RegisterStamp.PixelUserData),
                 banks.Stamp(RegisterStamp.ColorTargets, RegisterStamp.ShaderInterface), ShaderHeaderRegistry.Registrations);
             var flags = new KeptGraphicsFlags(pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, startInstanceUserData);
+            var shadowMiss = ShadowResolveMemo(banks, targetExportMapping, flags);
             ClaimKeptPrograms();
             var kept = _keptGraphics ??= new KeptGraphicsPrograms();
             if (TryKeepGraphicsPrograms(context, kept, stamps, flags, targetExportMapping, out var keptPrograms))
             {
                 _graphicsKept.Increment();
+                if (shadowMiss) _resolveMemo!.Store();
                 return keptPrograms;
             }
 
@@ -328,8 +330,58 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 depthAspectBound, stencilAspectBound, triangleList, mesh: null, startInstanceUserData: startInstanceUserData,
                 nativeTessellation: true);
             KeepGraphicsPrograms(kept, programs, context, stamps, flags, targetExportMapping);
+            if (shadowMiss) _resolveMemo!.Store();
             return programs;
         }
+    }
+
+    // The resolve memo of this cache (GraphicsResolveMemo), or null with it off; SHARPEMU_DRAW_REUSE=0 turns it off too.
+    private GraphicsResolveMemo? _resolveMemo = DrawReuseDisabled || GraphicsResolveMemo.DefaultMode == ResolveMemoMode.Off
+        ? null
+        : new GraphicsResolveMemo(GraphicsResolveMemo.DefaultMode, GraphicsResolveMemo.DefaultCapacity);
+
+    // For tests: the memo's mode on this cache, with a fresh memo.
+    internal ResolveMemoMode ResolveMemoMode
+    {
+        get => _resolveMemo?.Mode ?? ResolveMemoMode.Off;
+        set
+        {
+            lock (_resolveGate)
+            {
+                _resolveMemo = value == ResolveMemoMode.Off ? null : new GraphicsResolveMemo(value, GraphicsResolveMemo.DefaultCapacity);
+            }
+        }
+    }
+
+    // Shadow mode: counts whether the memo would have the draw's key; true when it has not and the key is to be stored
+    // once the draw resolved.
+    private bool ShadowResolveMemo(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    {
+        if (_resolveMemo is not { Mode: ResolveMemoMode.Shadow } memo)
+        {
+            return false;
+        }
+
+        if (_registry.HasFrontend)
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Frontend);
+            return false;
+        }
+
+        if (!memo.Fill(banks, targetExportMapping, flags, new PixelOutputBlendBits(PixelOutputBlend(banks.Context))))
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Key);
+            return false;
+        }
+
+        if (memo.Find() is not null)
+        {
+            GraphicsResolveMemo.NoteShadowHit();
+            return false;
+        }
+
+        GraphicsResolveMemo.NoteKeyMiss(memo.ClassifyMiss());
+        return true;
     }
 
     // The interface's earlier forms, for callers holding only the four inputs.
@@ -412,7 +464,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     public static string TakeKeptProgramsReport() =>
         FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] graphics_kept={_graphicsKept.Take()} graphics_resolved={_graphicsResolved.Take()} ") +
-        FormattableString.Invariant($"compute_kept={_computeKept.Take()} compute_rebound={_computeRebound.Take()} compute_resolved={_computeResolved.Take()}");
+        FormattableString.Invariant($"compute_kept={_computeKept.Take()} compute_rebound={_computeRebound.Take()} compute_resolved={_computeResolved.Take()} ") +
+        GraphicsResolveMemo.TakeReport();
 
     // Besides upstream's register stamps, the fork's resolution reads the host viewport transform (dynamic
     // viewport registers, compared resolved), the depth aspects and triangle-list assembly (per-vertex pixel
