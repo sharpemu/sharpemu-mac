@@ -396,7 +396,7 @@ public sealed partial class GpuCommandInterpreter
             if (eopEventType != 0x28 || gcrControl != 0)
             {
                 Diagnostics.DispatchRunTally.NoteSync();
-                _host.EmitGlobalBarrier();
+                EmitOrderingBarrier();
                 _host.ReleaseShaderWrites();
             }
 
@@ -407,7 +407,7 @@ public sealed partial class GpuCommandInterpreter
         if (ReleaseMemGcrNeedsBarrier(eopEventType, gcrControl))
         {
             Diagnostics.DispatchRunTally.NoteSync();
-            _host.EmitGlobalBarrier();
+            EmitOrderingBarrier();
             _host.ReleaseShaderWrites();
         }
 
@@ -461,7 +461,7 @@ public sealed partial class GpuCommandInterpreter
             case 0x0F:
             case 0x10:
                 Diagnostics.DispatchRunTally.NoteSync();
-                _host.EmitGlobalBarrier();
+                EmitOrderingBarrier();
                 if (eventType == PsPartialFlushEvent)
                 {
                     _host.ReleaseShaderWrites();
@@ -479,7 +479,7 @@ public sealed partial class GpuCommandInterpreter
                 }
 
                 Diagnostics.DispatchRunTally.NoteSync();
-                _host.EmitGlobalBarrier();
+                EmitOrderingBarrier();
                 if (eventType == CacheFlushAndInvalidateEvent)
                 {
                     _host.ReleaseShaderWrites();

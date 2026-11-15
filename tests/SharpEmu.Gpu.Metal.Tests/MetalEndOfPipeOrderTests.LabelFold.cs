@@ -118,6 +118,74 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests
         Assert.Equal(5UL, rig.Backing.Read64(WindowedLabel));
     }
 
+    // A command-processor write nothing causal came before (no read of a pending value, no flush or acquire on its
+    // queue) is device-ordered: the dispatch that reads it lands it inside the open compute encoder, with no barrier.
+    [Fact]
+    public void APlainCommandProcessorWriteADispatchReadsLandsInTheOpenComputeEncoder()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        Assert.True(host.CpWritesDeviceOrdered);
+        _ = host.TakeLabelBarriers();
+        _ = host.TakeLabelBarrierKinds();
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x55UL), "WRITE_DATA", causal: false);
+        host.OrderAfterDeferredCopies(LaterLabel, 8, MetalRenderHost.LabelLandCause.BindRead);
+        Assert.True(host.ComputeEncoderOpen);
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+        Assert.Equal(0L, host.TakeLabelBarriers());
+        var kinds = host.TakeLabelBarrierKinds();
+        Assert.Equal(0L, kinds[0]);
+        Assert.Equal(0L, kinds[1]);
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
+    }
+
+    // A causal write (its queue's wait was met by a label not yet landed) stays CPU-visible: it is held, and every write
+    // after it is held behind it, CPU-visible too, until they land together behind the shared event with the label -
+    // in Demon's Souls' recycled command memory the store must not reach the guest before the label it waited on.
+    [Fact]
+    public void ACausalWriteAndTheWritesAfterItLandBehindTheSharedEventWithTheLabel()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        _ = host.TakeLabelBarriers();
+        _ = host.TakeLabelBarrierKinds();
+
+        _ = host.EnsureComputeEncoder();
+        host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.WriteBack32, 1, WindowedLabel, 1));
+        host.RecordCommandProcessorWrite(LaterLabel, BitConverter.GetBytes(0x55UL), "WRITE_DATA", causal: true);
+        host.RecordCommandProcessorWrite(LaterLabel + 8, BitConverter.GetBytes(0x66UL), "WRITE_DATA", causal: false);
+        Assert.Equal(3, host.DeferredLabelCopyCount);
+
+        host.OrderAfterDeferredCopies(LaterLabel + 8, 8, MetalRenderHost.LabelLandCause.BindRead);
+        Assert.False(host.ComputeEncoderOpen);
+        Assert.Equal(0, host.DeferredLabelCopyCount);
+        Assert.Equal(1L, host.TakeLabelBarriers());
+        Assert.Equal(new long[] { 1, 0, 0, 0 }, host.TakeLabelBarrierKinds());
+
+        // Landed, the next plain write is device-ordered again.
+        _ = host.EnsureComputeEncoder();
+        host.RecordCommandProcessorWrite(LaterLabel + 16, BitConverter.GetBytes(0x77UL), "WRITE_DATA", causal: false);
+        host.OrderAfterDeferredCopies(LaterLabel + 16, 8, MetalRenderHost.LabelLandCause.BindRead);
+        Assert.True(host.ComputeEncoderOpen);
+        Assert.Equal(0L, host.TakeLabelBarriers());
+
+        host.FlushCommandBuffer();
+        WaitForGpu(host, host.LastWorkSerial);
+        WaitForCompletions(host);
+        Assert.Equal(1u, rig.Backing.Read32(WindowedLabel));
+        Assert.Equal(0x55UL, rig.Backing.Read64(LaterLabel));
+        Assert.Equal(0x66UL, rig.Backing.Read64(LaterLabel + 8));
+        Assert.Equal(0x77UL, rig.Backing.Read64(LaterLabel + 16));
+    }
+
     // A write-back label recorded after a GPU store is seen by the CPU only once the store is too: 500 times, the CPU
     // polls the label and reads the store's last word as soon as it sees it.
     [Fact]

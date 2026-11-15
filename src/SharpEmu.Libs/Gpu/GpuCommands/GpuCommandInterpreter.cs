@@ -61,6 +61,36 @@ public sealed partial class GpuCommandInterpreter
     private int _lastWriteLength;
     private ulong _lastWritePacket;
 
+    // Since this queue's last command-processor write: a read answered from a value not yet landed, or a partial flush,
+    // cache action or acquire. Either makes the next write a "work before me is done" signal the guest may act on, so the
+    // host keeps it CPU-visible and in its stream position with the labels before it; on the console a plain WRITE_DATA
+    // waits for nothing and publishes nothing for the CPU.
+    private bool _cpWriteCausal;
+
+    private static long _pendingValueReads;
+
+    /// <summary>Reads answered from a value not yet landed, on any queue (SHARPEMU_METAL_V2_CP_WRITE_DEVICE_ORDER=verify).</summary>
+    public static long PendingValueReads => Interlocked.Read(ref _pendingValueReads);
+
+    private void NoteCausalRead()
+    {
+        _cpWriteCausal = true;
+        Interlocked.Increment(ref _pendingValueReads);
+    }
+
+    private void EmitOrderingBarrier()
+    {
+        _cpWriteCausal = true;
+        _host.EmitGlobalBarrier();
+    }
+
+    private bool TakeCommandProcessorWriteCausal()
+    {
+        var causal = _cpWriteCausal;
+        _cpWriteCausal = false;
+        return causal;
+    }
+
     // The last packets this interpreter walked, so a stream that leaves its
     // packet boundaries says how it got there instead of only where it stopped.
     private readonly PacketTraceEntry[] _packetTrace = new PacketTraceEntry[32];
@@ -1041,6 +1071,7 @@ public sealed partial class GpuCommandInterpreter
         if (destination.Length is sizeof(uint) or sizeof(ulong) && PendingLabelLookup is { } pending &&
             pending(address, destination.Length == sizeof(ulong), out var labelValue))
         {
+            NoteCausalRead();
             if (destination.Length == sizeof(ulong))
             {
                 BinaryPrimitives.WriteUInt64LittleEndian(destination, labelValue);

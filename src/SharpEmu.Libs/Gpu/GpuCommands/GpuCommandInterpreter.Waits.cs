@@ -69,14 +69,19 @@ public sealed partial class GpuCommandInterpreter
             }
         }
 
+        // Met by a value not yet in memory (a recorded label or store this host lands later): what this queue writes
+        // next must not reach the guest before that value does (TakeCommandProcessorWriteCausal).
+        var pendingAnswer = deferred;
         if (!satisfied && TryReadOwnWrite(address, is64Bit, out var ownValue))
         {
             _ = WaitOperation.TryCompare(ownValue, reference, mask, compareFunction, out satisfied);
+            pendingAnswer = satisfied;
         }
 
         if (!satisfied && PendingLabelLookup is { } pending && pending(address, is64Bit, out var labelValue))
         {
             _ = WaitOperation.TryCompare(labelValue, reference, mask, compareFunction, out satisfied);
+            pendingAnswer = satisfied;
         }
 
         if (!satisfied && !deferred)
@@ -85,6 +90,13 @@ public sealed partial class GpuCommandInterpreter
             // work that writes them is on its way before the submission sleeps on them.
             value = ReadWaitOperand(address, is64Bit, commitPendingWrite: true);
             _ = WaitOperation.TryCompare(value, reference, mask, compareFunction, out satisfied);
+        }
+
+        if (satisfied && (pendingAnswer ||
+            (PendingLabelLookup is { } stillPending && stillPending(address, is64Bit, out _))))
+        {
+            // A host read (its overlay of recorded stores) may have answered from a value still pending too.
+            NoteCausalRead();
         }
 
         if (!satisfied)
@@ -435,6 +447,8 @@ public sealed partial class GpuCommandInterpreter
             !(PendingLabelLookup is { } pendingLabel && pendingLabel(address, false, out _)) &&
             _host.TryTakeOwedOperandAsZero(address, sizeof(uint)))
         {
+            // The owed bytes are read as zero before they land: what follows depends on them.
+            NoteCausalRead();
             ConditionalExecuteSpeculation.NoteTakenAsZero();
             TraceSkippedPackets("conditional-execute", packet.PacketAddress + (payloadDwords + 1) * sizeof(uint), executeCount, (uint)address);
             return payloadDwords + executeCount;

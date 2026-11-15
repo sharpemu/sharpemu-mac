@@ -135,9 +135,55 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    // SHARPEMU_METAL_V2_CP_WRITE_DEVICE_ORDER (on; =0 off): a command-processor write its queue made with nothing causal
+    // before it (TakeCommandProcessorWriteCausal: no read of a value not yet landed, no flush, cache action or acquire
+    // since its previous write) is held device-ordered rather than CPU-visible. On the console such a WRITE_DATA waits
+    // for no earlier work and publishes nothing for the CPU, so it needs no shared event, and a batch of them lands
+    // inside the open compute encoder. Every Demon's Souls batch held one and paid the shared event for it.
+    // =verify keeps every write CPU-visible and counts (cp_write_order_suspects, logged once) the ones that would have
+    // been device-ordered while some queue had read a pending value since the last shared barrier: a causal read site
+    // the interpreter does not flag shows up there.
+    private static readonly string? CpWriteDeviceOrderMode =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CP_WRITE_DEVICE_ORDER");
+
+    internal bool CpWritesDeviceOrdered { get; set; } = CpWriteDeviceOrderMode is not ("0" or "verify");
+
+    private static readonly bool CpWriteDeviceOrderVerify = CpWriteDeviceOrderMode == "verify";
+
+    // A causal command-processor write is held: every later one is held CPU-visible behind it until the held copies
+    // land, so none overtakes it and the order of the writes is kept across the landing.
+    private bool _causalCpWriteHeld;
+    private long _pendingReadsAtSharedBarrier;
+    private long _cpWriteOrderSuspects;
+
+    private (bool CpuVisible, LabelCopyKind Kind) CommandProcessorWriteClass(bool causal)
+    {
+        var ordered = causal || _causalCpWriteHeld;
+        if (CpWriteDeviceOrderVerify && !ordered &&
+            SharpEmu.Libs.Gpu.GpuCommands.GpuCommandInterpreter.PendingValueReads != _pendingReadsAtSharedBarrier)
+        {
+            _cpWriteOrderSuspects++;
+            MetalV2Diagnostics.WarnOnce("cp-write-order-suspect",
+                "A command-processor write its queue did not flag as causal followed a read of a pending value since the " +
+                "last shared label barrier (SHARPEMU_METAL_V2_CP_WRITE_DEVICE_ORDER=verify).");
+        }
+
+        return (!CpWritesDeviceOrdered || ordered, ordered ? LabelCopyKind.CpCausal : LabelCopyKind.CpWrite);
+    }
+
+    // heldBefore: the held copies before the write was recorded; more now means it was held.
+    private void NoteCommandProcessorWriteHeld(bool causal, int heldBefore)
+    {
+        if (causal && _deferredLabelCopies.Count > heldBefore)
+        {
+            _causalCpWriteHeld = true;
+        }
+    }
+
     private string TakeLabelLandingCounters()
     {
         var text = new System.Text.StringBuilder(256);
+        text.Append(" cp_write_order_suspects=").Append(Interlocked.Exchange(ref _cpWriteOrderSuspects, 0));
         Append(text, "label_land", LabelLandNames, _labelLand);
         Append(text, "label_batch", LabelBatchNames, _labelBatch);
         Append(text, "label_barrier", LabelBarrierNames, _labelBarrierKinds);
