@@ -113,6 +113,7 @@ internal sealed partial class MetalImageCache
 
         EnsureSparseBacked(image);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, image.Texture);
+        image.DeviceCopiedSinceRefresh = true;
         if (!_transfer.TryEncodeLayerSubsetCopy(
                 context, other.Texture, sourceFirst, image.Texture, targetFirst, layers, image.Shape.Width, image.Shape.Height))
         {

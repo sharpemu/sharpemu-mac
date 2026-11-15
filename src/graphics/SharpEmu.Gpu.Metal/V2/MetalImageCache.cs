@@ -44,6 +44,35 @@ internal interface IMetalImageCacheOwner
     // are not settled yet.
     bool HasPendingGpuWrite(ulong address, ulong size);
 
+    // A transfer begun now would end an open render pass (MetalRenderHost.UploadPrelude.cs).
+    bool UploadWouldEndRenderPass => false;
+
+    // The host's share of the conditions for uploading this texture from these guest bytes ahead
+    // of the open command buffer: what the open buffer has recorded over either.
+    MetalPreludeBlock PreludeBlocks(nint texture, ulong address, ulong size) => MetalPreludeBlock.None;
+
+    // An upload met an open render pass and ended it; blocks are the prelude conditions it failed.
+    void NotePassEndingUpload(MetalImageDirtyCause cause, MetalPreludeBlock blocks)
+    {
+    }
+
+    // SHARPEMU_METAL_V2_UPLOAD_PRELUDE: an upload that fails no prelude condition is encoded ahead
+    // of the open command buffer, through BeginUploadPrelude and EndUploadPrelude.
+    bool UploadPreludeEnabled => false;
+
+    // A command buffer committed ahead of the open one when EndUploadPrelude is called, or null when
+    // none can be had (the switch off, no render pass open).
+    IMetalSubmissionContext? BeginUploadPrelude() => null;
+
+    void EndUploadPrelude(IMetalSubmissionContext prelude)
+    {
+    }
+
+    // The upload a prelude was begun for encoded nothing.
+    void NoteUploadPreludeUnencoded()
+    {
+    }
+
     // Copies the guest bytes of a range into its staged (ring) copy on the GPU, behind the work still
     // writing them, so a transfer reading the staged copy next sees what that work leaves there.
     void GatherStagedRange(ulong address, in MetalGuestRange staging)
@@ -1087,6 +1116,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureSparseBacked(depth);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, depth.Texture);
+        depth.DeviceCopiedSinceRefresh = true;
         if (!_transfer.TryEncodeStencilFromColor(
                 context, in other.Description, other.Texture, in depth.Description, depth.Texture))
         {
@@ -1168,6 +1198,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureSparseBacked(image);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, depth.Texture, image.Texture);
+        image.DeviceCopiedSinceRefresh = true;
         if (!_transfer.TryEncodeColorFromStencil(
                 context, in depth.Description, depth.Texture, in image.Description, image.Texture))
         {
@@ -2125,6 +2156,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureSparseBacked(image);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, image.Texture);
+        image.DeviceCopiedSinceRefresh = true;
         var refusal = "disabled";
         var fused = AliasTransitionsEnabled && _transfer.TryEncodeFusedAlias(
             context, in other.Description, other.Texture, in image.Description, image.Texture, out refusal);
@@ -2831,26 +2863,43 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
-        PrepareSparseUpload(image, residentStart, residentEnd);
-        _owner.LandHeldCopies(description.Data.Address + residentStart, residentEnd - residentStart);
-        var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
-        var residentSize = residentEnd - residentStart;
-        var whole = residentSize <= TransferPieceBytes
-            ? ResolveUploadSource(description.Data.Address + residentStart, residentSize)
-            : default;
-        bool moved;
-        if (whole.IsValid && whole.Size >= residentSize)
+        // Sized before anything below lands or ends: whether this upload meets an open render pass,
+        // and which of the prelude's conditions it fails (MetalImageCache.UploadPrelude.cs). One that
+        // fails none runs ahead of the open command buffer instead of ending its pass.
+        MetalPreludeBlock? prelude = null;
+        var hoisted = false;
+        var moved = false;
+        if (_owner.UploadWouldEndRenderPass)
         {
-            var stencil = description.HasStencil
-                ? ResolveUploadSource(description.Stencil.Address, description.Stencil.Size)
-                : default;
-            moved = EncodeUpload(
-                context, in description, ResidentRange(image), whole, stencil, image.Texture,
-                residentStart, residentSize, image.FirstLevel);
+            var blocks = PreludeBlocks(image, residentStart, residentEnd, whole: true);
+            hoisted = TryUploadInPrelude(image, residentStart, residentEnd, ref blocks, out moved);
+            prelude = blocks;
         }
-        else
+
+        var gathersBefore = _uploadGathers;
+        IMetalSubmissionContext? context = null;
+        if (!hoisted)
         {
-            moved = UploadInPieces(context, image);
+            PrepareSparseUpload(image, residentStart, residentEnd);
+            _owner.LandHeldCopies(description.Data.Address + residentStart, residentEnd - residentStart);
+            context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
+            var residentSize = residentEnd - residentStart;
+            var whole = residentSize <= TransferPieceBytes
+                ? ResolveUploadSource(description.Data.Address + residentStart, residentSize)
+                : default;
+            if (whole.IsValid && whole.Size >= residentSize)
+            {
+                var stencil = description.HasStencil
+                    ? ResolveUploadSource(description.Stencil.Address, description.Stencil.Size)
+                    : default;
+                moved = EncodeUpload(
+                    context, in description, ResidentRange(image), whole, stencil, image.Texture,
+                    residentStart, residentSize, image.FirstLevel);
+            }
+            else
+            {
+                moved = UploadInPieces(context, image);
+            }
         }
 
         if (!moved)
@@ -2862,8 +2911,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         _uploadCauses[(int)image.DirtyCause]++;
+        if (hoisted)
+        {
+            NoteHoistedUse(image, true);
+        }
+        else
+        {
+            NotePassEndingUpload(image.DirtyCause, prelude, gathersBefore);
+        }
+
         NoteUploadForTrace(image, image.DirtyCause, residentEnd - residentStart, run: false);
-        if (context.WantsEncodedLabels)
+        if (context is { WantsEncodedLabels: true })
         {
             context.ProfileEncoded(ProfileLabel("upload", in description));
         }
@@ -2939,30 +2997,58 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         var cause = image.DirtyCause;
+        var anyHoisted = false;
         foreach (var (start, end) in runs[..count])
         {
-            var source = ResolveUploadSource(description.Data.Address + start, end - start);
-            if (!source.IsValid || source.Size < end - start)
+            // Each run goes ahead of the open buffer on its own conditions; one that stays in it names the
+            // texture there, so no later run of this image moves ahead of it.
+            MetalPreludeBlock? prelude = null;
+            var hoisted = false;
+            var moved = false;
+            if (_owner.UploadWouldEndRenderPass)
             {
-                return false;
+                var blocks = PreludeBlocks(image, start, end, whole: false);
+                hoisted = TryUploadInPrelude(image, start, end, ref blocks, out moved);
+                anyHoisted |= hoisted;
+                prelude = blocks;
             }
 
-            PrepareSparseUpload(image, start, end);
-            _owner.LandHeldCopies(description.Data.Address + start, end - start);
-            var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
-            if (!EncodeUpload(
+            var gathersBefore = _uploadGathers;
+            IMetalSubmissionContext? context = null;
+            if (!hoisted)
+            {
+                var source = ResolveUploadSource(description.Data.Address + start, end - start);
+                if (!source.IsValid || source.Size < end - start)
+                {
+                    NoteHoistedUse(image, anyHoisted);
+                    return false;
+                }
+
+                PrepareSparseUpload(image, start, end);
+                _owner.LandHeldCopies(description.Data.Address + start, end - start);
+                context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
+                moved = EncodeUpload(
                     context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,
-                    image.FirstLevel))
+                    image.FirstLevel);
+            }
+
+            if (!moved)
             {
                 // Nothing of this run reached the texture; the whole refresh decides what becomes of the image.
+                NoteHoistedUse(image, anyHoisted);
                 return false;
             }
 
             _uploadCauses[(int)cause]++;
+            if (!hoisted)
+            {
+                NotePassEndingUpload(cause, prelude, gathersBefore);
+            }
+
             NoteUploadForTrace(image, cause, end - start, run: true);
             _partialUploads++;
             _partialUploadBytesSaved += (long)(residentEnd - residentStart - (end - start));
-            if (context.WantsEncodedLabels)
+            if (context is { WantsEncodedLabels: true })
             {
                 context.ProfileEncoded(ProfileLabel("upload-run", in description));
             }
@@ -2975,6 +3061,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             Interlocked.Increment(ref _uploads);
         }
 
+        NoteHoistedUse(image, anyHoisted);
         if (image.FirstLevel != 0)
         {
             // What is still dirty lies outside the levels the texture holds.

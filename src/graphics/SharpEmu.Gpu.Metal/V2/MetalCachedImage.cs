@@ -170,6 +170,7 @@ internal sealed class MetalCachedImage : IDisposable
         {
             _stale[0] = (0, description.Data.Size);
             _staleCount = 1;
+            StaleCauses = 1 << (int)MetalImageDirtyCause.Created;
         }
 
         NoteContentChanged();
@@ -611,6 +612,20 @@ internal sealed class MetalCachedImage : IDisposable
     // Why the next upload will happen; purely diagnostic.
     public MetalImageDirtyCause DirtyCause { get; private set; } = MetalImageDirtyCause.Created;
 
+    /// <summary>
+    /// Every cause that marked the image stale since it was last clean, as bits of 1 &lt;&lt; cause.
+    /// <see cref="DirtyCause"/> keeps only the first, so a CPU-written image an alias hand-over
+    /// later marks over another run still says CpuWrite there; the upload prelude reads this.
+    /// </summary>
+    public byte StaleCauses { get; private set; }
+
+    /// <summary>
+    /// A device copy (an alias or stencil copy from another texture) wrote this texture since its
+    /// last whole refresh: the texture holds bytes guest memory may not, so the upload prelude never
+    /// moves a whole upload of it.
+    /// </summary>
+    public bool DeviceCopiedSinceRefresh;
+
     /// <summary>The most stale runs, and the most published runs, an image holds apart with run sets on.</summary>
     public const int MaxRuns = 4;
 
@@ -836,6 +851,7 @@ internal sealed class MetalCachedImage : IDisposable
         // Guest memory got newer bytes; the texture itself is unchanged until the upload, so
         // released chunks stay restorable from it (the upload's read restores what it covers).
         BumpContentVersion();
+        StaleCauses = (byte)((_cpuDirty ? StaleCauses : 0) | (1 << (int)cause));
         if (!_cpuDirty)
         {
             DirtyCause = cause;
@@ -912,6 +928,7 @@ internal sealed class MetalCachedImage : IDisposable
         var wasDirty = _cpuDirty;
         _cpuDirty = false;
         _staleCount = 0;
+        DeviceCopiedSinceRefresh = false;
         if (wasDirty)
         {
             BindingVersion++;
