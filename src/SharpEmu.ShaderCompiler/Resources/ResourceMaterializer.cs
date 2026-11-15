@@ -489,14 +489,19 @@ public static partial class ResourceMaterializer
     // Diagnostics: every guest word a fast snapshot's program reads when evaluated now with the snapshot's own draw values
     // (word reads only, no resident or clean shortcuts), in read order; null when the snapshot is not a fast one or the
     // evaluation threw (an abandoned read on a resolving thread included).
-    public static List<(ulong Address, uint Word)>? RecordWordReads(ResourceSnapshot snapshot)
+    public static List<(ulong Address, uint Word)>? RecordWordReads(ResourceSnapshot snapshot) =>
+        RecordReads(snapshot, clean: false)?.ConvertAll(read => (read.Address, read.Word));
+
+    // RecordWordReads, with the clean reader's reads recorded too when clean is set (Clean marks them; a refused clean
+    // read is recorded with word 0 and Refused set).
+    public static List<(ulong Address, uint Word, bool Clean, bool Refused)>? RecordReads(ResourceSnapshot snapshot, bool clean)
     {
         if (snapshot.Origin is not FastOrigin { Plan.MaterializationProgram: not null } origin)
         {
             return null;
         }
 
-        var reads = new List<(ulong Address, uint Word)>();
+        var reads = new List<(ulong Address, uint Word, bool Clean, bool Refused)>();
         var reader = origin.Inputs.ReadMemory;
         bool Recording(ulong address, out uint word)
         {
@@ -506,14 +511,28 @@ public static partial class ResourceMaterializer
                 return false;
             }
 
-            reads.Add((address, word));
+            reads.Add((address, word, false, false));
             return true;
+        }
+
+        var cleanReader = origin.Inputs.ReadCleanMemory;
+        bool RecordingClean(ulong address, out uint word)
+        {
+            word = 0;
+            if (cleanReader is null)
+            {
+                return false;
+            }
+
+            var read = cleanReader(address, out word);
+            reads.Add((address, word, true, !read));
+            return read;
         }
 
         var inputs = new ResourceRuntimeInputs
         {
             ReadMemory = Recording,
-            ReadCleanMemory = origin.Inputs.ReadCleanMemory,
+            ReadCleanMemory = clean && cleanReader is not null ? RecordingClean : cleanReader,
             UserData = origin.UserData,
             ShaderBase = origin.ShaderBase,
             ComputeState = origin.ComputeState,

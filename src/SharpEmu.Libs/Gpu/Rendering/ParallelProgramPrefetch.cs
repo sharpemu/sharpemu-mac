@@ -41,6 +41,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         // all FullGate items ran looked ahead of the ones that had not, and its take checks it against them.
         internal long FullGate;
         internal long ExecutedAtStart;
+        // =verify, =census: when the resolution ended (Stopwatch ticks).
+        internal long ResolvedAt;
+        // =census with SHARPEMU_PREFETCH_CENSUS_PS: the pixel stage's materialization reads, in order, as the
+        // resolving thread read them right after its resolution.
+        internal List<(ulong Address, uint Word, bool Clean, bool Refused)>? CensusReads;
+        // What the host said of the refused clean reads among them, at the resolution.
+        internal string? CensusRefusals;
         // The gate number of the last collector call (GateItemKind.Collect) queued before the job: above ExecutedAtStart,
         // the resolution looked ahead of it (draw_lookahead over_gc).
         internal long LastCollectGate;
@@ -70,6 +77,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         Off,
         On,
         Verify,
+        // =census: a measurement, not a check. The worker resolves every taken draw job again, looked ahead or not, uses
+        // its own result, and counts the jobs whose earlier resolution differs, with the time each stood between its
+        // resolution and its take: whether look-aheads differ more often than jobs that waited for their gate.
+        Census,
     }
 
     public static readonly DrawLookaheadMode DrawLookahead =
@@ -79,11 +90,14 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     {
         "0" => DrawLookaheadMode.Off,
         "verify" => DrawLookaheadMode.Verify,
+        "census" => DrawLookaheadMode.Census,
         _ => Environment.GetEnvironmentVariable("SHARPEMU_PERF_VERIFY") == "1" ? DrawLookaheadMode.Verify : DrawLookaheadMode.On,
     };
 
     // The mode this prefetch checks takes in (tests set Verify on one instance).
     internal DrawLookaheadMode LookaheadMode { get; set; } = DrawLookahead;
+
+    private bool RecordsForVerify => LookaheadMode is DrawLookaheadMode.Verify or DrawLookaheadMode.Census;
 
     // The command thread queues a collector call (GateItemKind.Collect) without moving the dispatch gate: the draws and
     // dispatches after it gate on the items before it, and their takes check NoteCollect. Only where draws look ahead
@@ -176,7 +190,17 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         return builder.Append("),verified=").Append(verified)
             .Append(",gc=(jobs=").Append(collect.Jobs).Append(",taken=").Append(collect.Taken).Append(",refused=").Append(collect.Refused)
             .Append(",calls=").Append(collect.Calls).Append(",effects=").Append(collect.Effects)
-            .Append("),replanned_all=").Append(Interlocked.Exchange(ref _replannedRefusals, 0)).Append(')').ToString();
+            .Append("),replanned_all=").Append(Interlocked.Exchange(ref _replannedRefusals, 0))
+            .Append(LookaheadMode == DrawLookaheadMode.Census ? TakeCensusReport() : string.Empty).Append(')').ToString();
+    }
+
+    // census=(gated=resolved/differed/stood_ms,ahead=resolved/differed/stood_ms)
+    private string TakeCensusReport()
+    {
+        string Group(int group) =>
+            $"{Interlocked.Exchange(ref _censusResolved[group], 0)}/{Interlocked.Exchange(ref _censusDiffered[group], 0)}/" +
+            $"{Interlocked.Exchange(ref _censusStoodTicks[group], 0) * 1000 / System.Diagnostics.Stopwatch.Frequency}";
+        return $",census=(gated={Group(0)},ahead={Group(1)})";
     }
 
     // The kind of a gated non-draw item, as the command thread queues it (NoteGateItem): what the draws after it wait for.
@@ -344,7 +368,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     public void NoteDispatchProgram(ComputeProgram program)
     {
-        if (LookaheadMode == DrawLookaheadMode.Verify)
+        if (RecordsForVerify)
         {
             _gateDispatchHashes[(Volatile.Read(ref _executedGate) + 1) & (GateKindRing - 1)] = program.Input.Stage.Program?.Hash ?? 0;
         }
@@ -657,8 +681,140 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             }
         }
 
+        if (LookaheadMode == DrawLookaheadMode.Census)
+        {
+            programs = TakeCensus(job, banks, in inputs, lookedAhead);
+        }
+
         return true;
     }
+
+    // =census counters, [0] jobs that waited for their gate, [1] look-aheads: taken jobs resolved again, those that
+    // differed, and the ticks they stood between resolution and take.
+    private readonly long[] _censusResolved = new long[2], _censusDiffered = new long[2], _censusStoodTicks = new long[2];
+    private readonly int[] _censusReports = new int[2];
+    private const int MaximumCensusReports = 8;
+
+    // SHARPEMU_PREFETCH_CENSUS_PS=<pixel program hash, hex>: the census records that pixel stage's reads on both threads.
+    private static readonly ulong CensusPixelHash =
+        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_PREFETCH_CENSUS_PS")?.Replace("0x", "", StringComparison.OrdinalIgnoreCase),
+            System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var hash) ? hash : 0;
+
+    private List<(ulong Address, uint Word, bool Clean, bool Refused)>? CensusReadsOf(GraphicsPrograms? programs) =>
+        LookaheadMode == DrawLookaheadMode.Census && CensusPixelHash != 0 &&
+        programs is { Available: true } && programs.PixelInput.Stage.Program?.Hash == CensusPixelHash
+            ? SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.RecordReads(programs.PixelInput.Stage.Resources, clean: true)
+            : null;
+
+    private string? DescribeRefusedCleanReads(List<(ulong Address, uint Word, bool Clean, bool Refused)>? reads)
+    {
+        if (reads is null)
+        {
+            return null;
+        }
+
+        var described = new List<string>();
+        foreach (var read in reads)
+        {
+            if (read.Refused && described.Count < 3)
+            {
+                described.Add($"0x{read.Address:X}:({_executor.DescribeGuestRange(read.Address, sizeof(uint))})");
+            }
+        }
+
+        return string.Join(" ", described);
+    }
+
+    // The reads of the job (resolving thread) and the worker side by side where they differ, by position, and what the
+    // host knows of the first differing addresses.
+    private string DescribeCensusReads(Job job, List<(ulong Address, uint Word, bool Clean, bool Refused)>? worker,
+        List<(ulong Address, uint Word, bool Clean, bool Refused)>? again)
+    {
+        if (job.CensusReads is not { } ahead || worker is null)
+        {
+            return $"reads=unavailable(job={job.CensusReads?.Count.ToString() ?? "null"},worker={worker?.Count.ToString() ?? "null"})";
+        }
+
+        static string Read((ulong Address, uint Word, bool Clean, bool Refused) read) =>
+            $"0x{read.Address:X}{(read.Clean ? "c" : "")}{(read.Refused ? "!" : "")}={read.Word:X8}";
+
+        var builder = new System.Text.StringBuilder();
+        builder.Append($"reads=(job={ahead.Count},worker={worker.Count},again={again?.Count.ToString() ?? "null"}) ");
+        var listed = 0;
+        var described = new List<ulong>();
+        for (var index = 0; index < Math.Max(ahead.Count, worker.Count) && listed < 40; index++)
+        {
+            var a = index < ahead.Count ? ahead[index] : default;
+            var w = index < worker.Count ? worker[index] : default;
+            if (index < ahead.Count && index < worker.Count && a == w)
+            {
+                continue;
+            }
+
+            listed++;
+            var g = again is not null && index < again.Count ? Read(again[index]) : "-";
+            builder.Append($"[{index}] job={(index < ahead.Count ? Read(a) : "-")} worker={(index < worker.Count ? Read(w) : "-")} again={g}; ");
+            foreach (var address in new[] { a.Address, w.Address })
+            {
+                var line = address & ~0xFFUL;
+                if (address != 0 && described.Count < 3 && !described.Contains(line))
+                {
+                    described.Add(line);
+                }
+            }
+        }
+
+        foreach (var line in described)
+        {
+            builder.Append($"host[0x{line:X}+0x100]=({_executor.DescribeGuestRange(line, 0x100)}) ");
+        }
+
+        builder.Append($"refused_at_resolution=[{job.CensusRefusals}] same_words_now=[");
+        foreach (var read in ahead)
+        {
+            if (read.Refused)
+            {
+                builder.Append($"0x{read.Address:X}:({_executor.DescribeGuestRange(read.Address, sizeof(uint))}) ");
+            }
+        }
+
+        builder.Append(']');
+
+        return builder.ToString();
+    }
+
+    private GraphicsPrograms TakeCensus(Job job, RegisterBanks banks, in GraphicsProgramInputs inputs, bool lookedAhead)
+    {
+        var stood = System.Diagnostics.Stopwatch.GetTimestamp() - job.ResolvedAt;
+        var resolved = _executor.ResolveGraphicsPrograms(banks, in inputs);
+        var workerReads = job.CensusReads is null ? null : CensusReadsOfAny(resolved);
+        var group = lookedAhead ? 1 : 0;
+        Interlocked.Increment(ref _censusResolved[group]);
+        Interlocked.Add(ref _censusStoodTicks[group], stood);
+        if (SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Difference(job.Programs!, resolved) is { } difference)
+        {
+            Interlocked.Increment(ref _censusDiffered[group]);
+            if (_censusReports[group] < MaximumCensusReports)
+            {
+                _censusReports[group]++;
+                Console.Error.WriteLine($"[GPU][PREFETCH] census differs group={(lookedAhead ? "ahead" : "gated")} {difference} " +
+                    $"stood_us={stood * 1_000_000 / System.Diagnostics.Stopwatch.Frequency} (job {job.Index}, gate {job.Gate}, full gate {job.FullGate}, " +
+                    $"executed at start {job.ExecutedAtStart}) " +
+                    $"job_vs_worker=[{SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.DescribeStages(job.Programs!, resolved)}] " +
+                    $"looked_over=[{DescribeLookedOver(job.ExecutedAtStart, job.FullGate)}] " +
+                    $"state_job=[{job.ResolveState}] state_now=[{_executor.DescribeProgramState()}] " +
+                    DescribeCensusReads(job, workerReads, job.CensusReads is null ? null : CensusReadsOfAny(resolved)));
+            }
+        }
+
+        return resolved;
+    }
+
+    // The worker's side of the census reads: its pixel stage's reads whatever program it picked.
+    private static List<(ulong Address, uint Word, bool Clean, bool Refused)>? CensusReadsOfAny(GraphicsPrograms? programs) =>
+        programs is { Available: true } && programs.PixelInput.Stage.Program is not null
+            ? SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.RecordReads(programs.PixelInput.Stage.Resources, clean: true)
+            : null;
 
     // SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=verify: the worker resolves the draw as it would have without the job, and the two
     // must hand the executor the same programs, inputs and resources (GraphicsProgramsComparer).
@@ -1154,9 +1310,12 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 job.StartInstanceUserData);
             job.ProgramState = _executor.ProgramState;
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);
-            if (LookaheadMode == DrawLookaheadMode.Verify)
+            if (RecordsForVerify)
             {
                 job.ResolveState = _executor.DescribeProgramState();
+                job.ResolvedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+                job.CensusReads = CensusReadsOf(job.Programs);
+                job.CensusRefusals = DescribeRefusedCleanReads(job.CensusReads);
             }
 
             job.Assumptions = _concurrent.EndConcurrentResolve();

@@ -2089,6 +2089,7 @@ internal sealed partial class MetalRenderHost :
         if (_imageCache.HasGpuModifiedImageBytes(address, size))
         {
             AbandonSpeculativeWait(address, size);
+            NoteHostReadWait(address, size, image: true);
             // The writeback is recorded into the buffer being built, so this one has
             // to be committed before the bytes can be read.
             FlushGpuWrites(address, size, MetalWritebackCause.HostRead);
@@ -2108,6 +2109,7 @@ internal sealed partial class MetalRenderHost :
             }
 
             NoteObservedRead(address, size);
+            NoteHostReadWait(address, size, image: false);
             if (TryWaitForWriteFence(address, size, pending))
             {
                 return;
@@ -2122,6 +2124,57 @@ internal sealed partial class MetalRenderHost :
                 WaitForCommittedSerial(pending, MetalWaitReason.ReadRange);
             }
         }
+    }
+
+    // Diagnostics (SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=census): the last host reads that waited, an image's writeback
+    // (image) or a recorded write landing (range), with when; DescribeGuestRangeForDiagnostics names those over a range.
+    private readonly (ulong Address, ulong Size, bool Image, long At)[] _hostReadWaits = new (ulong, ulong, bool, long)[64];
+    private int _hostReadWaitNext;
+
+    private void NoteHostReadWait(ulong address, ulong size, bool image)
+    {
+        if (SharpEmu.Libs.Gpu.Rendering.ParallelProgramPrefetch.DrawLookahead !=
+            SharpEmu.Libs.Gpu.Rendering.ParallelProgramPrefetch.DrawLookaheadMode.Census)
+        {
+            return;
+        }
+
+        lock (_hostReadWaits)
+        {
+            _hostReadWaits[_hostReadWaitNext++ & (_hostReadWaits.Length - 1)] =
+                (address, size, image, System.Diagnostics.Stopwatch.GetTimestamp());
+        }
+    }
+
+    public string DescribeGuestRangeForDiagnostics(ulong address, ulong size)
+    {
+        Span<byte> backing = stackalloc byte[sizeof(uint)];
+        var raw = _backing.TryReadBacking(address, backing)
+            ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(backing).ToString("X8", System.Globalization.CultureInfo.InvariantCulture)
+            : "unreadable";
+        var waits = new List<string>();
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        lock (_hostReadWaits)
+        {
+            foreach (var wait in _hostReadWaits)
+            {
+                if (wait.Size != 0 && wait.Address < address + size && address < wait.Address + wait.Size)
+                {
+                    waits.Add(FormattableString.Invariant(
+                        $"{(wait.Image ? "image" : "range")}@0x{wait.Address:X}+0x{wait.Size:X} {(now - wait.At) * 1_000_000 / System.Diagnostics.Stopwatch.Frequency}us_ago"));
+                }
+            }
+        }
+
+        var owner = ConcurrentOwnerForDiagnostics(address, size);
+        Func<ulong> serial = SignaledSerial;
+        return $"owner={owner} queued={PendingCommandWriteHoldsForDiagnostics(address, size)} " +
+            FormattableString.Invariant($"gpu_write_pending={IsGpuWritePendingForDiagnostics(address, size)} ") +
+            FormattableString.Invariant($"cp_cover={(_cpOverlay.Count == 0 ? "-" : _cpOverlay.Coverage(address, size, serial).ToString())} ") +
+            FormattableString.Invariant($"label_cover={(_labelOverlay.Count == 0 ? "-" : _labelOverlay.Coverage(address, size, serial).ToString())} ") +
+            FormattableString.Invariant($"backing_w0={raw} gpu_writes_may_cover={_gpuWrites.MayCover(address, size)} ") +
+            FormattableString.Invariant($"cp_overlay={_cpOverlay.Count} label_overlay={_labelOverlay.Count} ") +
+            $"images=[{_imageCache.DescribeRangeOwners(address, size)}] host_read_waits=[{string.Join(" | ", waits)}]";
     }
 
     // A read this small that waits for the GPU is a command-processor operand (an indirect

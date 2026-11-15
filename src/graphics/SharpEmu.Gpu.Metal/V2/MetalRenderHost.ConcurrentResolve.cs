@@ -802,6 +802,14 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         return AbandonCause.None;
     }
 
+    // Diagnostics (DescribeGuestRangeForDiagnostics): the first owner the resolving thread's test names, any thread.
+    private string ConcurrentOwnerForDiagnostics(ulong address, ulong size) =>
+        ConcurrentOwner(address, size, scope: null) is var cause && cause == AbandonCause.None ? "none" : AbandonCauseNames[(int)cause];
+
+    private bool PendingCommandWriteHoldsForDiagnostics(ulong address, ulong size) => PendingCommandWriteHolds(address, size);
+
+    private bool IsGpuWritePendingForDiagnostics(ulong address, ulong size) => IsGpuWritePendingConcurrent(address, size);
+
     private bool PendingCommandWriteHolds(ulong address, ulong size) =>
         _commandThread is { } thread && ParallelProgramPrefetch.ResolvingJob is var job and >= 0 &&
         thread.PendingRangeHolds(job, address, size);

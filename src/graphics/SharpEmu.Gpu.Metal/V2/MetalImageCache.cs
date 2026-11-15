@@ -2213,6 +2213,31 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return false;
     }
 
+    // Diagnostics (SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=census): the live images over the range, with their extent and state.
+    internal string DescribeRangeOwners(ulong address, ulong size)
+    {
+        if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
+        {
+            return "none";
+        }
+
+        using var held = _lock.Hold();
+        var owners = new List<string>();
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            if (_slots.TryGet(imageIdentifier) is { } image)
+            {
+                owners.Add(FormattableString.Invariant(
+                    $"0x{image.Description.Data.Address:X}+0x{image.Description.Data.Size:X} {image.Description.GuestFormat} ") +
+                    FormattableString.Invariant(
+                    $"{image.Description.Extent.Width}x{image.Description.Extent.Height}x{image.Description.Extent.Depth} tile={image.Description.TileMode} ") +
+                    $"gpu_modified={image.IsGpuModified} cpu_dirty={image.IsCpuDirty} gpu_overlaps={image.GpuOverlaps(address, size)}");
+            }
+        }
+
+        return owners.Count == 0 ? "none" : string.Join(" | ", owners);
+    }
+
     // Two surfaces over exactly the same guest bytes hand their contents over on the
     // device, with guest memory left out of it entirely. The pair that costs the most is
     // a depth-stencil target and the single-channel float alias something samples it

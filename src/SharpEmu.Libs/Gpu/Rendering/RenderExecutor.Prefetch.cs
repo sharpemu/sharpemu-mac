@@ -184,6 +184,8 @@ public sealed partial class RenderExecutor
 
     public string DescribeProgramState() => _pipelines.DescribeProgramState();
 
+    public string DescribeGuestRange(ulong address, ulong size) => _host.DescribeGuestRangeForDiagnostics(address, size);
+
     public ProgramStateStamp ProgramState => _pipelines.ProgramState;
 
     // The programs of a draw with these banks and inputs, as ResolveShaderPrograms resolves them.
