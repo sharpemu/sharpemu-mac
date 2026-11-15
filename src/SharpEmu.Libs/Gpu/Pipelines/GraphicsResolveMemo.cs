@@ -63,6 +63,24 @@ internal enum ResolveMemoUncacheable
     Count,
 }
 
+// Why a words miss was not rebuilt from its revalidation (ShaderPipelineCache.TryTakeResolveMemo) and resolved in full.
+internal enum ResolveMemoRebuildRefusal
+{
+    // A snapshot of the materialization cache, which is revalidated only.
+    Origin,
+    // A reader that tells table words apart, or no program to evaluate.
+    Refused,
+    // The program could not evaluate the words.
+    Evaluate,
+    // The materialization from the evaluated words failed.
+    Failed,
+    // The words specialize the program otherwise.
+    Specialization,
+    // Device data loads were learned while the words were read.
+    Generation,
+    Count,
+}
+
 // The graphics programs of draws already resolved, keyed by everything their resolution reads from the registers and
 // the draw (ResolveKey), many per frame: a draw whose key matches an entry takes its programs once every guest read the
 // full resolution makes still gives the same answer (ShaderPipelineCache.TryTakeResolveMemo). Used under the pipeline
@@ -74,6 +92,10 @@ internal sealed class GraphicsResolveMemo
     // SHARPEMU_RESOLVE_MEMO_ENTRIES: at least twice a frame's draws (Demon's Souls ~7300).
     internal static readonly int DefaultCapacity =
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_MEMO_ENTRIES"), out var entries) && entries >= 2 ? entries : 16384;
+
+    // SHARPEMU_RESOLVE_MEMO_REBUILD=0: an entry whose descriptor words changed resolves in full again instead of taking the
+    // snapshot its revalidation evaluated (ShaderPipelineCache.TryTakeResolveMemo).
+    internal static readonly bool DefaultRebuild = Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_MEMO_REBUILD") != "0";
 
     internal static ResolveMemoMode ParseMode(string? value) => value?.Trim().ToLowerInvariant() switch
     {
@@ -130,6 +152,9 @@ internal sealed class GraphicsResolveMemo
     }
 
     public ResolveMemoMode Mode { get; }
+
+    // Whether a words miss is rebuilt from its revalidation (DefaultRebuild; tests set it).
+    public bool Rebuild { get; set; } = DefaultRebuild;
 
     public int Count => _count;
 
@@ -358,6 +383,8 @@ internal sealed class GraphicsResolveMemo
     }
 
     private static readonly ThreadCounter _hits = new();
+    private static readonly ThreadCounter _rebuilt = new();
+    private static readonly ThreadCounter[] _rebuildRefused = NewCounters((int)ResolveMemoRebuildRefusal.Count);
     private static readonly ThreadCounter _evictions = new();
     private static readonly ThreadCounter _entries = new();
     private static readonly ThreadCounter _verifyChecked = new();
@@ -370,6 +397,10 @@ internal sealed class GraphicsResolveMemo
     private static ThreadCounter[] NewCounters(int count) => Enumerable.Range(0, count).Select(_ => new ThreadCounter()).ToArray();
 
     public static void NoteHit() => _hits.Increment();
+
+    public static void NoteRebuilt() => _rebuilt.Increment();
+
+    public static void NoteRebuildRefused(ResolveMemoRebuildRefusal cause) => _rebuildRefused[(int)cause].Increment();
 
     public static void NoteShadowHit() => _shadowWouldHit.Increment();
 
@@ -390,6 +421,8 @@ internal sealed class GraphicsResolveMemo
     public static string TakeReport() => FormattableString.Invariant(
         $"resolve_memo=(mode={DefaultMode.ToString().ToLowerInvariant()},hits={_hits.Take()},would_hit={_shadowWouldHit.Take()},") +
         "miss_by=(" + Take(_misses, "new", "epoch", "header", "identity", "tables", "semantics", "words", "generation") + ")," +
+        FormattableString.Invariant($"words_rebuilt={_rebuilt.Take()},rebuild={(DefaultRebuild ? 1 : 0)},") +
+        "rebuild_refused_by=(" + Take(_rebuildRefused, "origin", "refused", "evaluate", "failed", "specialization", "generation") + ")," +
         "key_miss=(" + Take(_keyMisses, "new", "user_data_only", "regs_only") + ")," +
         "uncacheable_by=(" + Take(_uncacheable, "frontend", "mesh", "tess", "calls", "unavailable", "tables", "trace", "origin", "key", "changed") + ")," +
         FormattableString.Invariant($"evictions={_evictions.Take()},entries={_entries.Total},verify_checked={_verifyChecked.Take()},") +

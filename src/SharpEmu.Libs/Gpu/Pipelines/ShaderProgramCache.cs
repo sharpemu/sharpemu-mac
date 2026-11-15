@@ -370,6 +370,44 @@ internal sealed class ShaderProgramCache
         return current;
     }
 
+    // Revalidate; and with rebuild, a fast stage whose own draw values evaluate to other descriptor words gets the stage
+    // a lookup of that draw makes now (ResourceMaterializer.RevalidateOrRebuildFast): the same program, since the
+    // specialization that picks its permutation is unchanged, and the snapshot materialized from that one evaluation.
+    // The caller has established that everything else the lookup reads is unchanged (ShaderPipelineCache's memo).
+    public ResourceMaterializer.FastRevalidation RevalidateOrRebuild(in ShaderStageResources stage, bool rebuild, out ShaderStageResources rebuilt)
+    {
+        rebuilt = stage;
+        if (!rebuild || stage.Program is null)
+        {
+            return Revalidate(stage) ? ResourceMaterializer.FastRevalidation.Current : ResourceMaterializer.FastRevalidation.Stale;
+        }
+
+        var started = MaterializationTally.StartTiming();
+        var fast = ResourceMaterializer.RevalidateOrRebuildFast(stage.Resources, out var snapshot);
+        if (fast == ResourceMaterializer.FastRevalidation.NotFast)
+        {
+            // A cached materialization: revalidated as before, never rebuilt here.
+            var current = Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes);
+            MaterializationTally.Note(current ? MaterializationTally.Outcome.KeptRevalidated : MaterializationTally.Outcome.KeptStale,
+                MaterializationTally.ElapsedTicks(started), stage.Resources);
+            return current ? ResourceMaterializer.FastRevalidation.Current : ResourceMaterializer.FastRevalidation.NotFast;
+        }
+
+        var outcome = fast switch
+        {
+            ResourceMaterializer.FastRevalidation.Current => MaterializationTally.Outcome.KeptRevalidated,
+            ResourceMaterializer.FastRevalidation.Rebuilt => ResourceMaterializer.LastFastOutcome,
+            _ => ResourceMaterializer.LastRevalidateRefused ? MaterializationTally.Outcome.RevalidateRefused : MaterializationTally.Outcome.KeptStale,
+        };
+        MaterializationTally.Note(outcome, MaterializationTally.ElapsedTicks(started), snapshot ?? stage.Resources);
+        if (fast == ResourceMaterializer.FastRevalidation.Rebuilt)
+        {
+            rebuilt = stage with { Resources = snapshot! };
+        }
+
+        return fast;
+    }
+
     // Read once: the draw path asked the environment on every draw and dispatch
     // (~4 % of the Demon's Souls render thread) for a debug dump that is almost never on.
     // A counted loop's record whose texture is of another class than its table's reads as null: the program is not

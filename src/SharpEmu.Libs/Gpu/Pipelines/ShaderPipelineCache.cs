@@ -359,6 +359,19 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
     }
 
+    // For tests: whether this cache's memo rebuilds a words miss from its revalidation (GraphicsResolveMemo.Rebuild).
+    internal bool ResolveMemoRebuild
+    {
+        get => _resolveMemo?.Rebuild ?? false;
+        set
+        {
+            lock (_resolveGate)
+            {
+                if (_resolveMemo is { } memo) memo.Rebuild = value;
+            }
+        }
+    }
+
     // Shadow mode: counts whether the memo would have the draw's key; true when it has not and the key is to be stored
     // once the draw resolved.
     private bool ShadowResolveMemo(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
@@ -415,9 +428,19 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             fillSerial = memo.FillSerial;
             if (memo.Find() is { } entry)
             {
-                if (TryTakeResolveMemo(entry, flags.PixelActive) is not { } miss)
+                if (TryTakeResolveMemo(memo, entry, flags.PixelActive, out var rebuilt) is not { } miss)
                 {
-                    GraphicsResolveMemo.NoteHit();
+                    if (rebuilt)
+                    {
+                        // A words miss answered from its revalidation: counted as the miss it is, not resolved again.
+                        GraphicsResolveMemo.NoteMiss(ResolveMemoMiss.Words);
+                        GraphicsResolveMemo.NoteRebuilt();
+                    }
+                    else
+                    {
+                        GraphicsResolveMemo.NoteHit();
+                    }
+
                     if (memo.Mode == ResolveMemoMode.Verify)
                     {
                         VerifyResolveMemo(entry, banks, targetExportMapping, flags);
@@ -463,8 +486,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // device data loads unchanged, the same header record and code identity at each stage's address, the same vertex
     // table words and pixel input semantics, and each stage's descriptor words evaluating to its snapshot (the reads
     // the full resolution records are made here as well).
-    private ResolveMemoMiss? TryTakeResolveMemo(GraphicsResolveMemo.Entry entry, bool pixelActive)
+    private ResolveMemoMiss? TryTakeResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, bool pixelActive, out bool rebuilt)
     {
+        rebuilt = false;
         if (entry.ContentEpoch != _programs.ContentEpoch || entry.TablesGeneration != _vertexTables.Generation)
         {
             return ResolveMemoMiss.Epoch;
@@ -510,27 +534,101 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return ResolveMemoMiss.Semantics;
         }
 
+        // Each stage's descriptor words, pixel first as the full resolution reads them. With rebuild, a stage whose words
+        // changed takes the snapshot its full resolution would materialize now from this same evaluation: everything else
+        // that resolution reads is the entry's (checked above or in the key), so it would pick the entry's programs again
+        // as long as the words keep their specialization (RevalidateOrRebuild refuses otherwise).
         var programs = entry.Programs!;
-        if ((pixelActive && !RevalidateMemoStage(programs.PixelInput.Stage)) || !RevalidateMemoStage(programs.VertexInput.Stage))
+        var pixelStage = programs.PixelInput.Stage;
+        var vertexStage = programs.VertexInput.Stage;
+        var rebuild = memo.Rebuild;
+        var stageRebuilt = false;
+        if ((pixelActive && !RevalidateMemoStage(ref pixelStage, rebuild, ref stageRebuilt)) || !RevalidateMemoStage(ref vertexStage, rebuild, ref stageRebuilt))
         {
             return ResolveMemoMiss.Words;
         }
 
         // A load learned while the words were read.
-        return entry.DeviceDataGeneration != DeviceDataLoads.Generation ? ResolveMemoMiss.Generation : null;
+        if (entry.DeviceDataGeneration != DeviceDataLoads.Generation)
+        {
+            if (!stageRebuilt) return ResolveMemoMiss.Generation;
+            GraphicsResolveMemo.NoteRebuildRefused(ResolveMemoRebuildRefusal.Generation);
+            return ResolveMemoMiss.Words;
+        }
+
+        if (stageRebuilt)
+        {
+            entry.Programs = WithStages(programs, vertexStage, pixelActive ? pixelStage : null);
+            entry.Fingerprint = memo.Mode == ResolveMemoMode.Verify ? GraphicsProgramsComparer.Fingerprint(entry.Programs) : 0;
+            rebuilt = true;
+        }
+
+        return null;
     }
 
-    private bool RevalidateMemoStage(in ShaderStageResources stage)
+    // False when the stage's words no longer evaluate to its snapshot and it was not rebuilt (refusals counted).
+    private bool RevalidateMemoStage(ref ShaderStageResources stage, bool rebuild, ref bool rebuilt)
     {
         _host.BeginGuestWordReads();
         try
         {
-            return _programs.Revalidate(stage);
+            switch (_programs.RevalidateOrRebuild(stage, rebuild, out var next))
+            {
+                case ResourceMaterializer.FastRevalidation.Current:
+                    return true;
+                case ResourceMaterializer.FastRevalidation.Rebuilt:
+                    stage = next;
+                    rebuilt = true;
+                    return true;
+                case ResourceMaterializer.FastRevalidation.NotFast:
+                    GraphicsResolveMemo.NoteRebuildRefused(ResolveMemoRebuildRefusal.Origin);
+                    return false;
+                default:
+                    if (rebuild)
+                    {
+                        GraphicsResolveMemo.NoteRebuildRefused(ResourceMaterializer.LastRebuildRefusal switch
+                        {
+                            ResourceMaterializer.RebuildRefusal.Evaluate => ResolveMemoRebuildRefusal.Evaluate,
+                            ResourceMaterializer.RebuildRefusal.Failed => ResolveMemoRebuildRefusal.Failed,
+                            ResourceMaterializer.RebuildRefusal.Specialization => ResolveMemoRebuildRefusal.Specialization,
+                            _ => ResolveMemoRebuildRefusal.Refused,
+                        });
+                    }
+
+                    return false;
+            }
         }
         finally
         {
             _host.EndGuestWordReads();
         }
+    }
+
+    // The programs with these stage resources in place of their own; the input descriptions are copied, never written:
+    // the result held before may still be on its way to the worker.
+    private static GraphicsPrograms WithStages(GraphicsPrograms programs, in ShaderStageResources vertexStage, ShaderStageResources? pixelStage)
+    {
+        var vertexInput = programs.VertexInput.WithoutStage();
+        vertexInput.Stage = vertexStage;
+        var pixelInput = programs.PixelInput;
+        if (pixelStage is { } pixel)
+        {
+            pixelInput = pixelInput.WithoutStage();
+            pixelInput.Stage = pixel;
+        }
+
+        return new GraphicsPrograms(vertexInput, pixelInput)
+        {
+            Tessellation = programs.Tessellation,
+            Vertex = programs.Vertex,
+            Pixel = programs.Pixel,
+            MeshInput = programs.MeshInput,
+            Available = programs.Available,
+            SolidClear = programs.SolidClear,
+            PositionStream = programs.PositionStream,
+            DisableBlending = programs.DisableBlending,
+            DropUnwrittenColorTargets = programs.DropUnwrittenColorTargets,
+        };
     }
 
     // Keeps a full resolution under the filled key, with what a hit re-checks, when it can be repeated from them: one

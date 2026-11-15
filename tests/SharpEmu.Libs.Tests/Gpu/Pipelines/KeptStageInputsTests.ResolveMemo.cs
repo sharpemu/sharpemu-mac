@@ -96,6 +96,64 @@ public sealed partial class KeptStageInputsTests
         Assert.Same(changed, Programs(cache, pixelActive: true));
     }
 
+    // A words miss whose new words keep the stage's specialization (another buffer base) is rebuilt from its revalidation:
+    // verify mode resolves the same draw in full and finds no difference; the result held before is left as it was.
+    [Fact]
+    public void ResolveMemo_RebuildsAWordsMissFromItsRevalidationAsTheFullResolutionWould()
+    {
+        var cache = MemoCache();
+        Assert.True(cache.ResolveMemoRebuild);
+        UseLoadingPixelProgram(Descriptor);
+        var first = Programs(cache, pixelActive: true);
+        var firstBuffers = first.PixelInput.Stage.Resources.Buffers.Select(words => words.ToArray()).ToArray();
+        var firstVertexStage = first.VertexInput.Stage;
+        Report();
+        _guest.WriteWords(Descriptor, PipelineTestGuest.BufferDescriptor(StreamBase + 0x100, 16, 4, Format32x4Float));
+        var rebuilt = Programs(cache, pixelActive: true);
+        var report = Report();
+        Assert.Contains("words=1", report);
+        Assert.Contains("words_rebuilt=1,", report);
+        Assert.Contains("verify_checked=1,", report);
+        Assert.Contains("verify_failed=0)", report);
+        Assert.NotSame(first, rebuilt);
+        Assert.NotSame(first.PixelInput, rebuilt.PixelInput);
+        Assert.Same(first.PixelInput.Stage.Program, rebuilt.PixelInput.Stage.Program);
+        Assert.Equal(first.Pixel, rebuilt.Pixel);
+        Assert.Equal(first.Vertex, rebuilt.Vertex);
+        Assert.Contains(rebuilt.PixelInput.Stage.Resources.Buffers, words => words[0] == unchecked((uint)(StreamBase + 0x100)));
+        // The earlier result is untouched (a worker may still hold it), and the unchanged vertex stage is kept as it was.
+        Assert.Equal(firstBuffers, first.PixelInput.Stage.Resources.Buffers);
+        Assert.Equal(firstVertexStage, rebuilt.VertexInput.Stage);
+        // The rebuilt entry is the one the next draw takes.
+        Assert.Same(rebuilt, Programs(cache, pixelActive: true));
+        Assert.Contains("hits=1,", Report());
+    }
+
+    // Words that specialize the program otherwise (another stride) may pick another permutation: not rebuilt, resolved in
+    // full (and counted); with rebuild off every words miss resolves in full.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ResolveMemo_ResolvesAWordsMissInFullWhenItsSpecializationChangesOrRebuildIsOff(bool rebuild)
+    {
+        var cache = MemoCache();
+        cache.ResolveMemoRebuild = rebuild;
+        UseLoadingPixelProgram(Descriptor);
+        var first = Programs(cache, pixelActive: true);
+        Report();
+        _guest.WriteWords(Descriptor, rebuild
+            ? PipelineTestGuest.BufferDescriptor(StreamBase, 32, 4, Format32x4Float)
+            : PipelineTestGuest.BufferDescriptor(StreamBase + 0x100, 16, 4, Format32x4Float));
+        var changed = Programs(cache, pixelActive: true);
+        var report = Report();
+        Assert.NotSame(first, changed);
+        Assert.Contains("words=1", report);
+        Assert.Contains("words_rebuilt=0,", report);
+        Assert.Contains(rebuild ? "specialization=1" : "specialization=0", report);
+        Assert.Same(changed, Programs(cache, pixelActive: true));
+        Assert.Contains("verify_failed=0)", Report());
+    }
+
     [Fact]
     public void ResolveMemo_MissesWhenTheVertexTableWordsChange()
     {
