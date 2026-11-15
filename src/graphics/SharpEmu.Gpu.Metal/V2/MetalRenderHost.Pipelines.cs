@@ -2198,5 +2198,6 @@ internal sealed partial class MetalRenderHost
         }
 
         _samplers.Clear();
+        _samplerGeneration++;
     }
 }

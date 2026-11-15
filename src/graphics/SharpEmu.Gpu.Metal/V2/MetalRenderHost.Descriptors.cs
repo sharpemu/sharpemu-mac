@@ -366,11 +366,14 @@ internal sealed partial class MetalRenderHost
 
     // A sampled binding found in the memo with a stamp that still holds; otherwise notes the key for
     // the full resolution, which reads the owner-list counts over the request before its lookup.
-    private bool TryTextureMemo(MetalStageBindings prepared, ImageResource image, uint[] words, int index, MetalBindingPacket? packet = null)
+    // `found` is the entry the key maps to, whether or not its stamp holds (the stage plan keeps it).
+    private bool TryTextureMemo(MetalStageBindings prepared, ImageResource image, uint[] words, int index, MetalBindingPacket? packet,
+        out TextureMemoEntry? found)
     {
         prepared.MemoHits[index] = null;
         prepared.MemoWanted[index] = false;
-        if (!TextureMemoEnabled || image.ResourceClass == MslImageResourceClass.Storage || words.Length < 8)
+        found = null;
+        if (!TextureMemoApplies(image, words))
         {
             return false;
         }
@@ -378,7 +381,17 @@ internal sealed partial class MetalRenderHost
         var key = packet is not null && packet.HasMemoKey(index)
             ? packet.MemoKeys![index]
             : new TextureMemoKey(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], ShapeOf(image));
-        if (_textureMemo.TryGetValue(key, out var entry) && _imageCache.TextureStampMayHold(in entry.Stamp))
+        found = _textureMemo.TryGetValue(key, out var entry) ? entry : null;
+        return TextureMemoAnswer(prepared, found, in key, index);
+    }
+
+    private static bool TextureMemoApplies(ImageResource image, uint[] words) =>
+        TextureMemoEnabled && image.ResourceClass != MslImageResourceClass.Storage && words.Length >= 8;
+
+    // A hit when the key's entry is there and its stamp may hold; otherwise notes the key for the full resolution.
+    private bool TextureMemoAnswer(MetalStageBindings prepared, TextureMemoEntry? entry, in TextureMemoKey key, int index)
+    {
+        if (entry is not null && _imageCache.TextureStampMayHold(in entry.Stamp))
         {
             // The request stays the entry's (MetalStageBindings.RequestAt): a copy is a quarter-kilobyte of
             // reference-holding struct per sampled binding per draw.
@@ -395,6 +408,13 @@ internal sealed partial class MetalRenderHost
         return false;
     }
 
+    // Drops every entry; the stage plans made before it keep none of theirs (_textureMemoGeneration).
+    internal void ClearTextureMemo()
+    {
+        _textureMemo.Clear();
+        _textureMemoGeneration++;
+    }
+
     private void RememberTexture(MetalStageBindings stage, int index, ResourceSlotIdentifier identifier, in ImageRequest request,
         in MetalImageCache.TextureMemoStamp stamp)
     {
@@ -403,7 +423,7 @@ internal sealed partial class MetalRenderHost
         {
             if (_textureMemo.Count >= TextureMemoLimit)
             {
-                _textureMemo.Clear();
+                ClearTextureMemo();
             }
 
             entry = new TextureMemoEntry { Key = key };
@@ -448,6 +468,13 @@ internal sealed partial class MetalRenderHost
         var movie = FindHostMovieBindings(info, snapshot);
         prepared.MovieLuma = movie.Luma;
         prepared.MovieChroma = movie.Chroma;
+        // The stage binding plan for these arrays (MetalRenderHost.StagePlan.cs), or whether to keep this one's answers.
+        var plan = FindStagePlan(stageIndex, program, info, snapshot, movie, out var storePlan);
+        if (storePlan && _stagePlanEntries.Length < info.Images.Count)
+        {
+            _stagePlanEntries = new TextureMemoEntry?[info.Images.Count];
+        }
+
         for (var index = 0; index < info.Images.Count; index++)
         {
             if (index == movie.Luma || index == movie.Chroma)
@@ -457,9 +484,40 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
-            if (TryTextureMemo(prepared, info.Images[index], snapshot.Images[index], index, packet))
+            if (plan?.Entries[index] is { } planned)
             {
-                continue;
+                if (StagePlanVerify)
+                {
+                    VerifyPlannedImage(prepared, info.Images[index], snapshot.Images[index], index, planned);
+                }
+
+                prepared.MemoHits[index] = null;
+                prepared.MemoWanted[index] = false;
+                if (TextureMemoAnswer(prepared, planned, in planned.Key, index))
+                {
+                    continue;
+                }
+
+                _stagePlanStaleImages++;
+            }
+            else
+            {
+                var hit = TryTextureMemo(prepared, info.Images[index], snapshot.Images[index], index, packet, out var found);
+                if (storePlan)
+                {
+                    _stagePlanEntries[index] = found;
+                }
+                else if (plan is not null && TextureMemoApplies(info.Images[index], snapshot.Images[index]))
+                {
+                    // A memoisable key that had no entry when the plan was made: the plan takes the one found now.
+                    _stagePlanImageLookups++;
+                    plan.Entries[index] = found;
+                }
+
+                if (hit)
+                {
+                    continue;
+                }
             }
 
             ResolveImageBinding(prepared, info.Images[index], snapshot.Images[index], index, packet);
@@ -471,9 +529,35 @@ internal sealed partial class MetalRenderHost
             prepared.SamplerViewClasses.AsSpan(0, info.Samplers.Count));
         for (var index = 0; index < info.Samplers.Count; index++)
         {
+            var integer = prepared.SamplerViewClasses[index] == MetalSamplerViewClasses.AllInteger;
+            if (plan is not null && plan.SamplerInteger[index] == integer)
+            {
+                if (StagePlanVerify)
+                {
+                    VerifyPlannedSampler(prepared, info.Samplers[index], snapshot.Samplers[index], index, integer,
+                        plan.SamplerHandles[index], plan.SamplerIds[index]);
+                }
+
+                prepared.Samplers[index] = plan.SamplerHandles[index];
+                prepared.SamplerIds[index] = plan.SamplerIds[index];
+                continue;
+            }
+
             prepared.Samplers[index] = ResolveSampler(
-                prepared, info.Samplers[index], snapshot.Samplers[index], index,
-                prepared.SamplerViewClasses[index] == MetalSamplerViewClasses.AllInteger, out prepared.SamplerIds[index], packet);
+                prepared, info.Samplers[index], snapshot.Samplers[index], index, integer, out prepared.SamplerIds[index], packet);
+            if (plan is not null)
+            {
+                // The class moved with this draw's image requests: the plan takes the sampler for the new one.
+                _stagePlanSamplerClass++;
+                plan.SamplerInteger[index] = integer;
+                plan.SamplerHandles[index] = prepared.Samplers[index];
+                plan.SamplerIds[index] = prepared.SamplerIds[index];
+            }
+        }
+
+        if (storePlan)
+        {
+            StoreStagePlan(stageIndex, program, info, snapshot, prepared);
         }
 
         var shaderData = prepared.ShaderData;
