@@ -21,8 +21,12 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// overlapping it are the ones the entry was stored with - none added or dropped over the range since (the image-set
 /// change ring, up to MetalImageCache.ImageSetWalkCap changes back) - and none of them is GPU-modified now (up to two
 /// held by the entry, checked live). An image's guest range never changes in place.</item>
+/// <item>Single-copy holes and stale windows: an entry stands at the trap version it was checked at; when that moved,
+/// MetalGuestMemory.RevalidateInPlace asks under the window lock whether one is under this range and window.</item>
+/// <item>The mapping (the backing alias, compared on every hit) and what MetalGuestMemory.InPlaceAnswerStands
+/// checks live (nothing stages everything, no slot trap, no released chunk under the range).</item>
 /// </list>
-/// The single-copy trap version is still read whole, as in v1.
+/// Written bindings always take the full chain. Every miss is counted once, by the first check that failed.
 /// </summary>
 internal sealed partial class MetalRenderHost
 {
@@ -75,10 +79,18 @@ internal sealed partial class MetalRenderHost
             return MissReadBinding(ref memo.RefusedWindow);
         }
 
+        // Single-copy holes or stale windows changed somewhere since the entry was checked: whether any is under this
+        // range and window is asked under the window lock.
         ref var side = ref memo.SideAt(index);
         if (side.Trap != _guestMemory.TrapVersionNow)
         {
-            return MissReadBinding(ref memo.MissTrap);
+            if (!_guestMemory.RevalidateInPlace(window, entry.Buffer, alias, size, out var trap))
+            {
+                return MissReadBinding(ref memo.MissTrap);
+            }
+
+            side.Trap = trap;
+            memo.RevalidatedTrap++;
         }
 
         // The image flush would find no GPU-modified image over the range: none can own its pages, or the images over
