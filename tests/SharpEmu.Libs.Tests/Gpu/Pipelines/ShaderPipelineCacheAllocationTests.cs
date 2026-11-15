@@ -51,8 +51,9 @@ public sealed class ShaderPipelineCacheAllocationTests(ITestOutputHelper output)
         // input's stage, whose shader-call fields (ShaderStageResources.CallArguments and the rest) stay null for a draw.
         // The upstream merge (tessellation, frontend and kept-pipeline fields) grew these to 520 and 880 bytes, and the binding
         // packet slot on each stage's resource snapshot (ResourceSnapshot.BindingPacket) to 528 and 896, and the draw's own
-        // user data, shader base and compute state on each fast snapshot's origin (ResourceMaterializer.FastOrigin) to 576 and 992.
-        Assert.True(perDraw[^1] <= (pixelActive ? 992 : 576), $"bytes={perDraw[^1]}");
+        // user data, shader base and compute state on each fast snapshot's origin (ResourceMaterializer.FastOrigin) to 576 and 992,
+        // and the specialization that origin keeps (whether a resolve memo rebuild keeps the program) to 584 and 1008.
+        Assert.True(perDraw[^1] <= (pixelActive ? 1008 : 584), $"bytes={perDraw[^1]}");
         var first = cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,
             banks.Context, mappings, pixelActive, depthBound: false, depthAspectBound: false);
         var second = cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,

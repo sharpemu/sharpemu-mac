@@ -63,6 +63,24 @@ internal enum ResolveMemoUncacheable
     Count,
 }
 
+// Why a words miss was not rebuilt from its revalidation (ShaderPipelineCache.TryTakeResolveMemo) and resolved in full.
+internal enum ResolveMemoRebuildRefusal
+{
+    // A snapshot of the materialization cache, which is revalidated only.
+    Origin,
+    // A reader that tells table words apart, or no program to evaluate.
+    Refused,
+    // The program could not evaluate the words.
+    Evaluate,
+    // The materialization from the evaluated words failed.
+    Failed,
+    // The words specialize the program otherwise.
+    Specialization,
+    // Device data loads were learned while the words were read.
+    Generation,
+    Count,
+}
+
 // The graphics programs of draws already resolved, keyed by everything their resolution reads from the registers and
 // the draw (ResolveKey), many per frame: a draw whose key matches an entry takes its programs once every guest read the
 // full resolution makes still gives the same answer (ShaderPipelineCache.TryTakeResolveMemo). Used under the pipeline
@@ -74,6 +92,10 @@ internal sealed class GraphicsResolveMemo
     // SHARPEMU_RESOLVE_MEMO_ENTRIES: at least twice a frame's draws (Demon's Souls ~7300).
     internal static readonly int DefaultCapacity =
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_MEMO_ENTRIES"), out var entries) && entries >= 2 ? entries : 16384;
+
+    // SHARPEMU_RESOLVE_MEMO_REBUILD=0: an entry whose descriptor words changed resolves in full again instead of taking the
+    // snapshot its revalidation evaluated (ShaderPipelineCache.TryTakeResolveMemo).
+    internal static readonly bool DefaultRebuild = Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_MEMO_REBUILD") != "0";
 
     internal static ResolveMemoMode ParseMode(string? value) => value?.Trim().ToLowerInvariant() switch
     {
@@ -109,6 +131,10 @@ internal sealed class GraphicsResolveMemo
     }
 
     private const int MaxKeyBytes = 4096;
+    // Ways per set. A frame's draws come back in the same order every frame, so a set holding more of a frame's keys
+    // than it has ways misses all of them every frame (LRU): at two ways ~23% of the bench's GameShaped draws (and the
+    // evictions ~= miss_by new of Demon's Souls) missed so; eight ways at the same capacity leave few such sets.
+    internal const int Ways = 8;
     private readonly byte[] _key = new byte[MaxKeyBytes];
     private int _keyLength;
     private int _userDataStart;
@@ -124,12 +150,15 @@ internal sealed class GraphicsResolveMemo
     {
         Mode = mode;
         var sets = 1;
-        while (sets * 2 < capacity) sets <<= 1;
+        while (sets * Ways < capacity) sets <<= 1;
         _setMask = sets - 1;
-        _ways = new Entry?[sets * 2];
+        _ways = new Entry?[sets * Ways];
     }
 
     public ResolveMemoMode Mode { get; }
+
+    // Whether a words miss is rebuilt from its revalidation (DefaultRebuild; tests set it).
+    public bool Rebuild { get; set; } = DefaultRebuild;
 
     public int Count => _count;
 
@@ -280,9 +309,9 @@ internal sealed class GraphicsResolveMemo
     // The entry with the filled key, or null.
     public Entry? Find()
     {
-        var set = (int)(Hash & (ulong)_setMask) * 2;
+        var set = (int)(Hash & (ulong)_setMask) * Ways;
         var key = Key;
-        for (var way = set; way < set + 2; way++)
+        for (var way = set; way < set + Ways; way++)
         {
             if (_ways[way] is { } entry && entry.Hash == Hash && key.SequenceEqual(entry.Key))
             {
@@ -305,13 +334,13 @@ internal sealed class GraphicsResolveMemo
             : ResolveMemoKeyMiss.New;
     }
 
-    // A new entry for the filled key, in place of the set's older way; the caller fills it.
+    // A new entry for the filled key, in place of the set's least recently used way; the caller fills it.
     public Entry Store()
     {
         var key = Key;
-        var set = (int)(Hash & (ulong)_setMask) * 2;
+        var set = (int)(Hash & (ulong)_setMask) * Ways;
         var way = set;
-        for (var candidate = set; candidate < set + 2; candidate++)
+        for (var candidate = set; candidate < set + Ways; candidate++)
         {
             if (_ways[candidate] is not { } held)
             {
@@ -358,6 +387,8 @@ internal sealed class GraphicsResolveMemo
     }
 
     private static readonly ThreadCounter _hits = new();
+    private static readonly ThreadCounter _rebuilt = new();
+    private static readonly ThreadCounter[] _rebuildRefused = NewCounters((int)ResolveMemoRebuildRefusal.Count);
     private static readonly ThreadCounter _evictions = new();
     private static readonly ThreadCounter _entries = new();
     private static readonly ThreadCounter _verifyChecked = new();
@@ -370,6 +401,10 @@ internal sealed class GraphicsResolveMemo
     private static ThreadCounter[] NewCounters(int count) => Enumerable.Range(0, count).Select(_ => new ThreadCounter()).ToArray();
 
     public static void NoteHit() => _hits.Increment();
+
+    public static void NoteRebuilt() => _rebuilt.Increment();
+
+    public static void NoteRebuildRefused(ResolveMemoRebuildRefusal cause) => _rebuildRefused[(int)cause].Increment();
 
     public static void NoteShadowHit() => _shadowWouldHit.Increment();
 
@@ -390,6 +425,8 @@ internal sealed class GraphicsResolveMemo
     public static string TakeReport() => FormattableString.Invariant(
         $"resolve_memo=(mode={DefaultMode.ToString().ToLowerInvariant()},hits={_hits.Take()},would_hit={_shadowWouldHit.Take()},") +
         "miss_by=(" + Take(_misses, "new", "epoch", "header", "identity", "tables", "semantics", "words", "generation") + ")," +
+        FormattableString.Invariant($"words_rebuilt={_rebuilt.Take()},rebuild={(DefaultRebuild ? 1 : 0)},") +
+        "rebuild_refused_by=(" + Take(_rebuildRefused, "origin", "refused", "evaluate", "failed", "specialization", "generation") + ")," +
         "key_miss=(" + Take(_keyMisses, "new", "user_data_only", "regs_only") + ")," +
         "uncacheable_by=(" + Take(_uncacheable, "frontend", "mesh", "tess", "calls", "unavailable", "tables", "trace", "origin", "key", "changed") + ")," +
         FormattableString.Invariant($"evictions={_evictions.Take()},entries={_entries.Total},verify_checked={_verifyChecked.Take()},") +

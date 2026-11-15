@@ -73,26 +73,34 @@ public sealed class GraphicsResolveMemoKeyTests
         Assert.False(Fill(memo, over));
     }
 
+    // One set (capacity = ways) keeps that many keys and replaces the least recently used one.
     [Fact]
-    public void ASetKeepsTwoKeysAndReplacesTheOlder()
+    public void ASetKeepsItsWaysAndReplacesTheLeastRecentlyUsedKey()
     {
-        var memo = new GraphicsResolveMemo(ResolveMemoMode.Shadow, 2);
-        var keys = Enumerable.Range(0, 3).Select(index =>
+        var memo = new GraphicsResolveMemo(ResolveMemoMode.Shadow, GraphicsResolveMemo.Ways);
+        var keys = Enumerable.Range(0, GraphicsResolveMemo.Ways + 1).Select(index =>
         {
             var banks = Banks();
             banks.Shader.Vertex.ExportAddress = 0x1000 + (ulong)index * 0x100;
             return banks;
         }).ToArray();
-        foreach (var banks in keys)
+        foreach (var banks in keys[..^1])
         {
             Assert.True(Fill(memo, banks));
             memo.Store();
         }
 
-        Assert.Equal(2, memo.Count);
         Assert.True(Fill(memo, keys[0]));
-        Assert.Null(memo.Find());
-        Assert.True(Fill(memo, keys[2]));
         Assert.NotNull(memo.Find());
+        Assert.True(Fill(memo, keys[^1]));
+        memo.Store();
+        Assert.Equal(GraphicsResolveMemo.Ways, memo.Count);
+        Assert.True(Fill(memo, keys[1]));
+        Assert.Null(memo.Find());
+        foreach (var banks in keys.Where((_, index) => index != 1))
+        {
+            Assert.True(Fill(memo, banks));
+            Assert.NotNull(memo.Find());
+        }
     }
 }

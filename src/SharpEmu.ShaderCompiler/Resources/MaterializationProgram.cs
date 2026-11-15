@@ -30,6 +30,10 @@ internal sealed class MaterializationProgram
         public Step[] Steps = [];
         // Set when every read loads a word at a constant offset from one base (FixedReads).
         public FixedReads? Fixed;
+        // The address order this level's reads took last (ReadOrder.Sort), kept per program: one per thread and level
+        // index was overwritten by every other program the thread evaluated (a draw's pixel and vertex plans in turn),
+        // so it rarely fit and the level sorted again. Never written once published; threads may race to replace it.
+        public int[]? Order;
     }
 
     /// <summary>
@@ -525,7 +529,7 @@ internal sealed class MaterializationProgram
             var level = _levels[levelIndex];
             if (level.Reads.Length != 0 && (level.Fixed is not { } fixedReads || !TryReadFixed(level.Reads, fixedReads, inputs, scratch)))
             {
-                ReadLevel(level.Reads, inputs, scratch, levelIndex);
+                ReadLevel(level, inputs, scratch);
             }
 
             foreach (var step in level.Steps)
@@ -801,8 +805,9 @@ internal sealed class MaterializationProgram
         return true;
     }
 
-    private static void ReadLevel(ReadStep[] reads, ResourceRuntimeInputs inputs, Scratch scratch, int levelIndex)
+    private static void ReadLevel(Level level, ResourceRuntimeInputs inputs, Scratch scratch)
     {
+        var reads = level.Reads;
         var values = scratch.Values;
         var valid = scratch.Valid;
         scratch.Count = 0;
@@ -842,7 +847,7 @@ internal sealed class MaterializationProgram
         var targets = scratch.Targets;
         var bases = scratch.NullBases;
         var absolute = scratch.Absolute;
-        scratch.Order.Sort(addresses, targets, bases, absolute, count, levelIndex);
+        scratch.Order.Sort(addresses, targets, bases, absolute, count, ref level.Order);
 
         var resident = inputs.ReadResidentMemory;
         var start = 0;
@@ -880,8 +885,8 @@ internal sealed class MaterializationProgram
     /// Puts a level's reads in address order, equal addresses in the order they were added (a stable sort). A
     /// table of descriptors interleaves its words across the reads, so they rarely arrive in order: one sort of
     /// packed (address, position) keys replaces moving every out-of-order read past each read before it. A level's
-    /// reads mostly come back in the order they took last time, so that order is tried first: the keys are unique,
-    /// so an order that leaves them increasing is the sorted one.
+    /// reads mostly come back in the order they took last time, so that order (the caller's, one per program level)
+    /// is tried first: the keys are unique, so an order that leaves them increasing is the sorted one.
     /// </summary>
     internal sealed class ReadOrder
     {
@@ -890,10 +895,19 @@ internal sealed class MaterializationProgram
         private int[] _targets = new int[64];
         private ulong[] _bases = new ulong[64];
         private bool[] _absolute = new bool[64];
-        private int[]?[] _levelOrders = [];
-        private int[] _levelCounts = [];
+        private int[] _order = new int[64];
 
-        public void Sort(ulong[] addresses, int[] targets, ulong[] bases, bool[] absolute, int count, int level = -1)
+        public void Sort(ulong[] addresses, int[] targets, ulong[] bases, bool[] absolute, int count)
+        {
+            int[]? none = null;
+            Sort(addresses, targets, bases, absolute, count, ref none, remember: false);
+        }
+
+        // With the order these reads took last time in remembered, replaced by this sort's order when it does not fit.
+        public void Sort(ulong[] addresses, int[] targets, ulong[] bases, bool[] absolute, int count, ref int[]? remembered) =>
+            Sort(addresses, targets, bases, absolute, count, ref remembered, remember: true);
+
+        private void Sort(ulong[] addresses, int[] targets, ulong[] bases, bool[] absolute, int count, ref int[]? remembered, bool remember)
         {
             var ordered = true;
             var packable = count <= 1 << 16;
@@ -922,16 +936,11 @@ internal sealed class MaterializationProgram
                 _targets = new int[length];
                 _bases = new ulong[length];
                 _absolute = new bool[length];
+                _order = new int[length];
             }
 
-            if (level >= _levelOrders.Length)
-            {
-                Array.Resize(ref _levelOrders, level + 1);
-                Array.Resize(ref _levelCounts, level + 1);
-            }
-
-            var known = level >= 0 ? _levelOrders[level] : null;
-            if (known is not null && _levelCounts[level] == count && Orders(known, addresses, count))
+            var known = remember ? Volatile.Read(ref remembered) : null;
+            if (known is not null && known.Length == count && Orders(known, addresses, count))
             {
                 Permute(known, addresses, targets, bases, absolute, count);
                 return;
@@ -944,16 +953,16 @@ internal sealed class MaterializationProgram
             }
 
             keys.Sort();
-            var order = known is not null && known.Length >= count ? known : new int[Math.Max(count, 16)];
+            // A new array to remember: another thread may be checking the one published before.
+            var order = remember ? new int[count] : _order;
             for (var index = 0; index < count; index++)
             {
                 order[index] = (int)(keys[index] & 0xFFFF);
             }
 
-            if (level >= 0)
+            if (remember)
             {
-                _levelOrders[level] = order;
-                _levelCounts[level] = count;
+                Volatile.Write(ref remembered, order);
             }
 
             Permute(order, addresses, targets, bases, absolute, count);

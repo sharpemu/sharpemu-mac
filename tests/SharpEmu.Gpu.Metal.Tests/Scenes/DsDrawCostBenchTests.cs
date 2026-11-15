@@ -218,7 +218,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
     // CLOCK_THREAD_CPUTIME_ID: the recording thread's own CPU time.
     private static ulong ThreadCpuNanoseconds() => clock_gettime_nsec_np(16);
 
-    private enum Variation { Draws, Dispatches, GameShaped }
+    private enum Variation { Draws, Dispatches, GameShaped, GameWords }
 
     // GameShaped: the draw stream split into this many submissions a round, a command buffer committed about every
     // SubmissionsPerCommit of them (Demon's Souls: ~39 submissions and ~17.5 command buffers a frame).
@@ -319,12 +319,14 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             Enumerable.Range(0, 4).Select(count => rig.Program(WithNops(TablePixel(attachments), count))).ToArray()).ToArray();
 
         // One draw as DrawStream records it: a pass's first draw (or a submission's) sets the targets and depth.
-        void EmitDraw(ScenePm4 pm4, int draw, int pass, bool fullState, (ulong table, ulong indices, ulong arguments) mesh, ulong material)
+        void EmitDraw(ScenePm4 pm4, int draw, int pass, bool fullState, (ulong table, ulong indices, ulong arguments) mesh, ulong material,
+            ulong pixelConstantsAt = 0)
         {
             var attachments = pass % 2 == 0 ? 5 : 6;
             var set = pass % TargetSets;
             uint[] vertexData = [Descriptors.Lo(mesh.table), Descriptors.Hi(mesh.table), 0, 0, .. Descriptors.Buffer(objectConstants, 16, 4)];
-            uint[] pixelData = [Descriptors.Lo(material), Descriptors.Hi(material), 0, 0, .. Descriptors.Buffer(pixelConstants, 16, 2)];
+            uint[] pixelData = [Descriptors.Lo(material), Descriptors.Hi(material), 0, 0,
+                .. Descriptors.Buffer(pixelConstantsAt != 0 ? pixelConstantsAt : pixelConstants, 16, 2)];
             var vertexProgram = vertexPrograms[(draw / 3) % vertexPrograms.Length];
             var pixelProgram = pixelPrograms[attachments - 5][(draw / 2) % 4];
             SceneState state;
@@ -495,9 +497,19 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
         // four dispatches at the start of each pass storing four buffers that
         // the draws of four meshes read as their normals; and a texture on far pages dropped every third submission and
         // made again when sampled next (image-set changes).
+        // GameWords: GameShaped whose descriptor words change between rounds under unchanged keys, as Demon's Souls'
+        // per-frame constants do (resolve memo miss_by words ~32% of its draws, key_miss user_data_only ~8.5%): every
+        // third mesh's table points its constants V# at one of two zero buffers in turn, and every 32nd draw's pixel
+        // constants V# (user data) at a copy of the pixel constants that changes every round. Same image as GameShaped.
         var gameMeshCount = Setting("MESHES", 3000);
         var gameDrawCount = Setting("GAME_DRAWS", 7300);
-        (uint[][] Streams, ulong[] Written, ulong[] Churn) GameStreams()
+        const int PixelConstantCopies = 256;
+        var alternateConstants = rig.Memory.Upload<float>(new float[8], 256);
+        var pixelConstantCopies = Enumerable.Range(0, PixelConstantCopies)
+            .Select(_ => rig.Memory.Upload<float>([0.0625f, 0, 0, 0, 0, 0, 0, 0], 256)).ToArray();
+        Assert.All(pixelConstantCopies, copy => Assert.Equal(Descriptors.Hi(pixelConstantCopies[0]), Descriptors.Hi(copy)));
+        (uint[][] Streams, ulong[] Written, ulong[] Churn, (ulong Address, uint[] Even, uint[] Odd)[] WordChurn, (int Stream, int Word)[] KeyChurn)
+            GameStreams(bool churnWords)
         {
             var gameMeshes = Enumerable.Range(0, gameMeshCount).Select(mesh => Mesh(mesh)).ToArray();
             var written = Enumerable.Range(0, 4).Select(_ => rig.Memory.Upload<uint>(new uint[StorageEdge * StorageEdge], 256)).ToArray();
@@ -521,6 +533,12 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             var streams = new uint[GameSubmissions][];
             var passLength = (gameDrawCount + Passes - 1) / Passes;
             var labelWrites = 0;
+            var wordChurn = churnWords
+                ? gameMeshes.Where((_, index) => index % 3 == 0).Select(mesh =>
+                    (mesh.table + 0x40, rig.Read<uint>(mesh.table + 0x40, 4), Descriptors.Buffer(alternateConstants, 16, 2))).ToArray()
+                : [];
+            var keyChurn = new List<(int Stream, int Word)>();
+            var keyChurnStarts = new List<(int Stream, int Start, int End)>();
             ScenePm4? pm4 = null;
             var submission = -1;
             for (var draw = 0; draw <= gameDrawCount; draw++)
@@ -557,7 +575,10 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 var material = firstOfSubmission
                     ? churnMaterials[submission % ChurnTextures]
                     : materials[(draw * 11 + pass * 3) % Materials];
-                EmitDraw(pm4!, draw, pass, passStart || firstOfSubmission, mesh, material);
+                var newKey = churnWords && draw % 32 == 7;
+                var emittedFrom = pm4!.Count;
+                EmitDraw(pm4!, draw, pass, passStart || firstOfSubmission, mesh, material, newKey ? pixelConstantCopies[0] : 0);
+                if (newKey) keyChurnStarts.Add((submission, emittedFrom, pm4!.Count));
                 var commitFollows = (int)((submission + 1) / SubmissionsPerCommit) != (int)(submission / SubmissionsPerCommit);
                 if (commitFollows && draw % 6 == 5)
                 {
@@ -568,7 +589,15 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 }
             }
 
-            return (streams, written, churn);
+            // The word of each such draw that holds its pixel constants' low address bits (found once in its packets).
+            foreach (var (stream, start, end) in keyChurnStarts)
+            {
+                var found = Enumerable.Range(start, end - start).Where(word => streams[stream][word] == Descriptors.Lo(pixelConstantCopies[0])).ToArray();
+                Assert.Single(found);
+                keyChurn.Add((stream, found[0]));
+            }
+
+            return (streams, written, churn, wordChurn, [.. keyChurn]);
         }
 
         var phases = Enum.GetValues<RenderPhaseProfile.Phase>().Where(phase => phase != RenderPhaseProfile.Phase.Count).ToArray();
@@ -577,7 +606,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
         ulong submissionId = 1000;
         foreach (var variation in Enum.GetValues<Variation>().Where(variation => only is null || variation.ToString() == only))
         {
-            var game = variation == Variation.GameShaped ? GameStreams() : default;
+            var game = variation is Variation.GameShaped or Variation.GameWords ? GameStreams(variation == Variation.GameWords) : default;
             var words = variation switch
             {
                 Variation.Draws => DrawStream(),
@@ -605,6 +634,9 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                     _ = PrefetchCounters.Invoke(rig.Host, null);
                     _ = KeptProgramsReport.Invoke(null, null);
                 }
+                foreach (var (address, even, odd) in game.WordChurn ?? []) rig.Memory.Write<uint>(address, round % 2 == 0 ? even : odd);
+                foreach (var (stream, word) in game.KeyChurn ?? [])
+                    rig.Memory.Write32(gameStreams![stream].Address + (ulong)word * 4, Descriptors.Lo(pixelConstantCopies[round % PixelConstantCopies]));
                 RenderPasses.SetValue(rig.Host, 0L);
                 var before = profiling ? phases.Select(phase => PhaseTicks(phase)).ToArray() : null;
                 if (gameStreams is null) rig.Host.CommandStream.EnqueueGraphics(streamAddress, (uint)words.Length, ++submissionId, null);

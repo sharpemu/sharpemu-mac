@@ -368,13 +368,120 @@ public static partial class ResourceMaterializer
 
     // The plan a fast snapshot came from and the draw inputs it was evaluated with. The inputs object is refilled for
     // every lookup (ShaderProgramCache), so the draw's own user data, shader base and compute state are kept beside it:
-    // revalidating with whatever the object held last evaluated another stage's or another draw's words.
+    // revalidating with whatever the object held last evaluated another stage's or another draw's words. The
+    // specialization the snapshot was materialized with is kept to tell whether a rebuild keeps its program.
     private sealed record FastOrigin(ShaderResourcePlan Plan, ResourceRuntimeInputs Inputs, IReadOnlyList<uint> UserData, ulong ShaderBase,
-        ComputeSelectorState? ComputeState)
+        ComputeSelectorState? ComputeState, ResourceSpecialization Specialization)
     {
-        public FastOrigin(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
-            : this(plan, inputs, inputs.UserData, inputs.ShaderBase, inputs.ComputeState)
+        public FastOrigin(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSpecialization specialization)
+            : this(plan, inputs, inputs.UserData, inputs.ShaderBase, inputs.ComputeState, specialization)
         {
+        }
+    }
+
+    // RevalidateOrRebuildFast's answer.
+    public enum FastRevalidation
+    {
+        // The snapshot did not come from the fast path.
+        NotFast,
+        // The plan evaluates to the snapshot's words again.
+        Current,
+        // Neither current nor rebuilt (LastRebuildRefusal says why).
+        Stale,
+        // The words changed; the rebuilt snapshot is the one a fast materialization of the draw makes now, with the
+        // same specialization.
+        Rebuilt,
+    }
+
+    // Why RevalidateOrRebuildFast left a stale snapshot stale.
+    public enum RebuildRefusal
+    {
+        None,
+        // A reader that tells table words apart, or a plan with no program to evaluate (as Revalidate refuses).
+        Refused,
+        // The program could not evaluate the draw's words (MaterializeFast falls to the general evaluator).
+        Evaluate,
+        // The materialization from the evaluated words failed.
+        Failed,
+        // The words specialize the program otherwise: another permutation may be the draw's.
+        Specialization,
+    }
+
+    [ThreadStatic]
+    private static RebuildRefusal _lastRebuildRefusal;
+
+    public static RebuildRefusal LastRebuildRefusal => _lastRebuildRefusal;
+
+    // RevalidateFast; and when the snapshot's own draw values evaluate to other words, the snapshot MaterializeFast
+    // makes for that draw now, built from this one evaluation instead of reading the words again, when it keeps the
+    // snapshot's specialization (so the permutation, and the program a lookup hands out, stay the snapshot's).
+    public static FastRevalidation RevalidateOrRebuildFast(ResourceSnapshot snapshot, out ResourceSnapshot? rebuilt)
+    {
+        rebuilt = null;
+        _lastRebuildRefusal = RebuildRefusal.None;
+        if (snapshot.Origin is not FastOrigin origin)
+        {
+            return FastRevalidation.NotFast;
+        }
+
+        var plan = origin.Plan;
+        _lastRevalidateRefused = origin.Inputs.TablePhase is not null || plan.MaterializationProgram is null;
+        if (_lastRevalidateRefused)
+        {
+            _lastRebuildRefusal = RebuildRefusal.Refused;
+            return FastRevalidation.Stale;
+        }
+
+        var inputs = TakeRevalidationInputs(origin.Inputs);
+        inputs.UserData = origin.UserData;
+        inputs.ShaderBase = origin.ShaderBase;
+        inputs.ComputeState = origin.ComputeState;
+        var output = TakeOutput();
+        try
+        {
+            if (!EvaluateInto(plan, inputs, output))
+            {
+                _lastRebuildRefusal = RebuildRefusal.Evaluate;
+                return FastRevalidation.Stale;
+            }
+
+            if (SameAsOutput(plan, snapshot, output))
+            {
+                return FastRevalidation.Current;
+            }
+
+            // As MaterializeFast after its own evaluation.
+            if (plan.RequiresSpecializationMemory && inputs.ReadCleanMemory is null)
+            {
+                _lastRebuildRefusal = RebuildRefusal.Failed;
+                return FastRevalidation.Stale;
+            }
+
+            _programRuns.Increment();
+            _fastMaterializations.Increment();
+            _lastFastOutcome = MaterializationTally.Outcome.FastMiss;
+            ResourceSnapshot next = null!;
+            ResourceSpecialization specialization = null!;
+            if (!MaterializeFromOutput(plan, inputs, output, ref next, ref specialization, out _))
+            {
+                _lastRebuildRefusal = RebuildRefusal.Failed;
+                return FastRevalidation.Stale;
+            }
+
+            if (!ReferenceEquals(specialization, origin.Specialization) && !specialization.Equals(origin.Specialization))
+            {
+                _lastRebuildRefusal = RebuildRefusal.Specialization;
+                return FastRevalidation.Stale;
+            }
+
+            rebuilt = next;
+            return FastRevalidation.Rebuilt;
+        }
+        finally
+        {
+            _programOutput = output;
+            inputs.UserData = [];
+            _revalidationInputs = inputs;
         }
     }
 
@@ -687,7 +794,7 @@ public static partial class ResourceMaterializer
                 UserData = userData,
                 DeviceAddressRanges = ranges,
                 MipStatistics = statistics,
-                Origin = new FastOrigin(plan, inputs),
+                Origin = new FastOrigin(plan, inputs, memo.Specialization),
             };
             specialization = memo.Specialization;
             failure = ResourceMaterializationFailure.None;
@@ -844,7 +951,7 @@ public static partial class ResourceMaterializer
                 UserData = materialized.UserData,
                 DeviceAddressRanges = ranges,
                 MipStatistics = statistics,
-                Origin = new FastOrigin(plan, inputs),
+                Origin = new FastOrigin(plan, inputs, memo.Specialization),
             };
             specialization = memo.Specialization;
             failure = ResourceMaterializationFailure.None;
@@ -917,7 +1024,7 @@ public static partial class ResourceMaterializer
             FlattenedResourceTable = nextSnapshot.FlattenedTable,
             UserData = nextSnapshot.UserData,
             DeviceAddressRanges = ranges,
-            Origin = new FastOrigin(plan, inputs),
+            Origin = new FastOrigin(plan, inputs, nextSpecialization),
         };
         specialization = nextSpecialization;
         failure = ResourceMaterializationFailure.None;
