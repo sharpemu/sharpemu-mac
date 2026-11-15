@@ -556,6 +556,15 @@ public sealed unsafe partial class DirectExecutionBackend :
 
 	private string? _importFilter;
 
+	// !string.IsNullOrWhiteSpace(_importFilter), set with it.
+	private bool _importFilterSet;
+
+	// No per-call import diagnostic is on (all-imports and filtered traces, SHARPEMU_PERF_HLE, the
+	// guest RIP sampler, the return-address probe, the register-packet profile): DispatchImportCore
+	// skips straight to the leaf dispatch. False until the session configures it, which keeps
+	// every diagnostic on the path.
+	private bool _leafDiagnosticsOff;
+
 	private bool _disableImportLoopGuard;
 
 	private int _importLoopGuardSeconds;
@@ -1540,6 +1549,11 @@ public sealed unsafe partial class DirectExecutionBackend :
 		_probeImportRootAddress = ParseOptionalHexAddress(
 			Environment.GetEnvironmentVariable("SHARPEMU_PROBE_IMPORT_ROOT_ADDRESS"));
 		_importFilter = Environment.GetEnvironmentVariable("SHARPEMU_LOG_IMPORT_FILTER");
+		_importFilterSet = !string.IsNullOrWhiteSpace(_importFilter);
+		// Every per-call diagnostic DispatchImportCore runs before a leaf dispatch, decided once:
+		// all of them are fixed for the session from here on.
+		_leafDiagnosticsOff = !_logAllImports && !_importFilterSet && !_perfHleHistogram && !_profileGuestRip &&
+			_probeImportReturnAddress == 0 && !SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.Enabled;
 		_disableImportLoopGuard = !string.Equals(
 			Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"),
 			"0",

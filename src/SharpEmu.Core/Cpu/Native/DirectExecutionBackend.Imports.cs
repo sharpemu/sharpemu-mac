@@ -534,10 +534,26 @@ public sealed partial class DirectExecutionBackend
 		// By reference: the entry is 48 bytes of per-import classification that
 		// nothing here mutates, and copying it was pure cost on every guest call.
 		ref readonly ImportStubEntry importStubEntry = ref _importEntries[importIndex];
-		TraceImportAddressProbe(cpuContext, in importStubEntry, argPackPtr);
-		using var registerPacketImport = SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.MeasureImport(importStubEntry.Nid);
+		// The session counters can be armed while the guest runs, so they are read on every call.
 		Volatile.Read(ref _activeImportSessionCounters)?.Record(importIndex, importStubEntry.Nid);
-		if (_perfHleHistogram)
+		int num2 = Volatile.Read(in _rawSentinelRecoveries);
+		if (num2 != _lastReportedRawSentinelRecoveries)
+		{
+			Console.Error.WriteLine($"[LOADER][TRACE] Raw sentinel recoveries: {num2} (last import index={importIndex})");
+			_lastReportedRawSentinelRecoveries = num2;
+		}
+
+		// With no per-call diagnostic on for the session (decided once, at configuration), one test
+		// skips all of them and the call goes straight to the leaf dispatches below.
+		var diagnostics = !_leafDiagnosticsOff;
+		if (diagnostics)
+		{
+			TraceImportAddressProbe(cpuContext, in importStubEntry, argPackPtr);
+		}
+		using var registerPacketImport = diagnostics
+			? SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.MeasureImport(importStubEntry.Nid)
+			: default;
+		if (diagnostics && _perfHleHistogram)
 		{
 			try { RecordPerfHleCall(importStubEntry.Export?.Name ?? importStubEntry.Nid); }
 			catch (Exception diagnosticFailure) when (diagnosticFailure is System.IO.IOException or ObjectDisposedException)
@@ -545,15 +561,9 @@ public sealed partial class DirectExecutionBackend
 				// Profiling output is optional; a closed sink must not skip the export.
 			}
 		}
-		if (_profileGuestRip)
+		if (diagnostics && _profileGuestRip)
 		{
 			EnsureGuestRipSampler();
-		}
-		int num2 = Volatile.Read(in _rawSentinelRecoveries);
-		if (num2 != _lastReportedRawSentinelRecoveries)
-		{
-			Console.Error.WriteLine($"[LOADER][TRACE] Raw sentinel recoveries: {num2} (last import index={importIndex})");
-			_lastReportedRawSentinelRecoveries = num2;
 		}
 		// The leaf paths answer the guest and return from this gateway before the
 		// [LOADER][TRACE] Import# block further down, so SHARPEMU_LOG_ALL_IMPORTS
@@ -562,7 +572,7 @@ public sealed partial class DirectExecutionBackend
 		// to make: Quake reads scePadReadState roughly two hundred thousand times a
 		// second and an all-imports log of a Quake run contains not one line of it.
 		// Say so once, and name the counter that does see them.
-		if (_logAllImports &&
+		if (diagnostics && _logAllImports &&
 			(importStubEntry.IsLeaf || importStubEntry.IsTrivialLeaf) &&
 			Interlocked.Exchange(ref _leafTraceGapAnnounced, 1) == 0)
 		{
@@ -577,8 +587,8 @@ public sealed partial class DirectExecutionBackend
 		// that need it - is this status import ever called, and what does it answer -
 		// are about imports the all-imports log cannot see. The arguments are read
 		// before the dispatch: the leaf paths write results through the same pack.
-		var traceLeaf = (importStubEntry.IsLeaf || importStubEntry.IsTrivialLeaf) &&
-			!string.IsNullOrWhiteSpace(_importFilter) &&
+		var traceLeaf = diagnostics && _importFilterSet &&
+			(importStubEntry.IsLeaf || importStubEntry.IsTrivialLeaf) &&
 			MatchesImportFilter(in importStubEntry);
 		ulong leafArg0 = 0, leafArg1 = 0, leafArg2 = 0, leafArg3 = 0, leafReturnRip = 0;
 		if (traceLeaf)
@@ -2102,7 +2112,7 @@ public sealed partial class DirectExecutionBackend
 		if (!_builderLeafEnabled ||
 			_logAllImports ||
 			_profileGuestRip ||
-			!string.IsNullOrWhiteSpace(_importFilter) ||
+			_importFilterSet ||
 			Volatile.Read(ref _pendingGuestExceptionCount) != 0 ||
 			Volatile.Read(ref _forcedGuestExit) ||
 			importStubEntry.Export is not { } export ||
