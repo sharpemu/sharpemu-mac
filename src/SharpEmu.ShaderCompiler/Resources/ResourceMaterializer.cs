@@ -403,8 +403,13 @@ public static partial class ResourceMaterializer
         }
     }
 
-    // SHARPEMU_RESOURCE_READ_PROOF: on (default), 0 (every revalidation evaluates the program word by word, as before),
+    // SHARPEMU_RESOURCE_READ_PROOF: off (default: every revalidation evaluates the program word by word), 1 or on,
     // verify (a proved revalidation also evaluates in full and stops when the snapshot is not current).
+    //
+    // Off by default since 2026-11-15: a Demon's Souls verify run found one proof that held before and after a full
+    // evaluation that did not give the snapshot ("[SHADER][READ_PROOF] verify mismatch", plan 0x4DFFC096614D79ED, vertex
+    // stage, 8 ranges, 156 bytes; about one in 200,000 proved revalidations), not yet explained, and in that game the
+    // proofs bought no resolver time (as many origins change or are recorded again as are proved).
     //
     // A fast snapshot's revalidation evaluates its program again with the snapshot's own user data, shader base and
     // readers and compares the words it emits with the snapshot. The evaluation that made the snapshot (or last found it
@@ -423,9 +428,9 @@ public static partial class ResourceMaterializer
 
     internal static ReadProofMode ParseReadProofMode(string? value) => value?.Trim().ToLowerInvariant() switch
     {
-        "0" or "off" => ReadProofMode.Off,
+        "1" or "on" => ReadProofMode.On,
         "verify" => ReadProofMode.Verify,
-        _ => ReadProofMode.On,
+        _ => ReadProofMode.Off,
     };
 
     internal static ReadProofMode ReadProofs { get; set; } = ParseReadProofMode(Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_READ_PROOF"));
