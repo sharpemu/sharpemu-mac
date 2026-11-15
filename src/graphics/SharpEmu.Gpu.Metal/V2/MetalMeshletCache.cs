@@ -313,6 +313,17 @@ internal sealed class MetalMeshletCache
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESHLET_TRACE") == "1";
 
     // SHARPEMU_METAL_MESHLET_VERSIONS=0 keeps one version per key, replaced on every change.
+    // SHARPEMU_METAL_MESHLET_POOL=0 creates a buffer per build and releases it when its entry goes,
+    // each a change of the resident list, as before.
+    private static readonly bool DefaultPool =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_MESHLET_POOL");
+
+    // Pooled buffers come in quarter steps of a power of two, from MinPooledBytes, so a rebuild
+    // of about the same size finds a free buffer of its class; free buffers past PoolBudgetBytes
+    // are released.
+    private const ulong MinPooledBytes = 4 * 1024;
+    private const ulong PoolBudgetBytes = 32UL * 1024 * 1024;
+
     private static readonly int DefaultMaxVersions =
         SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_MESHLET_VERSIONS") ? MaxVersionsPerKey : 1;
 
@@ -325,7 +336,11 @@ internal sealed class MetalMeshletCache
     private readonly MeshletBuilder.Scratch _scratch = new();
     private readonly System.IO.Hashing.XxHash3 _hasher = new();
     private uint[] _indices = [];
-    private readonly List<(nint Buffer, ulong Serial)> _retired = [];
+    private readonly List<(nint Buffer, nint Contents, ulong Bytes, ulong Serial)> _retired = [];
+    private readonly bool _pool;
+    // Free buffers by capacity: their last use completed, they stay resident, nothing reads them.
+    private readonly Dictionary<ulong, Stack<(nint Buffer, nint Contents)>> _free = [];
+    private ulong _freeBytes;
     private readonly Dictionary<Key, HashRing> _history = [];
     private int _traceLines;
     private ulong _bytes;
@@ -345,10 +360,14 @@ internal sealed class MetalMeshletCache
     private long _allocTicks;
     private long _evictions;
     private long _versionHits;
+    private long _poolHits;
+    private long _residentChurn;
 
     /// <param name="maxVersions">Versions kept per key, 1 to 4; the env setting when null.</param>
-    public MetalMeshletCache(MetalGuestMemory guestMemory, ICpuMemory memory, int? maxVersions = null)
+    /// <param name="pool">Whether buffers are pooled; the env setting when null.</param>
+    public MetalMeshletCache(MetalGuestMemory guestMemory, ICpuMemory memory, int? maxVersions = null, bool? pool = null)
     {
+        _pool = pool ?? DefaultPool;
         _guestMemory = guestMemory;
         _memory = memory;
         _maxVersions = Math.Clamp(maxVersions ?? DefaultMaxVersions, 1, MaxVersionsPerKey);
@@ -482,7 +501,7 @@ internal sealed class MetalMeshletCache
         MeshletBuilder.BuildInto(indices, maxVertices, maxPrimitives, built);
         var builderDone = System.Diagnostics.Stopwatch.GetTimestamp();
         var wordCount = built.WordCount;
-        var size = (ulong)wordCount * sizeof(uint);
+        var size = _pool ? SizeClass((ulong)wordCount * sizeof(uint)) : (ulong)wordCount * sizeof(uint);
         if (!MakeRoom(size, completedSerial))
         {
             ReleaseRetired(completedSerial);
@@ -490,7 +509,13 @@ internal sealed class MetalMeshletCache
             return false;
         }
 
-        var buffer = _guestMemory.CreateMeshletBuffer(size, out var contents);
+        if (_pool)
+        {
+            // Entries evicted for room whose last use completed are free for this build.
+            ReleaseRetired(completedSerial);
+        }
+
+        var buffer = TakeBuffer(size, out var contents);
         unsafe
         {
             built.CopyTo(new Span<uint>((void*)contents, wordCount));
@@ -586,6 +611,40 @@ internal sealed class MetalMeshletCache
     /// <summary>Buffers removed from the cache and waiting for their last use to complete.</summary>
     internal int RetiredCount => _retired.Count;
 
+    /// <summary>Builds in this window that reused a pooled buffer.</summary>
+    internal long PoolHits => _poolHits;
+
+    /// <summary>Meshlet buffers created or released in this window: each changes the resident list.</summary>
+    internal long ResidentChurn => _residentChurn;
+
+    /// <summary>The capacity a pooled buffer for <paramref name="bytes"/> has: the next quarter step
+    /// of the power of two at or below it, at least <see cref="MinPooledBytes"/>.</summary>
+    internal static ulong SizeClass(ulong bytes)
+    {
+        if (bytes <= MinPooledBytes)
+        {
+            return MinPooledBytes;
+        }
+
+        var step = (1UL << (63 - System.Numerics.BitOperations.LeadingZeroCount(bytes))) / 4;
+        return (bytes + step - 1) / step * step;
+    }
+
+    // A free pooled buffer of exactly this capacity, else a new one.
+    private nint TakeBuffer(ulong bytes, out nint contents)
+    {
+        if (_pool && _free.TryGetValue(bytes, out var free) && free.TryPop(out var pooled))
+        {
+            _freeBytes -= bytes;
+            _poolHits++;
+            contents = pooled.Contents;
+            return pooled.Buffer;
+        }
+
+        _residentChurn++;
+        return _guestMemory.CreateMeshletBuffer(bytes, out contents);
+    }
+
     private void Touch(Entry entry, ulong serial)
     {
         entry.LastUsedSerial = serial;
@@ -667,18 +726,37 @@ internal sealed class MetalMeshletCache
 
         _versionCount--;
         _bytes -= entry.Bytes;
-        _retired.Add((entry.Buffer, entry.LastUsedSerial));
+        _retired.Add((entry.Buffer, entry.Contents, entry.Bytes, entry.LastUsedSerial));
     }
 
+    // With the pool, a buffer whose last use completed goes back to it, still resident, so the
+    // resident list does not change; it is released only when the pool is full.
     private void ReleaseRetired(ulong completedSerial)
     {
         for (var i = _retired.Count - 1; i >= 0; i--)
         {
-            if (_retired[i].Serial <= completedSerial)
+            var retired = _retired[i];
+            if (retired.Serial > completedSerial)
             {
-                _guestMemory.ReleaseMeshletBuffer(_retired[i].Buffer);
-                _retired.RemoveAt(i);
+                continue;
             }
+
+            _retired.RemoveAt(i);
+            if (_pool && _freeBytes + retired.Bytes <= PoolBudgetBytes)
+            {
+                if (!_free.TryGetValue(retired.Bytes, out var free))
+                {
+                    free = new Stack<(nint Buffer, nint Contents)>();
+                    _free[retired.Bytes] = free;
+                }
+
+                free.Push((retired.Buffer, retired.Contents));
+                _freeBytes += retired.Bytes;
+                continue;
+            }
+
+            _guestMemory.ReleaseMeshletBuffer(retired.Buffer);
+            _residentChurn++;
         }
     }
 
@@ -697,7 +775,8 @@ internal sealed class MetalMeshletCache
             $"meshlet_hash_kb={_hashBytes / 1024} meshlet_build_kb={_buildBytes / 1024} " +
             $"meshlet_build_split_ms=[read={Ms(_readTicks)} build={Ms(_builderTicks)} alloc={Ms(_allocTicks)}] " +
             $"meshlet_entries={_slots.Count} meshlet_evictions={_evictions} " +
-            $"meshlet_version_hits={_versionHits} meshlet_versions={_versionCount}";
+            $"meshlet_version_hits={_versionHits} meshlet_versions={_versionCount} " +
+            $"meshlet_pool_hits={_poolHits} meshlet_pool_mb={_freeBytes / (1024 * 1024)} meshlet_resident_churn={_residentChurn}";
         _draws = 0;
         _builds = 0;
         _validationsSkipped = 0;
@@ -712,6 +791,8 @@ internal sealed class MetalMeshletCache
         _allocTicks = 0;
         _evictions = 0;
         _versionHits = 0;
+        _poolHits = 0;
+        _residentChurn = 0;
         return text;
 
         string Ms(long ticks) => (ticks * 1000.0 / frequency).ToString("F2", culture);

@@ -26,12 +26,12 @@ public sealed unsafe class MetalMeshletCacheTests(ITestOutputHelper output)
         public readonly MetalGuestMemory Memory;
         public readonly MetalMeshletCache Cache;
 
-        public Rig(int? maxVersions = null)
+        public Rig(int? maxVersions = null, bool? pool = null)
         {
             Memory = new MetalGuestMemory(
                 Device.Value, Backing, new MetalGuestWindowGranuleTests.BackingMemory(Backing),
                 MetalGuestWindowGranuleTests.GranuleBytes, MetalGuestWindowGranuleTests.MaxWindowBytes);
-            Cache = new MetalMeshletCache(Memory, new MetalGuestWindowGranuleTests.BackingMemory(Backing), maxVersions);
+            Cache = new MetalMeshletCache(Memory, new MetalGuestWindowGranuleTests.BackingMemory(Backing), maxVersions, pool);
         }
 
         public void Write(uint[] indices, ulong address = RangeAddress)
@@ -41,9 +41,22 @@ public sealed unsafe class MetalMeshletCacheTests(ITestOutputHelper output)
             Assert.True(Backing.TryWriteBacking(address, bytes));
         }
 
-        public MetalMeshletCache.Meshlets Get(uint indexCount, ulong serial, ulong completed, ulong address = RangeAddress)
+        public void Write16(uint[] indices, ulong address = RangeAddress)
         {
-            Assert.True(Cache.TryGet(address, indexCount, true, MaxVertices, MaxPrimitives, serial, completed, out var meshlets));
+            var bytes = new byte[indices.Length * sizeof(ushort)];
+            for (var i = 0; i < indices.Length; i++)
+            {
+                BitConverter.TryWriteBytes(bytes.AsSpan(i * sizeof(ushort)), checked((ushort)indices[i]));
+            }
+
+            Assert.True(Backing.TryWriteBacking(address, bytes));
+        }
+
+        public MetalMeshletCache.Meshlets Get(
+            uint indexCount, ulong serial, ulong completed, ulong address = RangeAddress, bool index32 = true,
+            uint maxVertices = MaxVertices, uint maxPrimitives = MaxPrimitives)
+        {
+            Assert.True(Cache.TryGet(address, indexCount, index32, maxVertices, maxPrimitives, serial, completed, out var meshlets));
             return meshlets;
         }
 
@@ -74,9 +87,17 @@ public sealed unsafe class MetalMeshletCacheTests(ITestOutputHelper output)
         return new ReadOnlySpan<uint>((void*)contents, (int)meshlets.PrimitiveBase + triangles).ToArray();
     }
 
-    private static void AssertBuiltFrom(uint[] indices, MetalMeshletCache.Meshlets meshlets)
+    // Triangles of three fresh vertices each, the values offset by `offset`: every offset builds
+    // the same number of words, so its buffers share one pool class, but hashes differently.
+    private static uint[] Strip(uint offset, int triangles = 300) =>
+        Enumerable.Range(0, triangles * 3).Select(i => offset + (uint)i).ToArray();
+
+    // The oracle is the builder as it is today (MeshletBuilder.Build into fresh arrays): the cache's
+    // words, written into a buffer that may hold an older build, must equal it word for word.
+    private static void AssertBuiltFrom(
+        uint[] indices, MetalMeshletCache.Meshlets meshlets, uint maxVertices = MaxVertices, uint maxPrimitives = MaxPrimitives)
     {
-        var expected = MeshletBuilder.Build(indices, MaxVertices, MaxPrimitives);
+        var expected = MeshletBuilder.Build(indices, maxVertices, maxPrimitives);
         Assert.Equal(expected.MeshletCount, meshlets.Count);
         Assert.Equal(expected.VertexBase, meshlets.VertexBase);
         Assert.Equal(expected.PrimitiveBase, meshlets.PrimitiveBase);
@@ -255,6 +276,147 @@ public sealed unsafe class MetalMeshletCacheTests(ITestOutputHelper output)
         Assert.Equal(0, rig.Cache.VersionHits);
         Assert.Contains("meshlet_builds=4 ", rig.Cache.TakeCounters());
     }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void BuildIntoMatchesTheReferenceBuilderBitForBit(bool index32)
+    {
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        // A few keys (count and limits) rebuilt with new random content, one version per key and
+        // every earlier submission complete: most builds write over a pooled buffer that held
+        // another build of its class.
+        using var rig = new Rig(maxVersions: 1, pool: true);
+        var random = new Random(index32 ? 7 : 8);
+        var shapes = new (int Triangles, int Range, uint Vertices, uint Primitives)[]
+        {
+            (0, 300, 64, 32), (7, 300, 3, 1), (600, 300, 64, 32), (600, 60000, 128, 256),
+            (3000, 300, 255, 255), (3000, 60000, 30, 10), (1999, 2000, 64, 126),
+        };
+        for (var serial = 1UL; serial <= 140; serial++)
+        {
+            var (triangles, range, vertices, primitives) = shapes[random.Next(shapes.Length)];
+            var indices = Enumerable.Range(0, triangles * 3).Select(_ => (uint)random.Next(0, range)).ToArray();
+            if (index32)
+            {
+                rig.Write(indices);
+            }
+            else
+            {
+                rig.Write16(indices);
+            }
+
+            var meshlets = rig.Get((uint)indices.Length, serial, serial - 1, index32: index32, maxVertices: vertices,
+                maxPrimitives: primitives);
+            AssertBuiltFrom(indices, meshlets, vertices, primitives);
+        }
+
+        Assert.True(rig.Cache.PoolHits > 0, rig.Cache.TakeCounters());
+    }
+
+    // A rebuild under submission 3 while submissions 1 and 2 are in flight gets a new buffer; once
+    // submission 1 completes, the buffer it read is reused, never the one submission 3 can read.
+    [Fact]
+    public void APooledBufferIsNotReusedWhileASubmissionCanReadIt()
+    {
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        using var rig = new Rig(maxVersions: 1, pool: true);
+        var contents = Enumerable.Range(1, 4).Select(k => Strip((uint)k * 10000)).ToArray();
+        rig.Write(contents[0]);
+        var first = rig.Get((uint)contents[0].Length, 1, 0);
+        rig.Write(contents[1]);
+        var second = rig.Get((uint)contents[1].Length, 2, 0);
+        rig.Write(contents[2]);
+        var third = rig.Get((uint)contents[2].Length, 3, 0);
+        Assert.Equal(3, new[] { first.Buffer, second.Buffer, third.Buffer }.Distinct().Count());
+        Assert.Equal(0, rig.Cache.PoolHits);
+        Assert.Equal(2, rig.Cache.RetiredCount);
+
+        // Submission 1 completed: its buffer is free, submission 2's is not, and 3's is in use.
+        rig.Write(contents[3]);
+        var fourth = rig.Get((uint)contents[3].Length, 4, 1);
+        Assert.Equal(first.Buffer, fourth.Buffer);
+        Assert.Equal(1, rig.Cache.PoolHits);
+        AssertBuiltFrom(contents[3], fourth);
+
+        // Nothing more completed: the next rebuild cannot take submission 2's or 3's buffer.
+        rig.Write(contents[0]);
+        var fifth = rig.Get((uint)contents[0].Length, 5, 1);
+        Assert.DoesNotContain(fifth.Buffer, new[] { second.Buffer, third.Buffer, fourth.Buffer });
+        AssertBuiltFrom(contents[0], fifth);
+    }
+
+    // Rebuilds served from the pool leave the resident list as it was: no buffer is created or
+    // released, so the list's version does not move and the next encoder names nothing new.
+    [Fact]
+    public void ARebuildFromThePoolLeavesTheResidentListUnchanged()
+    {
+        if (!RequireDevice())
+        {
+            return;
+        }
+
+        using var rig = new Rig(maxVersions: 1, pool: true);
+        var contents = Enumerable.Range(1, 6).Select(k => Strip((uint)k * 10000)).ToArray();
+        rig.Write(contents[0]);
+        rig.Get((uint)contents[0].Length, 1, 0);
+        rig.Write(contents[1]);
+        rig.Get((uint)contents[1].Length, 2, 1);
+        _ = rig.Cache.TakeCounters();
+
+        var before = rig.Memory.ResidentBuffers.ToArray();
+        var version = rig.Memory.ResidentVersion;
+        for (var serial = 3UL; serial <= 6; serial++)
+        {
+            var content = contents[(int)serial - 1];
+            rig.Write(content);
+            var meshlets = rig.Get((uint)content.Length, serial, serial - 1);
+            AssertBuiltFrom(content, meshlets);
+            if (rig.Memory.ResidencySet == 0)
+            {
+                Assert.Contains(meshlets.Buffer, rig.Memory.ResidentBuffers.ToArray());
+            }
+        }
+
+        Assert.Equal(4, rig.Cache.PoolHits);
+        Assert.Equal(0, rig.Cache.ResidentChurn);
+        var after = rig.Memory.ResidentBuffers.ToArray();
+        Assert.Equal(version, rig.Memory.ResidentVersion);
+        Assert.Equal(before, after);
+        output.WriteLine($"residency set {(rig.Memory.ResidencySet != 0 ? "on" : "off")}, resident {after.Length}: " +
+            rig.Cache.TakeCounters());
+
+        // Without the pool every rebuild creates a buffer and releases one.
+        using var unpooled = new Rig(maxVersions: 1, pool: false);
+        for (var serial = 1UL; serial <= 4; serial++)
+        {
+            var content = contents[(int)serial - 1];
+            unpooled.Write(content);
+            unpooled.Get((uint)content.Length, serial, serial - 1);
+        }
+
+        Assert.Equal(0, unpooled.Cache.PoolHits);
+        // Four creates, and the first two buffers released once their submissions completed.
+        Assert.Equal(6, unpooled.Cache.ResidentChurn);
+    }
+
+    [Theory]
+    [InlineData(0UL, 4096UL)]
+    [InlineData(4096UL, 4096UL)]
+    [InlineData(4097UL, 5120UL)]
+    [InlineData(16384UL, 16384UL)]
+    [InlineData(16385UL, 20480UL)]
+    [InlineData(1048577UL, 1310720UL)]
+    public void PooledBuffersComeInQuarterStepsOfAPowerOfTwo(ulong bytes, ulong capacity) =>
+        Assert.Equal(capacity, MetalMeshletCache.SizeClass(bytes));
 
     private bool RequireDevice()
     {
