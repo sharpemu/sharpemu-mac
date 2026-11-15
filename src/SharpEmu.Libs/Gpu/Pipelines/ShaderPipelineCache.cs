@@ -2000,7 +2000,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     // A program resolved ahead stands for the dispatch's own only where the dispatch would take it unchanged:
     // WithPrediction returns it as it is, and no frontend or consumption had a say.
-    private static ComputeProgram? Ahead(ComputeProgram program, KernelDemand? kernel, ShaderSource? source, out ComputePrefetchRefusal refusal)
+    private ComputeProgram? Ahead(ComputeProgram program, KernelDemand? kernel, ShaderSource? source, out ComputePrefetchRefusal refusal)
     {
         refusal = !program.Available || program.Consumed || program.ImageCopy is not null ? ComputePrefetchRefusal.Unavailable
             : source?.Registered.Frontend is not null ? ComputePrefetchRefusal.Frontend

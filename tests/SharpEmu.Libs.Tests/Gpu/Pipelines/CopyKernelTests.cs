@@ -305,6 +305,34 @@ public sealed class CopyKernelTests
         Assert.Equal(Untouched, Destination(guest, ConsumedWords.Length + 1)[^1]);
     }
 
+    // A host that consumes no prediction (Metal: no peek, no posted store, no known contents) gets the program as it is:
+    // nothing evaluated, consumed or known, and the dispatch's job resolved ahead stands for it.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AHostThatConsumesNoPrediction_EvaluatesNothingAndTheResolutionAheadStands(bool consumes)
+    {
+        var guest = Guest(elementCount: 10, parameter: 4, [1, 2, 3, 4]);
+        var stream = new FakeKernelWriteStream(guest.Memory);
+        guest.Host.KernelWriteStream = stream;
+        guest.Host.ConsumesKernelPredictions = consumes;
+        var banks = new RegisterBanks(message => new InvalidOperationException(message));
+        banks.Shader.Compute = Registers(4, 64);
+        var ahead = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry)
+            .ResolveComputeProgramAhead(banks, 0x8001, 1, 1, 1, indirect: false, out var refusal);
+        var result = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry)
+            .GetComputeProgram(banks, 0x8001, 1, 1, 1, indirect: false);
+
+        Assert.Equal(consumes ? ComputePrefetchRefusal.Prediction : ComputePrefetchRefusal.None, refusal);
+        Assert.Equal(consumes, ahead is null);
+        Assert.True(result.Available);
+        Assert.Equal(consumes, result.Consumed);
+        Assert.Null(result.KnownWrite);
+        stream.RunAll();
+        Assert.Equal(consumes ? new[] { "store" } : [], stream.Ran);
+        Assert.Equal(consumes ? 1u : Untouched, Destination(guest, 1)[0]);
+    }
+
     [Theory]
     [InlineData(DestinationAddress + 16, false)]
     [InlineData(DestinationAddress - 4, true)]

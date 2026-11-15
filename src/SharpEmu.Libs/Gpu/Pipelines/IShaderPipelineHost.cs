@@ -203,6 +203,11 @@ public interface IShaderPipelineHost
 
     uint[] NormalizeImageDescriptor(IShaderFrontend frontend, ReadOnlySpan<uint> words,
         ShaderStage stage, ulong shaderHash, string source) => frontend.NormalizeImageForResolution(words, stage, shaderHash, source, true);
+    // Whether a CPU kernel prediction (ShaderPipelineCache.KernelEvaluation) can reach anything: the host answers
+    // TryPeekResidentGuestBytes, TryPostKernelWrite or IRenderHost.NoteKnownGpuContents (and its command stream's
+    // NoteKnownWrite). Without it no dispatch is evaluated on the CPU.
+    bool ConsumesKernelPredictions => false;
+
     // A resident read that refuses instead of waiting for pending command-thread work.
     bool TryPeekResidentGuestBytes(ulong address, Span<byte> destination) => false;
 

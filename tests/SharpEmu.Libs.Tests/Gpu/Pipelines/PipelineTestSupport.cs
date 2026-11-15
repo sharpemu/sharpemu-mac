@@ -140,6 +140,9 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     // A pending known write the test names here; a read it covers whole is served from it.
     public (ulong Address, uint[] Words) Shadow { get; set; }
 
+    // It answers peeks and posts kernel writes, so dispatches are evaluated; a test sets false for a host that cannot.
+    public bool ConsumesKernelPredictions { get; set; } = true;
+
     public bool TryPeekResidentGuestBytes(ulong address, Span<byte> destination)
     {
         var (shadowAddress, words) = Shadow;
