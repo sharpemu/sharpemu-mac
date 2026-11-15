@@ -409,6 +409,13 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         return true;
     }
 
+    /// <summary>Whether an owed operand a COND_EXEC may take as zero is taken (off: the read parks).</summary>
+    public bool TakesOwedOperandsAsZero { get; set; }
+
+    public bool TryTakeOwedOperandAsZero(ulong address, ulong size) =>
+        TakesOwedOperandsAsZero &&
+        OwedOperandWrites.Exists(range => address < range.Address + range.Size && range.Address < address + size);
+
     public List<ulong> IndirectCpuReads { get; } = [];
 
     public void NoteIndirectArgumentsReadOnCpu(ulong address, ulong size) => IndirectCpuReads.Add(address);

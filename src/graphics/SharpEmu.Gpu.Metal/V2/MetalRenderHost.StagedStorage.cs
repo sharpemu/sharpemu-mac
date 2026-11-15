@@ -13,6 +13,14 @@ internal sealed partial class MetalRenderHost
 
     private MetalStagedStorage StagedStorage => _stagedStorageCopies ??= new MetalStagedStorage(_guestMemory, _stagedRanges);
 
+    /// <summary>Tests: a staged copy of these bytes, written by a recorded dispatch, to be written back at the encoder end.</summary>
+    internal void StageRecordedStoresForTest(ulong address, ulong size)
+    {
+        var staging = _guestMemory.Stage(address, size);
+        StagedStorage.Add(address, size, staging, _guestMemory.Stage(address, size), written: true);
+        StagedStorage.Arm();
+    }
+
     private bool _encodingStagedStores;
 
     /// <summary>
