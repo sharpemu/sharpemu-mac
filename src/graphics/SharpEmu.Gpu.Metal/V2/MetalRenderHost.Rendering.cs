@@ -1456,7 +1456,10 @@ internal sealed partial class MetalRenderHost
             EndRendering();
             EncodeStagedStores();
             // Copies that land here and need no shared event land in the encoder this opens, after its fence wait
-            // (MetalRenderHost.LabelScatter.cs), instead of in a copy encoder of their own ahead of it.
+            // (MetalRenderHost.LabelScatter.cs), instead of in a copy encoder of their own ahead of it. A clear this
+            // dispatch sees cannot land after them: MaterializePendingClearsForCompute below encodes it through
+            // BeginTransfer, whose EndEncoders lands these copies first (EncodeDeferredLabelCopies), so the fold then
+            // finds none.
             foldAtOpen = _deferredLabelCopies.Count != 0 && (!LabelsAtCommit || _landDeferredLabels) &&
                 !_encodingDeferredLabels && MayFoldHeldCopies(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies));
             if (!foldAtOpen)

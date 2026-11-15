@@ -67,16 +67,39 @@ public sealed partial class GpuCommandInterpreter
     // waits for nothing and publishes nothing for the CPU.
     private bool _cpWriteCausal;
 
-    private static long _pendingValueReads;
+    private void NoteCausalRead() => _cpWriteCausal = true;
 
-    /// <summary>Reads answered from a value not yet landed, on any queue (SHARPEMU_METAL_V2_CP_WRITE_DEVICE_ORDER=verify).</summary>
-    public static long PendingValueReads => Interlocked.Read(ref _pendingValueReads);
+    // SHARPEMU_METAL_V2_CP_WRITE_DEVICE_ORDER=verify (the host sets CpWriteOrderVerify): every read answered from bytes
+    // not yet landed counts where it is answered (the host's unlanded command-processor bytes and held copies, this
+    // queue's pending-label table), on any queue. A write this queue does not flag causal, made after that count moved
+    // since its previous write, is a suspect: a causal read site the interpreter does not flag. The count is global, so
+    // another queue's read can raise a suspect too (a lead, never a miss); reads the GPU makes at execution (indirect
+    // arguments, resources) are not counted.
+    public static bool CpWriteOrderVerify { get; set; }
 
-    private void NoteCausalRead()
+    private static long _pendingAnswers;
+    private static long _cpWriteOrderSuspects;
+    private static ulong _lastPendingAnswerAddress;
+    private static int _lastPendingAnswerSize;
+    private long _pendingAnswersAtWrite = Interlocked.Read(ref _pendingAnswers);
+
+    /// <summary>A read answered from bytes not yet landed (verify only).</summary>
+    public static void NotePendingAnswer(ulong address, int size)
     {
-        _cpWriteCausal = true;
-        Interlocked.Increment(ref _pendingValueReads);
+        if (!CpWriteOrderVerify)
+        {
+            return;
+        }
+
+        _lastPendingAnswerAddress = address;
+        _lastPendingAnswerSize = size;
+        Interlocked.Increment(ref _pendingAnswers);
     }
+
+    /// <summary>Unflagged command-processor writes made after a read answered from bytes not yet landed (verify only).</summary>
+    public static long TakeCpWriteOrderSuspects() => Interlocked.Exchange(ref _cpWriteOrderSuspects, 0);
+
+    private static int _cpWriteOrderSuspectLogged;
 
     private void EmitOrderingBarrier()
     {
@@ -88,6 +111,24 @@ public sealed partial class GpuCommandInterpreter
     {
         var causal = _cpWriteCausal;
         _cpWriteCausal = false;
+        if (CpWriteOrderVerify)
+        {
+            var answers = Interlocked.Read(ref _pendingAnswers);
+            if (!causal && answers != _pendingAnswersAtWrite)
+            {
+                Interlocked.Increment(ref _cpWriteOrderSuspects);
+                if (Interlocked.Exchange(ref _cpWriteOrderSuspectLogged, 1) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] command_stream.cp_write_order_suspect queue={QueueId} " +
+                        $"read=0x{_lastPendingAnswerAddress:X16} size={_lastPendingAnswerSize}: a command-processor write " +
+                        "not flagged causal followed a read answered from bytes not yet landed.");
+                }
+            }
+
+            _pendingAnswersAtWrite = answers;
+        }
+
         return causal;
     }
 

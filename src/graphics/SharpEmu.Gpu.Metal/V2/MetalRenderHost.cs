@@ -1973,6 +1973,7 @@ internal sealed partial class MetalRenderHost :
                 case MetalOverlayCoverage.Full:
                     _cpOverlay.Apply(address, destination);
                     Interlocked.Increment(ref _overlayReads);
+                    NotePendingAnswer(address, destination.Length);
                     return true;
                 case MetalOverlayCoverage.Partial:
                     if (!TryReadGuestCore(address, destination))
@@ -1982,6 +1983,7 @@ internal sealed partial class MetalRenderHost :
 
                     _cpOverlay.Apply(address, destination);
                     Interlocked.Increment(ref _overlayReads);
+                    NotePendingAnswer(address, destination.Length);
                     return true;
             }
         }
@@ -2026,6 +2028,7 @@ internal sealed partial class MetalRenderHost :
 
         if (TryReadThroughPendingCopy(address, destination))
         {
+            NotePendingAnswer(address, destination.Length);
             return true;
         }
 
@@ -2208,6 +2211,7 @@ internal sealed partial class MetalRenderHost :
             // The poll reads bytes this host has yet to land as written: nothing to commit.
             _cpOverlay.Apply(address, destination);
             Interlocked.Increment(ref _overlayReads);
+            NotePendingAnswer(address, destination.Length);
             return true;
         }
 

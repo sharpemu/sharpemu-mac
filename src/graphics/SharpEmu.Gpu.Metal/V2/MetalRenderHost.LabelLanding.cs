@@ -86,6 +86,9 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    /// <summary>Tests: the held copies land at the next boundary, as a join that ends a pass asks (Join).</summary>
+    internal void RequestLabelLandingForTest() => RequestLabelLanding(LabelLandCause.Join);
+
     private static int LabelMixIndex(in DeferredLabelCopy copy) => copy.Kind switch
     {
         LabelCopyKind.CpWrite => 0,
@@ -140,21 +143,31 @@ internal sealed partial class MetalRenderHost
     // since its previous write) is held device-ordered rather than CPU-visible. On the console such a WRITE_DATA waits
     // for no earlier work and publishes nothing for the CPU, so it needs no shared event, and a batch of them lands
     // inside the open compute encoder. Every Demon's Souls batch held one and paid the shared event for it.
-    // =verify keeps every write CPU-visible and counts (cp_write_order_suspects, logged once) the ones that would have
-    // been device-ordered while some queue had read a pending value since the last shared barrier: a causal read site
-    // the interpreter does not flag shows up there.
+    // =verify keeps every write CPU-visible and counts at the read: every read this host answers from bytes not yet
+    // landed (the command-processor overlay, a pending copy) and every hit in a queue's pending-label table bumps a
+    // counter, and a write its queue does not flag causal, made after that counter moved since the queue's previous
+    // write, is counted (cp_write_order_suspects) and logged once with the read's address and size
+    // (GpuCommandInterpreter.CpWriteOrderVerify). A causal read site the interpreter does not flag shows up there.
     private static readonly string? CpWriteDeviceOrderMode =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CP_WRITE_DEVICE_ORDER");
 
     internal bool CpWritesDeviceOrdered { get; set; } = CpWriteDeviceOrderMode is not ("0" or "verify");
 
-    private static readonly bool CpWriteDeviceOrderVerify = CpWriteDeviceOrderMode == "verify";
+    private static readonly bool CpWriteDeviceOrderVerify =
+        SharpEmu.Libs.Gpu.GpuCommands.GpuCommandInterpreter.CpWriteOrderVerify = CpWriteDeviceOrderMode == "verify";
+
+    // A read answered from bytes not yet landed (counted for =verify only).
+    private static void NotePendingAnswer(ulong address, int size)
+    {
+        if (CpWriteDeviceOrderVerify)
+        {
+            SharpEmu.Libs.Gpu.GpuCommands.GpuCommandInterpreter.NotePendingAnswer(address, size);
+        }
+    }
 
     // A causal command-processor write is held: every later one is held CPU-visible behind it until the held copies
     // land, so none overtakes it and the order of the writes is kept across the landing.
     private bool _causalCpWriteHeld;
-    private long _pendingReadsAtSharedBarrier;
-    private long _cpWriteOrderSuspects;
 
     // Command-processor writes recorded as a dispatch in the open compute encoder rather than held (label_cp_in_encoder).
     private long _labelCpInEncoder;
@@ -162,15 +175,6 @@ internal sealed partial class MetalRenderHost
     private (bool CpuVisible, LabelCopyKind Kind) CommandProcessorWriteClass(bool causal)
     {
         var ordered = causal || _causalCpWriteHeld;
-        if (CpWriteDeviceOrderVerify && !ordered &&
-            SharpEmu.Libs.Gpu.GpuCommands.GpuCommandInterpreter.PendingValueReads != _pendingReadsAtSharedBarrier)
-        {
-            _cpWriteOrderSuspects++;
-            MetalV2Diagnostics.WarnOnce("cp-write-order-suspect",
-                "A command-processor write its queue did not flag as causal followed a read of a pending value since the " +
-                "last shared label barrier (SHARPEMU_METAL_V2_CP_WRITE_DEVICE_ORDER=verify).");
-        }
-
         return (!CpWritesDeviceOrdered || ordered, ordered ? LabelCopyKind.CpCausal : LabelCopyKind.CpWrite);
     }
 
@@ -186,7 +190,8 @@ internal sealed partial class MetalRenderHost
     private string TakeLabelLandingCounters()
     {
         var text = new System.Text.StringBuilder(256);
-        text.Append(" cp_write_order_suspects=").Append(Interlocked.Exchange(ref _cpWriteOrderSuspects, 0));
+        text.Append(" cp_write_order_suspects=")
+            .Append(SharpEmu.Libs.Gpu.GpuCommands.GpuCommandInterpreter.TakeCpWriteOrderSuspects());
         text.Append(" label_cp_in_encoder=").Append(Interlocked.Exchange(ref _labelCpInEncoder, 0));
         Append(text, "label_land", LabelLandNames, _labelLand);
         Append(text, "label_batch", LabelBatchNames, _labelBatch);

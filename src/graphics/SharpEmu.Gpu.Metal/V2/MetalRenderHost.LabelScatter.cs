@@ -364,9 +364,17 @@ internal sealed partial class MetalRenderHost
         var expected = new Dictionary<ulong, uint>();
         foreach (ref readonly var copy in copies)
         {
-            var staging = (byte*)MetalNative.Send(copy.StagingBuffer, SelLabelFoldContents);
+            // Only staging the host wrote (an end-of-pipe value, a command-processor write) holds its value now; a GDS or
+            // occlusion source is produced by GPU work still ahead, so its words are not checked, and a word it lands
+            // over is no longer what an earlier copy wrote.
+            var staging = copy.Kind == LabelCopyKind.Other ? null : (byte*)MetalNative.Send(copy.StagingBuffer, SelLabelFoldContents);
             if (staging == null)
             {
+                for (var offset = 0; offset < copy.Bytes; offset += sizeof(uint))
+                {
+                    expected.Remove(copy.GuestAddress + (ulong)offset);
+                }
+
                 continue;
             }
 

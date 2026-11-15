@@ -1835,7 +1835,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         {
             EncodeEventBarrier(commandBuffer);
             _labelBarrierKinds[BarrierKindShared]++;
-            _pendingReadsAtSharedBarrier = SharpEmu.Libs.Gpu.GpuCommands.GpuCommandInterpreter.PendingValueReads;
         }
         else
         {
