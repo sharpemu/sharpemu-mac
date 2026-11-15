@@ -2178,7 +2178,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // (MetalImageTransfer.TryEncodeTextureToTexture): neither transfer converts anything
     // for those pairs, so texel for texel the target gets exactly the bits the round trip
     // would have detiled into it.
-    private static readonly bool DeviceAliasPublishEnabled =
+    // Test hook: an instance setting, so a test runs the same pair with the device copy off.
+    internal bool DeviceAliasPublishEnabled { get; set; } =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_ON_DEVICE") != "0";
 
     // Publishes just the shared bytes of a GPU-written image, leaving the texture
