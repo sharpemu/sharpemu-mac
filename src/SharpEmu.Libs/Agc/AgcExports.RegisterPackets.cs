@@ -25,11 +25,13 @@ public static partial class AgcExports
         var registerCount = (uint)ctx[CpuRegister.Rdx];
         if (registerCount == 0)
         {
+            if (Diagnostics.HleCallShapeProfile.Enabled) Diagnostics.HleCallShapeProfile.RecordShRegisters(0, false, false, 0, false, Diagnostics.HleCallShapeProfile.ShRegistersOutcome.Invalid);
             return ReturnPointer(ctx, 0);
         }
 
         if (commandBufferAddress == 0 || registersAddress == 0 || registerCount > 4096)
         {
+            if (Diagnostics.HleCallShapeProfile.Enabled) Diagnostics.HleCallShapeProfile.RecordShRegisters(registerCount, false, false, 0, false, Diagnostics.HleCallShapeProfile.ShRegistersOutcome.Invalid);
             return ReturnPointer(ctx, 0);
         }
 
@@ -40,6 +42,13 @@ public static partial class AgcExports
         var registerPool = System.Buffers.ArrayPool<RegisterDefaultValue>.Shared;
         var registers = registerPool.Rent((int)registerCount);
         uint[]? packet = null;
+        // SHARPEMU_PERF_HLE only: the call's shape, recorded once on the way out.
+        var profile = Diagnostics.HleCallShapeProfile.Enabled;
+        var unsorted = false;
+        var duplicates = false;
+        var sourceOverlap = false;
+        var runs = 0;
+        var outcome = Diagnostics.HleCallShapeProfile.ShRegistersOutcome.ReadFailed;
         try
         {
             if (!ctx.Memory.TryRead(
@@ -49,7 +58,23 @@ public static partial class AgcExports
                 return ReturnPointer(ctx, 0);
             }
 
+            if (profile)
+            {
+                for (var index = 1; index < (int)registerCount; index++)
+                {
+                    unsorted |= registers[index].Offset < registers[index - 1].Offset;
+                }
+            }
+
             registers.AsSpan(0, (int)registerCount).Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
+            if (profile)
+            {
+                for (var index = 1; index < (int)registerCount; index++)
+                {
+                    duplicates |= registers[index].Offset == registers[index - 1].Offset;
+                }
+            }
+
             ulong firstCommandAddress = 0;
             var startIndex = 0;
             var count = (int)registerCount;
@@ -64,9 +89,17 @@ public static partial class AgcExports
 
                 var valueCount = (uint)(endIndex - startIndex);
                 var packetDwords = valueCount + 2;
+                runs++;
                 if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress))
                 {
+                    outcome = Diagnostics.HleCallShapeProfile.ShRegistersOutcome.NoRoom;
                     return ReturnPointer(ctx, 0);
+                }
+
+                if (profile)
+                {
+                    sourceOverlap |= commandAddress < registersAddress + registerCount * 8UL &&
+                        registersAddress < commandAddress + packetDwords * 4UL;
                 }
 
                 packet ??= System.Buffers.ArrayPool<uint>.Shared.Rent(count + 2);
@@ -79,6 +112,7 @@ public static partial class AgcExports
 
                 if (!TryWriteCommandDwords(ctx, commandAddress, packet.AsSpan(0, (int)packetDwords)))
                 {
+                    outcome = Diagnostics.HleCallShapeProfile.ShRegistersOutcome.WriteFailed;
                     return ReturnPointer(ctx, 0);
                 }
 
@@ -86,10 +120,16 @@ public static partial class AgcExports
                 startIndex = endIndex;
             }
 
+            outcome = Diagnostics.HleCallShapeProfile.ShRegistersOutcome.Written;
             return ReturnPointer(ctx, firstCommandAddress);
         }
         finally
         {
+            if (profile)
+            {
+                Diagnostics.HleCallShapeProfile.RecordShRegisters(registerCount, unsorted, duplicates, runs, sourceOverlap, outcome);
+            }
+
             registerPool.Return(registers);
             if (packet is not null)
             {
