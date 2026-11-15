@@ -303,4 +303,118 @@ public sealed class ReadProofTests
         scratch.NoteRead(0x2000, 2);
         Assert.Null(MaterializationProgram.ReadProof.Build(program, scratch, []));
     }
+
+    private static T WithBackoff<T>(bool backoff, Func<T> body)
+    {
+        var previous = ResourceMaterializer.ReadProofBackoff;
+        ResourceMaterializer.ReadProofBackoff = backoff;
+        try
+        {
+            return WithMode(ResourceMaterializer.ReadProofMode.On, body);
+        }
+        finally
+        {
+            ResourceMaterializer.ReadProofBackoff = previous;
+        }
+    }
+
+    // A rebuild of the snapshot after the V#'s record count changed to `records`: the rebuilt snapshot.
+    private static ResourceSnapshot RebuildAfterChange(TestWordMemory memory, ResourceSnapshot snapshot, uint records)
+    {
+        memory.Words[2] = records;
+        Assert.Equal(ResourceMaterializer.FastRevalidation.Rebuilt, ResourceMaterializer.RevalidateOrRebuildFast(snapshot, out var rebuilt));
+        return rebuilt!;
+    }
+
+    // Words that change on every rebuild back the origin's chain off proofs: after two changes in a row its revalidations
+    // neither compare nor record one, and still answer as a full evaluation does; one that finds the snapshot current
+    // ends the back-off, and the next records a proof that proves the one after.
+    [Fact]
+    public void AnOriginWhoseWordsChangeEveryRebuildBacksOffUntilItIsCurrentAgain()
+    {
+        WithBackoff(true, () =>
+        {
+            var (plan, memory, comparer, inputs) = Setup();
+            var snapshot = Materialize(plan, inputs);
+            _ = ResourceMaterializer.TakeReadProofReport();
+            snapshot = RebuildAfterChange(memory, snapshot, 128);
+            Assert.NotNull(ResourceMaterializer.ReadProofOf(snapshot));
+            snapshot = RebuildAfterChange(memory, snapshot, 256);
+            // Backed off: the rebuilt snapshot holds no proof.
+            Assert.Null(ResourceMaterializer.ReadProofOf(snapshot));
+            var report = ResourceMaterializer.TakeReadProofReport();
+            Assert.Equal((2L, 1L), (Counter(report, "changed"), Counter(report, "backoffs")));
+
+            var calls = comparer.Calls;
+            snapshot = RebuildAfterChange(memory, snapshot, 64);
+            Assert.Null(ResourceMaterializer.ReadProofOf(snapshot));
+            Assert.Equal(ResourceMaterializer.FastRevalidation.Current, ResourceMaterializer.RevalidateOrRebuildFast(snapshot, out _));
+            Assert.Equal(calls, comparer.Calls);
+            report = ResourceMaterializer.TakeReadProofReport();
+            Assert.Equal((2L, 0L, 0L), (Counter(report, "backed_off"), Counter(report, "changed"), Counter(report, "recorded")));
+
+            // Re-armed: recorded again, then proved without reading a word.
+            Assert.Equal(ResourceMaterializer.FastRevalidation.Current, ResourceMaterializer.RevalidateOrRebuildFast(snapshot, out _));
+            Assert.NotNull(ResourceMaterializer.ReadProofOf(snapshot));
+            var reads = memory.Reads;
+            Assert.True(ResourceMaterializer.RevalidateFast(snapshot));
+            Assert.Equal(reads, memory.Reads);
+            report = ResourceMaterializer.TakeReadProofReport();
+            Assert.Equal((1L, 1L, 0L), (Counter(report, "none"), Counter(report, "hits"), Counter(report, "backed_off")));
+            return 0;
+        });
+    }
+
+    // The back-off lasts BackoffRevalidations revalidations whatever the words do, then compares and records again.
+    [Fact]
+    public void TheBackoffEndsAfterItsRevalidations()
+    {
+        WithBackoff(true, () =>
+        {
+            var (plan, memory, _, inputs) = Setup();
+            var snapshot = Materialize(plan, inputs);
+            snapshot = RebuildAfterChange(memory, snapshot, 128);
+            snapshot = RebuildAfterChange(memory, snapshot, 256);
+            _ = ResourceMaterializer.TakeReadProofReport();
+            for (var change = 0; change < ResourceMaterializer.BackoffRevalidations; change++)
+            {
+                snapshot = RebuildAfterChange(memory, snapshot, (uint)(change % 2 == 0 ? 64 : 32));
+            }
+
+            var report = ResourceMaterializer.TakeReadProofReport();
+            Assert.Equal((ResourceMaterializer.BackoffRevalidations, 0L), (Counter(report, "backed_off"), Counter(report, "changed")));
+            snapshot = RebuildAfterChange(memory, snapshot, 16);
+            report = ResourceMaterializer.TakeReadProofReport();
+            Assert.Equal((0L, 1L), (Counter(report, "backed_off"), Counter(report, "none")));
+            Assert.NotNull(ResourceMaterializer.ReadProofOf(snapshot));
+            return 0;
+        });
+    }
+
+    // A change, a proved revalidation, a change: not in a row, so no back-off. With the switch off, none ever.
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public void OnlyChangesInARowBackOffAndOnlyWithTheSwitchOn(bool backoff, bool provedBetween)
+    {
+        WithBackoff(backoff, () =>
+        {
+            var (plan, memory, _, inputs) = Setup();
+            var snapshot = Materialize(plan, inputs);
+            _ = ResourceMaterializer.TakeReadProofReport();
+            for (var change = 0; change < 4; change++)
+            {
+                snapshot = RebuildAfterChange(memory, snapshot, (uint)(change % 2 == 0 ? 128 : 256));
+                if (provedBetween)
+                {
+                    Assert.True(ResourceMaterializer.RevalidateFast(snapshot));
+                }
+            }
+
+            var report = ResourceMaterializer.TakeReadProofReport();
+            Assert.Equal((4L, 0L, 0L), (Counter(report, "changed"), Counter(report, "backoffs"), Counter(report, "backed_off")));
+            Assert.NotNull(ResourceMaterializer.ReadProofOf(snapshot));
+            return 0;
+        });
+    }
 }
