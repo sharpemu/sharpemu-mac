@@ -545,6 +545,10 @@ internal sealed partial class MetalRenderHost :
         Other,
     }
 
+    // The causes' names as the pass profile and union-pass notes take them, made once instead of twice per encoder end.
+    private static readonly string[] PassEndCauseNames =
+        Enum.GetValues<PassEndCause>().Select(cause => cause.ToString().ToLowerInvariant()).ToArray();
+
     /// <summary>Why a command buffer was committed (the flush_by field of the PERF line).</summary>
     internal enum MetalFlushCause : byte
     {
@@ -566,7 +570,7 @@ internal sealed partial class MetalRenderHost :
         _transferSharesCompute = false;
         if (_renderEncoder != 0)
         {
-            PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
+            PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : PassEndCauseNames[(int)cause]);
             switch (cause)
             {
                 case PassEndCause.Transfer: _passEndTransfer++; break;
@@ -582,7 +586,7 @@ internal sealed partial class MetalRenderHost :
         if (_computeEncoder != 0)
         {
             _encodersInBuffer++;
-            PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
+            PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : PassEndCauseNames[(int)cause]);
             EndAndReleaseEncoder(_computeEncoder, render: false);
             _computeEncoder = 0;
             _boundComputePipeline = 0;
@@ -2844,6 +2848,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" label_barriers=").Append(TakeLabelBarriers())
             .Append(" encoder_barriers=").Append(TakeEncoderBarriers())
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
+            .Append(TakeResidencyNameCounters())
             .Append(" device_address_writes=").Append(DeviceAddressWrites)
             .Append(TakeDeviceAddressReachCounters())
             .Append(" data_slots_device=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.LearnedSlots)
