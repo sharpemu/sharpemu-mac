@@ -144,6 +144,7 @@ public sealed class ResolveMemoRetentionBenchTests : IDisposable
             if (measured && frame == WarmFrames)
             {
                 GraphicsResolveMemo.TakeReport();
+                SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.TakeReadProofReport();
             }
 
             for (var draw = 0; draw < Draws; draw++)
@@ -182,26 +183,78 @@ public sealed class ResolveMemoRetentionBenchTests : IDisposable
             }
         }
 
-        var report = GraphicsResolveMemo.TakeReport();
+        var report = GraphicsResolveMemo.TakeReport() + " " + SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.TakeReadProofReport();
         Assert.Empty(_fatal.Messages);
         GC.KeepAlive(cache);
         return ((double)allocated / (Draws * MeasuredFrames), (double)retained / MeasuredFrames,
             ticks * 1e9 / Stopwatch.Frequency / (Draws * MeasuredFrames), report);
     }
 
-    // tuned false: the memo as it was before the retention changes (every rebuild kept).
+    // tuned false: the memo as it was before the retention changes (every rebuild and every new key's resolution kept).
+    // Both arms run on caches of their own in ABBA order (three rounds) after a warm-up pass of each; the timing is each arm's
+    // median.
     [Theory]
-    [InlineData(Churn.None, true)]
-    [InlineData(Churn.Words, true)]
-    [InlineData(Churn.Keys, true)]
-    [InlineData(Churn.Words, false)]
-    [InlineData(Churn.Keys, false)]
-    public void ResolveMemoRetentionBench(Churn churn, bool tuned)
+    [InlineData(Churn.None)]
+    [InlineData(Churn.Words)]
+    [InlineData(Churn.Keys)]
+    public void ResolveMemoRetentionBench(Churn churn)
     {
-        var (alloc, retained, ns, report) = Run(churn, ResolveMemoMode.On, cache => cache.ResolveMemoHoldChurn = tuned);
-        _output.WriteLine(FormattableString.Invariant(
-            $"churn={churn} tuned={tuned} draws/frame={Draws} alloc_per_draw={alloc:F0} B retained_per_frame={retained / 1024:F1} KiB ({retained / Draws:F0} B/draw) resolve={ns:F0} ns/draw"));
-        _output.WriteLine(report);
+        (double Alloc, double Retained, double Ns, string Report) Arm(bool tuned) => Run(churn, ResolveMemoMode.On, cache =>
+        {
+            cache.ResolveMemoHoldChurn = tuned;
+            cache.ResolveMemoAdmitSeen = tuned;
+        });
+
+        Arm(false);
+        Arm(true);
+        var arms = new[] { new List<(double Alloc, double Retained, double Ns, string Report)>(), new() };
+        for (var round = 0; round < 3; round++)
+        {
+            foreach (var tuned in new[] { false, true, true, false })
+            {
+                arms[tuned ? 1 : 0].Add(Arm(tuned));
+            }
+        }
+
+        foreach (var tuned in new[] { false, true })
+        {
+            var runs = arms[tuned ? 1 : 0];
+            var times = runs.Select(run => run.Ns).Order().ToArray();
+            _output.WriteLine(FormattableString.Invariant(
+                $"churn={churn} tuned={tuned} draws/frame={Draws} alloc_per_draw={runs[0].Alloc:F0} B retained_per_frame={runs[0].Retained / 1024:F1} KiB ({runs[0].Retained / Draws:F0} B/draw) resolve_median={times[times.Length / 2]:F0} ns/draw (min {times[0]:F0}, max {times[^1]:F0}, n={times.Length})"));
+            _output.WriteLine(runs[^1].Report);
+        }
+    }
+
+    // A rebuild shares what its words left as they were: the input description of the stage not rebuilt, and the word
+    // arrays of the six V#s that kept their base; verify finds it exact.
+    [Fact]
+    public void ARebuildSharesWhatItsWordsLeftUnchanged()
+    {
+        var cache = new ShaderPipelineCache(_guest.Context, _guest.Host, _guest.Compiler, _guest.Registry)
+        {
+            ResolveMemoMode = ResolveMemoMode.Verify,
+            ResolveMemoAdmitSeen = false,
+        };
+        var block = BlockOf(Churn.Words, 0, 0);
+        WriteBlock(block, 0, 0, moveWords: true);
+        PointPixelAt(block);
+        var first = cache.GetGraphicsPrograms(_banks, [], pixelActive: true, depthBound: false);
+        GraphicsResolveMemo.TakeReport();
+        WriteBlock(block, 0, 1, moveWords: true);
+        var rebuilt = cache.GetGraphicsPrograms(_banks, [], pixelActive: true, depthBound: false);
+        var report = GraphicsResolveMemo.TakeReport();
+        Assert.Contains("words_rebuilt=1,", report);
+        Assert.Contains("verify_failed=0)", report);
+        Assert.NotSame(first, rebuilt);
+        Assert.Same(first.VertexInput, rebuilt.VertexInput);
+        Assert.NotSame(first.PixelInput, rebuilt.PixelInput);
+        var before = first.PixelInput.Stage.Resources.Buffers;
+        var after = rebuilt.PixelInput.Stage.Resources.Buffers;
+        Assert.Equal(Buffers, after.Length);
+        Assert.Equal(Buffers - 2, after.Count(words => before.Any(held => ReferenceEquals(held, words))));
+        Assert.Equal(2, after.Count(words => !before.Any(held => held.AsSpan().SequenceEqual(words))));
+        Assert.Empty(_fatal.Messages);
     }
 
     // The same frames under verify: every hit and rebuild is resolved again in full and compared.

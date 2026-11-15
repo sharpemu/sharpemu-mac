@@ -20,8 +20,9 @@ public sealed partial class KeptStageInputsTests
     private const ulong Descriptor = PipelineTestGuest.MemoryBase + 0xD000;
     private const ulong OtherDescriptor = PipelineTestGuest.MemoryBase + 0xD100;
 
-    private ShaderPipelineCache MemoCache(ResolveMemoMode mode = ResolveMemoMode.Verify) =>
-        new(_guest.Context, _guest.Host, _guest.Compiler, _guest.Registry) { ResolveMemoMode = mode };
+    // admitSeen false (most tests here): a new key's resolution is kept on its first miss, so the second take hits.
+    private ShaderPipelineCache MemoCache(ResolveMemoMode mode = ResolveMemoMode.Verify, bool admitSeen = false) =>
+        new(_guest.Context, _guest.Host, _guest.Compiler, _guest.Registry) { ResolveMemoMode = mode, ResolveMemoAdmitSeen = admitSeen };
 
     private GraphicsPrograms Programs(ShaderPipelineCache cache, bool pixelActive)
     {
@@ -130,6 +131,34 @@ public sealed partial class KeptStageInputsTests
         // The rebuilt entry is the one the next draw takes.
         Assert.Same(rebuilt, Programs(cache, pixelActive: true));
         Assert.Contains("hits=1,", Report());
+    }
+
+    // With the first-miss filter (default), a new key's full resolution is kept only on the key's second miss: a key seen
+    // once (a draw whose user data names a new address every frame) leaves nothing in the memo.
+    [Fact]
+    public void ResolveMemo_KeepsANewKeysResolutionOnlyOnItsSecondMiss()
+    {
+        var cache = MemoCache(admitSeen: true);
+        Assert.True(cache.ResolveMemoAdmitSeen);
+        UseLoadingPixelProgram(Descriptor);
+        Report();
+        var first = Programs(cache, pixelActive: true);
+        var second = Programs(cache, pixelActive: true);
+        var report = Report();
+        Assert.NotSame(first, second);
+        Assert.Contains("new=2,", report);
+        Assert.Contains("first_miss_not_kept=1,", report);
+        Assert.Same(second, Programs(cache, pixelActive: true));
+        report = Report();
+        Assert.Contains("hits=1,", report);
+        Assert.Contains("verify_failed=0)", report);
+
+        // Another key seen once is not kept and leaves the kept one in place.
+        PointPixelAt(OtherDescriptor);
+        Programs(cache, pixelActive: true);
+        Assert.Contains("first_miss_not_kept=1,", Report());
+        PointPixelAt(Descriptor);
+        Assert.Same(second, Programs(cache, pixelActive: true));
     }
 
     // With the churn hold (default), a rebuild is handed out without the entry keeping it until a rebuild evaluates the

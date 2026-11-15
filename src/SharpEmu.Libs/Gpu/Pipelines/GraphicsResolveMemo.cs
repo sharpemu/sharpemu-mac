@@ -106,6 +106,14 @@ internal sealed class GraphicsResolveMemo
     // settle are kept on their second rebuild and hit from then on. Only what is kept changes, never a result.
     internal static readonly bool DefaultHoldChurn = Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_MEMO_HOLD_CHURN") != "0";
 
+    // SHARPEMU_RESOLVE_MEMO_ADMIT_SEEN=0: every full resolution under a new key is kept, as before. On (default), it is kept
+    // only when its key was missed before (SeenBefore): a draw whose user data names a new ring address every frame
+    // (Demon's Souls: ~6% of its draws, key_miss user_data_only ~= evictions) resolves in full every frame anyway, and
+    // keeping each of those resolutions made the long-lived memo point at a new entry, key and program graph per draw
+    // (promoted by every gen0 collection) while evicting entries that would have hit. A key that comes back is kept on
+    // its second miss and hits from its third take. Only what is kept changes, never a result.
+    internal static readonly bool DefaultAdmitSeen = Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_MEMO_ADMIT_SEEN") != "0";
+
     internal static ResolveMemoMode ParseMode(string? value) => value?.Trim().ToLowerInvariant() switch
     {
         "0" or "off" => ResolveMemoMode.Off,
@@ -164,6 +172,30 @@ internal sealed class GraphicsResolveMemo
         while (sets * Ways < capacity) sets <<= 1;
         _setMask = sets - 1;
         _ways = new Entry?[sets * Ways];
+        // Eight bits per key the filter holds before it is cleared.
+        _seen = new ulong[Math.Max(1, _ways.Length * 2 * 8 / 64)];
+        _seenMask = _seen.Length * 64 - 1;
+    }
+
+    // Whether the filled key was missed before (since the filter was last cleared); records it when not.
+    public bool SeenBefore()
+    {
+        var first = (int)(Hash & (ulong)_seenMask);
+        var second = (int)((Hash >> 32) & (ulong)_seenMask);
+        if ((_seen[first >> 6] & (1UL << first)) != 0 && (_seen[second >> 6] & (1UL << second)) != 0)
+        {
+            return true;
+        }
+
+        if (++_seenAdded > _ways.Length * 2)
+        {
+            Array.Clear(_seen);
+            _seenAdded = 1;
+        }
+
+        _seen[first >> 6] |= 1UL << first;
+        _seen[second >> 6] |= 1UL << second;
+        return false;
     }
 
     public ResolveMemoMode Mode { get; }
@@ -174,6 +206,16 @@ internal sealed class GraphicsResolveMemo
     // Whether a rebuild whose words differ from the entry's last rebuild is handed out without being kept (DefaultHoldChurn;
     // tests set it).
     public bool HoldChurn { get; set; } = DefaultHoldChurn;
+
+    // Whether a new key's resolution is kept only on the key's second miss (DefaultAdmitSeen; tests set it).
+    public bool AdmitSeen { get; set; } = DefaultAdmitSeen;
+
+    // The keys missed since the filter was last cleared, as a two-probe Bloom filter over the key hash: a false positive
+    // keeps a resolution on its first miss (as with AdmitSeen off), and a key is forgotten only when the filter is
+    // cleared, after twice the memo's capacity of first misses (~3% false positives at that fill).
+    private readonly ulong[] _seen;
+    private readonly int _seenMask;
+    private int _seenAdded;
 
     public int Count => _count;
 
@@ -404,6 +446,7 @@ internal sealed class GraphicsResolveMemo
     private static readonly ThreadCounter _hits = new();
     private static readonly ThreadCounter _rebuilt = new();
     private static readonly ThreadCounter _rebuildHeld = new();
+    private static readonly ThreadCounter _notAdmitted = new();
     private static readonly ThreadCounter[] _rebuildRefused = NewCounters((int)ResolveMemoRebuildRefusal.Count);
     private static readonly ThreadCounter _evictions = new();
     private static readonly ThreadCounter _entries = new();
@@ -422,6 +465,8 @@ internal sealed class GraphicsResolveMemo
     public static void NoteRebuilt() => _rebuilt.Increment();
 
     public static void NoteRebuildHeld() => _rebuildHeld.Increment();
+
+    public static void NoteNotAdmitted() => _notAdmitted.Increment();
 
     public static void NoteRebuildRefused(ResolveMemoRebuildRefusal cause) => _rebuildRefused[(int)cause].Increment();
 
@@ -454,6 +499,7 @@ internal sealed class GraphicsResolveMemo
         "rebuild_refused_by=(" + Take(_rebuildRefused, "origin", "refused", "evaluate", "failed", "specialization", "generation") + ")," +
         "key_miss=(" + Take(_keyMisses, "new", "user_data_only", "regs_only") + ")," +
         "uncacheable_by=(" + Take(_uncacheable, "frontend", "mesh", "tess", "calls", "unavailable", "tables", "trace", "origin", "key", "changed") + ")," +
+        FormattableString.Invariant($"first_miss_not_kept={_notAdmitted.Take()},admit_seen={(DefaultAdmitSeen ? 1 : 0)},") +
         FormattableString.Invariant($"evictions={_evictions.Take()},entries={_entries.Total},verify_checked={_verifyChecked.Take()},") +
         "verify_raced=(" + Take(_verifyRaced, "changed", "came_and_went", "superseded") + ")," +
         FormattableString.Invariant($"verify_failed={Interlocked.Read(ref _verifyFailed)})");

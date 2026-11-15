@@ -395,6 +395,19 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
     }
 
+    // For tests: whether this cache's memo keeps a new key's resolution only on its second miss (GraphicsResolveMemo.AdmitSeen).
+    internal bool ResolveMemoAdmitSeen
+    {
+        get => _resolveMemo?.AdmitSeen ?? false;
+        set
+        {
+            lock (_resolveGate)
+            {
+                if (_resolveMemo is { } memo) memo.AdmitSeen = value;
+            }
+        }
+    }
+
     // Shadow mode: counts whether the memo would have the draw's key; true when it has not and the key is to be stored
     // once the draw resolved.
     private bool ShadowResolveMemo(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
@@ -475,6 +488,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             {
                 GraphicsResolveMemo.NoteMiss(ResolveMemoMiss.New);
                 GraphicsResolveMemo.NoteKeyMiss(memo.ClassifyMiss());
+                // GraphicsResolveMemo.DefaultAdmitSeen: a key's first miss resolves in full without being kept.
+                if (memo.AdmitSeen && !memo.SeenBefore())
+                {
+                    GraphicsResolveMemo.NoteNotAdmitted();
+                    cacheable = false;
+                }
             }
         }
 
@@ -568,11 +587,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var pixelStage = programs.PixelInput.Stage;
         var vertexStage = programs.VertexInput.Stage;
         var rebuild = allowRebuild && memo.Rebuild;
-        var stageRebuilt = false;
-        if ((pixelActive && !RevalidateMemoStage(ref pixelStage, rebuild, ref stageRebuilt)) || !RevalidateMemoStage(ref vertexStage, rebuild, ref stageRebuilt))
+        var pixelRebuilt = false;
+        var vertexRebuilt = false;
+        if ((pixelActive && !RevalidateMemoStage(ref pixelStage, rebuild, ref pixelRebuilt)) || !RevalidateMemoStage(ref vertexStage, rebuild, ref vertexRebuilt))
         {
             return ResolveMemoMiss.Words;
         }
+
+        var stageRebuilt = pixelRebuilt || vertexRebuilt;
 
         // A load learned while the words were read.
         if (entry.DeviceDataGeneration != DeviceDataLoads.Generation)
@@ -589,11 +611,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return null;
         }
 
-        taken = WithStages(programs, vertexStage, pixelActive ? pixelStage : null);
+        taken = WithStages(programs, vertexRebuilt ? vertexStage : null, pixelRebuilt ? pixelStage : null);
         fingerprint = memo.Mode == ResolveMemoMode.Verify ? GraphicsProgramsComparer.Fingerprint(taken) : 0;
         rebuilt = true;
         // GraphicsResolveMemo.DefaultHoldChurn: kept only when the entry's last rebuild evaluated the same words.
-        var signature = memo.HoldChurn ? RebuildSignature(taken, pixelActive) : 0;
+        var signature = memo.HoldChurn ? RebuildSignature(taken, vertexRebuilt, pixelRebuilt) : 0;
         if (memo.HoldChurn && signature != entry.RebuildSignature)
         {
             entry.RebuildSignature = signature;
@@ -607,32 +629,19 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return null;
     }
 
-    // What a rebuild evaluated, for telling a draw whose words keep moving from one whose words settled (HoldChurn): every
-    // word of each stage's snapshot a rebuild materializes from its evaluation. A collision only keeps a correct rebuild.
-    private static ulong RebuildSignature(GraphicsPrograms programs, bool pixelActive)
+    // What a rebuild evaluated, for telling a draw whose words keep moving from one whose words settled (HoldChurn): the
+    // flattened tables of the rebuilt stages (a stage not rebuilt is the entry's own), which hold every descriptor word the
+    // evaluation read from memory; the rest of a fast snapshot comes from the origin's own user data. A collision, or words
+    // the tables miss, only keeps a correct rebuild.
+    private static ulong RebuildSignature(GraphicsPrograms programs, bool vertexRebuilt, bool pixelRebuilt)
     {
-        var hash = SignStage(0x9E3779B97F4A7C15UL, programs.VertexInput.Stage.Resources);
-        return pixelActive ? SignStage(hash, programs.PixelInput.Stage.Resources) : hash;
+        var hash = 0x9E3779B97F4A7C15UL ^ (vertexRebuilt ? 1UL : 0) ^ (pixelRebuilt ? 2UL : 0);
+        if (vertexRebuilt) hash = SignTable(hash, programs.VertexInput.Stage.Resources);
+        return pixelRebuilt ? SignTable(hash, programs.PixelInput.Stage.Resources) : hash;
     }
 
-    private static ulong SignStage(ulong hash, ResourceSnapshot snapshot)
-    {
-        foreach (var words in snapshot.Buffers) hash = SignWords(hash, words);
-        foreach (var words in snapshot.Images) hash = SignWords(hash, words);
-        foreach (var words in snapshot.Samplers) hash = SignWords(hash, words);
-        hash = SignWords(hash, snapshot.FlattenedResourceTable);
-        hash = SignWords(hash, snapshot.MipStatistics);
-        foreach (var range in snapshot.DeviceAddressRanges)
-        {
-            hash = (hash ^ range.Base) * 0x100000001B3UL;
-            hash = (hash ^ range.Size ^ ((ulong)range.Handle << 32) ^ (range.Planned ? 1UL : 0) ^ (range.Written ? 2UL : 0)) * 0x100000001B3UL;
-        }
-
-        return hash;
-    }
-
-    private static ulong SignWords(ulong hash, uint[]? words) =>
-        words is null ? hash * 31 + 1 : XxHash3.HashToUInt64(MemoryMarshal.AsBytes(words.AsSpan()), (long)(hash + (ulong)words.Length));
+    private static ulong SignTable(ulong hash, ResourceSnapshot snapshot) =>
+        XxHash3.HashToUInt64(MemoryMarshal.AsBytes(snapshot.FlattenedResourceTable.AsSpan()), (long)hash);
 
     // False when the stage's words no longer evaluate to its snapshot and it was not rebuilt (refusals counted).
     private bool RevalidateMemoStage(ref ShaderStageResources stage, bool rebuild, ref bool rebuilt)
@@ -672,12 +681,18 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
     }
 
-    // The programs with these stage resources in place of their own; the input descriptions are copied, never written:
-    // the result held before may still be on its way to the worker.
-    private static GraphicsPrograms WithStages(GraphicsPrograms programs, in ShaderStageResources vertexStage, ShaderStageResources? pixelStage)
+    // The programs with these stage resources in place of their own; the input descriptions of a rebuilt stage are
+    // copied, never written: the result held before may still be on its way to the worker. A stage not rebuilt keeps its
+    // input description, shared as a hit shares the whole result.
+    private static GraphicsPrograms WithStages(GraphicsPrograms programs, ShaderStageResources? vertexStage, ShaderStageResources? pixelStage)
     {
-        var vertexInput = programs.VertexInput.WithoutStage();
-        vertexInput.Stage = vertexStage;
+        var vertexInput = programs.VertexInput;
+        if (vertexStage is { } vertex)
+        {
+            vertexInput = vertexInput.WithoutStage();
+            vertexInput.Stage = vertex;
+        }
+
         var pixelInput = programs.PixelInput;
         if (pixelStage is { } pixel)
         {
