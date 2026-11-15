@@ -914,9 +914,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             : job.ComputeResult is null ? ComputeRefusal.Provider
             : !arguments.Matches(dispatchInitiator, groupsX, groupsY, groupsZ, indirect) ? ComputeRefusal.Inputs
             : job.ProgramState != _executor.ProgramState ? ComputeRefusal.Replanned
-            : Volatile.Read(ref _lastDispatchEffect) >= job.Gate || Volatile.Read(ref _lastCollectEffect) >= job.Gate ? ComputeRefusal.Effects
+            : HasComputeEffects(job) ? ComputeRefusal.Effects
             : !_concurrent.IsStillCurrentAcrossDispatches(job.Assumptions!) ? ComputeRefusal.Ownership
             : ComputeRefusal.Count;
+        if (refusal == ComputeRefusal.Count && job.ExecutedAtStart < Volatile.Read(ref _executedGate))
+        {
+            Interlocked.Increment(ref _computeTakenOver);
+        }
         // =verify keeps a taken job's assumptions to its comparison (VerifyCompute), as for a draw's look-ahead.
         var verifies = refusal == ComputeRefusal.Count && LookaheadMode == DrawLookaheadMode.Verify;
         if (!verifies)
@@ -993,6 +997,41 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             $"state_ahead=[{job.ResolveState}] state_now=[{_executor.DescribeProgramState()}].");
     }
 
+    // Whether a dispatch or collector call that ran after the job's resolution began noted an effect, measured from
+    // ExecutedAtStart as the draw take does. The worker runs item g with _executedGate = g-1, so an effect at item g
+    // records g-1 (NoteDispatchEffect, NoteCollect), and AdvanceGate(g) publishes the count only after item g ran. A
+    // resolution read ExecutedAtStart before anything else, so item g had finished before it read anything exactly when
+    // g <= ExecutedAtStart; g-1 >= ExecutedAtStart is an item that had not, whose effect it may have missed. Effects
+    // between Gate and ExecutedAtStart ran before the resolution began and are in what it read.
+    // SHARPEMU_PREFETCH_COMPUTE_WINDOW=0 measures from Gate again (every item since the earliest allowed start).
+    private bool HasComputeEffects(Job job)
+    {
+        var effect = Math.Max(Volatile.Read(ref _lastDispatchEffect), Volatile.Read(ref _lastCollectEffect));
+        var byGate = effect >= job.Gate;
+        var byStart = effect >= job.ExecutedAtStart;
+        if (byGate)
+        {
+            Interlocked.Increment(ref _computeEffectsByGate);
+        }
+
+        if (byStart)
+        {
+            Interlocked.Increment(ref _computeEffectsByStart);
+        }
+
+        return ComputeEffectsFromStart ? byStart : byGate;
+    }
+
+    private static readonly bool ComputeWindowDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_PREFETCH_COMPUTE_WINDOW") != "0";
+
+    // Tests set it on one instance.
+    internal bool ComputeEffectsFromStart { get; set; } = ComputeWindowDefault;
+
+    // effects_window: jobs that reached the effects test and the old (gate) rule and the new (started) rule each refuse,
+    // and the taken jobs whose resolution began before at least one item ahead of the dispatch ran.
+    private long _computeEffectsByGate, _computeEffectsByStart, _computeTakenOver;
+
     public (long Verified, long Raced, long Failed) TakeComputeVerifyCounters() =>
         (Interlocked.Exchange(ref _computeVerified, 0), Interlocked.Exchange(ref _computeVerifyRaced, 0),
             Interlocked.Exchange(ref _computeVerifyFailed, 0));
@@ -1001,7 +1040,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     public string TakeComputeReport()
     {
         var verify = TakeComputeVerifyCounters();
-        return $"dispatch_verify=(verified={verify.Verified},raced={verify.Raced},failed={verify.Failed})";
+        return $"effects_window=(mode={(ComputeEffectsFromStart ? "started" : "gate")},gate={Interlocked.Exchange(ref _computeEffectsByGate, 0)}," +
+            $"started={Interlocked.Exchange(ref _computeEffectsByStart, 0)},taken_over={Interlocked.Exchange(ref _computeTakenOver, 0)}) " +
+            $"dispatch_verify=(verified={verify.Verified},raced={verify.Raced},failed={verify.Failed})";
     }
 
     // Why a draw's job was not resolved when its draw took it: still gated on the work before it, the resolving

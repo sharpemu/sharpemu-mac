@@ -217,6 +217,60 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         Assert.Null(_prefetch.Current);
     }
 
+    // Effects count from the moment the resolution began (ExecutedAtStart), as for a draw: an effect at an item that ran
+    // after the job's gate opened but before its resolution read anything is in what it read, and the job is taken; one
+    // at an item that ran after the resolution began is refused. SHARPEMU_PREFETCH_COMPUTE_WINDOW=0 (the property)
+    // measures from the gate again and refuses both.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void EffectsCountFromTheStartOfTheResolutionUnlessTheWindowIsOff(bool fromStart)
+    {
+        _prefetch.ComputeEffectsFromStart = fromStart;
+        var banks = Banks().Snapshot();
+        // Item 1 ran; item 2 (the worker runs it with the count at 1) noted an effect and ran; then the job, gated on
+        // item 1, begins its resolution with two items run.
+        _prefetch.AdvanceGate(1);
+        _prefetch.NoteDispatchEffect();
+        _prefetch.AdvanceGate(2);
+        var before = _prefetch.SubmitCompute(banks, 1, Initiator, 4, 2, 1, false);
+        _prefetch.WaitIdle();
+        Assert.Equal(2, before.ExecutedAtStart);
+        Assert.Equal(fromStart, Take(banks, before));
+        Assert.Equal(fromStart ? 0 : 1, Refused(ParallelProgramPrefetch.ComputeRefusal.Effects));
+        Assert.Contains($"effects_window=(mode={(fromStart ? "started" : "gate")},gate=1,started=0,taken_over=0)",
+            _prefetch.TakeComputeReport());
+
+        // A job resolved with two items run, then item 3 notes an effect: refused under either rule.
+        var after = _prefetch.SubmitCompute(banks, 2, Initiator, 4, 2, 1, false);
+        _prefetch.WaitIdle();
+        _prefetch.NoteDispatchEffect();
+        _prefetch.AdvanceGate(3);
+        Assert.False(Take(banks, after));
+        Assert.Equal(1, Refused(ParallelProgramPrefetch.ComputeRefusal.Effects));
+        Assert.Contains("gate=1,started=1,", _prefetch.TakeComputeReport());
+
+        // A collector call's effect follows the same rule.
+        var collected = _prefetch.SubmitCompute(banks, 2, Initiator, 4, 2, 1, false);
+        _prefetch.WaitIdle();
+        Assert.Equal(3, collected.ExecutedAtStart);
+        _prefetch.NoteCollect(effect: true);
+        _prefetch.AdvanceGate(4);
+        Assert.False(Take(banks, collected));
+        Assert.Equal(1, Refused(ParallelProgramPrefetch.ComputeRefusal.Effects));
+    }
+
+    // A taken job whose resolution began before an item ahead of the dispatch ran counts as looked over (taken_over).
+    [Fact]
+    public void ATakenJobThatLookedOverAnItemIsCounted()
+    {
+        var banks = Banks().Snapshot();
+        var job = Resolved(banks, gate: 1);
+        _prefetch.AdvanceGate(2);
+        Assert.True(Take(banks, job));
+        Assert.Contains("taken_over=1)", _prefetch.TakeComputeReport());
+    }
+
     // A job resolved before the program cache replaced an entry (its stamp moved) may hold an entry a lookup made now
     // would not find: refused as replanned, as a draw's.
     [Fact]
@@ -241,7 +295,7 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         var resolutions = _pipelines.ComputeAheadResolutions;
         Assert.True(Take(banks, job));
         Assert.Equal(resolutions + 1, _pipelines.ComputeAheadResolutions);
-        Assert.Equal("dispatch_verify=(verified=1,raced=0,failed=0)", _prefetch.TakeComputeReport());
+        Assert.EndsWith("dispatch_verify=(verified=1,raced=0,failed=0)", _prefetch.TakeComputeReport());
 
         // The worker now resolves another program while the job's answers moved: a race, refused and counted.
         job = Resolved(banks);
@@ -249,7 +303,7 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         _pipelines.Compute = new ComputeProgram { Program = new ShaderProgram(0x44), Input = original.Input };
         _concurrent.Raced = true;
         Assert.False(Take(banks, job));
-        Assert.Equal("dispatch_verify=(verified=1,raced=1,failed=0)", _prefetch.TakeComputeReport());
+        Assert.EndsWith("dispatch_verify=(verified=1,raced=1,failed=0)", _prefetch.TakeComputeReport());
 
         // The same difference under answers that still hold is a hole: fatal, naming the job and the difference.
         _pipelines.Compute = original;
@@ -261,7 +315,7 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         Assert.Contains($"job {job.Index}", fatal.Message);
         Assert.Contains("looked_over=[", fatal.Message);
         Assert.Contains("stamp_ahead=", fatal.Message);
-        Assert.Equal("dispatch_verify=(verified=1,raced=0,failed=1)", _prefetch.TakeComputeReport());
+        Assert.EndsWith("dispatch_verify=(verified=1,raced=0,failed=1)", _prefetch.TakeComputeReport());
     }
 
     // A program that consumed its dispatch counts as an effect for the jobs resolved ahead of it.
