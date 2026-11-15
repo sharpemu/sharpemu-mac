@@ -75,10 +75,22 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        if (!ReadBindingMemoApplies || !_backing.TryResolveBackingAliasSpan(address, size, out var alias) ||
-            !_readBindingMemo.TryGet(address, size, computeStage, alias, ReadBindingStamp(), out range) ||
+        if (!ReadBindingMemoApplies || !_backing.TryResolveBackingAliasSpan(address, size, out var alias))
+        {
+            _readBindingMemo.Misses++;
+            _readBindingMemo.MissRefused++;
+            return false;
+        }
+
+        if (!_readBindingMemo.TryGet(address, size, computeStage, alias, ReadBindingStamp(), out range) ||
             !_guestMemory.InPlaceAnswerStands(alias, size))
         {
+            if (range.IsValid)
+            {
+                // The entry matched; the window under it no longer stands.
+                _readBindingMemo.MissRefused++;
+            }
+
             _readBindingMemo.Misses++;
             range = default;
             return false;
