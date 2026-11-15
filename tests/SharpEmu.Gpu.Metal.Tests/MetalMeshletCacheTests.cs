@@ -12,7 +12,7 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// back for the bytes at a range, and when a buffer it no longer needs can be written again.
 /// Buffers come from the device, so every test is behind the exclusive device gate.
 /// </summary>
-public sealed unsafe class MetalMeshletCacheTests(ITestOutputHelper output)
+public sealed unsafe partial class MetalMeshletCacheTests(ITestOutputHelper output)
 {
     private const ulong RangeAddress = MetalGuestWindowGranuleTests.GuestBase + 0x10000;
     private const uint MaxVertices = 64;
