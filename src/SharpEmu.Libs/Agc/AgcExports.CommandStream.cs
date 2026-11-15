@@ -236,7 +236,9 @@ public static partial class AgcExports
                         _executor.Prefetch = _parallel;
                         _prefetchesDispatches = concurrentHost.PrefetchesDispatches;
                         _dispatchesCrossDispatches = concurrentHost.PrefetchedDispatchesCrossDispatches;
-                        if (_prefetchesDispatches)
+                        _drawsCrossDispatches = concurrentHost.PrefetchedDrawsCrossDispatches &&
+                            _parallel.LookaheadMode != ParallelProgramPrefetch.DrawLookaheadMode.Off;
+                        if (_prefetchesDispatches || _drawsCrossDispatches)
                         {
                             _recorder.DispatchEffect = _parallel.NoteDispatchEffect;
                         }
@@ -359,6 +361,8 @@ public static partial class AgcExports
         // Dispatches get prefetch jobs too, and their gate may leave out the dispatches just before them.
         private readonly bool _prefetchesDispatches;
         private readonly bool _dispatchesCrossDispatches;
+        // Draws' jobs too may leave out the dispatches just before them (ParallelProgramPrefetch.SubmitDrawAhead).
+        private readonly bool _drawsCrossDispatches;
 
         // The host resolves draws and dispatches where they run (PendingDraw/PendingDispatch), not on
         // the interpreting thread into resolved records (ResolvedDrawWork/ResolvedDispatchWork).
@@ -691,7 +695,8 @@ public static partial class AgcExports
             {
                 var snapshot = banks.Snapshot();
                 var pending = TakePendingDraw(producing, submitId, state, snapshot, indexed, in indexedArguments, in autoArguments,
-                    _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0, indexed,
+                    _parallel?.SubmitDrawAhead(snapshot, producing ? (_drawsCrossDispatches ? Sink!.DispatchGate : Sink!.Gate) : 0,
+                        producing ? Sink!.Gate : 0, indexed,
                         indexed ? indexedArguments.StartInstanceUserData : autoArguments.StartInstanceUserData));
                 if (producing)
                 {

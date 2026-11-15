@@ -36,6 +36,84 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         // The resolving thread (or the caller) has taken it from the queue; it found its gate still closed when it got to it.
         internal volatile bool Started;
         internal volatile bool GateWaited;
+        // A draw's job: the gate it would have had without looking ahead (Gate may stop short of the dispatches just before
+        // it, SubmitDrawAhead), and the gated items that had run when its resolution began. A resolution that began before
+        // all FullGate items ran looked ahead of the ones that had not, and its take checks it against them.
+        internal long FullGate;
+        internal long ExecutedAtStart;
+    }
+
+    /// <summary>
+    /// A draw's job may resolve before the dispatches just before the draw ran, as a dispatch's may
+    /// (SubmitCompute): its gate stops short of them, its program resolves while they run, and its take accepts the
+    /// resolution only when none of those dispatches did more than encode GPU work (NoteDispatchEffect) and the
+    /// host's ownership answers and GPU write log show nothing it read changed (IsStillCurrentAcrossDispatches);
+    /// otherwise the draw resolves its programs itself (draw_lookahead refused by reason). Only dispatches are looked
+    /// ahead of: every other gated item (an interrupt, a commit, an event with no label, a host call) still holds the
+    /// draws after it. SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=0 holds draws behind dispatches again; =verify also resolves
+    /// every accepted look-ahead on the worker and fails on any difference in the programs or their bindings.
+    /// </summary>
+    public enum DrawLookaheadMode : byte
+    {
+        Off,
+        On,
+        Verify,
+    }
+
+    public static readonly DrawLookaheadMode DrawLookahead =
+        ParseDrawLookahead(Environment.GetEnvironmentVariable("SHARPEMU_PREFETCH_DRAW_LOOKAHEAD"));
+
+    internal static DrawLookaheadMode ParseDrawLookahead(string? value) => value switch
+    {
+        "0" => DrawLookaheadMode.Off,
+        "verify" => DrawLookaheadMode.Verify,
+        _ => Environment.GetEnvironmentVariable("SHARPEMU_PERF_VERIFY") == "1" ? DrawLookaheadMode.Verify : DrawLookaheadMode.On,
+    };
+
+    // The mode this prefetch checks takes in (tests set Verify on one instance).
+    internal DrawLookaheadMode LookaheadMode { get; set; } = DrawLookahead;
+
+    // Why a draw's take refused a resolution that looked ahead of dispatches; Count is accepted.
+    public enum DrawLookaheadRefusal : byte
+    {
+        // The resolution threw (an owned read), so the draw resolves it as any abandoned job.
+        Abandoned,
+        // Different inputs.
+        Inputs,
+        // A dispatch it was resolved ahead of did more than encode GPU work.
+        Effects,
+        // An ownership answer changed, or a GPU write logged since it began covers what it read.
+        Ownership,
+        Count,
+    }
+
+    private static readonly string[] DrawLookaheadRefusalNames = ["abandoned", "inputs", "effects", "ownership"];
+    private long _lookaheadJobs, _lookaheadTaken, _lookaheadVerified;
+    private readonly long[] _lookaheadRefusals = new long[(int)DrawLookaheadRefusal.Count];
+
+    public (long Jobs, long Taken, long[] Refused, long Verified) TakeDrawLookaheadCounters()
+    {
+        var refused = new long[(int)DrawLookaheadRefusal.Count];
+        for (var index = 0; index < refused.Length; index++)
+        {
+            refused[index] = Interlocked.Exchange(ref _lookaheadRefusals[index], 0);
+        }
+
+        return (Interlocked.Exchange(ref _lookaheadJobs, 0), Interlocked.Exchange(ref _lookaheadTaken, 0), refused,
+            Interlocked.Exchange(ref _lookaheadVerified, 0));
+    }
+
+    private string TakeDrawLookaheadReport()
+    {
+        var (jobs, taken, refused, verified) = TakeDrawLookaheadCounters();
+        var builder = new System.Text.StringBuilder("draw_lookahead=(mode=").Append(LookaheadMode.ToString().ToLowerInvariant())
+            .Append(",over=dispatch,jobs=").Append(jobs).Append(",taken=").Append(taken).Append(",refused=(");
+        for (var index = 0; index < refused.Length; index++)
+        {
+            builder.Append(index == 0 ? string.Empty : ",").Append(DrawLookaheadRefusalNames[index]).Append('=').Append(refused[index]);
+        }
+
+        return builder.Append("),verified=").Append(verified).Append(')').ToString();
     }
 
     // The kind of a gated non-draw item, as the command thread queues it (NoteGateItem): what the draws after it wait for.
@@ -233,16 +311,22 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     // A gate above zero holds the job until AdvanceGate reaches it: with the command stream on its own
     // thread, draws are submitted ahead of the work before them, which may change what they read.
-    public Job Submit(RegisterBanks banks, long gate = 0, bool indexed = false, int startInstanceUserData = -1)
+    public Job Submit(RegisterBanks banks, long gate = 0, bool indexed = false, int startInstanceUserData = -1) =>
+        SubmitDrawAhead(banks, gate, gate, indexed, startInstanceUserData);
+
+    // A draw's job whose resolution may start once the first gate items ran, before the rest up to fullGate (dispatches
+    // only, the sink's DispatchGate) did; with gate == fullGate, Submit.
+    public Job SubmitDrawAhead(RegisterBanks banks, long gate, long fullGate, bool indexed = false, int startInstanceUserData = -1)
     {
+        fullGate = Math.Max(gate, fullGate);
         // The command thread alone submits draws with a gate.
-        if (gate > _lastDrawGate)
+        if (fullGate > _lastDrawGate)
         {
-            Interlocked.Increment(ref _drawGateRaises[(int)GateKindOf(gate)]);
+            Interlocked.Increment(ref _drawGateRaises[(int)GateKindOf(fullGate)]);
         }
 
-        _lastDrawGate = gate;
-        return Enqueue(new Job(banks, gate, indexed, startInstanceUserData));
+        _lastDrawGate = fullGate;
+        return Enqueue(new Job(banks, gate, indexed, startInstanceUserData) { FullGate = fullGate });
     }
 
     private Job Enqueue(Job job)
@@ -391,23 +475,69 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
 
         using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchValidation);
+        // The resolution began before every gated item ahead of the draw ran: it looked ahead of dispatches.
+        var lookedAhead = job.ExecutedAtStart < job.FullGate;
+        if (lookedAhead)
+        {
+            Interlocked.Increment(ref _lookaheadJobs);
+        }
+
         if (job.State != 1)
         {
+            if (lookedAhead)
+            {
+                Interlocked.Increment(ref _lookaheadRefusals[(int)DrawLookaheadRefusal.Abandoned]);
+            }
+
             ReleaseAssumptions(job);
             return false;
         }
 
-        var current = job.Inputs.Equals(inputs) && _concurrent.IsStillCurrent(job.Assumptions!);
+        var refusal = !job.Inputs.Equals(inputs) ? DrawLookaheadRefusal.Inputs
+            : !lookedAhead ? (_concurrent.IsStillCurrent(job.Assumptions!) ? DrawLookaheadRefusal.Count : DrawLookaheadRefusal.Ownership)
+            // A dispatch that ran after the resolution began (gate above ExecutedAtStart) did more than encode GPU work.
+            : Volatile.Read(ref _lastDispatchEffect) >= job.ExecutedAtStart ? DrawLookaheadRefusal.Effects
+            : !_concurrent.IsStillCurrentAcrossDispatches(job.Assumptions!) ? DrawLookaheadRefusal.Ownership
+            : DrawLookaheadRefusal.Count;
         ReleaseAssumptions(job);
-        if (!current)
+        if (refusal != DrawLookaheadRefusal.Count)
         {
+            if (lookedAhead)
+            {
+                Interlocked.Increment(ref _lookaheadRefusals[(int)refusal]);
+            }
+
             Interlocked.Increment(ref _refusedCount);
             return false;
         }
 
         Interlocked.Increment(ref _takenCount);
         programs = job.Programs!;
+        if (lookedAhead)
+        {
+            Interlocked.Increment(ref _lookaheadTaken);
+            if (LookaheadMode == DrawLookaheadMode.Verify)
+            {
+                programs = VerifyLookahead(job, banks, in inputs);
+            }
+        }
+
         return true;
+    }
+
+    // SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=verify: the worker resolves the draw as it would have without the job, and the two
+    // must hand the executor the same programs, inputs and resources (GraphicsProgramsComparer).
+    private GraphicsPrograms VerifyLookahead(Job job, RegisterBanks banks, in GraphicsProgramInputs inputs)
+    {
+        var resolved = _executor.ResolveGraphicsPrograms(banks, in inputs);
+        Interlocked.Increment(ref _lookaheadVerified);
+        if (SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Difference(job.Programs!, resolved) is { } difference)
+        {
+            throw _fatal($"A draw's programs resolved ahead of the dispatches before it differ from the worker's: {difference} " +
+                $"(job {job.Index}, gate {job.Gate}, full gate {job.FullGate}, executed at start {job.ExecutedAtStart}).");
+        }
+
+        return resolved;
     }
 
     // The dispatch the worker runs now takes the program its job resolved when the job was resolved from the same banks
@@ -517,7 +647,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             $"queued={Interlocked.Exchange(ref _unresolvedQueued, 0)},started={Interlocked.Exchange(ref _unresolvedStarted, 0)}) " +
             $"unresolved_by_gate=({FormatByKind(_unresolvedByGate)}) gate_bound_by_gate=({FormatByKind(_gateBoundByGate)}) " +
             $"unresolved_wait_ms_by_gate=({FormatByKind(_unresolvedWaitTicksByGate, ticks => Milliseconds(ticks).ToString("F1", culture))}) " +
-            $"draw_gate_raises=({FormatByKind(_drawGateRaises)}) resolver_jobs={Interlocked.Exchange(ref _resolverJobs, 0)} " +
+            $"draw_gate_raises=({FormatByKind(_drawGateRaises)}) {TakeDrawLookaheadReport()} resolver_jobs={Interlocked.Exchange(ref _resolverJobs, 0)} " +
             $"resolver_idle_ms={Milliseconds(Interlocked.Exchange(ref _idleTicks, 0)).ToString("F1", culture)} " +
             $"gate_sleep_ms={Milliseconds(Interlocked.Exchange(ref _gateTicks, 0)).ToString("F1", culture)} idle_wakes={Interlocked.Exchange(ref _idleWakes, 0)} " +
             $"idle_spin_takes={Interlocked.Exchange(ref _idleSpinTakes, 0)} " +
@@ -844,6 +974,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     private void ResolveCore(Job job)
     {
+        // Read before the host's state: the items counted had run before anything the resolution reads.
+        job.ExecutedAtStart = Volatile.Read(ref _executedGate);
         _concurrent.BeginConcurrentResolve();
         _resolvingJob = job.Index + 1;
         try

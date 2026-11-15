@@ -57,6 +57,10 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     bool IConcurrentResolveHost.PrefetchedDispatchesCrossDispatches => DispatchPrefetchCrossesDispatches;
 
+    // The take of a draw resolved ahead of dispatches (ParallelProgramPrefetch.SubmitDrawAhead) checks the GPU write log
+    // and the copies read through as a dispatch's does (IsConcurrentResolveStillCurrentAcrossDispatches).
+    bool IConcurrentResolveHost.PrefetchedDrawsCrossDispatches => true;
+
     bool IConcurrentResolveHost.IsStillCurrentAcrossDispatches(object assumptions) => IsConcurrentResolveStillCurrentAcrossDispatches(assumptions);
 
     private long _writeLogRefusals;
@@ -382,6 +386,22 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         // The GPU write log's count when the resolution began reading (MetalGpuWriteRanges.LoggedWriteSince).
         public ulong WriteLogVersion;
 
+        // The destinations read as the source of the pending copy that writes them, whose owned answers were dropped
+        // (TryReadThroughPendingCopyConcurrent, FillCopyLine): merged with the last range when they touch it.
+        public readonly List<(ulong Start, ulong End)> CopiedThrough = new();
+
+        public void NoteCopiedThrough(ulong address, ulong size)
+        {
+            var end = address + size;
+            if (CopiedThrough.Count != 0 && CopiedThrough[^1] is var (lastStart, lastEnd) && address <= lastEnd && lastStart <= end)
+            {
+                CopiedThrough[^1] = (Math.Min(lastStart, address), Math.Max(lastEnd, end));
+                return;
+            }
+
+            CopiedThrough.Add((address, end));
+        }
+
         // The last pages found unowned, for each kind of read.
         private readonly ulong[] _cleanPages = [ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue,
             ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue];
@@ -418,6 +438,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         public void Reset((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
         {
             Answers.Clear();
+            CopiedThrough.Clear();
             Versions = versions;
             Array.Fill(_cleanPages, ulong.MaxValue);
             _nextCleanPage = 0;
@@ -697,9 +718,11 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     [ThreadStatic]
     private static MetalRenderHost? t_recheckHost;
 
-    // On the worker, for a dispatch's resolution that may have read guest memory before the dispatches ahead of it ran:
-    // as IsConcurrentResolveStillCurrent, and no GPU write logged since it began covers a range it read. A write those
-    // dispatches recorded may have landed and retired by now, which the ownership answers alone no longer show.
+    // On the worker, for a resolution (a dispatch's or a draw's) that may have read guest memory before the dispatches
+    // ahead of it ran: as IsConcurrentResolveStillCurrent, and no GPU write logged since it began covers a range it read,
+    // nor a destination it read through a pending copy. A write those dispatches recorded may have landed and retired by
+    // now, which the ownership answers alone no longer show; and one over a copied destination, whose owned answer the
+    // copy read dropped, makes it the destination's latest write instead of the copy.
     internal bool IsConcurrentResolveStillCurrentAcrossDispatches(object assumptionsObject)
     {
         var assumptions = (ConcurrentAssumptions)assumptionsObject;
@@ -708,6 +731,15 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             foreach (var (_, address, size, _) in assumptions.Answers)
             {
                 if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, address, size))
+                {
+                    Interlocked.Increment(ref _writeLogRefusals);
+                    return false;
+                }
+            }
+
+            foreach (var (start, end) in assumptions.CopiedThrough)
+            {
+                if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, start, end - start))
                 {
                     Interlocked.Increment(ref _writeLogRefusals);
                     return false;
