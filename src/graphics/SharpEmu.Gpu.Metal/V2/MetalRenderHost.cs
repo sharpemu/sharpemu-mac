@@ -356,6 +356,7 @@ internal sealed partial class MetalRenderHost :
         // Released once, when the in-flight ring is done with it (or in Dispose).
         MetalNative.Send(_commandBuffer, MetalNative.Selector("retain"));
         _submissionSerial = ++_nextSerial;
+        _transferTexturesInBuffer.Clear();
         var completed = CompletedSerial;
         _guestMemory.BeginSubmission(_submissionSerial, completed);
         // Staging slabs idle for a while are released or made purgeable here too, not only
@@ -402,6 +403,7 @@ internal sealed partial class MetalRenderHost :
 
         _ = EnsureCommandBuffer();
         NoteRecordedWork();
+        NoteTransferTextures(texture, otherTexture);
         _transferInSharedEncoder = false;
         if (TransfersShareCompute && _computeEncoder != 0 && texture != 0 && otherTexture == 0 &&
             cause is (MetalTransferCause.Upload or MetalTransferCause.Writeback) && !PendingClearTouches(texture))
@@ -2953,7 +2955,7 @@ internal sealed partial class MetalRenderHost :
             $"subset_joins={subsetJoins} subset_join_sampled={subsetJoinsSampled}{TakeSubsetRefusals()} " +
             $"join_device_ranges=[{FormatDeviceRangeJoinChecks()}] " +
             $"{TakeUnionPassText()} flush_hold=[{FormatHeldCommits()}] {FormatDeferredFills()} " +
-            $"transfers=[{TakeTransferCauses()}]" +
+            $"transfers=[{TakeTransferCauses()}] {TakePreludeText()}" +
             (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +
             $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()} " +
             SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport());

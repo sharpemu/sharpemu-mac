@@ -44,6 +44,18 @@ internal interface IMetalImageCacheOwner
     // are not settled yet.
     bool HasPendingGpuWrite(ulong address, ulong size);
 
+    // A transfer begun now would end an open render pass (MetalRenderHost.UploadPrelude.cs).
+    bool UploadWouldEndRenderPass => false;
+
+    // The host's share of the conditions for uploading this texture from these guest bytes ahead
+    // of the open command buffer: what the open buffer has recorded over either.
+    MetalPreludeBlock PreludeBlocks(nint texture, ulong address, ulong size) => MetalPreludeBlock.None;
+
+    // An upload met an open render pass and ended it; blocks are the prelude conditions it failed.
+    void NotePassEndingUpload(MetalImageDirtyCause cause, MetalPreludeBlock blocks)
+    {
+    }
+
     // Copies the guest bytes of a range into its staged (ring) copy on the GPU, behind the work still
     // writing them, so a transfer reading the staged copy next sees what that work leaves there.
     void GatherStagedRange(ulong address, in MetalGuestRange staging)
@@ -1087,6 +1099,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureSparseBacked(depth);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, depth.Texture);
+        depth.DeviceCopiedSinceRefresh = true;
         if (!_transfer.TryEncodeStencilFromColor(
                 context, in other.Description, other.Texture, in depth.Description, depth.Texture))
         {
@@ -1168,6 +1181,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureSparseBacked(image);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, depth.Texture, image.Texture);
+        image.DeviceCopiedSinceRefresh = true;
         if (!_transfer.TryEncodeColorFromStencil(
                 context, in depth.Description, depth.Texture, in image.Description, image.Texture))
         {
@@ -2125,6 +2139,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureSparseBacked(image);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, image.Texture);
+        image.DeviceCopiedSinceRefresh = true;
         var refusal = "disabled";
         var fused = AliasTransitionsEnabled && _transfer.TryEncodeFusedAlias(
             context, in other.Description, other.Texture, in image.Description, image.Texture, out refusal);
@@ -2831,6 +2846,12 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
+        // Sized before anything below lands or ends: whether this upload meets an open render pass,
+        // and which of the prelude's conditions it fails (MetalImageCache.UploadPrelude.cs).
+        MetalPreludeBlock? prelude = _owner.UploadWouldEndRenderPass
+            ? PreludeBlocks(image, residentStart, residentEnd, whole: true)
+            : null;
+        var gathersBefore = _uploadGathers;
         PrepareSparseUpload(image, residentStart, residentEnd);
         _owner.LandHeldCopies(description.Data.Address + residentStart, residentEnd - residentStart);
         var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
@@ -2862,6 +2883,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         _uploadCauses[(int)image.DirtyCause]++;
+        NotePassEndingUpload(image.DirtyCause, prelude, gathersBefore);
         NoteUploadForTrace(image, image.DirtyCause, residentEnd - residentStart, run: false);
         if (context.WantsEncodedLabels)
         {
@@ -2941,6 +2963,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var cause = image.DirtyCause;
         foreach (var (start, end) in runs[..count])
         {
+            MetalPreludeBlock? prelude = _owner.UploadWouldEndRenderPass
+                ? PreludeBlocks(image, start, end, whole: false)
+                : null;
+            var gathersBefore = _uploadGathers;
             var source = ResolveUploadSource(description.Data.Address + start, end - start);
             if (!source.IsValid || source.Size < end - start)
             {
@@ -2959,6 +2985,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             _uploadCauses[(int)cause]++;
+            NotePassEndingUpload(cause, prelude, gathersBefore);
             NoteUploadForTrace(image, cause, end - start, run: true);
             _partialUploads++;
             _partialUploadBytesSaved += (long)(residentEnd - residentStart - (end - start));
