@@ -103,7 +103,7 @@ internal sealed partial class MetalRenderHost
             }
 
             FlushGpuWrites(source, size, MetalWritebackCause.GuestCopy);
-            OrderAfterDeferredCopies(source, size);
+            OrderAfterDeferredCopies(source, size, LabelLandCause.Transfer);
             (sourceBuffer, sourceOffset, destinationBuffer, destinationOffset) = (origin.Buffer, origin.Offset, gds, destination);
         }
         else
@@ -114,7 +114,7 @@ internal sealed partial class MetalRenderHost
                 return false;
             }
 
-            OrderAfterDeferredCopies(destination, size);
+            OrderAfterDeferredCopies(destination, size, LabelLandCause.Transfer);
             (sourceBuffer, sourceOffset, destinationBuffer, destinationOffset) = (gds, source, target.Buffer, target.Offset);
         }
 

@@ -930,7 +930,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         var copy = new DeferredLabelCopy(
             staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, bytes, write.Destination,
-            CpuVisible: !LabelBarrierByCacheAction || WritesBackForCpu(write.Kind));
+            CpuVisible: !LabelBarrierByCacheAction || WritesBackForCpu(write.Kind), Kind: LabelCopyKind.EndOfPipe);
         var serial = EncodeOrderedCopy(in copy, write.Destination,
             CommandProcessorWriteHistory.Enabled ? GpuClobberDiagnostics.LandedKind(write.Kind) : null,
             bytes == sizeof(uint) ? (uint)write.Value : write.Value,
@@ -1048,7 +1048,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // A copy that cannot wait lands after the held ones: copies land in stream order.
             if (LabelsAtCommit && _deferredLabelCopies.Count != 0)
             {
-                OrderAfterDeferredCopies(0, ulong.MaxValue);
+                OrderAfterDeferredCopies(0, ulong.MaxValue, LabelLandCause.CannotWait);
             }
 
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.EndOfPipeLabel);
@@ -1286,7 +1286,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         source.CopyTo(payload);
         var copy = new DeferredLabelCopy(
-            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length, address);
+            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length, address,
+            Kind: LabelCopyKind.CpWrite);
         var recordHistory = CommandProcessorWriteHistory.Enabled;
         var serial = EncodeOrderedCopy(in copy, address, recordHistory ? "landed:" + kind : null,
             recordHistory ? FirstValue(source) : 0, MetalGpuWriteOrigin.Copy, "cp write", kind, size);
@@ -1389,7 +1390,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             }
 
             copies[index] = new DeferredLabelCopy(
-                0, 0, destination.Buffer, destination.Offset, sizeof(ulong), address + (ulong)index * strideBytes);
+                0, 0, destination.Buffer, destination.Offset, sizeof(ulong), address + (ulong)index * strideBytes,
+                Kind: LabelCopyKind.CpWrite);
         }
 
         var staging = _guestMemory.Allocate((ulong)count * sizeof(ulong), sizeof(ulong), out var payload);
@@ -1620,7 +1622,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         ulong DestinationOffset,
         int Bytes,
         ulong GuestAddress,
-        bool CpuVisible = true);
+        bool CpuVisible = true,
+        LabelCopyKind Kind = LabelCopyKind.Other);
 
     private readonly List<DeferredLabelCopy> _deferredLabelCopies = [];
     private bool _encodingDeferredLabels;
@@ -1802,10 +1805,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (cpuVisible)
         {
             EncodeEventBarrier(commandBuffer);
+            _labelBarrierKinds[BarrierKindShared]++;
         }
         else
         {
             EncodeDeviceEventBarrier(commandBuffer);
+            _labelBarrierKinds[BarrierKindDevice]++;
         }
 
         Interlocked.Increment(ref _labelBarriers);
@@ -1993,6 +1998,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             if (copy.GuestAddress < address + size && address < copy.GuestAddress + (ulong)copy.Bytes)
             {
                 NoteLabelScan(index + 1 - from);
+                _labelTouchClass = LabelForceIndex(in copy);
                 return true;
             }
         }
@@ -2058,19 +2064,26 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// after the dispatch instead, so the encoder ends here and the copies are encoded at
     /// that boundary. Draws need nothing here; beginning a pass ends the compute encoder.
     /// </summary>
-    internal void OrderAfterDeferredCopies(ulong address, ulong size)
+    internal void OrderAfterDeferredCopies(ulong address, ulong size, LabelLandCause cause = LabelLandCause.Other)
     {
         // A fill the open pass holds is ordered the same way (MetalRenderHost.DeferredFills.cs).
         LandDeferredFillsOver(address, size);
+        _labelTouchClass = -1;
         if (_deferredLabelCopies.Count == 0 || (_computeEncoder == 0 && !LabelsAtCommit) ||
             (size != ulong.MaxValue && !DeferredLabelCopiesTouch(address, size)))
         {
             return;
         }
 
+        if (size != ulong.MaxValue)
+        {
+            NoteLabelForce(size);
+        }
+
         // Held to the commit, a copy whose bytes this work binds lands here instead: the work
         // reads or writes them, and must see the copy, or overwrite it, in stream order.
         _landDeferredLabels = true;
+        _labelLandCause = cause;
         if (_computeEncoder != 0 || _renderEncoder != 0)
         {
             EndEncoders(PassEndCause.Other);
@@ -2079,10 +2092,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         EncodeDeferredLabelCopies();
     }
 
-    private void EncodeDeferredLabelCopies()
+    // boundary: what the landing is counted as when no site asked for it (copies held to encoder boundaries).
+    private void EncodeDeferredLabelCopies(LabelLandCause boundary = LabelLandCause.Other)
     {
-        if (_deferredLabelCopies.Count == 0 || _encodingDeferredLabels)
+        if (_encodingDeferredLabels)
         {
+            return;
+        }
+
+        if (_deferredLabelCopies.Count == 0)
+        {
+            _labelLandCause = LabelLandCause.None;
             return;
         }
 
@@ -2092,14 +2112,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         _landDeferredLabels = false;
+        var cause = _labelLandCause == LabelLandCause.None ? boundary : _labelLandCause;
+        _labelLandCause = LabelLandCause.None;
 
         _encodingDeferredLabels = true;
         try
         {
             var copies = _deferredLabelCopies.Count;
-            EncodeLabelCopies(
-                EnsureCommandBuffer(),
-                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies));
+            var held = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies);
+            NoteLabelLanding(held, cause);
+            EncodeLabelCopies(EnsureCommandBuffer(), held);
             ClearHeldLabelCopies();
             // The barrier and the blit encoder are gap the pass profile cannot sample.
             if (PassProfileEnabled)

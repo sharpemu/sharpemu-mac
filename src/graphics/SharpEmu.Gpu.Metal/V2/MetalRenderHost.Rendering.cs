@@ -1454,7 +1454,7 @@ internal sealed partial class MetalRenderHost
 
             EndRendering();
             EncodeStagedStores();
-            EncodeDeferredLabelCopies();
+            EncodeDeferredLabelCopies(LabelLandCause.EnsureCompute);
         }
 
         // Only the clears this dispatch can see are encoded ahead of it; the rest keep
@@ -2110,7 +2110,7 @@ internal sealed partial class MetalRenderHost
         // Everything held lands ahead of such a dispatch instead.
         if (LabelsAtCommit && _deferredLabelCopies.Count != 0 && _pendingComputePipeline is { PersistentThreads: true })
         {
-            OrderAfterDeferredCopies(0, ulong.MaxValue);
+            OrderAfterDeferredCopies(0, ulong.MaxValue, LabelLandCause.Persistent);
         }
 
         var encoder = EnsureComputeEncoder();
@@ -2214,7 +2214,7 @@ internal sealed partial class MetalRenderHost
         }
 
         // The GPU reads the group counts where the dispatch sits in the stream.
-        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint));
+        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint), LabelLandCause.Indirect);
         TraceIndirectDispatch(argumentsAddress);
         var started = DrawTimingStart();
         var encoder = EnsureComputeEncoder();

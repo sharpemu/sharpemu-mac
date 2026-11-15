@@ -105,7 +105,7 @@ internal sealed partial class MetalRenderHost
         }
 
         // The GPU reads the thread counts where the dispatch sits in the stream.
-        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint));
+        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint), LabelLandCause.Indirect);
         var started = DrawTimingStart();
         var encoder = EnsureComputeEncoder();
         var entry = _pendingComputePipeline ??

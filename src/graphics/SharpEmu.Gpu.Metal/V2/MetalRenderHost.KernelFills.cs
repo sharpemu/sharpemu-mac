@@ -510,7 +510,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        OrderAfterDeferredCopies(check.Destination, size);
+        OrderAfterDeferredCopies(check.Destination, size, LabelLandCause.Transfer);
         OrderAfterStagedStores(check.Destination, size);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
         var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);

@@ -105,7 +105,7 @@ internal sealed partial class MetalRenderHost
         if (_deferredLabelCopies.Count != 0 && BindsDeferredCopyDestination())
         {
             // The pass this begins is the boundary the copies land at, even when they wait for the commit.
-            _landDeferredLabels = true;
+            RequestLabelLanding(LabelLandCause.Join);
             _depthOnlyJoinsDeferredCopies++;
             return false;
         }
@@ -197,7 +197,8 @@ internal sealed partial class MetalRenderHost
     /// <summary>A range the stage's device-address program reaches, ordered after the held copies over it.</summary>
     internal void OrderDeviceRange(MetalStageBindings stage, ulong address, ulong size)
     {
-        OrderAfterDeferredCopies(address, size);
+        OrderAfterDeferredCopies(address, size,
+            size == ulong.MaxValue ? LabelLandCause.DaUnplanned : LabelLandCause.DaPlanned);
         if (stage.DeviceRangeCount == stage.DeviceRanges.Length)
         {
             Array.Resize(ref stage.DeviceRanges, Math.Max(4, stage.DeviceRanges.Length * 2));

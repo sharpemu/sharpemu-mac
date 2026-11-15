@@ -374,7 +374,8 @@ internal sealed partial class MetalRenderHost :
     }
 
     // Everything the cache and the transfers encode needs the encoders closed first.
-    void IMetalImageCacheOwner.LandHeldCopies(ulong address, ulong size) => OrderAfterDeferredCopies(address, size);
+    void IMetalImageCacheOwner.LandHeldCopies(ulong address, ulong size) =>
+        OrderAfterDeferredCopies(address, size, LabelLandCause.Image);
 
     IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer(MetalTransferCause cause) =>
         BeginTransferTouching(cause, 0, 0);
@@ -479,7 +480,11 @@ internal sealed partial class MetalRenderHost :
         if (DeferredLabelCopiesTouch(guestAddress, size) ||
             (_stagedStorageCopies is { Count: > 0 } staged && staged.HasRecordedStoresOver(guestAddress, size)))
         {
-            _landDeferredLabels |= DeferredLabelCopiesTouch(guestAddress, size);
+            if (DeferredLabelCopiesTouch(guestAddress, size))
+            {
+                RequestLabelLanding(LabelLandCause.Transfer);
+            }
+
             ((IMetalSubmissionContext)this).ReleaseSharedEncoder();
             return 0;
         }
@@ -639,7 +644,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _flushCauses[(int)why]++;
-        _landDeferredLabels = true;
+        RequestLabelLanding(LabelLandCause.Commit);
         _passEndFlushReason = reason;
         EndEncoders(cause);
         _passEndFlushReason = null;
@@ -1642,7 +1647,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         // A label held for the commit over these bytes lands first, so the fill overwrites it in stream order.
-        OrderAfterDeferredCopies(address, size);
+        OrderAfterDeferredCopies(address, size, LabelLandCause.Transfer);
         if (TryDeferFillToPassEnd(address, size, value, in range) ||
             TryFillInComputeEncoder(address, size, value, in range))
         {
@@ -1798,8 +1803,8 @@ internal sealed partial class MetalRenderHost :
 
         FlushGpuWrites(source, size, MetalWritebackCause.GuestCopy);
         // A label held for the commit over the source or the destination lands first, as a boundary used to land it.
-        OrderAfterDeferredCopies(source, size);
-        OrderAfterDeferredCopies(destination, size);
+        OrderAfterDeferredCopies(source, size, LabelLandCause.Transfer);
+        OrderAfterDeferredCopies(destination, size, LabelLandCause.Transfer);
         if (TryCopyInComputeEncoder(destination, source, size, in target, in origin))
         {
             _imageCache.InvalidateMemoryFromGpu(destination, size);
@@ -2846,6 +2851,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" scheduled_labels=").Append(TakeScheduledLabelSubmissions())
             .Append(" keep_warm=").Append(Interlocked.Exchange(ref _keepWarmSubmissions, 0))
             .Append(" label_barriers=").Append(TakeLabelBarriers())
+            .Append(TakeLabelLandingCounters())
             .Append(" encoder_barriers=").Append(TakeEncoderBarriers())
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
             .Append(TakeResidencyNameCounters())

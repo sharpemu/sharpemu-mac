@@ -182,7 +182,7 @@ internal sealed partial class MetalRenderHost
         // device-address program is checked against the ranges binding ordered.
         if (_deferredLabelCopies.Count != 0 && BindsDeferredCopyDestination())
         {
-            _landDeferredLabels = true;
+            RequestLabelLanding(LabelLandCause.Join);
             return RefuseSubsetJoin("copies");
         }
 
