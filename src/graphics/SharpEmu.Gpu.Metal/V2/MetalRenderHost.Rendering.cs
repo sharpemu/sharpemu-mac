@@ -1444,6 +1444,7 @@ internal sealed partial class MetalRenderHost
     private nint EnsureComputeEncoder(bool materializeClears)
     {
         NoteRecordedWork();
+        var foldAtOpen = false;
         if (_computeEncoder == 0)
         {
             if (_renderingActive)
@@ -1454,7 +1455,14 @@ internal sealed partial class MetalRenderHost
 
             EndRendering();
             EncodeStagedStores();
-            EncodeDeferredLabelCopies(LabelLandCause.EnsureCompute);
+            // Copies that land here and need no shared event land in the encoder this opens, after its fence wait
+            // (MetalRenderHost.LabelScatter.cs), instead of in a copy encoder of their own ahead of it.
+            foldAtOpen = _deferredLabelCopies.Count != 0 && (!LabelsAtCommit || _landDeferredLabels) &&
+                !_encodingDeferredLabels && MayFoldHeldCopies(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies));
+            if (!foldAtOpen)
+            {
+                EncodeDeferredLabelCopies(LabelLandCause.EnsureCompute);
+            }
         }
 
         // Only the clears this dispatch can see are encoded ahead of it; the rest keep
@@ -1497,6 +1505,22 @@ internal sealed partial class MetalRenderHost
         // A new encoder has none of the residency the last one was given.
         ForgetResidentResources();
         _computeEncodersOpened++;
+        if (foldAtOpen && _deferredLabelCopies.Count != 0 && (!LabelsAtCommit || _landDeferredLabels))
+        {
+            if (_labelLandCause == LabelLandCause.None)
+            {
+                _labelLandCause = LabelLandCause.EnsureCompute;
+            }
+
+            if (!TryLandHeldCopiesInComputeEncoder())
+            {
+                // The scatter declined the batch: it lands as before, ahead of an encoder of its own.
+                EndComputeEncoder();
+                EncodeDeferredLabelCopies(LabelLandCause.EnsureCompute);
+                return EnsureComputeEncoder(materializeClears);
+            }
+        }
+
         return _computeEncoder;
     }
 

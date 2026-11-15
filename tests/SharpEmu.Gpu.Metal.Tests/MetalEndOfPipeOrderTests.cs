@@ -220,6 +220,8 @@ public sealed unsafe partial class MetalEndOfPipeOrderTests(ITestOutputHelper ou
         host.LabelsAtCommit = false;
         // The fill after the boundary is a blit, not a dispatch in a compute encoder opened for it.
         host.CopiesShareCompute = false;
+        // The device-only label would land inside the encoder instead (DeviceOrderedHeldCopiesLandInTheOpenComputeEncoderInStreamOrder).
+        host.LabelsInEncoder = false;
         Assert.True(host.DefersCopiesInCompute);
 
         _ = host.EnsureComputeEncoder();

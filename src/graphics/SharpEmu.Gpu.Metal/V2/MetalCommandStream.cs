@@ -2084,6 +2084,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // reads or writes them, and must see the copy, or overwrite it, in stream order.
         _landDeferredLabels = true;
         _labelLandCause = cause;
+        if (_computeEncoder != 0 && TryLandHeldCopiesInComputeEncoder())
+        {
+            // Copies the CPU need not see first land in the open compute encoder (MetalRenderHost.LabelScatter.cs).
+            return;
+        }
+
         if (_computeEncoder != 0 || _renderEncoder != 0)
         {
             EndEncoders(PassEndCause.Other);

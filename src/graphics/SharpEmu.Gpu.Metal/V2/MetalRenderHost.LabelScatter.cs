@@ -64,8 +64,39 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
+        if (!TryBuildLabelScatter(copies, out var list, out var sources, out var buffers, out var count))
+        {
+            _labelScatterDeclined++;
+            return false;
+        }
+
+        EncodeLabelBarrier(commandBuffer, copies);
+        var encoder = RetainEncoder(MetalNative.Send(commandBuffer, SelComputeEncoder));
+        if (encoder == 0)
+        {
+            throw Fatal("A Metal compute encoder could not be created for held label copies.");
+        }
+
+        WaitForPreviousEncoder(encoder, render: false);
+        EncodeLabelScatterDispatch(encoder, in list, sources, buffers, count);
+        EndAndReleaseEncoder(encoder, render: false);
+        _encodersInBuffer++;
+        _labelScatterBatches++;
+        _labelScatterCopies += copies.Length;
+        return true;
+    }
+
+    // The scatter's word list for these copies, in the ring: one entry per destination word, holding the source of
+    // the last copy into it. False when the batch does not fit the scatter (a copy that is not whole aligned words, a
+    // buffer both copied from and into, too many buffers, no device address, no ring room).
+    private bool TryBuildLabelScatter(
+        ReadOnlySpan<DeferredLabelCopy> copies, out MetalGuestRange list, out int sources, out int buffers, out int count)
+    {
+        list = default;
+        count = 0;
+        buffers = 0;
         // The buffers copied from come first, then those copied into; none may be both.
-        var sources = 0;
+        sources = 0;
         var sourceHint = 0;
         foreach (ref readonly var copy in copies)
         {
@@ -73,19 +104,17 @@ internal sealed partial class MetalRenderHost
                 copy.StagingBuffer == 0 || copy.DestinationBuffer == 0 ||
                 !NoteLabelScatterBuffer(copy.StagingBuffer, 0, ref sources, ref sourceHint))
             {
-                _labelScatterDeclined++;
                 return false;
             }
         }
 
-        var buffers = sources;
+        buffers = sources;
         var destinationHint = sources;
         foreach (ref readonly var copy in copies)
         {
             if (FindLabelScatterBuffer(copy.DestinationBuffer, 0, sources, ref sourceHint) >= 0 ||
                 !NoteLabelScatterBuffer(copy.DestinationBuffer, sources, ref buffers, ref destinationHint))
             {
-                _labelScatterDeclined++;
                 return false;
             }
         }
@@ -95,14 +124,11 @@ internal sealed partial class MetalRenderHost
             _labelScatterAddresses[index] = MetalNative.SendGpuAddress(_labelScatterBuffers[index], SelLabelScatterGpuAddress);
             if (_labelScatterAddresses[index] == 0)
             {
-                _labelScatterDeclined++;
                 return false;
             }
         }
 
-        // One entry per destination word, holding the source of the last copy into it.
         _labelScatterWords.Clear();
-        var count = 0;
         sourceHint = 0;
         destinationHint = sources;
         foreach (ref readonly var copy in copies)
@@ -128,25 +154,20 @@ internal sealed partial class MetalRenderHost
             }
         }
 
-        var listBytes = (ulong)count * 16;
-        var list = _guestMemory.Allocate(listBytes, 16, out var payload);
+        list = _guestMemory.Allocate((ulong)count * 16, 16, out var payload);
         if (!list.IsValid)
         {
-            _labelScatterDeclined++;
             return false;
         }
 
         System.Runtime.InteropServices.MemoryMarshal.AsBytes(_labelScatterList.AsSpan(0, count)).CopyTo(payload);
-        var pipeline = LabelScatterPipeline();
-        EncodeLabelBarrier(commandBuffer, copies);
-        var encoder = RetainEncoder(MetalNative.Send(commandBuffer, SelComputeEncoder));
-        if (encoder == 0)
-        {
-            throw Fatal("A Metal compute encoder could not be created for held label copies.");
-        }
+        return true;
+    }
 
-        WaitForPreviousEncoder(encoder, render: false);
-        MetalNative.SendVoid(encoder, SelOcclusionPipeline, pipeline);
+    // The scatter dispatch over a list TryBuildLabelScatter made, into an encoder the caller ordered.
+    private unsafe void EncodeLabelScatterDispatch(nint encoder, in MetalGuestRange list, int sources, int buffers, int count)
+    {
+        MetalNative.SendVoid(encoder, SelOcclusionPipeline, LabelScatterPipeline());
         MetalNative.SendSetBuffer(encoder, SelOcclusionBuffer, list.Buffer, (nuint)list.Offset, 0);
         var words = (uint)count;
         MetalNative.SendSetBytes(encoder, SelOcclusionBytes, (nint)(&words), sizeof(uint), 1);
@@ -164,12 +185,154 @@ internal sealed partial class MetalRenderHost
         MetalNative.SendDispatch(encoder, SelOcclusionDispatch,
             new MtlSize { Width = (nuint)((count + LabelScatterThreads - 1) / LabelScatterThreads), Height = 1, Depth = 1 },
             new MtlSize { Width = LabelScatterThreads, Height = 1, Depth = 1 });
-        EndAndReleaseEncoder(encoder, render: false);
-        _encodersInBuffer++;
-        _labelScatterBatches++;
-        _labelScatterCopies += copies.Length;
+    }
+
+    // Held copies none of which the CPU has to see before what came ahead of them (a device-only end-of-pipe label, a
+    // command-processor write nothing waited on) land as one scatter dispatch in the open compute encoder instead of
+    // ending it for a barrier and a copy encoder of their own. The encoder waited on the encoder fence when it began, so
+    // it runs after every encoder before it; a memory barrier on either side of the dispatch orders it after the
+    // dispatches already in it and before the ones that follow: the copies land after all the work recorded before them,
+    // in device order, and before all the work after, which is what the device-only event and the copy encoder gave.
+    // A batch with a CPU-visible copy keeps the shared event, which alone makes the earlier stores visible to the CPU
+    // before the label (EncodeLabelBarrier). Demon's Souls ended ~55 compute encoders a frame this way, each a
+    // ~120-170 us GPU gap.
+    // SHARPEMU_METAL_V2_LABELS_IN_ENCODER=0 lands every batch behind its barrier and copy encoder again; =verify also
+    // reads every folded word back at completion and counts the ones that do not hold the folded value (a word that
+    // later work in the same submission writes again is reported too).
+    private static readonly string? LabelsInEncoderMode = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LABELS_IN_ENCODER");
+
+    internal bool LabelsInEncoder { get; set; } = LabelsInEncoderMode != "0";
+
+    private static readonly bool LabelsInEncoderVerify = LabelsInEncoderMode == "verify";
+
+    private long _labelsFolded;
+    private static long _labelFoldVerifyMismatches;
+
+    /// <summary>Batches of held copies landed inside the open compute encoder.</summary>
+    internal long LabelsFolded => Interlocked.Read(ref _labelsFolded);
+
+    /// <summary>SHARPEMU_METAL_V2_LABELS_IN_ENCODER=verify: folded words that did not hold their value at completion.</summary>
+    internal static long LabelFoldVerifyMismatches => Interlocked.Read(ref _labelFoldVerifyMismatches);
+
+    // Whether these held copies may land inside a compute encoder. A CPU-visible copy is the normal case of not folding
+    // and is not a refusal; the rest are counted (label_in_encoder_refused).
+    private bool MayFoldHeldCopies(ReadOnlySpan<DeferredLabelCopy> copies)
+    {
+        if (!LabelsInEncoder || copies.IsEmpty || !LabelBarrierByCacheAction)
+        {
+            return false;
+        }
+
+        foreach (ref readonly var copy in copies)
+        {
+            if (copy.CpuVisible)
+            {
+                return false;
+            }
+        }
+
+        if (EncoderOrdering != EncoderOrderingMode.Fence)
+        {
+            // Without the fence chain the encoder may start before the work ahead of it has finished.
+            _labelInEncoderRefused[2]++;
+            return false;
+        }
+
+        if (_oqPendingReductions.Count != 0)
+        {
+            // An occlusion prefix sum still owed is encoded with no encoder open, ahead of the copies that read it.
+            _labelInEncoderRefused[0]++;
+            return false;
+        }
+
+        if (_stagedStorageCopies is { Count: > 0 } staged && staged.HasRecordedStores)
+        {
+            // Staged stores are written back when the encoder ends; a held copy over them has to land after them.
+            _labelInEncoderRefused[3]++;
+            return false;
+        }
+
         return true;
     }
+
+    // Lands every held copy as one dispatch in the open compute encoder; false leaves them held (counted).
+    private bool TryLandHeldCopiesInComputeEncoder()
+    {
+        var copies = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies);
+        if (_computeEncoder == 0 || _renderEncoder != 0 || _encodingDeferredLabels || !MayFoldHeldCopies(copies))
+        {
+            return false;
+        }
+
+        if (!TryBuildLabelScatter(copies, out var list, out var sources, out var buffers, out var count))
+        {
+            _labelInEncoderRefused[1]++;
+            return false;
+        }
+
+        var cause = _labelLandCause == LabelLandCause.None ? LabelLandCause.Other : _labelLandCause;
+        _landDeferredLabels = false;
+        _labelLandCause = LabelLandCause.None;
+        NoteLabelLanding(copies, cause);
+        if (LabelsInEncoderVerify)
+        {
+            VerifyFoldedCopies(copies);
+        }
+
+        var encoder = _computeEncoder;
+        NoteRecordedWork();
+        MetalV2Native.SendMemoryBarrierScope(encoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+        EncodeLabelScatterDispatch(encoder, in list, sources, buffers, count);
+        MetalV2Native.SendMemoryBarrierScope(encoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+        // The next guest dispatch binds its own pipeline again; its buffers are bound per dispatch.
+        _boundComputePipeline = 0;
+        _labelBarrierKinds[BarrierKindInEncoder]++;
+        _labelsFolded++;
+        var held = copies.Length;
+        ClearHeldLabelCopies();
+        if (PassProfileEnabled)
+        {
+            PassProfileNoteWork($"label-fold n={held}", "transfer");
+        }
+
+        return true;
+    }
+
+    // =verify: what each folded word holds once the submission completes, the last copy into a word winning.
+    private unsafe void VerifyFoldedCopies(ReadOnlySpan<DeferredLabelCopy> copies)
+    {
+        var expected = new Dictionary<ulong, uint>();
+        foreach (ref readonly var copy in copies)
+        {
+            var staging = (byte*)MetalNative.Send(copy.StagingBuffer, SelLabelFoldContents);
+            if (staging == null)
+            {
+                continue;
+            }
+
+            for (var offset = 0; offset < copy.Bytes; offset += sizeof(uint))
+            {
+                expected[copy.GuestAddress + (ulong)offset] = *(uint*)(staging + copy.StagingOffset + (ulong)offset);
+            }
+        }
+
+        _completions.Enqueue(SubmissionSerial, () =>
+        {
+            Span<byte> word = stackalloc byte[sizeof(uint)];
+            foreach (var (address, value) in expected)
+            {
+                if (_memory.TryRead(address, word) && System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(word) != value)
+                {
+                    Interlocked.Increment(ref _labelFoldVerifyMismatches);
+                    MetalV2Diagnostics.WarnOnce("label-fold-verify",
+                        $"A label copy folded into a compute encoder did not hold its value at completion: address=0x{address:X16} " +
+                        $"expected=0x{value:X8} found=0x{System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(word):X8}.");
+                }
+            }
+        });
+    }
+
+    private static readonly nint SelLabelFoldContents = MetalNative.Selector("contents");
 
     // Consecutive copies mostly share their buffers (an occlusion dump's blocks, a pass's dumps), so the
     // buffer found last answers first.
