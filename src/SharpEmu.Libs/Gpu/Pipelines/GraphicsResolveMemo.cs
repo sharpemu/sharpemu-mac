@@ -131,6 +131,10 @@ internal sealed class GraphicsResolveMemo
     }
 
     private const int MaxKeyBytes = 4096;
+    // Ways per set. A frame's draws come back in the same order every frame, so a set holding more of a frame's keys
+    // than it has ways misses all of them every frame (LRU): at two ways ~23% of the bench's GameShaped draws (and the
+    // evictions ~= miss_by new of Demon's Souls) missed so; eight ways at the same capacity leave few such sets.
+    internal const int Ways = 8;
     private readonly byte[] _key = new byte[MaxKeyBytes];
     private int _keyLength;
     private int _userDataStart;
@@ -146,9 +150,9 @@ internal sealed class GraphicsResolveMemo
     {
         Mode = mode;
         var sets = 1;
-        while (sets * 2 < capacity) sets <<= 1;
+        while (sets * Ways < capacity) sets <<= 1;
         _setMask = sets - 1;
-        _ways = new Entry?[sets * 2];
+        _ways = new Entry?[sets * Ways];
     }
 
     public ResolveMemoMode Mode { get; }
@@ -305,9 +309,9 @@ internal sealed class GraphicsResolveMemo
     // The entry with the filled key, or null.
     public Entry? Find()
     {
-        var set = (int)(Hash & (ulong)_setMask) * 2;
+        var set = (int)(Hash & (ulong)_setMask) * Ways;
         var key = Key;
-        for (var way = set; way < set + 2; way++)
+        for (var way = set; way < set + Ways; way++)
         {
             if (_ways[way] is { } entry && entry.Hash == Hash && key.SequenceEqual(entry.Key))
             {
@@ -330,13 +334,13 @@ internal sealed class GraphicsResolveMemo
             : ResolveMemoKeyMiss.New;
     }
 
-    // A new entry for the filled key, in place of the set's older way; the caller fills it.
+    // A new entry for the filled key, in place of the set's least recently used way; the caller fills it.
     public Entry Store()
     {
         var key = Key;
-        var set = (int)(Hash & (ulong)_setMask) * 2;
+        var set = (int)(Hash & (ulong)_setMask) * Ways;
         var way = set;
-        for (var candidate = set; candidate < set + 2; candidate++)
+        for (var candidate = set; candidate < set + Ways; candidate++)
         {
             if (_ways[candidate] is not { } held)
             {
