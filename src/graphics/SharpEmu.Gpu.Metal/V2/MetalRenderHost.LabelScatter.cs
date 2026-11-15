@@ -298,6 +298,66 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
+    // SHARPEMU_METAL_V2_CP_WRITES_IN_ENCODER (on; =0 off): a command-processor write that is not causal, recorded while a
+    // compute encoder is open, is a scatter dispatch in that encoder at once instead of a held copy: it lands exactly where
+    // it was recorded, after all the work before it in device order (the encoder's fence wait and a memory barrier), and a
+    // dispatch that reads it then has nothing to land. It may land before an earlier held end-of-pipe label at other bytes,
+    // which the console allows (the command processor does not wait for end-of-pipe). It is held as before when a held
+    // copy covers its bytes (it must land after that copy: a label still owed into reused command memory), when any
+    // command-processor write is held (it must not overtake it), when a staged store recorded over its bytes is still to
+    // be written back at the encoder end, or when it is not whole aligned words.
+    internal bool CpWritesInEncoder { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CP_WRITES_IN_ENCODER") != "0";
+
+    // Command-processor writes held now; a later one is held behind them.
+    private int _heldCpWrites;
+    private long _cpWritesEncodedInEncoder;
+
+    /// <summary>Command-processor writes recorded as a dispatch in the open compute encoder.</summary>
+    internal long CpWritesEncodedInEncoder => Interlocked.Read(ref _cpWritesEncodedInEncoder);
+
+    private bool TryEncodeCommandProcessorWritesInEncoder(ReadOnlySpan<DeferredLabelCopy> copies)
+    {
+        if (!CpWritesInEncoder || _computeEncoder == 0 || _renderEncoder != 0 || _encodingDeferredLabels ||
+            _heldCpWrites != 0 || EncoderOrdering != EncoderOrderingMode.Fence)
+        {
+            return false;
+        }
+
+        foreach (ref readonly var copy in copies)
+        {
+            if (copy.Kind != LabelCopyKind.CpWrite || copy.CpuVisible || (copy.Bytes & 3) != 0 ||
+                ((copy.StagingOffset | copy.DestinationOffset) & 3) != 0 ||
+                DeferredLabelCopiesTouch(copy.GuestAddress, (ulong)copy.Bytes) ||
+                // The same bytes through another guest address (an alias of the window) are the same bytes.
+                DeferredLabelCopiesTouch(new MetalGuestRange(copy.DestinationBuffer, copy.DestinationOffset, (ulong)copy.Bytes, 0)) ||
+                (_stagedStorageCopies is { Count: > 0 } staged && staged.HasRecordedStoresOver(copy.GuestAddress, (ulong)copy.Bytes)))
+            {
+                return false;
+            }
+        }
+
+        if (!TryBuildLabelScatter(copies, out var list, out var sources, out var buffers, out var count))
+        {
+            return false;
+        }
+
+        var encoder = _computeEncoder;
+        NoteRecordedWork();
+        MetalV2Native.SendMemoryBarrierScope(encoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+        EncodeLabelScatterDispatch(encoder, in list, sources, buffers, count);
+        MetalV2Native.SendMemoryBarrierScope(encoder, SelComputeMemoryBarrier, Mtl.BarrierScopeBuffers | Mtl.BarrierScopeTextures);
+        _boundComputePipeline = 0;
+        _cpWritesEncodedInEncoder += copies.Length;
+        _labelCpInEncoder += copies.Length;
+        if (PassProfileEnabled)
+        {
+            PassProfileNoteWork("cp-write", "transfer");
+        }
+
+        return true;
+    }
+
     // =verify: what each folded word holds once the submission completes, the last copy into a word winning.
     private unsafe void VerifyFoldedCopies(ReadOnlySpan<DeferredLabelCopy> copies)
     {

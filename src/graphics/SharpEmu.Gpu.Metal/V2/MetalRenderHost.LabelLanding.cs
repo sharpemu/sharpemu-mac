@@ -156,6 +156,9 @@ internal sealed partial class MetalRenderHost
     private long _pendingReadsAtSharedBarrier;
     private long _cpWriteOrderSuspects;
 
+    // Command-processor writes recorded as a dispatch in the open compute encoder rather than held (label_cp_in_encoder).
+    private long _labelCpInEncoder;
+
     private (bool CpuVisible, LabelCopyKind Kind) CommandProcessorWriteClass(bool causal)
     {
         var ordered = causal || _causalCpWriteHeld;
@@ -184,6 +187,7 @@ internal sealed partial class MetalRenderHost
     {
         var text = new System.Text.StringBuilder(256);
         text.Append(" cp_write_order_suspects=").Append(Interlocked.Exchange(ref _cpWriteOrderSuspects, 0));
+        text.Append(" label_cp_in_encoder=").Append(Interlocked.Exchange(ref _labelCpInEncoder, 0));
         Append(text, "label_land", LabelLandNames, _labelLand);
         Append(text, "label_batch", LabelBatchNames, _labelBatch);
         Append(text, "label_barrier", LabelBarrierNames, _labelBarrierKinds);

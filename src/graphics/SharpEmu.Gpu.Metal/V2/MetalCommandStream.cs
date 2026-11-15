@@ -1015,7 +1015,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // what that later work left there.
         // A GPU-produced snapshot may wait for its producer encoder to end, but must
         // never be read on the CPU for label replay before that producer has executed.
-        if ((sourceIsFinal || deferStableGpuResult) &&
+        if (sourceIsFinal && TryEncodeCommandProcessorWritesInEncoder(copies))
+        {
+            // A plain command-processor write lands where it was recorded, as a dispatch in the open compute encoder.
+            serial = SubmissionSerial;
+            if (DsTrace.Gpu)
+            {
+                _dsLabelDeferred = 0;
+            }
+        }
+        else if ((sourceIsFinal || deferStableGpuResult) &&
             (LabelsAtCommit ||
              (MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
              (DefersCopiesInCompute && _computeEncoder != 0)))
@@ -1706,6 +1715,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _deferredLabelDestinationLow = Math.Min(_deferredLabelDestinationLow, copy.DestinationOffset);
             _deferredLabelDestinationHigh = Math.Max(_deferredLabelDestinationHigh, copy.DestinationOffset + (ulong)copy.Bytes);
             _deferredLabelCopies.Add(copy);
+            if (copy.Kind is LabelCopyKind.CpWrite or LabelCopyKind.CpCausal)
+            {
+                _heldCpWrites++;
+            }
+
             if (DeferredLabelFilterEnabled)
             {
                 _deferredGuestPages.Add(copy.GuestAddress, (ulong)copy.Bytes);
@@ -1720,6 +1734,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     {
         _deferredLabelCopies.Clear();
         _causalCpWriteHeld = false;
+        _heldCpWrites = 0;
         _labelScanEpoch++;
         if (DeferredLabelFilterEnabled)
         {
