@@ -29,8 +29,9 @@ internal sealed partial class MetalImageCache
     // The view a pass will name the attachment by, the image, and the GPU-write marking
     // the acquire left for later: a colour target, or a depth target and whether it
     // writes only the stencil plane.
+    // BaseLayer and LayerCount are the layers the view names, for layered deferral.
     private readonly record struct DeferredRefresh(nint View, ResourceSlotIdentifier Identifier,
-        MetalCachedImage Image, bool Depth, bool StencilOnly, bool AliasesPending);
+        MetalCachedImage Image, bool Depth, bool StencilOnly, bool AliasesPending, uint BaseLayer, uint LayerCount);
 
     private readonly List<DeferredRefresh> _deferredRefreshes = [];
 
@@ -59,9 +60,10 @@ internal sealed partial class MetalImageCache
 
     // Caller holds the lock.
     private void DeferRefreshLocked(nint view, ResourceSlotIdentifier identifier, MetalCachedImage image,
-        bool depth, bool stencilOnly, bool aliasesPending)
+        bool depth, bool stencilOnly, bool aliasesPending, uint baseLayer, uint layerCount)
     {
-        _deferredRefreshes.Add(new DeferredRefresh(view, identifier, image, depth, stencilOnly, aliasesPending));
+        _deferredRefreshes.Add(new DeferredRefresh(
+            view, identifier, image, depth, stencilOnly, aliasesPending, baseLayer, layerCount));
         Volatile.Write(ref _deferredRefreshCount, _deferredRefreshes.Count);
     }
 
@@ -206,8 +208,9 @@ internal sealed partial class MetalImageCache
             }
 
             var entry = TakeDeferredLocked(index);
+            var whole = overwritten && CoversWholeImage(entry, stencilOverwritten);
             CompleteDeferredLocked(
-                entry, overwritten && CoversWholeImage(entry, stencilOverwritten));
+                entry, whole, layerOverwritten: overwritten && !whole && LayerDeferEnabled && CoversViewLayer(entry));
             return;
         }
     }
@@ -243,12 +246,13 @@ internal sealed partial class MetalImageCache
 
     // Makes or drops the upload, then marks the image written by the pass exactly as the
     // acquire used to right after its refresh. Caller holds the lock.
-    private void CompleteDeferredLocked(in DeferredRefresh entry, bool overwritten)
+    private void CompleteDeferredLocked(in DeferredRefresh entry, bool overwritten, bool layerOverwritten = false)
     {
         var image = entry.Image;
+        (MetalImageDirtyCause Cause, (ulong Start, ulong End)[] Runs)? stale = null;
         if (entry.AliasesPending && (!overwritten || !TryDiscardOverwrittenAliases(entry.Identifier)))
         {
-            SynchronizeAliases(entry.Identifier, takesGpuOwnership: true);
+            SynchronizeAliases(entry.Identifier, takesGpuOwnership: true, role: overwritten ? "rt-overwrite" : "rt-load");
         }
         if (overwritten && image.IsCpuDirty)
         {
@@ -258,7 +262,7 @@ internal sealed partial class MetalImageCache
                 (long)(image.Description.Data.Size + (image.Description.HasStencil ? image.Description.Stencil.Size : 0)));
             image.RefreshComplete();
         }
-        else
+        else if (!TryLeaveOtherLayersStale(in entry, layerOverwritten, out stale))
         {
             RefreshFromGuest(image);
         }
@@ -266,16 +270,145 @@ internal sealed partial class MetalImageCache
         if (entry.Depth)
         {
             image.MarkGpuModified(depthPlaneChanged: !entry.StencilOnly);
-            NoteLinearGpuWrite(image);
-            image.GpuWriteSerial = _owner.CurrentSerial;
-            image.NoteUse(image.GpuWriteSerial);
-            return;
+        }
+        else
+        {
+            image.MarkGpuModified();
         }
 
-        image.MarkGpuModified();
         NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
         image.NoteUse(image.GpuWriteSerial);
+        if (stale is { } left)
+        {
+            // The layers this pass neither wrote nor read stay stale under the GPU write; their next use refreshes
+            // just them (TryRefreshDirtyRun), or a later pass that overwrites them drops them as this one did.
+            foreach (var (start, end) in left.Runs)
+            {
+                image.MarkCpuDirty(left.Cause, start, end);
+            }
+        }
+    }
+
+    // SHARPEMU_METAL_V2_LAYER_DEFER (on; =0 off): an array target's upload waits for its pass as a single-layer
+    // target's does, a GPU-written one's too, and a pass proven to overwrite the one layer its view names drops that
+    // layer's stale bytes. Demon's Souls clears each of its four 1024x1024 shadow cascades in its own pass, and the
+    // array was uploaded whole, 16 MiB, before the first of them every frame.
+    internal bool LayerDeferEnabled { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_LAYER_DEFER") != "0";
+
+    private long _layerRefreshSkippedLayers, _layerRefreshSkippedBytes;
+
+    /// <summary>Layers whose upload a proven overwrite dropped, and their stale guest bytes.</summary>
+    internal (long Layers, long Bytes) TakeLayerRefreshSkipped() =>
+        (Interlocked.Exchange(ref _layerRefreshSkippedLayers, 0), Interlocked.Exchange(ref _layerRefreshSkippedBytes, 0));
+
+    // An array whose stale layers may wait under a pass on some of its layers: one level, not a volume, no stencil
+    // plane (a run never carries one) and no sparse residency. Its layers must tile its bytes (TryLayerBytes).
+    private static bool LayeredDeferralShape(MetalCachedImage image) =>
+        image.Description.IsLayered && image.Description.Resources.Levels == 1 && image.Shape.MipLevels == 1 &&
+        image.Description.Samples <= 1 && !image.Description.HasStencil && !image.Description.IsVolume && image.Shape.TextureType != Mtl.TextureType3D &&
+        SparseOf(image) is null && image.Texture != 0 && !ImageDescription.IsEmptyRange(image.Description.Data);
+
+    // A GPU-written array stale over some layers may leave the upload to its pass too: the pass may overwrite them,
+    // or not touch them at all.
+    private bool CanDeferLayerRefresh(MetalCachedImage image) =>
+        LayerDeferEnabled && MetalV2Diagnostics.SkipOverwrittenRefresh && image.IsCpuDirty && image.IsGpuModified &&
+        LayeredDeferralShape(image);
+
+    // Whether a pass that overwrites the attachment overwrites every byte of the one layer its view names: a
+    // single-layer view of a one-level array, a depth target's depth plane with no stencil.
+    private static bool CoversViewLayer(in DeferredRefresh entry)
+    {
+        if (entry.LayerCount != 1 || !LayeredDeferralShape(entry.Image))
+        {
+            return false;
+        }
+
+        if (!entry.Depth)
+        {
+            return true;
+        }
+
+        var aspects = ViewFormatRules.DepthAspects(entry.Image.Description.PixelFormat);
+        return (aspects & GpuImageAspect.DepthBit) != 0 && (aspects & GpuImageAspect.StencilBit) == 0;
+    }
+
+    // Instead of the upload: drops the stale bytes of the view's layers when the pass is proven to overwrite them,
+    // and leaves the stale layers it does not touch stale. True with the runs still stale afterwards (or none);
+    // false - and the caller uploads as before - when the pass reads a stale layer, the cut would split a stale run
+    // the image has no room to hold as two (one interval never has), or what is left is not runs a later refresh
+    // makes exactly.
+    private bool TryLeaveOtherLayersStale(
+        in DeferredRefresh entry, bool layerOverwritten,
+        out (MetalImageDirtyCause Cause, (ulong Start, ulong End)[] Runs)? stale)
+    {
+        stale = null;
+        var image = entry.Image;
+        if (!LayerDeferEnabled || !image.IsCpuDirty || !LayeredDeferralShape(image) ||
+            !_transfer.TryLayerBytes(in image.Description, entry.BaseLayer, entry.LayerCount, out var viewStart, out var viewEnd))
+        {
+            return false;
+        }
+
+        Span<(ulong Start, ulong End)> left = stackalloc (ulong, ulong)[MetalCachedImage.MaxRuns + 1];
+        var overlaps = image.StaleOverlaps(viewStart, viewEnd);
+        int count;
+        if (overlaps)
+        {
+            if (!layerOverwritten)
+            {
+                return false;
+            }
+
+            count = MetalCachedImage.SubtractRun(image.StaleRuns, viewStart, viewEnd, left);
+            if (count > image.RunCapacity)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            count = image.StaleRuns.Length;
+            image.StaleRuns.CopyTo(left);
+        }
+
+        // What stays stale is refreshed later by TryRefreshDirtyRun alone (a GPU-written image is never uploaded
+        // whole): each run must be one that refresh makes exactly, and one it can read in place. Anything else uploads
+        // now, as before, rather than leave the stale keep in RefreshFromGuestCore runs it did not have.
+        foreach (var (start, end) in left[..count])
+        {
+            if (!SubRangeTransfersEnabled ||
+                !TryCoveringRun(in image.Description, start, end, out var runStart, out var runEnd) ||
+                runStart != start || runEnd != end ||
+                !_guestMemory.TryResolveInPlace(image.Description.Data.Address + start, end - start, out _))
+            {
+                return false;
+            }
+        }
+
+        if (overlaps)
+        {
+            ulong dropped = 0;
+            foreach (var run in image.StaleRuns)
+            {
+                if (run.Start < viewEnd && run.End > viewStart)
+                {
+                    dropped += Math.Min(viewEnd, run.End) - Math.Max(viewStart, run.Start);
+                }
+            }
+
+            Interlocked.Increment(ref _layerRefreshSkippedLayers);
+            Interlocked.Add(ref _layerRefreshSkippedBytes, (long)dropped);
+        }
+
+        // The GPU write that follows clears the stale runs; the caller marks what is left again after it.
+        if (count > 0)
+        {
+            stale = (image.DirtyCause, left[..count].ToArray());
+        }
+
+        return true;
     }
 
     // A released image's upload no longer has a texture to land in. Caller holds the lock.

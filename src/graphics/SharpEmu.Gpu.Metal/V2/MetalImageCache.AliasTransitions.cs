@@ -17,7 +17,29 @@ internal sealed partial class MetalImageCache
     internal bool AliasTransitionsEnabled { get; set; } = AliasTransitionsDefault;
 
     private long _aliasFused, _aliasFusedBytes, _aliasDiscarded, _aliasDiscardedBytes;
+    // round-trip counts only pairs whose bytes went through guest memory: a run or the whole other image
+    // published (and this one reloaded). A layout skip moves nothing and is counted on its own.
     private long _aliasRoundTrip, _aliasRoundTripBytes;
+    private long _aliasPublishedRuns, _aliasPublishedWholes, _aliasLayoutSkips;
+    private long _aliasMovedWritebackBytes, _aliasMovedBlitBytes;
+    private long _aliasRunRefreshRefused;
+
+    /// <summary>Test hook: GPU-written images that kept older texels over a stale run they could not reload alone.</summary>
+    internal long AliasRunRefreshRefused => Interlocked.Read(ref _aliasRunRefreshRefused);
+
+    private void NoteAliasRoundTrip(bool whole, ulong sharedSize)
+    {
+        _aliasRoundTrip++;
+        _aliasRoundTripBytes += (long)sharedSize;
+        if (whole)
+        {
+            _aliasPublishedWholes++;
+        }
+        else
+        {
+            _aliasPublishedRuns++;
+        }
+    }
     private long _aliasCpuReadRuns, _aliasCpuReadBytes;
     private readonly Dictionary<string, long> _aliasTransitionRefusals = new(StringComparer.Ordinal);
 
@@ -40,8 +62,22 @@ internal sealed partial class MetalImageCache
         var readRuns = Interlocked.Exchange(ref _aliasCpuReadRuns, 0);
         var readBytes = Interlocked.Exchange(ref _aliasCpuReadBytes, 0);
         var consumers = TakeConsumerRuns();
-        return $"alias_transitions=[fused:{counts.Fused},discarded:{counts.Discarded},round-trip:{counts.RoundTrip}] " +
-            $"alias_mib=[fused:{Mb(counts.FusedBytes)},discarded:{Mb(counts.DiscardedBytes)},round-trip:{Mb(counts.RoundTripBytes)}] " +
+        DrainAliasSubsetChecksLocked();
+        var subsetCopies = Interlocked.Exchange(ref _aliasSubsetCopies, 0);
+        var subsetBytes = Interlocked.Exchange(ref _aliasSubsetBytes, 0);
+        var layerSkips = TakeLayerRefreshSkipped();
+        return $"alias_transitions=[fused:{counts.Fused},discarded:{counts.Discarded},device-subset:{subsetCopies}," +
+            $"round-trip:{counts.RoundTrip},published-run:{Interlocked.Exchange(ref _aliasPublishedRuns, 0)}," +
+            $"published-whole:{Interlocked.Exchange(ref _aliasPublishedWholes, 0)}," +
+            $"layout-skip:{Interlocked.Exchange(ref _aliasLayoutSkips, 0)}] " +
+            $"alias_mib=[fused:{Mb(counts.FusedBytes)},discarded:{Mb(counts.DiscardedBytes)},device-subset:{Mb(subsetBytes)}," +
+            $"round-trip:{Mb(counts.RoundTripBytes)}] " +
+            $"alias_moved_mib=[wb:{Mb(Interlocked.Exchange(ref _aliasMovedWritebackBytes, 0))}," +
+            $"blit:{Mb(Interlocked.Exchange(ref _aliasMovedBlitBytes, 0))}] " +
+            $"alias_run_refresh_refused={Interlocked.Exchange(ref _aliasRunRefreshRefused, 0)} {TakeAliasRunText()} " +
+            $"layer_refresh_skipped=[{layerSkips.Layers},{Mb(layerSkips.Bytes)}] " +
+            $"alias_subset_verify=[checked:{Interlocked.Exchange(ref _aliasSubsetVerified, 0)}," +
+            $"mismatch:{Interlocked.Read(ref _aliasSubsetMismatches)},unverified:{Interlocked.Exchange(ref _aliasSubsetUnverified, 0)}] " +
             $"alias_transition_refused=[{refusals}] alias_cpu_read_runs={readRuns} " +
             $"alias_cpu_read_requested_mib={Mb(readBytes)} " +
             $"consumer_runs=[published:{consumers.Runs},skipped:{consumers.AlreadyPublished},gpu_writes_kept:{consumers.GpuWritesKept}] " +

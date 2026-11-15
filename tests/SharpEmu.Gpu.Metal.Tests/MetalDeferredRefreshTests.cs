@@ -116,6 +116,229 @@ public sealed unsafe class MetalDeferredRefreshTests(ITestOutputHelper output)
         AssertPixels(rig.Read(TargetAddress), [GuestPattern, GuestPattern, GuestPattern, GuestPattern]);
     }
 
+    // ---- Layered deferral (SHARPEMU_METAL_V2_LAYER_DEFER) --------------------------------------------------------
+    // A four-layer D32 array whose layers are each cleared by a pass of their own, the way Demon's Souls clears its
+    // shadow cascades. Round one starts from a new image; round two from the GPU-written array after the guest
+    // rewrote all of it (LaterPattern). A front or back cut leaves the rest stale and uploads nothing; a cut from the
+    // middle uploads, never skips; a layer sampled before its clear is uploaded first. Every order leaves guest memory
+    // byte for byte as the switch off leaves it.
+
+    private const ulong ArrayAddress = GuestBase + 0x10000;
+    private const uint ArrayWidth = 128;
+    private const uint ArrayHeight = 64;
+    private const uint ArrayLayers = 4;
+    private const float FirstClear = 0.25f;
+    private const float SecondClear = 0.75f;
+
+    public static TheoryData<uint[], int, int> LayerOrders => new()
+    {
+        // order, uploads on (round one + round two), layers dropped on; run sets on (SHARPEMU_METAL_V2_ALIAS_RUN_SETS)
+        { new uint[] { 0, 1, 2, 3 }, 0, 8 },
+        { new uint[] { 3, 2, 1, 0 }, 0, 8 },
+        // The first clear cuts the middle: two stale runs are left (run sets), and the later clears drop them.
+        { new uint[] { 2, 0, 3, 1 }, 0, 8 },
+        { new uint[] { 1, 2, 3, 0 }, 0, 8 },
+        // Layers 2 and 3 are never cleared: they are uploaded when the array is read, and only then.
+        { new uint[] { 0, 1 }, 2, 4 },
+    };
+
+    [Theory]
+    [MemberData(nameof(LayerOrders))]
+    public void LayerClearsOfADepthArrayDropOnlyTheUploadsTheyOverwrite(uint[] order, int uploadsOn, int layersDropped)
+    {
+        if (!RequireDevice()) return;
+        if (!MetalV2Diagnostics.SkipOverwrittenRefresh) return;
+        var off = RunLayerClears(order, layerDefer: false, sampleBeforeClear: null);
+        var on = RunLayerClears(order, layerDefer: true, sampleBeforeClear: null);
+        output.WriteLine($"order={string.Join(",", order)} on: uploads={on.Uploads} dropped={on.Dropped} " +
+            $"off: uploads={off.Uploads} dropped={off.Dropped}");
+
+        Assert.Equal(off.Round1, on.Round1);
+        Assert.Equal(off.Round2, on.Round2);
+        Assert.Equal(uploadsOn, on.Uploads);
+        Assert.Equal(layersDropped, on.Dropped);
+        Assert.Equal(0, off.Dropped);
+        Assert.True(off.Uploads >= 2, "with the switch off each round uploads the array at its first clear");
+        AssertLayers(on.Round2, order, SecondClear);
+    }
+
+    // Layer 0 is cleared, leaving layers 1-3 stale; then layer 2 is sampled before its own clear. The sample uploads
+    // the stale layers first (one run upload): it sees the guest's bytes, not the texture's older ones.
+    [Fact]
+    public void ALayerSampledBeforeItsClearIsUploadedFirst()
+    {
+        if (!RequireDevice()) return;
+        if (!MetalV2Diagnostics.SkipOverwrittenRefresh) return;
+        uint[] order = [0, 2, 1, 3];
+        var off = RunLayerClears(order, layerDefer: false, sampleBeforeClear: 2);
+        var on = RunLayerClears(order, layerDefer: true, sampleBeforeClear: 2);
+        output.WriteLine($"on: uploads={on.Uploads} dropped={on.Dropped} off: uploads={off.Uploads}");
+
+        Assert.Equal(off.Round1, on.Round1);
+        Assert.Equal(off.Round2, on.Round2);
+        Assert.Equal(off.Sampled, on.Sampled);
+        // Round one samples a new array's layer 2 the texture never held: the guest's GuestPattern; round two, after
+        // the guest rewrote it, LaterPattern.
+        Assert.Equal([GuestPattern, GuestPattern, GuestPattern, GuestPattern], on.Sampled[0]);
+        Assert.Equal([LaterPattern, LaterPattern, LaterPattern, LaterPattern], on.Sampled[1]);
+        // Each round: layer 0's clear drops its layer, the sample uploads layers 1-3 as one run.
+        Assert.Equal(2, on.Uploads);
+        Assert.Equal(2, on.Dropped);
+    }
+
+    private sealed record LayerOutcome(byte[] Round1, byte[] Round2, long Uploads, long Dropped, List<byte[]> Sampled);
+
+    private LayerOutcome RunLayerClears(uint[] order, bool layerDefer, uint? sampleBeforeClear)
+    {
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.ImageCache.LayerDeferEnabled = layerDefer;
+        _ = host.ImageCache.TakeLayerRefreshSkipped();
+        var size = ArrayLayerBytes() * ArrayLayers;
+        var uploads = host.ImageCache.Counters.Uploads;
+        var sampled = new List<byte[]>();
+        var dropped = 0L;
+        ResourceSlotIdentifier image = default;
+        byte[] Round(float clear)
+        {
+            foreach (var layer in order)
+            {
+                if (layer == sampleBeforeClear)
+                {
+                    using (host.BeginPreparation())
+                    {
+                        var request = DepthArrayRequest(layer, ImageRole.Texture);
+                        var found = host.ImageCache.FindImage(ref request);
+                        Assert.Equal(image, found);
+                        Assert.NotEqual(0, host.ImageCache.AcquireTextureView(found, in request));
+                        Assert.False(host.ImageCache.GetImage(found).IsCpuDirty);
+                    }
+
+                    sampled.Add(LayerTexel(host, image, layer));
+                }
+
+                using (host.BeginPreparation())
+                {
+                    var acquisition = ((IRenderHost)host).AcquireDepthAttachment(DepthArrayTarget(image, layer, clear: true));
+                    host.BeginRendering(DepthPass(acquisition.View, clear));
+                    host.EndRendering();
+                }
+
+                dropped += host.ImageCache.TakeLayerRefreshSkipped().Layers;
+            }
+
+            return rig.Read(ArrayAddress, size);
+        }
+
+        using (host.BeginPreparation())
+        {
+            var request = DepthArrayRequest(0, ImageRole.DepthTarget);
+            image = host.ImageCache.FindImage(ref request);
+        }
+
+        var round1 = Round(FirstClear);
+        rig.FillBacking(ArrayAddress, size, LaterPattern);
+        host.ImageCache.InvalidateMemory(ArrayAddress, size);
+        var round2 = Round(SecondClear);
+        return new LayerOutcome(round1, round2, host.ImageCache.Counters.Uploads - uploads, dropped, sampled);
+    }
+
+    // The first texel of a layer, read back from the texture: texel (0, 0) is the first element of the layer's tiles.
+    private static byte[] LayerTexel(MetalRenderHost host, ResourceSlotIdentifier image, uint layer)
+    {
+        host.FlushAndWaitForGpu();
+        var texture = host.ImageCache.GetImage(image).Texture;
+        var device = MetalNative.Send(texture, MetalNative.Selector("device"));
+        var buffer = MetalNative.SendNewBuffer(device, MetalNative.Selector("newBufferWithLength:options:"), 4, 0);
+        var queue = MetalNative.Send(device, MetalNative.Selector("newCommandQueue"));
+        try
+        {
+            var commands = MetalNative.Send(queue, MetalNative.Selector("commandBuffer"));
+            var blit = MetalNative.Send(commands, MetalNative.Selector("blitCommandEncoder"));
+            MetalNative.SendCopyTextureToBuffer(
+                blit, MetalNative.Selector(
+                    "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:" +
+                    "destinationBytesPerRow:destinationBytesPerImage:"),
+                texture, layer, 0, default, new MtlSize { Width = 1, Height = 1, Depth = 1 }, buffer, 0, 4, 4);
+            MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding"));
+            MetalNative.SendVoid(commands, MetalNative.Selector("commit"));
+            MetalNative.SendVoid(commands, MetalNative.Selector("waitUntilCompleted"));
+            return new ReadOnlySpan<byte>((void*)MetalNative.Send(buffer, MetalNative.Selector("contents")), 4).ToArray();
+        }
+        finally
+        {
+            MetalNative.SendVoid(buffer, MetalNative.Selector("release"));
+            MetalNative.SendVoid(queue, MetalNative.Selector("release"));
+        }
+    }
+
+    // Each cleared layer's first texel holds the clear; every other layer's, the guest's LaterPattern.
+    private static void AssertLayers(byte[] guest, uint[] cleared, float clear)
+    {
+        var layerBytes = (int)ArrayLayerBytes();
+        var clearBytes = BitConverter.GetBytes(clear);
+        for (var layer = 0u; layer < ArrayLayers; layer++)
+        {
+            var expected = Array.IndexOf(cleared, layer) >= 0 ? clearBytes : [LaterPattern, LaterPattern, LaterPattern, LaterPattern];
+            Assert.Equal(expected, guest[(int)(layer * layerBytes)..(int)(layer * layerBytes + 4)]);
+        }
+    }
+
+    private static ulong ArrayLayerBytes()
+    {
+        Assert.True(TileGeometry.TryGetDepthSize(ArrayWidth, ArrayHeight, 0, GuestDepthFormat.Z32Float,
+            GuestStencilFormat.Invalid, false, out _, out _, out var depthSize));
+        return (ulong)depthSize.Size;
+    }
+
+    private static ImageRequest DepthArrayRequest(uint layer, ImageRole role)
+    {
+        var size = ArrayLayerBytes() * ArrayLayers;
+        var pitch = TileGeometry.DepthPitch(ArrayWidth, 4);
+        var description = ImageDescription.Create();
+        description.Data = new GuestSpan(ArrayAddress, size);
+        description.PixelFormat = GpuFormat.D32Sfloat;
+        description.GuestFormat = GuestPixelFormat.Bits32Float;
+        description.Type = GuestImageType.Color2D;
+        description.Extent = new GpuExtent3D(ArrayWidth, ArrayHeight, 1);
+        description.Resources = new SubresourceCount(1, ArrayLayers);
+        description.Pitch = pitch;
+        description.BytesPerBlock = 4;
+        description.Samples = 1;
+        description.TileMode = GuestTileMode.Depth;
+        description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = pitch, Height = ArrayHeight };
+        var view = ImageViewDescription.Default with
+        {
+            Format = GpuFormat.D32Sfloat,
+            Type = GpuImageViewType.Type2D,
+            Aspect = GpuImageAspect.DepthBit,
+            BaseLayer = layer,
+            LayerCount = 1,
+            Usage = role == ImageRole.DepthTarget ? GpuImageUsage.DepthStencilAttachmentBit : GpuImageUsage.SampledBit,
+        };
+        return new ImageRequest(description, view, role);
+    }
+
+    private static DepthAttachmentState DepthArrayTarget(ResourceSlotIdentifier image, uint layer, bool clear)
+    {
+        var request = DepthArrayRequest(layer, ImageRole.DepthTarget);
+        var resolution = new DepthTargetResolution(
+            request, GpuFormat.D32Sfloat, ArrayWidth, ArrayHeight, 1, false, false,
+            ArrayAddress, request.Description.Data.Size, 0, 0, 0, 0, clear, false, false, false);
+        var state = new DepthStencilState(
+            clear, 0f, true, true, GpuCompareOp.Always, false, 0f, 1f, false, 0, false,
+            StencilOperations.Default, default, StencilOperations.Default, default);
+        return new DepthAttachmentState(new DepthTargetState(resolution, state), image);
+    }
+
+    private static RenderingState DepthPass(GpuImageHandle view, float clear)
+    {
+        var state = new RenderingState { Width = ArrayWidth, Height = ArrayHeight, Layers = 1, ColorAttachmentCount = 0, Samples = 1 };
+        state.DepthStencilAttachment = new RenderingAttachment(
+            view, GpuFormat.D32Sfloat, BitConverter.SingleToUInt32Bits(clear), 0, 0, 0, true, true, true, false, false);
+        return state;
+    }
+
     private static void AssertPixels(byte[] bytes, byte[] pixel)
     {
         for (var offset = 0; offset < bytes.Length; offset += 4)
@@ -248,17 +471,21 @@ public sealed unsafe class MetalDeferredRefreshTests(ITestOutputHelper output)
 
         // Writes guest memory directly, the way nothing the cache watches would. An upload
         // reads guest memory when the GPU runs it, so the GPU is let finish first.
-        public void FillBacking(ulong address, byte value)
+        public void FillBacking(ulong address, byte value) => FillBacking(address, ImageBytes, value);
+
+        public void FillBacking(ulong address, ulong size, byte value)
         {
             Host.FlushAndWaitForGpu();
-            var bytes = new byte[ImageBytes];
+            var bytes = new byte[size];
             Array.Fill(bytes, value);
             Assert.True(_backing.TryWriteBacking(address, bytes));
         }
 
-        public byte[] Read(ulong address)
+        public byte[] Read(ulong address) => Read(address, ImageBytes);
+
+        public byte[] Read(ulong address, ulong size)
         {
-            var bytes = new byte[ImageBytes];
+            var bytes = new byte[size];
             Assert.True(Host.TryReadGuest(address, bytes));
             return bytes;
         }
