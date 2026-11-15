@@ -154,4 +154,30 @@ public sealed unsafe partial class MetalClearFoldingTests
         AssertMisses(host, () => BindRead(host), before);
         host.FlushAndWaitForGpu();
     }
+
+    // C1: a frame's worth of distinct read-only ranges (Demon's Souls binds some 20k a frame) is held whole: binding
+    // them all a second time hits nearly every one.
+    [Fact]
+    public void TwentyThousandDistinctReadOnlyRangesBoundTwiceHitOnTheSecondPass()
+    {
+        if (!RequireDevice()) return;
+        using var rig = MemoRig();
+        var host = rig.Host;
+        // Verifying each hit runs the whole chain again; this test is about capacity, the others about soundness.
+        host.ReadBindingMemoVerify = false;
+        const int ranges = 20000;
+        for (var index = 0; index < ranges; index++)
+        {
+            BindRead(host, MemoBuffer + ((ulong)index * 0x80), 0x40);
+        }
+
+        var hits = host.ReadBindingMemoCounts.Hits;
+        for (var index = 0; index < ranges; index++)
+        {
+            BindRead(host, MemoBuffer + ((ulong)index * 0x80), 0x40);
+        }
+
+        var secondPassHits = host.ReadBindingMemoCounts.Hits - hits;
+        Assert.True(secondPassHits >= ranges * 99 / 100, $"second pass hits {secondPassHits} of {ranges}");
+    }
 }

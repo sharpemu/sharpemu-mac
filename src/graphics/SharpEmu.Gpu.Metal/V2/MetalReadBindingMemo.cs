@@ -35,10 +35,44 @@ internal sealed class MetalReadBindingMemo
         public MetalGuestRange Range;
     }
 
-    // Two ways per set, the more recently used first: a frame's command buffer binds a few thousand ranges, which
-    // direct-mapped slots lost to collisions (most of the DsDrawCostBench draws' misses before).
-    private const int Sets = 2048;
-    private readonly Entry[] _entries = new Entry[Sets * 2];
+    /// <summary>Ways per set, the most recently used first (move-to-front); the last one is evicted.</summary>
+    internal const int Ways = 4;
+
+    /// <summary>
+    /// Sets in the table. A Demon's Souls frame binds some 20k distinct read-only ranges, which come back a frame later;
+    /// 2048 sets of two ways lost nearly all of them to evictions. 16384 sets of four hold 65536 entries (about 0.3-0.5
+    /// of them in use), so few sets overflow. SHARPEMU_METAL_V2_READ_BINDING_MEMO_SETS=&lt;power of two&gt; (diagnostic).
+    /// </summary>
+    internal static readonly int DefaultSets = ResolveSets(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_READ_BINDING_MEMO_SETS"));
+
+    internal static int ResolveSets(string? configured)
+    {
+        const int sets = 16384;
+        if (configured is null)
+        {
+            return sets;
+        }
+
+        if (int.TryParse(configured, out var value) && value >= 1 && value <= (1 << 22) && System.Numerics.BitOperations.IsPow2(value))
+        {
+            return value;
+        }
+
+        MetalV2Diagnostics.WarnOnce(
+            "read-binding-memo-sets",
+            $"SHARPEMU_METAL_V2_READ_BINDING_MEMO_SETS={configured} is not a power of two from 1 to 4194304; using {sets}.");
+        return sets;
+    }
+
+    private readonly int _setMask;
+    private readonly Entry[] _entries;
+
+    public MetalReadBindingMemo(int sets = 0)
+    {
+        sets = sets == 0 ? DefaultSets : sets;
+        _setMask = sets - 1;
+        _entries = new Entry[sets * Ways];
+    }
 
     public long Hits;
     public long Misses;
@@ -46,48 +80,77 @@ internal sealed class MetalReadBindingMemo
     public long Verified;
 
     // Why lookups missed: an empty set, other ranges' entries in it (collisions or evictions), or this range's
-    // entry with another alias or stamp (each field that moved counts, so they can add up past the misses); refused
-    // are the caller's live refusals and windows that no longer stand. Evictions are stores over another range's entry.
+    // entry with another alias or stamp (each field that moved counts, so they can add up past the misses).
+    // Evictions are stores over another range's entry.
     public long MissEmpty, MissOtherKey, MissAlias, MissSerial, MissPartition, MissTrap, MissImageSet, MissGpuModified;
-    public long MissRefused, Evictions;
+    public long Evictions;
 
-    private static int SetOf(ulong address, ulong size, bool compute)
+    // The caller's live refusals, one per refused lookup, the first that applied: a trace on, the range not mapped
+    // whole, a deferred fill, a held label copy or a staged copy at all, or a matched entry whose window no longer
+    // stands. StoreAfterRefusal: stores after a lookup refused for pending work.
+    public long RefusedTrace, RefusedUnmapped, RefusedFill, RefusedLabel, RefusedStaged, RefusedWindow;
+    public long StoreAfterRefusal;
+
+    internal int SetOf(ulong address, ulong size, bool compute) => SetIndex(address, size, compute, _setMask);
+
+    internal static int SetIndex(ulong address, ulong size, bool compute, int setMask)
     {
         var hash = ((address >> 4) * 0x9E3779B97F4A7C15UL) ^ (size * 0xC2B2AE3D27D4EB4FUL) ^ (compute ? 0x165667B19E3779F9UL : 0UL);
-        return (int)((hash ^ (hash >> 29)) >> 40) & (Sets - 1);
+        return (int)((hash ^ (hash >> 29)) >> 40) & setMask;
     }
 
     private static bool Holds(in Entry entry, ulong address, ulong size, bool compute) =>
         entry.Valid && entry.Address == address && entry.Size == size && entry.Compute == compute;
 
-    /// <summary>The range kept for this binding at this stamp and alias, if one is.</summary>
-    public bool TryGet(ulong address, ulong size, bool compute, ulong alias, in Stamp stamp, out MetalGuestRange range)
+    // The way holding the range moved to the front of its set; false when no way does.
+    private bool TryFront(int first, ulong address, ulong size, bool compute)
     {
-        var way = SetOf(address, size, compute) * 2;
-        ref var first = ref _entries[way];
-        if (!Holds(in first, address, size, compute))
+        var set = _entries.AsSpan(first, Ways);
+        if (Holds(in set[0], address, size, compute))
         {
-            ref var second = ref _entries[way + 1];
-            if (Holds(in second, address, size, compute))
-            {
-                (first, second) = (second, first);
-            }
-            else
-            {
-                MissEmpty += !first.Valid && !second.Valid ? 1 : 0;
-                MissOtherKey += first.Valid || second.Valid ? 1 : 0;
-                range = default;
-                return false;
-            }
-        }
-
-        if (first.Alias == alias && first.Stamp == stamp)
-        {
-            range = first.Range;
             return true;
         }
 
-        NoteStale(in first, alias, in stamp);
+        for (var way = 1; way < Ways; way++)
+        {
+            if (Holds(in set[way], address, size, compute))
+            {
+                var found = set[way];
+                set[..way].CopyTo(set[1..]);
+                set[0] = found;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The range kept for this binding at this stamp and alias, if one is.</summary>
+    public bool TryGet(ulong address, ulong size, bool compute, ulong alias, in Stamp stamp, out MetalGuestRange range)
+    {
+        var first = SetOf(address, size, compute) * Ways;
+        if (!TryFront(first, address, size, compute))
+        {
+            var any = false;
+            for (var way = 0; way < Ways; way++)
+            {
+                any |= _entries[first + way].Valid;
+            }
+
+            MissEmpty += any ? 0 : 1;
+            MissOtherKey += any ? 1 : 0;
+            range = default;
+            return false;
+        }
+
+        ref var front = ref _entries[first];
+        if (front.Alias == alias && front.Stamp == stamp)
+        {
+            range = front.Range;
+            return true;
+        }
+
+        NoteStale(in front, alias, in stamp);
         range = default;
         return false;
     }
@@ -104,19 +167,16 @@ internal sealed class MetalReadBindingMemo
 
     public void Store(ulong address, ulong size, bool compute, ulong alias, in Stamp stamp, in MetalGuestRange range)
     {
-        var way = SetOf(address, size, compute) * 2;
-        if (!Holds(in _entries[way], address, size, compute))
+        var first = SetOf(address, size, compute) * Ways;
+        if (!TryFront(first, address, size, compute))
         {
-            if (!Holds(in _entries[way + 1], address, size, compute))
-            {
-                // The less recently used way goes; the new entry takes the front.
-                Evictions += _entries[way + 1].Valid ? 1 : 0;
-            }
-
-            _entries[way + 1] = _entries[way];
+            // The least recently used way goes; the new entry takes the front.
+            var set = _entries.AsSpan(first, Ways);
+            Evictions += set[Ways - 1].Valid ? 1 : 0;
+            set[..(Ways - 1)].CopyTo(set[1..]);
         }
 
-        ref var entry = ref _entries[way];
+        ref var entry = ref _entries[first];
         entry.Address = address;
         entry.Size = size;
         entry.Alias = alias;
@@ -130,13 +190,14 @@ internal sealed class MetalReadBindingMemo
     /// <summary>hits, misses (and why), stores, evictions and verified hits since the last call; resets them.</summary>
     public string TakeCounters()
     {
-        var text = $"hits={Hits} misses={Misses} stores={Stores} verified={Verified} " +
+        var text = $"hits={Hits} misses={Misses} stores={Stores} verified={Verified} evictions={Evictions} " +
             $"miss_by=(empty={MissEmpty},other_key={MissOtherKey},alias={MissAlias},serial={MissSerial}," +
-            $"partition={MissPartition},trap={MissTrap},image_set={MissImageSet},gpu_modified={MissGpuModified}," +
-            $"refused={MissRefused}) evictions={Evictions}";
-        Hits = Misses = Stores = Verified = 0;
+            $"partition={MissPartition},trap={MissTrap},image_set={MissImageSet},gpu_modified={MissGpuModified}) " +
+            $"refused_by=(trace={RefusedTrace},unmapped={RefusedUnmapped},window={RefusedWindow},fill={RefusedFill}," +
+            $"label={RefusedLabel},staged={RefusedStaged}) store_after_refusal={StoreAfterRefusal}";
+        Hits = Misses = Stores = Verified = Evictions = 0;
         MissEmpty = MissOtherKey = MissAlias = MissSerial = MissPartition = MissTrap = MissImageSet = MissGpuModified = 0;
-        MissRefused = Evictions = 0;
+        RefusedTrace = RefusedUnmapped = RefusedFill = RefusedLabel = RefusedStaged = RefusedWindow = StoreAfterRefusal = 0;
         return text;
     }
 }

@@ -60,6 +60,43 @@ internal sealed partial class MetalRenderHost
         ReadBindingMemoEnabled && _deferredFills.Count == 0 && _deferredLabelCopies.Count == 0 &&
         _stagedStorageCopies is not { Count: > 0 } && ReadBindingTracesOff;
 
+    // A lookup refused for pending work (a fill, a label copy or a staged copy): the store after its chain is counted.
+    private bool _readBindingRefusedPending;
+
+    // Counts the first reason ReadBindingMemoApplies (or the range's mapping) refused a lookup.
+    private void NoteReadBindingRefusal(bool unmapped)
+    {
+        var memo = _readBindingMemo;
+        memo.Misses++;
+        if (!ReadBindingTracesOff)
+        {
+            memo.RefusedTrace++;
+        }
+        else if (_deferredFills.Count != 0)
+        {
+            memo.RefusedFill++;
+            _readBindingRefusedPending = true;
+        }
+        else if (_deferredLabelCopies.Count != 0)
+        {
+            memo.RefusedLabel++;
+            _readBindingRefusedPending = true;
+        }
+        else if (_stagedStorageCopies is { Count: > 0 })
+        {
+            memo.RefusedStaged++;
+            _readBindingRefusedPending = true;
+        }
+        else if (unmapped)
+        {
+            memo.RefusedUnmapped++;
+        }
+        else
+        {
+            throw Fatal("A read-only binding memo lookup was refused with nothing to refuse it.");
+        }
+    }
+
     private MetalReadBindingMemo.Stamp ReadBindingStamp()
     {
         var (serial, partition, trap) = _guestMemory.InPlaceStamp;
@@ -75,10 +112,16 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        if (!ReadBindingMemoApplies || !_backing.TryResolveBackingAliasSpan(address, size, out var alias))
+        _readBindingRefusedPending = false;
+        if (!ReadBindingMemoApplies)
         {
-            _readBindingMemo.Misses++;
-            _readBindingMemo.MissRefused++;
+            NoteReadBindingRefusal(unmapped: false);
+            return false;
+        }
+
+        if (!_backing.TryResolveBackingAliasSpan(address, size, out var alias))
+        {
+            NoteReadBindingRefusal(unmapped: true);
             return false;
         }
 
@@ -88,7 +131,7 @@ internal sealed partial class MetalRenderHost
             if (range.IsValid)
             {
                 // The entry matched; the window under it no longer stands.
-                _readBindingMemo.MissRefused++;
+                _readBindingMemo.RefusedWindow++;
             }
 
             _readBindingMemo.Misses++;
@@ -111,6 +154,12 @@ internal sealed partial class MetalRenderHost
             ReadBindingStamp() != before || !_guestMemory.InPlaceAnswerStands(inPlaceAlias, size))
         {
             return;
+        }
+
+        if (_readBindingRefusedPending)
+        {
+            _readBindingMemo.StoreAfterRefusal++;
+            _readBindingRefusedPending = false;
         }
 
         _readBindingMemo.Store(address, size, computeStage, inPlaceAlias, before, range);
