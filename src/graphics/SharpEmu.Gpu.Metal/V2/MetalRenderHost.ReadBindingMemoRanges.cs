@@ -1,0 +1,211 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+namespace SharpEmu.Gpu.Metal.V2;
+
+/// <summary>
+/// The read-only binding memo checked per range (MetalReadBindingMemoV2, SHARPEMU_METAL_V2_READ_BINDING_MEMO_RANGES,
+/// on by default). The v1 memo's stamp made every entry miss whenever anything anywhere moved: the next command buffer,
+/// a window cut elsewhere, any image added, dropped or GPU-written. Demon's Souls moves one of those between nearly
+/// every two bindings of a range, so most lookups paid the full chain. Here each condition is checked for the range:
+/// <list type="bullet">
+/// <item>The command buffer: what resolving a range in place did per command buffer (pin the window, mark it used, make
+/// it resident) the hit does too (MetalGuestMemory.UseWindowForHit), once per window per command buffer.</item>
+/// <item>The window cuts: the window object the range was placed in is still in the partition (a cut move, a cut back
+/// to granules and a renewal all retire the windows they replace) and still has the buffer the entry holds; a window's
+/// bounds never change, so the range still fits it.</item>
+/// </list>
+/// The single-copy trap version and the image stamps are still read whole, as in v1, and so is the v1 refusal while any
+/// fill, label copy or staged copy is pending.
+/// </summary>
+internal sealed partial class MetalRenderHost
+{
+    private bool MissReadBinding(ref long cause)
+    {
+        _readBindingMemoV2.Misses++;
+        cause++;
+        return false;
+    }
+
+    private bool TryReadBindingMemoRanges(ulong address, ulong size, bool computeStage, out MetalGuestRange range)
+    {
+        var memo = _readBindingMemoV2;
+        range = default;
+        if (!ReadBindingTracesOff)
+        {
+            return MissReadBinding(ref memo.RefusedTrace);
+        }
+
+        if (_deferredFills.Count != 0)
+        {
+            return MissReadBinding(ref memo.RefusedFill);
+        }
+
+        if (_deferredLabelCopies.Count != 0)
+        {
+            return MissReadBinding(ref memo.RefusedLabel);
+        }
+
+        if (_stagedStorageCopies is { Count: > 0 })
+        {
+            return MissReadBinding(ref memo.RefusedStaged);
+        }
+
+        if (!_backing.TryResolveBackingAliasSpan(address, size, out var alias))
+        {
+            return MissReadBinding(ref memo.RefusedUnmapped);
+        }
+
+        var index = memo.Find(address, size, computeStage);
+        if (index < 0)
+        {
+            return false;
+        }
+
+        ref var entry = ref memo.At(index);
+        if (entry.Alias != alias)
+        {
+            return MissReadBinding(ref memo.MissAlias);
+        }
+
+        var window = entry.Window!;
+        if (Volatile.Read(ref window.Retired))
+        {
+            return MissReadBinding(ref memo.MissWindowRetired);
+        }
+
+        if (window.Buffer != entry.Buffer)
+        {
+            return MissReadBinding(ref memo.MissWindowBuffer);
+        }
+
+        if (!_guestMemory.InPlaceAnswerStands(alias, size))
+        {
+            return MissReadBinding(ref memo.RefusedWindow);
+        }
+
+        ref var side = ref memo.SideAt(index);
+        if (side.Trap != _guestMemory.TrapVersionNow)
+        {
+            return MissReadBinding(ref memo.MissTrap);
+        }
+
+        if (entry.ImageSet != _imageCache.ImageSetVersion)
+        {
+            return MissReadBinding(ref memo.MissImageSet);
+        }
+
+        if (side.GpuModified != _imageCache.Epochs.GpuModified)
+        {
+            return MissReadBinding(ref memo.MissImageGpuModified);
+        }
+
+        if (!_guestMemory.UseWindowForHit(window, out var touched))
+        {
+            return MissReadBinding(ref memo.MissWindowRetired);
+        }
+
+        memo.WindowTouches += touched ? 1 : 0;
+        MetalGpuReferenceCensus.Mark(address, size);
+        memo.Hits++;
+        if (side.Serial != _submissionSerial)
+        {
+            memo.HitsNewCommandBuffer++;
+            side.Serial = _submissionSerial;
+        }
+
+        _readBindingHitIndex = index;
+        range = new MetalGuestRange(entry.Buffer, entry.Offset, size, entry.GpuAddress);
+        return true;
+    }
+
+    // After the full chain of a read-only binding: kept when the flush found no image over the range and the range
+    // resolved in place to a window that is still in the partition. The stamps are those read before the chain, so
+    // anything that moved while it ran makes the entry miss.
+    private void StoreReadBindingRanges(
+        ulong address, ulong size, bool computeStage, in MetalReadBindingMemo.Stamp before, bool flushFoundImage,
+        ulong inPlaceAlias, MetalWindowPartition.Window? window, in MetalGuestRange range)
+    {
+        var memo = _readBindingMemoV2;
+        if (!ReadBindingTracesOff)
+        {
+            return;
+        }
+
+        if (flushFoundImage)
+        {
+            memo.StoreSkipFlushed++;
+            return;
+        }
+
+        if (inPlaceAlias == 0 || window is null || !range.IsValid || range.Buffer != window.Buffer || range.Size != size)
+        {
+            memo.StoreSkipNotInPlace++;
+            return;
+        }
+
+        if (size > uint.MaxValue)
+        {
+            memo.StoreSkipLarge++;
+            return;
+        }
+
+        if (Volatile.Read(ref window.Retired) || !_guestMemory.InPlaceAnswerStands(inPlaceAlias, size))
+        {
+            memo.StoreSkipRetiredAfter++;
+            return;
+        }
+
+        var index = memo.Insert(address, (uint)size, computeStage);
+        ref var entry = ref memo.At(index);
+        entry.Alias = inPlaceAlias;
+        entry.Window = window;
+        entry.Buffer = range.Buffer;
+        entry.Offset = range.Offset;
+        entry.GpuAddress = range.GpuAddress;
+        entry.ImageSet = before.ImageSet;
+        ref var side = ref memo.SideAt(index);
+        side.Trap = before.Trap;
+        side.GpuModified = before.GpuModified;
+        side.Serial = _submissionSerial;
+    }
+
+    // =verify, before the full chain runs behind a v2 hit: the hit pinned and touched its window (the chain would
+    // do it too, so this is checked first).
+    private void VerifyReadBindingHitClaims(ulong address, ulong size, bool computeStage, in MetalGuestRange memo)
+    {
+        var index = _readBindingHitIndex;
+        var entry = index >= 0 ? _readBindingMemoV2.At(index) : default;
+        if (entry.Window is not { } window || entry.Address != address || entry.Size != size)
+        {
+            throw Fatal(
+                $"A memoised read-only binding has no entry behind it: address=0x{address:X16} size=0x{size:X} compute={computeStage}.");
+        }
+
+        if (!_guestMemory.WindowUsedThisSubmission(window))
+        {
+            throw Fatal(
+                $"A memoised read-only binding did not pin and touch its window for this command buffer: address=0x{address:X16} " +
+                $"size=0x{size:X} window={window.Id} retired={window.Retired} memo={memo}.");
+        }
+    }
+
+    /// <summary>What the chain behind a read-only binding can do, read on both sides of it in the verify mode.</summary>
+    private readonly record struct ReadBindingChainSnapshot(
+        int LabelCopies, bool LandLabels, int Fills, long FillsLandedEarly, nint RenderEncoder, nint ComputeEncoder,
+        long PassEndsOther, bool StoresOver, long WindowMoves, long WindowRenewals, long ImageWritebacks)
+    {
+        public static ReadBindingChainSnapshot Take(MetalRenderHost host, ulong address, ulong size) => new(
+            host._deferredLabelCopies.Count,
+            host._landDeferredLabels,
+            host._deferredFills.Count,
+            host._deferredFillsLandedEarly,
+            host._renderEncoder,
+            host._computeEncoder,
+            host._passEndOther,
+            host._stagedStorageCopies is { Count: > 0 } staged && staged.HasRecordedStoresOver(address, size),
+            host._guestMemory.WindowLayoutCounts.Moves,
+            host._guestMemory.SingleCopyWindowCounts.Renewals,
+            host._imageCache.Counters.Writebacks);
+    }
+}

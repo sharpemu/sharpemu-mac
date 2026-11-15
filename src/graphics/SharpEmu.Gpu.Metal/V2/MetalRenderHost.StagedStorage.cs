@@ -29,13 +29,16 @@ internal sealed partial class MetalRenderHost
     /// reach guest memory (<see cref="MetalStagedStorage"/>).
     /// </summary>
     internal MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written, bool computeStage = false) =>
-        ResolveStorageBuffer(address, size, written, computeStage, out _);
+        ResolveStorageBuffer(address, size, written, computeStage, out _, out _);
 
     // inPlaceAlias: the backing alias MetalGuestMemory.TryResolveInPlace placed the range by when the range is its
-    // window, else 0 (MetalReadBindingMemo).
-    private MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written, bool computeStage, out ulong inPlaceAlias)
+    // window, else 0; inPlaceWindow: that window, else null (MetalReadBindingMemo, MetalReadBindingMemoV2).
+    private MetalGuestRange ResolveStorageBuffer(
+        ulong address, ulong size, bool written, bool computeStage, out ulong inPlaceAlias,
+        out MetalWindowPartition.Window? inPlaceWindow)
     {
         inPlaceAlias = 0;
+        inPlaceWindow = null;
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageDeferredLabels);
         OrderAfterDeferredCopies(address, size, written ? LabelLandCause.BindWritten : LabelLandCause.BindRead);
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageSharedLookup);
@@ -48,9 +51,10 @@ internal sealed partial class MetalRenderHost
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageStoreOrder);
         OrderAfterStagedStores(address, size);
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageBufferResolve);
-        if (_guestMemory.TryResolveInPlace(address, size, out var window, out var alias))
+        if (_guestMemory.TryResolveInPlace(address, size, out var window, out var alias, out var placedIn))
         {
             inPlaceAlias = alias;
+            inPlaceWindow = placedIn;
             return window;
         }
 

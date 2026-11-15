@@ -69,6 +69,11 @@ internal sealed class MetalWindowPartition
         public nint Buffer;
 
         public ulong GpuAddress;
+
+        // Set once the window leaves the partition (Replace: a move, a cut back to granules, a renewal); it never
+        // comes back. Written under the owner's window lock, read without it by the read-binding memo on the worker,
+        // where every placement runs.
+        public bool Retired;
     }
 
     internal enum Placement
@@ -336,6 +341,7 @@ internal sealed class MetalWindowPartition
         for (var index = first; index <= last; index++)
         {
             var old = _windows[index];
+            Volatile.Write(ref old.Retired, true);
             retired.Add(old);
             _byId[old.Id] = null;
             _freeIds.Push(old.Id);

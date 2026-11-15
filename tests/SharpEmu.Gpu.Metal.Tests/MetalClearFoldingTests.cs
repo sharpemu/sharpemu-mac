@@ -241,11 +241,27 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
         private readonly PageGuard _pages;
         private readonly Backing _backing = new();
 
-        public Rig(nint device)
+        // granuleMegabytes: windows of that many MiB (SHARPEMU_METAL_V2_GRANULE_MB) instead of one over the whole
+        // backing, so a range can cross a window edge; tests in this assembly do not run in parallel.
+        public Rig(nint device, int granuleMegabytes = 0)
         {
             _queue = MetalNative.Send(device, MetalNative.Selector("newCommandQueue"));
             _pages = new PageGuard(_space);
-            Host = new MetalRenderHost(device, _queue, _backing, _backing, _pages, new MetalGpuWorkerRelay(static () => { }));
+            const string granule = "SHARPEMU_METAL_V2_GRANULE_MB";
+            var configured = Environment.GetEnvironmentVariable(granule);
+            if (granuleMegabytes != 0)
+            {
+                Environment.SetEnvironmentVariable(granule, granuleMegabytes.ToString());
+            }
+
+            try
+            {
+                Host = new MetalRenderHost(device, _queue, _backing, _backing, _pages, new MetalGpuWorkerRelay(static () => { }));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(granule, configured);
+            }
         }
 
         public MetalRenderHost Host { get; }

@@ -45,10 +45,25 @@ internal sealed partial class MetalRenderHost
     internal bool ReadBindingMemoVerify { get; set; } =
         ReadBindingMemoSetting == "verify" || Environment.GetEnvironmentVariable("SHARPEMU_PERF_VERIFY") == "1";
 
+    /// <summary>
+    /// Entries checked per range (MetalReadBindingMemoV2), the default; SHARPEMU_METAL_V2_READ_BINDING_MEMO_RANGES=0
+    /// keeps the stamp of everything (MetalReadBindingMemo), as before.
+    /// </summary>
+    internal bool ReadBindingMemoRanges { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_READ_BINDING_MEMO_RANGES") != "0";
+
     private readonly MetalReadBindingMemo _readBindingMemo = new();
+    private readonly MetalReadBindingMemoV2 _readBindingMemoV2 = new();
+
+    /// <summary>The v2 memo and its counters (tests).</summary>
+    internal MetalReadBindingMemoV2 ReadBindingMemoV2 => _readBindingMemoV2;
+
+    // The entry the last v2 hit answered from (the verify mode reads its claims).
+    private int _readBindingHitIndex = -1;
 
     internal (long Hits, long Misses, long Stores, long Verified) ReadBindingMemoCounts =>
-        (_readBindingMemo.Hits, _readBindingMemo.Misses, _readBindingMemo.Stores, _readBindingMemo.Verified);
+        (_readBindingMemo.Hits + _readBindingMemoV2.Hits, _readBindingMemo.Misses + _readBindingMemoV2.Misses,
+         _readBindingMemo.Stores + _readBindingMemoV2.Stores, _readBindingMemo.Verified + _readBindingMemoV2.Verified);
 
     // Nothing that reports bindings is on.
     private bool ReadBindingTracesOff =>
@@ -112,6 +127,11 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
+        if (ReadBindingMemoRanges)
+        {
+            return TryReadBindingMemoRanges(address, size, computeStage, out range);
+        }
+
         _readBindingRefusedPending = false;
         if (!ReadBindingMemoApplies)
         {
@@ -148,8 +168,18 @@ internal sealed partial class MetalRenderHost
     // resolved in place, and nothing the stamp holds moved while the chain ran.
     private void StoreReadBinding(
         ulong address, ulong size, bool computeStage, in MetalReadBindingMemo.Stamp before, bool flushFoundImage,
-        ulong inPlaceAlias, in MetalGuestRange range)
+        ulong inPlaceAlias, MetalWindowPartition.Window? inPlaceWindow, in MetalGuestRange range)
     {
+        if (ReadBindingMemoRanges)
+        {
+            if (ReadBindingMemoEnabled)
+            {
+                StoreReadBindingRanges(address, size, computeStage, in before, flushFoundImage, inPlaceAlias, inPlaceWindow, in range);
+            }
+
+            return;
+        }
+
         if (flushFoundImage || inPlaceAlias == 0 || !range.IsValid || !ReadBindingMemoEnabled || !ReadBindingTracesOff ||
             ReadBindingStamp() != before || !_guestMemory.InPlaceAnswerStands(inPlaceAlias, size))
         {
@@ -165,16 +195,38 @@ internal sealed partial class MetalRenderHost
         _readBindingMemo.Store(address, size, computeStage, inPlaceAlias, before, range);
     }
 
-    // =verify: the full chain behind a hit, which must give the same range and find no image to flush.
+    // =verify: the full chain behind a hit, which must give the same range and find no image to flush; behind a v2
+    // hit (MetalRenderHost.ReadBindingMemoRanges.cs) also do nothing, and find the window the hit pinned and touched.
     private void VerifyReadBinding(ulong address, ulong size, bool computeStage, MetalWritebackCause cause, in MetalGuestRange memo)
     {
+        var ranges = ReadBindingMemoRanges;
+        var before = ranges ? ReadBindingChainSnapshot.Take(this, address, size) : default;
+        if (ranges)
+        {
+            VerifyReadBindingHitClaims(address, size, computeStage, in memo);
+        }
+
         var flushed = _imageCache.FlushGpuWrites(address, size, cause, written: false);
-        var full = ResolveStorageBuffer(address, size, written: false, computeStage, out var alias);
+        var full = ResolveStorageBuffer(address, size, written: false, computeStage, out var alias, out _);
         if (flushed || alias == 0 || full != memo)
         {
             throw Fatal(
                 $"A memoised read-only binding disagrees with the full path: address=0x{address:X16} size=0x{size:X} " +
                 $"compute={computeStage} memo={memo} full={full} in_place={alias != 0} flushed_image={flushed}.");
+        }
+
+        if (ranges)
+        {
+            var after = ReadBindingChainSnapshot.Take(this, address, size);
+            if (before.StoresOver || after != before)
+            {
+                throw Fatal(
+                    $"The full path behind a memoised read-only binding did something the hit skipped: address=0x{address:X16} " +
+                    $"size=0x{size:X} compute={computeStage} before={before} after={after}.");
+            }
+
+            _readBindingMemoV2.Verified++;
+            return;
         }
 
         _readBindingMemo.Verified++;
@@ -252,7 +304,8 @@ internal sealed partial class MetalRenderHost
 
     private string TakeReadBindingCounters()
     {
-        var text = $"read_binding_memo=({_readBindingMemo.TakeCounters()}) bind_shape=(binds={_bindCalls} " +
+        var memo = ReadBindingMemoRanges ? _readBindingMemoV2.TakeCounters() : _readBindingMemo.TakeCounters();
+        var text = $"read_binding_memo=({memo}) bind_shape=(binds={_bindCalls} " +
             $"image_set_moves={_bindImageSetMoves} binding_epoch_moves={_bindBindingEpochMoves} " +
             $"snapshot_repeats=[images={_snapshotRefRepeats[0]},samplers={_snapshotRefRepeats[1]},buffers={_snapshotRefRepeats[2]}]/{_snapshotRefChecks} " +
             $"buffers_read_only={_readOnlyBufferBinds} buffers_written={_writtenBufferBinds} storage_images={_storageImageBinds} tiny_pass_dummies={_tinyPassDummies}) {TakeStagePlanCounters()}";
