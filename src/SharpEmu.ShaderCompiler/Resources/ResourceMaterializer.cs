@@ -677,7 +677,7 @@ public static partial class ResourceMaterializer
             _lastFastOutcome = MaterializationTally.Outcome.FastMiss;
             ResourceSnapshot next = null!;
             ResourceSpecialization specialization = null!;
-            if (!MaterializeFromOutput(plan, inputs, output, ref next, ref specialization, out _))
+            if (!MaterializeFromOutput(plan, inputs, output, ref next, ref specialization, out _, previous: snapshot))
             {
                 _lastRebuildRefusal = RebuildRefusal.Failed;
                 return FastRevalidation.Stale;
@@ -1330,8 +1330,11 @@ public static partial class ResourceMaterializer
         }
     }
 
+    // previous: the snapshot a rebuild replaces; with a specialization memo hit, a buffer whose words it already holds
+    // takes its array (published snapshots are never written, so equal words can share one).
     private static bool MaterializeFromOutput(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, MaterializationProgram.Output output,
-        ref ResourceSnapshot snapshot, ref ResourceSpecialization specialization, out ResourceMaterializationFailure failure)
+        ref ResourceSnapshot snapshot, ref ResourceSpecialization specialization, out ResourceMaterializationFailure failure,
+        ResourceSnapshot? previous = null)
     {
         var info = plan.Info;
         var bufferCount = info.Buffers.Count;
@@ -1355,10 +1358,19 @@ public static partial class ResourceMaterializer
         }
 
         var buffers = new uint[bufferCount][];
+        var held = memo is not null && previous is not null && previous.Buffers.Length == bufferCount ? previous.Buffers : null;
         for (var index = 0; index < bufferCount; index++)
         {
             var words = output.Source(index);
-            buffers[index] = memo is not null && (words[3] >> 30) != 0 ? new uint[words.Length] : words.ToArray();
+            var zeroed = memo is not null && (words[3] >> 30) != 0;
+            if (held is not null && held[index] is { } kept && kept.Length == words.Length &&
+                (zeroed ? !kept.AsSpan().ContainsAnyExcept(0u) : kept.AsSpan().SequenceEqual(words)))
+            {
+                buffers[index] = kept;
+                continue;
+            }
+
+            buffers[index] = zeroed ? new uint[words.Length] : words.ToArray();
         }
 
         var table = output.TableWords.ToArray();
