@@ -34,9 +34,19 @@ public sealed unsafe class ManagedWriteIntervalTests
             Assert.True(Views.TryMapReservedRange(Address, Page, 0, HostPageProtection.ReadWrite, out _));
             Assert.True(Views.TryMapReservedRange(Address + Page, Page, Page, HostPageProtection.ReadWrite, out _));
         }
+        // Enrolls through a mapped copy, whose revision capture is the ledger's first observer:
+        // every write after it takes admission, identity, slot and history.
         internal object Enroll()
         {
             Assert.Equal(CpuMappedCopyResult.Copied, Views.TryReadMappedCopy(Address, Page, Address, new byte[1], out _));
+            var ledger = typeof(HostBackingObject).GetField("_managedWrites", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(Backing)!;
+            Assert.True((bool)ledger.GetType().GetProperty("IsObserved", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(ledger)!);
+            return ledger;
+        }
+        // Enrolls with no observer: writes stay dormant (unless SHARPEMU_WRITE_INTERVALS_DORMANT=0).
+        internal object EnrollDormant()
+        {
+            typeof(HostBackingObject).GetMethod("EnrollManagedWrites", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(Backing, null);
             return typeof(HostBackingObject).GetField("_managedWrites", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(Backing)!;
         }
         internal byte[] Bytes() => new ReadOnlySpan<byte>((void*)Backing.AliasBase, (int)(Page * 2)).ToArray();
@@ -239,7 +249,29 @@ public sealed unsafe class ManagedWriteIntervalTests
     }
 
     [Fact]
-    public void WarmedEnrolledSingleViewFastPathWriteCompletesOneIntervalAndDoesNotAllocate()
+    public void WarmedDormantSingleViewFastPathWriteRegistersNoIntervalAndDoesNotAllocate()
+    {
+        using var state = new State(); var ledger = state.EnrollDormant(); byte[] bytes = [2, 4, 6, 8];
+        var dormant = (bool)ledger.GetType().GetField("DormantEnabled", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        if (!dormant) return; // SHARPEMU_WRITE_INTERVALS_DORMANT=0: the observed test covers it
+        Assert.False((bool)ledger.GetType().GetProperty("IsObserved", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(ledger)!);
+        Assert.True(state.Views.TryWriteSingleView(State.Address + 16, bytes));
+        Assert.Equal(bytes, state.Bytes().AsSpan(16, bytes.Length).ToArray());
+        Assert.False(state.Views.TryWriteSingleView(State.Address + State.Page - 2, bytes));
+        for (var i = 0; i < 10000; i++) Assert.True(state.Views.TryWriteSingleView(State.Address, bytes));
+        var before = GC.GetAllocatedBytesForCurrentThread(); var allSucceeded = true;
+        for (var i = 0; i < 10000; i++) allSucceeded &= state.Views.TryWriteSingleView(State.Address, bytes);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(allSucceeded); Assert.Equal(0, allocated);
+        // No admission, identity, slot, history or counter: the ledger is exactly as enrolled.
+        Assert.Equal(0, Count(ledger, "nextIdentity")); Assert.Equal(0, Count(ledger, "admission"));
+        Assert.Equal(0, Count(ledger, "begun")); Assert.Equal(0, Count(ledger, "completed"));
+        Assert.Equal(0, Count(ledger, "active")); Assert.Equal(0, Count(ledger, "aborted"));
+        Assert.Equal(0, Incomplete(ledger));
+    }
+
+    [Fact]
+    public void WarmedObservedSingleViewFastPathWriteCompletesOneIntervalAndDoesNotAllocate()
     {
         using var state = new State(); var ledger = state.Enroll(); byte[] bytes = [2, 4, 6, 8];
         // An enrolled backing no longer declines the lock-free path; each write is one

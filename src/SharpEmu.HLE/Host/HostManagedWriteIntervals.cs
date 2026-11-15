@@ -32,10 +32,39 @@ internal sealed partial class HostManagedWriteIntervals
         Interlocked.Exchange(ref coverageIncomplete, 1);
     }
 
-    internal HostManagedWriteIntervals(HostBackingObject backing) => this.backing = backing;
+    // Dormant until the first observer. Nothing in production captures a revision, reserves a
+    // publication or enrolls a read watch, so until something does, an ordinary writer only
+    // registers itself on its own stripe of the dormant-writer lane (no admission, identity, slot,
+    // history or counters) and its token has Slot == DormantSlot. An observer first sets
+    // `observerSeen` (Interlocked.Exchange, a full fence) and then sums that lane; a writer increments
+    // its stripe (a full fence) and then re-reads `observerSeen`, backing out to the full path if it
+    // is set. So an observer that sees `observerSeen` set and a zero sum knows every dormant writer has
+    // landed and every later one takes the full path; while the sum is not zero it refuses (it
+    // never waits) and counts the refusal. Admission, identity and history then hold exactly as
+    // before for every write after that point. SHARPEMU_WRITE_INTERVALS_DORMANT=0 starts observed.
+    internal const int DormantSlot = -2;
+    private const int DormantLane = 1;
+    internal static readonly bool DormantEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_WRITE_INTERVALS_DORMANT") != "0";
+    private readonly HostAccessStripes dormantWriters;
+    private int observerSeen; // sticky
+    private int dormantDrained; // an observer saw `observerSeen` set and no dormant writer: none can exist again
+    private long observationRefusals;
+    internal bool IsObserved => Volatile.Read(ref observerSeen) != 0;
+    internal long ObservationRefusals => Volatile.Read(ref observationRefusals);
+
+    internal HostManagedWriteIntervals(HostBackingObject backing)
+    {
+        this.backing = backing;
+        dormantWriters = backing.AliasStripes ?? new HostAccessStripes();
+        if (!DormantEnabled) observerSeen = dormantDrained = 1;
+    }
+
     internal readonly record struct Token(HostManagedWriteIntervals? Owner, int Slot, long Identity)
     {
         internal long RejectedAdmission { get; init; }
+        // The dormant-writer stripe cell a dormant token registered on (Slot == DormantSlot only).
+        internal int DormantCell { get; init; }
         internal bool IsPublicationBusy => Owner is not null && Slot == -1 && Identity == 0 &&
             RejectedAdmission >= 0 && (RejectedAdmission & PublicationBit) != 0;
     }
@@ -45,6 +74,14 @@ internal sealed partial class HostManagedWriteIntervals
     private Token BeginCore(ulong offset, ulong count, bool operation)
     {
         if (count == 0) return default;
+        if (Volatile.Read(ref observerSeen) == 0)
+        {
+            if (offset > backing.Size || count > backing.Size - offset)
+            { LoseCoverage(CoverageLoss.InvalidPhysicalBounds); return default; }
+            var cell = dormantWriters.Enter(DormantLane); // full fence before the re-read
+            if (Volatile.Read(ref observerSeen) == 0) return new(this, DormantSlot, 0) { DormantCell = cell };
+            dormantWriters.ExitCell(cell); // an observer arrived: take the full path
+        }
         var observed = Volatile.Read(ref admission);
         var acquired = false;
         for (var attempt = 0; attempt < Capacity; attempt++)
@@ -89,6 +126,13 @@ internal sealed partial class HostManagedWriteIntervals
     internal bool End(Token token, bool succeeded)
     {
         if (token.Owner is null) return token.Identity == 0 && token.Slot == 0; // disabled/nonempty tracking decline
+        if (token.Slot == DormantSlot && token.Identity == 0 && ReferenceEquals(token.Owner, this))
+        {
+            // No watch can exist while a dormant writer is registered, and no observer has a
+            // revision this write could fall inside: there is no history to record.
+            dormantWriters.ExitCell(token.DormantCell);
+            return true;
+        }
         if (!ReferenceEquals(token.Owner, this) || token.Identity <= 0 || (uint)token.Slot >= Capacity)
             return false;
         // Consume this exact operation before reuse. A copied/stale token cannot
@@ -113,7 +157,33 @@ internal sealed partial class HostManagedWriteIntervals
     }
 
 
-    internal static bool AllowsBytes(Token token) => token.Owner is null || token.Slot >= 0;
+    internal static bool AllowsBytes(Token token) => token.Owner is null || token.Slot >= 0 || token.Slot == DormantSlot;
+    // A dormant operation envelope already makes every observer refuse until it ends, so the
+    // byte intervals inside it need no registration of their own.
+    internal static bool IsDormant(Token token) => token.Owner is not null && token.Slot == DormantSlot;
+
+    // Every observer calls this before it reads admission, identity or history. True once no
+    // dormant writer can be in flight; false (counted, never a wait) while one is.
+    private bool TryObserve()
+    {
+        if (Volatile.Read(ref dormantDrained) != 0) return true;
+        if (Interlocked.Exchange(ref observerSeen, 1) == 0)
+        {
+            // Once per backing, on stdout (game.log): from here on every ordinary write pays the
+            // full ledger again, so a production observer must not arrive unnoticed.
+            try { Console.Out.WriteLine($"[MEM] write-intervals observed backing={backing.Identity}: ordinary writes now take admission, identity and history"); }
+            catch (Exception) { } // a log failure must not change the observer's outcome
+        }
+
+        if (dormantWriters.Sum(DormantLane) != 0)
+        {
+            Interlocked.Increment(ref observationRefusals);
+            return false;
+        }
+
+        Volatile.Write(ref dormantDrained, 1);
+        return true;
+    }
 
     // Participating writers only, never a certificate for native/JIT/raw stores.
     // The count is acquired before allocating an interval identity; losing
@@ -121,6 +191,7 @@ internal sealed partial class HostManagedWriteIntervals
     internal bool TryCaptureRevision(out long revision)
     {
         revision = -1;
+        if (!TryObserve()) return false;
         if (Volatile.Read(ref coverageIncomplete) != 0 || Volatile.Read(ref admission) != 0) return false;
         var found = Volatile.Read(ref nextIdentity);
         if (found < 0 || Volatile.Read(ref admission) != 0 || Volatile.Read(ref coverageIncomplete) != 0) return false;
@@ -136,6 +207,11 @@ internal sealed partial class HostManagedWriteIntervals
         if (originalRevision < 0 || originalRevision == long.MaxValue || Volatile.Read(ref coverageIncomplete) != 0)
         {
             TracePublicationDecline("invalid-original-revision-or-incomplete", originalRevision);
+            return false;
+        }
+        if (!TryObserve())
+        {
+            TracePublicationDecline("observation-activating", originalRevision);
             return false;
         }
         var previousAdmission = Interlocked.CompareExchange(ref admission, PublicationBit, 0);

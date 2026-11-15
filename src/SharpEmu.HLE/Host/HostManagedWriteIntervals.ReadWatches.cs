@@ -147,6 +147,8 @@ internal sealed partial class HostManagedWriteIntervals
         }
         if (Volatile.Read(ref coverageIncomplete) != 0)
         { rejection = "watch-enrollment-coverage-incomplete"; return null; }
+        if (!TryObserve())
+        { rejection = "watch-enrollment-observation-activating"; return null; }
         var exclusiveOwner = CreateAdmissionOwner(CpuMappedAdmissionOwnerKind.ReadWatchEnrollment);
         originalAdmission = Interlocked.CompareExchange(ref admission, PublicationBit, 0);
         if (originalAdmission != 0)
@@ -176,7 +178,7 @@ internal sealed partial class HostManagedWriteIntervals
     // remains private until the transaction fully applies its own bytes.
     internal ReadWatch? TryCreatePublicationSuccessor(ReadWatch original)
     {
-        if (!original.IsUnrevokedDuringPublication(this)) return null;
+        if (!TryObserve() || !original.IsUnrevokedDuringPublication(this)) return null;
         var installed = Volatile.Read(ref readWatches);
         if (installed is null) return null;
         var revision = Volatile.Read(ref nextIdentity);

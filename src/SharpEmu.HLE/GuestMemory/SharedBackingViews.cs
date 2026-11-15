@@ -553,10 +553,12 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
 
-    private void CopyToCanonicalAlias(ulong destination, ReadOnlySpan<byte> source)
+    // dormantEnvelope: the caller holds a dormant operation token (HostManagedWriteIntervals.IsDormant),
+    // whose registration already makes every observer refuse, so these bytes need none of their own.
+    private void CopyToCanonicalAlias(ulong destination, ReadOnlySpan<byte> source, bool dormantEnvelope = false)
     {
         _singleCopy?.BeforeWrite(destination - AliasBase, (ulong)source.Length);
-        var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)source.Length);
+        var interval = dormantEnvelope ? default : _backing!.BeginManagedWrite(destination - AliasBase, (ulong)source.Length);
         var succeeded = false;
         if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
         try
@@ -568,11 +570,11 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
 
-    private void CopyCanonicalAliasChunk(ulong source, ulong destination, int bytes)
+    private void CopyCanonicalAliasChunk(ulong source, ulong destination, int bytes, bool dormantEnvelope = false)
     {
         _singleCopy?.BeforeRead(source - AliasBase, (ulong)bytes);
         _singleCopy?.BeforeWrite(destination - AliasBase, (ulong)bytes);
-        var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)bytes);
+        var interval = dormantEnvelope ? default : _backing!.BeginManagedWrite(destination - AliasBase, (ulong)bytes);
         var succeeded = false;
         if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
         try { Buffer.MemoryCopy((void*)source, (void*)destination, bytes, bytes); succeeded = true; }
@@ -646,7 +648,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             var succeeded = false;
             try
             {
-                CopyToCanonicalAlias(target, data);
+                CopyToCanonicalAlias(target, data, HostManagedWriteIntervals.IsDormant(interval));
                 succeeded = true;
                 return true;
             }
@@ -693,7 +695,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             var succeeded = false;
             try
             {
-                CopyCanonicalAliasChunk(from, to, (int)size);
+                CopyCanonicalAliasChunk(from, to, (int)size, HostManagedWriteIntervals.IsDormant(interval));
                 succeeded = true;
                 return true;
             }
@@ -744,8 +746,9 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             var succeeded = false;
             try
             {
-                CopyToCanonicalAlias(firstTarget, first);
-                CopyToCanonicalAlias(secondTarget, second);
+                var dormant = HostManagedWriteIntervals.IsDormant(interval);
+                CopyToCanonicalAlias(firstTarget, first, dormant);
+                CopyToCanonicalAlias(secondTarget, second, dormant);
                 succeeded = true;
                 return true;
             }
@@ -790,7 +793,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             var succeeded = false;
             try
             {
-                filled = FillCanonicalAlias(target, length, state, fill);
+                filled = FillCanonicalAlias(target, length, state, fill, HostManagedWriteIntervals.IsDormant(interval));
                 succeeded = true;
                 return true;
             }
@@ -805,7 +808,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         }
     }
 
-    private int FillCanonicalAlias<TState>(ulong destination, int length, TState state, GuestSpanFill<TState> fill)
+    private int FillCanonicalAlias<TState>(ulong destination, int length, TState state, GuestSpanFill<TState> fill, bool dormantEnvelope = false)
     {
         // A fill may stop short (a file read at its end): released chunks it covers whole get
         // back only the bytes it did not reach, once it says how far it got.
@@ -813,7 +816,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         var produced = 0;
         try
         {
-            var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)length);
+            var interval = dormantEnvelope ? default : _backing!.BeginManagedWrite(destination - AliasBase, (ulong)length);
             var succeeded = false;
             if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
             try
