@@ -290,7 +290,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
         // Each mesh a quad over one cell of a 6x4 grid, four 16-byte-record vertex buffers and a constants buffer;
         // indices 0-5 and an indexed-indirect argument record.
         var objectConstants = rig.Memory.Upload<float>(new float[16], 256);
-        (ulong table, ulong indices, ulong arguments) Mesh(int mesh, ulong normalBuffer = 0)
+        (ulong table, ulong indices, ulong arguments) Mesh(int mesh, ulong normalBuffer = 0, ulong tableAt = 0)
         {
             var (column, row) = (mesh % 6, mesh / 6 % 4);
             var (left, right) = (-1f + column / 3f, -1f + (column + 1) / 3f);
@@ -302,11 +302,13 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             var normal = normalBuffer != 0 ? normalBuffer : rig.Memory.Upload<float>(new float[24]);
             var color = rig.Memory.Upload<float>(Enumerable.Range(0, 24).Select(index => index % 4 == 3 ? 0f : mesh % 512 / 512f).ToArray());
             var constants = rig.Memory.Upload<float>(new float[8], 256);
-            var table = rig.Memory.Upload<uint>(
+            uint[] tableWords =
             [
                 .. Descriptors.Buffer(position, 16, 6), .. Descriptors.Buffer(uv, 16, 6), .. Descriptors.Buffer(normal, 16, 6),
                 .. Descriptors.Buffer(color, 16, 6), .. Descriptors.Buffer(constants, 16, 2),
-            ], 256);
+            ];
+            if (tableAt != 0) rig.Memory.Write<uint>(tableAt, tableWords);
+            var table = tableAt != 0 ? tableAt : rig.Memory.Upload<uint>(tableWords, 256);
             var indices = rig.Memory.Upload<ushort>([0, 1, 2, 3, 4, 5, 0, 0], 256);
             var arguments = rig.Memory.Upload<uint>([6, 1, 0, 0, 0, 0, 0, 0], 256);
             return (table, indices, arguments);
@@ -497,9 +499,40 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
         // made again when sampled next (image-set changes).
         var gameMeshCount = Setting("MESHES", 3000);
         var gameDrawCount = Setting("GAME_DRAWS", 7300);
+        // SHARPEMU_DS_DRAW_BENCH_COPIED_TABLES=1: the game meshes' vertex tables (one per 128 bytes) lie in the
+        // destination of a copy kernel the host refuses, armed again for every command buffer, as Demon's Souls' draws
+        // read a table its copy kernel writes every frame: off the worker each table word is owned by the copy's pending
+        // write and answered from its source (~20 word tests a draw, as in game). The destination holds the copy's result.
+        var copiedTables = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_COPIED_TABLES") == "1";
+        ulong copyDestination = 0, copySource = 0, copyWords = 0;
+        void ArmCopiedTables()
+        {
+            if (copyWords == 0) return;
+            Assert.False(rig.Host.TryCopyWordsOnHost(copyDestination, copySource, copyWords - 1, copyWords));
+            rig.Host.NoteGuestMemoryWrite(copyDestination, copyWords * sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
+        }
+
         (uint[][] Streams, ulong[] Written, ulong[] Churn) GameStreams()
         {
-            var gameMeshes = Enumerable.Range(0, gameMeshCount).Select(mesh => Mesh(mesh)).ToArray();
+            if (copiedTables)
+            {
+                copyWords = (ulong)gameMeshCount * 32;
+                copyDestination = rig.Memory.Allocate(copyWords * sizeof(uint), 0x10000);
+                copySource = rig.Memory.Allocate(copyWords * sizeof(uint), 0x10000);
+                rig.Host.HostKernelCopyMode = MetalHostKernelCopyMode.Off;
+                rig.Host.HostKernelCopyDryRun = false;
+            }
+
+            var gameMeshes = Enumerable.Range(0, gameMeshCount)
+                .Select(mesh => Mesh(mesh, tableAt: copiedTables ? copyDestination + (ulong)mesh * 128 : 0)).ToArray();
+            if (copiedTables)
+            {
+                // dst[i] = src[i % (words - 1)]: the source is the destination, and the destination's last word (padding) its first.
+                var copied = rig.Read<uint>(copyDestination, (int)copyWords);
+                rig.Memory.Write<uint>(copySource, copied);
+                rig.Memory.Write32(copyDestination + (copyWords - 1) * sizeof(uint), copied[0]);
+            }
+
             var written = Enumerable.Range(0, 4).Select(_ => rig.Memory.Upload<uint>(new uint[StorageEdge * StorageEdge], 256)).ToArray();
             var dynamicMeshes = written.Select((buffer, index) => Mesh(index, normalBuffer: buffer)).ToArray();
             var dispatchTables = written.Select((buffer, index) => DispatchTable(index, buffer)).ToArray();
@@ -619,11 +652,17 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 }
                 else
                 {
+                    ArmCopiedTables();
                     for (var index = 0; index < gameStreams.Length; index++)
                     {
                         rig.Host.CommandStream.EnqueueGraphics(gameStreams[index].Address, gameStreams[index].Length, ++submissionId, null);
                         rig.RecordPending();
-                        if ((int)((index + 1) / SubmissionsPerCommit) != (int)(index / SubmissionsPerCommit)) rig.Host.FlushCommandBuffer();
+                        if ((int)((index + 1) / SubmissionsPerCommit) != (int)(index / SubmissionsPerCommit))
+                        {
+                            rig.Host.FlushCommandBuffer();
+                            ArmCopiedTables();
+                        }
+
                         if (index % 3 == 2)
                         {
                             var churn = game.Churn[index % ChurnTextures];
