@@ -531,6 +531,11 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
         // at _GAME_DRAWS and _CHURN_EVERY=1, every draw has a mesh of its own whose table changes every round.
         var meshRepeat = Setting("MESH_REPEAT", 2);
         var dispatchEvery = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_DISPATCH_EVERY"), out var every) && every > 0 ? every : 0;
+        // SHARPEMU_DS_DRAW_BENCH_BURST=1: a round's game streams are all submitted before the worker records any, as
+        // Demon's Souls submits ~13 command buffers at once, so the collector call after each submission lies between
+        // draws (and is looked ahead of with SHARPEMU_PREFETCH_DRAW_LOOKAHEAD); one commit and one copy arming a round,
+        // and the churned textures unregistered after it. 0 (the default) records each submission as it is queued.
+        var burst = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_BURST") == "1";
         ulong copyDestination = 0, copySource = 0, copyWords = 0;
         void ArmCopiedTables()
         {
@@ -711,6 +716,21 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 if (gameStreams is null)
                 {
                     rig.RecordPending();
+                }
+                else if (burst)
+                {
+                    ArmCopiedTables();
+                    for (var index = 0; index < gameStreams.Length; index++)
+                    {
+                        rig.Host.CommandStream.EnqueueGraphics(gameStreams[index].Address, gameStreams[index].Length, ++submissionId, null);
+                    }
+
+                    rig.RecordPending();
+                    rig.Host.FlushCommandBuffer();
+                    for (var index = 2; index < gameStreams.Length; index += 3)
+                    {
+                        ((SharpEmu.HLE.GpuMemory.IGuestImageStore)rig.Host.ImageCache).Unregister(game.Churn[index % ChurnTextures], 0x10000);
+                    }
                 }
                 else
                 {

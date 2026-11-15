@@ -181,7 +181,8 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     public long Gate => _enqueuedNonDraw;
 
-    // _enqueuedNonDraw as of the last gated non-draw item that was not a dispatch (AgcExports.IDeferredWorkSink.DispatchGate).
+    // _enqueuedNonDraw as of the last gated non-draw item that was not a dispatch, nor a collector call the resolutions
+    // look ahead of (ParallelProgramPrefetch.LooksAheadOfCollects; AgcExports.IDeferredWorkSink.DispatchGate).
     private long _dispatchGate;
 
     public long DispatchGate => _dispatchGate;
@@ -700,7 +701,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         {
             item.JobsBefore = (_prefetch?.Submitted ?? 0) - (item.OwnsLastJob ? 1 : 0);
             _enqueuedNonDraw++;
-            if (!item.IsDispatch)
+            if (!item.IsDispatch && !(item.GateKind == ParallelProgramPrefetch.GateItemKind.Collect && _prefetch is { LooksAheadOfCollects: true }))
             {
                 _dispatchGate = _enqueuedNonDraw;
             }

@@ -295,6 +295,32 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         Assert.Equal(0, image.Texture);
     }
 
+    // The collector call after each submission tells the program resolutions running ahead of it whether it did
+    // anything they may have read (ParallelProgramPrefetch.NoteCollect): no effect while every image stays, one when
+    // an image is released, and none for disposing the released texture once its submission completed.
+    [Fact]
+    public void ACollectionReportsAnEffectOnlyWhenItReleasesAnImage()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Configure(retireFrames: 2, retireSeconds: 1);
+        var idle = rig.Acquire(GuestBase, ImageRole.Texture);
+        var busy = GuestBase + 0x10000;
+        rig.Acquire(busy, ImageRole.Texture);
+        Assert.Equal(0, rig.Frame(seconds: 0.1, touch: busy));
+
+        var effects = 0;
+        for (var frame = 0; frame < 6 && rig.Cache.TryGetImage(idle, out _); frame++)
+        {
+            effects += rig.Frame(seconds: 1, touch: busy);
+        }
+
+        Assert.False(rig.Cache.TryGetImage(idle, out _));
+        Assert.Equal(1, effects);
+        Assert.Equal(0, rig.Frame(seconds: 0.1, touch: busy));
+        Assert.False(rig.Cache.Collect());
+    }
+
     // Budget eviction takes only images outside the working set and idle for the minimum time;
     // critical pressure drops the time requirement but never the frame guard.
     [Fact]
@@ -630,9 +656,11 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         }
 
         // One presented frame lasting this long: the touched image is used in it, the frame is
-        // marked, and enough submissions complete that the tick guard is past.
-        public void Frame(double seconds, ulong? touch = null, bool submit = true)
+        // marked, and enough submissions complete that the tick guard is past. Returns how many of
+        // its collections reported an effect (MetalImageCache.Collect).
+        public int Frame(double seconds, ulong? touch = null, bool submit = true)
         {
+            var effects = 0;
             if (touch is { } address)
             {
                 Acquire(address, ImageRole.Texture);
@@ -649,8 +677,10 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
                     Harness.Begin();
                 }
 
-                Cache.Collect();
+                effects += Cache.Collect() ? 1 : 0;
             }
+
+            return effects;
         }
 
         public void WriteGuest(ulong address, byte[] bytes) => Assert.True(_backing.TryWriteBacking(address, bytes));

@@ -609,11 +609,30 @@ internal sealed partial class MetalImageCache
 
     /// <summary>
     /// Advances the collection tick, re-reads the budget when it is due, retires images past
-    /// the retirement age and evicts stale images over the budget.
+    /// the retirement age and evicts stale images over the budget. Returns whether it did anything a program
+    /// resolution running on another thread may have read (ParallelProgramPrefetch.NoteCollect).
     /// </summary>
-    public void Collect()
+    /// <remarks>
+    /// A resolution reads guest bytes, the ownership answers (registered GPU-modified images, pending GPU writes, the
+    /// overlays, queued writes) and pending copies. What each step can change, and whether it counts:
+    /// - the collection tick and the access clock, the idle clock sample, the budget evaluation and the expiry of
+    ///   recently dropped images: least-recently-used and budget bookkeeping the worker reads when it creates, evicts
+    ///   or overlaps images, never a resolution; not an effect;
+    /// - pruning completed fenced writebacks: the fences only hold guest CPU stores until a writeback's submission
+    ///   completes, and none is consulted by a resolution's reads or ownership tests; not an effect;
+    /// - an image released (housekeeping's retirement or staleness, budget eviction): it changes the image set and
+    ///   ownership, may write the image back into guest memory and may restore single-copy chunks, which a re-check of
+    ///   the answers alone can miss (owned and released again since the read); an effect, seen as a moved ImageSetVersion;
+    /// - retired images disposed: only the Metal views and texture of an image already unregistered (its release
+    ///   moved ImageSetVersion then, and its slot is gone), which no resolution reads; not an effect;
+    /// - single-copy arming, emptying, punch bookkeeping and unwatching (MetalSingleCopy.Tick): they change what guest
+    ///   memory backs and how a resolution's compares answer; an effect.
+    /// </remarks>
+    public bool Collect()
     {
         using var held = _lock.Hold();
+        var imageSet = ImageSetVersion;
+        var gpuModified = Epochs.GpuModified;
         _collectionTick++;
         if (SharpEmu.Logging.MemoryTelemetry.Enabled)
         {
@@ -627,7 +646,8 @@ internal sealed partial class MetalImageCache
         MaybeEvaluateBudgetLocked(now);
         HousekeepLocked(now);
         CollectIfOverBudget(now);
-        SingleCopy?.Tick(this, now);
+        var singleCopyWork = SingleCopy?.Tick(this, now) == true;
+        return singleCopyWork || ImageSetVersion != imageSet || Epochs.GpuModified != gpuModified;
     }
 
     private void CollectIfOverBudget() => CollectIfOverBudget(_clock());

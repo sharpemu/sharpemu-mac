@@ -612,15 +612,21 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         FlushAndWaitForGpu(MetalWaitReason.Synchronize);
     }
 
+    // Posted after every completed submission. The draws and dispatches after it may resolve their programs before it
+    // runs (ParallelProgramPrefetch.LooksAheadOfCollects): on the worker it tells the prefetch whether it did anything
+    // such a resolution may have read, and those that began before it are then refused (NoteCollect). An effect is any
+    // deferred draw it ran or anything MetalImageCache.Collect reports (an image released, single-copy work).
     public void RunGarbageCollector()
     {
-        if (PostToWorker(RunGarbageCollector))
+        if (PostToWorker(RunGarbageCollector, SharpEmu.Libs.Gpu.Rendering.ParallelProgramPrefetch.GateItemKind.Collect))
         {
             return;
         }
 
+        var drained = _translation is { HasPendingDraws: true };
         DrainDraws();
-        _imageCache.Collect();
+        var collected = _imageCache.Collect();
+        _translation?.Prefetch?.NoteCollect(effect: drained || collected);
     }
 
     // SHARPEMU_TRACE_GDS=1: the first data share fills and copies, offsets and guest addresses.

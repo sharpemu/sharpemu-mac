@@ -157,6 +157,25 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         Assert.True(Take(banks, behind));
     }
 
+    // A collector call that noted an effect refuses the dispatch jobs resolved ahead of it as a dispatch's effect does;
+    // one that did nothing refuses none.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ACollectorCallEffectRefusesOnlyTheJobsResolvedAheadOfIt(bool effect)
+    {
+        var banks = Banks().Snapshot();
+        var ahead = Resolved(banks, gate: 3);
+        var behind = _prefetch.SubmitCompute(banks, 4, Initiator, 4, 2, 1, false);
+        // Item 3 (the fourth gated non-draw) is the collector call.
+        _prefetch.NoteCollect(effect);
+        _prefetch.AdvanceGate(4);
+        _prefetch.WaitIdle();
+        Assert.Equal(!effect, Take(banks, ahead));
+        Assert.Equal(effect ? 1 : 0, Refused(ParallelProgramPrefetch.ComputeRefusal.Effects));
+        Assert.True(Take(banks, behind));
+    }
+
     [Fact]
     public void ADrawDoesNotTakeADispatchJobNorADispatchADrawJob()
     {

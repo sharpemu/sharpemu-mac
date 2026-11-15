@@ -41,6 +41,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         // all FullGate items ran looked ahead of the ones that had not, and its take checks it against them.
         internal long FullGate;
         internal long ExecutedAtStart;
+        // The gate number of the last collector call (GateItemKind.Collect) queued before the job: above ExecutedAtStart,
+        // the resolution looked ahead of it (draw_lookahead over_gc).
+        internal long LastCollectGate;
     }
 
     /// <summary>
@@ -48,9 +51,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     /// (SubmitCompute): its gate stops short of them, its program resolves while they run, and its take accepts the
     /// resolution only when none of those dispatches did more than encode GPU work (NoteDispatchEffect) and the
     /// host's ownership answers and GPU write log show nothing it read changed (IsStillCurrentAcrossDispatches);
-    /// otherwise the draw resolves its programs itself (draw_lookahead refused by reason). Only dispatches are looked
-    /// ahead of: every other gated item (an interrupt, a commit, an event with no label, a host call) still holds the
-    /// draws after it. SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=0 holds draws behind dispatches again; =verify also resolves
+    /// otherwise the draw resolves its programs itself (draw_lookahead refused by reason). The host's collector call
+    /// after each completed submission (GateItemKind.Collect) is looked ahead of the same way (LooksAheadOfCollects):
+    /// it notes an effect when it did anything a resolution may have read (NoteCollect), and a resolution that began
+    /// before such a call ran is refused (gc_effects). Every other gated item (an interrupt, a commit, an event with
+    /// no label, another host call) still holds the draws after it. SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=0 holds draws
+    /// behind dispatches and collector calls again (and dispatches behind collector calls), and
+    /// SHARPEMU_PREFETCH_GC_LOOKAHEAD=0 behind collector calls only; =verify also resolves
     /// every accepted look-ahead on the worker and fails on any difference in the programs or their bindings.
     /// </summary>
     public enum DrawLookaheadMode : byte
@@ -73,7 +80,19 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // The mode this prefetch checks takes in (tests set Verify on one instance).
     internal DrawLookaheadMode LookaheadMode { get; set; } = DrawLookahead;
 
-    // Why a draw's take refused a resolution that looked ahead of dispatches; Count is accepted.
+    // The command thread queues a collector call (GateItemKind.Collect) without moving the dispatch gate: the draws and
+    // dispatches after it gate on the items before it, and their takes check NoteCollect. Only where draws look ahead
+    // (the mode, and a host whose cross-dispatch check covers it), so SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=0 gates again;
+    // SHARPEMU_PREFETCH_GC_LOOKAHEAD=0 gates behind collector calls alone and keeps the look-ahead over dispatches.
+    private static readonly bool CollectLookaheadDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_PREFETCH_GC_LOOKAHEAD") != "0";
+
+    internal bool CollectLookahead { get; set; } = CollectLookaheadDefault;
+
+    public bool LooksAheadOfCollects =>
+        CollectLookahead && LookaheadMode != DrawLookaheadMode.Off && _concurrent.PrefetchedDrawsCrossDispatches;
+
+    // Why a draw's take refused a resolution that looked ahead of dispatches or collector calls; Count is accepted.
     public enum DrawLookaheadRefusal : byte
     {
         // The resolution threw (an owned read), so the draw resolves it as any abandoned job.
@@ -84,12 +103,41 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         Effects,
         // An ownership answer changed, or a GPU write logged since it began covers what it read.
         Ownership,
+        // A collector call it was resolved ahead of did something a resolution may have read (NoteCollect).
+        CollectEffects,
         Count,
     }
 
-    private static readonly string[] DrawLookaheadRefusalNames = ["abandoned", "inputs", "effects", "ownership"];
+    private static readonly string[] DrawLookaheadRefusalNames = ["abandoned", "inputs", "effects", "ownership", "gc_effects"];
     private long _lookaheadJobs, _lookaheadTaken, _lookaheadVerified;
     private readonly long[] _lookaheadRefusals = new long[(int)DrawLookaheadRefusal.Count];
+
+    // The subset of the look-aheads above that began before a collector call ran (over_gc), and the collector calls
+    // the worker ran and those of them that noted an effect (gc_calls).
+    private long _collectLookaheadJobs, _collectLookaheadTaken, _collectLookaheadRefused, _collectCalls, _collectEffectCalls;
+
+    public (long Jobs, long Taken, long Refused, long Calls, long Effects) TakeCollectLookaheadCounters() =>
+        (Interlocked.Exchange(ref _collectLookaheadJobs, 0), Interlocked.Exchange(ref _collectLookaheadTaken, 0),
+            Interlocked.Exchange(ref _collectLookaheadRefused, 0), Interlocked.Exchange(ref _collectCalls, 0),
+            Interlocked.Exchange(ref _collectEffectCalls, 0));
+
+    // The collector call the worker runs now (GateItemKind.Collect) did something a resolution may have read: images
+    // released, deferred draws run, single-copy chunks armed, emptied or unwatched. A job resolved ahead of
+    // it is refused, as behind a dispatch's effect. -1 while none did.
+    private long _lastCollectEffect = -1;
+
+    public void NoteCollect(bool effect)
+    {
+        Interlocked.Increment(ref _collectCalls);
+        if (effect)
+        {
+            Interlocked.Increment(ref _collectEffectCalls);
+            Volatile.Write(ref _lastCollectEffect, Volatile.Read(ref _executedGate));
+        }
+    }
+
+    // The last collector call's gate number (command thread only, NoteGateItem), for Job.LastCollectGate.
+    private long _lastCollectGate;
 
     public (long Jobs, long Taken, long[] Refused, long Verified) TakeDrawLookaheadCounters()
     {
@@ -106,14 +154,18 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private string TakeDrawLookaheadReport()
     {
         var (jobs, taken, refused, verified) = TakeDrawLookaheadCounters();
+        var collect = TakeCollectLookaheadCounters();
         var builder = new System.Text.StringBuilder("draw_lookahead=(mode=").Append(LookaheadMode.ToString().ToLowerInvariant())
-            .Append(",over=dispatch,jobs=").Append(jobs).Append(",taken=").Append(taken).Append(",refused=(");
+            .Append(",over_gc=").Append(LooksAheadOfCollects ? "on" : "off")
+            .Append(",jobs=").Append(jobs).Append(",taken=").Append(taken).Append(",refused=(");
         for (var index = 0; index < refused.Length; index++)
         {
             builder.Append(index == 0 ? string.Empty : ",").Append(DrawLookaheadRefusalNames[index]).Append('=').Append(refused[index]);
         }
 
-        return builder.Append("),verified=").Append(verified).Append(')').ToString();
+        return builder.Append("),verified=").Append(verified)
+            .Append(",gc=(jobs=").Append(collect.Jobs).Append(",taken=").Append(collect.Taken).Append(",refused=").Append(collect.Refused)
+            .Append(",calls=").Append(collect.Calls).Append(",effects=").Append(collect.Effects).Append("))").ToString();
     }
 
     // The kind of a gated non-draw item, as the command thread queues it (NoteGateItem): what the draws after it wait for.
@@ -135,12 +187,15 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         Flush,
         // Another posted host call.
         Call,
+        // The host's collector call after a completed submission (ICommandStreamHost.RunGarbageCollector); with
+        // LooksAheadOfCollects the draws and dispatches after it do not gate on it.
+        Collect,
         // Other deferred work.
         Other,
         Count,
     }
 
-    private static readonly string[] GateItemKindNames = ["none", "dispatch", "cp", "label", "range", "wait", "event", "flush", "call", "other"];
+    private static readonly string[] GateItemKindNames = ["none", "dispatch", "cp", "label", "range", "wait", "event", "flush", "call", "gc", "other"];
 
     private readonly RenderExecutor _executor;
     private readonly IRenderHost _host;
@@ -225,7 +280,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         Inputs,
         // The ownership answers it read under changed (IConcurrentResolveHost.IsStillCurrentAcrossDispatches).
         Ownership,
-        // A dispatch it was resolved ahead of did more than encode GPU work (NoteDispatchEffect).
+        // A dispatch it was resolved ahead of did more than encode GPU work (NoteDispatchEffect), or a collector call it
+        // was resolved ahead of noted an effect (NoteCollect).
         Effects,
         Count,
     }
@@ -277,7 +333,14 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private readonly GateItemKind[] _gateKinds = new GateItemKind[GateKindRing];
 
     // On the command thread, as it queues the gated non-draw item that brings its gate count to gate.
-    public void NoteGateItem(long gate, GateItemKind kind) => _gateKinds[gate & (GateKindRing - 1)] = kind;
+    public void NoteGateItem(long gate, GateItemKind kind)
+    {
+        _gateKinds[gate & (GateKindRing - 1)] = kind;
+        if (kind == GateItemKind.Collect)
+        {
+            _lastCollectGate = gate;
+        }
+    }
 
     private GateItemKind GateKindOf(long gate) => gate <= 0 ? GateItemKind.None : _gateKinds[gate & (GateKindRing - 1)];
 
@@ -315,7 +378,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         SubmitDrawAhead(banks, gate, gate, indexed, startInstanceUserData);
 
     // A draw's job whose resolution may start once the first gate items ran, before the rest up to fullGate (dispatches
-    // only, the sink's DispatchGate) did; with gate == fullGate, Submit.
+    // and collector calls only, the sink's DispatchGate) did; with gate == fullGate, Submit.
     public Job SubmitDrawAhead(RegisterBanks banks, long gate, long fullGate, bool indexed = false, int startInstanceUserData = -1)
     {
         fullGate = Math.Max(gate, fullGate);
@@ -326,7 +389,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
 
         _lastDrawGate = fullGate;
-        return Enqueue(new Job(banks, gate, indexed, startInstanceUserData) { FullGate = fullGate });
+        return Enqueue(new Job(banks, gate, indexed, startInstanceUserData) { FullGate = fullGate, LastCollectGate = _lastCollectGate });
     }
 
     private Job Enqueue(Job job)
@@ -475,11 +538,17 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
 
         using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchValidation);
-        // The resolution began before every gated item ahead of the draw ran: it looked ahead of dispatches.
+        // The resolution began before every gated item ahead of the draw ran: it looked ahead of dispatches, and of a
+        // collector call when one of those items was one.
         var lookedAhead = job.ExecutedAtStart < job.FullGate;
+        var overCollect = lookedAhead && job.LastCollectGate > job.ExecutedAtStart;
         if (lookedAhead)
         {
             Interlocked.Increment(ref _lookaheadJobs);
+            if (overCollect)
+            {
+                Interlocked.Increment(ref _collectLookaheadJobs);
+            }
         }
 
         if (job.State != 1)
@@ -487,6 +556,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             if (lookedAhead)
             {
                 Interlocked.Increment(ref _lookaheadRefusals[(int)DrawLookaheadRefusal.Abandoned]);
+                if (overCollect)
+                {
+                    Interlocked.Increment(ref _collectLookaheadRefused);
+                }
             }
 
             ReleaseAssumptions(job);
@@ -495,7 +568,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
         var refusal = !job.Inputs.Equals(inputs) ? DrawLookaheadRefusal.Inputs
             : !lookedAhead ? (_concurrent.IsStillCurrent(job.Assumptions!) ? DrawLookaheadRefusal.Count : DrawLookaheadRefusal.Ownership)
-            // A dispatch that ran after the resolution began (gate above ExecutedAtStart) did more than encode GPU work.
+            // A collector call or a dispatch that ran after the resolution began (gate above ExecutedAtStart) noted an effect.
+            : Volatile.Read(ref _lastCollectEffect) >= job.ExecutedAtStart ? DrawLookaheadRefusal.CollectEffects
             : Volatile.Read(ref _lastDispatchEffect) >= job.ExecutedAtStart ? DrawLookaheadRefusal.Effects
             : !_concurrent.IsStillCurrentAcrossDispatches(job.Assumptions!) ? DrawLookaheadRefusal.Ownership
             : DrawLookaheadRefusal.Count;
@@ -505,6 +579,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             if (lookedAhead)
             {
                 Interlocked.Increment(ref _lookaheadRefusals[(int)refusal]);
+                if (overCollect)
+                {
+                    Interlocked.Increment(ref _collectLookaheadRefused);
+                }
             }
 
             Interlocked.Increment(ref _refusedCount);
@@ -516,6 +594,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         if (lookedAhead)
         {
             Interlocked.Increment(ref _lookaheadTaken);
+            if (overCollect)
+            {
+                Interlocked.Increment(ref _collectLookaheadTaken);
+            }
+
             if (LookaheadMode == DrawLookaheadMode.Verify)
             {
                 programs = VerifyLookahead(job, banks, in inputs);
@@ -533,16 +616,17 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         Interlocked.Increment(ref _lookaheadVerified);
         if (SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Difference(job.Programs!, resolved) is { } difference)
         {
-            throw _fatal($"A draw's programs resolved ahead of the dispatches before it differ from the worker's: {difference} " +
-                $"(job {job.Index}, gate {job.Gate}, full gate {job.FullGate}, executed at start {job.ExecutedAtStart}).");
+            throw _fatal($"A draw's programs resolved ahead of the dispatches or collector calls before it differ from the worker's: {difference} " +
+                $"(job {job.Index}, gate {job.Gate}, full gate {job.FullGate}, executed at start {job.ExecutedAtStart}, last collector call {job.LastCollectGate}).");
         }
 
         return resolved;
     }
 
     // The dispatch the worker runs now takes the program its job resolved when the job was resolved from the same banks
-    // and arguments, the provider stood for it, no dispatch it was resolved ahead of did more than encode GPU work,
-    // and the host's ownership answers still hold across those dispatches; otherwise it resolves the program itself.
+    // and arguments, the provider stood for it, no dispatch it was resolved ahead of did more than encode GPU work (nor
+    // collector call noted an effect), and the host's ownership answers still hold across those items; otherwise it
+    // resolves the program itself.
     public bool TryTakeCompute(RegisterBanks banks, uint dispatchInitiator, uint groupsX, uint groupsY, uint groupsZ, bool indirect,
         out ComputeProgram program)
     {
@@ -576,7 +660,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         var refusal = job.State != 1 ? ComputeRefusal.Abandoned
             : job.ComputeResult is null ? ComputeRefusal.Provider
             : !arguments.Matches(dispatchInitiator, groupsX, groupsY, groupsZ, indirect) ? ComputeRefusal.Inputs
-            : Volatile.Read(ref _lastDispatchEffect) >= job.Gate ? ComputeRefusal.Effects
+            : Volatile.Read(ref _lastDispatchEffect) >= job.Gate || Volatile.Read(ref _lastCollectEffect) >= job.Gate ? ComputeRefusal.Effects
             : !_concurrent.IsStillCurrentAcrossDispatches(job.Assumptions!) ? ComputeRefusal.Ownership
             : ComputeRefusal.Count;
         ReleaseAssumptions(job);

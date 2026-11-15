@@ -53,8 +53,9 @@ public static partial class AgcExports
 
         long EnqueueDeferred(DeferredWork work, bool isDraw);
 
-        // The non-draw items handed over so far up to the last that is not a dispatch: a dispatch's program may
-        // resolve once they ran, while the dispatches after them still wait (ParallelProgramPrefetch.SubmitCompute).
+        // The non-draw items handed over so far up to the last that is not a dispatch (nor a collector call the
+        // resolutions look ahead of): a dispatch's program may resolve once they ran, while the dispatches after them
+        // still wait (ParallelProgramPrefetch.SubmitCompute, LooksAheadOfCollects).
         long DispatchGate => Gate;
 
         // A dispatch whose program a job submitted just before it resolves: the item waits for the jobs before that
