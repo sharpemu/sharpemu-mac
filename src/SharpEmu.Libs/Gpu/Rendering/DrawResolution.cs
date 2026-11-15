@@ -1,6 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.ShaderCompiler;
@@ -17,6 +20,8 @@ internal sealed class DrawResolution
     public readonly uint[] ColorSlots = new uint[RenderingState.ColorAttachmentCapacity];
     public DepthTargetState? Depth;
     public bool PixelActive;
+    // The context fields the colours and depth above were resolved from (TargetInputs.Matches).
+    public TargetInputs Inputs;
 
     public ulong ValidatedContextStamp;
     public ulong ValidatedUserConfigStamp;
@@ -143,4 +148,72 @@ internal readonly record struct PipelineKey(
     private static bool SameInterpolators(uint[]? first, uint[]? second) =>
         ReferenceEquals(first, second) ||
         (first is not null && second is not null && first.AsSpan().SequenceEqual(second));
+}
+
+// Everything ColorTargetResolver and DepthTargetResolver read from the context bank (the colour target words, the
+// target mask, the depth words and the depth/stencil state fields beside them); the resolvers are pure functions of
+// these, so a draw whose target registers were written again with the same values resolves the same targets. Floats
+// are compared by their bits (a -0 clear value is not a +0 one). DrawResolutionInputsTests writes every context
+// register and checks that one these fields do not cover leaves the resolved targets alone.
+internal struct TargetInputs
+{
+    [InlineArray(ContextRegisters.ColorTargetCount)]
+    internal struct ColorWords
+    {
+        private ColorTargetWords _first;
+    }
+
+    public ColorWords Colors;
+    public uint RenderTargetMask;
+    public DepthTargetWords Depth;
+    public uint DepthClearBits;
+    public uint DepthBoundsMinBits;
+    public uint DepthBoundsMaxBits;
+    public byte StencilClearValue;
+    public StencilControlRegisters StencilControl;
+    public StencilMaskRegisters StencilMask;
+    public bool Captured;
+
+    public void Capture(ContextRegisters context)
+    {
+        context.ColorTargets.AsSpan(0, ContextRegisters.ColorTargetCount).CopyTo(Colors);
+        RenderTargetMask = context.RenderTargetMask;
+        Depth = context.DepthTarget;
+        DepthClearBits = BitConverter.SingleToUInt32Bits(context.DepthClearValue);
+        DepthBoundsMinBits = BitConverter.SingleToUInt32Bits(context.DepthBoundsMin);
+        DepthBoundsMaxBits = BitConverter.SingleToUInt32Bits(context.DepthBoundsMax);
+        StencilClearValue = context.StencilClearValue;
+        StencilControl = context.StencilControl;
+        StencilMask = context.StencilMask;
+        Captured = true;
+    }
+
+    public readonly bool Matches(ContextRegisters context)
+    {
+        if (!Captured || RenderTargetMask != context.RenderTargetMask || Depth != context.DepthTarget ||
+            DepthClearBits != BitConverter.SingleToUInt32Bits(context.DepthClearValue) ||
+            DepthBoundsMinBits != BitConverter.SingleToUInt32Bits(context.DepthBoundsMin) ||
+            DepthBoundsMaxBits != BitConverter.SingleToUInt32Bits(context.DepthBoundsMax) ||
+            StencilClearValue != context.StencilClearValue ||
+            !SameBytes(in StencilControl, in context.StencilControl) || !SameBytes(in StencilMask, in context.StencilMask))
+        {
+            return false;
+        }
+
+        ReadOnlySpan<ColorTargetWords> colors = Colors;
+        var current = context.ColorTargets;
+        for (var slot = 0; slot < colors.Length; slot++)
+        {
+            if (colors[slot] != current[slot])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Both register structs are bytes only: no padding, so their bytes are their value.
+    private static bool SameBytes<T>(in T left, in T right) where T : unmanaged =>
+        MemoryMarshal.AsBytes(new ReadOnlySpan<T>(in left)).SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<T>(in right)));
 }

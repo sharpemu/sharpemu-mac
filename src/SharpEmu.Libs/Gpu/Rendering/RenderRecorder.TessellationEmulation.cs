@@ -31,7 +31,7 @@ internal sealed partial class RenderRecorder
             return false;
         }
 
-        _inPlace.Valid = false;
+        DropInPlace(InPlaceDrop.Tessellation);
         ReleaseFragmentWrites();
         _host.EndRendering("tessellation");
         using (_host.BeginPreparation())
