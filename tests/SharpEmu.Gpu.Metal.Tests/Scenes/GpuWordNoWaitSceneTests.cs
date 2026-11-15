@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Gpu.Metal.V2;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Xunit;
 using Xunit.Abstractions;
@@ -144,6 +145,76 @@ public sealed class GpuWordNoWaitSceneTests(ITestOutputHelper output) : SceneTes
         // The stream's own read waits as before and sees the written word.
         Assert.Equal(3u ^ 0x5A5A, ReadWord(host, word + 3 * 4));
         rig.Drain();
+        watchdog.Dispose();
+        MetalNative.SendVoid(gate, SelRelease);
+        Assert.Empty(rig.Fatals);
+    }
+
+    // A resolution ahead of the stream reads a page a held dispatch still writes the first line of: the other
+    // lines of the page are read without waiting (MetalRenderHost.ConcurrentOwnedLines), a word of the written
+    // line abandons, and a write recorded into a line it read before the take refuses the resolution.
+    [Fact]
+    public void AResolutionReadsTheCleanLinesOfAPageTheGpuStillWritesAndAWriteIntoThemRefusesIt()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var host = rig.Host;
+        host.ConcurrentOwnedLines = true;
+        var page = rig.Memory.Allocate(4096, 4096);
+        var writer = rig.Dispatch(new ScenePm4(), ScenePrograms.StoreGlobalId, Descriptors.Buffer(page, 4, Words, format: 20), 1).ToArray();
+        var later = rig.Dispatch(new ScenePm4(), ScenePrograms.StoreGlobalId, Descriptors.Buffer(page + 0x400, 4, Words, format: 20), 1).ToArray();
+        rig.Submit(writer);
+        var planted = new byte[4096];
+        for (var index = 0; index < planted.Length / 4; index++)
+        {
+            BitConverter.TryWriteBytes(planted.AsSpan(index * 4), 0xC0DE0000u + (uint)index);
+        }
+
+        rig.Memory.Write(page, planted);
+        var gate = MetalNative.Send(DeviceOf(host), SelNewSharedEvent);
+        var released = 0;
+        using var watchdog = Watchdog(gate, () => Interlocked.Exchange(ref released, 1));
+        var concurrent = (IConcurrentResolveHost)host;
+        try
+        {
+            MetalV2Native.SendEventValue(host.CommandBuffer, SelEncodeWaitForEvent, gate, 1);
+            rig.Enqueue(writer);
+            rig.RecordPending();
+            var waitsBefore = host.HostGpuWaits;
+
+            concurrent.BeginConcurrentResolve();
+            object assumptions;
+            try
+            {
+                Assert.True(host.TryReadGuestWord(page + 0x404, out var word));
+                Assert.Equal(0xC0DE0000u + 0x404 / 4, word);
+                Assert.True(host.TryReadGuestWord(page + 0x408, out word));
+                Assert.Equal(0xC0DE0000u + 0x408 / 4, word);
+                Assert.Throws<GpuFatal.AbandonedWorkException>(() => host.TryReadGuestWord(page + 3 * 4, out _));
+            }
+            finally
+            {
+                assumptions = concurrent.EndConcurrentResolve();
+            }
+
+            Assert.Equal(waitsBefore, host.HostGpuWaits);
+            Assert.Equal(0, Volatile.Read(ref released));
+            Assert.True(concurrent.IsStillCurrent(assumptions));
+
+            // A store into the clean line the resolution read, recorded before the take.
+            rig.Enqueue(later);
+            rig.RecordPending();
+            Assert.False(concurrent.IsStillCurrent(assumptions));
+            concurrent.ReleaseAssumptions(assumptions);
+        }
+        finally
+        {
+            MetalNative.SendVoid(gate, SelSetSignaledValue, (nint)1);
+        }
+
+        rig.Drain();
+        AssertStored(rig, page, Words);
+        AssertStored(rig, page + 0x400, Words);
         watchdog.Dispose();
         MetalNative.SendVoid(gate, SelRelease);
         Assert.Empty(rig.Fatals);
