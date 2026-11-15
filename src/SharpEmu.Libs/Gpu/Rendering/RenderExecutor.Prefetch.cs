@@ -96,6 +96,10 @@ public interface IConcurrentResolveHost
 
     bool PrefetchedDispatchesCrossDispatches => false;
 
+    // A draw's resolution may start before the dispatches just before it ran (ParallelProgramPrefetch.SubmitDrawAhead),
+    // its take checked with IsStillCurrentAcrossDispatches; only a host whose check covers what those dispatches write.
+    bool PrefetchedDrawsCrossDispatches => false;
+
     // On the render thread, for a dispatch's resolution that may have read guest memory before the dispatches ahead of
     // it ran: the answers hold, and none of the GPU writes those dispatches recorded covers what it read.
     bool IsStillCurrentAcrossDispatches(object assumptions) => IsStillCurrent(assumptions);

@@ -74,6 +74,8 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         // An end-of-pipe label: the GPU writes it once the work before it retires, so a read on the
         // stream's thread finds the bytes as they are until then (PostLabel).
         public bool IsLabel;
+        // What kind of item this is, for the draws its gate holds (ParallelProgramPrefetch.NoteGateItem).
+        public ParallelProgramPrefetch.GateItemKind GateKind;
         public bool Sync;
         public volatile bool Done;
         public Exception? Failure;
@@ -254,10 +256,14 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         return 0;
     }
 
-    public void Post(Action action)
+    public void Post(Action action) => Post(action, ParallelProgramPrefetch.GateItemKind.Call);
+
+    // A host call of a known kind (an interrupt, a commit), for the gate counters.
+    public void Post(Action action, ParallelProgramPrefetch.GateItemKind kind)
     {
         var item = RentAsyncItem(Kind.Call);
         item.Action = action;
+        item.GateKind = kind;
         Enqueue(item);
     }
 
@@ -273,7 +279,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     public void Run(Action action)
     {
-        var item = new Item { Kind = Kind.Call, Action = action, Sync = true };
+        var item = new Item { Kind = Kind.Call, Action = action, Sync = true, GateKind = ParallelProgramPrefetch.GateItemKind.Wait };
         Interlocked.Increment(ref _syncRuns);
         Enqueue(item);
         var started = Stopwatch.GetTimestamp();
@@ -293,6 +299,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         var item = RentAsyncItem(Kind.Write);
         item.Address = address;
         item.Data = data.ToArray();
+        item.GateKind = ParallelProgramPrefetch.GateItemKind.CommandProcessorWrite;
         lock (_writeLock)
         {
             _pendingWrites.Enqueue(item);
@@ -314,6 +321,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         item.RangeSize = size;
         item.Ungated = ungated && size != 0;
         item.JobsBefore = _prefetch?.Submitted ?? 0;
+        item.GateKind = ParallelProgramPrefetch.GateItemKind.Range;
         if (size != 0)
         {
             lock (_writeLock)
@@ -333,6 +341,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     {
         var item = RentAsyncItem(Kind.Call);
         item.IsLabel = size != 0;
+        item.GateKind = ParallelProgramPrefetch.GateItemKind.Label;
         item.Action = action;
         item.Address = address;
         item.RangeSize = size;
@@ -357,6 +366,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
     {
         var item = RentAsyncItem(Kind.Call);
         item.IsFill = size != 0;
+        item.GateKind = ParallelProgramPrefetch.GateItemKind.Range;
         item.FillValue = value;
         item.Action = action;
         item.Address = address;
@@ -397,6 +407,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         item.RangeSize = size;
         item.Ungated = ungated && size != 0;
         item.JobsBefore = _prefetch?.Submitted ?? 0;
+        item.GateKind = ParallelProgramPrefetch.GateItemKind.CommandProcessorWrite;
         if (KnownRangeReads)
         {
             item.RangeBytes = bytes;
@@ -694,6 +705,8 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 _dispatchGate = _enqueuedNonDraw;
             }
 
+            _prefetch?.NoteGateItem(_enqueuedNonDraw, GateKindOf(item));
+
             if (TraceItemKinds)
             {
                 NoteItemKind(item);
@@ -724,6 +737,13 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
             _wakeConsumer();
         }
     }
+
+    private static ParallelProgramPrefetch.GateItemKind GateKindOf(Item item) => item.Kind switch
+    {
+        Kind.Write => ParallelProgramPrefetch.GateItemKind.CommandProcessorWrite,
+        Kind.Deferred => item.IsDispatch ? ParallelProgramPrefetch.GateItemKind.Dispatch : ParallelProgramPrefetch.GateItemKind.Other,
+        _ => item.GateKind == ParallelProgramPrefetch.GateItemKind.None ? ParallelProgramPrefetch.GateItemKind.Other : item.GateKind,
+    };
 
     private void WaitForSpace()
     {

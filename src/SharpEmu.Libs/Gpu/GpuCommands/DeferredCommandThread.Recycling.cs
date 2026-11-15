@@ -77,6 +77,7 @@ public sealed partial class DeferredCommandThread
         item.Ungated = false;
         item.IsFill = false;
         item.IsLabel = false;
+        item.GateKind = SharpEmu.Libs.Gpu.Rendering.ParallelProgramPrefetch.GateItemKind.None;
         item.FillValue = 0;
         item.RangeBytes = null;
         item.IsQwords = false;

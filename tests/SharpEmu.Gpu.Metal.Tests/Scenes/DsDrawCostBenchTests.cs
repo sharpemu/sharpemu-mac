@@ -520,6 +520,17 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
         // read a table its copy kernel writes every frame: off the worker each table word is owned by the copy's pending
         // write and answered from its source (~20 word tests a draw, as in game). The destination holds the copy's result.
         var copiedTables = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_COPIED_TABLES") == "1";
+        // SHARPEMU_DS_DRAW_BENCH_DISPATCH_EVERY=n: one of the four buffer-storing dispatches after every nth draw of the game
+        // streams as well, as Demon's Souls runs its ~1000 dispatches a frame between draws: each holds the program
+        // resolution of the draw after it (its gate), unless that draw's job looks ahead of dispatches
+        // (SHARPEMU_PREFETCH_DRAW_LOOKAHEAD). 0 (the default) leaves the streams as they were.
+        // SHARPEMU_DS_DRAW_BENCH_CHURN_EVERY=n: GameWords changes the table of every nth mesh between rounds (3 by default);
+        // 1 changes them all, so nearly every revalidation of a kept stage finds its words changed.
+        var churnEvery = Setting("CHURN_EVERY", 3);
+        // SHARPEMU_DS_DRAW_BENCH_MESH_REPEAT=n: each game mesh is drawn in n draws in a row (2 by default). With 1, _MESHES
+        // at _GAME_DRAWS and _CHURN_EVERY=1, every draw has a mesh of its own whose table changes every round.
+        var meshRepeat = Setting("MESH_REPEAT", 2);
+        var dispatchEvery = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_DISPATCH_EVERY"), out var every) && every > 0 ? every : 0;
         ulong copyDestination = 0, copySource = 0, copyWords = 0;
         void ArmCopiedTables()
         {
@@ -572,7 +583,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             var passLength = (gameDrawCount + Passes - 1) / Passes;
             var labelWrites = 0;
             var wordChurn = churnWords
-                ? gameMeshes.Where((_, index) => index % 3 == 0).Select(mesh =>
+                ? gameMeshes.Where((_, index) => index % churnEvery == 0).Select(mesh =>
                     (mesh.table + 0x40, rig.Read<uint>(mesh.table + 0x40, 4), Descriptors.Buffer(alternateConstants, 16, 2))).ToArray()
                 : [];
             var keyChurn = new List<(int Stream, int Word)>();
@@ -609,7 +620,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 var firstOfSubmission = (int)((long)draw * GameSubmissions / gameDrawCount) != (int)((long)(draw - 1) * GameSubmissions / gameDrawCount) || draw == 0;
                 var mesh = draw % 16 == 15
                     ? dynamicMeshes[draw / 16 % dynamicMeshes.Length]
-                    : gameMeshes[(int)((ulong)(draw / 2) * 7919UL % (ulong)gameMeshCount)];
+                    : gameMeshes[(int)((ulong)(draw / meshRepeat) * 7919UL % (ulong)gameMeshCount)];
                 var material = firstOfSubmission
                     ? churnMaterials[submission % ChurnTextures]
                     : materials[(draw * 11 + pass * 3) % Materials];
@@ -617,6 +628,18 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 var emittedFrom = pm4!.Count;
                 EmitDraw(pm4!, draw, pass, passStart || firstOfSubmission, mesh, material, newKey ? pixelConstantCopies[0] : 0);
                 if (newKey) keyChurnStarts.Add((submission, emittedFrom, pm4!.Count));
+                if (dispatchEvery != 0 && draw % dispatchEvery == dispatchEvery - 1)
+                {
+                    var dispatch = draw / dispatchEvery % dispatchTables.Length;
+                    var compute = new SceneState(1, 1);
+                    compute.Context.Clear();
+                    compute.Uconfig.Clear();
+                    compute.ComputeShader(computePrograms[dispatch % computePrograms.Length], 8, 8, 1,
+                        [Descriptors.Lo(dispatchTables[dispatch]), Descriptors.Hi(dispatchTables[dispatch])], true, true, false, 1, 0);
+                    compute.Emit(pm4!);
+                    pm4!.DispatchDirect(StorageEdge / 8, StorageEdge / 8, 1);
+                }
+
                 var commitFollows = (int)((submission + 1) / SubmissionsPerCommit) != (int)(submission / SubmissionsPerCommit);
                 if (commitFollows && draw % 6 == 5)
                 {

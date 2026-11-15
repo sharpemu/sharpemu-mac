@@ -2777,7 +2777,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     public void TriggerInterrupt(int eventId, uint contextId)
     {
-        if (PostToWorker(() => TriggerInterrupt(eventId, contextId)))
+        if (PostToWorker(() => TriggerInterrupt(eventId, contextId), SharpEmu.Libs.Gpu.Rendering.ParallelProgramPrefetch.GateItemKind.Event))
         {
             return;
         }

@@ -388,6 +388,19 @@ public static partial class ResourceMaterializer
             get => Volatile.Read(ref _proof);
             set => Volatile.Write(ref _proof, value);
         }
+
+        // The read-proof back-off (ReadProofBackoff): revalidations in a row whose proof did not hold and whose words
+        // changed, and the revalidations left that neither compare nor record a proof. Plain fields: a lost update moves
+        // only the heuristic, never an answer, since a backed-off revalidation evaluates in full.
+        public int ProofChanges;
+        public int ProofSkips;
+
+        // A snapshot rebuilt from this origin's revalidation stands for the same draw: its origin carries the back-off on.
+        public void CarryBackoffTo(FastOrigin rebuilt)
+        {
+            rebuilt.ProofChanges = ProofChanges;
+            rebuilt.ProofSkips = ProofSkips;
+        }
     }
 
     // SHARPEMU_RESOURCE_READ_PROOF: on (default), 0 (every revalidation evaluates the program word by word, as before),
@@ -417,6 +430,19 @@ public static partial class ResourceMaterializer
 
     internal static ReadProofMode ReadProofs { get; set; } = ParseReadProofMode(Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_READ_PROOF"));
 
+    // An origin whose words keep changing pays for its proof without ever using it: the compare that fails, then a full
+    // evaluation that records a new proof, and on a rebuild the check that the new snapshot matches it. Demon's Souls:
+    // ~3.0k of ~18k revalidations a frame changed, and read proofs saved nothing in game. After BackoffAfterChanges
+    // changed revalidations in a row, the origin (and the snapshots rebuilt from it) skips proofs for the next
+    // BackoffRevalidations revalidations, which evaluate in full as with proofs off; a revalidation that finds the
+    // snapshot current ends the back-off at once, and the next one records a proof again.
+    // SHARPEMU_RESOURCE_READ_PROOF_BACKOFF=0 compares and records on every revalidation, as before.
+    internal static bool ReadProofBackoff { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_READ_PROOF_BACKOFF") != "0";
+
+    internal const int BackoffAfterChanges = 2;
+    internal const int BackoffRevalidations = 16;
+
     // A verify-mode proof whose replay differs from the full evaluation (the full one compared its words again first).
     public sealed class ReadProofMismatchException(string message) : InvalidOperationException(message);
 
@@ -431,6 +457,8 @@ public static partial class ResourceMaterializer
     private static readonly ThreadCounter _proofUnmatched = new();
     private static readonly ThreadCounter _proofVerified = new();
     private static readonly ThreadCounter _proofVerifyRaced = new();
+    private static readonly ThreadCounter _proofBackoffs = new();
+    private static readonly ThreadCounter _proofBackedOff = new();
     private static long _proofVerifyFailed;
 
     // The read_proof=(...) part of the prefetch counters: revalidations proved current (hits); revalidations evaluated in
@@ -438,12 +466,14 @@ public static partial class ResourceMaterializer
     // through the host (normalized), or because the proof did not hold and the words then evaluated to the snapshot
     // (refused: owned or unreadable words, or changes the output does not show) or not (changed); proofs recorded,
     // refused (torn: one address read as two values) and not kept (unmatched: a snapshot that differs from the words
-    // its evaluation emitted); verify counts.
+    // its evaluation emitted); verify counts; origins that entered the back-off (backoffs) and revalidations that skipped
+    // their proof in it (backed_off).
     public static string TakeReadProofReport() => FormattableString.Invariant(
         $"read_proof=(mode={ReadProofs.ToString().ToLowerInvariant()},hits={_proofHits.Take()},none={_proofNone.Take()},") +
         FormattableString.Invariant($"no_comparer={_proofNoComparer.Take()},normalized={_proofNormalized.Take()},refused={_proofRefusedCurrent.Take()},changed={_proofChanged.Take()},") +
         FormattableString.Invariant($"recorded={_proofRecorded.Take()},torn={_proofTorn.Take()},unmatched={_proofUnmatched.Take()},verified={_proofVerified.Take()},") +
-        FormattableString.Invariant($"verify_raced={_proofVerifyRaced.Take()},verify_failed={Interlocked.Read(ref _proofVerifyFailed)})");
+        FormattableString.Invariant($"verify_raced={_proofVerifyRaced.Take()},verify_failed={Interlocked.Read(ref _proofVerifyFailed)},") +
+        FormattableString.Invariant($"backoff={(ReadProofBackoff ? "on" : "off")},backoffs={_proofBackoffs.Take()},backed_off={_proofBackedOff.Take()})");
 
     // The proof a fast snapshot's origin holds (tests).
     internal static MaterializationProgram.ReadProof? ReadProofOf(ResourceSnapshot snapshot) => (snapshot.Origin as FastOrigin)?.Proof;
@@ -525,7 +555,7 @@ public static partial class ResourceMaterializer
             }
 
             var same = SameAsOutput(plan, snapshot, output);
-            NoteRevalidation(origin, proof, path, same);
+            NoteRevalidation(origin, proof, path, same, rebuilds: true);
             if (same)
             {
                 return FastRevalidation.Current;
@@ -556,7 +586,16 @@ public static partial class ResourceMaterializer
             }
 
             // The rebuilt snapshot's origin has this origin's draw values and readers: the reads just made are its own.
-            AttachProof(plan, next, output, proof);
+            // A rebuilt origin that carries a back-off on would not use the proof: it is not checked against the snapshot.
+            if (next.Origin is FastOrigin rebuiltOrigin)
+            {
+                origin.CarryBackoffTo(rebuiltOrigin);
+            }
+
+            if (next.Origin is not FastOrigin { ProofSkips: > 0 })
+            {
+                AttachProof(plan, next, output, proof);
+            }
 
             rebuilt = next;
             return FastRevalidation.Rebuilt;
@@ -622,7 +661,7 @@ public static partial class ResourceMaterializer
                 }
 
                 var same = SameAsOutput(plan, snapshot, output);
-                NoteRevalidation(origin, proof, path, same);
+                NoteRevalidation(origin, proof, path, same, rebuilds: false);
                 return same;
             }
             finally
@@ -651,6 +690,8 @@ public static partial class ResourceMaterializer
         Proved,
         // A word compared unequal or owned, an unreadable word read, or the active sources differ: evaluated in full.
         Refused,
+        // The origin's words kept changing (ReadProofBackoff): evaluated in full, nothing compared or recorded.
+        BackedOff,
     }
 
     // Whether the origin's proof shows its snapshot current without evaluating its program (ReadProofMode). The proof is
@@ -680,6 +721,13 @@ public static partial class ResourceMaterializer
             return ProofPath.NoComparer;
         }
 
+        if (ReadProofBackoff && origin.ProofSkips > 0)
+        {
+            origin.ProofSkips--;
+            _proofBackedOff.Increment();
+            return ProofPath.BackedOff;
+        }
+
         if (origin.Proof is not { } proof)
         {
             return ProofPath.None;
@@ -691,6 +739,12 @@ public static partial class ResourceMaterializer
         }
 
         _proofHits.Increment();
+        // Proved: the changes before it were not in a row.
+        if (origin.ProofChanges != 0)
+        {
+            origin.ProofChanges = 0;
+        }
+
         if (mode == ReadProofMode.Verify)
         {
             VerifyProof(plan, snapshot, proof, inputs, output);
@@ -722,8 +776,10 @@ public static partial class ResourceMaterializer
     }
 
     // After a full revalidation: counted by why it was not proved, and its proof kept on the origin when its words were
-    // the snapshot's (a rebuild hands it to the rebuilt snapshot's origin instead, AttachProof).
-    private static void NoteRevalidation(FastOrigin origin, MaterializationProgram.ReadProof? proof, ProofPath path, bool same)
+    // the snapshot's (a rebuild hands it to the rebuilt snapshot's origin instead, AttachProof). A change found where a
+    // rebuild follows (rebuilds) counts toward the back-off: each is a new generation of the snapshot's words, where a
+    // snapshot only revalidated stays stale and may be asked again about the same change.
+    private static void NoteRevalidation(FastOrigin origin, MaterializationProgram.ReadProof? proof, ProofPath path, bool same, bool rebuilds)
     {
         switch (path)
         {
@@ -738,13 +794,31 @@ public static partial class ResourceMaterializer
             case ProofPath.Normalized:
                 _proofNormalized.Increment();
                 break;
+            case ProofPath.BackedOff:
+                // Current again: the next revalidation records a proof.
+                if (same)
+                {
+                    origin.ProofSkips = 0;
+                    origin.ProofChanges = 0;
+                }
+
+                return;
             default:
                 (same ? _proofRefusedCurrent : _proofChanged).Increment();
+                if (!same && rebuilds && ReadProofBackoff && ++origin.ProofChanges >= BackoffAfterChanges)
+                {
+                    origin.ProofChanges = 0;
+                    origin.ProofSkips = BackoffRevalidations;
+                    origin.Proof = null;
+                    _proofBackoffs.Increment();
+                }
+
                 break;
         }
 
         if (same)
         {
+            origin.ProofChanges = 0;
             origin.Proof = proof;
         }
     }

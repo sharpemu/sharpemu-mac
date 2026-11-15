@@ -351,6 +351,9 @@ internal sealed partial class MetalRenderHost
         var skip = (int)((address - copy.Destination) % sizeof(uint));
         words.Slice(skip, destination.Length).CopyTo(destination);
         Interlocked.Increment(ref _concurrentCopyReads);
+        // Its owned answer is dropped by the caller: a write over it logged after the resolution began (a dispatch it was
+        // resolved ahead of) would be the destination's latest instead of the copy (IsConcurrentResolveStillCurrentAcrossDispatches).
+        assumptions.NoteCopiedThrough(address, (ulong)destination.Length);
         return true;
     }
 
@@ -412,6 +415,7 @@ internal sealed partial class MetalRenderHost
         words &= summary.Mask;
         if (words != 0)
         {
+            assumptions.NoteCopiedThrough(line, ConcurrentWordLineBytes);
             assumptions.CopyLine = line;
             assumptions.CopyLineWords = words;
             assumptions.CopyLineStamp = stamp;
