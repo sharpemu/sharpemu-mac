@@ -66,11 +66,13 @@ internal sealed partial class MetalRenderHost
         var window = entry.Window!;
         if (Volatile.Read(ref window.Retired))
         {
+            memo.Release(index);
             return MissReadBinding(ref memo.MissWindowRetired);
         }
 
         if (window.Buffer != entry.Buffer)
         {
+            memo.Release(index);
             return MissReadBinding(ref memo.MissWindowBuffer);
         }
 
@@ -108,6 +110,7 @@ internal sealed partial class MetalRenderHost
             {
                 if (!_imageCache.ImageSetUnchangedOver(entry.ImageSet, address, size, out var now))
                 {
+                    memo.Release(index);
                     return MissReadBinding(ref memo.MissImageSet);
                 }
 
@@ -145,6 +148,7 @@ internal sealed partial class MetalRenderHost
 
         if (!_guestMemory.UseWindowForHit(window, out var touched))
         {
+            memo.Release(index);
             return MissReadBinding(ref memo.MissWindowRetired);
         }
 

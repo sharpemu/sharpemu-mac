@@ -72,7 +72,7 @@ internal sealed class MetalReadBindingMemoV2
         _sides = new Side[sets * Ways];
     }
 
-    public long Hits, Misses, Stores, Verified, Evictions;
+    public long Hits, Misses, Stores, Verified, Evictions, Released;
 
     // One per miss, the first check that failed (they add up to Misses).
     public long MissEmpty, MissOtherKey, MissAlias, MissWindowRetired, MissWindowBuffer, MissTrap;
@@ -89,6 +89,18 @@ internal sealed class MetalReadBindingMemoV2
     public long StoreSkipFlushed, StoreSkipNotInPlace, StoreSkipRetiredAfter, StoreSkipLarge, StoreSkipImageMany;
 
     private static byte FlagsOf(bool compute) => (byte)(FlagValid | (compute ? FlagCompute : 0));
+
+    /// <summary>
+    /// Frees an entry that can never answer again (its window left the partition or changed its buffer, the images
+    /// over its range changed): left in place it would keep the window and the images it holds alive until its way
+    /// was evicted.
+    /// </summary>
+    public void Release(int index)
+    {
+        _entries[index] = default;
+        _sides[index] = default;
+        Released++;
+    }
 
     /// <summary>The entry at an index <see cref="Find"/> or <see cref="Insert"/> returned.</summary>
     public ref Entry At(int index) => ref _entries[index];
@@ -151,9 +163,18 @@ internal sealed class MetalReadBindingMemoV2
             }
         }
 
+        // A free way first (never filled, or released), otherwise the set's least recently used entry.
+        for (var way = 0; way < Ways && found < 0; way++)
+        {
+            if (_entries[first + way].Flags == 0)
+            {
+                found = way;
+            }
+        }
+
         if (found < 0)
         {
-            Evictions += _entries[first + Ways - 1].Flags != 0 ? 1 : 0;
+            Evictions++;
             found = Ways - 1;
         }
 
@@ -181,7 +202,7 @@ internal sealed class MetalReadBindingMemoV2
     /// <summary>The counters since the last call (the PERF line's read_binding_memo); resets them.</summary>
     public string TakeCounters()
     {
-        var text = $"ranges=1 hits={Hits} misses={Misses} stores={Stores} verified={Verified} evictions={Evictions} " +
+        var text = $"ranges=1 hits={Hits} misses={Misses} stores={Stores} verified={Verified} evictions={Evictions} released={Released} " +
             $"miss_by=(empty={MissEmpty},other_key={MissOtherKey},alias={MissAlias},window_retired={MissWindowRetired}," +
             $"window_buffer={MissWindowBuffer},trap={MissTrap},image_pages={MissImagePages},image_set={MissImageSet}," +
             $"image_gpu_modified={MissImageGpuModified}) " +
@@ -191,7 +212,7 @@ internal sealed class MetalReadBindingMemoV2
             $"hits_new_cb={HitsNewCommandBuffer} hits_with_pending={HitsWithPending} " +
             $"store_skip=(flushed={StoreSkipFlushed},image_many={StoreSkipImageMany},not_in_place={StoreSkipNotInPlace}," +
             $"retired_after={StoreSkipRetiredAfter},large={StoreSkipLarge})";
-        Hits = Misses = Stores = Verified = Evictions = 0;
+        Hits = Misses = Stores = Verified = Evictions = Released = 0;
         MissEmpty = MissOtherKey = MissAlias = MissWindowRetired = MissWindowBuffer = MissTrap = 0;
         MissImagePages = MissImageSet = MissImageGpuModified = 0;
         RefusedTrace = RefusedUnmapped = RefusedWindow = RefusedFill = RefusedLabel = RefusedStaged = 0;
