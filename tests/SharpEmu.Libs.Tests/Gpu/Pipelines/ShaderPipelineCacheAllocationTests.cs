@@ -53,8 +53,9 @@ public sealed class ShaderPipelineCacheAllocationTests(ITestOutputHelper output)
         // packet slot on each stage's resource snapshot (ResourceSnapshot.BindingPacket) to 528 and 896, and the draw's own
         // user data, shader base and compute state on each fast snapshot's origin (ResourceMaterializer.FastOrigin) to 576 and 992,
         // and the specialization that origin keeps (whether a resolve memo rebuild keeps the program) to 584 and 1008, and the
-        // read proof comparer on each stage's runtime inputs (ResourceRuntimeInputs.CompareGuestWords) to 592 and 1024.
-        Assert.True(perDraw[^1] <= (pixelActive ? 1024 : 592), $"bytes={perDraw[^1]}");
+        // read proof comparer on each stage's runtime inputs (ResourceRuntimeInputs.CompareGuestWords) to 592 and 1024, and the
+        // read-proof back-off counters on each fast snapshot's origin (FastOrigin.ProofChanges, ProofSkips) to 600 and 1040.
+        Assert.True(perDraw[^1] <= (pixelActive ? 1040 : 600), $"bytes={perDraw[^1]}");
         var first = cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,
             banks.Context, mappings, pixelActive, depthBound: false, depthAspectBound: false);
         var second = cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,
