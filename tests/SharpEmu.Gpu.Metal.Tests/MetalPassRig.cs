@@ -336,6 +336,9 @@ internal sealed unsafe class MetalPassRig : IDisposable
         return data;
     }
 
+    // Writes guest memory directly, as a guest CPU store does; nothing the cache watches is told.
+    public void WriteRaw(ulong address, ReadOnlySpan<byte> bytes) => Assert.True(_backing.TryWrite(address, bytes));
+
     public byte[] ReadRaw(ulong address, ulong bytes)
     {
         var data = new byte[bytes];

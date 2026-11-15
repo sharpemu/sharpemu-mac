@@ -364,6 +364,7 @@ internal sealed partial class MetalRenderHost :
         StagingTiler?.TrimStaging(completed);
         // So are the shader modules and pipeline states past their bound (ShaderCache).
         MaybeTrimShaderCache(completed);
+        RetireUploadPreludes(completed);
         // Every watch whose submission the GPU has finished is checked here, on the one
         // thread that records them, rather than from the completion handler.
         _guard?.Verify(completed);
@@ -3084,6 +3085,8 @@ internal sealed partial class MetalRenderHost :
             }
 
             _scheduleNudge?.Dispose();
+            // Committed ahead of the buffer just waited for, so finished with it.
+            RetireUploadPreludes(CompletedSerial, all: true);
             ReleaseInFlightSubmissions();
             ReportStepCaps();
             DisposeStepReport();

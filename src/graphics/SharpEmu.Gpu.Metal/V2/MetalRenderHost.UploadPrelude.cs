@@ -49,11 +49,157 @@ internal enum MetalPreludeBlock : uint
     Unmapped = 1 << 14,
 }
 
-// The upload prelude counters: every image upload that met an open render pass, by cause, and by
-// each condition of the prelude it passes or fails. Printed on the TBDR line as
-// prelude=[eligible,refused,<reason>=n...] pass_end_upload=[cpu,invalidated,created,gpu,alias].
+// The upload prelude. An image upload the CPU caused (stale causes CpuWrite, Invalidated or
+// Created only), needed while a render pass is open, is encoded into a command buffer of its own
+// that is committed at once, ahead of the open one, instead of ending the pass: on a tile-based
+// GPU ending and resuming Demon's Souls' 7-attachment G-buffer pass stores and reloads 22-26 MB.
+// SHARPEMU_METAL_V2_UPLOAD_PRELUDE=0 ends the pass for every upload, as before.
+//
+// Order. Metal runs a queue's command buffers in the order they are enqueued, and commit enqueues
+// a buffer not enqueued yet; nothing in this backend calls enqueue, and the open buffer is
+// committed only by FlushCommandBuffer. So the prelude's commit (EndUploadPrelude) puts it after
+// every buffer committed before it and before the open buffer, whenever that one is committed and
+// however long the stream holds it (MetalCommandStream HoldForOpenPass): nothing committed after
+// the prelude can run ahead of it. Its encoders take the same encoder fence as every other
+// encoder (EncoderOrdering = Fence; any other mode refuses, counted as ordering): Metal resolves a
+// fence across command buffers of one queue in commit order, so the prelude's first encoder waits
+// for the last encoder of the buffer committed before it, and the open buffer's first encoder -
+// and through the chain the open render pass - waits for the prelude's last. The texture is
+// hazard-tracked as well (private textures are created tracked), so a draw of the open pass that
+// samples it after the upload waits for the prelude's write either way.
+//
+// What moves. The upload now runs before everything the open buffer recorded ahead of it, so it
+// may move only when none of that touches the texture or writes the bytes it reads: the texture
+// has no use in the open buffer (its image's last-use and GPU-write serials, the textures the open
+// buffer's transfers named, a clear waiting for its pass), and no GPU write over the source is
+// recorded in it (MetalGpuWriteRanges at the open serial: dispatch stores, image writebacks, fills
+// and copies; staged stores landing at an encoder end; a held label copy or a held fill over the
+// bytes). An alias-caused or GPU-caused upload never moves: its source is normally produced by a
+// writeback earlier in the same buffer. A staged source that needs a GPU gather, a sparse texture,
+// a depth/stencil image, an upload in pieces, and a whole upload of an image a device copy wrote
+// since its last refresh are refused too. Each refusal is counted and the upload ends the pass as
+// before. Work recorded after the upload (draws sampling the texture, later writes over the
+// source, other committed buffers) runs after the prelude, as it ran after the upload before.
+//
+// Lifetime. The prelude borrows staging, ring copies and window pins under the open buffer's
+// serial (its context's SubmissionSerial), so they return to their pools only when the open buffer
+// completes. Its signal is encoded after all of its encoders, whose fence chain starts behind the
+// prelude's last encoder, so that serial completes only after the prelude has. The image notes the
+// open serial as a use, as the binding after the upload would, so its texture outlives the prelude
+// and a second upload of it in the same open buffer stays in that buffer. A prelude buffer is kept
+// until the open serial completes, then its status is read: one that failed is counted and reported.
+//
+// Residency. A residency set (other titles) is attached to the queue, so the prelude has it as the
+// open buffer does; without one (Demon's Souls) the transfer binds its window, ring and staging
+// buffers directly to its encoders, which makes them resident for the prelude buffer.
+//
+// The counters: every image upload that met an open render pass, by cause, and by each condition
+// of the prelude it passes or fails, printed on the TBDR line as
+// prelude=[eligible,hoisted,refused,failed,<reason>=n...] pass_end_upload=[cpu,invalidated,created,gpu,alias];
+// eligible counts uploads that passed every condition with the switch off.
 internal sealed partial class MetalRenderHost
 {
+    /// <summary>Whether an upload the CPU caused may run ahead of an open render pass (SHARPEMU_METAL_V2_UPLOAD_PRELUDE).</summary>
+    internal bool UploadPreludeEnabled { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_UPLOAD_PRELUDE") != "0";
+
+    bool IMetalImageCacheOwner.UploadPreludeEnabled => UploadPreludeEnabled;
+
+    private long _preludeHoisted;
+    private long _preludeFailed;
+
+    // Committed prelude buffers, with the serial whose completion implies theirs.
+    private readonly List<(nint Buffer, ulong Serial)> _preludeBuffers = [];
+    private UploadPreludeContext? _preludeContext;
+
+    IMetalSubmissionContext? IMetalImageCacheOwner.BeginUploadPrelude()
+    {
+        if (!UploadPreludeEnabled || _commandBuffer == 0 || _renderEncoder == 0 ||
+            EncoderOrdering != EncoderOrderingMode.Fence)
+        {
+            return null;
+        }
+
+        var buffer = NewCommandBuffer();
+        if (buffer == 0)
+        {
+            throw Fatal("A Metal command buffer could not be created for an upload prelude.");
+        }
+
+        // Kept until its status is read; the queue hands it back autoreleased.
+        MetalNative.SendVoid(buffer, SelRetain);
+        MetalMemoryTelemetry.CommandBuffers.Add();
+        // An end-of-pipe completion of the open serial waits for the GPU: the prelude is its work too.
+        NoteRecordedWork();
+        var context = _preludeContext ??= new UploadPreludeContext(this);
+        context.CommandBuffer = buffer;
+        return context;
+    }
+
+    void IMetalImageCacheOwner.EndUploadPrelude(IMetalSubmissionContext prelude)
+    {
+        var context = (UploadPreludeContext)prelude;
+        var buffer = context.CommandBuffer;
+        context.CommandBuffer = 0;
+        MetalNative.SendVoid(buffer, SelCommit);
+        MetalMemoryTelemetry.Commits.Add();
+        _preludeBuffers.Add((buffer, _submissionSerial));
+        _preludeHoisted++;
+    }
+
+    // Reads the status of each prelude whose open serial has completed, and lets it go.
+    private void RetireUploadPreludes(ulong completed, bool all = false)
+    {
+        if (_preludeBuffers.Count == 0)
+        {
+            return;
+        }
+
+        var kept = 0;
+        for (var index = 0; index < _preludeBuffers.Count; index++)
+        {
+            var (buffer, serial) = _preludeBuffers[index];
+            if (!all && serial > completed)
+            {
+                _preludeBuffers[kept++] = _preludeBuffers[index];
+                continue;
+            }
+
+            if (MetalV2Native.SendValue(buffer, MetalNative.Selector("status")) == CommandBufferStatusError)
+            {
+                _preludeFailed++;
+                var error = MetalNative.Send(buffer, MetalNative.Selector("error"));
+                Console.Error.WriteLine(
+                    $"[METAL-V2][WARN] An upload prelude failed, so a texture it uploaded does not hold the guest's " +
+                    $"bytes: serial={serial} {MetalNative.DescribeError(error)}");
+            }
+
+            MetalNative.SendVoid(buffer, SelRelease);
+        }
+
+        _preludeBuffers.RemoveRange(kept, _preludeBuffers.Count - kept);
+    }
+
+    /// <summary>Prelude buffers whose status has not been read yet.</summary>
+    internal int PendingUploadPreludes => _preludeBuffers.Count;
+
+    // The submission context of a prelude buffer. It borrows under the open buffer's serial and
+    // orders its encoders with the host's encoder fence; it shares no encoder of the open buffer.
+    private sealed class UploadPreludeContext(MetalRenderHost host) : IMetalSubmissionContext
+    {
+        public nint CommandBuffer { get; set; }
+
+        public nint Device => host._device;
+
+        public ulong SubmissionSerial => host._submissionSerial;
+
+        public ulong CompletedSerial => host.CompletedSerial;
+
+        public void EncoderStarted(nint encoder, bool render) => host.WaitForPreviousEncoder(encoder, render);
+
+        public void EncoderEnding(nint encoder, bool render) => host.UpdateEncoderFence(encoder, render);
+    }
+
     private static readonly string[] PreludeBlockNames =
     [
         "cause_alias", "cause_gpu", "used", "clear", "gpu_write", "gather", "held_copy", "held_fill",
@@ -150,7 +296,8 @@ internal sealed partial class MetalRenderHost
     internal string TakePreludeText()
     {
         var builder = new StringBuilder("prelude=[eligible=");
-        builder.Append(_preludeEligible).Append(" refused=").Append(_preludeRefused);
+        builder.Append(_preludeEligible).Append(" hoisted=").Append(_preludeHoisted)
+            .Append(" refused=").Append(_preludeRefused).Append(" failed=").Append(_preludeFailed);
         for (var index = 0; index < _preludeBlocked.Length; index++)
         {
             if (_preludeBlocked[index] != 0)
@@ -165,14 +312,16 @@ internal sealed partial class MetalRenderHost
             .Append(" gpu=").Append(_passEndUploads[(int)MetalImageDirtyCause.GpuWrite])
             .Append(" alias=").Append(_passEndUploads[(int)MetalImageDirtyCause.AliasWrite]).Append(']');
         _preludeEligible = 0;
+        _preludeHoisted = 0;
         _preludeRefused = 0;
+        _preludeFailed = 0;
         Array.Clear(_preludeBlocked);
         Array.Clear(_passEndUploads);
         return builder.ToString();
     }
 
-    /// <summary>The prelude counters since the last call, for tests: (eligible, refused, refusals by reason name).</summary>
-    internal (long Eligible, long Refused, Dictionary<string, long> Blocked) TakePreludeCounters()
+    /// <summary>The prelude counters since the last call, for tests.</summary>
+    internal (long Eligible, long Hoisted, long Refused, long Failed, Dictionary<string, long> Blocked) TakePreludeCounters()
     {
         var blocked = new Dictionary<string, long>();
         for (var index = 0; index < _preludeBlocked.Length; index++)
@@ -180,7 +329,7 @@ internal sealed partial class MetalRenderHost
             blocked[PreludeBlockNames[index]] = _preludeBlocked[index];
         }
 
-        var counters = (_preludeEligible, _preludeRefused, blocked);
+        var counters = (_preludeEligible, _preludeHoisted, _preludeRefused, _preludeFailed, blocked);
         _ = TakePreludeText();
         return counters;
     }
