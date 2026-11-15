@@ -161,11 +161,12 @@ public sealed partial class KeptStageInputsTests
         Assert.Same(second, Programs(cache, pixelActive: true));
     }
 
-    // With the churn hold (default), a rebuild is handed out without the entry keeping it until a rebuild evaluates the
-    // same words as the one before it: a draw whose words move on every take leaves the memo pointing at what it kept,
-    // and words that settle are kept on their second rebuild and hit after that. Verify finds every take exact.
+    // With the churn hold (default), a rebuild right after another rebuild of the same entry is handed out without being
+    // kept until it evaluates the same words as that one: a draw whose words move on every take leaves the memo pointing
+    // at what it kept, words that settle are kept on their second rebuild and hit after that, and a change after a hit is
+    // kept at once. Verify finds every take exact.
     [Fact]
-    public void ResolveMemo_KeepsARebuildOnlyOnceItsWordsRepeat()
+    public void ResolveMemo_HoldsARebuildThatFollowsAnotherUntilItsWordsRepeat()
     {
         var cache = MemoCache();
         Assert.True(cache.ResolveMemoHoldChurn);
@@ -176,28 +177,34 @@ public sealed partial class KeptStageInputsTests
         var moved = Programs(cache, pixelActive: true);
         _guest.WriteWords(Descriptor, PipelineTestGuest.BufferDescriptor(StreamBase + 0x200, 16, 4, Format32x4Float));
         var movedAgain = Programs(cache, pixelActive: true);
+        _guest.WriteWords(Descriptor, PipelineTestGuest.BufferDescriptor(StreamBase + 0x300, 16, 4, Format32x4Float));
+        var movedThird = Programs(cache, pixelActive: true);
         var report = Report();
-        Assert.Contains("words_rebuilt=2,", report);
+        // The first change after the stored resolution is kept; the two after it are not.
+        Assert.Contains("words_rebuilt=3,", report);
         Assert.Contains("rebuilt_not_kept=2,", report);
-        Assert.Contains("verify_checked=2,", report);
+        Assert.Contains("verify_checked=3,", report);
         Assert.Contains("verify_failed=0)", report);
         Assert.Contains(moved.PixelInput.Stage.Resources.Buffers, words => words[0] == unchecked((uint)(StreamBase + 0x100)));
         Assert.Contains(movedAgain.PixelInput.Stage.Resources.Buffers, words => words[0] == unchecked((uint)(StreamBase + 0x200)));
+        Assert.Contains(movedThird.PixelInput.Stage.Resources.Buffers, words => words[0] == unchecked((uint)(StreamBase + 0x300)));
 
         // The same words again: rebuilt from the kept programs once more, and this time kept.
         var settled = Programs(cache, pixelActive: true);
         report = Report();
-        Assert.NotSame(movedAgain, settled);
+        Assert.NotSame(movedThird, settled);
         Assert.Contains("words_rebuilt=1,", report);
         Assert.Contains("rebuilt_not_kept=0,", report);
         Assert.Same(settled, Programs(cache, pixelActive: true));
         Assert.Contains("hits=1,", Report());
 
-        // Back to the first words: the kept rebuild no longer holds, and the first programs are as they were.
+        // A change after a hit is kept at once.
         _guest.WriteWords(Descriptor, PipelineTestGuest.BufferDescriptor(StreamBase, 16, 4, Format32x4Float));
         var back = Programs(cache, pixelActive: true);
         Assert.NotSame(settled, back);
         Assert.Equal(first.PixelInput.Stage.Resources.Buffers, back.PixelInput.Stage.Resources.Buffers);
+        Assert.Contains("rebuilt_not_kept=0,", Report());
+        Assert.Same(back, Programs(cache, pixelActive: true));
         Assert.Contains("verify_failed=0)", Report());
     }
 

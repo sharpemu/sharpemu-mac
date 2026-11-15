@@ -98,12 +98,14 @@ internal sealed class GraphicsResolveMemo
     internal static readonly bool DefaultRebuild = Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_MEMO_REBUILD") != "0";
 
     // SHARPEMU_RESOLVE_MEMO_HOLD_CHURN=0: every rebuilt words miss replaces its entry's programs, as before. On (default), a
-    // rebuild is kept only when it evaluated the same words as the entry's last rebuild (Entry.RebuildSignature): a draw
-    // whose descriptor words move on every take (Demon's Souls: ring-allocated constant buffers, ~1/3 of its draws) is
-    // handed its rebuilt programs without the long-lived entry pointing at them, so they die young instead of being
-    // promoted by every gen0 collection (~56 MB each in game) and compacted. Its next take revalidates the programs the
-    // entry kept and rebuilds again, the work a kept rebuild would have cost it (its words moved again); words that
-    // settle are kept on their second rebuild and hit from then on. Only what is kept changes, never a result.
+    // rebuild right after another rebuild of the same entry is kept only when it evaluated the same words as that one
+    // (Entry.RebuildSignature): a draw whose descriptor words move on every take (Demon's Souls: ring-allocated constant
+    // buffers, ~1/3 of its draws) is handed its rebuilt programs without the long-lived entry pointing at them, so they die
+    // young instead of being promoted by every gen0 collection (~56 MB each in game) and compacted. Its next take
+    // revalidates the programs the entry kept and rebuilds again, the work a kept rebuild would have cost it (its words
+    // moved again); words that settle are kept on their second rebuild and hit from then on, and a change after a hit is
+    // kept at once as before (words that change every other take keep their hits). Only what is kept changes, never a
+    // result.
     internal static readonly bool DefaultHoldChurn = Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_MEMO_HOLD_CHURN") != "0";
 
     // SHARPEMU_RESOLVE_MEMO_ADMIT_SEEN=0: every full resolution under a new key is kept, as before. On (default), it is kept
@@ -145,8 +147,10 @@ internal sealed class GraphicsResolveMemo
         public long TablesGeneration;
         // GraphicsProgramsComparer.Fingerprint at insertion (verify: nothing wrote the shared result since).
         public ulong Fingerprint;
-        // The signature of the words this entry's last rebuild evaluated (HoldChurn), 0 before any.
+        // The signature of the words this entry's last rebuild evaluated when it followed another rebuild (HoldChurn), else 0.
         public ulong RebuildSignature;
+        // Whether the entry's last take rebuilt (kept or not) rather than hit (HoldChurn).
+        public bool RebuiltLast;
     }
 
     private const int MaxKeyBytes = 4096;
@@ -203,7 +207,7 @@ internal sealed class GraphicsResolveMemo
     // Whether a words miss is rebuilt from its revalidation (DefaultRebuild; tests set it).
     public bool Rebuild { get; set; } = DefaultRebuild;
 
-    // Whether a rebuild whose words differ from the entry's last rebuild is handed out without being kept (DefaultHoldChurn;
+    // Whether a rebuild that follows another one with other words is handed out without being kept (DefaultHoldChurn;
     // tests set it).
     public bool HoldChurn { get; set; } = DefaultHoldChurn;
 

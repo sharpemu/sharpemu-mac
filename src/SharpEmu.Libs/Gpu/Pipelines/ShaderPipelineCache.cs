@@ -608,24 +608,34 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             taken = programs;
             fingerprint = entry.Fingerprint;
+            if (held is null)
+            {
+                entry.RebuiltLast = false;
+            }
+
             return null;
         }
 
         taken = WithStages(programs, vertexRebuilt ? vertexStage : null, pixelRebuilt ? pixelStage : null);
         fingerprint = memo.Mode == ResolveMemoMode.Verify ? GraphicsProgramsComparer.Fingerprint(taken) : 0;
         rebuilt = true;
-        // GraphicsResolveMemo.DefaultHoldChurn: kept only when the entry's last rebuild evaluated the same words.
-        var signature = memo.HoldChurn ? RebuildSignature(taken, vertexRebuilt, pixelRebuilt) : 0;
-        if (memo.HoldChurn && signature != entry.RebuildSignature)
+        // GraphicsResolveMemo.DefaultHoldChurn: a rebuild right after another is kept only when both evaluated the same words.
+        var signature = 0UL;
+        if (memo.HoldChurn && entry.RebuiltLast)
         {
-            entry.RebuildSignature = signature;
-            GraphicsResolveMemo.NoteRebuildHeld();
-            return null;
+            signature = RebuildSignature(taken, vertexRebuilt, pixelRebuilt);
+            if (signature != entry.RebuildSignature)
+            {
+                entry.RebuildSignature = signature;
+                GraphicsResolveMemo.NoteRebuildHeld();
+                return null;
+            }
         }
 
         entry.Programs = taken;
         entry.Fingerprint = fingerprint;
         entry.RebuildSignature = signature;
+        entry.RebuiltLast = true;
         return null;
     }
 
