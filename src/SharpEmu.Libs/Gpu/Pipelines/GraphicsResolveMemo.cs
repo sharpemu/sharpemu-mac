@@ -57,8 +57,8 @@ internal enum ResolveMemoUncacheable
     Origin,
     // A user data count over the bank (the full resolution stops on it).
     Key,
-    // A program entry, the device data loads or the vertex table metadata changed while the draw resolved, or its
-    // vertex source is not the draw's.
+    // A program entry, the device data loads or the vertex table metadata changed while the draw resolved, its vertex
+    // source is not the draw's, or another draw's key was filled while it resolved.
     Changed,
     Count,
 }
@@ -137,11 +137,16 @@ internal sealed class GraphicsResolveMemo
 
     public ReadOnlySpan<byte> Key => _key.AsSpan(0, _keyLength);
 
+    // How many keys were filled: a store belongs to the key filled before its resolution only while this has not moved
+    // (a guest read inside a resolution can resolve another draw on the same thread, which fills its own key).
+    public long FillSerial { get; private set; }
+
     // The draw's key: every register and draw input the resolution reads, the user data words last. False when the user
     // data count is over the bank (the full resolution stops there).
     public bool Fill(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags,
         PixelOutputBlendBits blendBits)
     {
+        FillSerial++;
         var key = _key.AsSpan();
         var at = 0;
         var vertex = banks.Shader.Vertex;

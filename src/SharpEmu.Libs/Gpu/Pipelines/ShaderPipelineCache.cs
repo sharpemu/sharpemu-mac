@@ -396,6 +396,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         in KeptGraphicsFlags flags)
     {
         var cacheable = false;
+        var fillSerial = 0L;
         if (_registry.HasFrontend)
         {
             GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Frontend);
@@ -411,6 +412,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         else
         {
             cacheable = true;
+            fillSerial = memo.FillSerial;
             if (memo.Find() is { } entry)
             {
                 if (TryTakeResolveMemo(entry, flags.PixelActive) is not { } miss)
@@ -439,7 +441,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var linkedLookups = _programs.LinkedLookups;
         var tablesGeneration = _vertexTables.Generation;
         var programs = ResolveFull(banks, targetExportMapping, flags);
-        if (cacheable)
+        if (cacheable && memo.FillSerial != fillSerial)
+        {
+            // The memo holds another draw's key now: this result has no key to be stored under.
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Changed);
+        }
+        else if (cacheable)
         {
             StoreResolveMemo(memo, banks, programs, flags.PixelActive, deviceDataGeneration, contentEpoch, linkedLookups, tablesGeneration);
         }
