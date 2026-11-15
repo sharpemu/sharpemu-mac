@@ -186,6 +186,73 @@ public sealed unsafe class MetalDeferredRefreshTests(ITestOutputHelper output)
         Assert.Equal(2, on.Dropped);
     }
 
+    // Layer 0 is cleared with layers 1-3 stale, then drawn into again, as each draw into a shadow cascade is: the
+    // second acquire has nothing for a pass to decide (no stale byte is under its layer), so nothing waits - a
+    // waiting attachment ends the open pass - the other layers stay stale, and nothing is uploaded.
+    [Fact]
+    public void ADrawIntoAClearedLayerDoesNotWaitWhileOtherLayersAreStale()
+    {
+        if (!RequireDevice()) return;
+        if (!MetalV2Diagnostics.SkipOverwrittenRefresh) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        var size = ArrayLayerBytes() * ArrayLayers;
+        ResourceSlotIdentifier image;
+        using (host.BeginPreparation())
+        {
+            var request = DepthArrayRequest(0, ImageRole.DepthTarget);
+            image = host.ImageCache.FindImage(ref request);
+        }
+
+        // Round one makes the array GPU-written; the guest then rewrites all of it.
+        foreach (var layer in new uint[] { 0, 1, 2, 3 })
+        {
+            using (host.BeginPreparation())
+            {
+                var acquisition = ((IRenderHost)host).AcquireDepthAttachment(DepthArrayTarget(image, layer, clear: true));
+                host.BeginRendering(DepthPass(acquisition.View, FirstClear));
+                host.EndRendering();
+            }
+        }
+
+        _ = rig.Read(ArrayAddress, size);
+        rig.FillBacking(ArrayAddress, size, LaterPattern);
+        host.ImageCache.InvalidateMemory(ArrayAddress, size);
+        var uploads = host.ImageCache.Counters.Uploads;
+        _ = host.ImageCache.TakeLayerStaleKept();
+        var layerBytes = ArrayLayerBytes();
+        using (host.BeginPreparation())
+        {
+            var acquisition = ((IRenderHost)host).AcquireDepthAttachment(DepthArrayTarget(image, 0, clear: true));
+            Assert.True(host.ImageCache.HasDeferredRefreshes);
+            host.BeginRendering(DepthPass(acquisition.View, SecondClear));
+            Assert.False(host.ImageCache.HasDeferredRefreshes);
+
+            var cached = host.ImageCache.GetImage(image);
+            Assert.True(cached.IsCpuDirty);
+            var stale = cached.StaleRuns.ToArray();
+            var binding = cached.BindingVersion;
+            for (var draw = 0; draw < 3; draw++)
+            {
+                var again = ((IRenderHost)host).AcquireDepthAttachment(DepthArrayTarget(image, 0, clear: false));
+                Assert.Equal(acquisition.View, again.View);
+                Assert.False(host.ImageCache.HasDeferredRefreshes);
+                Assert.True(cached.IsGpuModified);
+                Assert.Equal(stale, cached.StaleRuns.ToArray());
+                Assert.Equal(binding, cached.BindingVersion);
+            }
+
+            Assert.False(cached.StaleOverlaps(0, layerBytes));
+            Assert.True(cached.IsStaleOver(layerBytes, size));
+            host.EndRendering();
+        }
+
+        Assert.Equal(3, host.ImageCache.TakeLayerStaleKept());
+        Assert.Equal(uploads, host.ImageCache.Counters.Uploads);
+        // Layer 0 holds the clear; the layers no pass touched are the guest's later bytes, uploaded only by the read.
+        AssertLayers(rig.Read(ArrayAddress, size), [0], SecondClear);
+    }
+
     private sealed record LayerOutcome(byte[] Round1, byte[] Round2, long Uploads, long Dropped, List<byte[]> Sampled);
 
     private LayerOutcome RunLayerClears(uint[] order, bool layerDefer, uint? sampleBeforeClear)

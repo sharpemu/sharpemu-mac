@@ -1001,7 +1001,16 @@ internal sealed class MetalCachedImage : IDisposable
     /// <param name="depthPlaneChanged">
     /// False for a depth-stencil target the GPU writes only the stencil of.
     /// </param>
-    public void MarkGpuModified(bool depthPlaneChanged = true)
+    public void MarkGpuModified(bool depthPlaneChanged = true) => MarkGpuModified(depthPlaneChanged, keepStale: false);
+
+    /// <summary>
+    /// As <see cref="MarkGpuModified(bool)"/> for a write that touches no stale byte: every stale run stays as it
+    /// is (MetalImageCache.TryKeepOtherLayersStaleLocked), so nothing about how the image binds moves with it.
+    /// </summary>
+    public void MarkGpuModifiedKeepingStale(bool depthPlaneChanged = true) =>
+        MarkGpuModified(depthPlaneChanged, keepStale: true);
+
+    private void MarkGpuModified(bool depthPlaneChanged, bool keepStale)
     {
         // Every write path gives a texture held from a later level the whole chain first
         // (MetalImageCache.PromoteLinearView): a writeback of a cut texture would retile its
@@ -1030,8 +1039,16 @@ internal sealed class MetalCachedImage : IDisposable
         // after this (MetalImageCache.CompleteDeferredLocked).
         ClaimPendingWriteback();
         _gpuModified = true;
-        _cpuDirty = false;
-        _staleCount = 0;
+        if (keepStale)
+        {
+            wasDirty = false;
+        }
+        else
+        {
+            _cpuDirty = false;
+            _staleCount = 0;
+        }
+
         _publishedCount = 0;
         GpuWriteSequence = Interlocked.Increment(ref _gpuWriteCounter);
         if (!wasModified)

@@ -1815,7 +1815,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // The pass about to begin may clear or overwrite all of it; BeginRendering decides
         // whether the upload is worth making (MetalImageCache.DeferredRefresh).
         var defer = deferRefresh && (CanDeferRefresh(image) || CanDeferLayerRefresh(image));
-        if (!defer)
+        // Stale layers the view does not name need no pass to decide them: they stay stale and nothing waits.
+        var keepStale = defer && TryKeepOtherLayersStaleLocked(image, request.View.BaseLayer, request.View.LayerCount);
+        defer &= !keepStale;
+        if (!defer && !keepStale)
         {
             RefreshFromGuest(image);
         }
@@ -1845,7 +1848,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return deferredView;
         }
 
-        image.MarkGpuModified();
+        if (keepStale)
+        {
+            image.MarkGpuModifiedKeepingStale();
+        }
+        else
+        {
+            image.MarkGpuModified();
+        }
+
         NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
         image.NoteUse(image.GpuWriteSerial);
@@ -1895,7 +1906,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // refreshes now, before the description changes.
         var defer = deferRefresh && writes && (CanDeferRefresh(image) || CanDeferLayerRefresh(image)) &&
             (!request.Description.HasStencil || stencil == image.Description.Stencil);
-        if (!defer)
+        // As for a colour target: stale layers the view does not name stay stale and nothing waits.
+        var keepStale = defer && TryKeepOtherLayersStaleLocked(image, request.View.BaseLayer, request.View.LayerCount);
+        defer &= !keepStale;
+        if (!defer && !keepStale)
         {
             RefreshFromGuest(image);
         }
@@ -1936,7 +1950,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         if (writes)
         {
-            image.MarkGpuModified(depthPlaneChanged: !stencilOnly);
+            if (keepStale)
+            {
+                image.MarkGpuModifiedKeepingStale(depthPlaneChanged: !stencilOnly);
+            }
+            else
+            {
+                image.MarkGpuModified(depthPlaneChanged: !stencilOnly);
+            }
+
             NoteLinearGpuWrite(image);
             image.GpuWriteSerial = _owner.CurrentSerial;
         }

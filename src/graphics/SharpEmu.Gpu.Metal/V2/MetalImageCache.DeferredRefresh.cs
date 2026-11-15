@@ -376,15 +376,9 @@ internal sealed partial class MetalImageCache
         // What stays stale is refreshed later by TryRefreshDirtyRun alone (a GPU-written image is never uploaded
         // whole): each run must be one that refresh makes exactly, and one it can read in place. Anything else uploads
         // now, as before, rather than leave the stale keep in RefreshFromGuestCore runs it did not have.
-        foreach (var (start, end) in left[..count])
+        if (!StaleRunsCanWait(image, left[..count]))
         {
-            if (!SubRangeTransfersEnabled ||
-                !TryCoveringRun(in image.Description, start, end, out var runStart, out var runEnd) ||
-                runStart != start || runEnd != end ||
-                !_guestMemory.TryResolveInPlace(image.Description.Data.Address + start, end - start, out _))
-            {
-                return false;
-            }
+            return false;
         }
 
         if (overlaps)
@@ -408,6 +402,47 @@ internal sealed partial class MetalImageCache
             stale = (image.DirtyCause, left[..count].ToArray());
         }
 
+        return true;
+    }
+
+    // Whether each of these runs is one TryRefreshDirtyRun makes exactly and can read in place.
+    private bool StaleRunsCanWait(MetalCachedImage image, ReadOnlySpan<(ulong Start, ulong End)> runs)
+    {
+        foreach (var (start, end) in runs)
+        {
+            if (!SubRangeTransfersEnabled ||
+                !TryCoveringRun(in image.Description, start, end, out var runStart, out var runEnd) ||
+                runStart != start || runEnd != end ||
+                !_guestMemory.TryResolveInPlace(image.Description.Data.Address + start, end - start, out _))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private long _layerStaleKept;
+
+    /// <summary>Target acquires that left an array's other layers stale without waiting for the pass.</summary>
+    internal long TakeLayerStaleKept() => Interlocked.Exchange(ref _layerStaleKept, 0);
+
+    // A GPU-written array target none of whose stale runs is over the view's layers has nothing for its pass to
+    // decide: the pass can neither overwrite nor read those bytes, so they stay stale under the write exactly as
+    // CompleteDeferredLocked would leave them, and nothing waits. Waiting here made every draw into a Demon's Souls
+    // shadow cascade end the pass before it (a pass is not continued while an attachment waits for its upload) for
+    // as long as a later cascade was still stale. Caller holds the lock and marks the image written with
+    // MarkGpuModifiedKeepingStale.
+    private bool TryKeepOtherLayersStaleLocked(MetalCachedImage image, uint baseLayer, uint layerCount)
+    {
+        if (!CanDeferLayerRefresh(image) ||
+            !_transfer.TryLayerBytes(in image.Description, baseLayer, layerCount, out var viewStart, out var viewEnd) ||
+            image.StaleOverlaps(viewStart, viewEnd) || !StaleRunsCanWait(image, image.StaleRuns))
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _layerStaleKept);
         return true;
     }
 
