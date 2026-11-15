@@ -2887,6 +2887,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         WriteCopyReadTraces();
+        _imageCache.WriteUploadTrace();
         var causes = _imageCache.TakeTransferCauses();
         var subRange = _imageCache.TakePartialTransfers();
         var aliases = _imageCache.AliasCounters;
