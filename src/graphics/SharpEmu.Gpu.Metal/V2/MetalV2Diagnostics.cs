@@ -422,8 +422,12 @@ internal static class MetalV2Diagnostics
     public static readonly int HoldFlushBusyMaxMicroseconds =
         PositiveInt("SHARPEMU_METAL_V2_FLUSH_HOLD_BUSY_US", 16000);
 
-    // SHARPEMU_METAL_V2_COMMIT_WHEN_GPU_DRY=0 leaves the open buffer to the stream's own flushes
-    // and limits. On, a draw or dispatch about to prepare commits it once the GPU has finished
+    // SHARPEMU_METAL_V2_COMMIT_WHEN_GPU_DRY=1 (off by default) commits early for a starved GPU; off, the open buffer
+    // is left to the stream's own flushes and limits. Off because it bought nothing where it was measured: Demon's
+    // Souls, same build and scene, 82.2 ms a frame with it and 82.1 without, for 17 more render passes and 18 more
+    // commits a frame. The GPU does starve there (~17 ms a frame), but while the worker records passes that are cheap
+    // for the GPU and dear for the CPU; the frame ends when the passes recorded last have run, and those were never
+    // waiting. On, a draw or dispatch about to prepare commits it once the GPU has finished
     // everything committed and the buffer holds enough to be worth a split, ending an open render
     // pass if one is (MetalCommandStream.cs, GpuDryVerdict). The bars: at least
     // SHARPEMU_METAL_V2_GPU_DRY_MIN_COMMANDS draws and dispatches since the last commit, and at least
@@ -432,7 +436,7 @@ internal static class MetalV2Diagnostics
     // once more at SHARPEMU_METAL_V2_GPU_DRY_SPLIT_US_PER_MB microseconds per MB (Demon's Souls: a
     // 16 MB target loaded and stored in ~0.5 ms, so the 68 MB G-buffer set ~1.6 ms a split).
     public static readonly bool CommitWhenGpuDry =
-        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMIT_WHEN_GPU_DRY"), "0", StringComparison.Ordinal);
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMIT_WHEN_GPU_DRY"), "1", StringComparison.Ordinal);
 
     public static readonly int GpuDryMinCommands = PositiveInt("SHARPEMU_METAL_V2_GPU_DRY_MIN_COMMANDS", 64);
 

@@ -301,6 +301,15 @@ public static class RenderPhaseProfile
             ? Math.Clamp(sample, 1, 64)
             : 4;
 
+    // A captured frame also has to be this long after the last one began. At a low frame rate one frame in four is
+    // still several a second, and each costs the render thread: Demon's Souls at 12 fps drew every fourth frame about
+    // 5 ms slower (80 against 85 ms), a visible beat in the frame pacing for a breakdown nobody reads that often.
+    // SHARPEMU_OVERLAY_PHASE_MIN_MS=0 samples by frame count alone.
+    internal static long OverlayPhaseMinTicks { get; set; } =
+        (int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_OVERLAY_PHASE_MIN_MS"), out var minMs)
+            ? Math.Clamp(minMs, 0, 10_000)
+            : 1000) * Stopwatch.Frequency / 1000;
+
     private static bool _overlayPhasesWanted;
     private static bool _overlayTimelineWanted;
     // Render thread: presented frames left before the next captured one.
@@ -750,7 +759,8 @@ public static class RenderPhaseProfile
         {
             Overlay.OverlayTelemetry.EndRenderFrame(now, null, null);
             _overlaySegments?.Clear();
-            if (_overlayPhasesWanted && --_overlaySkip <= 0)
+            if (_overlayPhasesWanted && --_overlaySkip <= 0 &&
+                now - Volatile.Read(ref _overlayCaptureStart) >= OverlayPhaseMinTicks)
             {
                 // The next frame is captured from here.
                 Array.Clear(_framePhaseTicks);
