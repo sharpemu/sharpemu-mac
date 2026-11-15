@@ -978,6 +978,7 @@ internal sealed partial class MetalRenderHost
             var role = stage.IsStorage[index] ? ImageRole.StorageImage : ImageRole.Texture;
             if (stage.IsStorage[index])
             {
+                _storageImageBinds++;
                 request = request with { View = request.View with { LevelCount = 1 } };
                 stage.Requests[index] = request;
             }
@@ -2281,6 +2282,10 @@ internal sealed partial class MetalRenderHost
     private int _encoderResidentCount;
     private readonly Dictionary<nint, int> _encoderResidentIndex = new();
     private long _residencyCallsSkipped;
+    // Resources an encoder was told (not skipped), and compute encoders opened: what re-declaring the submission's
+    // residents to every new compute encoder costs (the WAITS line's residency_named and compute_encoders).
+    private long _residencyCallsNamed;
+    private long _computeEncodersOpened;
 
     private void ForgetResidentResources()
     {
@@ -2295,6 +2300,9 @@ internal sealed partial class MetalRenderHost
 
     /// <summary>How many -useResource: calls the encoder cache skipped.</summary>
     public long TakeSkippedResidencyCalls() => Interlocked.Exchange(ref _residencyCallsSkipped, 0);
+
+    private string TakeResidencyNameCounters() =>
+        $" residency_named={Interlocked.Exchange(ref _residencyCallsNamed, 0)} compute_encoders={Interlocked.Exchange(ref _computeEncodersOpened, 0)}";
 
     // A device-address program can dereference any mapped guest page, so the encoder that
     // runs one names the windows the address table spans, whether or not anything resolved
@@ -2461,6 +2469,7 @@ internal sealed partial class MetalRenderHost
 
             _encoderResidentUsage[index] |= usage;
             _encoderResidentStages[index] |= stages;
+            _residencyCallsNamed++;
             return true;
         }
 
@@ -2476,6 +2485,7 @@ internal sealed partial class MetalRenderHost
         _encoderResidentUsage[_encoderResidentCount] = usage;
         _encoderResidentStages[_encoderResidentCount] = stages;
         _encoderResidentCount++;
+        _residencyCallsNamed++;
         return true;
     }
 

@@ -2848,6 +2848,7 @@ internal sealed partial class MetalRenderHost :
             .Append(" label_barriers=").Append(TakeLabelBarriers())
             .Append(" encoder_barriers=").Append(TakeEncoderBarriers())
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
+            .Append(TakeResidencyNameCounters())
             .Append(" device_address_writes=").Append(DeviceAddressWrites)
             .Append(TakeDeviceAddressReachCounters())
             .Append(" data_slots_device=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.LearnedSlots)

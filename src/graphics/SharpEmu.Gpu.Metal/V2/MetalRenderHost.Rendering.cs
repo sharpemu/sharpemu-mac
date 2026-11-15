@@ -1496,6 +1496,7 @@ internal sealed partial class MetalRenderHost
 
         // A new encoder has none of the residency the last one was given.
         ForgetResidentResources();
+        _computeEncodersOpened++;
         return _computeEncoder;
     }
 

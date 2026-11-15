@@ -146,6 +146,7 @@ internal sealed partial class MetalRenderHost
     private long _readOnlyBufferBinds;
     private long _writtenBufferBinds;
     private long _tinyPassDummies;
+    private long _storageImageBinds;
 
     // Per stage kind, the last eight Images, Samplers and Buffers arrays a snapshot bound, and how often one repeated.
     private const int SnapshotRefSlots = 8;
@@ -205,9 +206,9 @@ internal sealed partial class MetalRenderHost
         var text = $"read_binding_memo=({_readBindingMemo.TakeCounters()}) bind_shape=(binds={_bindCalls} " +
             $"image_set_moves={_bindImageSetMoves} binding_epoch_moves={_bindBindingEpochMoves} " +
             $"snapshot_repeats=[images={_snapshotRefRepeats[0]},samplers={_snapshotRefRepeats[1]},buffers={_snapshotRefRepeats[2]}]/{_snapshotRefChecks} " +
-            $"buffers_read_only={_readOnlyBufferBinds} buffers_written={_writtenBufferBinds} tiny_pass_dummies={_tinyPassDummies}) {TakeStagePlanCounters()}";
+            $"buffers_read_only={_readOnlyBufferBinds} buffers_written={_writtenBufferBinds} storage_images={_storageImageBinds} tiny_pass_dummies={_tinyPassDummies}) {TakeStagePlanCounters()}";
         _bindCalls = _bindImageSetMoves = _bindBindingEpochMoves = _readOnlyBufferBinds = _writtenBufferBinds = 0;
-        _tinyPassDummies = _snapshotRefChecks = 0;
+        _tinyPassDummies = _snapshotRefChecks = _storageImageBinds = 0;
         Array.Clear(_snapshotRefRepeats);
         return text;
     }
