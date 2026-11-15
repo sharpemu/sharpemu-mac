@@ -1694,10 +1694,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var deferAliases = deferRefresh && AliasTransitionsEnabled && CanDeferRefresh(image) &&
             !image.Description.HasStencil && !image.Description.IsBlock && !image.Description.IsVolume &&
             image.Description.Resources.Levels == 1 && image.Description.TransferLayers == 1;
-        if (!deferAliases) SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
+        if (!deferAliases) SynchronizeAliases(imageIdentifier, takesGpuOwnership: true, role: "rt");
         // The pass about to begin may clear or overwrite all of it; BeginRendering decides
         // whether the upload is worth making (MetalImageCache.DeferredRefresh).
-        var defer = deferRefresh && CanDeferRefresh(image);
+        var defer = deferRefresh && (CanDeferRefresh(image) || CanDeferLayerRefresh(image));
         if (!defer)
         {
             RefreshFromGuest(image);
@@ -1723,7 +1723,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             image.NoteUse(_owner.CurrentSerial);
             var deferredView = image.GetOrCreateView(request.View);
-            DeferRefreshLocked(deferredView, imageIdentifier, image, depth: false, stencilOnly: false, deferAliases);
+            DeferRefreshLocked(deferredView, imageIdentifier, image, depth: false, stencilOnly: false, deferAliases,
+                request.View.BaseLayer, request.View.LayerCount);
             return deferredView;
         }
 
@@ -1775,7 +1776,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // Only a target the pass writes can be one it clears. The refresh reads the
         // stencil plane from where the image has it, so a request that moves the plane
         // refreshes now, before the description changes.
-        var defer = deferRefresh && writes && CanDeferRefresh(image) &&
+        var defer = deferRefresh && writes && (CanDeferRefresh(image) || CanDeferLayerRefresh(image)) &&
             (!request.Description.HasStencil || stencil == image.Description.Stencil);
         if (!defer)
         {
@@ -1811,7 +1812,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             image.NoteUse(_owner.CurrentSerial);
             var deferredView = image.GetOrCreateView(request.View);
-            DeferRefreshLocked(deferredView, imageIdentifier, image, depth: true, stencilOnly, aliasesPending: false);
+            DeferRefreshLocked(deferredView, imageIdentifier, image, depth: true, stencilOnly, aliasesPending: false,
+                request.View.BaseLayer, request.View.LayerCount);
             return deferredView;
         }
 
@@ -2864,9 +2866,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var residentEnd = image.ResidentEnd;
         var dirtyStart = Math.Max(image.DirtyStart, residentStart);
         var dirtyEnd = Math.Min(image.DirtyEnd, residentEnd);
+        // Past half the run still goes alone for a GPU-written array (layered deferral leaves one stale over the
+        // layers its passes have not overwritten yet): the whole refresh is no option there - it would replace the
+        // layers only the texture holds - so the half rule, a cost rule, would only keep the stale layers.
+        var pastHalfAllowed = LayerDeferEnabled && image.IsGpuModified && description.IsLayered;
         if (!SubRangeTransfersEnabled || description.HasStencil ||
             dirtyEnd <= dirtyStart ||
-            dirtyEnd - dirtyStart > (residentEnd - residentStart) / 2)
+            (dirtyEnd - dirtyStart > (residentEnd - residentStart) / 2 && !pastHalfAllowed))
         {
             return false;
         }
@@ -2930,19 +2936,30 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // or its first byte instead. A run that widens to the whole image is refused, and
     // the caller transfers the whole image as before: bytes a run dropped would stay
     // stale, and a texture that disagrees with guest memory never catches up.
+    // SHARPEMU_METAL_V2_DEPTH_LAYER_RUNS (on; =0 off): a depth run may begin at a layer boundary past the first.
+    private static readonly bool DepthLayerRuns =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEPTH_LAYER_RUNS") != "0";
+
     private bool TryCoveringRun(
         in ImageDescription description, ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end) =>
         TryCoveringRun(_transfer, in description, dirtyStart, dirtyEnd, out start, out end);
 
     internal static bool TryCoveringRun(
         IMetalImageTransfer transfer, in ImageDescription description,
-        ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end)
+        ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end) =>
+        TryCoveringRun(transfer, in description, dirtyStart, dirtyEnd, DepthLayerRuns, out start, out end);
+
+    internal static bool TryCoveringRun(
+        IMetalImageTransfer transfer, in ImageDescription description,
+        ulong dirtyStart, ulong dirtyEnd, bool depthLayerRuns, out ulong start, out ulong end)
     {
         // A colour surface begins a run at the cut it is dirty from: the texel row of a
         // linear one, the block row of a tiled one - a tile row of a 4 KiB mode, a macro
-        // tile row of a 64 KiB one. The depth kernels have no device test for a run past
-        // the first byte, so a depth run still starts at the image's first byte.
-        start = description.IsDepth
+        // tile row of a 64 KiB one. A depth run begins at the layer it is dirty from: the
+        // depth kernels walk a layer at a time, and MetalImageTransferTests.CoveringRuns
+        // moves runs from layers 1-3 of D32 and D32S8 bit for bit.
+        // SHARPEMU_METAL_V2_DEPTH_LAYER_RUNS=0 starts a depth run at the first byte again.
+        start = description.IsDepth && !depthLayerRuns
             ? 0
             : transfer.AlignRunEnd(in description, 0, Math.Min(dirtyStart, dirtyEnd));
         if (transfer.AlignRunStart(in description, start) != start)

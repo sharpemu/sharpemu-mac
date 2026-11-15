@@ -92,6 +92,47 @@ internal sealed partial class MetalImageTransfer
         return true;
     }
 
+    /// <summary>
+    /// The guest bytes, as offsets into the image, of layers [<paramref name="baseLayer"/>, + <paramref name="count"/>)
+    /// of a one-level, non-volume image whose guest size is a whole number of equal layers: every byte of those layers
+    /// and no byte of any other. False for anything else.
+    /// </summary>
+    public bool TryLayerBytes(in ImageDescription description, uint baseLayer, uint count, out ulong start, out ulong end)
+    {
+        start = 0;
+        end = 0;
+        var layers = description.Resources.Layers;
+        if (_disposed || count == 0 || layers == 0 || baseLayer >= layers || count > layers - baseLayer ||
+            description.IsVolume || description.Resources.Levels != 1 || ImageDescription.IsEmptyRange(description.Data))
+        {
+            return false;
+        }
+
+        var plan = PlanFor(description);
+        ulong stride;
+        if (plan.DepthStencil)
+        {
+            stride = plan.SliceSize;
+            if (plan.Layers != layers)
+            {
+                return false;
+            }
+        }
+        else if (plan.Volume || !TryLayerStride(plan, layers, out stride))
+        {
+            return false;
+        }
+
+        if (stride == 0 || stride * layers != description.Data.Size)
+        {
+            return false;
+        }
+
+        start = baseLayer * stride;
+        end = start + count * stride;
+        return true;
+    }
+
     private static bool SameLayerShape(in ImageDescription source, in ImageDescription target) =>
         source.Type is GuestImageType.Color2D or GuestImageType.Color2DArray &&
         target.Type is GuestImageType.Color2D or GuestImageType.Color2DArray &&

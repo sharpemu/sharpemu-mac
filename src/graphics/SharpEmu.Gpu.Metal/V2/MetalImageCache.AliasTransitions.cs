@@ -62,6 +62,7 @@ internal sealed partial class MetalImageCache
         DrainAliasSubsetChecksLocked();
         var subsetCopies = Interlocked.Exchange(ref _aliasSubsetCopies, 0);
         var subsetBytes = Interlocked.Exchange(ref _aliasSubsetBytes, 0);
+        var layerSkips = TakeLayerRefreshSkipped();
         return $"alias_transitions=[fused:{counts.Fused},discarded:{counts.Discarded},device-subset:{subsetCopies}," +
             $"round-trip:{counts.RoundTrip},published-run:{Interlocked.Exchange(ref _aliasPublishedRuns, 0)}," +
             $"published-whole:{Interlocked.Exchange(ref _aliasPublishedWholes, 0)}," +
@@ -71,6 +72,7 @@ internal sealed partial class MetalImageCache
             $"alias_moved_mib=[wb:{Mb(Interlocked.Exchange(ref _aliasMovedWritebackBytes, 0))}," +
             $"blit:{Mb(Interlocked.Exchange(ref _aliasMovedBlitBytes, 0))}] " +
             $"alias_run_refresh_refused={Interlocked.Exchange(ref _aliasRunRefreshRefused, 0)} " +
+            $"layer_refresh_skipped=[{layerSkips.Layers},{Mb(layerSkips.Bytes)}] " +
             $"alias_subset_verify=[checked:{Interlocked.Exchange(ref _aliasSubsetVerified, 0)}," +
             $"mismatch:{Interlocked.Read(ref _aliasSubsetMismatches)},unverified:{Interlocked.Exchange(ref _aliasSubsetUnverified, 0)}] " +
             $"alias_transition_refused=[{refusals}] alias_cpu_read_runs={readRuns} " +
