@@ -43,6 +43,13 @@ public interface IGuestGpuBackend
     /// submit skips the walk of the command buffer that builds them.</summary>
     bool ConsumesSubmittedGeometrySnapshots => false;
 
+    /// <summary>True when this backend's command-stream host reads the submit-time copy of a
+    /// command buffer and of its indirect register tables (the <c>SubmittedCommandBuffer</c> a
+    /// single-buffer AGC submit hands as <c>geometrySnapshots</c>). A backend whose host reads
+    /// the stream from guest memory itself says no: the guest submit then makes no copy and only
+    /// checks that the buffer is mapped.</summary>
+    bool ConsumesSubmittedCommandBytes => true;
+
     // The vertex stage a tessellated pipeline requires and the control stage that feeds the guest's hull factors to the tessellator.
     (IGuestCompiledShader Vertex, IGuestCompiledShader Control) CompileTessellationBridge(
         SharpEmu.ShaderCompiler.Resources.BindingLayout layout, Gen5TessellationDomain domain) =>

@@ -80,15 +80,28 @@ public static partial class AgcExports
             if (dwordCount > 0xF_FFFF)
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
             var commandLength = (int)dwordCount * sizeof(uint);
-            var commandBytes = System.Buffers.ArrayPool<byte>.Shared.Rent(commandLength);
-            if (commandLength != 0 && !ctx.Memory.TryRead(commandAddress, commandBytes.AsSpan(0, commandLength)))
+            SubmittedCommandBuffer? submitted = null;
+            if (GuestGpu.Current.ConsumesSubmittedCommandBytes)
             {
-                System.Buffers.ArrayPool<byte>.Shared.Return(commandBytes);
+                var commandBytes = System.Buffers.ArrayPool<byte>.Shared.Rent(commandLength);
+                if (commandLength != 0 && !ctx.Memory.TryRead(commandAddress, commandBytes.AsSpan(0, commandLength)))
+                {
+                    System.Buffers.ArrayPool<byte>.Shared.Return(commandBytes);
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+
+                var registerTables = CaptureSubmittedTables(ctx, commandAddress, commandBytes.AsSpan(0, commandLength));
+                var snapshots = CaptureSubmittedGeometry(ctx, gpuState, commandAddress, dwordCount);
+                submitted = new SubmittedCommandBuffer(commandBytes, snapshots, registerTables) { Length = commandLength, Pooled = true };
+            }
+            else if (commandLength != 0 && !ctx.Memory.CanRead(commandAddress, (ulong)commandLength))
+            {
+                // This backend's host reads the stream from guest memory itself and is handed no
+                // copy (the copy was rented, filled, scanned for tables and then dropped unread on
+                // every submit): the submit only answers for the range being mapped, as the copy did.
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
-            var registerTables = CaptureSubmittedTables(ctx, commandAddress, commandBytes.AsSpan(0, commandLength));
-            var snapshots = CaptureSubmittedGeometry(ctx, gpuState, commandAddress, dwordCount);
             SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.GeometryCaptureFinished,
                 0, gpuState.SubmissionSequence + 1, commandAddress, dwordCount);
             if (profileEnabled)
@@ -102,7 +115,7 @@ public static partial class AgcExports
                 commandAddress,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                new SubmittedCommandBuffer(commandBytes, snapshots, registerTables) { Length = commandLength, Pooled = true }, out preparation))
+                submitted, out preparation))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
             }
