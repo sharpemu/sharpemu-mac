@@ -198,10 +198,18 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
 
         public bool TryEnterBackingAliasAccess() => AliasAccess;
 
+        // Off unless a test sets it: guest [Start, End) moved to backing bytes Delta further on, as a remap would.
+        public (ulong Start, ulong End, ulong Delta) Remap { get; set; }
+
         public bool TryResolveBackingAlias(ulong address, ulong size, out ulong alias)
         {
             var crossesView = ViewBoundary != 0 && address < ViewBoundary && address + size > ViewBoundary;
             alias = Contains(address, size) && !crossesView ? (ulong)_block + (address - GuestBase) : 0;
+            if (alias != 0 && address >= Remap.Start && address + size <= Remap.End)
+            {
+                alias += Remap.Delta;
+            }
+
             return alias != 0;
         }
 
@@ -245,6 +253,8 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
         public bool AliasAccess { set => _backing.AliasAccess = value; }
 
         public ulong ViewBoundary { set => _backing.ViewBoundary = value; }
+
+        public (ulong Start, ulong End, ulong Delta) Remap { set => _backing.Remap = value; }
 
         public static ImageRequest Request(ulong address, ImageRole role)
         {

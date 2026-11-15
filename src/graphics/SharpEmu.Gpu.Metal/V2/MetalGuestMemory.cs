@@ -728,10 +728,15 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     /// The window a binding of the range reads and writes in place; false when no one
     /// window covers it and it has to be staged (<see cref="Stage"/>).
     /// </summary>
-    public bool TryResolveInPlace(ulong gpuVa, ulong size, out MetalGuestRange range)
+    public bool TryResolveInPlace(ulong gpuVa, ulong size, out MetalGuestRange range) =>
+        TryResolveInPlace(gpuVa, size, out range, out _);
+
+    /// <summary><see cref="TryResolveInPlace(ulong, ulong, out MetalGuestRange)"/>, with the backing alias the range was placed by.</summary>
+    public bool TryResolveInPlace(ulong gpuVa, ulong size, out MetalGuestRange range, out ulong alias)
     {
         range = default;
-        if (StageEverything || !TryResolveWindow(gpuVa, size, out range))
+        alias = 0;
+        if (StageEverything || !TryResolveWindow(gpuVa, size, out range, out alias))
         {
             return false;
         }
@@ -739,6 +744,26 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         MetalGpuReferenceCensus.Mark(gpuVa, size);
         return true;
     }
+
+    /// <summary>
+    /// What an in-place answer depends on besides the range's backing alias (MetalReadBindingMemo): the submission
+    /// (windows are pinned and touched per command buffer, and a pinned window keeps its cut and its buffer until the
+    /// next one), the window cuts (a window's buffer is only ever replaced by a cut change, MetalWindowPartition.Replace)
+    /// and the single-copy holes and stale windows (each change moves the trap version). Read on the worker, as the
+    /// window memo reads them.
+    /// </summary>
+    internal (ulong Serial, long Partition, long Trap) InPlaceStamp =>
+        (Volatile.Read(ref _submissionSerial), _partition.Version, Volatile.Read(ref _trapVersion));
+
+    /// <summary>
+    /// Whether <see cref="TryResolveInPlace"/> of a range that translates to <paramref name="alias"/>, resolved in
+    /// place earlier at the current <see cref="InPlaceStamp"/>, would give the same window range now and do nothing
+    /// else: nothing stages everything, no trap records bindings, and no chunk of the range is released (the window
+    /// memo's own conditions; with them the full path restores, fills and places nothing).
+    /// </summary>
+    internal bool InPlaceAnswerStands(ulong alias, ulong size) =>
+        !StageEverything && Trap is null && InAlias(alias, size) &&
+        !(_singleCopy is { } singleCopy && singleCopy.AnyReleased(alias - _aliasBase, size));
 
     /// <summary>True when the range is a window's own bytes - guest memory - rather than a ring copy.</summary>
     public bool IsInPlace(in MetalGuestRange range)
@@ -1146,12 +1171,15 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             new WindowMemoEntry(window, coverStart, coverEnd, _submissionSerial, version, _trapVersion));
     }
 
-    private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved, bool warn = true)
+    private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved, bool warn = true) =>
+        TryResolveWindow(gpuVa, size, out resolved, out _, warn);
+
+    private bool TryResolveWindow(ulong gpuVa, ulong size, out MetalGuestRange resolved, out ulong alias, bool warn = true)
     {
-        var ok = TryResolveWindowCore(gpuVa, size, out resolved, warn, WindowMemoEnabled);
+        var ok = TryResolveWindowCore(gpuVa, size, out resolved, out alias, warn, WindowMemoEnabled);
         if (WindowMemoVerify && WindowMemoEnabled)
         {
-            var fullOk = TryResolveWindowCore(gpuVa, size, out var full, warn: false, useMemo: false);
+            var fullOk = TryResolveWindowCore(gpuVa, size, out var full, out _, warn: false, useMemo: false);
             if (ok != fullOk || (ok && resolved != full))
             {
                 throw GpuFatal.Fatal(
@@ -1163,10 +1191,11 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         return ok;
     }
 
-    private bool TryResolveWindowCore(ulong gpuVa, ulong size, out MetalGuestRange resolved, bool warn, bool useMemo)
+    private bool TryResolveWindowCore(ulong gpuVa, ulong size, out MetalGuestRange resolved, out ulong alias, bool warn, bool useMemo)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.GuestWindowResolve);
         resolved = default;
+        alias = 0;
         if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa)
         {
             return false;
@@ -1175,7 +1204,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         // A range that crosses the edge between two mappings of one allocation is
         // still contiguous in the backing, so it still has one window address; the
         // single-mapping test alone sent those to the staging ring.
-        if (!_backing.TryResolveBackingAliasSpan(gpuVa, size, out var alias) || !InAlias(alias, size))
+        if (!_backing.TryResolveBackingAliasSpan(gpuVa, size, out alias) || !InAlias(alias, size))
         {
             if (warn)
             {

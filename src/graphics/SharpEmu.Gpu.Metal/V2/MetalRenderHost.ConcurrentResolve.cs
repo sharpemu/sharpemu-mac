@@ -168,7 +168,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             $"dispatch_saved_ms={computeSavedMs.ToString("F1", culture)}";
         return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
-            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()}{dispatches}{FormatPacketCounters()} {own}{TakeDrainCallers()}";
+            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()}{dispatches}{FormatPacketCounters()} {own} {TakeOwnerTestCounters()}{TakeDrainCallers()}";
     }
 
     private static string FormatProviderRefusals(long[] refused) =>
@@ -194,7 +194,115 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     private static readonly bool ConcurrentWordLines =
         Environment.GetEnvironmentVariable("SHARPEMU_CONCURRENT_WORD_LINES") != "0";
 
-    internal sealed class ConcurrentAssumptions((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
+    // SHARPEMU_CONCURRENT_OWNED_LINES=0 tests a page found owned again for every word read in it, then the word.
+    // A page found owned is remembered for the rest of the resolution (a ring beside the clean pages), and in it
+    // the 256-byte line of a word is tested before the word: a clean line is recorded once and its words are read
+    // from it, and only the words of an owned line are tested one by one. Demon's Souls keeps a pending GPU write
+    // in its descriptor page, so each of the ~45 words a stage reads paid a page test and a word test.
+    private static readonly bool ConcurrentOwnedLinesDefault =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_CONCURRENT_OWNED_LINES");
+
+    internal bool ConcurrentOwnedLines { get; set; } = ConcurrentOwnedLinesDefault;
+
+    // SHARPEMU_CONCURRENT_SCOPED_SERIAL=0 asks the GPU for the completed serial (a message send) at every
+    // ownership test of a resolution and of the worker's re-check of one. With it on, a resolution and a re-check
+    // each read it once, at their first test that needs it. A serial only grows, so an older one reports more
+    // writes pending, never fewer: an answer it gives is owned where a newer serial may say clean, never the
+    // other way (the same argument as the worker's scoped serial, SHARPEMU_METAL_V2_SCOPED_SERIAL).
+    private static readonly bool ConcurrentScopedSerialDefault =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_CONCURRENT_SCOPED_SERIAL");
+
+    internal bool ConcurrentScopedSerial { get; set; } = ConcurrentScopedSerialDefault;
+
+    // What an ownership test costs, counted where it runs (a resolution, a re-check) and added to the host's
+    // totals once per resolution or re-check, for the PERF line: owner_tests=(...).
+    internal enum OwnerTestCounter
+    {
+        Page,
+        Line,
+        Word,
+        Recheck,
+        ImageLock,
+        SerialRead,
+        OverlayCall,
+    }
+
+    private static readonly string[] OwnerTestCounterNames = ["page", "line", "word", "recheck", "image_locks", "serial_reads", "overlay_calls"];
+
+    private readonly long[] _ownerTests = new long[OwnerTestCounterNames.Length];
+
+    /// <summary>
+    /// The serial the ownership tests of one resolution or one re-check use, and what they cost. Used by one
+    /// thread at a time.
+    /// </summary>
+    internal class ConcurrentOwnerScope
+    {
+        private readonly Func<ulong> _signaled;
+        private ulong _serial;
+        private bool _serialKnown;
+
+        public ConcurrentOwnerScope(Func<ulong> signaled)
+        {
+            _signaled = signaled;
+            Serial = ReadSerial;
+        }
+
+        // Read once per scope while Scoped is set; every call reads it again otherwise.
+        public bool Scoped;
+
+        // The completed serial, for IsGpuWritePendingConcurrent and the overlays' Coverage.
+        public readonly Func<ulong> Serial;
+
+        public readonly long[] Counters = new long[OwnerTestCounterNames.Length];
+
+        public void Count(OwnerTestCounter counter) => Counters[(int)counter]++;
+
+        // A new scope: the next test that needs the serial reads it.
+        public void ForgetSerial() => _serialKnown = false;
+
+        private ulong ReadSerial()
+        {
+            if (Scoped && _serialKnown)
+            {
+                return _serial;
+            }
+
+            Counters[(int)OwnerTestCounter.SerialRead]++;
+            _serial = _signaled();
+            _serialKnown = true;
+            return _serial;
+        }
+    }
+
+    // Adds a scope's counters to the host's totals and clears them.
+    private void FlushOwnerTests(ConcurrentOwnerScope scope)
+    {
+        var counters = scope.Counters;
+        for (var index = 0; index < counters.Length; index++)
+        {
+            if (counters[index] != 0)
+            {
+                Interlocked.Add(ref _ownerTests[index], counters[index]);
+                counters[index] = 0;
+            }
+        }
+    }
+
+    internal string TakeOwnerTestCounters()
+    {
+        var builder = new System.Text.StringBuilder("owner_tests=(");
+        for (var index = 0; index < _ownerTests.Length; index++)
+        {
+            builder.Append(index == 0 ? string.Empty : ",").Append(OwnerTestCounterNames[index]).Append('=')
+                .Append(Interlocked.Exchange(ref _ownerTests[index], 0));
+        }
+
+        return builder.Append(')').ToString();
+    }
+
+    internal sealed class ConcurrentAssumptions(
+        (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions, Func<ulong> signaled)
+        : ConcurrentOwnerScope(signaled)
     {
         public readonly List<(ConcurrentQuery Query, ulong Address, ulong Size, bool Owned)> Answers = new();
 
@@ -209,8 +317,19 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue];
         private int _nextCleanPage;
 
-        // The last line of a clean page read whole for word reads (TryReadGuestWordConcurrent): the words
-        // after it in the line are answered from it, under the clean-page answer already recorded.
+        // The last pages found owned (ConcurrentOwnedLines). Not an answer: nothing is recorded for them, and a
+        // read in one is answered by its line or by itself, as it would be after testing the page again.
+        private readonly ulong[] _ownedPages = [ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue];
+        private int _nextOwnedPage;
+
+        // The last lines of owned pages tested, each with its answer (LineOwnedBit): a clean one was recorded.
+        private const ulong LineOwnedBit = 2;
+        private readonly ulong[] _lines = [ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue,
+            ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue];
+        private int _nextLine;
+
+        // The last line of a clean page or a clean line read whole for word reads (TryReadGuestWordConcurrent):
+        // the words after it in the line are answered from it, under the clean answer already recorded.
         public ulong WordLine = ulong.MaxValue;
         public readonly byte[] WordLineBytes = new byte[ConcurrentWordLineBytes];
 
@@ -221,7 +340,41 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             Versions = versions;
             Array.Fill(_cleanPages, ulong.MaxValue);
             _nextCleanPage = 0;
+            Array.Fill(_ownedPages, ulong.MaxValue);
+            _nextOwnedPage = 0;
+            Array.Fill(_lines, ulong.MaxValue);
+            _nextLine = 0;
             WordLine = ulong.MaxValue;
+            ForgetSerial();
+        }
+
+        public bool IsOwnedPage(ConcurrentQuery query, ulong page) => Array.IndexOf(_ownedPages, page | (ulong)query) >= 0;
+
+        public void NoteOwnedPage(ConcurrentQuery query, ulong page)
+        {
+            _ownedPages[_nextOwnedPage] = page | (ulong)query;
+            _nextOwnedPage = (_nextOwnedPage + 1) & (_ownedPages.Length - 1);
+        }
+
+        // Null when the line has not been tested in this resolution (or has left the ring).
+        public bool? LineOwned(ConcurrentQuery query, ulong line)
+        {
+            var key = line | (ulong)query;
+            foreach (var entry in _lines)
+            {
+                if ((entry & ~LineOwnedBit) == key)
+                {
+                    return (entry & LineOwnedBit) != 0;
+                }
+            }
+
+            return null;
+        }
+
+        public void NoteLine(ConcurrentQuery query, ulong line, bool owned)
+        {
+            _lines[_nextLine] = line | (ulong)query | (owned ? LineOwnedBit : 0);
+            _nextLine = (_nextLine + 1) & (_lines.Length - 1);
         }
 
         public bool IsCleanPage(ConcurrentQuery query, ulong page)
@@ -291,12 +444,17 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var writeLogVersion = _gpuWrites.WriteLogVersion;
         if (pooled is null)
         {
-            _concurrentAssumptions = new ConcurrentAssumptions(OwnershipVersions()) { WriteLogVersion = writeLogVersion };
+            _concurrentAssumptions = new ConcurrentAssumptions(OwnershipVersions(), _signaledSerialReader ??= SignaledSerial)
+            {
+                WriteLogVersion = writeLogVersion,
+                Scoped = ConcurrentScopedSerial,
+            };
             return;
         }
 
         pooled.Reset(OwnershipVersions());
         pooled.WriteLogVersion = writeLogVersion;
+        pooled.Scoped = ConcurrentScopedSerial;
         _concurrentAssumptions = pooled;
     }
 
@@ -331,6 +489,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     {
         var assumptions = _concurrentAssumptions ?? throw new InvalidOperationException("No concurrent resolution is open.");
         _concurrentAssumptions = null;
+        FlushOwnerTests(assumptions);
         return assumptions;
     }
 
@@ -395,16 +554,42 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             return true;
         }
 
-        foreach (var (query, address, size, owned) in assumptions.Answers)
+        // One serial for the whole re-check (ConcurrentScopedSerial): an older serial can only turn a clean
+        // answer owned, so a re-check that passes with it would pass with every newer one.
+        var scope = t_recheckScope;
+        if (scope is null || !ReferenceEquals(t_recheckHost, this))
         {
-            if (IsOwnedConcurrent(query, address, size) != owned)
-            {
-                return false;
-            }
+            scope = t_recheckScope = new ConcurrentOwnerScope(_signaledSerialReader ??= SignaledSerial);
+            t_recheckHost = this;
         }
 
-        return true;
+        scope.Scoped = ConcurrentScopedSerial;
+        scope.ForgetSerial();
+        try
+        {
+            foreach (var (_, address, size, owned) in assumptions.Answers)
+            {
+                scope.Count(OwnerTestCounter.Recheck);
+                if ((ConcurrentOwner(address, size, scope) != AbandonCause.None) != owned)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            FlushOwnerTests(scope);
+        }
     }
+
+    // The re-check's scope, per thread that takes resolutions.
+    [ThreadStatic]
+    private static ConcurrentOwnerScope? t_recheckScope;
+
+    [ThreadStatic]
+    private static MetalRenderHost? t_recheckHost;
 
     // On the worker, for a dispatch's resolution that may have read guest memory before the dispatches ahead of it ran:
     // as IsConcurrentResolveStillCurrent, and no GPU write logged since it began covers a range it read. A write those
@@ -431,20 +616,53 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // is checked first: the worker records a write's ownership before it lets go of the queued range,
     // so the range found gone means the ownership below is already there.
     private bool IsOwnedConcurrent(ConcurrentQuery query, ulong address, ulong size) =>
-        ConcurrentOwner(address, size) != AbandonCause.None;
+        ConcurrentOwner(address, size, scope: null) != AbandonCause.None;
 
-    // The first owner of the range, in the order the tests above are cheapest to fail.
-    private AbandonCause ConcurrentOwner(ulong address, ulong size) =>
-        PendingCommandWriteHolds(address, size) ? AbandonCause.Queued
-        : _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size) ? AbandonCause.Image
-        : IsGpuWritePendingConcurrent(address, size) ? AbandonCause.GpuWrite
-        : _cpOverlay.Count != 0 &&
-            _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None
-            ? AbandonCause.CommandProcessor
-        : _labelOverlay.Count != 0 &&
-            _labelOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None
-            ? AbandonCause.Label
-        : AbandonCause.None;
+    // The first owner of the range, in the order the tests above are cheapest to fail. A scope gives the
+    // completed serial (read once while it is scoped) and counts what the tests cost; without one, each test
+    // that needs the serial asks the GPU for it.
+    private AbandonCause ConcurrentOwner(ulong address, ulong size, ConcurrentOwnerScope? scope)
+    {
+        if (PendingCommandWriteHolds(address, size))
+        {
+            return AbandonCause.Queued;
+        }
+
+        if (_imageCache.MayOwn(address, size))
+        {
+            scope?.Count(OwnerTestCounter.ImageLock);
+            if (_imageCache.HasGpuModifiedImageBytes(address, size))
+            {
+                return AbandonCause.Image;
+            }
+        }
+
+        var serial = scope?.Serial ?? (_signaledSerialReader ??= SignaledSerial);
+        if (IsGpuWritePendingConcurrent(address, size, serial))
+        {
+            return AbandonCause.GpuWrite;
+        }
+
+        if (_cpOverlay.Count != 0)
+        {
+            scope?.Count(OwnerTestCounter.OverlayCall);
+            if (_cpOverlay.Coverage(address, size, serial) != MetalOverlayCoverage.None)
+            {
+                return AbandonCause.CommandProcessor;
+            }
+        }
+
+        if (_labelOverlay.Count != 0)
+        {
+            scope?.Count(OwnerTestCounter.OverlayCall);
+            if (_labelOverlay.Coverage(address, size, serial) != MetalOverlayCoverage.None)
+            {
+                return AbandonCause.Label;
+            }
+        }
+
+        return AbandonCause.None;
+    }
 
     private bool PendingCommandWriteHolds(ulong address, ulong size) =>
         _commandThread is { } thread && ParallelProgramPrefetch.ResolvingJob is var job and >= 0 &&
@@ -469,27 +687,65 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                 return false;
             }
 
-            if (CrossDrawCleanPages && IsCrossDrawClean(query, page, assumptions.Versions))
+            var ownedLines = ConcurrentOwnedLines;
+            if (!ownedLines || !assumptions.IsOwnedPage(query, page))
             {
-                assumptions.Record(query, page, ConcurrentPageBytes, false);
-                assumptions.NoteCleanPage(query, page);
-                return false;
-            }
-
-            if (!IsOwnedConcurrent(query, page, ConcurrentPageBytes))
-            {
-                assumptions.Record(query, page, ConcurrentPageBytes, false);
-                assumptions.NoteCleanPage(query, page);
-                if (CrossDrawCleanPages)
+                if (CrossDrawCleanPages && IsCrossDrawClean(query, page, assumptions.Versions))
                 {
-                    NoteCrossDrawClean(query, page, assumptions.Versions);
+                    assumptions.Record(query, page, ConcurrentPageBytes, false);
+                    assumptions.NoteCleanPage(query, page);
+                    return false;
                 }
 
-                return false;
+                assumptions.Count(OwnerTestCounter.Page);
+                if (ConcurrentOwner(page, ConcurrentPageBytes, assumptions) == AbandonCause.None)
+                {
+                    assumptions.Record(query, page, ConcurrentPageBytes, false);
+                    assumptions.NoteCleanPage(query, page);
+                    if (CrossDrawCleanPages)
+                    {
+                        NoteCrossDrawClean(query, page, assumptions.Versions);
+                    }
+
+                    return false;
+                }
+
+                // Remembered for the rest of the resolution, and not recorded: an owned page answers nothing
+                // itself. Should it turn clean meanwhile, its reads keep taking the finer tests below, which only
+                // ever find less clean than the page would.
+                if (ownedLines)
+                {
+                    assumptions.NoteOwnedPage(query, page);
+                }
+            }
+
+            // In an owned page, the read's line first. Every test is an overlap test, so a clean line is clean for
+            // every range inside it; its answer is recorded like a clean page's and checked again at the take.
+            // A range longer than a line, or one that leaves its line, is in no single line: tested as itself.
+            var line = address & ~((ulong)ConcurrentWordLineBytes - 1);
+            if (ownedLines && size <= ConcurrentWordLineBytes && address - line <= ConcurrentWordLineBytes - size)
+            {
+                var lineOwned = assumptions.LineOwned(query, line);
+                if (lineOwned is null)
+                {
+                    assumptions.Count(OwnerTestCounter.Line);
+                    lineOwned = ConcurrentOwner(line, ConcurrentWordLineBytes, assumptions) != AbandonCause.None;
+                    assumptions.NoteLine(query, line, lineOwned.Value);
+                    if (!lineOwned.Value)
+                    {
+                        assumptions.Record(query, line, ConcurrentWordLineBytes, false);
+                    }
+                }
+
+                if (!lineOwned.Value)
+                {
+                    return false;
+                }
             }
         }
 
-        _lastConcurrentOwner = ConcurrentOwner(address, size);
+        assumptions.Count(OwnerTestCounter.Word);
+        _lastConcurrentOwner = ConcurrentOwner(address, size, assumptions);
         var owned = _lastConcurrentOwner != AbandonCause.None;
         assumptions.Record(query, address, size, owned);
         return owned;
@@ -554,14 +810,14 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     // A recorded GPU write the GPU has not finished covers these bytes. The coarse bounds test first, then
     // the records themselves, read only while the worker leaves them alone (a few tries, else pending).
-    private bool IsGpuWritePendingConcurrent(ulong address, ulong size)
+    private bool IsGpuWritePendingConcurrent(ulong address, ulong size, Func<ulong>? completedSerial = null)
     {
         if (!_gpuWrites.MayCover(address, size))
         {
             return false;
         }
 
-        var completed = SignaledSerial();
+        var completed = completedSerial is null ? SignaledSerial() : completedSerial();
         for (var attempt = 0; attempt < 4; attempt++)
         {
             if (_gpuWrites.TryPendingSerialSnapshot(address, size, completed, out var pending))
@@ -610,11 +866,13 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             throw new GpuFatal.AbandonedWorkException($"The resolution reads GPU-owned memory: address=0x{address:X16}.");
         }
 
-        // The whole page answered clean: the rest of the line is read with this word. The line lies within the
-        // page, which an aligned line of a power of two below the page size always does.
+        // The whole page, or the whole line of an owned page, answered clean: the rest of the line is read with
+        // this word. The line lies within the page, which an aligned line of a power of two below the page size
+        // always does.
         var line = address & ~lineMask;
         if (ConcurrentWordLines && (address & 3) == 0 &&
-            assumptions.IsCleanPage(ConcurrentQuery.Word, address & ~(ConcurrentPageBytes - 1)) &&
+            (assumptions.IsCleanPage(ConcurrentQuery.Word, address & ~(ConcurrentPageBytes - 1)) ||
+             (ConcurrentOwnedLines && assumptions.LineOwned(ConcurrentQuery.Word, line) == false)) &&
             _backing.TryReadBacking(line, assumptions.WordLineBytes))
         {
             assumptions.WordLine = line;

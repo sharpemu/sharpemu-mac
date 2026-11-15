@@ -205,6 +205,9 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
     private static readonly MethodInfo PrefetchCounters =
         typeof(MetalRenderHost).GetMethod("FormatPrefetchCounters", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
+    private static readonly MethodInfo ReadBindingCounters =
+        typeof(MetalRenderHost).GetMethod("TakeReadBindingCounters", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
     [DllImport("libSystem.dylib")]
     private static extern ulong clock_gettime_nsec_np(int clockId);
 
@@ -455,6 +458,8 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             }
 
             var prefetch = (string)PrefetchCounters.Invoke(rig.Host, null)!;
+            // Read-only bindings answered from the one before (MetalReadBindingMemo) over every round, warm-up included.
+            var bindings = (string)ReadBindingCounters.Invoke(rig.Host, null)!;
             var checksum = 0xCBF29CE484222325UL;
             void Fold(ulong address, int count)
             {
@@ -495,6 +500,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 gen0CollectionsPerThousandItems = collections * 1000.0 / (rounds * items),
                 checksum = $"{checksum:X16}",
                 counters = prefetch,
+                bindings,
                 phaseMicroseconds = phaseTotals.Where(pair => pair.Value / rounds >= 0.005)
                     .OrderByDescending(pair => pair.Value).ToDictionary(pair => pair.Key, pair => Math.Round(pair.Value / rounds, 3)),
             });

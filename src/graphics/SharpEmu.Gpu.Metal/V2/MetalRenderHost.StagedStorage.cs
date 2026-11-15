@@ -20,8 +20,14 @@ internal sealed partial class MetalRenderHost
     /// range, otherwise a staged copy that sees the GPU's earlier writes and whose stores
     /// reach guest memory (<see cref="MetalStagedStorage"/>).
     /// </summary>
-    internal MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written, bool computeStage = false)
+    internal MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written, bool computeStage = false) =>
+        ResolveStorageBuffer(address, size, written, computeStage, out _);
+
+    // inPlaceAlias: the backing alias MetalGuestMemory.TryResolveInPlace placed the range by when the range is its
+    // window, else 0 (MetalReadBindingMemo).
+    private MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written, bool computeStage, out ulong inPlaceAlias)
     {
+        inPlaceAlias = 0;
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageDeferredLabels);
         OrderAfterDeferredCopies(address, size);
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageSharedLookup);
@@ -34,8 +40,9 @@ internal sealed partial class MetalRenderHost
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageStoreOrder);
         OrderAfterStagedStores(address, size);
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageBufferResolve);
-        if (_guestMemory.TryResolveInPlace(address, size, out var window))
+        if (_guestMemory.TryResolveInPlace(address, size, out var window, out var alias))
         {
+            inPlaceAlias = alias;
             return window;
         }
 
