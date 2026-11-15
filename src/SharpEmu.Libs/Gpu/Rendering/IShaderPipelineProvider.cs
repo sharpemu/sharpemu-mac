@@ -344,4 +344,4 @@ public interface IShaderPipelineProvider
 }
 
 /// <summary>See <see cref="IShaderPipelineProvider.ProgramState"/>.</summary>
-public readonly record struct ProgramStateStamp(long ContentEpoch, long DeviceData, long Tables);
+public readonly record struct ProgramStateStamp(long ContentEpoch, long DeviceData, long Tables, long Registrations = 0);

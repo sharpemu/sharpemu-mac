@@ -341,7 +341,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
     }
 
-    public ProgramStateStamp ProgramState => new(_programs.ContentEpoch, DeviceDataLoads.Generation, _vertexTables.Generation);
+    // Shader header registrations are in the stamp too: a header registered at a code address changes what a lookup there
+    // finds, and it moves no content epoch.
+    public ProgramStateStamp ProgramState =>
+        new(_programs.ContentEpoch, DeviceDataLoads.Generation, _vertexTables.Generation, ShaderHeaderRegistry.Registrations);
 
     public string DescribeProgramState() =>
         $"content_epoch={_programs.ContentEpoch} device_data={DeviceDataLoads.Generation} " +
