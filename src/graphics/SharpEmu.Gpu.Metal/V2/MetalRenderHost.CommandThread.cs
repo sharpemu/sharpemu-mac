@@ -322,6 +322,7 @@ internal sealed partial class MetalRenderHost
             _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None)
         {
             _cpOverlay.Apply(address, destination);
+            NotePendingAnswer(address, destination.Length);
         }
 
         return true;

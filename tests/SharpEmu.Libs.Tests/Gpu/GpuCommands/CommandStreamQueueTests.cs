@@ -452,6 +452,150 @@ public sealed class CommandStreamQueueTests
     /// memory the guest had already reused. On a host that lands command-processor writes in
     /// order the store is recorded behind the label instead, and a wait on it is still met.
     /// </summary>
+    /// <summary>
+    /// A command-processor store is causal only when its queue, since its previous store, read a value not yet landed
+    /// (a wait met by a recorded label) or flushed, wrote back or acquired: only then does it say the work before it
+    /// is done, and the host keeps it CPU-visible behind the labels before it.
+    /// </summary>
+    [Fact]
+    public void AStoreIsCausalOnlyAfterAPendingReadOrABarrierOnItsQueue()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.DefersCommandProcessorWrites = true;
+        host.PendingLabelTick = 5;
+        var plain = Label + 0x10;
+        var afterWait = Label + 0x20;
+        var next = Label + 0x30;
+        var afterFlush = Label + 0x40;
+        var afterAcquire = Label + 0x50;
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1,
+            WriteLabel(plain, 1),
+            ReleaseMemoryInterrupt(Label, 1), WaitEqual(Label, 1), WriteLabel(afterWait, 2),
+            WriteLabel(next, 3),
+            StreamRunner.Packet(PacketOpcode.EventWrite, 0x07u | (4u << 8)), WriteLabel(afterFlush, 4));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+
+        queue.GetInterpreter(0).AcquireMemory(1u << 23, 0);
+        Enqueue(host, queue, Graphics, 2, WriteLabel(afterAcquire, 5));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+
+        Assert.Equal(
+            [(plain, false), (afterWait, true), (next, false), (afterFlush, true), (afterAcquire, true)],
+            host.CommandProcessorWriteCausal);
+    }
+
+    // A wait on another queue's label still in the pending table is met by the recorded value: the store after it
+    // depends on work not yet done, so it is causal.
+    [Fact]
+    public void AWaitOnAnotherQueuesPendingLabelMarksTheNextStoreCausal()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.DefersCommandProcessorWrites = true;
+        host.PendingLabelTick = 5;
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, ReleaseMemoryInterrupt(Label, 1));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+
+        EnqueueCompute(host, queue, 0x20, Compute, 2, WriteLabel(Label + 0x10, 1), WaitEqual(Label, 1), WriteLabel(Label + 0x20, 2));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal([(Label + 0x10, false), (Label + 0x20, true)], host.CommandProcessorWriteCausal);
+    }
+
+    // A wait that parks and resumes once the label landed reads memory, not the pending table, and leaves the next store
+    // plain. That is sound because a label leaves the pending table only in NotifyCompletedGpuTick, after its command
+    // buffer completed, when every store before it is already published to the CPU: nothing the store could overtake
+    // is still owed.
+    [Fact]
+    public void AWaitThatParksAndResumesAfterTheLabelLandedLeavesTheNextStorePlain()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.DefersCommandProcessorWrites = true;
+        host.PendingLabelTick = 5;
+        host.WriteDword(Label, 0);
+        EnqueueCompute(host, queue, 0x20, Compute, 1, WaitEqual(Label, 1), WriteLabel(Label + 0x20, 2));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+
+        // The label is recorded, its command buffer completes, and it lands.
+        queue.GetInterpreter(0).PendingLabelRecorded!(Label, 4, 1);
+        queue.NotifyCompletedGpuTick(5);
+        host.WriteDword(Label, 1);
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal([(Label + 0x20, false)], host.CommandProcessorWriteCausal);
+    }
+
+    // A COND_EXEC whose flag the GPU still owes, taken as zero, skips packets on a value not yet landed: the store
+    // after it is causal.
+    [Fact]
+    public void AConditionalExecuteOverAnOwedFlagMarksTheNextStoreCausal()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersCommandProcessorWrites = true;
+        host.TakesOwedOperandsAsZero = true;
+        var flag = Label + 0x300;
+        host.WriteDword(flag, 0);
+        for (var read = 0; read < 32; read++)
+        {
+            ConditionalExecuteSpeculation.Observe(flag, 0);
+        }
+
+        Assert.True(ConditionalExecuteSpeculation.ShouldTakeAsZero(flag));
+        host.OwedOperandWrites.Add((flag, 4));
+        var skipped = WriteLabel(Label + 0x30, 9);
+        Enqueue(host, queue, Graphics, 1,
+            WriteLabel(Label + 0x10, 1),
+            StreamRunner.Packet(PacketOpcode.ConditionalExecute, StreamRunner.Low(flag), StreamRunner.High(flag), 0, (uint)skipped.Length),
+            skipped,
+            WriteLabel(Label + 0x20, 2));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal([(Label + 0x10, false), (Label + 0x20, true)], host.CommandProcessorWriteCausal);
+    }
+
+    // A COPY_DATA from a label still pending copies a value not yet landed: the store after it is causal.
+    [Fact]
+    public void ACopyDataFromAPendingLabelMarksTheNextStoreCausal()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersEndOfPipeLabels = true;
+        host.DefersCommandProcessorWrites = true;
+        host.PendingLabelTick = 5;
+        host.WriteDword(Label, 0);
+        var copy = StreamRunner.Packet(PacketOpcode.CopyData, 2u | (2u << 8),
+            StreamRunner.Low(Label), StreamRunner.High(Label), StreamRunner.Low(Label + 0x40), StreamRunner.High(Label + 0x40));
+        Enqueue(host, queue, Graphics, 1,
+            ReleaseMemoryInterrupt(Label, 1), WriteLabel(Label + 0x10, 1), copy, WriteLabel(Label + 0x20, 2));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal((Label + 0x20, true), host.CommandProcessorWriteCausal[^1]);
+        Assert.DoesNotContain((Label + 0x40, false), host.CommandProcessorWriteCausal);
+    }
+
+    // =verify: a read answered from bytes not yet landed, then a write its queue does not flag causal, is a suspect.
+    [Fact]
+    public void AnUnflaggedWriteAfterAPendingAnswerIsASuspectUnderVerify()
+    {
+        var (host, queue) = NewQueue();
+        host.DefersCommandProcessorWrites = true;
+        var verify = GpuCommandInterpreter.CpWriteOrderVerify;
+        GpuCommandInterpreter.CpWriteOrderVerify = true;
+        try
+        {
+            Enqueue(host, queue, Graphics, 1, WriteLabel(Label + 0x10, 1));
+            Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+            _ = GpuCommandInterpreter.TakeCpWriteOrderSuspects();
+            GpuCommandInterpreter.NotePendingAnswer(Label, 4);
+            Enqueue(host, queue, Graphics, 2, WriteLabel(Label + 0x20, 2));
+            Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+            Assert.True(GpuCommandInterpreter.TakeCpWriteOrderSuspects() >= 1);
+        }
+        finally
+        {
+            GpuCommandInterpreter.CpWriteOrderVerify = verify;
+        }
+    }
+
     [Fact]
     public void AStoreAfterAWaitOnARecordedLabelIsRecordedBehindTheLabel()
     {

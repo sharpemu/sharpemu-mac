@@ -930,7 +930,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         var copy = new DeferredLabelCopy(
             staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, bytes, write.Destination,
-            CpuVisible: !LabelBarrierByCacheAction || WritesBackForCpu(write.Kind));
+            CpuVisible: !LabelBarrierByCacheAction || WritesBackForCpu(write.Kind), Kind: LabelCopyKind.EndOfPipe);
         var serial = EncodeOrderedCopy(in copy, write.Destination,
             CommandProcessorWriteHistory.Enabled ? GpuClobberDiagnostics.LandedKind(write.Kind) : null,
             bytes == sizeof(uint) ? (uint)write.Value : write.Value,
@@ -1015,7 +1015,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // what that later work left there.
         // A GPU-produced snapshot may wait for its producer encoder to end, but must
         // never be read on the CPU for label replay before that producer has executed.
-        if ((sourceIsFinal || deferStableGpuResult) &&
+        if (sourceIsFinal && TryEncodeCommandProcessorWritesInEncoder(copies))
+        {
+            // A plain command-processor write lands where it was recorded, as a dispatch in the open compute encoder.
+            serial = SubmissionSerial;
+            if (DsTrace.Gpu)
+            {
+                _dsLabelDeferred = 0;
+            }
+        }
+        else if ((sourceIsFinal || deferStableGpuResult) &&
             (LabelsAtCommit ||
              (MetalV2Diagnostics.DeferLabelWrites && _renderEncoder != 0) ||
              (DefersCopiesInCompute && _computeEncoder != 0)))
@@ -1048,7 +1057,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // A copy that cannot wait lands after the held ones: copies land in stream order.
             if (LabelsAtCommit && _deferredLabelCopies.Count != 0)
             {
-                OrderAfterDeferredCopies(0, ulong.MaxValue);
+                OrderAfterDeferredCopies(0, ulong.MaxValue, LabelLandCause.CannotWait);
             }
 
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.EndOfPipeLabel);
@@ -1184,29 +1193,33 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
     // The hops below are their own methods so the worker's own calls build no closure: a lambda
     // over the parameters makes the compiler allocate its capture at entry of the method that holds it.
-    private void PostCommandProcessorWrite(ulong address, byte[] queued, string kind)
+    private void PostCommandProcessorWrite(ulong address, byte[] queued, string kind, bool causal)
     {
         if (QueueCommandProcessorWrites)
         {
             // Reads overlapping this queued write wait until the worker installed
             // its overlay. Unrelated packets can continue; prefetch's non-draw gate
             // still orders future resource reads after the write.
-            _commandThread!.PostWrite(() => RecordCommandProcessorWrite(address, queued, kind), address, queued, UngatedWrites);
+            _commandThread!.PostWrite(() => RecordCommandProcessorWrite(address, queued, kind, causal), address, queued, UngatedWrites);
         }
         else
         {
-            RunTagged(() => RecordCommandProcessorWrite(address, queued, kind), nameof(RecordCommandProcessorWrite));
+            RunTagged(() => RecordCommandProcessorWrite(address, queued, kind, causal), nameof(RecordCommandProcessorWrite));
         }
     }
 
-    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
+    // A caller that cannot tell whether the write is causal (a DMA fill staged as a write, a test) gets the causal path.
+    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind) =>
+        RecordCommandProcessorWrite(address, source, kind, causal: true);
+
+    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal)
     {
         if (OnCommandThread)
         {
             if (source.IsEmpty) return;
             if (address == 0 || (ulong)source.Length > ulong.MaxValue - address)
                 throw Fatal($"A command-processor write has an invalid range: address=0x{address:X16} bytes={source.Length}.");
-            PostCommandProcessorWrite(address, source.ToArray(), kind);
+            PostCommandProcessorWrite(address, source.ToArray(), kind, causal);
             return;
         }
 
@@ -1221,7 +1234,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             throw Fatal($"A command-processor write has an invalid range: address=0x{address:X16} bytes={source.Length}.");
         }
 
-        if (TryEncodeCommandProcessorWrite(address, source, kind))
+        if (TryEncodeCommandProcessorWrite(address, source, kind, causal))
         {
             Interlocked.Increment(ref _gpuTimedCommandProcessorWrites);
             return;
@@ -1255,7 +1268,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }, lazy ? (address, bytes.Length) : null);
     }
 
-    private bool TryEncodeCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind)
+    private bool TryEncodeCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandProcessorWrite);
         if (!GpuTimedLabels)
@@ -1285,11 +1298,15 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         source.CopyTo(payload);
+        var (cpuVisible, copyKind) = CommandProcessorWriteClass(causal);
         var copy = new DeferredLabelCopy(
-            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length, address);
+            staging.Buffer, staging.Offset, destination.Buffer, destination.Offset, source.Length, address,
+            CpuVisible: cpuVisible, Kind: copyKind);
         var recordHistory = CommandProcessorWriteHistory.Enabled;
+        var held = _deferredLabelCopies.Count;
         var serial = EncodeOrderedCopy(in copy, address, recordHistory ? "landed:" + kind : null,
             recordHistory ? FirstValue(source) : 0, MetalGpuWriteOrigin.Copy, "cp write", kind, size);
+        NoteCommandProcessorWriteHeld(causal, held);
 
         // Parse-time readers see the bytes as written until they land (MetalPendingWriteOverlay).
         using var bookkeepingScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
@@ -1315,7 +1332,10 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// by a completion, the clobber diagnostic - records them one by one before anything has been
     /// recorded. SHARPEMU_GPU_CP_WRITE_BATCH=0 always does.
     /// </remarks>
-    public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
+    public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind) =>
+        RecordCommandProcessorQwords(address, count, strideBytes, value, kind, causal: true);
+
+    public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind, bool causal)
     {
         if (count <= 0) return;
         if (OnCommandThread)
@@ -1328,12 +1348,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 (count == 1 || strideBytes <= (ulong.MaxValue - address - sizeof(ulong)) / (ulong)(count - 1)))
             {
                 var size = (ulong)(count - 1) * strideBytes + sizeof(ulong);
-                _commandThread!.PostQwords(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind), address, size, value,
+                _commandThread!.PostQwords(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind, causal), address, size, value,
                     count == 1 ? sizeof(ulong) : strideBytes, UngatedWrites);
             }
             else
             {
-                RunTagged(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind));
+                RunTagged(() => RecordCommandProcessorQwords(address, count, strideBytes, value, kind, causal));
             }
             return;
         }
@@ -1343,7 +1363,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (count > 1 && strideBytes >= sizeof(ulong) && address != 0 && CommandProcessorWriteBatching.Enabled &&
             !GpuClobberDiagnostics.Enabled &&
             strideBytes <= (ulong.MaxValue - address - sizeof(ulong)) / (ulong)(count - 1) &&
-            TryEncodeCommandProcessorQwords(address, count, strideBytes, value, kind))
+            TryEncodeCommandProcessorQwords(address, count, strideBytes, value, kind, causal))
         {
             Interlocked.Add(ref _gpuTimedCommandProcessorWrites, count);
             _batchedCommandProcessorRuns++;
@@ -1354,7 +1374,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
         for (var index = 0; index < count; index++)
         {
-            RecordCommandProcessorWrite(address + (ulong)index * strideBytes, bytes, kind);
+            RecordCommandProcessorWrite(address + (ulong)index * strideBytes, bytes, kind, causal);
         }
     }
 
@@ -1365,7 +1385,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <summary>Qword runs recorded as one write rather than store by store.</summary>
     internal long BatchedCommandProcessorRuns => _batchedCommandProcessorRuns;
 
-    private bool TryEncodeCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
+    private bool TryEncodeCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind, bool causal)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandProcessorWrite);
         // Declined, not counted: the one-by-one path that follows counts each store it forces.
@@ -1380,6 +1400,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         var copies = _cpBatchCopies.AsSpan(0, count);
+        var (cpuVisible, copyKind) = CommandProcessorWriteClass(causal);
         for (var index = 0; index < count; index++)
         {
             var destination = _guestMemory.ResolveWritable(address + (ulong)index * strideBytes, sizeof(ulong));
@@ -1389,7 +1410,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             }
 
             copies[index] = new DeferredLabelCopy(
-                0, 0, destination.Buffer, destination.Offset, sizeof(ulong), address + (ulong)index * strideBytes);
+                0, 0, destination.Buffer, destination.Offset, sizeof(ulong), address + (ulong)index * strideBytes,
+                CpuVisible: cpuVisible, Kind: copyKind);
         }
 
         var staging = _guestMemory.Allocate((ulong)count * sizeof(ulong), sizeof(ulong), out var payload);
@@ -1408,8 +1430,10 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             };
         }
 
+        var held = _deferredLabelCopies.Count;
         var serial = EncodeOrderedCopies(copies, address, null, 0, MetalGpuWriteOrigin.Copy,
             "cp write", kind, (ulong)count * sizeof(ulong));
+        NoteCommandProcessorWriteHeld(causal, held);
 
         // Parse-time readers see the bytes as written until they land (MetalPendingWriteOverlay).
         using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandCpBookkeeping))
@@ -1620,7 +1644,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         ulong DestinationOffset,
         int Bytes,
         ulong GuestAddress,
-        bool CpuVisible = true);
+        bool CpuVisible = true,
+        LabelCopyKind Kind = LabelCopyKind.Other);
 
     private readonly List<DeferredLabelCopy> _deferredLabelCopies = [];
     private bool _encodingDeferredLabels;
@@ -1690,6 +1715,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             _deferredLabelDestinationLow = Math.Min(_deferredLabelDestinationLow, copy.DestinationOffset);
             _deferredLabelDestinationHigh = Math.Max(_deferredLabelDestinationHigh, copy.DestinationOffset + (ulong)copy.Bytes);
             _deferredLabelCopies.Add(copy);
+            if (copy.Kind is LabelCopyKind.CpWrite or LabelCopyKind.CpCausal)
+            {
+                _heldCpWrites++;
+            }
+
             if (DeferredLabelFilterEnabled)
             {
                 _deferredGuestPages.Add(copy.GuestAddress, (ulong)copy.Bytes);
@@ -1703,6 +1733,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private void ClearHeldLabelCopies()
     {
         _deferredLabelCopies.Clear();
+        _causalCpWriteHeld = false;
+        _heldCpWrites = 0;
         _labelScanEpoch++;
         if (DeferredLabelFilterEnabled)
         {
@@ -1802,10 +1834,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (cpuVisible)
         {
             EncodeEventBarrier(commandBuffer);
+            _labelBarrierKinds[BarrierKindShared]++;
         }
         else
         {
             EncodeDeviceEventBarrier(commandBuffer);
+            _labelBarrierKinds[BarrierKindDevice]++;
         }
 
         Interlocked.Increment(ref _labelBarriers);
@@ -1993,6 +2027,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             if (copy.GuestAddress < address + size && address < copy.GuestAddress + (ulong)copy.Bytes)
             {
                 NoteLabelScan(index + 1 - from);
+                _labelTouchClass = LabelForceIndex(in copy);
                 return true;
             }
         }
@@ -2058,19 +2093,32 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// after the dispatch instead, so the encoder ends here and the copies are encoded at
     /// that boundary. Draws need nothing here; beginning a pass ends the compute encoder.
     /// </summary>
-    internal void OrderAfterDeferredCopies(ulong address, ulong size)
+    internal void OrderAfterDeferredCopies(ulong address, ulong size, LabelLandCause cause = LabelLandCause.Other)
     {
         // A fill the open pass holds is ordered the same way (MetalRenderHost.DeferredFills.cs).
         LandDeferredFillsOver(address, size);
+        _labelTouchClass = -1;
         if (_deferredLabelCopies.Count == 0 || (_computeEncoder == 0 && !LabelsAtCommit) ||
             (size != ulong.MaxValue && !DeferredLabelCopiesTouch(address, size)))
         {
             return;
         }
 
+        if (size != ulong.MaxValue)
+        {
+            NoteLabelForce(size);
+        }
+
         // Held to the commit, a copy whose bytes this work binds lands here instead: the work
         // reads or writes them, and must see the copy, or overwrite it, in stream order.
         _landDeferredLabels = true;
+        _labelLandCause = cause;
+        if (_computeEncoder != 0 && TryLandHeldCopiesInComputeEncoder())
+        {
+            // Copies the CPU need not see first land in the open compute encoder (MetalRenderHost.LabelScatter.cs).
+            return;
+        }
+
         if (_computeEncoder != 0 || _renderEncoder != 0)
         {
             EndEncoders(PassEndCause.Other);
@@ -2079,10 +2127,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         EncodeDeferredLabelCopies();
     }
 
-    private void EncodeDeferredLabelCopies()
+    // boundary: what the landing is counted as when no site asked for it (copies held to encoder boundaries).
+    private void EncodeDeferredLabelCopies(LabelLandCause boundary = LabelLandCause.Other)
     {
-        if (_deferredLabelCopies.Count == 0 || _encodingDeferredLabels)
+        if (_encodingDeferredLabels)
         {
+            return;
+        }
+
+        if (_deferredLabelCopies.Count == 0)
+        {
+            _labelLandCause = LabelLandCause.None;
             return;
         }
 
@@ -2092,14 +2147,16 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         _landDeferredLabels = false;
+        var cause = _labelLandCause == LabelLandCause.None ? boundary : _labelLandCause;
+        _labelLandCause = LabelLandCause.None;
 
         _encodingDeferredLabels = true;
         try
         {
             var copies = _deferredLabelCopies.Count;
-            EncodeLabelCopies(
-                EnsureCommandBuffer(),
-                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies));
+            var held = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies);
+            NoteLabelLanding(held, cause);
+            EncodeLabelCopies(EnsureCommandBuffer(), held);
             ClearHeldLabelCopies();
             // The barrier and the blit encoder are gap the pass profile cannot sample.
             if (PassProfileEnabled)

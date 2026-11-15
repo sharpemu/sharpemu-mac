@@ -1144,6 +1144,7 @@ public sealed class CommandStreamQueue
             if (_pendingLabels.TryGetValue(address, out var label) && label.Size >= (is64Bit ? 8 : 4))
             {
                 value = is64Bit ? label.Value : (uint)label.Value;
+                GpuCommandInterpreter.NotePendingAnswer(address, is64Bit ? 8 : 4);
                 return true;
             }
 
@@ -1151,6 +1152,7 @@ public sealed class CommandStreamQueue
             if (!is64Bit && address >= 4 && _pendingLabels.TryGetValue(address - 4, out label) && label.Size == 8)
             {
                 value = (uint)(label.Value >> 32);
+                GpuCommandInterpreter.NotePendingAnswer(address, 4);
                 return true;
             }
 

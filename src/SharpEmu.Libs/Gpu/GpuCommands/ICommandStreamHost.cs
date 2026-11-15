@@ -362,6 +362,19 @@ public interface ICommandStreamHost
     }
 
     /// <summary>
+    /// <see cref="RecordCommandProcessorWrite(ulong, ReadOnlySpan{byte}, string)"/> from a queue that knows whether the
+    /// write is causal: since that queue's previous one it read a value not yet landed, or flushed, wrote back or
+    /// acquired. Only a causal write says the work before it is done, so only it has to reach the guest no sooner than
+    /// the labels before it; a host that cannot tell them apart treats every write as causal.
+    /// </summary>
+    void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal) =>
+        RecordCommandProcessorWrite(address, source, kind);
+
+    /// <summary><see cref="RecordCommandProcessorQwords(ulong, int, ulong, ulong, string)"/> with the causal flag.</summary>
+    void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind, bool causal) =>
+        RecordCommandProcessorQwords(address, count, strideBytes, value, kind);
+
+    /// <summary>
     /// Writes <paramref name="count"/> copies of one eight-byte value, <paramref name="strideBytes"/>
     /// apart, in record order with deferred labels: the same bytes, in the same order, as
     /// <paramref name="count"/> calls to <see cref="RecordCommandProcessorWrite"/> with nothing between

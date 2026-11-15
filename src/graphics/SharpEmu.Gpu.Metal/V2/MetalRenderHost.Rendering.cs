@@ -1444,6 +1444,7 @@ internal sealed partial class MetalRenderHost
     private nint EnsureComputeEncoder(bool materializeClears)
     {
         NoteRecordedWork();
+        var foldAtOpen = false;
         if (_computeEncoder == 0)
         {
             if (_renderingActive)
@@ -1454,7 +1455,17 @@ internal sealed partial class MetalRenderHost
 
             EndRendering();
             EncodeStagedStores();
-            EncodeDeferredLabelCopies();
+            // Copies that land here and need no shared event land in the encoder this opens, after its fence wait
+            // (MetalRenderHost.LabelScatter.cs), instead of in a copy encoder of their own ahead of it. A clear this
+            // dispatch sees cannot land after them: MaterializePendingClearsForCompute below encodes it through
+            // BeginTransfer, whose EndEncoders lands these copies first (EncodeDeferredLabelCopies), so the fold then
+            // finds none.
+            foldAtOpen = _deferredLabelCopies.Count != 0 && (!LabelsAtCommit || _landDeferredLabels) &&
+                !_encodingDeferredLabels && MayFoldHeldCopies(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies));
+            if (!foldAtOpen)
+            {
+                EncodeDeferredLabelCopies(LabelLandCause.EnsureCompute);
+            }
         }
 
         // Only the clears this dispatch can see are encoded ahead of it; the rest keep
@@ -1497,6 +1508,22 @@ internal sealed partial class MetalRenderHost
         // A new encoder has none of the residency the last one was given.
         ForgetResidentResources();
         _computeEncodersOpened++;
+        if (foldAtOpen && _deferredLabelCopies.Count != 0 && (!LabelsAtCommit || _landDeferredLabels))
+        {
+            if (_labelLandCause == LabelLandCause.None)
+            {
+                _labelLandCause = LabelLandCause.EnsureCompute;
+            }
+
+            if (!TryLandHeldCopiesInComputeEncoder())
+            {
+                // The scatter declined the batch: it lands as before, ahead of an encoder of its own.
+                EndComputeEncoder();
+                EncodeDeferredLabelCopies(LabelLandCause.EnsureCompute);
+                return EnsureComputeEncoder(materializeClears);
+            }
+        }
+
         return _computeEncoder;
     }
 
@@ -2110,7 +2137,7 @@ internal sealed partial class MetalRenderHost
         // Everything held lands ahead of such a dispatch instead.
         if (LabelsAtCommit && _deferredLabelCopies.Count != 0 && _pendingComputePipeline is { PersistentThreads: true })
         {
-            OrderAfterDeferredCopies(0, ulong.MaxValue);
+            OrderAfterDeferredCopies(0, ulong.MaxValue, LabelLandCause.Persistent);
         }
 
         var encoder = EnsureComputeEncoder();
@@ -2214,7 +2241,7 @@ internal sealed partial class MetalRenderHost
         }
 
         // The GPU reads the group counts where the dispatch sits in the stream.
-        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint));
+        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint), LabelLandCause.Indirect);
         TraceIndirectDispatch(argumentsAddress);
         var started = DrawTimingStart();
         var encoder = EnsureComputeEncoder();

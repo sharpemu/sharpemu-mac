@@ -61,6 +61,77 @@ public sealed partial class GpuCommandInterpreter
     private int _lastWriteLength;
     private ulong _lastWritePacket;
 
+    // Since this queue's last command-processor write: a read answered from a value not yet landed, or a partial flush,
+    // cache action or acquire. Either makes the next write a "work before me is done" signal the guest may act on, so the
+    // host keeps it CPU-visible and in its stream position with the labels before it; on the console a plain WRITE_DATA
+    // waits for nothing and publishes nothing for the CPU.
+    private bool _cpWriteCausal;
+
+    private void NoteCausalRead() => _cpWriteCausal = true;
+
+    // SHARPEMU_METAL_V2_CP_WRITE_DEVICE_ORDER=verify (the host sets CpWriteOrderVerify): every read answered from bytes
+    // not yet landed counts where it is answered (the host's unlanded command-processor bytes and held copies, this
+    // queue's pending-label table), on any queue. A write this queue does not flag causal, made after that count moved
+    // since its previous write, is a suspect: a causal read site the interpreter does not flag. The count is global, so
+    // another queue's read can raise a suspect too (a lead, never a miss); reads the GPU makes at execution (indirect
+    // arguments, resources) are not counted.
+    public static bool CpWriteOrderVerify { get; set; }
+
+    private static long _pendingAnswers;
+    private static long _cpWriteOrderSuspects;
+    private static ulong _lastPendingAnswerAddress;
+    private static int _lastPendingAnswerSize;
+    private long _pendingAnswersAtWrite = Interlocked.Read(ref _pendingAnswers);
+
+    /// <summary>A read answered from bytes not yet landed (verify only).</summary>
+    public static void NotePendingAnswer(ulong address, int size)
+    {
+        if (!CpWriteOrderVerify)
+        {
+            return;
+        }
+
+        _lastPendingAnswerAddress = address;
+        _lastPendingAnswerSize = size;
+        Interlocked.Increment(ref _pendingAnswers);
+    }
+
+    /// <summary>Unflagged command-processor writes made after a read answered from bytes not yet landed (verify only).</summary>
+    public static long TakeCpWriteOrderSuspects() => Interlocked.Exchange(ref _cpWriteOrderSuspects, 0);
+
+    private static int _cpWriteOrderSuspectLogged;
+
+    private void EmitOrderingBarrier()
+    {
+        _cpWriteCausal = true;
+        _host.EmitGlobalBarrier();
+    }
+
+    private bool TakeCommandProcessorWriteCausal()
+    {
+        var causal = _cpWriteCausal;
+        _cpWriteCausal = false;
+        if (CpWriteOrderVerify)
+        {
+            var answers = Interlocked.Read(ref _pendingAnswers);
+            if (!causal && answers != _pendingAnswersAtWrite)
+            {
+                Interlocked.Increment(ref _cpWriteOrderSuspects);
+                if (Interlocked.Exchange(ref _cpWriteOrderSuspectLogged, 1) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] command_stream.cp_write_order_suspect queue={QueueId} " +
+                        $"read=0x{_lastPendingAnswerAddress:X16} size={_lastPendingAnswerSize}: a command-processor write " +
+                        "not flagged causal followed a read answered from bytes not yet landed.");
+                }
+            }
+
+            _pendingAnswersAtWrite = answers;
+        }
+
+        return causal;
+    }
+
     // The last packets this interpreter walked, so a stream that leaves its
     // packet boundaries says how it got there instead of only where it stopped.
     private readonly PacketTraceEntry[] _packetTrace = new PacketTraceEntry[32];
@@ -1041,6 +1112,7 @@ public sealed partial class GpuCommandInterpreter
         if (destination.Length is sizeof(uint) or sizeof(ulong) && PendingLabelLookup is { } pending &&
             pending(address, destination.Length == sizeof(ulong), out var labelValue))
         {
+            NoteCausalRead();
             if (destination.Length == sizeof(ulong))
             {
                 BinaryPrimitives.WriteUInt64LittleEndian(destination, labelValue);
