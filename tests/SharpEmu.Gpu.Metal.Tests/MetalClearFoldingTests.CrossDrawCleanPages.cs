@@ -178,6 +178,8 @@ public sealed unsafe partial class MetalClearFoldingTests
         using var rig = new Rig(Device.Value);
         var host = rig.Host;
         host.ConcurrentOwnedLines = true;
+        // Answered from the line's mask otherwise (MetalClearFoldingTests.LineMasks).
+        host.ConcurrentLineMasks = MetalRenderHost.LineMaskMode.Off;
         WriteOwnedPage(rig);
         _ = host.TakeOwnerTestCounters();
         var concurrent = (IConcurrentResolveHost)host;
