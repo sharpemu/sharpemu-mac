@@ -337,6 +337,22 @@ internal sealed class ShaderProgramCache
 
     public ResourceMaterializationCache? Materializations => _materializations;
 
+    // Bumped whenever a program entry is replaced (a re-plan) or a plan refused: a lookup made before may find another
+    // entry now (ShaderPipelineCache's resolve memo).
+    private long _contentEpoch;
+
+    internal long ContentEpoch => Interlocked.Read(ref _contentEpoch);
+
+    // Lookups that linked shader calls or ran a runtime fallback, which a resolve memo hit could not repeat.
+    private long _linkedLookups;
+
+    internal long LinkedLookups => Interlocked.Read(ref _linkedLookups);
+
+    // A lookup made now logs or traces what it reads, which a resolve memo hit would skip.
+    internal bool TracesLookups =>
+        _spirvDumpEnabled || ReadLog is not null || Diagnostics.GpuReadTrace.Enabled || SharpEmu.Libs.Gpu.Images.ImageClearTrace.Enabled ||
+        RenderTrace.Enabled;
+
     public bool Revalidate(in ShaderStageResources stage)
     {
         if (stage.Program is null)
@@ -692,6 +708,7 @@ internal sealed class ShaderProgramCache
                     {
                         BuildStaticState(source.Stage, options);
                         _rejectedPlans[BuildProgramKey(source)] = (exception.Message, deviceDataLoads);
+                        Interlocked.Increment(ref _contentEpoch);
                         throw;
                     }
 
@@ -757,6 +774,7 @@ internal sealed class ShaderProgramCache
                     BuildStaticState(source.Stage, options);
                     key = BuildProgramKey(source);
                     _programs[key] = entry;
+                    Interlocked.Increment(ref _contentEpoch);
                     DeviceDataLoads.CountReplan();
                 }
             }
@@ -796,6 +814,10 @@ internal sealed class ShaderProgramCache
         // A backend that cannot link compiles the caller alone, as every backend did before
         // linking existed: its S_SWAPPC_B64 calls are skipped rather than the program refused.
         var hasShaderCalls = entry.HasShaderCalls && _compiler.LinkedShaderCallsSupported;
+        if (hasShaderCalls || entry.RuntimeCallRecords || runtimeFallback is not null)
+        {
+            Interlocked.Increment(ref _linkedLookups);
+        }
 
         // Both are assigned by the materialization that follows; a failed one throws.
         ResourceSnapshot snapshot = null!;

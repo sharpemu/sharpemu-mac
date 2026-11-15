@@ -54,12 +54,16 @@ public sealed partial class VertexTableMetadataCache
     internal bool TryGet(RegisteredShader shader, ulong codeHash, out VertexTableMetadata? metadata) =>
         _entries.TryGetValue((shader, codeHash), out metadata);
 
+    // Bumped when the entries are dropped: an entry found before may be read from the header again.
+    internal long Generation { get; private set; }
+
     internal void Add(RegisteredShader shader, ulong codeHash, VertexTableMetadata metadata)
     {
         if (_entries.Count >= MaxEntries)
         {
             _entries.Clear();
             _history?.Clear();
+            Generation++;
         }
 
         _entries[(shader, codeHash)] = metadata;

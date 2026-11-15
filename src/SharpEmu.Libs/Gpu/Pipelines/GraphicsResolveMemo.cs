@@ -57,6 +57,9 @@ internal enum ResolveMemoUncacheable
     Origin,
     // A user data count over the bank (the full resolution stops on it).
     Key,
+    // A program entry, the device data loads or the vertex table metadata changed while the draw resolved, or its
+    // vertex source is not the draw's.
+    Changed,
     Count,
 }
 
@@ -72,11 +75,12 @@ internal sealed class GraphicsResolveMemo
     internal static readonly int DefaultCapacity =
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_MEMO_ENTRIES"), out var entries) && entries >= 2 ? entries : 16384;
 
-    // The memo only counts what it would hit for now (shadow); 0 turns that off too.
     internal static ResolveMemoMode ParseMode(string? value) => value?.Trim().ToLowerInvariant() switch
     {
         "0" or "off" => ResolveMemoMode.Off,
-        _ => ResolveMemoMode.Shadow,
+        "shadow" => ResolveMemoMode.Shadow,
+        "verify" => ResolveMemoMode.Verify,
+        _ => ResolveMemoMode.On,
     };
 
     // One way of a set: the key it was resolved under and what the hit re-checks.
@@ -382,7 +386,7 @@ internal sealed class GraphicsResolveMemo
         $"resolve_memo=(mode={DefaultMode.ToString().ToLowerInvariant()},hits={_hits.Take()},would_hit={_shadowWouldHit.Take()},") +
         "miss_by=(" + Take(_misses, "new", "epoch", "header", "identity", "tables", "semantics", "words", "generation") + ")," +
         "key_miss=(" + Take(_keyMisses, "new", "user_data_only", "regs_only") + ")," +
-        "uncacheable_by=(" + Take(_uncacheable, "frontend", "mesh", "tess", "calls", "unavailable", "tables", "trace", "origin", "key") + ")," +
+        "uncacheable_by=(" + Take(_uncacheable, "frontend", "mesh", "tess", "calls", "unavailable", "tables", "trace", "origin", "key", "changed") + ")," +
         FormattableString.Invariant($"evictions={_evictions.Take()},entries={_entries.Total},verify_checked={_verifyChecked.Take()},") +
         FormattableString.Invariant($"verify_failed={Interlocked.Read(ref _verifyFailed)})");
 }
