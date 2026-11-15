@@ -107,6 +107,7 @@ internal sealed partial class MetalRenderHost
 
     private long _preludeHoisted;
     private long _preludeFailed;
+    private long _preludeUnencoded;
 
     // Committed prelude buffers, with the serial whose completion implies theirs.
     private readonly List<(nint Buffer, ulong Serial)> _preludeBuffers = [];
@@ -145,6 +146,14 @@ internal sealed partial class MetalRenderHost
         MetalMemoryTelemetry.Commits.Add();
         _preludeBuffers.Add((buffer, _submissionSerial));
         _preludeHoisted++;
+    }
+
+    // The upload refused to encode after its prelude was begun: the buffer went out with nothing of the image in
+    // it and the image stays stale, so it is not a hoist.
+    void IMetalImageCacheOwner.NoteUploadPreludeUnencoded()
+    {
+        _preludeHoisted--;
+        _preludeUnencoded++;
     }
 
     // Reads the status of each prelude whose open serial has completed, and lets it go.
@@ -297,7 +306,8 @@ internal sealed partial class MetalRenderHost
     {
         var builder = new StringBuilder("prelude=[eligible=");
         builder.Append(_preludeEligible).Append(" hoisted=").Append(_preludeHoisted)
-            .Append(" refused=").Append(_preludeRefused).Append(" failed=").Append(_preludeFailed);
+            .Append(" refused=").Append(_preludeRefused).Append(" failed=").Append(_preludeFailed)
+            .Append(" unencoded=").Append(_preludeUnencoded);
         for (var index = 0; index < _preludeBlocked.Length; index++)
         {
             if (_preludeBlocked[index] != 0)
@@ -315,6 +325,7 @@ internal sealed partial class MetalRenderHost
         _preludeHoisted = 0;
         _preludeRefused = 0;
         _preludeFailed = 0;
+        _preludeUnencoded = 0;
         Array.Clear(_preludeBlocked);
         Array.Clear(_passEndUploads);
         return builder.ToString();

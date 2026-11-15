@@ -68,6 +68,11 @@ internal interface IMetalImageCacheOwner
     {
     }
 
+    // The upload a prelude was begun for encoded nothing.
+    void NoteUploadPreludeUnencoded()
+    {
+    }
+
     // Copies the guest bytes of a range into its staged (ring) copy on the GPU, behind the work still
     // writing them, so a transfer reading the staged copy next sees what that work leaves there.
     void GatherStagedRange(ulong address, in MetalGuestRange staging)

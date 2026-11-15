@@ -107,6 +107,11 @@ internal sealed partial class MetalImageCache
             _owner.EndUploadPrelude(prelude);
         }
 
+        if (!moved)
+        {
+            _owner.NoteUploadPreludeUnencoded();
+        }
+
         return true;
     }
 
