@@ -32,14 +32,14 @@ internal sealed partial class MetalRenderHost
 {
     private bool MissReadBinding(ref long cause)
     {
-        _readBindingMemoV2.Misses++;
+        ReadBindingMemoV2.Misses++;
         cause++;
         return false;
     }
 
     private bool TryReadBindingMemoRanges(ulong address, ulong size, bool computeStage, out MetalGuestRange range)
     {
-        var memo = _readBindingMemoV2;
+        var memo = ReadBindingMemoV2;
         range = default;
         if (!ReadBindingTracesOff)
         {
@@ -170,7 +170,7 @@ internal sealed partial class MetalRenderHost
         ulong address, ulong size, bool computeStage, in MetalReadBindingMemo.Stamp before, bool flushFoundImage,
         ulong inPlaceAlias, MetalWindowPartition.Window? window, in MetalGuestRange range)
     {
-        var memo = _readBindingMemoV2;
+        var memo = ReadBindingMemoV2;
         if (!ReadBindingTracesOff)
         {
             return;
@@ -241,7 +241,7 @@ internal sealed partial class MetalRenderHost
     private void VerifyReadBindingHitClaims(ulong address, ulong size, bool computeStage, in MetalGuestRange memo)
     {
         var index = _readBindingHitIndex;
-        var entry = index >= 0 ? _readBindingMemoV2.At(index) : default;
+        var entry = index >= 0 ? ReadBindingMemoV2.At(index) : default;
         if (entry.Window is not { } window || entry.Address != address || entry.Size != size)
         {
             throw Fatal(
@@ -256,7 +256,7 @@ internal sealed partial class MetalRenderHost
         }
 
         // The images it answered by: none owns a page, or exactly the images it holds are over the range.
-        var side = _readBindingMemoV2.SideAt(index);
+        var side = ReadBindingMemoV2.SideAt(index);
         var mayOwn = _imageCache.MayOwn(address, size);
         _imageCache.ListOverlapping(address, size, out var first, out var second, out var count, out _);
         var holds = entry.Tier switch

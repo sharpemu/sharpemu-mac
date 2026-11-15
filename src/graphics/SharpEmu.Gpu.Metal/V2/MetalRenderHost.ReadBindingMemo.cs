@@ -52,11 +52,14 @@ internal sealed partial class MetalRenderHost
     internal bool ReadBindingMemoRanges { get; set; } =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_READ_BINDING_MEMO_RANGES") != "0";
 
-    private readonly MetalReadBindingMemo _readBindingMemo = new();
-    private readonly MetalReadBindingMemoV2 _readBindingMemoV2 = new();
+    // Each table is about 7 MiB at the default 16384 sets: only the one in use is made.
+    private MetalReadBindingMemo? _readBindingMemoV1;
+    private MetalReadBindingMemoV2? _readBindingMemoV2;
+
+    private MetalReadBindingMemo ReadBindingMemoV1 => _readBindingMemoV1 ??= new();
 
     /// <summary>The v2 memo and its counters (tests).</summary>
-    internal MetalReadBindingMemoV2 ReadBindingMemoV2 => _readBindingMemoV2;
+    internal MetalReadBindingMemoV2 ReadBindingMemoV2 => _readBindingMemoV2 ??= new();
 
     /// <summary>The held label copy class the last binding touched, -1 for none (tests).</summary>
     internal int LabelTouchClass => _labelTouchClass;
@@ -65,8 +68,10 @@ internal sealed partial class MetalRenderHost
     private int _readBindingHitIndex = -1;
 
     internal (long Hits, long Misses, long Stores, long Verified) ReadBindingMemoCounts =>
-        (_readBindingMemo.Hits + _readBindingMemoV2.Hits, _readBindingMemo.Misses + _readBindingMemoV2.Misses,
-         _readBindingMemo.Stores + _readBindingMemoV2.Stores, _readBindingMemo.Verified + _readBindingMemoV2.Verified);
+        ((_readBindingMemoV1?.Hits ?? 0) + (_readBindingMemoV2?.Hits ?? 0),
+         (_readBindingMemoV1?.Misses ?? 0) + (_readBindingMemoV2?.Misses ?? 0),
+         (_readBindingMemoV1?.Stores ?? 0) + (_readBindingMemoV2?.Stores ?? 0),
+         (_readBindingMemoV1?.Verified ?? 0) + (_readBindingMemoV2?.Verified ?? 0));
 
     // Nothing that reports bindings is on.
     private bool ReadBindingTracesOff =>
@@ -84,7 +89,7 @@ internal sealed partial class MetalRenderHost
     // Counts the first reason ReadBindingMemoApplies (or the range's mapping) refused a lookup.
     private void NoteReadBindingRefusal(bool unmapped)
     {
-        var memo = _readBindingMemo;
+        var memo = ReadBindingMemoV1;
         memo.Misses++;
         if (!ReadBindingTracesOff)
         {
@@ -148,21 +153,21 @@ internal sealed partial class MetalRenderHost
             return false;
         }
 
-        if (!_readBindingMemo.TryGet(address, size, computeStage, alias, ReadBindingStamp(), out range) ||
+        if (!ReadBindingMemoV1.TryGet(address, size, computeStage, alias, ReadBindingStamp(), out range) ||
             !_guestMemory.InPlaceAnswerStands(alias, size))
         {
             if (range.IsValid)
             {
                 // The entry matched; the window under it no longer stands.
-                _readBindingMemo.RefusedWindow++;
+                ReadBindingMemoV1.RefusedWindow++;
             }
 
-            _readBindingMemo.Misses++;
+            ReadBindingMemoV1.Misses++;
             range = default;
             return false;
         }
 
-        _readBindingMemo.Hits++;
+        ReadBindingMemoV1.Hits++;
         MetalGpuReferenceCensus.Mark(address, size);
         return true;
     }
@@ -191,11 +196,11 @@ internal sealed partial class MetalRenderHost
 
         if (_readBindingRefusedPending)
         {
-            _readBindingMemo.StoreAfterRefusal++;
+            ReadBindingMemoV1.StoreAfterRefusal++;
             _readBindingRefusedPending = false;
         }
 
-        _readBindingMemo.Store(address, size, computeStage, inPlaceAlias, before, range);
+        ReadBindingMemoV1.Store(address, size, computeStage, inPlaceAlias, before, range);
     }
 
     // =verify: the full chain behind a hit, which must give the same range and find no image to flush; behind a v2
@@ -228,11 +233,11 @@ internal sealed partial class MetalRenderHost
                     $"size=0x{size:X} compute={computeStage} before={before} after={after}.");
             }
 
-            _readBindingMemoV2.Verified++;
+            ReadBindingMemoV2.Verified++;
             return;
         }
 
-        _readBindingMemo.Verified++;
+        ReadBindingMemoV1.Verified++;
     }
 
     // ---- The shape of the stage bindings (the PERF line's bind_shape): ----
@@ -307,7 +312,7 @@ internal sealed partial class MetalRenderHost
 
     private string TakeReadBindingCounters()
     {
-        var memo = ReadBindingMemoRanges ? _readBindingMemoV2.TakeCounters() : _readBindingMemo.TakeCounters();
+        var memo = ReadBindingMemoRanges ? ReadBindingMemoV2.TakeCounters() : ReadBindingMemoV1.TakeCounters();
         var text = $"read_binding_memo=({memo}) bind_shape=(binds={_bindCalls} " +
             $"image_set_moves={_bindImageSetMoves} binding_epoch_moves={_bindBindingEpochMoves} " +
             $"snapshot_repeats=[images={_snapshotRefRepeats[0]},samplers={_snapshotRefRepeats[1]},buffers={_snapshotRefRepeats[2]}]/{_snapshotRefChecks} " +
