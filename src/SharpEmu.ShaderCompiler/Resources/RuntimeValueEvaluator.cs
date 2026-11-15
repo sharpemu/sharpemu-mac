@@ -431,10 +431,21 @@ public sealed class RuntimeValueEvaluator
     // shader learns it as a device load. This read still waits, the next plan does not.
     private void LearnPendingDataSlot(int slot, int[] memoryIndices)
     {
+        if (TryTableReadAddress(slot, out var address) && _inputs.DataWritePending!(address))
+        {
+            DeviceDataLoads.Learn(_plan.Hash, memoryIndices);
+        }
+    }
+
+    // The guest address a table read (plan.TableReads[slot]) loads its dword from, evaluated with these inputs; false when
+    // the read is not a plain memory load or its pointer cannot be evaluated.
+    private bool TryTableReadAddress(int slot, out ulong address)
+    {
+        address = 0;
         var value = _plan.TableReads[slot].Value;
         if (value.MemoryIndex >= _plan.Memory.Count || value.Operands.Length < 2)
         {
-            return;
+            return false;
         }
 
         var handle = value.Operands[0];
@@ -443,16 +454,36 @@ public sealed class RuntimeValueEvaluator
             !EvaluateWide(handle.Operands[1], out var high) ||
             !Operand(value, 1, out var offset))
         {
-            return;
+            return false;
         }
 
         var baseAddress = ((high << 32) | (uint)low) & AddressMask;
-        if (ResolveRawAddress(value.Kind, baseAddress, high, 0, (int)_plan.Memory[value.MemoryIndex].Offset, (uint)offset,
-                out var address) == RawAddress.Read &&
-            _inputs.DataWritePending!(address))
+        return ResolveRawAddress(value.Kind, baseAddress, high, 0, (int)_plan.Memory[value.MemoryIndex].Offset, (uint)offset,
+            out address) == RawAddress.Read;
+    }
+
+    // Diagnostics: the guest address of the table read that fills flattened-table word flatOffset, or null when no table
+    // read fills it (a written range's or a mapping's word) or its address cannot be evaluated with these inputs.
+    internal static ulong? TableWordAddress(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int flatOffset)
+    {
+        var slot = -1;
+        for (var index = 0; index < plan.TableReads.Count; index++)
         {
-            DeviceDataLoads.Learn(_plan.Hash, memoryIndices);
+            if (plan.TableReads[index].FlatOffset == (uint)flatOffset)
+            {
+                slot = index;
+                break;
+            }
         }
+
+        if (slot < 0)
+        {
+            return null;
+        }
+
+        using var scratch = RuntimeEvaluationScratch.Rent();
+        var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs);
+        return evaluator.TryTableReadAddress(slot, out var address) ? address : null;
     }
 
     private static bool AddSignedAddress(ulong baseAddress, long offset, out ulong result)

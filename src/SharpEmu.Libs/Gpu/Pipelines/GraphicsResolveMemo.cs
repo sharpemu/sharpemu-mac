@@ -397,6 +397,7 @@ internal sealed class GraphicsResolveMemo
     private static readonly ThreadCounter[] _keyMisses = NewCounters((int)ResolveMemoKeyMiss.Count);
     private static readonly ThreadCounter[] _uncacheable = NewCounters((int)ResolveMemoUncacheable.Count);
     private static long _verifyFailed;
+    private static readonly ThreadCounter[] _verifyRaced = NewCounters((int)ResolveMemoVerifyRace.Count);
 
     private static ThreadCounter[] NewCounters(int count) => Enumerable.Range(0, count).Select(_ => new ThreadCounter()).ToArray();
 
@@ -418,6 +419,11 @@ internal sealed class GraphicsResolveMemo
 
     public static void NoteVerifyFailed() => Interlocked.Increment(ref _verifyFailed);
 
+    // Tests that provoke a mismatch on purpose take it back out of the run-long count the other tests read.
+    internal static void ForgetVerifyFailureForTest() => Interlocked.Decrement(ref _verifyFailed);
+
+    public static void NoteVerifyRaced(ResolveMemoVerifyRace how) => _verifyRaced[(int)how].Increment();
+
     private static string Take(ThreadCounter[] counters, params string[] names) =>
         string.Join(",", names.Select((name, index) => FormattableString.Invariant($"{name}={counters[index].Take()}")));
 
@@ -430,7 +436,17 @@ internal sealed class GraphicsResolveMemo
         "key_miss=(" + Take(_keyMisses, "new", "user_data_only", "regs_only") + ")," +
         "uncacheable_by=(" + Take(_uncacheable, "frontend", "mesh", "tess", "calls", "unavailable", "tables", "trace", "origin", "key", "changed") + ")," +
         FormattableString.Invariant($"evictions={_evictions.Take()},entries={_entries.Total},verify_checked={_verifyChecked.Take()},") +
+        "verify_raced=(" + Take(_verifyRaced, "changed", "came_and_went") + ")," +
         FormattableString.Invariant($"verify_failed={Interlocked.Read(ref _verifyFailed)})");
+}
+
+// How a verify difference turned out to be a race (ShaderPipelineCache.VerifyResolveMemo): the hit's revalidation misses
+// when made again (its words changed since), or it still holds and a second full resolution agrees with the hit.
+internal enum ResolveMemoVerifyRace
+{
+    Changed,
+    CameAndWent,
+    Count,
 }
 
 internal enum ResolveMemoKeyMiss

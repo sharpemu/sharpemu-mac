@@ -5,6 +5,7 @@ using System.Reflection;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
@@ -236,6 +237,84 @@ public sealed partial class KeptStageInputsTests
         Assert.Same(cached, Programs(cache, pixelActive: true));
         Assert.NotSame(cached, Programs(cache, pixelActive: false));
         Assert.NotSame(cached, Programs(cache, pixelActive: true));
+    }
+
+    // Verify on a thread beside the guest: a resolution reads the descriptor once (the hit's revalidation, the full
+    // resolution, the re-check and the second full resolution each read it in turn), and a guest store between two of
+    // those reads makes the full resolution differ from a hit that was current when it was made. The answers of the
+    // descriptor's first word, read after the two draws that store and first verify the entry (reads 1-3): the hit's
+    // revalidation (4), its full resolution (5), the difference's report reading where the words lie (6), the re-check
+    // (7), the second full resolution (8).
+    private (GraphicsPrograms Hit, GraphicsPrograms Third, string Report) VerifyWithDescriptorReads(Func<int, bool> moved)
+    {
+        var cache = MemoCache();
+        UseLoadingPixelProgram(Descriptor);
+        var hit = Programs(cache, pixelActive: true);
+        Assert.Same(hit, Programs(cache, pixelActive: true));
+        Report();
+        var reads = 0;
+        _guest.Host.WordRead = (address, word) => address == Descriptor && moved(++reads + 3) ? word + 0x100 : word;
+        try
+        {
+            var third = Programs(cache, pixelActive: true);
+            return (hit, third, Report());
+        }
+        finally
+        {
+            _guest.Host.WordRead = null;
+        }
+    }
+
+    // The store lands after the hit read its words and stays: the re-check misses, so the difference is a race (counted),
+    // not a mismatch, and the draw takes the full resolution's programs, which read the store.
+    [Fact]
+    public void ResolveMemo_VerifyCountsAStoreBetweenTheHitAndTheFullResolutionAsARace()
+    {
+        var failed = VerifyFailedCount();
+        var (hit, third, report) = VerifyWithDescriptorReads(read => read >= 5);
+        Assert.Contains("verify_raced=(changed=1,came_and_went=0)", report);
+        Assert.Equal(failed, VerifyFailedCount());
+        Assert.NotSame(hit, third);
+        Assert.Contains(third.PixelInput.Stage.Resources.Buffers, words => words[0] == unchecked((uint)(StreamBase + 0x100)));
+    }
+
+    // The store is seen by the full resolution only: the re-check holds and a second full resolution agrees with the hit.
+    [Fact]
+    public void ResolveMemo_VerifyCountsADifferenceThatCameAndWentAsARace()
+    {
+        var failed = VerifyFailedCount();
+        var (hit, third, report) = VerifyWithDescriptorReads(read => read == 5);
+        Assert.Contains("verify_raced=(changed=0,came_and_went=1)", report);
+        Assert.Equal(failed, VerifyFailedCount());
+        Assert.Same(hit, third);
+    }
+
+    // A difference that outlives the re-check (the hit still revalidates, a second full resolution still differs) is a
+    // mismatch: stopped as before, and on a speculative thread counted apart from plain abandons. Here the store is seen by
+    // every read but the re-check's (7), as a writer that does not hold still would be.
+    [Fact]
+    public void ResolveMemo_VerifyStopsWhenTheHitStillRevalidatesAndTheDifferenceStays()
+    {
+        var failed = VerifyFailedCount();
+        GpuFatal.TakeSpeculativeVerifyFailures();
+        var thrown = Assert.Throws<GpuFatal.AbandonedWorkException>(() =>
+            GpuFatal.Speculatively(() => VerifyWithDescriptorReads(read => read is >= 5 and not 7)));
+        Assert.Contains("verify mismatch field=pixel.buffers", thrown.Message);
+        Assert.Contains("recheck=current again=pixel.buffers", thrown.Message);
+        // The report names the permutation keys and where the differing words are read from.
+        Assert.Matches("pixel=\\[same_program=True specialization=(same_object|equal) words=buffers\\[0\\] ", thrown.Message);
+        Assert.Contains($"read_at=w0@0x{Descriptor:X}", thrown.Message);
+        var counted = VerifyFailedCount();
+        GraphicsResolveMemo.ForgetVerifyFailureForTest();
+        Assert.Equal(failed + 1, counted);
+        Assert.Equal(1, GpuFatal.TakeSpeculativeVerifyFailures());
+    }
+
+    private static long VerifyFailedCount()
+    {
+        var report = GraphicsResolveMemo.TakeReport();
+        var at = report.IndexOf("verify_failed=", StringComparison.Ordinal) + "verify_failed=".Length;
+        return long.Parse(report[at..report.IndexOf(')', at)], System.Globalization.CultureInfo.InvariantCulture);
     }
 
     // The comparer behind verify names every field of what a resolution hands out: a field added later fails here

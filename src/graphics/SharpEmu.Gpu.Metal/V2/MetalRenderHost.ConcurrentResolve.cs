@@ -170,7 +170,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             $"ownership={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Ownership]},effects={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Effects]}) " +
             $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
             $"dispatch_saved_ms={computeSavedMs.ToString("F1", culture)}";
-        return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
+        return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) abandoned_verify={GpuFatal.TakeSpeculativeVerifyFailures()} taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
             $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()} {prefetch.TakeResolverReport()}{dispatches}{FormatPacketCounters()} {own} {TakeOwnerTestCounters()}{TakeDrainCallers()}";
     }

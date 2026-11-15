@@ -60,6 +60,110 @@ internal static class GraphicsProgramsComparer
             $"pixel_inputs={programs.PixelInput.InputCount} custom=0x{programs.PixelInput.CustomInterpolationMask:X}";
     }
 
+    // For a fatal or a race report: per stage, how the two resolutions' permutation keys (specializations) and snapshot
+    // words differ, whatever their programs are; each differing flattened-table word with both values and the guest
+    // address it is loaded from (evaluated now with the snapshot's own draw values). Tells inputs that differ (some
+    // writer) from equal inputs that picked another permutation.
+    public static string DescribeStages(GraphicsPrograms left, GraphicsPrograms right) =>
+        $"vertex=[{DescribeStage(left.VertexInput.Stage, right.VertexInput.Stage)}] pixel=[{DescribeStage(left.PixelInput.Stage, right.PixelInput.Stage)}]";
+
+    private static string DescribeStage(in ShaderStageResources left, in ShaderStageResources right)
+    {
+        if (left.Program is null || right.Program is null)
+        {
+            return left.Program is null && right.Program is null ? "none" : "one_side_none";
+        }
+
+        var leftSpecialization = ResourceMaterializer.SpecializationOf(left.Resources);
+        var rightSpecialization = ResourceMaterializer.SpecializationOf(right.Resources);
+        var specialization = leftSpecialization is null || rightSpecialization is null ? "unknown"
+            : ReferenceEquals(leftSpecialization, rightSpecialization) ? "same_object"
+            : leftSpecialization.DifferenceFrom(rightSpecialization) ?? "equal";
+        return $"same_program={ReferenceEquals(left.Program, right.Program)} specialization={specialization} " +
+            $"words={DescribeWords(left.Resources, right.Resources)}";
+    }
+
+    private static string DescribeWords(ResourceSnapshot left, ResourceSnapshot right)
+    {
+        if (ReferenceEquals(left, right)) return "same_snapshot";
+        var differences = new List<string>();
+        List<(ulong Address, uint Word)>? reads = null;
+        var readsTaken = false;
+        // Where a differing word of the right side is read from now: the addresses an evaluation of right's program
+        // reads that value at (a descriptor's words come from memory, not from a table slot with a known address).
+        string ReadAt(uint[] a, uint[] b)
+        {
+            if (!readsTaken)
+            {
+                readsTaken = true;
+                reads = ResourceMaterializer.RecordWordReads(right);
+            }
+
+            if (reads is null) return " read_at=unknown";
+            var found = new List<string>();
+            for (var word = 0; word < b.Length && found.Count < 4; word++)
+            {
+                if (word < a.Length && a[word] == b[word]) continue;
+                foreach (var read in reads)
+                {
+                    if (read.Word != b[word]) continue;
+                    found.Add($"w{word}@0x{read.Address:X}");
+                    break;
+                }
+            }
+
+            return found.Count == 0 ? " read_at=none" : " read_at=" + string.Join(",", found);
+        }
+
+        void Jagged(string name, uint[][] a, uint[][] b)
+        {
+            if (a.Length != b.Length)
+            {
+                differences.Add($"{name}.count {a.Length} vs {b.Length}");
+                return;
+            }
+
+            for (var index = 0; index < a.Length; index++)
+            {
+                if (a[index].AsSpan().SequenceEqual(b[index])) continue;
+                differences.Add($"{name}[{index}] {Words(a[index])} vs {Words(b[index])}{ReadAt(a[index], b[index])}");
+            }
+        }
+
+        Jagged("buffers", left.Buffers, right.Buffers);
+        Jagged("images", left.Images, right.Images);
+        Jagged("samplers", left.Samplers, right.Samplers);
+        var (leftTable, rightTable) = (left.FlattenedResourceTable, right.FlattenedResourceTable);
+        if (leftTable.Length != rightTable.Length)
+        {
+            differences.Add($"table.count {leftTable.Length} vs {rightTable.Length}");
+        }
+        else
+        {
+            var listed = 0;
+            for (var slot = 0; slot < leftTable.Length; slot++)
+            {
+                if (leftTable[slot] == rightTable[slot]) continue;
+                if (++listed > 12)
+                {
+                    differences.Add("table.more");
+                    break;
+                }
+
+                var address = ResourceMaterializer.TableWordAddress(left, slot) ?? ResourceMaterializer.TableWordAddress(right, slot);
+                differences.Add($"table[{slot}]@{(address is { } at ? $"0x{at:X}" : "none")} 0x{leftTable[slot]:X8} vs 0x{rightTable[slot]:X8}");
+            }
+        }
+
+        if (!left.UserData.AsSpan().SequenceEqual(right.UserData)) differences.Add("user_data");
+        if (!left.DeviceAddressRanges.AsSpan().SequenceEqual(right.DeviceAddressRanges)) differences.Add("ranges");
+        if (!SameArray(left.MipStatistics, right.MipStatistics)) differences.Add("mip_statistics");
+        if (left.BindlessImages.Length != right.BindlessImages.Length) differences.Add("bindless.count");
+        return differences.Count == 0 ? "equal" : string.Join(";", differences);
+    }
+
+    private static string Words(uint[] words) => string.Join(",", words.Select(word => word.ToString("X8", System.Globalization.CultureInfo.InvariantCulture)));
+
     private static string? VertexDifference(VertexInputInfo memo, VertexInputInfo full)
     {
         if (memo.Tessellation is not null || full.Tessellation is not null) return "vertex.tessellation";

@@ -368,7 +368,7 @@ internal sealed class ShaderProgramCache
         }
         catch (ResourceMaterializer.ReadProofMismatchException mismatch)
         {
-            throw GpuFatal.Fatal(mismatch.Message);
+            throw GpuFatal.VerifyFailed(mismatch.Message);
         }
 
         var current = fast ?? (Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes));
@@ -400,7 +400,7 @@ internal sealed class ShaderProgramCache
         }
         catch (ResourceMaterializer.ReadProofMismatchException mismatch)
         {
-            throw GpuFatal.Fatal(mismatch.Message);
+            throw GpuFatal.VerifyFailed(mismatch.Message);
         }
 
         if (fast == ResourceMaterializer.FastRevalidation.NotFast)

@@ -102,8 +102,16 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
         }
 
         word = BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+        if (WordRead is { } transform)
+        {
+            word = transform(address, word);
+        }
+
         return true;
     }
+
+    // The word a read answers in place of the one in memory, as a guest store landing between two reads would.
+    public Func<ulong, uint, uint>? WordRead { get; set; }
 
     // Addresses whose clean reads are refused, as for bytes a GPU image or buffer may still own.
     public Func<ulong, bool>? RefuseCleanRead { get; set; }

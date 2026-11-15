@@ -81,6 +81,33 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
 
     public override bool Equals(object? obj) => Equals(obj as ResourceSpecialization);
 
+    // Diagnostics: the first list entry that differs from other's, with both values, or null when Equals holds.
+    public string? DifferenceFrom(ResourceSpecialization other)
+    {
+        static string? First<T>(string name, List<T> left, List<T> right)
+        {
+            for (var index = 0; index < Math.Max(left.Count, right.Count); index++)
+            {
+                if (index >= left.Count || index >= right.Count || !EqualityComparer<T>.Default.Equals(left[index], right[index]))
+                {
+                    var a = index < left.Count ? left[index]?.ToString() : "none";
+                    var b = index < right.Count ? right[index]?.ToString() : "none";
+                    return $"{name}[{index}] {a} vs {b}";
+                }
+            }
+
+            return null;
+        }
+
+        if (Equals(other)) return null;
+        if (BaseBufferCount != other.BaseBufferCount) return $"base_buffers {BaseBufferCount} vs {other.BaseBufferCount}";
+        return First("buffers", Buffers, other.Buffers) ?? First("images", Images, other.Images) ??
+            First("candidate_tables", BufferCandidateTables, other.BufferCandidateTables) ??
+            First("image_groups", ImageDescriptorGroups, other.ImageDescriptorGroups) ??
+            First("sampler_groups", SamplerDescriptorGroups, other.SamplerDescriptorGroups) ??
+            First("samplers", Samplers, other.Samplers) ?? "unequal";
+    }
+
     public override int GetHashCode()
     {
         var hash = new HashCode();

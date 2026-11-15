@@ -666,6 +666,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 $"differences=[{SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Differences(job.Programs!, resolved)}] " +
                 $"ahead=[{SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Describe(job.Programs!)}] " +
                 $"worker=[{SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.Describe(resolved)}] worker_again={stable} " +
+                $"ahead_vs_worker=[{SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.DescribeStages(job.Programs!, resolved)}] " +
                 $"looked_over=[{DescribeLookedOver(job.ExecutedAtStart, job.FullGate)}] " +
                 $"last_dispatch_effect={Volatile.Read(ref _lastDispatchEffect)} last_collect_effect={Volatile.Read(ref _lastCollectEffect)} " +
                 $"state_ahead=[{job.ResolveState}] state_now=[{_executor.DescribeProgramState()}].");

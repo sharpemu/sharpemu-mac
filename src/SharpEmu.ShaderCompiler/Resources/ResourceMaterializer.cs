@@ -483,6 +483,76 @@ public static partial class ResourceMaterializer
     // The proof a fast snapshot's origin holds (tests).
     internal static MaterializationProgram.ReadProof? ReadProofOf(ResourceSnapshot snapshot) => (snapshot.Origin as FastOrigin)?.Proof;
 
+    // Diagnostics: the specialization a fast snapshot was materialized with (the permutation's key), else null.
+    public static ResourceSpecialization? SpecializationOf(ResourceSnapshot snapshot) => (snapshot.Origin as FastOrigin)?.Specialization;
+
+    // Diagnostics: every guest word a fast snapshot's program reads when evaluated now with the snapshot's own draw values
+    // (word reads only, no resident or clean shortcuts), in read order; null when the snapshot is not a fast one or the
+    // evaluation threw (an abandoned read on a resolving thread included).
+    public static List<(ulong Address, uint Word)>? RecordWordReads(ResourceSnapshot snapshot)
+    {
+        if (snapshot.Origin is not FastOrigin { Plan.MaterializationProgram: not null } origin)
+        {
+            return null;
+        }
+
+        var reads = new List<(ulong Address, uint Word)>();
+        var reader = origin.Inputs.ReadMemory;
+        bool Recording(ulong address, out uint word)
+        {
+            word = 0;
+            if (reader is null || !reader(address, out word))
+            {
+                return false;
+            }
+
+            reads.Add((address, word));
+            return true;
+        }
+
+        var inputs = new ResourceRuntimeInputs
+        {
+            ReadMemory = Recording,
+            ReadCleanMemory = origin.Inputs.ReadCleanMemory,
+            UserData = origin.UserData,
+            ShaderBase = origin.ShaderBase,
+            ComputeState = origin.ComputeState,
+        };
+        try
+        {
+            EvaluateInto(origin.Plan, inputs, new MaterializationProgram.Output());
+            return reads;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    // Diagnostics: the guest address flattened-table word flatOffset of a fast snapshot is loaded from, evaluated now with
+    // the snapshot's own draw values and readers; null when no table read fills that word, the snapshot is not a fast
+    // one, or the address cannot be evaluated (an abandoned read on a resolving thread included).
+    public static ulong? TableWordAddress(ResourceSnapshot snapshot, int flatOffset)
+    {
+        if (snapshot.Origin is not FastOrigin origin)
+        {
+            return null;
+        }
+
+        var inputs = origin.Inputs.CopyReaders();
+        inputs.UserData = origin.UserData;
+        inputs.ShaderBase = origin.ShaderBase;
+        inputs.ComputeState = origin.ComputeState;
+        try
+        {
+            return RuntimeValueEvaluator.TableWordAddress(origin.Plan, inputs, flatOffset);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     // The test seam for verify: puts a proof on a fast snapshot's origin as if its evaluation had recorded it.
     internal static void SetReadProofForTest(ResourceSnapshot snapshot, MaterializationProgram.ReadProof? proof) =>
         ((FastOrigin)snapshot.Origin!).Proof = proof;

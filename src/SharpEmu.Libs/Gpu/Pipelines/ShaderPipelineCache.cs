@@ -445,12 +445,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                         GraphicsResolveMemo.NoteHit();
                     }
 
-                    if (memo.Mode == ResolveMemoMode.Verify)
-                    {
-                        VerifyResolveMemo(entry, banks, targetExportMapping, flags);
-                    }
-
-                    return entry.Programs!;
+                    return memo.Mode == ResolveMemoMode.Verify
+                        ? VerifyResolveMemo(memo, entry, banks, targetExportMapping, flags)
+                        : entry.Programs!;
                 }
 
                 GraphicsResolveMemo.NoteMiss(miss);
@@ -490,7 +487,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // device data loads unchanged, the same header record and code identity at each stage's address, the same vertex
     // table words and pixel input semantics, and each stage's descriptor words evaluating to its snapshot (the reads
     // the full resolution records are made here as well).
-    private ResolveMemoMiss? TryTakeResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, bool pixelActive, out bool rebuilt)
+    // allowRebuild false (verify's re-check): a words miss is a miss, and the entry is left as it is.
+    private ResolveMemoMiss? TryTakeResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, bool pixelActive, out bool rebuilt,
+        bool allowRebuild = true)
     {
         rebuilt = false;
         if (entry.ContentEpoch != _programs.ContentEpoch || entry.TablesGeneration != _vertexTables.Generation)
@@ -545,7 +544,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var programs = entry.Programs!;
         var pixelStage = programs.PixelInput.Stage;
         var vertexStage = programs.VertexInput.Stage;
-        var rebuild = memo.Rebuild;
+        var rebuild = allowRebuild && memo.Rebuild;
         var stageRebuilt = false;
         if ((pixelActive && !RevalidateMemoStage(ref pixelStage, rebuild, ref stageRebuilt)) || !RevalidateMemoStage(ref vertexStage, rebuild, ref stageRebuilt))
         {
@@ -746,26 +745,78 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             decoded.Attributes.AsSpan().SequenceEqual(resolved.Attributes) && decoded.Buffers.AsSpan().SequenceEqual(resolved.Buffers);
     }
 
-    // Verify: the hit's programs against a full resolution of the same draw, and against what they were when kept; any
-    // difference stops emulation.
-    private void VerifyResolveMemo(GraphicsResolveMemo.Entry entry, RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        in KeptGraphicsFlags flags)
+    // Verify: the hit's programs against a full resolution of the same draw, and against what they were when kept; the
+    // programs to hand out. A resolution beside the guest and the worker reads guest memory a little later than the hit's
+    // revalidation did, so a word written between the two shows as a difference no key or revalidation could have
+    // caught: the hit was current when it was made, and the take check judges its recorded reads as it judges a full
+    // resolution's. So a difference is first checked for that race: the hit's revalidation is made again (without a
+    // rebuild), and a miss now means its words changed since (raced, the full resolution handed out); while it still
+    // holds, the draw is resolved in full once more, and an answer equal to the hit means the difference came and went
+    // (raced). Only a hit that still revalidates while a second full resolution still differs from it is a mismatch, and
+    // a result written since it was kept always is; either stops emulation (on a speculative thread the work is
+    // abandoned and counted, GpuFatal.VerifyFailed).
+    private GraphicsPrograms VerifyResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, RegisterBanks banks,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
     {
         var memoPrograms = entry.Programs!;
         var full = ResolveFull(banks, targetExportMapping, flags);
-        var difference = GraphicsProgramsComparer.Difference(memoPrograms, full) ??
-            (GraphicsProgramsComparer.Fingerprint(memoPrograms) != entry.Fingerprint ? "written_since_kept" : null);
         GraphicsResolveMemo.NoteVerified();
+        var difference = GraphicsProgramsComparer.Difference(memoPrograms, full);
         if (difference is null)
+        {
+            if (GraphicsProgramsComparer.Fingerprint(memoPrograms) == entry.Fingerprint)
+            {
+                return memoPrograms;
+            }
+
+            throw ResolveMemoVerifyFailed(entry, "written_since_kept", "");
+        }
+
+        // Named before anything is read again: the words that differ, their addresses, and both permutation keys.
+        var stages = GraphicsProgramsComparer.DescribeStages(memoPrograms, full);
+        if (TryTakeResolveMemo(memo, entry, flags.PixelActive, out _, allowRebuild: false) is { } miss)
+        {
+            GraphicsResolveMemo.NoteVerifyRaced(ResolveMemoVerifyRace.Changed);
+            ReportResolveMemoRace(entry, difference, $"recheck=miss:{miss.ToString().ToLowerInvariant()}", stages);
+            return full;
+        }
+
+        var again = ResolveFull(banks, targetExportMapping, flags);
+        if (GraphicsProgramsComparer.Difference(memoPrograms, again) is not { } againDifference)
+        {
+            GraphicsResolveMemo.NoteVerifyRaced(ResolveMemoVerifyRace.CameAndWent);
+            ReportResolveMemoRace(entry, difference, "recheck=current again=same_as_hit", stages);
+            return memoPrograms;
+        }
+
+        throw ResolveMemoVerifyFailed(entry, difference,
+            $" recheck=current again={againDifference} hit_vs_full=[{stages}] hit_vs_again=[{GraphicsProgramsComparer.DescribeStages(memoPrograms, again)}]");
+    }
+
+    private static Exception ResolveMemoVerifyFailed(GraphicsResolveMemo.Entry entry, string difference, string detail)
+    {
+        GraphicsResolveMemo.NoteVerifyFailed();
+        var message = $"[GPU][RESOLVE_MEMO] verify mismatch field={difference} vs=0x{entry.VertexAddress:X16} ps=0x{entry.PixelAddress:X16} " +
+            $"key_hash=0x{entry.Hash:X16}{detail}.";
+        Console.Error.WriteLine(message);
+        return GpuFatal.VerifyFailed(message);
+    }
+
+    // The first races of a run, with what differed: the words and the guest addresses they were read from name the writer.
+    private static int _resolveMemoRaceReports;
+    private const int MaxResolveMemoRaceReports = 32;
+
+    private static void ReportResolveMemoRace(GraphicsResolveMemo.Entry entry, string difference, string how, string stages)
+    {
+        if (Interlocked.Increment(ref _resolveMemoRaceReports) > MaxResolveMemoRaceReports)
         {
             return;
         }
 
-        GraphicsResolveMemo.NoteVerifyFailed();
-        var message = $"[GPU][RESOLVE_MEMO] verify mismatch field={difference} vs=0x{entry.VertexAddress:X16} ps=0x{entry.PixelAddress:X16} " +
-            $"key_hash=0x{entry.Hash:X16}.";
-        Console.Error.WriteLine(message);
-        throw GpuFatal.Fatal(message);
+        var thread = Thread.CurrentThread;
+        Console.Error.WriteLine($"[GPU][RESOLVE_MEMO] verify raced field={difference} {how} speculative={GpuFatal.IsSpeculative} " +
+            $"thread={thread.Name ?? thread.ManagedThreadId.ToString(System.Globalization.CultureInfo.InvariantCulture)} " +
+            $"vs=0x{entry.VertexAddress:X16} ps=0x{entry.PixelAddress:X16} key_hash=0x{entry.Hash:X16} hit_vs_full=[{stages}].");
     }
 
     // The interface's earlier forms, for callers holding only the four inputs.
