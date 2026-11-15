@@ -520,6 +520,11 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
         // read a table its copy kernel writes every frame: off the worker each table word is owned by the copy's pending
         // write and answered from its source (~20 word tests a draw, as in game). The destination holds the copy's result.
         var copiedTables = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_COPIED_TABLES") == "1";
+        // SHARPEMU_DS_DRAW_BENCH_DISPATCH_EVERY=n: one of the four buffer-storing dispatches after every nth draw of the game
+        // streams as well, as Demon's Souls runs its ~1000 dispatches a frame between draws: each holds the program
+        // resolution of the draw after it (its gate), unless that draw's job looks ahead of dispatches
+        // (SHARPEMU_PREFETCH_DRAW_LOOKAHEAD). 0 (the default) leaves the streams as they were.
+        var dispatchEvery = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_DISPATCH_EVERY"), out var every) && every > 0 ? every : 0;
         ulong copyDestination = 0, copySource = 0, copyWords = 0;
         void ArmCopiedTables()
         {
@@ -617,6 +622,18 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 var emittedFrom = pm4!.Count;
                 EmitDraw(pm4!, draw, pass, passStart || firstOfSubmission, mesh, material, newKey ? pixelConstantCopies[0] : 0);
                 if (newKey) keyChurnStarts.Add((submission, emittedFrom, pm4!.Count));
+                if (dispatchEvery != 0 && draw % dispatchEvery == dispatchEvery - 1)
+                {
+                    var dispatch = draw / dispatchEvery % dispatchTables.Length;
+                    var compute = new SceneState(1, 1);
+                    compute.Context.Clear();
+                    compute.Uconfig.Clear();
+                    compute.ComputeShader(computePrograms[dispatch % computePrograms.Length], 8, 8, 1,
+                        [Descriptors.Lo(dispatchTables[dispatch]), Descriptors.Hi(dispatchTables[dispatch])], true, true, false, 1, 0);
+                    compute.Emit(pm4!);
+                    pm4!.DispatchDirect(StorageEdge / 8, StorageEdge / 8, 1);
+                }
+
                 var commitFollows = (int)((submission + 1) / SubmissionsPerCommit) != (int)(submission / SubmissionsPerCommit);
                 if (commitFollows && draw % 6 == 5)
                 {

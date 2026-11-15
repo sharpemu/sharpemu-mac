@@ -33,7 +33,36 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         internal long Index;
         // 0 queued, 1 resolved, 2 abandoned.
         internal volatile int State;
+        // The resolving thread (or the caller) has taken it from the queue; it found its gate still closed when it got to it.
+        internal volatile bool Started;
+        internal volatile bool GateWaited;
     }
+
+    // The kind of a gated non-draw item, as the command thread queues it (NoteGateItem): what the draws after it wait for.
+    public enum GateItemKind : byte
+    {
+        None,
+        Dispatch,
+        // A command-processor write of known bytes (WRITE_DATA, a DMA of known words) or one of the stream's own stores.
+        CommandProcessorWrite,
+        // An end-of-pipe event: a label, or with no destination only an interrupt or a signal.
+        Label,
+        // A fill or copy of a guest range.
+        Range,
+        // A call the stream waits on (a read the worker answers, a host call with a result).
+        Wait,
+        // An interrupt the worker raises.
+        Event,
+        // A commit the idle stream asks for.
+        Flush,
+        // Another posted host call.
+        Call,
+        // Other deferred work.
+        Other,
+        Count,
+    }
+
+    private static readonly string[] GateItemKindNames = ["none", "dispatch", "cp", "label", "range", "wait", "event", "flush", "call", "other"];
 
     private readonly RenderExecutor _executor;
     private readonly IRenderHost _host;
@@ -164,6 +193,39 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     public void NoteDispatchEffect() => Volatile.Write(ref _lastDispatchEffect, Volatile.Read(ref _executedGate));
 
+    // The kind of each gated non-draw item by its gate number, for the counters below. A job's gate is never more than the
+    // command thread's queue depth (at most 4096 items) behind the newest, so a ring twice that holds every gate in use.
+    private const int GateKindRing = 8192;
+    private readonly GateItemKind[] _gateKinds = new GateItemKind[GateKindRing];
+
+    // On the command thread, as it queues the gated non-draw item that brings its gate count to gate.
+    public void NoteGateItem(long gate, GateItemKind kind) => _gateKinds[gate & (GateKindRing - 1)] = kind;
+
+    private GateItemKind GateKindOf(long gate) => gate <= 0 ? GateItemKind.None : _gateKinds[gate & (GateKindRing - 1)];
+
+    // Per kind of the item that last gated a draw's job: the draws submitted with a gate above the draw before them
+    // (draw_gate_raises), the draw takes that found their job unresolved (busy or queued), the subset whose job the
+    // resolving thread had reached before its gate opened (gate-bound), and the worker's wait in them.
+    private long _lastDrawGate;
+    private readonly long[] _drawGateRaises = new long[(int)GateItemKind.Count];
+    private readonly long[] _unresolvedByGate = new long[(int)GateItemKind.Count];
+    private readonly long[] _gateBoundByGate = new long[(int)GateItemKind.Count];
+    private readonly long[] _unresolvedWaitTicksByGate = new long[(int)GateItemKind.Count];
+    private long _unresolvedStarted;
+
+    private static string FormatByKind(long[] counts, Func<long, string>? format = null)
+    {
+        var builder = new System.Text.StringBuilder();
+        for (var kind = 1; kind < counts.Length; kind++)
+        {
+            var value = Interlocked.Exchange(ref counts[kind], 0);
+            builder.Append(kind == 1 ? string.Empty : ",").Append(GateItemKindNames[kind]).Append('=')
+                .Append(format is null ? value.ToString(System.Globalization.CultureInfo.InvariantCulture) : format(value));
+        }
+
+        return builder.ToString();
+    }
+
     public (long Resolved, long Abandoned, long Taken, long Refused, double WaitMilliseconds) TakeCounters() =>
         (Interlocked.Exchange(ref _resolvedCount, 0), Interlocked.Exchange(ref _abandonedCount, 0),
             Interlocked.Exchange(ref _takenCount, 0), Interlocked.Exchange(ref _refusedCount, 0),
@@ -171,8 +233,17 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     // A gate above zero holds the job until AdvanceGate reaches it: with the command stream on its own
     // thread, draws are submitted ahead of the work before them, which may change what they read.
-    public Job Submit(RegisterBanks banks, long gate = 0, bool indexed = false, int startInstanceUserData = -1) =>
-        Enqueue(new Job(banks, gate, indexed, startInstanceUserData));
+    public Job Submit(RegisterBanks banks, long gate = 0, bool indexed = false, int startInstanceUserData = -1)
+    {
+        // The command thread alone submits draws with a gate.
+        if (gate > _lastDrawGate)
+        {
+            Interlocked.Increment(ref _drawGateRaises[(int)GateKindOf(gate)]);
+        }
+
+        _lastDrawGate = gate;
+        return Enqueue(new Job(banks, gate, indexed, startInstanceUserData));
+    }
 
     private Job Enqueue(Job job)
     {
@@ -304,7 +375,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         // well-prefetched burst is one, and two clock reads per draw were measurable.
         if (job.State == 0)
         {
-            NoteUnresolvedTake(job);
+            var gateKind = NoteUnresolvedTake(job);
             var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             // Caller work is reported separately, not disguised as a shorter resolver wait.
             // Keep long queues out of the claim routine's lock/finally frame.
@@ -313,7 +384,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 !TryResolveOnCaller(job))
             {
                 WaitFor(job);
-                Interlocked.Add(ref _waitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
+                var waited = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted;
+                Interlocked.Add(ref _waitTicks, waited);
+                Interlocked.Add(ref _unresolvedWaitTicksByGate[(int)gateKind], waited);
             }
         }
 
@@ -398,11 +471,24 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // thread busy with another job, or queued behind others with its gate open (takes_unresolved).
     private long _unresolvedGated, _unresolvedBusy, _unresolvedQueued;
 
-    private void NoteUnresolvedTake(Job job)
+    private GateItemKind NoteUnresolvedTake(Job job)
     {
         if (job.Gate > Volatile.Read(ref _executedGate)) Interlocked.Increment(ref _unresolvedGated);
         else if (Volatile.Read(ref _running)) Interlocked.Increment(ref _unresolvedBusy);
         else Interlocked.Increment(ref _unresolvedQueued);
+        var kind = GateKindOf(job.Gate);
+        Interlocked.Increment(ref _unresolvedByGate[(int)kind]);
+        if (job.Started)
+        {
+            Interlocked.Increment(ref _unresolvedStarted);
+        }
+
+        if (job.GateWaited)
+        {
+            Interlocked.Increment(ref _gateBoundByGate[(int)kind]);
+        }
+
+        return kind;
     }
 
     // The resolving thread's idle time in its queue wait and its wakes from it, its time spinning and sleeping on job
@@ -428,7 +514,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         var lastCpu = Interlocked.Exchange(ref _lastResolverCpu, cpu);
         var cpuMs = cpu < 0 || lastCpu < 0 ? -1.0 : (cpu - lastCpu) / 1e6;
         return $"takes_unresolved=(busy={Interlocked.Exchange(ref _unresolvedBusy, 0)},gated={Interlocked.Exchange(ref _unresolvedGated, 0)}," +
-            $"queued={Interlocked.Exchange(ref _unresolvedQueued, 0)}) resolver_jobs={Interlocked.Exchange(ref _resolverJobs, 0)} " +
+            $"queued={Interlocked.Exchange(ref _unresolvedQueued, 0)},started={Interlocked.Exchange(ref _unresolvedStarted, 0)}) " +
+            $"unresolved_by_gate=({FormatByKind(_unresolvedByGate)}) gate_bound_by_gate=({FormatByKind(_gateBoundByGate)}) " +
+            $"unresolved_wait_ms_by_gate=({FormatByKind(_unresolvedWaitTicksByGate, ticks => Milliseconds(ticks).ToString("F1", culture))}) " +
+            $"draw_gate_raises=({FormatByKind(_drawGateRaises)}) resolver_jobs={Interlocked.Exchange(ref _resolverJobs, 0)} " +
             $"resolver_idle_ms={Milliseconds(Interlocked.Exchange(ref _idleTicks, 0)).ToString("F1", culture)} " +
             $"gate_sleep_ms={Milliseconds(Interlocked.Exchange(ref _gateTicks, 0)).ToString("F1", culture)} idle_wakes={Interlocked.Exchange(ref _idleWakes, 0)} " +
             $"idle_spin_takes={Interlocked.Exchange(ref _idleSpinTakes, 0)} " +
@@ -519,6 +608,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 return false;
             _queue.Dequeue();
             _running = true;
+            job.Started = true;
             if (claimed)
             {
                 _claimSteals++;
@@ -642,6 +732,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
                 job = _queue.Peek();
                 _workerClaimed = true;
+                if (job.Gate > Volatile.Read(ref _executedGate))
+                {
+                    job.GateWaited = true;
+                }
+
                 var gateStarted = job.Gate > Volatile.Read(ref _executedGate) || _paused ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 if (job.Gate > Volatile.Read(ref _executedGate))
                 {
@@ -696,6 +791,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
                 _queue.Dequeue();
                 _running = true;
+                job.Started = true;
             }
 
             var sampled = (++_resolverJobs & (AllocationSamplePeriod - 1)) == 0;
