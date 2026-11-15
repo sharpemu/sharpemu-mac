@@ -318,8 +318,14 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         // A dispatch it was resolved ahead of did more than encode GPU work (NoteDispatchEffect), or a collector call it
         // was resolved ahead of noted an effect (NoteCollect).
         Effects,
+        // The program cache stamp moved since the resolution began (Job.ProgramState), as DrawLookaheadRefusal.Replanned.
+        Replanned,
         Count,
     }
+
+    // =verify: taken dispatch jobs the worker resolved again and compared (VerifyCompute), those whose difference the
+    // moved answers excuse (refused, the dispatch resolves itself), and those that differed under answers that held.
+    private long _computeVerified, _computeVerifyRaced, _computeVerifyFailed;
 
     private long _computeSubmitted;
     private long _computeTaken;
@@ -907,10 +913,17 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         var refusal = job.State != 1 ? ComputeRefusal.Abandoned
             : job.ComputeResult is null ? ComputeRefusal.Provider
             : !arguments.Matches(dispatchInitiator, groupsX, groupsY, groupsZ, indirect) ? ComputeRefusal.Inputs
+            : job.ProgramState != _executor.ProgramState ? ComputeRefusal.Replanned
             : Volatile.Read(ref _lastDispatchEffect) >= job.Gate || Volatile.Read(ref _lastCollectEffect) >= job.Gate ? ComputeRefusal.Effects
             : !_concurrent.IsStillCurrentAcrossDispatches(job.Assumptions!) ? ComputeRefusal.Ownership
             : ComputeRefusal.Count;
-        ReleaseAssumptions(job);
+        // =verify keeps a taken job's assumptions to its comparison (VerifyCompute), as for a draw's look-ahead.
+        var verifies = refusal == ComputeRefusal.Count && LookaheadMode == DrawLookaheadMode.Verify;
+        if (!verifies)
+        {
+            ReleaseAssumptions(job);
+        }
+
         if (refusal != ComputeRefusal.Count)
         {
             NoteComputeRefusal(refusal);
@@ -922,10 +935,73 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             return false;
         }
 
+        program = job.ComputeResult!;
+        if (verifies)
+        {
+            try
+            {
+                if (VerifyCompute(job, banks, arguments) is not { } verified)
+                {
+                    return false;
+                }
+
+                program = verified;
+            }
+            finally
+            {
+                ReleaseAssumptions(job);
+            }
+        }
+
         Interlocked.Increment(ref _computeTaken);
         Interlocked.Add(ref _computeSavedTicks, job.ResolveTicks);
-        program = job.ComputeResult!;
         return true;
+    }
+
+    // SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=verify: the worker resolves the taken dispatch again through the same side-effect-free
+    // path (nothing consumed, predicted or submitted) and both must hand the executor the same program, inputs and
+    // resources (GraphicsProgramsComparer.ComputeDifference). The worker's result stands; a difference under answers
+    // that moved since the resolution (IsStillCurrentAcrossDispatches, which refuses a GPU write logged since it began
+    // over what it read) is a race, refused and counted, and the dispatch resolves itself; any other is fatal.
+    private ComputeProgram? VerifyCompute(Job job, RegisterBanks banks, ComputeArguments arguments)
+    {
+        var resolved = _executor.ResolveComputeProgramAhead(banks, arguments.DispatchInitiator, arguments.GroupsX, arguments.GroupsY,
+            arguments.GroupsZ, arguments.Indirect, out var workerRefusal);
+        Interlocked.Increment(ref _computeVerified);
+        var difference = resolved is null
+            ? $"worker_refused={workerRefusal}"
+            : SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.ComputeDifference(job.ComputeResult!, resolved);
+        if (difference is null)
+        {
+            return resolved;
+        }
+
+        if (job.Assumptions is { } assumptions && !_concurrent.IsStillCurrentAcrossDispatches(assumptions))
+        {
+            Interlocked.Increment(ref _computeVerifyRaced);
+            return null;
+        }
+
+        Interlocked.Increment(ref _computeVerifyFailed);
+        var executed = Volatile.Read(ref _executedGate);
+        throw _fatal($"A dispatch's program resolved ahead of it differs from the worker's: {difference} " +
+            $"(job {job.Index}, gate {job.Gate}, executed at start {job.ExecutedAtStart}, executed now {executed}). " +
+            (resolved is null ? string.Empty : $"{SharpEmu.Libs.Gpu.Pipelines.GraphicsProgramsComparer.DescribeCompute(job.ComputeResult!, resolved)} ") +
+            $"looked_over=[{DescribeLookedOver(job.ExecutedAtStart, executed)}] " +
+            $"last_dispatch_effect={Volatile.Read(ref _lastDispatchEffect)} last_collect_effect={Volatile.Read(ref _lastCollectEffect)} " +
+            $"stamp_ahead={job.ProgramState} stamp_now={_executor.ProgramState} " +
+            $"state_ahead=[{job.ResolveState}] state_now=[{_executor.DescribeProgramState()}].");
+    }
+
+    public (long Verified, long Raced, long Failed) TakeComputeVerifyCounters() =>
+        (Interlocked.Exchange(ref _computeVerified, 0), Interlocked.Exchange(ref _computeVerifyRaced, 0),
+            Interlocked.Exchange(ref _computeVerifyFailed, 0));
+
+    // The dispatch counters beyond TakeComputeCounters, for the host's prefetch line: the compute verify's.
+    public string TakeComputeReport()
+    {
+        var verify = TakeComputeVerifyCounters();
+        return $"dispatch_verify=(verified={verify.Verified},raced={verify.Raced},failed={verify.Failed})";
     }
 
     // Why a draw's job was not resolved when its draw took it: still gated on the work before it, the resolving
@@ -1315,8 +1391,15 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             {
                 // Only a dispatch's job keeps its resolving time (dispatch_saved_ms); a draw's read the clock for nothing.
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                // Before the lookup, as for a draw: a take under another stamp is refused (ComputeRefusal.Replanned).
+                job.ProgramState = _executor.ProgramState;
                 job.ComputeResult = _executor.ResolveComputeProgramAhead(job.Banks, compute.DispatchInitiator, compute.GroupsX,
                     compute.GroupsY, compute.GroupsZ, compute.Indirect, out job.ComputeRefusal);
+                if (RecordsForVerify)
+                {
+                    job.ResolveState = _executor.DescribeProgramState();
+                }
+
                 job.Assumptions = _concurrent.EndConcurrentResolve();
                 // The dispatch's binding decode joins its resolution (IConcurrentResolveHost.PrepareBindingsAhead).
                 if (job.ComputeResult is { Available: true, Consumed: false, ImageCopy: null } resolved)

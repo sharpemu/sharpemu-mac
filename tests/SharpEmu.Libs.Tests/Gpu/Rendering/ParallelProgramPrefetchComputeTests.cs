@@ -42,6 +42,9 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
     {
         internal bool Current = true;
         internal bool CurrentAcrossDispatches = true;
+        // The answers move after the take's check: the verify's check (the second for the job) sees them moved.
+        internal bool Raced;
+        private int _crossChecksSinceRace;
         internal int Checks, CrossChecks;
         public void BeginConcurrentResolve() { }
         public object EndConcurrentResolve() => this;
@@ -54,6 +57,11 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         public bool IsStillCurrentAcrossDispatches(object assumptions)
         {
             Interlocked.Increment(ref CrossChecks);
+            if (Raced && ++_crossChecksSinceRace % 2 == 0)
+            {
+                return false;
+            }
+
             return CurrentAcrossDispatches && IsStillCurrent(assumptions);
         }
     }
@@ -207,6 +215,53 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         Assert.Equal(current ? 0 : 1, _pipelines.Calls.Count(call => call.StartsWith("get_compute_program", StringComparison.Ordinal)));
         Assert.Equal(current ? 1 : 0, _prefetch.TakeComputeCounters().Taken);
         Assert.Null(_prefetch.Current);
+    }
+
+    // A job resolved before the program cache replaced an entry (its stamp moved) may hold an entry a lookup made now
+    // would not find: refused as replanned, as a draw's.
+    [Fact]
+    public void AJobResolvedBeforeTheProgramCacheMovedIsRefused()
+    {
+        var banks = Banks().Snapshot();
+        var job = Resolved(banks);
+        _pipelines.ProgramState = new ProgramStateStamp(1, 0, 0);
+        Assert.False(Take(banks, job));
+        Assert.Equal(1, Refused(ParallelProgramPrefetch.ComputeRefusal.Replanned));
+        Assert.True(Take(banks, Resolved(banks)));
+    }
+
+    // =verify: the worker resolves every taken dispatch job again and compares; a difference under answers that held
+    // is fatal, one under answers that moved is a race the dispatch resolves itself.
+    [Fact]
+    public void VerifyResolvesATakenJobAgainAndCountsOrFailsOnADifference()
+    {
+        _prefetch.LookaheadMode = ParallelProgramPrefetch.DrawLookaheadMode.Verify;
+        var banks = Banks().Snapshot();
+        var job = Resolved(banks);
+        var resolutions = _pipelines.ComputeAheadResolutions;
+        Assert.True(Take(banks, job));
+        Assert.Equal(resolutions + 1, _pipelines.ComputeAheadResolutions);
+        Assert.Equal("dispatch_verify=(verified=1,raced=0,failed=0)", _prefetch.TakeComputeReport());
+
+        // The worker now resolves another program while the job's answers moved: a race, refused and counted.
+        job = Resolved(banks);
+        var original = _pipelines.Compute;
+        _pipelines.Compute = new ComputeProgram { Program = new ShaderProgram(0x44), Input = original.Input };
+        _concurrent.Raced = true;
+        Assert.False(Take(banks, job));
+        Assert.Equal("dispatch_verify=(verified=1,raced=1,failed=0)", _prefetch.TakeComputeReport());
+
+        // The same difference under answers that still hold is a hole: fatal, naming the job and the difference.
+        _pipelines.Compute = original;
+        job = Resolved(banks);
+        _concurrent.Raced = false;
+        _pipelines.Compute = new ComputeProgram { Program = new ShaderProgram(0x44), Input = original.Input };
+        var fatal = Assert.Throws<RenderExecutorFatalException>(() => Take(banks, job));
+        Assert.Contains("compute_program", fatal.Message);
+        Assert.Contains($"job {job.Index}", fatal.Message);
+        Assert.Contains("looked_over=[", fatal.Message);
+        Assert.Contains("stamp_ahead=", fatal.Message);
+        Assert.Equal("dispatch_verify=(verified=1,raced=0,failed=1)", _prefetch.TakeComputeReport());
     }
 
     // A program that consumed its dispatch counts as an effect for the jobs resolved ahead of it.

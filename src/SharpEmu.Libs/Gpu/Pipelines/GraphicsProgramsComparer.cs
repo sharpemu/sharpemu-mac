@@ -206,6 +206,40 @@ internal static class GraphicsProgramsComparer
         return StageDifference("pixel", memo.Stage, full.Stage);
     }
 
+    // A dispatch's two resolutions (ParallelProgramPrefetch's compute verify): what the executor branches on, the
+    // program, every launch input and the stage as Difference compares a draw's. Null when they hand it the same.
+    public static string? ComputeDifference(ComputeProgram ahead, ComputeProgram worker)
+    {
+        if (ahead.Available != worker.Available) return "available";
+        if (ahead.Consumed != worker.Consumed) return "consumed";
+        if ((ahead.ImageCopy is null) != (worker.ImageCopy is null)) return "image_copy";
+        if ((ahead.KnownWrite is null) != (worker.KnownWrite is null)) return "known_write";
+        if (ahead.Program != worker.Program) return "compute_program";
+        var (a, w) = (ahead.Input, worker.Input);
+        if (ReferenceEquals(a, w)) return null;
+        if (a.ThreadsX != w.ThreadsX || a.ThreadsY != w.ThreadsY || a.ThreadsZ != w.ThreadsZ) return "compute.threads";
+        if (a.DispatchThreadDimensions != w.DispatchThreadDimensions || a.DispatchThreadsX != w.DispatchThreadsX ||
+            a.DispatchThreadsY != w.DispatchThreadsY || a.DispatchThreadsZ != w.DispatchThreadsZ) return "compute.dispatch_threads";
+        if (a.GroupIdX != w.GroupIdX || a.GroupIdY != w.GroupIdY || a.GroupIdZ != w.GroupIdZ || a.ThreadIdCount != w.ThreadIdCount ||
+            a.ThreadGroupSizeEnabled != w.ThreadGroupSizeEnabled || a.WorkgroupRegister != w.WorkgroupRegister) return "compute.ids";
+        if (a.WaveSize != w.WaveSize || a.LocalDataShareDwords != w.LocalDataShareDwords || a.ScratchDwords != w.ScratchDwords ||
+            a.NeedsLocalDataShareBarriers != w.NeedsLocalDataShareBarriers) return "compute.launch";
+        if (a.IeeeMode != w.IeeeMode || a.FloatMode != w.FloatMode || a.Dx10Clamp != w.Dx10Clamp) return "compute.float_mode";
+        return StageDifference("compute", a.Stage, w.Stage);
+    }
+
+    // For the compute verify's fatal: each side's program and stage, and how their stages differ (DescribeStages).
+    public static string DescribeCompute(ComputeProgram ahead, ComputeProgram worker)
+    {
+        static string Side(ComputeProgram program) => program.Input.Stage.Program is not { } stage
+            ? $"available={program.Available} cs=0x{program.Program.Id:X}/0x{program.Program.Module:X} stage=none"
+            : $"available={program.Available} cs=0x{program.Program.Id:X}/0x{program.Program.Module:X} hash=0x{stage.Hash:X16} " +
+              $"base=0x{program.Input.Stage.ShaderBase:X} buffers={program.Input.Stage.Resources.Buffers.Length} " +
+              $"images={program.Input.Stage.Resources.Images.Length} table={program.Input.Stage.Resources.FlattenedResourceTable.Length}";
+
+        return $"ahead=[{Side(ahead)}] worker=[{Side(worker)}] stages=[{DescribeStage(ahead.Input.Stage, worker.Input.Stage)}]";
+    }
+
     private static string? StageDifference(string stage, in ShaderStageResources memo, in ShaderStageResources full)
     {
         if (!ReferenceEquals(memo.Program, full.Program)) return stage + ".program";
