@@ -121,6 +121,36 @@ public sealed class OverlayTelemetryTests : IDisposable
         Assert.Equal(4f, OverlayTelemetry.DataSource.Capture().Frames[^1].GpuMs, 2);
     }
 
+    // The overlay states its demand with every snapshot. That must not resume a capture the render thread paused
+    // until its next sampled frame: it did, so every frame was timed and the sampling never applied.
+    [Fact]
+    public void AnOverlaySnapshotDoesNotResumeAPausedCapture()
+    {
+        if (RenderPhaseProfile.OverlayPhaseSample == 1 || RenderPhaseProfile.Enabled)
+        {
+            return;
+        }
+
+        OverlayTelemetry.DataSource.SetCaptureDemand(OverlayCaptureDemand.RenderPhases | OverlayCaptureDemand.Timeline);
+        Assert.True(RenderPhaseProfile.Measuring);
+        RenderPhaseProfile.RecordFrame();
+        Assert.False(RenderPhaseProfile.Measuring);
+        for (var frame = 1; frame < RenderPhaseProfile.OverlayPhaseSample; frame++)
+        {
+            _ = OverlayTelemetry.DataSource.Capture();
+            OverlayTelemetry.DataSource.SetCaptureDemand(OverlayCaptureDemand.RenderPhases | OverlayCaptureDemand.Timeline);
+            Assert.False(RenderPhaseProfile.Measuring);
+            RenderPhaseProfile.RecordFrame();
+        }
+
+        // The sampled frame, and a changed demand still takes effect at once.
+        Assert.True(RenderPhaseProfile.Measuring);
+        RenderPhaseProfile.RecordFrame();
+        Assert.False(RenderPhaseProfile.Measuring);
+        OverlayTelemetry.DataSource.SetCaptureDemand(OverlayCaptureDemand.RenderPhases);
+        Assert.True(RenderPhaseProfile.Measuring);
+    }
+
     [Fact]
     public void FramesBetweenCapturedOnesShowTheLastCapturedRenderBreakdown()
     {
