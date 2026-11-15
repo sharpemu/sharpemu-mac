@@ -1889,7 +1889,12 @@ internal sealed partial class MetalRenderHost
             return true;
         }
 
-        if (_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
+        // A recorded GPU write still landing in the word owns it as an image does: the backing still holds the bytes
+        // from before the write, which the GPU will not see. Refused, as the resident reader below and the resolving
+        // thread's test (ConcurrentOwner) refuse it, so a clean answer is the same on every thread; a resource branch's
+        // predicate read here otherwise kept one path on the worker and both on the resolver.
+        if (_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)) ||
+            (_gpuWrites.MayCover(address, sizeof(uint)) && _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0))
         {
             return false;
         }
