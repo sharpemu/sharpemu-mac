@@ -14,12 +14,16 @@ namespace SharpEmu.ShaderCompiler.Metal;
 // A half whose own lanes are all off can skip such a body by itself when running it could not
 // have changed anything the other half or the code after it sees:
 //   - every lane of that half is off throughout, so the body's vector work writes nothing there;
-//   - the body holds no cross-lane read, LDS access or exchange, so the running half waits on
-//     nobody, and no EXEC write that could turn on a lane that was off when it began: only
-//     narrowing writes and restores of masks the body saved itself;
+//   - the body holds no read of the other half's lanes, LDS access or exchange, so the running
+//     half waits on nobody (DPP and its row-local shuffles stay inside the half), and no EXEC
+//     write that could turn on a lane that was off when it began: only narrowing writes and
+//     restores of masks that, on every path to the restore, the body last wrote with lanes of
+//     its own EXEC;
 //   - every scalar register, VCC or SCC value the body writes is dead where it joins the code
-//     after it, so the halves differ only in values nothing reads;
-//   - the body is entered only through the branch and leaves only to the join.
+//     after it, so the halves differ only in values nothing reads (each operand counts the
+//     registers it really reads: one for a 32-bit operand, a buffer resource's four);
+//   - the body is entered only through the branch and leaves only to the join, and every
+//     S_CBRANCH_EXECZ inside it is half-local too (one the wave takes as a whole exchanges).
 // Then the branch tests this half's EXEC (simd_ballot) and the mask-ballot elision drops the
 // exchange no reader is left for. The body's emitted text is checked again once the ballots
 // are resolved; one that still exchanges has the program translated without these branches.
@@ -39,6 +43,26 @@ public static partial class Gen5MslTranslator
         /// resolved; the program is then compiled again without half-local branches.</summary>
         internal bool HalfLocalBranchExchanged { get; private set; }
 
+        private static readonly bool HalfBranchReport =
+            Environment.GetEnvironmentVariable("SHARPEMU_MSL_HALF_BRANCH_REPORT") == "1";
+
+        /// <summary>Why the last body was refused, for <see cref="HalfBranchReport"/>.</summary>
+        private string? _halfBranchRefusal;
+
+        private bool RefuseHalfBranch(string reason)
+        {
+            _halfBranchRefusal = reason;
+            return false;
+        }
+
+        private void ReportHalfBranch(Gen5ShaderInstruction branch, string verdict)
+        {
+            if (HalfBranchReport)
+            {
+                Console.Error.WriteLine($"[MSL][HALF-BRANCH] 0x{_request.Hash:X16} pc=0x{branch.Pc:X4} {verdict}");
+            }
+        }
+
         private bool IsHalfLocalBranchBlock(int block) =>
             _halfLocalBranchBlocks is { } blocks && block < blocks.Length && blocks[block];
 
@@ -50,6 +74,13 @@ public static partial class Gen5MslTranslator
         {
             if (!HalfLocalBranchesApply)
             {
+                if (HalfBranchReport && _stage == Gen5MslStage.Compute && IsWave64)
+                {
+                    Console.Error.WriteLine(
+                        $"[MSL][HALF-BRANCH] 0x{_request.Hash:X16} program not applicable: threads={ComputeThreads} " +
+                        $"bridged={IsBridgedComputeWaves} option={_options.HalfLocalExecBranches}");
+                }
+
                 return;
             }
 
@@ -59,6 +90,11 @@ public static partial class Gen5MslTranslator
                 if (instruction.Opcode.StartsWith("SMovrel", StringComparison.Ordinal) ||
                     instruction.Opcode is "SSetpcB64" or "SSwappcB64" or "SRfeB64" or "SGetpcB64")
                 {
+                    if (HalfBranchReport)
+                    {
+                        Console.Error.WriteLine($"[MSL][HALF-BRANCH] 0x{_request.Hash:X16} program refused: {instruction.Opcode}");
+                    }
+
                     return;
                 }
             }
@@ -91,6 +127,11 @@ public static partial class Gen5MslTranslator
                 }
                 else if (!TryGetBranchTargetBlock(blocks, last, out taken))
                 {
+                    if (HalfBranchReport)
+                    {
+                        Console.Error.WriteLine($"[MSL][HALF-BRANCH] 0x{_request.Hash:X16} program refused: unresolved branch target");
+                    }
+
                     return;
                 }
 
@@ -110,22 +151,72 @@ public static partial class Gen5MslTranslator
             }
 
             var (liveIn, sccLiveIn) = ScalarLiveness(blocks, successors);
-            bool[]? branches = null;
-            bool[]? bodies = null;
+            var accepted = new bool[count];
+            var candidate = new bool[count];
             for (var block = 0; block + 1 < count; block++)
             {
                 var last = instructions[blocks[block].EndIndex - 1];
                 var join = takenTargets[block];
-                if (last.Opcode != "SCbranchExecz" || join <= block + 1 ||
-                    !IsHalfLocalBody(blocks, successors, block + 1, join, liveIn, sccLiveIn))
+                if (last.Opcode != "SCbranchExecz")
                 {
                     continue;
                 }
 
+                candidate[block] = true;
+                if (join <= block + 1)
+                {
+                    ReportHalfBranch(last, "backward or empty body");
+                    continue;
+                }
+
+                if (!IsHalfLocalBody(blocks, successors, block + 1, join, liveIn, sccLiveIn))
+                {
+                    ReportHalfBranch(last, _halfBranchRefusal ?? "unrecorded");
+                    continue;
+                }
+
+                accepted[block] = true;
+            }
+
+            // A body that holds an S_CBRANCH_EXECZ the wave still takes as a whole holds that
+            // branch's exchange, so it cannot be skipped by one half either.
+            for (var changed = true; changed;)
+            {
+                changed = false;
+                for (var block = 0; block < count; block++)
+                {
+                    if (!accepted[block])
+                    {
+                        continue;
+                    }
+
+                    for (var inside = block + 1; inside < takenTargets[block]; inside++)
+                    {
+                        if (candidate[inside] && !accepted[inside])
+                        {
+                            accepted[block] = false;
+                            changed = true;
+                            ReportHalfBranch(instructions[blocks[block].EndIndex - 1], "nested whole-wave execz");
+                            break;
+                        }
+                    }
+                }
+            }
+
+            bool[]? branches = null;
+            bool[]? bodies = null;
+            for (var block = 0; block < count; block++)
+            {
+                if (!accepted[block])
+                {
+                    continue;
+                }
+
+                ReportHalfBranch(instructions[blocks[block].EndIndex - 1], "accepted");
                 branches ??= new bool[count];
                 bodies ??= new bool[count];
                 branches[block] = true;
-                for (var inside = block + 1; inside < join; inside++)
+                for (var inside = block + 1; inside < takenTargets[block]; inside++)
                 {
                     bodies[inside] = true;
                 }
@@ -149,22 +240,20 @@ public static partial class Gen5MslTranslator
                     if (inside ? successor < first || successor > join
                         : successor > first && successor < join || (successor == first && block != first - 1))
                     {
-                        return false;
+                        return RefuseHalfBranch(inside ? "body leaves other than to the join" : "body entered other than by the branch");
                     }
                 }
 
                 if (inside && successors[block].Length == 0)
                 {
                     // An exit in the body would end the half that ran it, and the guest wave with it.
-                    return false;
+                    return RefuseHalfBranch("exit in body");
                 }
             }
 
-            // The SGPR pairs the body writes, and those it writes only with a subset of the EXEC it
-            // began with (a saved EXEC, a compare, an AND with EXEC or such a pair).
+            // The scalar registers and SCC the body may write.
             UInt128 writes = 0;
             var writesScc = false;
-            UInt128 pairs = 0;
             for (var block = first; block < join; block++)
             {
                 for (var index = blocks[block].StartIndex; index < blocks[block].EndIndex; index++)
@@ -172,60 +261,137 @@ public static partial class Gen5MslTranslator
                     var instruction = instructions[index];
                     if (!IsHalfLocalBodyInstruction(instruction))
                     {
-                        return false;
+                        return RefuseHalfBranch($"instruction {instruction.Encoding}:{instruction.Opcode}{(instruction.Control is Gen5DppControl or Gen5Dpp8Control ? "+dpp" : string.Empty)}");
                     }
 
                     var (_, _, mayWrite, mayWriteScc) = ScalarEffects(instruction);
                     writes |= mayWrite;
                     writesScc |= mayWriteScc;
-                    pairs |= mayWrite;
                 }
             }
 
-            var subset = pairs & ~(UInt128.One << (int)ExecLoRegister | UInt128.One << (int)ExecHiRegister);
+            // Every EXEC write must leave EXEC a subset of what it was when the body began. A write
+            // may restore a pair only where that pair is known to hold such a subset: on every path
+            // from the body's start to the write, the pair's last write is one with lanes of EXEC
+            // (WritesExecSubsetPair). That is a must-analysis over the body's blocks: nothing is
+            // known at the start (a pair from outside the body may hold anything), the paths meet
+            // by intersection, and any other write of a register forgets its pair.
+            var bodyCount = join - first;
+            var predecessors = new List<int>[bodyCount];
+            for (var block = first; block < join; block++)
+            {
+                predecessors[block - first] = [];
+            }
+
+            for (var block = first; block < join; block++)
+            {
+                foreach (var successor in successors[block])
+                {
+                    if (successor >= first && successor < join)
+                    {
+                        predecessors[successor - first].Add(block);
+                    }
+                }
+            }
+
+            var known = new UInt128[bodyCount];
+            Array.Fill(known, UInt128.MaxValue);
+            known[0] = 0;
             for (var changed = true; changed;)
             {
                 changed = false;
                 for (var block = first; block < join; block++)
                 {
-                    for (var index = blocks[block].StartIndex; index < blocks[block].EndIndex; index++)
+                    var state = block == first ? 0 : UInt128.MaxValue;
+                    foreach (var predecessor in predecessors[block - first])
                     {
-                        var instruction = instructions[index];
-                        var (_, _, mayWrite, _) = ScalarEffects(instruction);
-                        var nonExec = mayWrite & ~(UInt128.One << (int)ExecLoRegister | UInt128.One << (int)ExecHiRegister);
-                        if (nonExec == 0 || (nonExec & subset) == 0)
-                        {
-                            continue;
-                        }
+                        state &= SubsetPairsAfter(blocks[predecessor], known[predecessor - first], out _);
+                    }
 
-                        if (!WritesExecSubsetPair(instruction, subset, out var pair) ||
-                            (nonExec & ~(UInt128.One << (int)pair | UInt128.One << (int)(pair + 1))) != 0)
-                        {
-                            if ((subset & nonExec) != 0)
-                            {
-                                subset &= ~nonExec;
-                                changed = true;
-                            }
-                        }
+                    if (state != known[block - first])
+                    {
+                        known[block - first] = state;
+                        changed = true;
                     }
                 }
             }
 
-            // A subset pair the body reads must be one it wrote first: none may be live into it.
-            subset &= ~liveIn[first];
             for (var block = first; block < join; block++)
             {
-                for (var index = blocks[block].StartIndex; index < blocks[block].EndIndex; index++)
+                SubsetPairsAfter(blocks[block], known[block - first], out var widening);
+                if (widening is not null)
                 {
-                    if (WritesExec(instructions[index]) && !NarrowsOrRestoresExec(instructions[index], subset))
-                    {
-                        return false;
-                    }
+                    return RefuseHalfBranch($"widening exec write {widening.Opcode}");
                 }
             }
 
             var execBits = UInt128.One << (int)ExecLoRegister | UInt128.One << (int)ExecHiRegister;
-            return (writes & ~execBits & liveIn[join]) == 0 && !(writesScc && sccLiveIn[join]);
+            var liveWrites = writes & ~execBits & liveIn[join];
+            if (liveWrites != 0 || (writesScc && sccLiveIn[join]))
+            {
+                if (HalfBranchReport)
+                {
+                    var names = new List<string>();
+                    for (var register = 0; register < 128; register++)
+                    {
+                        if ((liveWrites & (UInt128.One << register)) != 0)
+                        {
+                            names.Add($"s{register}");
+                        }
+                    }
+
+                    if (writesScc && sccLiveIn[join])
+                    {
+                        names.Add("scc");
+                    }
+
+                    return RefuseHalfBranch($"scalar writes live at join: {string.Join(',', names)}");
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>Runs one block of a half-local body over <paramref name="subset"/>, the register
+        /// pairs known to hold a subset of the body's starting EXEC on entry, and returns the pairs
+        /// known after it. <paramref name="widening"/> is the first EXEC write that could turn on a
+        /// lane the body began without, or null.</summary>
+        private UInt128 SubsetPairsAfter(ShaderBlock block, UInt128 subset, out Gen5ShaderInstruction? widening)
+        {
+            widening = null;
+            var instructions = _request.Program.Instructions;
+            var execBits = UInt128.One << (int)ExecLoRegister | UInt128.One << (int)ExecHiRegister;
+            for (var index = block.StartIndex; index < block.EndIndex; index++)
+            {
+                var instruction = instructions[index];
+                if (WritesExec(instruction) && !NarrowsOrRestoresExec(instruction, subset))
+                {
+                    widening ??= instruction;
+                }
+
+                var (_, _, mayWrite, _) = ScalarEffects(instruction);
+                var nonExec = mayWrite & ~execBits;
+                if (nonExec == 0)
+                {
+                    continue;
+                }
+
+                if (WritesExecSubsetPair(instruction, subset, out var pair))
+                {
+                    var pairBits = UInt128.One << (int)pair | UInt128.One << (int)(pair + 1);
+                    if ((nonExec & ~pairBits) == 0)
+                    {
+                        subset = (subset & ~nonExec) | pairBits;
+                        continue;
+                    }
+                }
+
+                subset &= ~nonExec;
+            }
+
+            return subset;
         }
 
         /// <summary>Work a half may run, or skip, without its partner in a forward EXEC body.</summary>
@@ -256,7 +422,11 @@ public static partial class Gen5MslTranslator
                 case Gen5ShaderEncoding.Vop3:
                 case Gen5ShaderEncoding.Vop3p:
                 case Gen5ShaderEncoding.Vopc:
-                    return instruction.Control is not (Gen5DppControl or Gen5Dpp8Control) &&
+                    // DPP8 reads lanes of its own group of eight and the RDNA DPP16 controls lanes of
+                    // its own row of sixteen, so they stay in the half and are emitted as shuffles
+                    // inside that half's simdgroup. Other DPP16 controls (GFX9's wave shifts and
+                    // row broadcasts) are not taken.
+                    return (instruction.Control is not Gen5DppControl dpp || IsRowLocalDppControl(dpp.Control)) &&
                         !opcode.StartsWith("VReadlane", StringComparison.Ordinal) &&
                         !opcode.StartsWith("VReadfirstlane", StringComparison.Ordinal) &&
                         !opcode.StartsWith("VWritelane", StringComparison.Ordinal) &&
@@ -276,6 +446,12 @@ public static partial class Gen5MslTranslator
                     return false;
             }
         }
+
+        /// <summary>quad_perm, row_shl, row_shr, row_ror, row_mirror, row_half_mirror, row_share and
+        /// row_xmask: the DPP16 controls whose source lane is in the reading lane's row.</summary>
+        private static bool IsRowLocalDppControl(uint control) =>
+            control is <= 0xFF or (>= 0x101 and <= 0x10F) or (>= 0x111 and <= 0x11F) or (>= 0x121 and <= 0x12F) or
+                0x140 or 0x141 or (>= 0x150 and <= 0x16F);
 
         private static bool WritesExec(Gen5ShaderInstruction instruction)
         {
@@ -488,11 +664,12 @@ public static partial class Gen5MslTranslator
                 Gen5ShaderEncoding.Mtbuf or Gen5ShaderEncoding.Mimg or Gen5ShaderEncoding.Flat or Gen5ShaderEncoding.Ds;
             UInt128 reads = 0;
             var readsScc = false;
-            foreach (var source in instruction.Sources)
+            for (var sourceIndex = 0; sourceIndex < instruction.Sources.Count; sourceIndex++)
             {
+                var source = instruction.Sources[sourceIndex];
                 if (source.Kind == Gen5OperandKind.ScalarRegister)
                 {
-                    reads |= Bits(source.Value, memory ? 8u : 2u);
+                    reads |= Bits(source.Value, ScalarSourceWidth(instruction, sourceIndex, memory));
                 }
                 else if (source.Kind == Gen5OperandKind.EncodedConstant)
                 {
@@ -525,17 +702,102 @@ public static partial class Gen5MslTranslator
 
             var (writes, _) = DefiniteScalarWrites(instruction);
             var width = MayScalarDestinationWidth(opcode);
-            foreach (var destination in instruction.Destinations)
+            if (IsEnumeratedScalarDestination(instruction, width, out var firstDestination))
             {
-                if (destination.Kind == Gen5OperandKind.ScalarRegister)
+                // A load that lists every register it writes (S_LOAD_DWORDX4 s16..s19) writes
+                // those and no more: the width already counts them.
+                writes |= Bits(firstDestination, width);
+            }
+            else
+            {
+                foreach (var destination in instruction.Destinations)
                 {
-                    writes |= Bits(destination.Value, width);
+                    if (destination.Kind == Gen5OperandKind.ScalarRegister)
+                    {
+                        writes |= Bits(destination.Value, width);
+                    }
                 }
             }
 
             var writesScc = instruction.Encoding is Gen5ShaderEncoding.Sop1 or Gen5ShaderEncoding.Sop2 or
                 Gen5ShaderEncoding.Sopc or Gen5ShaderEncoding.Sopk;
             return (reads, readsScc, writes, writesScc);
+        }
+
+        /// <summary>How many registers from a scalar source operand an instruction may read, at most.
+        /// A 32-bit ALU operand reads one register, a 64-bit one (an opcode naming 64 anywhere, a
+        /// lane mask, a carry, the SAD family's packed operands) two. A memory operand reads its
+        /// descriptor or address in full: an S_LOAD base pair, an S_BUFFER_LOAD or MUBUF/MTBUF
+        /// buffer resource (4), an image resource (8) and sampler (4), and one register for a
+        /// scalar offset or M0. Anything else reads eight. Under-reading would let a body's write
+        /// go unseen, so every shape not named here keeps the wider count.</summary>
+        private static uint ScalarSourceWidth(Gen5ShaderInstruction instruction, int sourceIndex, bool memory)
+        {
+            var opcode = instruction.Opcode;
+            if (memory)
+            {
+                switch (instruction.Encoding)
+                {
+                    case Gen5ShaderEncoding.Smrd or Gen5ShaderEncoding.Smem
+                        when opcode.StartsWith("SLoad", StringComparison.Ordinal):
+                        return sourceIndex == 0 ? 2u : 1u;
+                    case Gen5ShaderEncoding.Smrd or Gen5ShaderEncoding.Smem
+                        when opcode.StartsWith("SBufferLoad", StringComparison.Ordinal):
+                        return sourceIndex == 0 ? 4u : 1u;
+                    case Gen5ShaderEncoding.Mubuf or Gen5ShaderEncoding.Mtbuf when sourceIndex >= 1:
+                        // Vector address, buffer resource, scalar offset, then M0 for an LDS load.
+                        return sourceIndex == 1 ? 4u : 1u;
+                    case Gen5ShaderEncoding.Mimg when instruction.Control is Gen5ImageControl &&
+                        sourceIndex >= instruction.Sources.Count - 2 &&
+                        instruction.Sources[^2].Kind == Gen5OperandKind.ScalarRegister &&
+                        instruction.Sources[^1].Kind == Gen5OperandKind.ScalarRegister:
+                        // The vector addresses, then the image resource and the sampler.
+                        return sourceIndex == instruction.Sources.Count - 2 ? 8u : 4u;
+                    default:
+                        return 8u;
+                }
+            }
+
+            if (opcode.Contains("64", StringComparison.Ordinal) ||
+                opcode.StartsWith("VCndmask", StringComparison.Ordinal) ||
+                opcode.Contains("Co", StringComparison.Ordinal) ||
+                opcode.Contains("Addc", StringComparison.Ordinal) ||
+                opcode.Contains("Subb", StringComparison.Ordinal) ||
+                opcode.Contains("DivFmas", StringComparison.Ordinal) ||
+                opcode.Contains("sad", StringComparison.OrdinalIgnoreCase))
+            {
+                return 2u;
+            }
+
+            return instruction.Encoding is Gen5ShaderEncoding.Sop1 or Gen5ShaderEncoding.Sop2 or Gen5ShaderEncoding.Sopc or
+                Gen5ShaderEncoding.Sopk or Gen5ShaderEncoding.Vop1 or Gen5ShaderEncoding.Vop2 or Gen5ShaderEncoding.Vop3 or
+                Gen5ShaderEncoding.Vop3p or Gen5ShaderEncoding.Vopc
+                ? 1u
+                : 2u;
+        }
+
+        /// <summary>Whether the destinations are exactly <paramref name="width"/> consecutive scalar
+        /// registers, the whole write the opcode makes, listed one by one.</summary>
+        private static bool IsEnumeratedScalarDestination(Gen5ShaderInstruction instruction, uint width, out uint first)
+        {
+            first = 0;
+            var destinations = instruction.Destinations;
+            if (width < 2 || destinations.Count != width)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < destinations.Count; index++)
+            {
+                if (destinations[index].Kind != Gen5OperandKind.ScalarRegister ||
+                    destinations[index].Value != destinations[0].Value + (uint)index)
+                {
+                    return false;
+                }
+            }
+
+            first = destinations[0].Value;
+            return true;
         }
 
         /// <summary>The scalar registers an instruction certainly writes (its named destinations,
@@ -601,9 +863,13 @@ public static partial class Gen5MslTranslator
                      _blockText[block].Contains(Wave64Barrier, StringComparison.Ordinal) ||
                      _blockText[block].Contains("threadgroup_barrier", StringComparison.Ordinal) ||
                      _blockText[block].Contains("sharpemu_wave_scratch", StringComparison.Ordinal) ||
-                     _blockText[block].Contains("simd_shuffle", StringComparison.Ordinal) ||
                      _blockText[block].Contains("simd_broadcast", StringComparison.Ordinal)))
                 {
+                    if (HalfBranchReport)
+                    {
+                        Console.Error.WriteLine($"[MSL][HALF-BRANCH] 0x{_request.Hash:X16} body block {block} still exchanges");
+                    }
+
                     HalfLocalBranchExchanged = true;
                     return false;
                 }

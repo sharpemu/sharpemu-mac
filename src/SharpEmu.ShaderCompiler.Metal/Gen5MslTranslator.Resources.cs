@@ -102,6 +102,11 @@ public static partial class Gen5MslTranslator
 
         if (!compiled && context.HalfLocalBranchExchanged)
         {
+            if (Environment.GetEnvironmentVariable("SHARPEMU_MSL_HALF_BRANCH_REPORT") == "1")
+            {
+                Console.Error.WriteLine($"[MSL][HALF-BRANCH] 0x{request.Hash:X16} program retranslated: an accepted body exchanged");
+            }
+
             options = options with { HalfLocalExecBranches = false };
             context = new CompilationContext(request, options);
             compiled = context.TryCompile(out shader, out error);

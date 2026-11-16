@@ -100,6 +100,7 @@ undoes an optimization to isolate a miscompile:
 | `SHARPEMU_MSL_CONSTANTTABLES` | on | Reads uniform tables through the device address space. |
 | `SHARPEMU_MSL_LDSSIZE` | on | Declares all 32 KB of threadgroup memory. |
 | `SHARPEMU_MSL_MASKBALLOT` | on | Materializes every wave ballot. |
+| `SHARPEMU_MSL_HALF_BRANCHES` | on | Tests the whole wave64 (an exchange between its two simdgroups) at every forward `S_CBRANCH_EXECZ` of a one-wave compute group, instead of letting each half skip a body that only touches its own lanes. |
 | `SHARPEMU_MSL_SPILLCOPY` | on | Reads spilled scalar registers through the lane exchange. |
 | `SHARPEMU_MSL_PERSISTENT_FENCES` | on | Leaves `S_WAITCNT` a no-op in persistent-thread kernels. |
 | `SHARPEMU_MSL_PERSISTENT_RECORDS` | on | Accesses multi-dword records of persistent-thread kernels dword by dword. |
@@ -122,6 +123,7 @@ undoes an optimization to isolate a miscompile:
 | `SHARPEMU_METAL_V2_DUMP_MAX=<n>` | Maximum dumps. Default 240. |
 | `SHARPEMU_METAL_V2_DUMP_EVERY=<n>` | Dump one frame's targets every `n` flips. |
 | `SHARPEMU_METAL_V2_DUMP_AFTER_SECONDS=<n>`, `SHARPEMU_METAL_V2_DUMP_AFTER_FLIPS=<n>` | Hold dumps back until the game has run that long, or flipped that many times. |
+| `SHARPEMU_MSL_HALF_BRANCH_REPORT=1` | Prints, for each forward `S_CBRANCH_EXECZ` of a wave64 compute program, whether each half may take it alone and the first reason it may not (`[MSL][HALF-BRANCH]`). Works with the shader corpus replay. |
 | `SHARPEMU_SHADER_MSL_DUMP_DIR=<dir>` | Writes each translated program as `<stage>-<hash>.metal` with a `<stage>-<hash>.gen5` listing of the guest instructions. `1` writes to `msl-dumps` under the logs folder. |
 | `SHARPEMU_SHADER_MSL_DUMP_HASH=<hashes>` | Restricts the dump to a comma-separated list of shader hashes. |
 | `SHARPEMU_METAL_V2_IGNORE_TESTS=1` | Drops culling, depth and stencil tests from every draw, to tell an empty pass from a rejected one. |
