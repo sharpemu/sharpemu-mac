@@ -50,6 +50,7 @@ them for measurements or to isolate a problem.
 | `SHARPEMU_METAL_V2_WINDOW_MB` | `1024` | Largest a window grows to hold one binding. 512 to 4096. |
 | `SHARPEMU_METAL_V2_IMAGE_BUDGET_MB` | computed | Fixed byte budget for the detiled image cache, at least 256. By default the budget follows the memory the host has free. |
 | `SHARPEMU_METAL_V2_SINGLE_COPY` | on | `0` never releases guest memory that a clean texture's Metal copy duplicates. Requires the chunked guest backing. |
+| `SHARPEMU_METAL_V2_WHOLE_STALE_RELOAD` | on | `0` restores the old refusal: a GPU-written image whose every byte an alias has since written keeps its older texels instead of reloading them, and writes them back over the alias's bytes. For A/B comparisons only. |
 | `SHARPEMU_METAL_V2_STAGED_CACHE_MB` | `256` | Budget of the staged-range cache. |
 | `SHARPEMU_METAL_V2_TRANSIENT_COMMIT_MB` | `256` | Transient staging a command buffer may hold before it is committed early. |
 | `SHARPEMU_METAL_V2_RESIDENCY_SET` | off | `1` puts every guest window in an `MTLResidencySet`. |

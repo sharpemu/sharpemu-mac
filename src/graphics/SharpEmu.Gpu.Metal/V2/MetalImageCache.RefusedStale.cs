@@ -16,6 +16,7 @@ internal enum MetalRunRefusal : byte
     NoCoveringRun,
     SourceInvalid,
     NotMoved,
+    WholeTooLarge,
 }
 
 // Diagnostics only: what becomes of the texels a GPU-written image keeps when RefreshFromGuestCore refuses its
@@ -28,7 +29,7 @@ internal enum MetalRunRefusal : byte
 internal sealed partial class MetalImageCache
 {
     private static readonly string[] RunRefusalNames =
-        ["none", "subrange-off", "stencil", "no-run", "over-half", "no-cover", "source", "not-moved"];
+        ["none", "subrange-off", "stencil", "no-run", "over-half", "no-cover", "source", "not-moved", "whole-large"];
 
     private static readonly string[] RefusedReadNames =
         ["sampled", "sampled-conservative", "storage", "load", "writeback", "transfer"];
@@ -64,6 +65,21 @@ internal sealed partial class MetalImageCache
     private readonly long[] _refusedReads = new long[RefusedReadNames.Length * 2];
     private readonly Dictionary<string, long> _refusedReadsByImage = new(StringComparer.Ordinal);
     private long _refusedDeadWhole, _refusedReadThenWhole, _refusedPartialWrite, _refusedReloaded, _refusedReleased;
+
+    /// <summary>Test hook: refused-stale reads of every role, clean and after a write, not yet reported.</summary>
+    internal long RefusedStaleReads
+    {
+        get
+        {
+            long total = 0;
+            foreach (ref var count in _refusedReads.AsSpan())
+            {
+                total += Interlocked.Read(ref count);
+            }
+
+            return total;
+        }
+    }
 
     private static bool SingleSubresource(MetalCachedImage image) =>
         image.Description.Resources.Levels <= 1 && image.Description.TransferLayers <= 1 && !image.Description.IsVolume;

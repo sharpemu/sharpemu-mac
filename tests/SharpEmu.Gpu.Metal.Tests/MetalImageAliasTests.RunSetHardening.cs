@@ -204,10 +204,12 @@ public sealed unsafe partial class MetalImageAliasTests
     // The D32 plane S is GPU-written; its R32 alias T (the target) is GPU-modified too and owns a published run (the
     // first half of it, as a partial writeback would leave). S is then written again - its texture gets new bytes,
     // guest memory still holds older ones - and T is sampled: the whole range is copied S -> T.
-    private static DeviceAliasOutcome RunDeviceAliasIntoPublishedTarget(bool deviceOn, bool targetOwns = true)
+    private static DeviceAliasOutcome RunDeviceAliasIntoPublishedTarget(
+        bool deviceOn, bool targetOwns = true, bool wholeStaleReload = true)
     {
         using var rig = new Rig(Device.Value);
         rig.Cache.DepthTwins = false;
+        rig.Cache.WholeStaleReloadEnabled = wholeStaleReload;
         rig.Cache.DeviceAliasPublishEnabled = deviceOn;
         var depthRequest = Depth32Request(ImageRole.DepthTarget);
         var textureRequest = Depth32Request(ImageRole.Texture);
@@ -306,13 +308,14 @@ public sealed unsafe partial class MetalImageAliasTests
         }
     }
 
-    // Looks wrong, pinned: with the device copy off, a target that is GPU-modified with older texels and a
-    // published first half, sampled over a source that is GPU-modified with newer ones (a state the cache's own
-    // transitions do not reach: taking GPU ownership clears the other image's), is not reloaded from the guest bytes
-    // the source was just published into, and its flush writes its older texels over them. The device copy leaves
-    // no such state (the test above).
+    // With the device copy off, a target that is GPU-modified with older texels and a published first half, sampled
+    // over a source that is GPU-modified with newer ones (a state the cache's own transitions do not reach: taking
+    // GPU ownership clears the other image's), is stale over all of itself once the sync publishes the source: it
+    // reloads the newer guest bytes whole and owes guest memory nothing, so its flush writes none of its older texels
+    // over them (MetalImageCache.WholeStale.cs). SHARPEMU_METAL_V2_WHOLE_STALE_RELOAD=0 pins the old refusal: no
+    // reload, and the flush puts the older texels back over the newer bytes.
     [Fact]
-    public void WithTheDeviceCopyOffATargetOwningOlderTexelsOverwritesTheNewerGuestBytesAtTheFlush()
+    public void WithTheDeviceCopyOffATargetOwningOlderTexelsReloadsTheNewerGuestBytesWholeInsteadOfOverwritingThem()
     {
         if (!RequireDevice()) return;
         var off = RunDeviceAliasIntoPublishedTarget(deviceOn: false);
@@ -320,8 +323,13 @@ public sealed unsafe partial class MetalImageAliasTests
         Assert.Equal(0, off.DevicePublishes);
         // Published into guest memory by the sync, before the flush.
         Assert.Equal(0, Differing(texels, off.Newer, off.GuestBeforeFlush));
-        // Then the target's older texels replace them.
-        Assert.True(Differing(texels, off.Newer, off.GuestAfterFlush) > texels.Length / 2);
-        Assert.Equal(0, Differing(texels, off.Target, off.GuestAfterFlush));
+        // The target took them whole, and the flush kept them.
+        Assert.Equal(0, Differing(texels, off.Newer, off.Target));
+        Assert.Equal(0, Differing(texels, off.Newer, off.GuestAfterFlush));
+
+        var refused = RunDeviceAliasIntoPublishedTarget(deviceOn: false, wholeStaleReload: false);
+        Assert.Equal(0, Differing(texels, refused.Newer, refused.GuestBeforeFlush));
+        Assert.True(Differing(texels, refused.Newer, refused.GuestAfterFlush) > texels.Length / 2);
+        Assert.Equal(0, Differing(texels, refused.Target, refused.GuestAfterFlush));
     }
 }

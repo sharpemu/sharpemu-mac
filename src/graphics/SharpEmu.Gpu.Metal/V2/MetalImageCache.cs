@@ -2393,6 +2393,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
+        if (TrySkipWholeStaleWriteback(image))
+        {
+            // Guest memory holds every byte of the run already; the image owns none of them.
+            failure = MetalAliasFallbackReason.None;
+            return true;
+        }
+
         if (!TryCoveringRun(in description, start, end, out var aligned, out var alignedEnd))
         {
             failure = MetalAliasFallbackReason.CoveringRunRefused;
@@ -3101,7 +3108,23 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         var overHalf = stale > (residentEnd - residentStart) / 2;
-        if (count == 0 || (overHalf && !NarrowRefreshPastHalf(image)))
+        // A GPU-written image stale over every resident byte owes guest memory none of them: the run is the whole
+        // resident range, reloaded through this same path (its sources, its order after the publication that made
+        // the bytes) rather than refused for widening to the whole image (MetalImageCache.WholeStale.cs).
+        var wholeStale = count != 0 && IsWholeStale(image, runs[..count], residentStart, residentEnd);
+        if (wholeStale)
+        {
+            if (residentEnd - residentStart > TransferPieceBytes)
+            {
+                _runRefusal = MetalRunRefusal.WholeTooLarge;
+                return false;
+            }
+
+            runs[0] = (residentStart, residentEnd);
+            count = 1;
+        }
+
+        if (count == 0 || (overHalf && !NarrowRefreshPastHalf(image) && !wholeStale))
         {
             _runRefusal = count == 0 ? MetalRunRefusal.NoResidentRun : MetalRunRefusal.OverHalf;
             return false;
@@ -3109,6 +3132,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         for (var index = 0; index < count; index++)
         {
+            if (wholeStale)
+            {
+                break;
+            }
+
             if (!TryCoveringRun(in description, runs[index].Start, runs[index].End, out var start, out var end))
             {
                 _runRefusal = MetalRunRefusal.NoCoveringRun;
@@ -3146,7 +3174,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var moved = false;
             if (_owner.UploadWouldEndRenderPass)
             {
-                var blocks = PreludeBlocks(image, start, end, whole: false);
+                // Whole: a device copy into the texture since its last refresh orders before the reload.
+                var blocks = PreludeBlocks(image, start, end, whole: wholeStale);
                 hoisted = TryUploadInPrelude(image, start, end, ref blocks, out moved);
                 anyHoisted |= hoisted;
                 prelude = blocks;
@@ -3214,6 +3243,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (overHalf)
         {
             _runStats.NoteRefreshOverHalf();
+        }
+
+        if (wholeStale)
+        {
+            NoteWholeStaleReloaded(image);
         }
 
         return true;
@@ -3497,6 +3531,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (!image.IsGpuModified || image.Texture == 0 || ImageDescription.IsEmptyRange(image.Description.Data))
         {
             image.ClearGpuModified();
+            return MetalWritebackOutcome.Complete;
+        }
+
+        if (TrySkipWholeStaleWriteback(image))
+        {
             return MetalWritebackOutcome.Complete;
         }
 
