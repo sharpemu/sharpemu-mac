@@ -76,6 +76,12 @@ public static class GpuStreamDiagnostics
         return true;
     }
 
+    // SHARPEMU_CP_HISTORY=reuse: whether the guest has changed the submission's top-level DCB since submit.
+    // Small DCBs only (<= 8 Ki dwords): hashing every slice of a gameplay frame's large DCBs stalls the stream.
+    internal static bool ChangedSinceSubmit(ICommandStreamHost host, CommandSubmission submission) =>
+        DcbHashEnabled && submission.DcbHashed && submission.DwordCount <= 8192 &&
+        TryHashGuest(host, submission.Address, submission.DwordCount, out var now) && now != submission.DcbHash;
+
     // Re-hashes the submission's top-level DCB and reports a difference from the submit-time hash.
     public static void Verify(ICommandStreamHost host, CommandSubmission submission, string at)
     {

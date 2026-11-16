@@ -140,7 +140,7 @@ public sealed class CommandStreamQueue
     {
         _host = host;
         _boundariesInFlight = Math.Max(0, boundariesInFlight);
-        if (GpuStreamDiagnostics.DcbHashEnabled || GpuClobberDiagnostics.Enabled)
+        if (GpuStreamDiagnostics.DcbHashEnabled || GpuClobberDiagnostics.Enabled || CommandProcessorWriteHistory.Reuse)
         {
             _beforeFatal = ReportBeforeFatal;
         }
@@ -382,6 +382,14 @@ public sealed class CommandStreamQueue
         {
             _fatalProcessor?.ReportClobber(submission, DescribeQueuesForClobber());
         }
+
+        if (CommandProcessorWriteHistory.Reuse)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][REUSE] fatal queue={submission.QueueId} submission={submission.SubmissionId} " +
+                $"walk=0x{_fatalProcessor?.ReuseWalkPosition() ?? 0:X} {DescribeQueuesForClobber()}");
+            CommandProcessorWriteHistory.DumpForReuse(submission.Address, submission.DwordCount, 800);
+        }
     }
 
     private string DescribeQueuesForClobber()
@@ -497,6 +505,12 @@ public sealed class CommandStreamQueue
         if (submission.Kind is not (CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary))
             SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.Enqueued, submission.QueueId,
                 submission.SubmissionId, submission.Address, submission.DwordCount, _submissionCount);
+        if (CommandProcessorWriteHistory.Reuse)
+        {
+            CommandProcessorWriteHistory.RecordStream("enq", submission.QueueId, submission.Address, submission.DwordCount,
+                submission.SubmissionId, (ulong)submission.Kind);
+        }
+
         if (DsTrace.Gpu && DsTrace.Armed)
         {
             DsTrace.Emit(DsEv.QENQ, (ulong)submission.QueueId, submission.SubmissionId,
@@ -1858,10 +1872,33 @@ public sealed class CommandStreamQueue
             GpuFatal.BeforeFatal = _beforeFatal;
         }
 
+        if (CommandProcessorWriteHistory.Reuse)
+        {
+            CommandProcessorWriteHistory.RecordStream(firstSlice ? "slice-first" : "slice-resume", submission.QueueId,
+                submission.Address, submission.DwordCount, submission.SubmissionId, processor.ReuseWalkPosition());
+            if (!firstSlice && GpuStreamDiagnostics.ChangedSinceSubmit(_host, submission))
+            {
+                CommandProcessorWriteHistory.RecordStream("rewritten-by-slice-start", submission.QueueId, submission.Address,
+                    submission.DwordCount, submission.SubmissionId, 0);
+            }
+        }
+
         try
         {
             complete = processor.Process(submission.Commands, submission.Address, submission.DwordCount,
                 submission.CommandBytes, submission.RegisterTables) == SubmissionProgress.Complete;
+            if (CommandProcessorWriteHistory.Reuse && GpuStreamDiagnostics.ChangedSinceSubmit(_host, submission))
+            {
+                CommandProcessorWriteHistory.RecordStream("rewritten-by-slice-end", submission.QueueId, submission.Address,
+                    submission.DwordCount, submission.SubmissionId, 0);
+            }
+
+            if (CommandProcessorWriteHistory.Reuse)
+            {
+                CommandProcessorWriteHistory.RecordStream(
+                    complete ? "slice-done" : $"slice-stop:{submission.Commands.SuspendCondition.Kind}@0x{submission.Commands.SuspendCondition.Address:X}",
+                    submission.QueueId, submission.Address, submission.DwordCount, submission.SubmissionId, processor.ReuseWalkPosition());
+            }
         }
         finally
         {

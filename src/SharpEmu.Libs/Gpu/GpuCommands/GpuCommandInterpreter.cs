@@ -611,6 +611,11 @@ public sealed partial class GpuCommandInterpreter
             }
 
             var packetAddress = cursor.Address + ((ulong)cursor.Offset * sizeof(uint));
+            if (CommandProcessorWriteHistory.Reuse)
+            {
+                CommandProcessorWriteHistory.CurrentPacket = packetAddress;
+            }
+
             if (CommandStreamQueue.TraceBoundaryWaits)
             {
                 LastPacketAddress = packetAddress;

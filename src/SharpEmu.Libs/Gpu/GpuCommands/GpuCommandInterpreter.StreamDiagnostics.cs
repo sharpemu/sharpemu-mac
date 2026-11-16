@@ -98,6 +98,12 @@ public sealed partial class GpuCommandInterpreter
     /// address that differs from the packet now, or a landed label at the packet's bytes,
     /// is the clobber; the same bad words at submit mean the guest wrote them.
     /// </summary>
+    /// <summary>Where the walk stands (SHARPEMU_CP_HISTORY=reuse): the next packet of the innermost buffer, 0 when idle.</summary>
+    internal ulong ReuseWalkPosition() =>
+        _execution is { IsEmpty: false } execution
+            ? execution.Top.Address + ((ulong)execution.Top.Offset * sizeof(uint))
+            : 0;
+
     internal void ReportClobber(CommandSubmission submission, string queues)
     {
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
