@@ -82,6 +82,7 @@ public sealed class FrameOverlapProbe
     private readonly List<Frame> _unfinished = new();
     private readonly long _armAt;
     private long _framesUnarmed;
+    private long _queuedCopies;
     private Frame? _lastVisibleFlip;
     private int _depth;
     private int _refusalReports;
@@ -109,6 +110,9 @@ public sealed class FrameOverlapProbe
         _clock = clock ?? Stopwatch.GetTimestamp;
         _armAt = ArmAfterSeconds > 0 ? _clock() + (long)(ArmAfterSeconds * Stopwatch.Frequency) : long.MinValue;
     }
+
+    /// <summary>A copy whose source is a queued publication was queued behind it.</summary>
+    public void NoteQueuedCopy() => Interlocked.Increment(ref _queuedCopies);
 
     /// <summary>Whether a publication still queued (not yet run) writes any of these bytes.</summary>
     public bool Owes(ulong address, ulong size)
@@ -381,6 +385,7 @@ public sealed class FrameOverlapProbe
             var line =
                 $"[METAL-V2][OVERLAP-PROBE] frames={_frames} published_early={_framesEarly} " +
                 $"published_at_completion={_framesAtCompletion} refused_frames={_framesRefused} unarmed={_framesUnarmed} " +
+                $"queued_copies={Interlocked.Exchange(ref _queuedCopies, 0)} " +
                 $"prev_running_at_commit={_framesWaited} items_early={_itemsEarly} " +
                 $"ms_early_p50={Percentile(_earlyMs, 0.5):F1} ms_early_p90={Percentile(_earlyMs, 0.9):F1} " +
                 $"depth_max={_depthMax} flips={_flips} flips_early={_flipsEarly} " +

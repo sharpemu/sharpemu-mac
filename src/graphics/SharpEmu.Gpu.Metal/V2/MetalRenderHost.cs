@@ -1789,10 +1789,12 @@ internal sealed partial class MetalRenderHost :
         if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled && _overlapProbe!.Owes(source, size))
         {
             // SHARPEMU_FRAME_OVERLAP_PROBE=1: the source is a publication still queued, so the copy is one
-            // too, made on the host behind it in stream order.
+            // too, made behind it in stream order. It runs on the completion thread, so it copies raw guest
+            // memory (what the publication before it wrote) and touches nothing the worker owns.
+            _overlapProbe.NoteQueuedCopy();
             QueueCompletion(() =>
             {
-                CopyGuestBytesOnHost(destination, source, size);
+                CopyQueuedPublication(destination, source, size);
                 _imageCache.InvalidateMemory(destination, size);
             }, probeRange: (destination, (int)Math.Min(size, int.MaxValue)));
             return;
@@ -1929,6 +1931,33 @@ internal sealed partial class MetalRenderHost :
         finally
         {
             _guard.End(watch);
+        }
+    }
+
+    // SHARPEMU_FRAME_OVERLAP_PROBE=1 only: a copy of a queued publication, from the completion thread.
+    private void CopyQueuedPublication(ulong destination, ulong source, ulong size)
+    {
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)Math.Min(size, 64 * 1024));
+        try
+        {
+            for (var copied = 0UL; copied < size;)
+            {
+                var count = (int)Math.Min((ulong)buffer.Length, size - copied);
+                var span = buffer.AsSpan(0, count);
+                if (!_memory.TryRead(source + copied, span) || !_memory.TryWrite(destination + copied, span))
+                {
+                    MetalV2Diagnostics.WarnOnce("overlap-probe-copy",
+                        $"[OVERLAP-PROBE] a queued copy could not copy guest memory: destination=0x{destination:X16} " +
+                        $"source=0x{source:X16} size=0x{size:X}.");
+                    break;
+                }
+
+                copied += (ulong)count;
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
