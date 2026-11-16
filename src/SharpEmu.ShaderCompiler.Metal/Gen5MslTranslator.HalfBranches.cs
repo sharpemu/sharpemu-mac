@@ -700,6 +700,22 @@ public static partial class Gen5MslTranslator
                 opcode.StartsWith("SSubb", StringComparison.Ordinal) || opcode.StartsWith("SCmov", StringComparison.Ordinal) ||
                 opcode.StartsWith("SCbranchScc", StringComparison.Ordinal);
 
+            // S_ADDK, S_MULK, S_CMOVK and S_BITSET0/1 name their destination once, and it is also the
+            // operand they update (or keep, when a conditional move is not taken): a read, not only
+            // a write. Without it the destination looks dead before them.
+            if (opcode.StartsWith("SAddk", StringComparison.Ordinal) || opcode.StartsWith("SMulk", StringComparison.Ordinal) ||
+                opcode.StartsWith("SCmovk", StringComparison.Ordinal) || opcode.StartsWith("SBitset0", StringComparison.Ordinal) ||
+                opcode.StartsWith("SBitset1", StringComparison.Ordinal))
+            {
+                foreach (var destination in instruction.Destinations)
+                {
+                    if (destination.Kind == Gen5OperandKind.ScalarRegister)
+                    {
+                        reads |= Bits(destination.Value, IsWideScalarOpcode(opcode) ? 2u : 1u);
+                    }
+                }
+            }
+
             var (writes, _) = DefiniteScalarWrites(instruction);
             var width = MayScalarDestinationWidth(opcode);
             if (IsEnumeratedScalarDestination(instruction, width, out var firstDestination))
