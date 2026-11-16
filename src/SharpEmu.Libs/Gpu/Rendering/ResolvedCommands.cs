@@ -128,6 +128,10 @@ internal sealed class ResolvedDraw
     public GpuExtent3D CopyExtent;
     public GpuImageAspect CopyAspects;
 
+    // A multisample resolve or depth/stencil copy wrote the fields above since the last Reset; until one does they
+    // hold their defaults, and Reset leaves them alone (two 328-byte targets and two image requests every draw).
+    public bool TargetCopyFieldsWritten;
+
     public void Reset()
     {
         TessellationHull = null;
@@ -161,14 +165,18 @@ internal sealed class ResolvedDraw
         IndexedTrace = null;
         PacketAddress = 0;
         Clear = default;
-        ResolveSource = default;
-        ResolveDestination = default;
-        CopyRead = default;
-        CopyWrite = default;
-        CopyReadFormat = default;
-        CopyWriteFormat = default;
-        CopyExtent = default;
-        CopyAspects = default;
+        if (TargetCopyFieldsWritten)
+        {
+            ResolveSource = default;
+            ResolveDestination = default;
+            CopyRead = default;
+            CopyWrite = default;
+            CopyReadFormat = default;
+            CopyWriteFormat = default;
+            CopyExtent = default;
+            CopyAspects = default;
+            TargetCopyFieldsWritten = false;
+        }
     }
 }
 

@@ -41,13 +41,22 @@ public sealed partial class RenderExecutor
         {
             ref readonly var resolution = ref layout.Colors[index];
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("color-request", $"slot={layout.ColorSlots[index]} address=0x{resolution.Request.Description.Data.Address:X16} size=0x{resolution.Request.Description.Data.Size:X} view={resolution.Request.View}");
-            state.Colors[(int)state.ColorCount++] = new ColorTargetState(in resolution, layout.ColorSlots[index], ResourceSlotIdentifier.Invalid);
+            // Written in place, field by field, as the constructor would: no stack copy of the resolution.
+            ref var color = ref state.Colors[(int)state.ColorCount++];
+            color.Resolution = resolution;
+            color.Slot = layout.ColorSlots[index];
+            color.Image = ResourceSlotIdentifier.Invalid;
+            color.View = default;
         }
 
-        if (layout.Depth is { } depthTarget)
+        if (layout.Depth.HasValue)
         {
+            ref readonly var depthTarget = ref Nullable.GetValueRefOrDefaultRef(in layout.Depth);
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("depth-request", $"address=0x{depthTarget.Target.Request.Description.Data.Address:X16} size=0x{depthTarget.Target.Request.Description.Data.Size:X} view={depthTarget.Target.Request.View}");
-            state.Depth = new DepthAttachmentState(in depthTarget, ResourceSlotIdentifier.Invalid);
+            state.Depth.Target = depthTarget;
+            state.Depth.Image = ResourceSlotIdentifier.Invalid;
+            state.Depth.View = default;
+            state.Depth.MetadataClear = false;
             state.DepthResolved = true;
         }
 
@@ -331,6 +340,7 @@ public sealed partial class RenderExecutor
         record.Kind = ResolvedDrawKind.MultisampleResolve;
         record.ResolveSource = from;
         record.ResolveDestination = to;
+        record.TargetCopyFieldsWritten = true;
         return true;
     }
 
@@ -367,6 +377,7 @@ public sealed partial class RenderExecutor
         var write = ImageRequestBuilders.DepthTargetCopy(in words, _host.FormatSupport, writeBuffer: true)
             ?? throw _host.Fatal("A depth/stencil copy has no writable depth target.");
         record.Kind = ResolvedDrawKind.DepthStencilCopy;
+        record.TargetCopyFieldsWritten = true;
         record.CopyRead = read.Request;
         record.CopyWrite = write.Request;
         record.CopyReadFormat = read.Format;
