@@ -64,6 +64,32 @@ public sealed class FrameOverlapProbe
             ? seconds
             : 0;
 
+    /// <summary>
+    /// SHARPEMU_FRAME_OVERLAP_PROBE_AFTER_DRAWS=<draws>: publications land early only once
+    /// SHARPEMU_FRAME_OVERLAP_PROBE_AFTER_FLIPS (default 60) consecutive frames each recorded at least that
+    /// many draws, plus SHARPEMU_FRAME_OVERLAP_PROBE_SETTLE_S (default 10) seconds. It replaces
+    /// SHARPEMU_FRAME_OVERLAP_PROBE_AFTER_S and keys the arming to gameplay-sized frames rather than to the
+    /// GPU host's start time.
+    /// </summary>
+    public readonly record struct ArmTrigger(int Draws, int Flips, double SettleSeconds)
+    {
+        public static ArmTrigger? FromEnvironment()
+        {
+            var culture = System.Globalization.CultureInfo.InvariantCulture;
+            if (!int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE_AFTER_DRAWS"),
+                    System.Globalization.NumberStyles.Integer, culture, out var draws) || draws <= 0)
+            {
+                return null;
+            }
+
+            var flips = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE_AFTER_FLIPS"),
+                System.Globalization.NumberStyles.Integer, culture, out var parsedFlips) && parsedFlips > 0 ? parsedFlips : 60;
+            var settle = double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE_SETTLE_S"),
+                System.Globalization.NumberStyles.Float, culture, out var parsedSettle) && parsedSettle >= 0 ? parsedSettle : 10;
+            return new ArmTrigger(draws, flips, settle);
+        }
+    }
+
     public const string WarningLine =
         "unguarded frame-overlap probe: rendering and guest memory are not protected; measurement only";
 
@@ -83,7 +109,12 @@ public sealed class FrameOverlapProbe
     // Serials of the committed buffers that carried a flip, newest last (the last two are kept).
     private ulong _lastFlipSerial;
     private ulong _flipBeforeLastSerial;
-    private readonly long _armAt;
+    private long _armAt;
+    private readonly ArmTrigger? _trigger;
+    private long _drawsOpen;
+    private long _drawsSinceFlip;
+    private int _heavyFlips;
+    private bool _landingReported;
     private int _refusalReports;
 
     // Window counters, guarded by _gate.
@@ -108,12 +139,56 @@ public sealed class FrameOverlapProbe
     private readonly List<double> _earlyMs = new();
     private readonly List<double> _flipsOutstanding = new();
 
-    public FrameOverlapProbe(Action<ulong, Action> enqueueAtSerial, Func<ulong> completedSerial, Func<long>? clock = null)
+    public FrameOverlapProbe(Action<ulong, Action> enqueueAtSerial, Func<ulong> completedSerial, Func<long>? clock = null,
+        ArmTrigger? trigger = null)
     {
         _enqueueAtSerial = enqueueAtSerial;
         _completedSerial = completedSerial;
         _clock = clock ?? Stopwatch.GetTimestamp;
-        _armAt = ArmAfterSeconds > 0 ? _clock() + (long)(ArmAfterSeconds * Stopwatch.Frequency) : long.MinValue;
+        _trigger = trigger ?? ArmTrigger.FromEnvironment();
+        _armAt = _trigger is not null
+            ? long.MaxValue
+            : ArmAfterSeconds > 0 ? _clock() + (long)(ArmAfterSeconds * Stopwatch.Frequency) : long.MinValue;
+    }
+
+    /// <summary>The open buffer recorded a draw (counted only for the arming trigger).</summary>
+    public void NoteDraw()
+    {
+        if (_trigger is not null)
+        {
+            Interlocked.Increment(ref _drawsOpen);
+        }
+    }
+
+    // Under _gate, at every commit: a flip closes a frame; enough heavy frames in a row arm the probe.
+    private void CountDrawsForTrigger(bool flip)
+    {
+        if (_trigger is not { } trigger)
+        {
+            return;
+        }
+
+        _drawsSinceFlip += Interlocked.Exchange(ref _drawsOpen, 0);
+        if (!flip)
+        {
+            return;
+        }
+
+        if (_armAt == long.MaxValue)
+        {
+            _heavyFlips = _drawsSinceFlip >= trigger.Draws ? _heavyFlips + 1 : 0;
+            if (_heavyFlips >= trigger.Flips)
+            {
+                _armAt = _clock() + (long)(trigger.SettleSeconds * Stopwatch.Frequency);
+                Console.Error.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                    $"[METAL-V2][OVERLAP-PROBE] armed: {_heavyFlips} consecutive frames with >= {trigger.Draws} draws " +
+                    $"(last {_drawsSinceFlip}); publications land early in {trigger.SettleSeconds:0.#} s; " +
+                    $"wall={DateTime.Now:HH:mm:ss.fff} host_uptime_s={Environment.TickCount64 / 1000.0:0.0} " +
+                    $"process_s={(DateTime.Now - Process.GetCurrentProcess().StartTime).TotalSeconds:0.0}"));
+            }
+        }
+
+        _drawsSinceFlip = 0;
     }
 
     /// <summary>
@@ -262,6 +337,7 @@ public sealed class FrameOverlapProbe
                 SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnProbeCommit(serial, batch.HasFlip);
             }
 
+            CountDrawsForTrigger(batch.HasFlip);
             _open = new Batch(batch.Index + 1) { FirstSerial = serial + 1 };
             if (batch.Items.Count == 0 && !batch.HasFlip)
             {
@@ -324,6 +400,14 @@ public sealed class FrameOverlapProbe
             {
                 _batchesUnarmed++;
                 return;
+            }
+
+            if (_trigger is not null && !_landingReported)
+            {
+                _landingReported = true;
+                Console.Error.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                    $"[METAL-V2][OVERLAP-PROBE] landing early from serial={batch.Serial}; wall={DateTime.Now:HH:mm:ss.fff} " +
+                    $"process_s={(DateTime.Now - Process.GetCurrentProcess().StartTime).TotalSeconds:0.0}"));
             }
         }
 

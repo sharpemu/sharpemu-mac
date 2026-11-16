@@ -1068,7 +1068,9 @@ public sealed class InFlightOverlapTracker : IDisposable
     {
         var written = record.Writes[writeIndex];
         var programs = written.Op < record.Ops.Count ? record.Ops[written.Op].Programs : [];
-        var key = (written.Address, written.Program, programs.Length == 0 ? 0 : programs[0]);
+        // One entry per writer (write program, op program, range size): ring addresses rotate every frame, so
+        // keying on the address would spend the budget on the same writer frame after frame.
+        var key = (written.Size, written.Program, programs.Length == 0 ? 0 : programs[0]);
         if (_censused.Count >= CensusWriters || !_censused.Add(key))
         {
             return;

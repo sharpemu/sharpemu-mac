@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Diagnostics;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -87,10 +88,11 @@ public sealed class FrameOverlapProbeTests
     // the way the Metal host queues it, and serials advancing at every commit.
     private sealed class ProbeHost : ManagedCommandStreamHost
     {
-        public ProbeHost(FakeGpu gpu, Log log) : base(new NullMemory(), log, log)
+        public ProbeHost(FakeGpu gpu, Log log, Func<long>? clock = null, FrameOverlapProbe.ArmTrigger? trigger = null)
+            : base(new NullMemory(), log, log)
         {
             Gpu = gpu;
-            Probe = new FrameOverlapProbe(gpu.Enqueue, () => gpu.Signaled);
+            Probe = new FrameOverlapProbe(gpu.Enqueue, () => gpu.Signaled, clock, trigger);
         }
 
         public FakeGpu Gpu { get; }
@@ -138,6 +140,56 @@ public sealed class FrameOverlapProbeTests
         start += name.Length + 2;
         var end = line.IndexOf(' ', start);
         return end < 0 ? line[start..] : line[start..end];
+    }
+
+    // One frame: `draws` draws spread over two buffers, the second carrying the flip, each completed at once.
+    private static void Frame(ProbeHost host, int draws, ref ulong flipId)
+    {
+        for (var draw = 0; draw < draws; draw++)
+        {
+            host.Probe.NoteDraw();
+            if (draw == draws / 2)
+            {
+                host.Interrupt(1);
+                host.Commit();
+            }
+        }
+
+        host.RecordFlip(++flipId, 2);
+        host.Commit();
+        host.Gpu.Pump();
+        host.Gpu.Signal(host.OpenSerial - 1);
+    }
+
+    [Fact]
+    public void TheDrawTriggerArmsAfterEnoughHeavyFramesInARowAndThenTheSettleDelay()
+    {
+        long now = 0;
+        var host = new ProbeHost(_gpu, _log, () => now, new FrameOverlapProbe.ArmTrigger(Draws: 10, Flips: 3, SettleSeconds: 1));
+        ulong flipId = 0;
+
+        // Two heavy frames, a light one (menu or loading) resets the run, then two heavy again: not armed.
+        Frame(host, 12, ref flipId);
+        Frame(host, 12, ref flipId);
+        Frame(host, 4, ref flipId);
+        Frame(host, 12, ref flipId);
+        Frame(host, 12, ref flipId);
+        var line = host.Probe.TakeWindowLine();
+        Assert.Equal("0", Counter(line, "published_early"));
+
+        // The third heavy frame in a row arms it; within the settle delay nothing lands early yet.
+        Frame(host, 12, ref flipId);
+        now += Stopwatch.Frequency / 2;
+        Frame(host, 12, ref flipId);
+        line = host.Probe.TakeWindowLine();
+        Assert.Equal("0", Counter(line, "published_early"));
+
+        // Past the delay buffers land early again, and a later light frame does not disarm it.
+        now += Stopwatch.Frequency;
+        Frame(host, 4, ref flipId);
+        Frame(host, 4, ref flipId);
+        line = host.Probe.TakeWindowLine();
+        Assert.NotEqual("0", Counter(line, "published_early"));
     }
 
     [Fact]
