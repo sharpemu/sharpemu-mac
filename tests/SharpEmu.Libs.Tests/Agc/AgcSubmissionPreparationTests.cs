@@ -138,6 +138,25 @@ public sealed class AgcSubmissionPreparationTests
         Assert.Equal(0, backend.Admissions);
     }
 
+    // CanRead answers for one mapping; the copy read a buffer that spans mappings in pieces.
+    [Fact]
+    public void SubmitWithoutACopyStillTakesABufferThatOnlyAReadCanAnswerFor()
+    {
+        var memory = new ReadOnlyAnswers(Memory());
+        var backend = new StreamReadingBackend();
+        using var scope = new BackendScope(backend);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = Packet;
+        Assert.Equal(0, AgcExports.DriverSubmitDcb(context));
+        Assert.Equal(1, backend.Admissions);
+    }
+
+    private sealed class ReadOnlyAnswers(FakeCpuMemory inner) : ICpuMemory
+    {
+        public bool TryRead(ulong virtualAddress, Span<byte> destination) => inner.TryRead(virtualAddress, destination);
+        public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source) => inner.TryWrite(virtualAddress, source);
+    }
+
     private static FakeCpuMemory Memory()
     {
         var memory = new FakeCpuMemory(Base, 0x1000);

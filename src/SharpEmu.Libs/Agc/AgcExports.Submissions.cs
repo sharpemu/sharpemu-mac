@@ -80,7 +80,7 @@ public static partial class AgcExports
             if (dwordCount > 0xF_FFFF)
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
             var commandLength = (int)dwordCount * sizeof(uint);
-            SubmittedCommandBuffer? submitted = null;
+            object? submitted;
             if (GuestGpu.Current.ConsumesSubmittedCommandBytes)
             {
                 var commandBytes = System.Buffers.ArrayPool<byte>.Shared.Rent(commandLength);
@@ -94,12 +94,21 @@ public static partial class AgcExports
                 var snapshots = CaptureSubmittedGeometry(ctx, gpuState, commandAddress, dwordCount);
                 submitted = new SubmittedCommandBuffer(commandBytes, snapshots, registerTables) { Length = commandLength, Pooled = true };
             }
-            else if (commandLength != 0 && !ctx.Memory.CanRead(commandAddress, (ulong)commandLength))
+            else
             {
                 // This backend's host reads the stream from guest memory itself and is handed no
                 // copy (the copy was rented, filled, scanned for tables and then dropped unread on
-                // every submit): the submit only answers for the range being mapped, as the copy did.
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                // every submit): the submit only answers for the buffer being readable, as the copy
+                // did. CanRead wants one mapping; a buffer it refuses (one that spans mappings) is
+                // read once to decide, which is what the copy was.
+                if (commandLength != 0 && !ctx.Memory.CanRead(commandAddress, (ulong)commandLength) &&
+                    !IsReadableByCopy(ctx.Memory, commandAddress, commandLength))
+                {
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+
+                // Geometry snapshots are their own capability, as in the multi-buffer submit.
+                submitted = CaptureSubmittedGeometry(ctx, gpuState, commandAddress, dwordCount);
             }
 
             SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.GeometryCaptureFinished,
@@ -430,6 +439,13 @@ public static partial class AgcExports
                     return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static bool IsReadableByCopy(ICpuMemory memory, ulong address, int length)
+    {
+        var scratch = System.Buffers.ArrayPool<byte>.Shared.Rent(length);
+        try { return memory.TryRead(address, scratch.AsSpan(0, length)); }
+        finally { System.Buffers.ArrayPool<byte>.Shared.Return(scratch); }
     }
 
     private static Dictionary<ulong, byte[]>? CaptureSubmittedTables(CpuContext ctx, ulong address, ReadOnlySpan<byte> commands)
