@@ -120,6 +120,15 @@ public sealed unsafe class MetalBufferWordVariantTests(ITestOutputHelper output)
 
     private static readonly Lazy<nint> Device = new(MetalNative.MTLCreateSystemDefaultDevice);
 
+    // The switch reads a static of another part of MetalRenderHost: computed on use, it cannot
+    // come out false because the parts' static initializers ran in another order.
+    [Fact]
+    public void TheSwitchFollowsPortableBuffersAndItsVariable() =>
+        Assert.Equal(
+            MetalRenderHost.PortableBuffers &&
+                Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BUFFER_WORD_CONSTANTS") != "0",
+            MetalRenderHost.BufferWordConstants);
+
     [Fact]
     public void AVariantIsListedUnderAnotherArchiveKeyThanTheGenericPipeline()
     {

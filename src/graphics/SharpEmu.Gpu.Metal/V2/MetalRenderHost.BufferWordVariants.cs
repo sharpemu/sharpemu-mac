@@ -39,8 +39,12 @@ internal sealed partial class MetalRenderHost
     /// (PortableBufferWord.ConstantsEnabled), on with portable buffers unless
     /// SHARPEMU_METAL_V2_BUFFER_WORD_CONSTANTS=0, which restores today's MSL exactly.
     /// </summary>
-    internal static readonly bool BufferWordConstants =
-        PortableBuffers && Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BUFFER_WORD_CONSTANTS") != "0";
+    internal static bool BufferWordConstants => PortableBuffers && BufferWordConstantsRequested;
+
+    // Read on its own: PortableBuffers is a static of another part of this class, and the order
+    // the parts' static initializers run in is not defined.
+    private static readonly bool BufferWordConstantsRequested =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BUFFER_WORD_CONSTANTS") != "0";
 
     /// <summary>The translation switches that decide the MSL, for the stamps of what is stored by them.</summary>
     internal static string TranslationSwitchStamp =>
@@ -455,7 +459,14 @@ internal sealed partial class MetalRenderHost
         {
             foreach (var (entry, variants, variant) in _bufferWordQueue.GetConsumingEnumerable())
             {
-                BuildBufferWordVariant(entry, variants, variant);
+                // Ahead of need: a pipeline Metal refuses for a variant must not end the
+                // process (the generic pipeline draws the same), so a fatal inside the build
+                // is thrown to BuildBufferWordVariant, which counts the variant as failed.
+                SharpEmu.Libs.Gpu.Scheduling.GpuFatal.Speculatively(() =>
+                {
+                    BuildBufferWordVariant(entry, variants, variant);
+                    return 0;
+                });
             }
         }
         catch (ObjectDisposedException)
