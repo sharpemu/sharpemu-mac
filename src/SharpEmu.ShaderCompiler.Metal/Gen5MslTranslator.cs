@@ -344,6 +344,12 @@ public static partial class Gen5MslTranslator
         private HashSet<uint>? _entryMaskExports;
         private bool _validMaskFromExec;
         private readonly bool _pixelDepthExport;
+
+        // Where a program may trade the guest's rounding for speed: nothing it computes is a position or a
+        // depth that another program must reproduce bit for bit.
+        private bool FusesLegacyMultiplyAdd => _options.FuseLegacyMultiplyAdd &&
+            ((_stage == Gen5MslStage.Compute && _request.Tessellation is null) ||
+             (_stage == Gen5MslStage.Pixel && !_pixelDepthExport));
         private readonly bool _pixelStencilExport;
         private readonly bool _pixelSampleMaskExport;
         private readonly Gen5ColorExportFormat? _mrtzFormat;

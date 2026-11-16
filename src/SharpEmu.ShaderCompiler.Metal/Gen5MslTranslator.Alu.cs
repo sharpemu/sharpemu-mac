@@ -276,6 +276,12 @@ public static partial class Gen5MslTranslator
                 // and V_MAC_F32 (gfx10.1) round the product before the add.
                 "VFmaF32" or "VFmaAkF32" or "VFmaMkF32" =>
                     FloatResult(instruction, $"fma({F(instruction, 0)}, {F(instruction, 1)}, {F(instruction, 2)})"),
+                // Gen5MslCodegenOptions.FuseLegacyMultiplyAdd: one fused operation where no position or
+                // depth comes out of the program, at the price of the guest's product rounding.
+                "VMadF32" or "VMadAkF32" or "VMadMkF32" when FusesLegacyMultiplyAdd =>
+                    FloatResult(instruction, $"fma({F(instruction, 0)}, {F(instruction, 1)}, {F(instruction, 2)})"),
+                "VMacF32" when FusesLegacyMultiplyAdd =>
+                    FloatResult(instruction, $"fma({F(instruction, 0)}, {F(instruction, 1)}, as_type<float>(v[{destination}]))"),
                 "VMadF32" or "VMadAkF32" or "VMadMkF32" => EmitUnfusedMultiplyAdd(instruction, F(instruction, 2)),
                 "VFmaF16" or "VFmaMkF16" or "VFmaAkF16" => Float16Result(
                     instruction,

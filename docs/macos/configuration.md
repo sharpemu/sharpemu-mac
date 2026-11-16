@@ -102,6 +102,7 @@ undoes an optimization to isolate a miscompile:
 | `SHARPEMU_MSL_PERSISTENT_FENCES` | on | Leaves `S_WAITCNT` a no-op in persistent-thread kernels. |
 | `SHARPEMU_MSL_PERSISTENT_RECORDS` | on | Accesses multi-dword records of persistent-thread kernels dword by dword. |
 | `SHARPEMU_MSL_BYTEBIAS` | off | `1` keeps the per-buffer byte bias. |
+| `SHARPEMU_MSL_FUSE_MAD` | off | `1` emits the guest's legacy multiply-adds (`V_MAD_F32`, `V_MAC_F32`) as one fused operation in compute programs and pixel programs without depth export. Faster (about 5 ms of an 82 ms Demon's Souls frame) but not bit-exact: the guest rounds the product first. |
 | `SHARPEMU_LOD_STATS` | guarded | `always` compiles the LOD statistics counters into every pixel pipeline. |
 
 ## Diagnostics
