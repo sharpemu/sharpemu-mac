@@ -153,11 +153,6 @@ internal static class MetalV2Diagnostics
     public static readonly ulong[] EarlyLabelProbeAddresses = ParseEarlyLabelAddresses(
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EARLY_LABEL_PROBE"));
 
-    // SHARPEMU_FLIP_AHEAD=1 (experimental, default off): a GPU flip hands the presenter a copy of its
-    // frame, blitted in the stream at the flip, and tells video-out the flip is recorded, so the guest
-    // may learn of it before the GPU finishes it (VideoOutExports.FlipAhead.cs, MetalFlipCopyPool).
-    public static readonly bool FlipAhead = Environment.GetEnvironmentVariable("SHARPEMU_FLIP_AHEAD") == "1";
-
     public static readonly int EarlyLabelProbe =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EARLY_LABEL_PROBE") switch
         {

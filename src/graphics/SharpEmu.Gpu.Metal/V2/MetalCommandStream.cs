@@ -900,7 +900,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                     VideoOutBackendServices.CompleteFlipOnGpu(requestId);
                     MetalV2Presenter.SignalFlipPacer();
                 });
-                NoteFlipRecordedIfEligible(requestId);
                 break;
             case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
                 NoteFlipSerialForEarlyLabels();
@@ -911,7 +910,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                     MetalV2Presenter.SignalFlipPacer();
                     TriggerInterrupt(eventId, 0);
                 });
-                NoteFlipRecordedIfEligible(requestId);
                 break;
             case EndOfPipeWriteKind.GdsWrite32:
                 RecordEndOfPipeGdsWrite(in write);
@@ -2918,7 +2916,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         try
         {
-            CaptureFlip(handle, index, requestId, flipMode, flipArgument, gpuQueued: true);
+            CaptureFlip(handle, index, requestId, flipMode, flipArgument);
         }
         catch
         {
@@ -2939,7 +2937,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         DrainDraws();
-        CaptureFlip(handle, index, requestId, flipMode: 0, flipArg: 0, gpuQueued: false);
+        CaptureFlip(handle, index, requestId, flipMode: 0, flipArg: 0);
     }
 
     // The display surface is a cached image like any other; the flip hands its
@@ -2952,7 +2950,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     internal static long FlipsDiscarded;
     internal static long FlipsPublished;
 
-    private void CaptureFlip(int handle, int index, ulong requestId, int flipMode, long flipArg, bool gpuQueued)
+    private void CaptureFlip(int handle, int index, ulong requestId, int flipMode, long flipArg)
     {
         Interlocked.Increment(ref _flipAttempts);
         Interlocked.Increment(ref FlipsCaptured);
@@ -3016,11 +3014,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-after-refresh"); }
         SampleFlipLuma(image.Texture);
         var texture = PresentationViewOf(imageIdentifier, image, in request);
-        // SHARPEMU_FLIP_AHEAD: the presenter gets a copy taken here, in the stream, instead of
-        // the display image the guest may render into once it hears of the flip.
-        var presented = texture;
-        var copied = MetalV2Diagnostics.FlipAhead && gpuQueued && _flipTarget is not null && texture != 0 &&
-            TryCopyFlipFrame(texture, out presented);
         var serial = SubmissionSerial;
         FlushCommandBuffer(PassEndCause.Present);
         if (_flipTarget is null || texture == 0)
@@ -3045,17 +3038,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         Interlocked.Increment(ref FlipsPublished);
         ReportFlipSurface(in displayBuffer, in request, imageIdentifier, image, texture);
         _flipTarget.PublishGuestFrame(
-            presented,
+            texture,
             Math.Max(displayBuffer.Width, 1),
             Math.Max(displayBuffer.Height, 1),
             requestId,
             serial,
             VideoOutBackendServices.IsHdrPixelFormat(displayBuffer.PixelFormat));
-        if (MetalV2Diagnostics.FlipAhead)
-        {
-            NoteFlipFrameCaptured(requestId, copied);
-        }
-
         VideoOutBackendServices.TraceGpuFlip(
             _memory, handle, index, flipMode, flipArg, displayBuffer.Address, requestId);
         // The shared phase profile measures the whole draw translation path, which v2
