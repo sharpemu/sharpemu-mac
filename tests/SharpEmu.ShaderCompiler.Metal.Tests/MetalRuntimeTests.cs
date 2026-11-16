@@ -556,13 +556,14 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     [Fact]
     public void LegacyMadRoundsTheProductAndFmaDoesNot()
     {
-        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.MadVersusFma);
+        var exact = Gen5MslCodegenOptions.FromEnvironment with { FuseLegacyMultiplyAdd = false };
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.MadVersusFma, options: exact);
         Assert.Contains("#pragma clang fp contract(off)", shader.Source, StringComparison.Ordinal);
 
         if (SkipWithoutMetalDevice("the execution test")) return;
 
         var result = ExecuteRequestOrThrow(Gen5ComputeFixtures.MadVersusFma, new byte[256],
-            waveLaneCount: 32, localSizeX: 32, threadsPerThreadgroup: 32);
+            waveLaneCount: 32, localSizeX: 32, threadsPerThreadgroup: 32, options: exact);
         for (var lane = 0; lane < 32; lane++)
         {
             Assert.Equal(0u, ReadDword(result, lane * 8));
@@ -832,9 +833,10 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     private static byte[] ExecuteRequestOrThrow(Gen5ComputeFixture fixture, byte[] buffer,
-        uint waveLaneCount = 32, uint localSizeX = 32, uint threadsPerThreadgroup = 1, uint localDataShareDwords = 0)
+        uint waveLaneCount = 32, uint localSizeX = 32, uint threadsPerThreadgroup = 1, uint localDataShareDwords = 0,
+        Gen5MslCodegenOptions? options = null)
     {
-        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount, localSizeX, localDataShareDwords);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture, waveLaneCount, localSizeX, localDataShareDwords, options: options);
         if (!MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError))
         {
             throw new InvalidOperationException($"[{fixture.Name}] {compileError}\n{shader.Source}");

@@ -129,11 +129,12 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// multiply-add in compute programs and in pixel programs that export no depth. The guest rounds the
 /// product before the add, so the fused result differs wherever that rounding mattered: by at most half
 /// an ULP of the product in the sum, and a result just under the smallest normal flushes to zero where
-/// the guest kept the addend (Rdna2AluConformanceTests fails the MAD/MAC forms with this on). It never
+/// the guest kept the addend (Rdna2AluConformanceTests, which runs with this off, would fail the MAD/MAC forms with it on). It never
 /// touches compares, NaN ordering or any other instruction, unlike <see cref="ContractPixelCompute"/>.
 /// Vertex, mesh and depth-exporting pixel programs, which feed positions and depth, never fuse. The heavy
 /// Demon's Souls kernels are mostly V_MAD_F32, each two operations unfused: about 5 ms of an 82 ms frame.
-/// Off by default; <c>SHARPEMU_MSL_FUSE_MAD=1</c> turns it on.</param>
+/// The fused form is not bit-exact for MAD/MAC. On by default; <c>SHARPEMU_MSL_FUSE_MAD=0</c> restores
+/// the exact two-operation form.</param>
 public sealed record Gen5MslCodegenOptions(
     bool StructuredControlFlow = true,
     bool RegisterAllocation = true,
@@ -160,7 +161,7 @@ public sealed record Gen5MslCodegenOptions(
     bool ContractPixelCompute = false,
     bool RuntimeDwordFormatLoads = true,
     bool FusedLaneReads = true,
-    bool FuseLegacyMultiplyAdd = false)
+    bool FuseLegacyMultiplyAdd = true)
 {
     /// <summary>Diagnostic threshold for moving mesh LDS from threadgroup memory to the
     /// device pool, in bytes. The supported mesh allocation is at most 16 KiB. Zero
@@ -348,7 +349,7 @@ public sealed record Gen5MslCodegenOptions(
         ContractPixelCompute: Environment.GetEnvironmentVariable("SHARPEMU_MSL_CONTRACT") == "1",
         RuntimeDwordFormatLoads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_RUNTIME_DWORD_FORMAT") != "0",
         FusedLaneReads: Environment.GetEnvironmentVariable("SHARPEMU_MSL_READLANE_FUSE") != "0",
-        FuseLegacyMultiplyAdd: Environment.GetEnvironmentVariable("SHARPEMU_MSL_FUSE_MAD") == "1")
+        FuseLegacyMultiplyAdd: Environment.GetEnvironmentVariable("SHARPEMU_MSL_FUSE_MAD") != "0")
     {
         UnobservedAluWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") is "1" or "all",
         UnobservedAluAllStages = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_ALU") == "all",
