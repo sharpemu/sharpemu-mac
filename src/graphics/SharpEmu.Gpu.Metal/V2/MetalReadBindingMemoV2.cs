@@ -191,12 +191,19 @@ internal sealed class MetalReadBindingMemoV2
 
     private void MoveToFront(int first, int way)
     {
-        var entry = _entries[first + way];
-        var side = _sides[first + way];
-        _entries.AsSpan(first, way).CopyTo(_entries.AsSpan(first + 1, way));
-        _sides.AsSpan(first, way).CopyTo(_sides.AsSpan(first + 1, way));
-        _entries[first] = entry;
-        _sides[first] = side;
+        // At most Ways - 1 entries move down one way: element copies, not a bulk move with its write-barrier call.
+        var entries = _entries;
+        var sides = _sides;
+        var entry = entries[first + way];
+        var side = sides[first + way];
+        for (var index = first + way; index > first; index--)
+        {
+            entries[index] = entries[index - 1];
+            sides[index] = sides[index - 1];
+        }
+
+        entries[first] = entry;
+        sides[first] = side;
     }
 
     /// <summary>The counters since the last call (the PERF line's read_binding_memo); resets them.</summary>

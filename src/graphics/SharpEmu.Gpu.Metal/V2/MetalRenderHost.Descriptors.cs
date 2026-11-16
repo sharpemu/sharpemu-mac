@@ -1756,7 +1756,7 @@ internal sealed partial class MetalRenderHost
                     break;
                 case MslArgumentFieldKind.StepReport:
                     BinaryPrimitives.WriteUInt64LittleEndian(
-                        span, StepReportAddress(stage.Program.Hash, StepReportStageName(stageIndex)));
+                        span, StepReportAddress(stage.Program.Hash, stageIndex));
                     break;
                 case MslArgumentFieldKind.PairLocks:
                     // One table for every program, resident with the windows, so two programs
@@ -1831,8 +1831,8 @@ internal sealed partial class MetalRenderHost
     private MetalGuestRange WriteArgumentRange(ReadOnlySpan<byte> bytes)
     {
         var range = _guestMemory.Allocate((ulong)bytes.Length, 256, out var span);
-        span.Clear();
         bytes.CopyTo(span);
+        span[bytes.Length..].Clear();
         return range;
     }
 
@@ -2080,6 +2080,8 @@ internal sealed partial class MetalRenderHost
     // The program reads the table's fixed slots below minimumWords without a bounds check
     // (Gen5MslCodegenOptions.ConstantTableSlots), so a shorter table goes up zero-padded:
     // those slots read the 0 the check gave. The padded words are part of the reuse key.
+    // The padded copy is written whole (the table, then a zero tail), so its stack memory is not zeroed first.
+    [System.Runtime.CompilerServices.SkipLocalsInit]
     private ulong UploadFlattenedTable(uint[] table, uint minimumWords)
     {
         if ((uint)table.Length >= minimumWords)
@@ -2088,8 +2090,8 @@ internal sealed partial class MetalRenderHost
         }
 
         Span<uint> padded = minimumWords <= 1024 ? stackalloc uint[(int)minimumWords] : new uint[minimumWords];
-        padded.Clear();
         table.CopyTo(padded);
+        padded[table.Length..].Clear();
         return UploadDwords(padded);
     }
 
@@ -2106,8 +2108,8 @@ internal sealed partial class MetalRenderHost
         var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(
             stage.ShaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
         var range = _guestMemory.Allocate((ulong)Math.Max(bytes.Length, 16), 256, out var span);
-        span.Clear();
         bytes.CopyTo(span);
+        span[bytes.Length..].Clear();
         _threadLimitsTarget = range with
         {
             Offset = range.Offset + ((ulong)layout.DispatchThreadLimitsDword * sizeof(uint)),
@@ -2124,9 +2126,10 @@ internal sealed partial class MetalRenderHost
             return found.GpuAddress;
         }
 
+        // The range is the table's bytes and a zero tail up to the 16-byte minimum, each written once.
         var range = _guestMemory.Allocate((ulong)Math.Max(bytes.Length, 16), 256, out var span);
-        span.Clear();
         bytes.CopyTo(span);
+        span[bytes.Length..].Clear();
         if (ArgumentBufferReuse)
         {
             _uploadedTables.Add(bytes, _submissionSerial, in range);
