@@ -3130,13 +3130,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
-        for (var index = 0; index < count; index++)
+        // A whole-stale run is the resident range already: nothing to widen, and no byte around it to protect.
+        for (var index = 0; index < count && !wholeStale; index++)
         {
-            if (wholeStale)
-            {
-                break;
-            }
-
             if (!TryCoveringRun(in description, runs[index].Start, runs[index].End, out var start, out var end))
             {
                 _runRefusal = MetalRunRefusal.NoCoveringRun;
