@@ -7,9 +7,10 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.HLE;
 
 /// <summary>
-/// The in-flight overlap diagnostic without a page guard: a sampled frame's gate arms the released buffers the
-/// GPU has not completed (reads for stores, writes for loads), each fault is attributed by byte and let go,
-/// a submission's command buffer is watched until it is walked, and every watch is given back.
+/// The in-flight overlap diagnostic without a page guard or thread: a sampled frame's buffers are armed as they
+/// commit (reads for stores, writes for loads), a fault is attributed by byte and counted as the race only between
+/// the buffer's publication and its completion, a page touched before the publication is armed again at it, a
+/// submission's command buffer is watched until it is walked, and every watch is given back.
 /// </summary>
 public sealed class InFlightOverlapTrackerTests
 {
@@ -49,7 +50,7 @@ public sealed class InFlightOverlapTrackerTests
 
     private long _now = 1;
 
-    private InFlightOverlapTracker Create(FakeWatches watches, int every = 1) => new(watches, () => _now, every, 1000, armReads: true);
+    private InFlightOverlapTracker Create(FakeWatches watches, int every = 1) => new(watches, () => _now, every, 1000, armReads: true, startThread: false);
 
     // Present at serial 1, then buffer 2 reads a constant range and has an occlusion result copied into guest memory.
     private static void RecordFrame(InFlightOverlapTracker tracker)
@@ -103,33 +104,37 @@ public sealed class InFlightOverlapTrackerTests
     }
 
     [Fact]
-    public void NothingIsArmedBeforeTheGateAndCompletionGivesEveryWatchBack()
+    public void ABufferIsArmedAtCommitAndCompletionGivesEveryWatchBack()
     {
         var watches = new FakeWatches();
         var tracker = Create(watches);
         RecordFrame(tracker);
-
-        // Present + 1 is not the gate.
-        tracker.OnRelease(2);
-        Assert.Equal(0, watches.Live);
-
-        tracker.OnRelease(3);
         Assert.Equal(2, watches.Live);
-        tracker.OnCompleted(3);
+
+        tracker.OnCompleted(2);
+
         Assert.Equal(0, watches.Live);
     }
 
     [Fact]
-    public void ACompletedBufferIsNotArmed()
+    public void AStoreBeforeThePublicationIsNotTheRaceAndThePageIsArmedAgainAtIt()
     {
         var watches = new FakeWatches();
         var tracker = Create(watches);
         RecordFrame(tracker);
-        tracker.OnCompleted(2);
 
+        Assert.True(tracker.TryHandleFault(FaultKind.Write, 0x100010, out _));
+        Assert.Equal(0, watches.Counts.GetValueOrDefault((0x100000UL, false)));
         tracker.OnRelease(3);
+        Assert.Equal(1, watches.Counts.GetValueOrDefault((0x100000UL, false)));
+        Assert.True(tracker.TryHandleFault(FaultKind.Write, 0x100020, out _));
 
-        Assert.Equal(0, watches.Live);
+        tracker.OnCompleted(3);
+        CloseWindow(tracker);
+        var line = tracker.TakeWindowLine()!;
+        Assert.Contains("pre_release stores=1.0/1 by_tag=[constant:1.0]", line);
+        Assert.Contains("rearmed=1.0/1", line);
+        Assert.Contains("store_rs_hit_pages=1.0/1", line);
     }
 
     [Fact]
@@ -146,7 +151,7 @@ public sealed class InFlightOverlapTrackerTests
 
         var line = tracker.TakeWindowLine()!;
         Assert.Contains("store_rs_hit_pages=0.0/0", line);
-        Assert.Contains("ranges=0.0/0 hit_range_mb=0.000 page_range_mb=0.000 nb_pages=1.0/1", line);
+        Assert.Contains("ranges=0.0/0 hit_range_mb=0.000 nb_pages=1.0/1", line);
     }
 
     [Fact]
@@ -174,7 +179,7 @@ public sealed class InFlightOverlapTrackerTests
     public void AnUnsampledFrameArmsNothing()
     {
         var watches = new FakeWatches();
-        var tracker = Create(watches, every: 2);
+        var tracker = Create(watches, every: 4);
         RecordFrame(tracker);
 
         tracker.OnRelease(3);
