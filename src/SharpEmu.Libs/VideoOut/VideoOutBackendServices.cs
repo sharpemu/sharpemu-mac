@@ -74,6 +74,16 @@ public static class VideoOutBackendServices
             VideoOutExports.CompleteFlipOnGpu(requestId);
     }
 
+    // SHARPEMU_FLIP_AHEAD: the GPU host recorded the flip, committed the buffer carrying it
+    // and captured its frame as a copy (VideoOutExports.NoteFlipRecorded).
+    public static void NoteFlipRecorded(ulong requestId)
+    {
+        if (Bridge is { } bridge)
+            bridge.NoteFlipRecorded(requestId);
+        else
+            VideoOutExports.NoteFlipRecorded(requestId);
+    }
+
     public static void DiscardFlip(ulong requestId)
     {
         if (Bridge is { } bridge)
@@ -203,6 +213,8 @@ public interface IVideoOutBackendBridge
     bool IsFlipPresentationPending(ulong requestId);
 
     void MarkFlipPresented(ulong requestId);
+
+    void NoteFlipRecorded(ulong requestId);
 
     void NotifyPresentationWindowClosed();
 
