@@ -129,6 +129,18 @@ public sealed unsafe class MetalBufferWordVariantTests(ITestOutputHelper output)
                 Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BUFFER_WORD_CONSTANTS") != "0",
             MetalRenderHost.BufferWordConstants);
 
+    // A variant pipeline is listed under its pair, but is never written as the library file of
+    // its modules: that file is what every later draw of the module loads.
+    [Fact]
+    public void AVariantPipelineIsNeverWrittenAsAModulesLibraryFile()
+    {
+        var vertex = new UInt128(0x1111, 0x2222);
+        var pixel = new UInt128(0x1234, 0x5678);
+
+        Assert.Equal((vertex, pixel), MetalBinaryArchive.LibraryFileKeys(vertex, pixel, specialized: false));
+        Assert.Equal((default(UInt128), default(UInt128)), MetalBinaryArchive.LibraryFileKeys(vertex, pixel, specialized: true));
+    }
+
     [Fact]
     public void AVariantIsListedUnderAnotherArchiveKeyThanTheGenericPipeline()
     {

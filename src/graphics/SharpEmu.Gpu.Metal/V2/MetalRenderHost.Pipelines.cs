@@ -1200,7 +1200,8 @@ internal sealed partial class MetalRenderHost
                     vertexArchiveKey,
                     pixelLibraryKey,
                     missed,
-                    pixelArchiveKey);
+                    pixelArchiveKey,
+                    specialized: bufferWords is not null);
             }
 
             if (state == 0)

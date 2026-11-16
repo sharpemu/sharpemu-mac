@@ -584,12 +584,16 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// from its MSL, and its file was never read.
     /// </summary>
     public void NoteRenderPipeline(
-        nint descriptor, PipelineKind kind, UInt128 vertexKey, UInt128 pixelKey, bool missed, UInt128? pixelPairKey = null)
+        nint descriptor, PipelineKind kind, UInt128 vertexKey, UInt128 pixelKey, bool missed, UInt128? pixelPairKey = null,
+        bool specialized = false)
     {
         if (descriptor == 0 || Volatile.Read(ref _disposed) != 0)
         {
             return;
         }
+
+        var pairKey = PairKey(vertexKey, pixelPairKey ?? pixelKey);
+        (vertexKey, pixelKey) = LibraryFileKeys(vertexKey, pixelKey, specialized);
 
         // Before the segments are loaded nothing could hit; a pipeline they hold would be
         // stored twice, and one they do not is stored by a later start.
@@ -602,7 +606,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
 
         MetalNative.Send(descriptor, SelRetain);
-        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, PairKey(vertexKey, pixelPairKey ?? pixelKey))))
+        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, pairKey)))
         {
             Interlocked.Increment(ref _capturesDropped);
             MetalNative.SendVoid(descriptor, SelRelease);
@@ -610,6 +614,15 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             Forget(pixel);
         }
     }
+
+    /// <summary>
+    /// The stage keys a noted pipeline may be written as the library file of. A pipeline of
+    /// specialized functions (a buffer-word variant) has none: written under its modules'
+    /// keys when their files are missing, the file would hold that variant's strides and
+    /// formats, and the next start would load it as the library of every draw of the module.
+    /// </summary>
+    internal static (UInt128 Vertex, UInt128 Pixel) LibraryFileKeys(UInt128 vertexKey, UInt128 pixelKey, bool specialized) =>
+        specialized ? default : (vertexKey, pixelKey);
 
     /// <summary>Serializes the current segment now; waits when <paramref name="wait"/>.</summary>
     public void Flush(bool wait, TimeSpan? timeout = null)
