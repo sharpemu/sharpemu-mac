@@ -422,7 +422,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     // Per kind of the item that last gated a draw's job: the draws submitted with a gate above the draw before them
     // (draw_gate_raises), the draw takes that found their job unresolved (busy or queued), the subset whose job the
-    // resolving thread had reached before its gate opened (gate-bound), and the worker's wait in them.
+    // resolving thread had reached before its gate opened (gate-bound), and the worker's wait in them. The kind is that
+    // of the job's own gate (Job.Gate): where draws look ahead of dispatches and collector calls it is the last item
+    // they do not, often a synchronous call or an idle commit long before the draw, so an unresolved take counted
+    // under a kind was held by it only when it is gate-bound as well.
     private long _lastDrawGate;
     private readonly long[] _drawGateRaises = new long[(int)GateItemKind.Count];
     private readonly long[] _unresolvedByGate = new long[(int)GateItemKind.Count];
@@ -598,7 +601,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         // well-prefetched burst is one, and two clock reads per draw were measurable.
         if (job.State == 0)
         {
-            var gateKind = NoteUnresolvedTake(job);
+            var gateKind = NoteUnresolvedTake(job, out var behind);
             var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             // Caller work is reported separately, not disguised as a shorter resolver wait.
             // Keep long queues out of the claim routine's lock/finally frame.
@@ -610,6 +613,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 var waited = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted;
                 Interlocked.Add(ref _waitTicks, waited);
                 Interlocked.Add(ref _unresolvedWaitTicksByGate[(int)gateKind], waited);
+                Interlocked.Add(ref behind ? ref _unresolvedBehindWaitTicks : ref _unresolvedFrontierWaitTicks, waited);
             }
         }
 
@@ -1049,8 +1053,17 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // thread busy with another job, or queued behind others with its gate open (takes_unresolved).
     private long _unresolvedGated, _unresolvedBusy, _unresolvedQueued;
 
-    private GateItemKind NoteUnresolvedTake(Job job)
+    // The same takes by what bounded the resolving thread's lead (takes_unresolved frontier= and behind=): at the
+    // frontier the job was the newest submitted, so the stream had produced nothing further for it to resolve ahead
+    // (its lead is the command thread's); behind, later jobs were already queued and the one resolving thread, which
+    // resolves in submission order, had not got through this one yet. With the worker's wait in each. Submitted is
+    // read without the lock: a stale value only moves a take between the two.
+    private long _unresolvedFrontier, _unresolvedBehind, _unresolvedFrontierWaitTicks, _unresolvedBehindWaitTicks;
+
+    private GateItemKind NoteUnresolvedTake(Job job, out bool behind)
     {
+        behind = Submitted > job.Index + 1;
+        Interlocked.Increment(ref behind ? ref _unresolvedBehind : ref _unresolvedFrontier);
         if (job.Gate > Volatile.Read(ref _executedGate)) Interlocked.Increment(ref _unresolvedGated);
         else if (Volatile.Read(ref _running)) Interlocked.Increment(ref _unresolvedBusy);
         else Interlocked.Increment(ref _unresolvedQueued);
@@ -1092,7 +1105,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         var lastCpu = Interlocked.Exchange(ref _lastResolverCpu, cpu);
         var cpuMs = cpu < 0 || lastCpu < 0 ? -1.0 : (cpu - lastCpu) / 1e6;
         return $"takes_unresolved=(busy={Interlocked.Exchange(ref _unresolvedBusy, 0)},gated={Interlocked.Exchange(ref _unresolvedGated, 0)}," +
-            $"queued={Interlocked.Exchange(ref _unresolvedQueued, 0)},started={Interlocked.Exchange(ref _unresolvedStarted, 0)}) " +
+            $"queued={Interlocked.Exchange(ref _unresolvedQueued, 0)},started={Interlocked.Exchange(ref _unresolvedStarted, 0)}," +
+            $"frontier={Interlocked.Exchange(ref _unresolvedFrontier, 0)},behind={Interlocked.Exchange(ref _unresolvedBehind, 0)}," +
+            $"frontier_wait_ms={Milliseconds(Interlocked.Exchange(ref _unresolvedFrontierWaitTicks, 0)).ToString("F1", culture)}," +
+            $"behind_wait_ms={Milliseconds(Interlocked.Exchange(ref _unresolvedBehindWaitTicks, 0)).ToString("F1", culture)}) " +
             $"unresolved_by_gate=({FormatByKind(_unresolvedByGate)}) gate_bound_by_gate=({FormatByKind(_gateBoundByGate)}) " +
             $"unresolved_wait_ms_by_gate=({FormatByKind(_unresolvedWaitTicksByGate, ticks => Milliseconds(ticks).ToString("F1", culture))}) " +
             $"draw_gate_raises=({FormatByKind(_drawGateRaises)}) {TakeDrawLookaheadReport()} resolver_jobs={Interlocked.Exchange(ref _resolverJobs, 0)} " +
