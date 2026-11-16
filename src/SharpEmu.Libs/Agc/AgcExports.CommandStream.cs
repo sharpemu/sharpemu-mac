@@ -272,6 +272,13 @@ public static partial class AgcExports
         // The words of every bound color target, so a flip can replay a retained draw into the display buffer.
         private static void RecordKnownColorTargets(SubmittedDcbState state, RegisterBanks banks)
         {
+            var stamp = banks.Stamp(RegisterStamp.ColorTargets);
+            if (stamp == state.KnownColorTargetsStamp)
+            {
+                return;
+            }
+
+            state.KnownColorTargetsStamp = stamp;
             var context = banks.Context;
             for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
             {
