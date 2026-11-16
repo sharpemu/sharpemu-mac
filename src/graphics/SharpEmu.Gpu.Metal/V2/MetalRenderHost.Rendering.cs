@@ -1898,6 +1898,7 @@ internal sealed partial class MetalRenderHost
 
     public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
         var started = DrawTimingStart();
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
@@ -1950,6 +1951,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
         var started = DrawTimingStart();
         if (_indexBuffer == 0)
         {
@@ -2012,6 +2014,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndirect(BufferBinding arguments)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
         var started = DrawTimingStart();
         // The guest's argument layout is (vertexCount, instanceCount, firstVertex,
         // firstInstance), which is exactly MTLDrawPrimitivesIndirectArguments.
@@ -2077,6 +2080,7 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
         var started = DrawTimingStart();
         if (_indexBuffer == 0)
         {
@@ -2150,6 +2154,7 @@ internal sealed partial class MetalRenderHost
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: true);
         var started = DrawTimingStart();
         // A persistent-thread kernel spins on memory other work publishes, which can be what a
         // label copy held for the commit writes: the copy would land only after the kernel had
@@ -2254,6 +2259,7 @@ internal sealed partial class MetalRenderHost
     // indirect counts are dispatched as the guest wrote them, as before; the order is not used.
     public bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: true);
         var range = _guestMemory.Resolve(argumentsAddress, 3 * sizeof(uint));
         if (!range.IsValid)
         {

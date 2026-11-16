@@ -1672,6 +1672,11 @@ public sealed class CommandStreamQueue
         }
 
         var dsPacketsStarted = 0UL;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.SetQueue((int)submission!.QueueId);
+        }
+
         if (dsSlice)
         {
             DsCurrentSubmissionId = submission!.SubmissionId;

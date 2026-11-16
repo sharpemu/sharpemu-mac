@@ -31,6 +31,11 @@ internal sealed partial class MetalRenderHost
     ColorAttachmentAcquisition IRenderHost.AcquireColorAttachment(in ColorTargetState target)
     {
         var request = target.Resolution.Request;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteImage(request.Description.Data.Address, (ulong)request.Description.Data.Size, written: true);
+        }
+
         var imageIdentifier = target.Image;
         if (!_imageCache.TryGetImage(imageIdentifier, out _))
         {
@@ -119,6 +124,11 @@ internal sealed partial class MetalRenderHost
     {
         var resolution = depth.Target.Target;
         var request = resolution.Request;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteImage(request.Description.Data.Address, (ulong)request.Description.Data.Size, written: true);
+        }
+
         var imageIdentifier = depth.Image;
         if (!_imageCache.TryGetImage(imageIdentifier, out _))
         {

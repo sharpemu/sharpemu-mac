@@ -149,6 +149,41 @@ public static class FrameOverlapDiagnostic
         }
     }
 
+    public delegate bool GuestReader(ulong address, Span<byte> destination);
+
+    /// <summary>The GPU host's view of guest memory, for the in-flight census values (bytes before and after the GPU wrote them).</summary>
+    public static void SetReader(GuestReader reader)
+    {
+        if (InFlight is { } inflight)
+        {
+            inflight.Reader = reader;
+        }
+    }
+
+    [ThreadStatic]
+    private static int t_queue;
+
+    /// <summary>The guest queue whose submission the calling (worker) thread is walking.</summary>
+    public static void SetQueue(int queue) => t_queue = queue;
+
+    public static void NoteOpProgram(ulong hash) => InFlight?.NoteOpProgram(hash);
+
+    public static void NoteImage(ulong address, ulong size, bool written) => InFlight?.NoteImage(address, size, written);
+
+    /// <summary>While alive, a draw or dispatch is being recorded; its end closes the in-flight census op.</summary>
+    public static OpScope Op(bool dispatch) => new(Enabled && InFlight is not null, dispatch);
+
+    public readonly struct OpScope(bool active, bool dispatch) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (active)
+            {
+                InFlight?.EndOp(dispatch, t_queue);
+            }
+        }
+    }
+
     /// <summary>The worker committed a command buffer (<paramref name="present"/>: it holds a flip).</summary>
     public static void OnProbeCommit(ulong serial, bool present) => InFlight?.OnCommit(serial, present);
 

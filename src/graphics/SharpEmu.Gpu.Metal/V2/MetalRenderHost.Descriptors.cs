@@ -663,6 +663,11 @@ internal sealed partial class MetalRenderHost
             ? packet.Resolutions![index]
             : ImageRequestBuilders.Texture(words, ShapeOf(image));
         var request = resolution.Request;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteImage(request.Description.Data.Address, (ulong)request.Description.Data.Size, image.Written);
+        }
+
         if (prepared.MemoWanted[index])
         {
             prepared.MemoPages[index] = _imageCache.RequestPageVersions(in request);
@@ -936,6 +941,11 @@ internal sealed partial class MetalRenderHost
         _writtenViewRanges.Clear();
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ResourceBinding);
         var stage = (MetalStageBindings)prepared;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteOpProgram(stage.Program.Hash);
+        }
+
         var info = stage.Program.Resources!.Info;
         var snapshot = stage.StageResources.Resources;
         NoteBindShape(stage, snapshot);

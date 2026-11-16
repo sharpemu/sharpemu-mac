@@ -203,6 +203,38 @@ public sealed class InFlightOverlapTrackerTests
     }
 
     [Fact]
+    public void ACensusFindsTheWriterOpAndTheLastWriterOfItsInputsInStreamOrder()
+    {
+        var watches = new FakeWatches();
+        var tracker = Create(watches);
+        tracker.OnCommit(1, present: true);
+        // Op 0, a draw: renders the image at 0x500000.
+        tracker.NoteOpProgram(0xA0);
+        tracker.NoteImage(0x500000, 0x1000, written: true);
+        tracker.EndOp(dispatch: false, queue: 0);
+        tracker.OnCommit(2, present: false);
+        // Op 0 of buffer 3, a dispatch on queue 9: samples that image, reads a constant range, stores a result.
+        tracker.NoteOpProgram(0xB0);
+        tracker.NoteImage(0x500000, 0x1000, written: false);
+        tracker.MarkRead(0x600000, 0x40, OverlapTag.Constant);
+        tracker.NoteWrite(0x200000, 0x40, OverlapWrite.Storage, OverlapTag.StorageWritten, 0xB0);
+        tracker.EndOp(dispatch: true, queue: 9);
+        tracker.OnCommit(3, present: false);
+        tracker.OnRelease(3);
+
+        var image = tracker.LastWriterOf(1, 3, 0, 0x500000, 0x1000);
+        Assert.Contains("serial=2 vs_present=1 op=0/1 kind=draw queue=0 programs=[00000000000000A0]", image);
+        Assert.Contains("how=image_target", image);
+        Assert.Contains("last_writer=none_in_window", tracker.LastWriterOf(1, 3, 0, 0x600000, 0x40));
+
+        // The guest loads the result before buffer 3 completes: the census keeps the range for its value.
+        Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x200010, out _));
+        Assert.Single(tracker.RecordOf(1, 3).CensusRanges!);
+        tracker.OnCompleted(3);
+        Assert.Equal(0, watches.Live);
+    }
+
+    [Fact]
     public void ErasPlaceABufferAgainstTheSampledFramesPresent()
     {
         var watches = new FakeWatches();

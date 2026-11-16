@@ -196,6 +196,10 @@ internal sealed partial class MetalRenderHost :
         }
         // SHARPEMU_DIAG_FRAME_OVERLAP=1: single-copy holds the one read-watch bit, so the diagnostic then arms writes only.
         SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Attach(pages, readWatchesShared: _singleCopy is not null);
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.SetReader((address, destination) => _guestMemory.TryPeek(address, destination));
+        }
         if (MetalStagedRangeCache.Enabled)
         {
             _stagedRanges = new MetalStagedRangeCache(

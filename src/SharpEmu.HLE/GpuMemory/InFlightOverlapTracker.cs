@@ -63,9 +63,15 @@ public sealed class InFlightOverlapTracker : IDisposable
         public ulong Serial;
         public Window? Window;
         public bool Armed, Disarmed, Late;
-        public readonly List<(ulong Address, ulong Size, OverlapTag Tag)> Reads = new();
-        public readonly List<(ulong Address, ulong Size, int Origin, OverlapTag Tag, ulong Program)> Writes = new();
+        public readonly List<(ulong Address, ulong Size, OverlapTag Tag, int Op)> Reads = new();
+        public readonly List<(ulong Address, ulong Size, int Origin, OverlapTag Tag, ulong Program, int Op)> Writes = new();
         public readonly List<ulong> OwnedPages = new();
+
+        // Census only (never armed): GPU images an op samples and the images it renders or stores into,
+        // by guest address, and each op's kind, guest queue and programs.
+        public readonly List<(ulong Address, ulong Size, int Op)> ImageReads = new(), ImageWrites = new();
+        public readonly List<(bool Dispatch, int Queue, ulong[] Programs)> Ops = new();
+        public List<(ulong Address, ulong Size)>? CensusRanges;
         public (ulong Start, ulong End, int Index)[]? ReadIndex, WriteIndex;
         public ulong[]? ReadMaxEnd, WriteMaxEnd;
     }
@@ -150,7 +156,7 @@ public sealed class InFlightOverlapTracker : IDisposable
 
         lock (_gate)
         {
-            _open.Reads.Add((address, size, tag));
+            _open.Reads.Add((address, size, tag, _open.Ops.Count));
         }
     }
 
@@ -163,9 +169,50 @@ public sealed class InFlightOverlapTracker : IDisposable
 
         lock (_gate)
         {
-            _open.Writes.Add((address, size, (int)origin, tag, program));
+            _open.Writes.Add((address, size, (int)origin, tag, program, _open.Ops.Count));
         }
     }
+
+    private readonly List<ulong> _opPrograms = new();
+
+    /// <summary>A program bound for the draw or dispatch being recorded.</summary>
+    public void NoteOpProgram(ulong hash)
+    {
+        lock (_gate)
+        {
+            if (!_opPrograms.Contains(hash))
+            {
+                _opPrograms.Add(hash);
+            }
+        }
+    }
+
+    /// <summary>A GPU image the op being recorded samples (<paramref name="written"/>: renders or stores into).</summary>
+    public void NoteImage(ulong address, ulong size, bool written)
+    {
+        if (address == 0 || size == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            (written ? _open.ImageWrites : _open.ImageReads).Add((address, size, _open.Ops.Count));
+        }
+    }
+
+    /// <summary>The draw or dispatch being recorded ended: what was noted since the last one is its op.</summary>
+    public void EndOp(bool dispatch, int queue)
+    {
+        lock (_gate)
+        {
+            _open.Ops.Add((dispatch, queue, _opPrograms.ToArray()));
+            _opPrograms.Clear();
+        }
+    }
+
+    /// <summary>Reads guest bytes for the census values (set by the GPU host; null: no values).</summary>
+    public FrameOverlapDiagnostic.GuestReader? Reader { get; set; }
 
     private Window WindowFor(long frame)
     {
@@ -193,7 +240,8 @@ public sealed class InFlightOverlapTracker : IDisposable
             record.Serial = serial;
             // Frame F (F % K == 0) arms its own buffers (committed while F-1 presents were seen) and its post-flip ones.
             long? frame = _frames % _sampleEvery == 0 ? _frames : (_frames + 1) % _sampleEvery == 0 ? _frames + 1 : null;
-            if (frame is { } index && index > 0 && serial > _completedSerial && (record.Reads.Count != 0 || record.Writes.Count != 0))
+            if (frame is { } index && index > 0 && serial > _completedSerial &&
+                (record.Reads.Count != 0 || record.Writes.Count != 0 || record.ImageWrites.Count != 0 || record.ImageReads.Count != 0))
             {
                 record.Window = WindowFor(index);
                 record.Window.Records.Add(record);
@@ -465,6 +513,14 @@ public sealed class InFlightOverlapTracker : IDisposable
 
                 _inFlight.RemoveAt(index);
                 done.Disarmed = true;
+                if (done.CensusRanges is { } ranges)
+                {
+                    foreach (var (address, size) in ranges)
+                    {
+                        Console.Error.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                            $"[METAL-V2][OVERLAP-CENSUS] value serial={done.Serial} range=0x{address:X}+0x{size:X} after_gpu={Bytes(address, size)}"));
+                    }
+                }
                 foreach (var page in done.OwnedPages)
                 {
                     ref var state = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrNullRef(_pages, page);
@@ -917,11 +973,144 @@ public sealed class InFlightOverlapTracker : IDisposable
             window.WsLoadMs.Add(ms);
             Report(window, "load_ws", address, written.Address, written.Size, OriginNames[written.Origin] + "/" + TagNames[(int)written.Tag],
                 writeHit.Serial, era, ms, written.Program);
+            Census(window, writeHit, writeIndex, address, era, ms);
             return false;
         }
 
         window.WsLoadNeighbour++;
         return false;
+    }
+
+    private const int CensusWriters = 80;
+    private const int CensusInputs = 24;
+    private readonly HashSet<(ulong, ulong, ulong)> _censused = new();
+
+    private string Bytes(ulong address, ulong size)
+    {
+        if (Reader is not { } reader)
+        {
+            return "-";
+        }
+
+        Span<byte> bytes = stackalloc byte[32];
+        var length = (int)Math.Min(32UL, size);
+        return reader(address, bytes[..length]) ? Convert.ToHexString(bytes[..length]) : "unreadable";
+    }
+
+    private static string Programs(ulong[] programs) => string.Join(",", programs.Select(program => program.ToString("X16", CultureInfo.InvariantCulture)));
+
+    private string DescribeOp(Window window, Record record, int op)
+    {
+        var position = $"op={op}/{record.Ops.Count}";
+        if (op >= record.Ops.Count)
+        {
+            return $"serial={record.Serial} vs_present={(long)record.Serial - (long)window.PresentSerial} {position} kind=packet_or_unended";
+        }
+
+        var (dispatch, queue, programs) = record.Ops[op];
+        return $"serial={record.Serial} vs_present={(long)record.Serial - (long)window.PresentSerial} {position} kind={(dispatch ? "dispatch" : "draw")} " +
+            $"queue={queue} programs=[{Programs(programs)}]";
+    }
+
+    // The newest write in stream order before (record, op) that overlaps the range, within the window's buffers.
+    internal string LastWriterOf(long frame, ulong serial, int op, ulong address, ulong size)
+    {
+        lock (_gate)
+        {
+            var window = _windows.Concat(_done).First(candidate => candidate.Index == frame);
+            return LastWriter(window, window.Records.First(record => record.Serial == serial), op, address, size);
+        }
+    }
+
+    internal Record RecordOf(long frame, ulong serial)
+    {
+        lock (_gate)
+        {
+            return _windows.Concat(_done).First(candidate => candidate.Index == frame).Records.First(record => record.Serial == serial);
+        }
+    }
+
+    private string LastWriter(Window window, Record record, int op, ulong address, ulong size)
+    {
+        var end = address + size;
+        var start = window.Records.IndexOf(record);
+        for (var at = start; at >= 0; at--)
+        {
+            var candidate = window.Records[at];
+            var limit = ReferenceEquals(candidate, record) ? op : int.MaxValue;
+            (int Op, string How, ulong Program)? best = null;
+            foreach (var write in candidate.Writes)
+            {
+                if (write.Op < limit && write.Address < end && address < write.Address + write.Size && (best is null || write.Op >= best.Value.Op))
+                {
+                    best = (write.Op, OriginNames[write.Origin] + "/" + TagNames[(int)write.Tag], write.Program);
+                }
+            }
+
+            foreach (var image in candidate.ImageWrites)
+            {
+                if (image.Op < limit && image.Address < end && address < image.Address + image.Size && (best is null || image.Op >= best.Value.Op))
+                {
+                    best = (image.Op, "image_target", 0);
+                }
+            }
+
+            if (best is { } found)
+            {
+                return $"last_writer {DescribeOp(window, candidate, found.Op)} how={found.How} write_program={found.Program:X16}";
+            }
+        }
+
+        return "last_writer=none_in_window (an earlier frame, the CPU, or a GPU image never written by these buffers)";
+    }
+
+    private void Census(Window window, Record record, int writeIndex, ulong address, int era, double ms)
+    {
+        var written = record.Writes[writeIndex];
+        var programs = written.Op < record.Ops.Count ? record.Ops[written.Op].Programs : [];
+        var key = (written.Address, written.Program, programs.Length == 0 ? 0 : programs[0]);
+        if (_censused.Count >= CensusWriters || !_censused.Add(key))
+        {
+            return;
+        }
+
+        (record.CensusRanges ??= new()).Add((written.Address, written.Size));
+        var culture = CultureInfo.InvariantCulture;
+        Console.Error.WriteLine(string.Create(culture,
+            $"[METAL-V2][OVERLAP-CENSUS] frame={window.Index} load=0x{address:X} range=0x{written.Address:X}+0x{written.Size:X} " +
+            $"how={OriginNames[written.Origin]}/{TagNames[(int)written.Tag]} write_program={written.Program:X16} era={EraNames[era]} ms_after_gate={ms:F2} " +
+            $"completed_vs_present={(long)_completedSerial - (long)window.PresentSerial} before_gpu={Bytes(written.Address, written.Size)} " +
+            $"writer {DescribeOp(window, record, written.Op)}"));
+        var inputs = 0;
+        var seen = new HashSet<ulong>();
+        foreach (var read in record.Reads)
+        {
+            if (read.Op != written.Op || !seen.Add(read.Address) || inputs++ >= CensusInputs)
+            {
+                continue;
+            }
+
+            Console.Error.WriteLine(
+                $"[METAL-V2][OVERLAP-CENSUS]   input 0x{read.Address:X}+0x{read.Size:X} tag={TagNames[(int)read.Tag]} " +
+                LastWriter(window, record, written.Op, read.Address, read.Size));
+        }
+
+        foreach (var image in record.ImageReads)
+        {
+            if (image.Op != written.Op || !seen.Add(image.Address) || inputs++ >= CensusInputs)
+            {
+                continue;
+            }
+
+            Console.Error.WriteLine(
+                $"[METAL-V2][OVERLAP-CENSUS]   input 0x{image.Address:X}+0x{image.Size:X} tag=image " +
+                LastWriter(window, record, written.Op, image.Address, image.Size));
+        }
+
+        if (inputs > CensusInputs)
+        {
+            Console.Error.WriteLine($"[METAL-V2][OVERLAP-CENSUS]   inputs_not_listed={inputs - CensusInputs}");
+        }
     }
 
     private void Report(Window window, string what, ulong address, ulong rangeAddress, ulong rangeSize, string kind, ulong serial, int era, double ms, ulong program)
