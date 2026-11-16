@@ -41,6 +41,7 @@ them for measurements or to isolate a problem.
 | `SHARPEMU_GUEST_BACKING_SHAREABLE` | unset | `1` makes the guest backing shareable with another process, and keeps a shared table and log of guest views. This is groundwork for the two-process split (`SHARPEMU_GPU_PROCESS=1` sets it too). See [Guest memory for the two-process split](split-shared-memory.md). |
 | `SHARPEMU_HLE_FAST_PATH` | on | `0` disables the native stubs for `pthread_self` and `pthread_getspecific`. They are also off while import or pthread tracing is active. |
 | `SHARPEMU_STALL_WATCHDOG_SECONDS` | `20` | Seconds without import progress before the stall watchdog acts. `0` disables it. |
+| `SHARPEMU_FLIP_AHEAD` | off | Experimental. `1` tells the game a GPU flip is done once the flip is recorded and the flip before it has really finished on the GPU, instead of when the frame is shown, so the game can build its next frame while the GPU draws this one (at most one flip ahead). Each such frame is copied in the GPU stream into a presenter-owned texture (up to 7 textures the size of the display buffer), so what is shown is unchanged; a flip whose frame cannot be copied keeps the usual timing, and the refusal is logged once. Pacing, interrupts and labels are unchanged. Counters: `[VIDEOOUT][FLIP-AHEAD]` and the `flip_copy*` fields of `[METAL-PRESENT]`. |
 
 ## Metal memory
 
