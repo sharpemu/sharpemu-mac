@@ -93,6 +93,25 @@ public class ShaderProgramInfo
     private int _writesAnyBuffer;
 
     public ImageResourceInfo[] Images { get; init; } = [];
+
+    // Whether any storage image is written, found once as WritesAnyBuffer is: asked several times a draw.
+    public bool WritesAnyStorageImage
+    {
+        get
+        {
+            var known = Volatile.Read(ref _writesAnyStorageImage);
+            if (known == 0)
+            {
+                known = Array.Exists(Images, static image => image.Class == ImageResourceClass.Storage && image.Written) ? 2 : 1;
+                Volatile.Write(ref _writesAnyStorageImage, known);
+            }
+
+            return known == 2;
+        }
+    }
+
+    private int _writesAnyStorageImage;
+
     public int SamplerCount { get; init; }
     public uint WaveSize { get; init; } = 64;
     public uint ScratchDwords { get; init; }

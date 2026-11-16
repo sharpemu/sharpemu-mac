@@ -161,18 +161,7 @@ public sealed partial class RenderExecutor
         return false;
     }
 
-    internal static bool WritesStorageImage(ShaderProgramInfo program)
-    {
-        foreach (var image in program.Images)
-        {
-            if (image.Class == ImageResourceClass.Storage && image.Written)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    internal static bool WritesStorageImage(ShaderProgramInfo program) => program.WritesAnyStorageImage;
 
     private static bool IsPremultipliedFillBlend(in BlendRegisters blend) =>
         blend.Enable && blend.ColorSourceFactor == BlendFactorOne && blend.ColorDestinationFactor == BlendFactorOneMinusSourceAlpha && blend.ColorFunction == BlendFunctionAdd;
