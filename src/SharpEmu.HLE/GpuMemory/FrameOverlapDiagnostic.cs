@@ -261,6 +261,7 @@ public sealed class FrameOverlapTracker : IDisposable
     private const byte ReadArmed = 16;
     private const byte Armed = 32;
     private const byte ManagedSeen = 64;
+    private const byte Retried = 128;
 
     private readonly IFrameOverlapWatches _watches;
     private readonly Func<long> _clock;
@@ -288,6 +289,11 @@ public sealed class FrameOverlapTracker : IDisposable
 
     // The frame whose pages are armed.
     private Frame? _armed;
+
+    // The frame disarmed last: a fault that reached the guest's handler before the protection
+    // the disarm gave back was applied there is answered once per page (retry), not declined.
+    private Frame? _released;
+    private long _lateFaults;
 
     private readonly Window _window = new();
     private readonly Dictionary<ulong, (ulong Size, long Hits)> _topDetach = new();
@@ -805,13 +811,15 @@ public sealed class FrameOverlapTracker : IDisposable
             {
                 Volatile.Write(ref _armed, null);
             }
+
+            Volatile.Write(ref _released, frame);
         }
     }
 
     public bool TryHandleFault(FaultKind kind, ulong address, out bool stillBlocked)
     {
         stillBlocked = false;
-        if (Volatile.Read(ref _armed) is null)
+        if (Volatile.Read(ref _armed) is null && Volatile.Read(ref _released) is null)
         {
             return false;
         }
@@ -821,6 +829,16 @@ public sealed class FrameOverlapTracker : IDisposable
         {
             if (_armed is not { } frame || !frame.Pages.TryGetValue(page, out var flags) || (flags & Armed) == 0)
             {
+                // Released already, but the access faulted on the protection the watch had: once
+                // the release is applied the access goes through, so it is retried, once a page.
+                if (_released is { } released && released.Pages.TryGetValue(page, out var old) && (old & Retried) == 0 &&
+                    !_watches.StillBlocks(page, kind))
+                {
+                    released.Pages[page] = (byte)(old | Retried);
+                    Interlocked.Increment(ref _lateFaults);
+                    return true;
+                }
+
                 return false;
             }
 
@@ -1056,7 +1074,7 @@ public sealed class FrameOverlapTracker : IDisposable
             builder.Append(culture, $"refuse: frames={w.RefusedFrames} gds={w.Gds} gpu_valued={w.GpuValued} unbounded={w.Unbounded} atomic_in_ws={w.AtomicInWrites} | ");
             builder.Append(culture, $"boundary: unfinished_frames={w.UnfinishedFrames} blocked_frames={w.BlockedFrames} drain_ms={P(w.DrainMs)} | ");
             builder.Append($"overlap_ms={P(w.OverlapMs)} complete_to_admit_ms={P(w.CompleteToAdmitMs)} | ");
-            builder.Append(culture, $"trap: armed_pages={Mx(w.ArmedPages)} arm_ms={P(w.ArmMs)} late_arms={w.LateArms} cap_frames={w.CapFrames} skipped_read_watched={w.Skipped} ");
+            builder.Append(culture, $"trap: armed_pages={Mx(w.ArmedPages)} arm_ms={P(w.ArmMs)} late_arms={w.LateArms} late_faults={Interlocked.Exchange(ref _lateFaults, 0)} cap_frames={w.CapFrames} skipped_read_watched={w.Skipped} ");
             builder.Append($"rs_written={Mx(w.RsWritten)} detach_mb={Mx(w.DetachMb)} ws_read={Mx(w.WsRead)} ws_written={Mx(w.WsWritten)} ");
             builder.Append($"label_touched={Mx(w.LabelTouched)} cb_touched={Mx(w.CbTouched)} da_only_written={Mx(w.DaOnly)} managed={Mx(w.Managed)} first_fault_ms={P(w.FirstFaultMs)} ");
             builder.Append(culture, $"trap_before_submit_frames={w.TrapBeforeSubmitFrames} ws_read_frames={w.WriteSetReadFrames}");

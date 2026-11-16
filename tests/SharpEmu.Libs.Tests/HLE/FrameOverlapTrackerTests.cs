@@ -175,6 +175,28 @@ public sealed class FrameOverlapTrackerTests
     }
 
     [Fact]
+    public void AFaultThatRacedTheDisarmIsRetriedOncePerPage()
+    {
+        var watches = new FakeWatches();
+        var tracker = Create(watches);
+        tracker.NoteWrite(0x40000, 8, OverlapWrite.CpWrite);
+        tracker.OnBoundaryAdmitted(0, 0);
+        tracker.OnFrameCommitted(1);
+        tracker.OnCompleted(1);
+        tracker.DrainRequests();
+        tracker.OnBoundaryAdmitted(0, 0);
+        tracker.DrainRequests();
+        Assert.Equal(0, watches.Live);
+
+        // The guest read the page before the given-back protection reached it.
+        Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x40000, out var blocked));
+        Assert.False(blocked);
+        Assert.False(tracker.TryHandleFault(FaultKind.Read, 0x40000, out _));
+        Assert.False(tracker.TryHandleFault(FaultKind.Read, 0x50000, out _));
+        Assert.Contains("late_faults=1", tracker.TakeWindowLine());
+    }
+
+    [Fact]
     public void ThePageSetCountsDistinctPagesAcrossBlocks()
     {
         var set = new OverlapPageSet();
