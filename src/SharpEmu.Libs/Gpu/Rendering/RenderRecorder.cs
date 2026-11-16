@@ -642,12 +642,26 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             _host.BindResources(pixelBindings);
         }
 
-        var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : default;
-        var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
-        var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
-            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress,
-                emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false)
-            : default;
+        ReadOnlySpan<BufferBinding> vertexBuffers;
+        PreparedIndexBuffer indexBuffer;
+        BufferBinding indirectArguments;
+        using (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.Vertex))
+        {
+            vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : default;
+        }
+
+        using (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.Index))
+        {
+            indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
+        }
+
+        using (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.Indirect))
+        {
+            indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
+                ? _host.ObtainBuffer(emission.IndirectArgumentsAddress,
+                    emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false)
+                : default;
+        }
         RenderExecutor.DropUnwrittenColorTargets(context, ref state, pixelProgram);
         if (inPlace && TryRestoreAttachments(ref state))
         {

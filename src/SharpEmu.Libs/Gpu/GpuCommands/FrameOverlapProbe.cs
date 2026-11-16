@@ -256,6 +256,12 @@ public sealed class FrameOverlapProbe
         {
             _commits++;
             batch = _open;
+            if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+            {
+                // SHARPEMU_DIAG_FRAME_OVERLAP_ARM=inflight: the buffer's reads and writes are recorded under its serial.
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnProbeCommit(serial, batch.HasFlip);
+            }
+
             _open = new Batch(batch.Index + 1) { FirstSerial = serial + 1 };
             if (batch.Items.Count == 0 && !batch.HasFlip)
             {
@@ -319,6 +325,12 @@ public sealed class FrameOverlapProbe
                 _batchesUnarmed++;
                 return;
             }
+        }
+
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            // The in-flight diagnostic arms what this publication releases before the guest can see it.
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnProbeRelease(batch.Serial);
         }
 
         var early = _completedSerial() < batch.Serial;

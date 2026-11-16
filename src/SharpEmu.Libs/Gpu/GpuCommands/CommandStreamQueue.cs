@@ -1817,6 +1817,12 @@ public sealed class CommandStreamQueue
                 $"packet=0x{submission.Commands.CurrentPacketAddress:X16} wait={submission.Wait.Kind}@0x{submission.Wait.Address:X} " +
                 DescribePackets(submission.Address, submission.DwordCount));
 
+        if (result == SliceResult.Completed && SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled &&
+            submission!.Kind != CommandSubmissionKind.FlipPreparation)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnSubmissionWalked(submission.Address, (ulong)submission.DwordCount * sizeof(uint));
+        }
+
         if (dsSlice)
         {
             DsEmitSlice(submission!, result, dsStarted, dsCpuStarted, dsPacketsStarted);

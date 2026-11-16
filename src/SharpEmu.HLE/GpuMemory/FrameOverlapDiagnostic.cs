@@ -109,7 +109,54 @@ public static class FrameOverlapDiagnostic
     public static readonly bool ArmReads =
         Environment.GetEnvironmentVariable("SHARPEMU_DIAG_FRAME_OVERLAP_READS") != "0";
 
+    /// <summary>
+    /// SHARPEMU_DIAG_FRAME_OVERLAP_ARM=inflight (with SHARPEMU_FRAME_OVERLAP_PROBE=1): instead of the per-frame
+    /// trap, watch what the guest touches while buffers the probe has already published still run on the GPU
+    /// (<see cref="InFlightOverlapTracker"/>). Page cap default 262144 (1 GiB) unless MAX_PAGES says otherwise.
+    /// </summary>
+    public static readonly bool ArmInFlight =
+        Environment.GetEnvironmentVariable("SHARPEMU_DIAG_FRAME_OVERLAP_ARM") == "inflight";
+
     private static FrameOverlapTracker? _tracker;
+    private static InFlightOverlapTracker? _inflight;
+
+    public static InFlightOverlapTracker? InFlight => Volatile.Read(ref _inflight);
+
+    [ThreadStatic]
+    private static OverlapTag t_tag;
+
+    /// <summary>While alive, in-place reads and GPU writes noted on this thread carry <paramref name="tag"/> (in-flight mode).</summary>
+    public static TagScope Tag(OverlapTag tag)
+    {
+        if (!Enabled)
+        {
+            return default;
+        }
+
+        var previous = t_tag;
+        t_tag = tag;
+        return new TagScope(previous, true);
+    }
+
+    public readonly struct TagScope(OverlapTag previous, bool active) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (active)
+            {
+                t_tag = previous;
+            }
+        }
+    }
+
+    /// <summary>The worker committed a command buffer (<paramref name="present"/>: it holds a flip).</summary>
+    public static void OnProbeCommit(ulong serial, bool present) => InFlight?.OnCommit(serial, present);
+
+    /// <summary>The probe is about to publish everything up to <paramref name="serial"/> to the guest.</summary>
+    public static void OnProbeRelease(ulong serial) => InFlight?.OnRelease(serial);
+
+    /// <summary>The command stream walked a submission to its end.</summary>
+    public static void OnSubmissionWalked(ulong address, ulong bytes) => InFlight?.OnSubmissionWalked(address, bytes);
 
     /// <summary>
     /// The guest process of the two-process split: its read faults go to the GPU process, which
@@ -127,6 +174,23 @@ public static class FrameOverlapDiagnostic
             return;
         }
 
+        if (ArmInFlight)
+        {
+            var reads = ArmReads && !readWatchesShared;
+            var cap = Environment.GetEnvironmentVariable("SHARPEMU_DIAG_FRAME_OVERLAP_MAX_PAGES") is null ? 262144 : MaxArmedPages;
+            Volatile.Write(ref _inflight, guard is null
+                ? null
+                : new InFlightOverlapTracker(new PageGuardOverlapWatches(guard), Stopwatch.GetTimestamp, SampleEvery, cap, reads));
+            if (guard is not null)
+            {
+                Console.Error.WriteLine(
+                    $"[METAL-V2][OVERLAP-INFLIGHT] on: every={SampleEvery} max_pages={cap} read_watches={(reads ? 1 : 0)}" +
+                    (ArmReads && readWatchesShared ? " (off: single-copy holds the read-watch bit)" : string.Empty));
+            }
+
+            return;
+        }
+
         var previous = Interlocked.Exchange(ref _tracker, guard is null
             ? null
             : new FrameOverlapTracker(new PageGuardOverlapWatches(guard), Stopwatch.GetTimestamp, SampleEvery, MaxArmedPages,
@@ -141,10 +205,38 @@ public static class FrameOverlapDiagnostic
         }
     }
 
-    public static void MarkGpuRead(ulong address, ulong size, OverlapRead kind, ulong program = 0) => Tracker?.MarkRead(address, size, kind, program);
+    public static void MarkGpuRead(ulong address, ulong size, OverlapRead kind, ulong program = 0)
+    {
+        if (InFlight is { } inflight)
+        {
+            // Staged bytes were copied at record time: the guest may rewrite them at once.
+            if (kind != OverlapRead.Staged)
+            {
+                inflight.MarkRead(address, size, kind switch
+                {
+                    OverlapRead.Upload => OverlapTag.Texture,
+                    OverlapRead.DeviceAddress => OverlapTag.DeviceAddress,
+                    _ => t_tag,
+                });
+            }
 
-    public static void NoteGpuWrite(ulong address, ulong size, OverlapWrite origin) =>
-        Tracker?.NoteWrite(address, size, origin, origin is OverlapWrite.Storage or OverlapWrite.Binding or OverlapWrite.DeviceAddress ? TakeWriter() : 0);
+            return;
+        }
+
+        Tracker?.MarkRead(address, size, kind, program);
+    }
+
+    public static void NoteGpuWrite(ulong address, ulong size, OverlapWrite origin)
+    {
+        var writer = origin is OverlapWrite.Storage or OverlapWrite.Binding or OverlapWrite.DeviceAddress ? TakeWriter() : 0;
+        if (InFlight is { } inflight)
+        {
+            inflight.NoteWrite(address, size, origin, t_tag, writer);
+            return;
+        }
+
+        Tracker?.NoteWrite(address, size, origin, writer);
+    }
 
     [ThreadStatic]
     private static ulong t_writer;
@@ -166,7 +258,11 @@ public static class FrameOverlapDiagnostic
 
     public static void NoteEndOfPipeAtomicAdd(ulong address) => Tracker?.NoteAtomicAdd(address);
 
-    public static void OnAdmission(ulong address, ulong bytes) => Tracker?.OnAdmission(address, bytes);
+    public static void OnAdmission(ulong address, ulong bytes)
+    {
+        InFlight?.OnAdmission(address, bytes);
+        Tracker?.OnAdmission(address, bytes);
+    }
 
     public static void OnBoundaryAdmitted(int unfinished, int blocked) => Tracker?.OnBoundaryAdmitted(unfinished, blocked);
 
@@ -174,9 +270,17 @@ public static class FrameOverlapDiagnostic
 
     public static void OnFrameCommitted(ulong lastSerial) => Tracker?.OnFrameCommitted(lastSerial);
 
-    public static void OnCompleted(ulong serial) => Tracker?.OnCompleted(serial);
+    public static void OnCompleted(ulong serial)
+    {
+        InFlight?.OnCompleted(serial);
+        Tracker?.OnCompleted(serial);
+    }
 
-    public static void NoteManagedWrite(ulong address, ulong size) => Tracker?.NoteManagedWrite(address, size);
+    public static void NoteManagedWrite(ulong address, ulong size)
+    {
+        InFlight?.NoteManagedWrite(address, size);
+        Tracker?.NoteManagedWrite(address, size);
+    }
 
     /// <summary>
     /// A fault on a page the diagnostic armed: counted and released. <paramref name="stillBlocked"/>
@@ -185,10 +289,15 @@ public static class FrameOverlapDiagnostic
     public static bool TryHandleFault(FaultKind kind, ulong address, out bool stillBlocked)
     {
         stillBlocked = false;
+        if (InFlight is { } inflight)
+        {
+            return inflight.TryHandleFault(kind, address, out stillBlocked);
+        }
+
         return Tracker is { } tracker && tracker.TryHandleFault(kind, address, out stillBlocked);
     }
 
-    public static string? TakeWindowLine() => Tracker?.TakeWindowLine();
+    public static string? TakeWindowLine() => InFlight?.TakeWindowLine() ?? Tracker?.TakeWindowLine();
 }
 
 /// <summary>The guest pages of one frame, one bit per 4 KiB page in 4 MiB blocks.</summary>

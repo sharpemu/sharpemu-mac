@@ -395,6 +395,7 @@ internal sealed partial class MetalRenderHost
             // the pass ends below; there is no next slot to initialize.
             if (batch.Slot < OcclusionIntervalCapacity) InitializeOcclusionSlot(batch);
         }
+        using var overlapTag = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.Occlusion);
         _ = EncodeOrderedCopies(copies[..count], address, null, 0, MetalGpuWriteOrigin.Copy,
             "occlusion dump", null, (ulong)count * sizeof(ulong), sourceIsFinal: false, deferStableGpuResult: batch is not null,
             noteAsOneRange: CoalesceOcclusionDumps);

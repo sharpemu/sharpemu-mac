@@ -98,6 +98,7 @@ internal sealed partial class MetalRenderHost
 
         var shift = argumentsAddress & 0x3;
         var alignedAddress = argumentsAddress - shift;
+        using var overlapTag = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.Indirect);
         var range = _guestMemory.Resolve(alignedAddress, shift + (3 * sizeof(uint)));
         if (!range.IsValid)
         {

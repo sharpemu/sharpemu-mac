@@ -1032,6 +1032,10 @@ internal sealed partial class MetalRenderHost
 
             var written = info.Buffers[index].Written;
             var computeStage = stage.Program.Stage == ShaderStageKind.Compute;
+            using var overlapTag = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(
+                written ? SharpEmu.HLE.GpuMemory.OverlapTag.StorageWritten
+                : info.Buffers[index].Scalar ? SharpEmu.HLE.GpuMemory.OverlapTag.Constant
+                : SharpEmu.HLE.GpuMemory.OverlapTag.StorageRead);
             if (written)
             {
                 _writtenBufferBinds++;

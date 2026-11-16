@@ -289,7 +289,10 @@ internal sealed partial class MetalRenderHost
         MipStatistics.Shared.ClearBoundSlots();
 
         _imageCache.InvalidateMemoryFromGpu(destination, reportBytes);
-        NoteGuestMemoryWrite(destination, reportBytes, MetalGpuWriteOrigin.Copy);
+        using (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.LodStatistics))
+        {
+            NoteGuestMemoryWrite(destination, reportBytes, MetalGpuWriteOrigin.Copy);
+        }
         // A command processor polling the header suspends until the submission that
         // writes it completes; the worker commits what it has before it parks.
         _pendingLabelWrites++;
