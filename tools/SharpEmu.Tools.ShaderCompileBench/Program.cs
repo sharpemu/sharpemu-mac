@@ -391,7 +391,6 @@ internal static class Program
         var order = Arg("order", "list") == "bigfirst" ? rows.OrderByDescending(r => r.Source.Length).ToList() : rows;
         var queue = new ConcurrentQueue<Row>(order);
         var selNewLibrary = MetalNative.Selector("newLibraryWithSource:options:error:");
-        var selNewFunction = MetalNative.Selector("newFunctionWithName:");
         var selNewPipeline = MetalNative.Selector("newComputePipelineStateWithFunction:error:");
         var selRelease = MetalNative.Selector("release");
         var started = Stopwatch.GetTimestamp();
@@ -435,7 +434,13 @@ internal static class Program
 
                     if (makePipeline)
                     {
-                        function = MetalNative.Send(library, selNewFunction, MetalNative.NsString(row.Entry));
+                        // A source that declares function constants needs constant values (generic ones here).
+                        var mip = row.Source.Contains(
+                            SharpEmu.ShaderCompiler.Metal.Gen5MslShader.MipStatisticsFunctionConstantName + " [[function_constant(",
+                            StringComparison.Ordinal);
+                        function = MetalRenderHost.NewTranslatedFunction(
+                            library, row.Entry, mip ? false : null,
+                            [.. SharpEmu.ShaderCompiler.Metal.Gen5MslShader.ParseBufferWordConstants(row.Source)], [], out _);
                         var t2 = Stopwatch.GetTimestamp();
                         row.FunctionMs = (t2 - t1) * TicksToMs;
                         nint pipelineError = 0;

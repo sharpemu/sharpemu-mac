@@ -345,10 +345,8 @@ internal sealed partial class MetalRenderHost
                 return slot < 0 ? match.Value : $"[[color({slot})";
             });
             var library = CompileLibrary(source, module.Hash, shader.UsesPerVertexInputs, prewarmable: true, out var archiveKey, out _);
-            nint error = 0;
-            var function = shader.UsesMipStatisticsConstant
-                ? NewMipStatisticsFunction(library, shader.EntryPoint, enabled: counters, out error)
-                : MetalNative.Send(library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(shader.EntryPoint));
+            // Its buffer words stay generic (MetalRenderHost.BufferWordVariants).
+            var function = NewTranslatedFunction(library, shader, mipStatistics: counters, out var error);
             if (function == 0)
             {
                 ReleaseLibrary(library);

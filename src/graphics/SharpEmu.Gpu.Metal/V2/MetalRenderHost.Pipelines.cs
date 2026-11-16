@@ -83,6 +83,12 @@ internal sealed partial class MetalRenderHost
         // state is only released once that command buffer is done and it has been idle.
         public ulong LastUsedSerial;
         public long LastUsedTicks;
+
+        // Whether either program declares buffer-word function constants, and the variants
+        // specialized for the words a draw holds (MetalRenderHost.BufferWordVariants); null
+        // when the pipeline's kind stays generic.
+        public bool DeclaresBufferWords;
+        public BufferWordVariants? BufferWordVariants;
     }
 
     // One compiled MSL module: its library, its function, and the shader it came from.
@@ -121,6 +127,10 @@ internal sealed partial class MetalRenderHost
         // The pixel function with its colour outputs moved (ColorRemap -> library and function),
         // built the first time a subset join needs that remap of this program.
         public Dictionary<(uint Remap, bool LodStatistics), (nint Library, nint Function, UInt128 ArchiveKey)>? RemappedFunctions;
+
+        // The functions specialized with buffer words for variant pipelines, made on the
+        // variant builder the first time a variant needs them (RetainSpecializedFunction).
+        public Dictionary<SpecializationKey, nint>? SpecializedFunctions;
 
         // The binary archive keys of the library and of the rectangle-list library (zero
         // with no archive): the pipeline made from them stores them under these.
@@ -276,11 +286,7 @@ internal sealed partial class MetalRenderHost
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
         {
-            nint specializationError = 0;
-            var function = shader.UsesMipStatisticsConstant
-                ? NewMipStatisticsFunction(library, shader.EntryPoint, enabled: false, out specializationError)
-                : MetalNative.Send(
-                    library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(shader.EntryPoint));
+            var function = NewTranslatedFunction(library, shader, mipStatistics: false, out var specializationError);
             if (function == 0)
             {
                 ReleaseLibrary(library);
@@ -328,7 +334,7 @@ internal sealed partial class MetalRenderHost
                 return module.LodFunction;
             }
 
-            var function = NewMipStatisticsFunction(module.Library, module.Shader.EntryPoint, enabled: true, out var error);
+            var function = NewTranslatedFunction(module.Library, module.Shader, mipStatistics: true, out var error);
             if (function == 0)
             {
                 throw Fatal(
@@ -350,16 +356,20 @@ internal sealed partial class MetalRenderHost
                 return module.RectangleFunction;
             }
 
+            var shader = module.Compiled.AcquireShader();
             var library = CompileLibrary(
-                Gen5MslRectangleList.BuildSource(module.Compiled.AcquireShader()), module.Hash, usesPerVertexInputs: false, prewarmable: true,
+                Gen5MslRectangleList.BuildSource(shader), module.Hash, usesPerVertexInputs: false, prewarmable: true,
                 out module.RectangleArchiveKey, out module.RectangleSourceKey);
-            var function = MetalNative.Send(
-                library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(Gen5MslRectangleList.EntryPoint));
+            // The post-tessellation form carries the program's declarations: its buffer words
+            // stay generic (MetalRenderHost.BufferWordVariants).
+            var function = NewTranslatedFunction(
+                library, Gen5MslRectangleList.EntryPoint, null, BufferWordConstantsOf(shader), [], out var error);
             if (function == 0)
             {
                 ReleaseLibrary(library);
                 throw Fatal(
-                    $"The rectangle-list MSL library has no entry point: entry={Gen5MslRectangleList.EntryPoint} hash=0x{module.Hash:X16}.");
+                    $"The rectangle-list MSL library has no entry point: entry={Gen5MslRectangleList.EntryPoint} hash=0x{module.Hash:X16}" +
+                    (error != 0 ? $" {MetalNative.DescribeError(error)}." : "."));
             }
 
             module.RectangleLibrary = library;
@@ -889,6 +899,8 @@ internal sealed partial class MetalRenderHost
             VertexLayout = compiled.VertexLayout,
             GraphicsDescription = description,
             LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+            DeclaresBufferWords = DeclaresBufferWords(vertexModule, pixelModule),
+            BufferWordVariants = BufferWordVariantsFor(description, vertexModule, pixelModule, mesh, rectangleList),
         };
         _pipelineEntries[entry.Id] = entry;
         Interlocked.Increment(ref _residentPipelines);
@@ -932,7 +944,8 @@ internal sealed partial class MetalRenderHost
         Gen5MslMeshInfo? mesh,
         bool rectangleList,
         nuint controlPointIndexType,
-        out string? vertexLayout)
+        out string? vertexLayout,
+        BufferWordPipeline? bufferWords = null)
     {
         var parameters = description.StaticParameters;
         var descriptorClass = mesh is null ? "MTLRenderPipelineDescriptor" : "MTLMeshRenderPipelineDescriptor";
@@ -953,7 +966,9 @@ internal sealed partial class MetalRenderHost
                 MetalNative.SendVoid(
                     descriptor,
                     MetalNative.Selector("setVertexFunction:"),
-                    rectangleList ? RequireRectangleFunction(vertexModule) : vertexModule.Function);
+                    rectangleList ? RequireRectangleFunction(vertexModule)
+                    : bufferWords is { VertexFunction: not 0 } ? bufferWords.VertexFunction
+                    : vertexModule.Function);
                 MetalV2Native.SendVoidValue(
                     descriptor, MetalNative.Selector("setRasterSampleCount:"), Math.Max(parameters.Samples, 1));
                 if (rectangleList)
@@ -1004,7 +1019,12 @@ internal sealed partial class MetalRenderHost
             if (pixelModule is not null)
             {
                 nint pixelFunction;
-                if (description.ColorRemap != 0)
+                if (bufferWords is { PixelFunction: not 0 })
+                {
+                    // Made with the counters in or out as PixelFunctionOf chooses them.
+                    pixelFunction = bufferWords.PixelFunction;
+                }
+                else if (description.ColorRemap != 0)
                 {
                     (pixelFunction, pixelLibraryKey) = RequireRemappedPixelFunction(pixelModule, description.ColorRemap, description.LodStatistics);
                 }
@@ -1105,7 +1125,9 @@ internal sealed partial class MetalRenderHost
                     vertexModule.Shader.WritesLayer || vertexModule.Shader.WritesViewportIndex,
                     rectangleList,
                     controlPointIndexType,
-                    description.LodStatistics && pixelModule is { Shader.UsesMipStatisticsConstant: true });
+                    description.LodStatistics && pixelModule is { Shader.UsesMipStatisticsConstant: true },
+                    bufferWords?.Values,
+                    bufferWords?.VertexCount ?? 0);
                 if (_states.TryAcquire(shareKey, out var shared, out _))
                 {
                     Interlocked.Increment(ref _pipelineDedups);
@@ -1114,7 +1136,8 @@ internal sealed partial class MetalRenderHost
             }
 
             nint error = 0;
-            using var runtime = MetalCompileScheduler.Shared.Runtime();
+            // A variant compiles at prewarm priority: its builder holds a prewarm slot.
+            using var runtime = bufferWords is null ? MetalCompileScheduler.Shared.Runtime() : default;
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var archive = MetalBinaryArchive.For(_device);
             var vertexArchiveKey = rectangleList ? vertexModule.RectangleArchiveKey : vertexModule.ArchiveKey;
@@ -1124,6 +1147,8 @@ internal sealed partial class MetalRenderHost
                 ? default
                 : MetalBinaryArchive.LodStatisticsKey(
                     pixelModule.ArchiveKey, description.LodStatistics && pixelModule.Shader.UsesMipStatisticsConstant);
+            // A variant is another pipeline of the same libraries, listed under a pair of its own.
+            pixelArchiveKey = BufferWordArchiveKey(pixelArchiveKey, bufferWords?.ArchiveKey ?? default);
             var archives = archive?.AcquirePipelineArchives(vertexArchiveKey, pixelArchiveKey) ?? 0;
             state = 0;
             if (archives != 0)
@@ -1248,7 +1273,9 @@ internal sealed partial class MetalRenderHost
         bool layered,
         bool rectangleList,
         nuint controlPointIndexType,
-        bool lodStatistics = false)
+        bool lodStatistics = false,
+        uint[]? bufferWords = null,
+        int vertexBufferWords = 0)
     {
         var parameters = description.StaticParameters;
         var key = new MetalPipelineStateKey.Builder()
@@ -1256,6 +1283,15 @@ internal sealed partial class MetalRenderHost
             .Add(pixelSource is not null)
             .Add(pixelSource ?? default)
             .Add(lodStatistics)
+            // The values a variant's functions were specialized with (vertex ones first).
+            .Add((ulong)vertexBufferWords)
+            .Add((ulong)(bufferWords?.Length ?? 0));
+        foreach (var word in bufferWords ?? [])
+        {
+            key.Add((ulong)word);
+        }
+
+        key
             .Add(rectangleList)
             .Add(rectangleList ? controlPointIndexType : 0)
             .Add(Math.Max(parameters.Samples, 1))
@@ -2173,10 +2209,12 @@ internal sealed partial class MetalRenderHost
         // Let whatever is still compiling finish before the device goes away.
         _compiler?.Dispose();
         _compiler = null;
+        StopBufferWordBuilders();
         // What this run added to the title's archive is written before its functions go.
         MetalBinaryArchive.For(_device)?.Flush(wait: true, TimeSpan.FromSeconds(10));
         foreach (var entry in _pipelineEntries.Values)
         {
+            ReleaseBufferWordVariants(entry);
             if (entry.State != 0)
             {
                 ReleaseState(entry.State);
@@ -2222,6 +2260,7 @@ internal sealed partial class MetalRenderHost
                 MetalNative.SendVoid(module.LodFunction, SelRelease);
             }
 
+            ReleaseSpecializedFunctions(module);
             if (module.Library != 0)
             {
                 ReleaseLibrary(module.Library);

@@ -270,6 +270,7 @@ internal sealed partial class MetalRenderHost
         DisarmPendingCopy();
         _pendingGraphicsPipeline = null;
         _pendingComputePipeline = null;
+        NoteBufferWordStages(null, null);
         _vertexBufferCount = 0;
         _indexBuffer = 0;
         _acquisitionSequence++;
@@ -1589,6 +1590,7 @@ internal sealed partial class MetalRenderHost
         if (bindPoint == GpuBindPoint.Graphics)
         {
             NoteJoinStages(stages);
+            NoteBufferWordStages(stages);
         }
 
         Span<uint> pushData = stackalloc uint[(int)PushData.DwordCount];

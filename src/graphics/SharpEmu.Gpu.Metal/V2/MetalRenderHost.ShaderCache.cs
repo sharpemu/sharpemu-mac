@@ -256,6 +256,8 @@ internal sealed partial class MetalRenderHost
 
     private void ReleasePipelineState(MetalPipelineEntry entry)
     {
+        // Its variants are built again when draws ask for them.
+        ReleaseBufferWordVariants(entry);
         ReleaseState(entry.State);
         if (entry.RectangleStates is { } rectangles)
         {
@@ -292,6 +294,7 @@ internal sealed partial class MetalRenderHost
                 module.LodFunction = 0;
             }
 
+            ReleaseSpecializedFunctions(module);
             ReleaseLibrary(module.Library);
             if (module.RectangleFunction != 0)
             {

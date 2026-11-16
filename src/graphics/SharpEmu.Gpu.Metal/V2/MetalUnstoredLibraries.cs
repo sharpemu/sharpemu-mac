@@ -195,6 +195,8 @@ internal static class MetalUnstoredLibraries
                 entryPoint,
                 entry.UsesPerVertexInputs,
                 UsesMipStatisticsConstant(entry.Source),
+                // A stored source carries no metadata: its buffer-word declarations are read off it.
+                Gen5MslShader.ParseBufferWordConstants(entry.Source),
                 key,
                 out var error);
             if (bytes > 0)

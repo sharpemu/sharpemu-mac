@@ -2897,6 +2897,8 @@ internal sealed partial class MetalRenderHost :
             // queued or running on the compiler threads now.
             $"draws_skipped_compiling={Interlocked.Exchange(ref _drawsSkippedCompiling, 0)} " +
             $"leave_out=[{FormatLeaveOutCounters()}] " +
+            // Pipelines specialized for a draw's buffer words, and the draws on them (FormatBufferWordCounters).
+            $"buffer_words=[{FormatBufferWordCounters()}] " +
             $"pipeline_waits_blocking={Interlocked.Exchange(ref _pipelineWaitsBlocking, 0)} " +
             $"async_compiles_inflight={PipelinesCompiling} " +
             // Read-aheads of the dispatches after one waiting on its pipeline, the dispatches

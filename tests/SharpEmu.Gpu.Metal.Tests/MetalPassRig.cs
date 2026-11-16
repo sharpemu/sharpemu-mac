@@ -246,11 +246,15 @@ internal sealed unsafe class MetalPassRig : IDisposable
         static string F(float value) => value.ToString("F4", CultureInfo.InvariantCulture) + "f";
     }
 
-    /// <summary>One draw of a pipeline into these targets, as an executor records it.</summary>
-    public void Draw(PipelineHandle pipeline, ReadOnlySpan<Target> targets, MetalRenderHost.MetalStageBindings? stage = null)
+    /// <summary>One draw of a pipeline into these targets, as an executor records it; <paramref name="bind"/>
+    /// binds what else the draw needs (vertex buffers, the stages a variant lookup reads) after the reset.</summary>
+    public void Draw(
+        PipelineHandle pipeline, ReadOnlySpan<Target> targets, MetalRenderHost.MetalStageBindings? stage = null,
+        Action<MetalRenderHost>? bind = null)
     {
         var host = Host;
         host.ResetBindings();
+        bind?.Invoke(host);
         if (stage is { Program.UsesDeviceAddresses: true })
         {
             // Bound as PrepareBindings binds it: each range its program reaches ordered after

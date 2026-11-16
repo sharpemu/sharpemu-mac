@@ -1630,13 +1630,20 @@ internal sealed partial class MetalRenderHost
 
         var entry = _pendingGraphicsPipeline ??
             throw Fatal("A draw has no bound Metal render pipeline state.");
-        if (!ReferenceEquals(_boundGraphicsPipeline, entry))
+        var entryChanged = !ReferenceEquals(_boundGraphicsPipeline, entry);
+        if (entryChanged)
         {
             // Every later draw of this encoder with the entry (its rectangle states too) is
             // in the same command buffer.
             UsePipelineState(entry);
-            MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, entry.State);
-            _boundRenderState = entry.State;
+        }
+
+        // The variant made for this draw's buffer words, once built (MetalRenderHost.BufferWordVariants).
+        var renderState = GraphicsStateOf(entry);
+        if (entryChanged)
+        {
+            MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, renderState);
+            _boundRenderState = renderState;
             SignpostPipeline(_renderEncoder, entry);
             MetalV2Native.SendVoidValue(
                 _renderEncoder, SelSetCullMode, (nuint)(MetalV2Diagnostics.IgnoreCulling ? Mtl.CullModeNone : entry.CullMode));
@@ -1644,6 +1651,12 @@ internal sealed partial class MetalRenderHost
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetDepthClipMode, (nuint)entry.DepthClipMode);
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetTriangleFillMode, (nuint)entry.FillMode);
             _boundGraphicsPipeline = entry;
+        }
+        else if (entry.BufferWordVariants is not null && _boundRenderState != renderState)
+        {
+            // The same entry, another layout: its variant (or the generic state) in place of the last.
+            MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, renderState);
+            _boundRenderState = renderState;
         }
 
         // Encoder state survives between draws, so only what changed is sent. A draw

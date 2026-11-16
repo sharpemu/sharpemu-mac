@@ -45,35 +45,6 @@ internal sealed partial class MetalRenderHost
     private bool _lodStatsCompiledOut;
     private bool _lodStatsPrimed;
 
-    /// <summary>
-    /// The function of a pixel (or any) library entry that declares the LOD statistics function
-    /// constant, specialized with <paramref name="enabled"/>; the caller owns it, or zero.
-    /// </summary>
-    internal static unsafe nint NewMipStatisticsFunction(nint library, string entry, bool enabled, out nint error)
-    {
-        error = 0;
-        var values = MetalNative.Send(
-            MetalNative.Send(MetalNative.Class("MTLFunctionConstantValues"), MetalNative.Selector("alloc")),
-            MetalNative.Selector("init"));
-        try
-        {
-            var value = enabled ? (byte)1 : (byte)0;
-            MetalNative.SendSetConstantValue(
-                values, MetalNative.Selector("setConstantValue:type:atIndex:"), (nint)(&value), MetalDataTypeBool,
-                Gen5MslShader.MipStatisticsFunctionConstantIndex);
-            return MetalNative.Send(
-                library,
-                MetalNative.Selector("newFunctionWithName:constantValues:error:"),
-                MetalNative.NsString(entry),
-                values,
-                ref error);
-        }
-        finally
-        {
-            MetalNative.SendVoid(values, MetalNative.Selector("release"));
-        }
-    }
-
     private const nuint MetalDataTypeBool = 53;
 
     // After the bank: the slots the last report said were sampled, those whose finest mip
@@ -200,6 +171,8 @@ internal sealed partial class MetalRenderHost
     {
         EnableLodStatistics();
         PortableBufferWord.Enabled = PortableBuffers;
+        // Only a portable program has run-time words (MetalRenderHost.BufferWordVariants).
+        PortableBufferWord.ConstantsEnabled = BufferWordConstants;
     }
 
     /// <summary>GET_LOD_STATS reports this host packed on the GPU.</summary>
