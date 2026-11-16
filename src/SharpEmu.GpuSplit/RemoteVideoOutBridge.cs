@@ -83,6 +83,8 @@ internal sealed class RemoteVideoOutBridge(SplitGpuHost host, string titleId, bo
 
     public void MarkFlipPresented(ulong requestId) => FlipEvent(GpuSplitFlipEvent.Presented, requestId);
 
+    public void NoteFlipRecorded(ulong requestId) => FlipEvent(GpuSplitFlipEvent.Recorded, requestId);
+
     public void NotifyPresentationWindowClosed() => host.SendNotice(GpuSplitNotice.PresentationWindowClosed);
 
     // Only a flip that names no buffer (-1) is released here; every other flip answers false without

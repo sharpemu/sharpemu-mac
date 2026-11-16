@@ -310,6 +310,8 @@ public sealed class SplitHookTests : IDisposable
 
         public void CompleteFlipOnGpu(ulong requestId) => Calls.Add($"gpu {requestId}");
 
+        public void NoteFlipRecorded(ulong requestId) => Calls.Add($"recorded {requestId}");
+
         public void DiscardFlip(ulong requestId) => Calls.Add($"discard {requestId}");
 
         public string GetApplicationTitleId()
