@@ -25,6 +25,35 @@ public static class PortableBufferWord
 
     public static bool Enabled { get; set; }
 
+    /// <summary>
+    /// Each run-time word a portable program reads also becomes a Metal function constant
+    /// (<c>[[function_constant(n)]]</c>) the program takes in place of the shader-data dword
+    /// when a function is made with a value for it, so the library stays layout independent
+    /// and a function specialized for one layout folds the word into its addressing and
+    /// format decode. A function made without values reads the shader data as before.
+    /// Process-wide like <see cref="Enabled"/>, and off until the host makes specialized
+    /// functions.
+    /// </summary>
+    public static bool ConstantsEnabled { get; set; }
+
+    /// <summary>The first function-constant index the buffer words take; 0 is the LOD statistics switch.</summary>
+    public const uint FirstConstantIndex = 1;
+
+    /// <summary>The prefix of a buffer word constant's name; <see cref="ConstantName"/> completes it.</summary>
+    public const string ConstantNamePrefix = "sharpemu_fc_bw";
+
+    /// <summary>The function-constant index of a buffer's word: 0 is the stride, 1 word 3.</summary>
+    public static uint ConstantIndex(int binding, int word) =>
+        (uint)word > 1 || binding < 0
+            ? throw new ArgumentOutOfRangeException(word > 1 ? nameof(word) : nameof(binding))
+            : FirstConstantIndex + ((uint)binding * DwordCount) + (uint)word;
+
+    /// <summary>
+    /// The name of the constant at <paramref name="index"/>, read in place of shader-data dword
+    /// <paramref name="dword"/>: both are spelled in it, so a source declares what it reads.
+    /// </summary>
+    public static string ConstantName(uint index, uint dword) => $"{ConstantNamePrefix}{index}_sd{dword}";
+
     public static bool ReadsFormatAtRuntime(BufferResource buffer) => buffer.Formatted && !buffer.Written;
 
     /// <summary>The run-time words of one V#: the stride and word 3.</summary>

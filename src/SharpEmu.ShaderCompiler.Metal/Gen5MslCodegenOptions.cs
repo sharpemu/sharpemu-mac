@@ -250,6 +250,15 @@ public sealed record Gen5MslCodegenOptions(
     /// the inline decoder and the DecodedFormatLoadThreshold helper.</summary>
     public bool FormatFetch { get; init; } = true;
 
+    /// <summary>Make each run-time buffer word of a portable program a function constant
+    /// (PortableBufferWord.ConstantsEnabled); null follows that process-wide switch. Set by tests.</summary>
+    public bool? BufferWordConstants { get; init; }
+
+    /// <summary>A program with more BUFFER_LOAD_FORMAT_* than this keeps the run-time decode alone at
+    /// every site whose word 3 is a function constant (<see cref="BufferWordConstants"/>): each such site
+    /// otherwise carries the constant form as well, and a library with hundreds builds slower.</summary>
+    public int FormatFetchConstantSiteLimit { get; init; } = Gen5MslTranslator.FormatFetchConstantSiteLimit;
+
     /// <summary>Experimental guarded forwarding of the last 128-bit LDS write in a
     /// single-wave mesh subgroup. SHARPEMU_MSL_MESH_LDS_FORWARDING=1.</summary>
     public bool MeshLdsForwarding { get; init; }

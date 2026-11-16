@@ -756,6 +756,7 @@ public static partial class Gen5MslTranslator
                 {
                     UsesPerVertexInputs = UsesVertexValueInputs,
                     UsesMipStatisticsConstant = UsesMipStatisticsConstant,
+                    BufferWordConstants = BufferWordConstants(),
                     ConstantPositions = _stage == Gen5MslStage.Vertex && !DebugVertexPosition && _request.Tessellation is null
                         ? EvaluateConstantPositions(_request.Program.Instructions, _request.ClipSpace)
                         : null,
@@ -896,6 +897,8 @@ public static partial class Gen5MslTranslator
                     $"constant bool {Gen5MslShader.MipStatisticsFunctionConstantName} " +
                     $"[[function_constant({Gen5MslShader.MipStatisticsFunctionConstantIndex})]];");
             }
+
+            AppendBufferWordConstants(source);
 
             source.AppendLine();
 
@@ -2597,15 +2600,37 @@ public static partial class Gen5MslTranslator
             var stride = FormatUInt(packedStride & 0x3FFF);
             var descriptorFormat = specialized.DescriptorFormat;
             var descriptorWord3 = FormatUInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
+            string? word3Constant = null;
             if (_request.Bindings is { BufferWordCount: not 0 } portable && (uint)bindingIndex < portable.MemoryOffsetCount)
             {
                 // Portable buffers (PortableBufferWord): the V#'s stride, and the format word
                 // of a formatted buffer the program only reads, come from the shader data.
                 var words = portable.FirstBufferWordDword() + (uint)bindingIndex * PortableBufferWord.DwordCount;
-                stride = Temp("uint", $"({ShaderDataDword(words)} & 0x{PortableBufferWord.StrideMask:X}u)");
-                if (PortableBufferWord.ReadsFormatAtRuntime(specialized))
+                if (BufferWordConstantsEnabled)
                 {
-                    descriptorWord3 = Temp("uint", ShaderDataDword(words + 1));
+                    // Each word a function constant (PortableBufferWord.ConstantsEnabled), declared
+                    // only where the program uses it: the stride where an index multiplies it,
+                    // word 3 where an untyped formatted load decodes it.
+                    var strideWord = BufferIndex(control, addThreadId ? "true" : null) != "0u"
+                        ? BufferWordConstant(bindingIndex, 0, words, out _)
+                        : ShaderDataDword(words);
+                    stride = Temp("uint", $"({strideWord} & 0x{PortableBufferWord.StrideMask:X}u)");
+                    if (PortableBufferWord.ReadsFormatAtRuntime(specialized))
+                    {
+                        descriptorWord3 = Temp(
+                            "uint",
+                            IsFormatBufferLoad(instruction.Opcode) && !control.Typed
+                                ? BufferWordConstant(bindingIndex, 1, words + 1, out word3Constant)
+                                : ShaderDataDword(words + 1));
+                    }
+                }
+                else
+                {
+                    stride = Temp("uint", $"({ShaderDataDword(words)} & 0x{PortableBufferWord.StrideMask:X}u)");
+                    if (PortableBufferWord.ReadsFormatAtRuntime(specialized))
+                    {
+                        descriptorWord3 = Temp("uint", ShaderDataDword(words + 1));
+                    }
                 }
             }
 
@@ -2669,14 +2694,27 @@ public static partial class Gen5MslTranslator
             {
                 if (!control.Typed)
                 {
-                    EmitBufferFormatLoad(
-                        bindingIndex,
-                        address,
-                        descriptorWord3,
-                        control.VectorData,
-                        components,
-                        d16,
-                        control.Glc);
+                    if (word3Constant is null ||
+                        !TryEmitConstantFormatLoad(
+                            bindingIndex,
+                            address,
+                            descriptorWord3,
+                            word3Constant,
+                            control.VectorData,
+                            components,
+                            d16,
+                            control.Glc))
+                    {
+                        EmitBufferFormatLoad(
+                            bindingIndex,
+                            address,
+                            descriptorWord3,
+                            control.VectorData,
+                            components,
+                            d16,
+                            control.Glc);
+                    }
+
                     return true;
                 }
 
