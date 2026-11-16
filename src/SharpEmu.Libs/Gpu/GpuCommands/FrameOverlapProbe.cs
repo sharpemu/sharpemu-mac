@@ -49,6 +49,12 @@ public sealed class FrameOverlapProbe
     public static readonly bool Enabled = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE"), "1", StringComparison.Ordinal);
 
+    // SHARPEMU_FRAME_OVERLAP_PROBE_WAITS=count: a park on owed bytes is counted (suspended_owed)
+    // instead of refusing the frame. By the frame's commit the walk is past the wait, so this measures
+    // what the refusal costs.
+    public static readonly bool CountOwedWaitsOnly = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE_WAITS"), "count", StringComparison.Ordinal);
+
     public const string WarningLine =
         "unguarded frame-overlap probe: rendering and guest memory are not protected; measurement only";
 
@@ -79,6 +85,7 @@ public sealed class FrameOverlapProbe
     private long _flips;
     private int _depthMax;
     private long _suspendedOther;
+    private long _suspendedOwed;
     private readonly long[] _refusals = new long[RefusalCount];
     private readonly List<double> _earlyMs = new();
     private readonly List<double> _periodMs = new();
@@ -167,9 +174,13 @@ public sealed class FrameOverlapProbe
                 {
                     _suspendedOther++;
                 }
+                else if (CountOwedWaitsOnly)
+                {
+                    _suspendedOwed++;
+                }
             }
 
-            if (owed)
+            if (owed && !CountOwedWaitsOnly)
             {
                 Refuse(FrameOverlapRefusal.SuspendedWalk, wait.Address);
             }
@@ -322,9 +333,9 @@ public sealed class FrameOverlapProbe
                 $"ms_early_p50={Percentile(_earlyMs, 0.5):F1} ms_early_p90={Percentile(_earlyMs, 0.9):F1} " +
                 $"depth_max={_depthMax} flips={_flips} flips_early={_flipsEarly} " +
                 $"flip_period_p50={Percentile(_periodMs, 0.5):F1} flip_period_p90={Percentile(_periodMs, 0.9):F1} " +
-                $"suspended_other={_suspendedOther} refusals: {refusals}";
+                $"suspended_other={_suspendedOther} suspended_owed={_suspendedOwed} refusals: {refusals}";
             _frames = _framesEarly = _framesAtCompletion = _framesRefused = _framesWaited = 0;
-            _itemsEarly = _flipsEarly = _flips = _suspendedOther = 0;
+            _itemsEarly = _flipsEarly = _flips = _suspendedOther = _suspendedOwed = 0;
             _depthMax = _depth;
             Array.Clear(_refusals);
             _earlyMs.Clear();
