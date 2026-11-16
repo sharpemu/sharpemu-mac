@@ -1689,10 +1689,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var outputs = _boundOutputs;
         outputs.Clear();
         var location = 0u;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         foreach (var slot in boundSlots)
         {
             if (unwrittenExportMasks is { } exportMasks &&
-                RenderExecutor.IsUnwrittenColorTarget(context, slot, targetExportMapping[(int)slot], exportMasks))
+                RenderExecutor.IsUnwrittenColorTarget(context, in routing, slot, targetExportMapping[(int)slot], exportMasks))
             {
                 continue;
             }
@@ -1704,7 +1705,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             // A bound slot that no export reaches keeps its contents: its color write mask is zero.
-            var exportTarget = PixelExportRouting.ExportForSlot(context.ShaderInterface, slot);
+            var exportTarget = routing.ExportForSlot(slot);
             // The high nibble keys the compiled program by the export that feeds the slot.
             outputModes[(int)slot] = (byte)(((uint)kind + 1) | (uint)((exportTarget + 1) << 4));
             outputMappings[(int)slot] = new ColorComponentMap(mapping.Packed);
@@ -1868,9 +1869,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         var written = 0;
         var writtenSlot = 0u;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         foreach (var slot in boundSlots)
         {
-            if (!RenderExecutor.IsUnwrittenColorTarget(context, slot, mappingBySlot[(int)slot], pixelColorExportMasks))
+            if (!RenderExecutor.IsUnwrittenColorTarget(context, in routing, slot, mappingBySlot[(int)slot], pixelColorExportMasks))
             {
                 written++;
                 writtenSlot = slot;
@@ -1907,11 +1909,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         uint writtenWidth = 0, writtenHeight = 0;
         uint unwrittenWidth = uint.MaxValue, unwrittenHeight = uint.MaxValue;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         for (var index = 0; index < boundSlots.Length; index++)
         {
             var slot = boundSlots[index];
             var extent = boundExtents[index];
-            if (RenderExecutor.IsUnwrittenColorTarget(context, slot, mappingBySlot[(int)slot], pixelColorExportMasks))
+            if (RenderExecutor.IsUnwrittenColorTarget(context, in routing, slot, mappingBySlot[(int)slot], pixelColorExportMasks))
             {
                 unwrittenWidth = Math.Min(unwrittenWidth, extent.Width);
                 unwrittenHeight = Math.Min(unwrittenHeight, extent.Height);
@@ -2654,6 +2657,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var colorCount = (uint)colors.Length;
         parameters.ColorCount = colorCount;
         renderingState.ColorCount = colorCount;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         for (var index = 0; index < colors.Length; index++)
         {
             ref readonly var color = ref colors[index];
@@ -2669,7 +2673,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // leave a color target bound and export only to the null target).
             var exportTarget = color.Slot == 0 && context.BlendControls[0].UsesSecondarySource &&
                 (context.ColorTargets[0].Info & (1u << 16)) == 0
-                ? 0 : PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
+                ? 0 : routing.ExportForSlot(color.Slot);
             var exported = pixelStage is not null &&
                 (exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0);
             var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.ColorWriteMaskForSlot(color.Slot)) : 0;

@@ -413,11 +413,12 @@ public sealed partial class RenderExecutor
         }
 
         var exportMasks = pixelProgram?.PixelColorExportMasks ?? 0u;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         var kept = 0u;
         for (var i = 0; i < state.ColorCount; i++)
         {
             ref readonly var target = ref state.Colors[i];
-            if (IsUnwrittenColorTarget(context, target.Slot, target.Resolution.ExportMapping, exportMasks))
+            if (IsUnwrittenColorTarget(context, in routing, target.Slot, target.Resolution.ExportMapping, exportMasks))
             {
                 continue;
             }
@@ -443,11 +444,12 @@ public sealed partial class RenderExecutor
         }
 
         var exportMasks = pixelProgram?.PixelColorExportMasks ?? 0u;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         var written = 0u;
         for (var i = 0; i < state.ColorCount; i++)
         {
             ref readonly var target = ref state.Colors[i];
-            if (!IsUnwrittenColorTarget(context, target.Slot, target.Resolution.ExportMapping, exportMasks))
+            if (!IsUnwrittenColorTarget(context, in routing, target.Slot, target.Resolution.ExportMapping, exportMasks))
             {
                 written |= 1u << i;
             }
@@ -458,14 +460,19 @@ public sealed partial class RenderExecutor
 
     // The export that reaches the slot is the one routed to it, not the export of the same
     // number: exports are compacted onto the slots CB_SHADER_MASK enables.
-    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks)
+    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks) =>
+        IsUnwrittenColorTarget(context, PixelExportRouting.Routing.Of(context.ShaderInterface), slot, exportMapping, pixelColorExportMasks);
+
+    // As above, with the registers' export routing counted once by a caller that asks for several slots.
+    internal static bool IsUnwrittenColorTarget(
+        ContextRegisters context, in PixelExportRouting.Routing routing, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks)
     {
         if (exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0)
         {
             return true;
         }
 
-        var export = PixelExportRouting.ExportForSlot(context.ShaderInterface, slot);
+        var export = routing.ExportForSlot(slot);
         return export < 0 || ((pixelColorExportMasks >> (export * 4)) & 0xFu) == 0;
     }
 }
