@@ -119,6 +119,23 @@ public sealed class GuestGpuMemory : IDisposable
             return true;
         }
 
+        // SHARPEMU_DIAG_FRAME_OVERLAP=1: a page the diagnostic armed is counted and let go. When another
+        // watcher still holds it, the retried access faults again and reaches that watcher's path.
+        if (FrameOverlapDiagnostic.Enabled)
+        {
+            if (FrameOverlapDiagnostic.TryHandleFault(kind, address, out _))
+            {
+                return true;
+            }
+
+            // The guest process of the split: the GPU process holds the watches, and only its
+            // read faults are not already sent there (write faults reach it through the image store).
+            if (kind == FaultKind.Read && FrameOverlapDiagnostic.RemoteReadFault is { } remoteRead && remoteRead(address))
+            {
+                return true;
+            }
+        }
+
         // The fault names a byte in the page whose protection stopped the access, so the range ends
         // with that page: a store to the last bytes of a span is still the span's, and an access
         // that reaches into the next page faults again there.
@@ -228,6 +245,11 @@ public sealed class GuestGpuMemory : IDisposable
         }
 
         SplitCrossingStats.Count(SplitCrossing.ManagedWrite);
+        if (FrameOverlapDiagnostic.Enabled)
+        {
+            FrameOverlapDiagnostic.NoteManagedWrite(address, size);
+        }
+
         if (!Covers(address, size))
         {
             Interlocked.Increment(ref _lazyCoveredWrites);
@@ -249,6 +271,11 @@ public sealed class GuestGpuMemory : IDisposable
         }
 
         SplitCrossingStats.Count(SplitCrossing.ManagedWriteLanded);
+        if (FrameOverlapDiagnostic.Enabled)
+        {
+            FrameOverlapDiagnostic.NoteManagedWrite(address, size);
+        }
+
         // The new bytes must be visible before the store reads its page state.
         Interlocked.MemoryBarrier();
         Buffers?.MarkCpuWriteLanded(address, size);

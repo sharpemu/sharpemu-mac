@@ -220,6 +220,12 @@ public sealed class SplitGpuSession : IDisposable
 
         ImageStore.PrepareForSignalContext();
         _memory.AttachStores(null, ImageStore);
+        if (FrameOverlapDiagnostic.Enabled)
+        {
+            // The GPU process holds the diagnostic's watches: its read faults go there (write faults already do).
+            FrameOverlapDiagnostic.RemoteReadFault = ImageStore.MarkCpuRead;
+        }
+
         _memory.AttachGpuQueue(Relay, null);
         _memory.AttachSpanObserver(ImageStore);
         if (installGlobals)
@@ -751,6 +757,7 @@ public sealed class SplitGpuSession : IDisposable
         _memory.AttachSpanObserver(null);
         _memory.AttachGpuQueue(null, null);
         _memory.AttachStores(null, null);
+        FrameOverlapDiagnostic.RemoteReadFault = null;
         if (_globalsInstalled)
         {
             AgcBackendServices.ShaderHeaderObserver = null;

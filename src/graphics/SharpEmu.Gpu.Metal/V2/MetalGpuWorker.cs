@@ -269,6 +269,11 @@ internal sealed class MetalCompletionQueue : IDisposable
             var before = Interlocked.CompareExchange(ref _completedHint, value, seen);
             if (before == seen)
             {
+                if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+                {
+                    SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnCompleted(value);
+                }
+
                 return;
             }
 

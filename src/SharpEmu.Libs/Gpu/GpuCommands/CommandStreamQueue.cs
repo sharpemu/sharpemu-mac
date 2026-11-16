@@ -470,6 +470,36 @@ public sealed class CommandStreamQueue
         return $"packets={packets} end={index}/{words.Length} ops=[{string.Join(' ', counts.Select(pair => $"{pair.Key:X2}x{pair.Value}"))}]{writes}";
     }
 
+    // SHARPEMU_DIAG_FRAME_OVERLAP=1: the guest's submissions per frame, and at its boundary how
+    // many submissions of the frame are still to walk (queued, or the one running) and how many wait.
+    private void NoteAdmissionForOverlapDiagnostic(CommandSubmission submission)
+    {
+        if (submission.Kind == CommandSubmissionKind.FrameBoundary)
+        {
+            var unfinished = _processing ? 1 : 0;
+            var blocked = 0;
+            foreach (var queue in _queues)
+            {
+                foreach (var pending in queue)
+                {
+                    if (pending.Kind is CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary)
+                    {
+                        continue;
+                    }
+
+                    unfinished++;
+                    blocked += pending.Blocked ? 1 : 0;
+                }
+            }
+
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnBoundaryAdmitted(unfinished, blocked);
+        }
+        else if (submission.Kind != CommandSubmissionKind.FlipPreparation)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnAdmission(submission.Address, (ulong)submission.DwordCount * sizeof(uint));
+        }
+    }
+
     private void EnqueueLocked(CommandSubmission submission)
     {
         if (!_accepting)
@@ -483,6 +513,11 @@ public sealed class CommandStreamQueue
         }
 
         submission.AdmissionOrdinal = ++_admissionOrdinal;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            NoteAdmissionForOverlapDiagnostic(submission);
+        }
+
         if (submission.QueueId == TraceQueueId)
             Console.Error.WriteLine(
                 $"[GPU][QTRACE] admit q={submission.QueueId} sub={submission.SubmissionId} kind={submission.Kind} " +
@@ -1830,6 +1865,11 @@ public sealed class CommandStreamQueue
         if (submission.Kind == CommandSubmissionKind.FrameBoundary)
         {
             SlicesRun++;
+            if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+            {
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnBoundaryWalked();
+            }
+
             _host.FlushFrame();
             return true;
         }

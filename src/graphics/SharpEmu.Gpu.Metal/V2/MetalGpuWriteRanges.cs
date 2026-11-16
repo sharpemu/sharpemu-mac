@@ -244,6 +244,12 @@ internal sealed class MetalGpuWriteRanges
         ulong serial,
         MetalGpuWriteOrigin origin = MetalGpuWriteOrigin.StorageBuffer)
     {
+        // Every write as recorded, before any folding (SHARPEMU_DIAG_FRAME_OVERLAP=1).
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(address, size, (SharpEmu.HLE.GpuMemory.OverlapWrite)origin);
+        }
+
         BeginMutation();
         try
         {
@@ -495,6 +501,11 @@ internal sealed class MetalGpuWriteRanges
     /// </summary>
     public void NoteUnbounded(ulong serial)
     {
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(0, 0, SharpEmu.HLE.GpuMemory.OverlapWrite.Unbounded);
+        }
+
         BeginMutation();
         try
         {

@@ -1177,6 +1177,18 @@ internal sealed partial class MetalRenderHost
     {
         var unplanned = false;
         var declaredWrite = false;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled && (stage.Program.UsesDeviceAddresses || snapshot.DeviceAddressRanges.Length != 0))
+        {
+            // An encoder running a device-address program: its reach is evaluated only when every handle is planned.
+            var planned = true;
+            foreach (var range in snapshot.DeviceAddressRanges)
+            {
+                planned &= range.Planned;
+            }
+
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteDeviceAddressProgram(planned);
+        }
+
         BeginDeviceRangeOrdering(stage);
         if (snapshot.DeviceAddressRanges.Length != 0 && _singleCopy is { } singleCopy)
         {
@@ -1207,6 +1219,11 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = ClampMappedSize(range.Base, range.Size);
+            if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+            {
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.MarkGpuRead(range.Base, size, SharpEmu.HLE.GpuMemory.OverlapRead.DeviceAddress);
+            }
+
             if (_traceBufferUserAddress != 0)
             {
                 TraceBufferUser(stage, $"device_address h{range.Handle}{(range.Written ? " written" : string.Empty)}", range.Base, size);

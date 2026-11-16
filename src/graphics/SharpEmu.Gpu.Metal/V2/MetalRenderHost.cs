@@ -192,6 +192,8 @@ internal sealed partial class MetalRenderHost :
             _singleCopy = new MetalSingleCopy(device, _guestMemory, backing, pages, () => CompletedSerial);
             _imageCache.SingleCopy = _singleCopy;
         }
+        // SHARPEMU_DIAG_FRAME_OVERLAP=1: single-copy holds the one read-watch bit, so the diagnostic then arms writes only.
+        SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Attach(pages, readWatchesShared: _singleCopy is not null);
         if (MetalStagedRangeCache.Enabled)
         {
             _stagedRanges = new MetalStagedRangeCache(
@@ -2848,6 +2850,11 @@ internal sealed partial class MetalRenderHost :
             $"msl_dispatcher={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Dispatcher} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed} " +
             (_meshletCache?.TakeCounters() ?? "meshlet_draws=0") + " " + TakeIndirectCounters());
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.TakeWindowLine() is { } overlapLine)
+        {
+            Console.Error.WriteLine(overlapLine);
+        }
+
         _slowWaitReports = 0;
         ResetSlowCompletionReports();
         if (WaitOrigins && _waitOrigins.Count != 0)

@@ -44,7 +44,8 @@ internal static class MetalGpuReferenceCensus
     [ThreadStatic]
     private static int _scope;
 
-    public static bool Enabled => MemoryTelemetry.Enabled;
+    // The frame-overlap diagnostic reads the same marks (SHARPEMU_DIAG_FRAME_OVERLAP=1).
+    public static bool Enabled => MemoryTelemetry.Enabled || SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled;
 
     /// <summary>Marks the blocks of a guest range; a scope (image upload or writeback) overrides the kind.</summary>
     public static void Mark(ulong address, ulong size, MetalRefKind kind = MetalRefKind.Binding)
@@ -54,7 +55,28 @@ internal static class MetalGpuReferenceCensus
             return;
         }
 
-        Shared.Record(_scope != 0 ? (MetalRefKind)(_scope - 1) : kind, address, size);
+        var effective = _scope != 0 ? (MetalRefKind)(_scope - 1) : kind;
+        if (MemoryTelemetry.Enabled)
+        {
+            Shared.Record(effective, address, size);
+        }
+
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            if (effective == MetalRefKind.ImageWriteback)
+            {
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(address, size, SharpEmu.HLE.GpuMemory.OverlapWrite.Writeback);
+            }
+            else
+            {
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.MarkGpuRead(address, size, effective switch
+                {
+                    MetalRefKind.Staged => SharpEmu.HLE.GpuMemory.OverlapRead.Staged,
+                    MetalRefKind.ImageUpload => SharpEmu.HLE.GpuMemory.OverlapRead.Upload,
+                    _ => SharpEmu.HLE.GpuMemory.OverlapRead.InPlace,
+                });
+            }
+        }
     }
 
     /// <summary>While alive, every mark on this thread counts as <paramref name="kind"/> (image paths).</summary>
@@ -121,7 +143,7 @@ internal static class MetalGpuReferenceCensus
     /// <summary>The spans the device-address table maps: reachable by any program, exactly named by none.</summary>
     public static void SetDeviceAddressSpans(IEnumerable<(ulong Address, ulong Size)> spans)
     {
-        if (Enabled)
+        if (MemoryTelemetry.Enabled)
         {
             Shared.SetDeviceAddressSpans(spans);
         }

@@ -122,6 +122,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         DrainDraws();
         _frameBoundaries++;
         CommitStream("stream-frame");
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            // Everything the frame recorded is committed: this serial finishes it.
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnFrameCommitted(Volatile.Read(ref _submittedSerial));
+        }
     }
 
     // ---- command-buffer coalescing (SHARPEMU_METAL_V2_FLUSH_COALESCE) ----
@@ -833,6 +838,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         DrainDraws();
         using var endOfPipeScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
             SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandEndOfPipe);
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            NoteEndOfPipeForOverlapDiagnostic(in write);
+        }
+
         _endOfPipeRecords++;
         // Recorded ahead of the label, so its bytes land before the guest is told the
         // work is done.
@@ -1001,6 +1011,36 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// RELEASE_MEM data select 7: the add happens once the work before it has finished, from
     /// that work's completion, and like an owed label it keeps later labels behind it.
     /// </summary>
+    // SHARPEMU_DIAG_FRAME_OVERLAP=1: the destination of every end-of-pipe write, and the ones an
+    // overlapped frame could not publish early (GDS stores, GPU-valued clock samples, atomic adds).
+    private static void NoteEndOfPipeForOverlapDiagnostic(in EndOfPipeWrite write)
+    {
+        var bytes = (ulong)EndOfPipeLabelBytes(write.Kind);
+        switch (write.Kind)
+        {
+            case EndOfPipeWriteKind.GdsWrite32:
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteRefusal(gds: true);
+                bytes = (ulong)write.GdsWordCount * sizeof(uint);
+                break;
+            case EndOfPipeWriteKind.AtomicAdd32:
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteEndOfPipeAtomicAdd(write.Destination);
+                bytes = sizeof(uint);
+                break;
+            default:
+                if (IsClockLabel(in write))
+                {
+                    SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteRefusal(gds: false);
+                }
+
+                break;
+        }
+
+        if (write.Destination != 0 && bytes != 0)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(write.Destination, bytes, SharpEmu.HLE.GpuMemory.OverlapWrite.EopDestination);
+        }
+    }
+
     private void RecordEndOfPipeAtomicAdd(in EndOfPipeWrite write)
     {
         if (!DefersEndOfPipeLabel(EndOfPipeWriteKind.AtomicAdd32))
@@ -1413,6 +1453,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (address == 0 || (ulong)source.Length > ulong.MaxValue - address)
         {
             throw Fatal($"A command-processor write has an invalid range: address=0x{address:X16} bytes={source.Length}.");
+        }
+
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(address, (ulong)source.Length, SharpEmu.HLE.GpuMemory.OverlapWrite.CpWrite);
         }
 
         if (TryPublishEarlyLabel(address, source, kind, causal))
