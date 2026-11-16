@@ -41,10 +41,12 @@ internal static partial class MetalNative
         out string error,
         IReadOnlyList<DeviceTable>? tables = null,
         nuint? mathMode = null,
-        bool groupSizeIsMultipleOfWidth = false)
+        bool groupSizeIsMultipleOfWidth = false,
+        IReadOnlyList<(uint Index, uint Value)>? constants = null,
+        nint library = 0)
     {
         result = default;
-        if (!TryCompileLibrary(shader.Source, out var library, out error, mathMode))
+        if (library == 0 && !TryCompileLibrary(shader.Source, out library, out error, mathMode))
         {
             return false;
         }
@@ -73,10 +75,9 @@ internal static partial class MetalNative
             return false;
         }
 
-        var function = Send(library, Selector("newFunctionWithName:"), NsString(shader.EntryPoint));
+        var function = NewFunction(library, shader.EntryPoint, constants, out error);
         if (function == 0)
         {
-            error = $"entry point '{shader.EntryPoint}' not found";
             return false;
         }
 
