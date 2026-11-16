@@ -143,6 +143,45 @@ internal static class MetalV2Diagnostics
     public static readonly bool DeferEndOfPipe =
         DeferBarriers && Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_EOP") == "1";
 
+    // SHARPEMU_METAL_V2_EARLY_LABEL_PROBE=1 (or =all) is a measurement, not a mode to play in: a small
+    // command-processor write the interpreter flags causal (=all: any of up to eight bytes) reaches guest
+    // memory once the last flip recorded before it has completed, instead of after the GPU work recorded
+    // before the write. A title that paces its frames on such a word then submits its next frame while
+    // this one is still on the GPU, which is not what the console does: the guest may reuse memory the
+    // unfinished work still reads. It exists to measure what one frame of overlap would be worth.
+    // A comma-separated list of hex addresses instead narrows it to the writes that start at one of them.
+    public static readonly ulong[] EarlyLabelProbeAddresses = ParseEarlyLabelAddresses(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EARLY_LABEL_PROBE"));
+
+    public static readonly int EarlyLabelProbe =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EARLY_LABEL_PROBE") switch
+        {
+            "1" => 1,
+            "all" => 2,
+            _ => EarlyLabelProbeAddresses.Length != 0 ? 3 : 0,
+        };
+
+    private static ulong[] ParseEarlyLabelAddresses(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value is "1" or "all")
+        {
+            return [];
+        }
+
+        var addresses = new List<ulong>();
+        foreach (var part in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var text = part.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? part[2..] : part;
+            if (ulong.TryParse(text, System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture, out var address))
+            {
+                addresses.Add(address);
+            }
+        }
+
+        return [.. addresses];
+    }
+
     // SHARPEMU_METAL_V2_REPORT_VERTEX_LAYOUT=1 keeps the vertex descriptor each
     // pipeline was built with, for the per-draw report: a stride or an attribute format
     // that does not match what the program fetches is invisible in everything else.

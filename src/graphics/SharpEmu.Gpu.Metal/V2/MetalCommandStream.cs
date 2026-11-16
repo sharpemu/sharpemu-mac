@@ -893,6 +893,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 break;
             case EndOfPipeWriteKind.Flip:
             case EndOfPipeWriteKind.FlipWithWrite32:
+                NoteFlipSerialForEarlyLabels();
                 QueueCompletion(() =>
                 {
                     if (!encoded) PublishHostLabel(in label, owed);
@@ -901,6 +902,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 });
                 break;
             case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
+                NoteFlipSerialForEarlyLabels();
                 QueueCompletion(() =>
                 {
                     if (!encoded) PublishHostLabel(in label, owed);
@@ -1413,6 +1415,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             throw Fatal($"A command-processor write has an invalid range: address=0x{address:X16} bytes={source.Length}.");
         }
 
+        if (TryPublishEarlyLabel(address, source, kind, causal))
+        {
+            return;
+        }
+
         if (TryEncodeCommandProcessorWrite(address, source, kind, causal))
         {
             Interlocked.Increment(ref _gpuTimedCommandProcessorWrites);
@@ -1445,6 +1452,67 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 Interlocked.Decrement(ref _owedHostLabels);
             }
         }, lazy ? (address, bytes.Length) : null);
+    }
+
+    // SHARPEMU_METAL_V2_EARLY_LABEL_PROBE (MetalV2Diagnostics.EarlyLabelProbe): the serial whose completion
+    // carries the last flip recorded so far. A probed write is published when that serial completes.
+    private ulong _earlyLabelFlipSerial;
+    private long _earlyLabelCount;
+    private long _earlyLabelAlreadyComplete;
+
+    private void NoteFlipSerialForEarlyLabels()
+    {
+        if (MetalV2Diagnostics.EarlyLabelProbe == 0)
+        {
+            return;
+        }
+
+        // The serial QueueCompletion is about to put the flip on.
+        var pending = LastWorkSerial;
+        _earlyLabelFlipSerial = pending != 0 && pending <= _previousSerial ? pending : SubmissionSerial;
+    }
+
+    private bool TryPublishEarlyLabel(ulong address, ReadOnlySpan<byte> source, string kind, bool causal)
+    {
+        var mode = MetalV2Diagnostics.EarlyLabelProbe;
+        if (mode == 0 || source.Length > sizeof(ulong) || (mode == 1 && !causal) ||
+            (mode == 3 && Array.IndexOf(MetalV2Diagnostics.EarlyLabelProbeAddresses, address) < 0))
+        {
+            return false;
+        }
+
+        var bytes = source.ToArray();
+        var gate = _earlyLabelFlipSerial;
+        var count = Interlocked.Increment(ref _earlyLabelCount);
+        if (gate <= CompletedSerial)
+        {
+            Interlocked.Increment(ref _earlyLabelAlreadyComplete);
+        }
+
+        if (count <= 16 || count % 4096 == 0)
+        {
+            Console.Error.WriteLine(
+                $"[METAL-V2][EARLY-LABEL] probe count={count} already_complete={Interlocked.Read(ref _earlyLabelAlreadyComplete)} " +
+                $"address=0x{address:X16} bytes={bytes.Length} value=0x{FirstValue(bytes):X} kind={kind} causal={causal} " +
+                $"gate={gate} open={SubmissionSerial} completed={CompletedSerial}");
+        }
+
+        var landedKind = CommandProcessorWriteHistory.Enabled ? "early:" + kind : null;
+        _completions.Enqueue(gate, () =>
+        {
+            if (!_memory.TryWrite(address, bytes))
+            {
+                throw Fatal(
+                    $"An early command-processor write cannot be written to guest memory: address=0x{address:X16} bytes={bytes.Length}.");
+            }
+
+            _imageCache.InvalidateMemory(address, (ulong)bytes.Length);
+            if (landedKind is not null && CommandProcessorWriteHistory.Enabled)
+            {
+                CommandProcessorWriteHistory.Record(-1, address, bytes.Length, FirstValue(bytes), landedKind, deferred: true);
+            }
+        });
+        return true;
     }
 
     private bool TryEncodeCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal)
