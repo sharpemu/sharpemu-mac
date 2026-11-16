@@ -411,7 +411,13 @@ public sealed partial class RenderExecutor
                 continue;
             }
 
-            state.Colors[(int)kept++] = target;
+            // Until the first dropped target every kept one is already in its place.
+            if (kept != i)
+            {
+                state.Colors[(int)kept] = target;
+            }
+
+            kept++;
         }
 
         state.ColorCount = kept;

@@ -469,9 +469,18 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         {
             if (program.Images[index].Class == ImageResourceClass.Sampled)
             {
-                MipStatistics.Shared.NoteSampled(
-                    new TextureDescriptorWords(descriptors[index]),
-                    statistics is not null && index < statistics.Length ? statistics[index] : ShaderCompiler.Resources.ResourceSnapshot.NoMipStatistics);
+                var sampled = statistics is not null && index < statistics.Length ? statistics[index] : ShaderCompiler.Resources.ResourceSnapshot.NoMipStatistics;
+                // A binding without a statistics counter notes nothing (MipStatistics.NoteSampled): its descriptor
+                // is not copied. The counter bit is the snapshot's, or the descriptor's word 5 bit 25 without one.
+                var words = descriptors[index];
+                if (sampled == ShaderCompiler.Resources.ResourceSnapshot.NoMipStatistics
+                        ? words.Length <= 5 || (words[5] & ShaderCompiler.Resources.ResourceSnapshot.MipStatisticsEnableWordMask) == 0
+                        : (sampled & ShaderCompiler.Resources.ResourceSnapshot.MipStatisticsEnabled) == 0)
+                {
+                    continue;
+                }
+
+                MipStatistics.Shared.NoteSampled(new TextureDescriptorWords(words), sampled);
             }
         }
     }
