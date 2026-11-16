@@ -203,6 +203,30 @@ public sealed class InFlightOverlapTrackerTests
     }
 
     [Fact]
+    public void ACensusFindsALastWriterInAnUnsampledFrameThroughTheStreamHistory()
+    {
+        var watches = new FakeWatches();
+        var tracker = Create(watches, every: 4);
+        tracker.OnCommit(1, present: true);
+        // Buffer 2 belongs to no sampled window: the previous frame's tail, storing 0x700000.
+        tracker.NoteOpProgram(0xC0);
+        tracker.NoteWrite(0x700000, 0x40, OverlapWrite.Storage, OverlapTag.StorageWritten, 0xC0);
+        tracker.EndOp(dispatch: true, queue: 0);
+        tracker.OnCommit(2, present: true);
+        tracker.OnCommit(3, present: true);
+        // Buffer 4 opens window 4 and reads it.
+        tracker.NoteOpProgram(0xD0);
+        tracker.MarkRead(0x700000, 0x40, OverlapTag.StorageRead);
+        tracker.NoteWrite(0x200000, 0x40, OverlapWrite.Storage, OverlapTag.StorageWritten, 0xD0);
+        tracker.EndOp(dispatch: true, queue: 0);
+        tracker.OnCommit(4, present: false);
+
+        var writer = tracker.LastWriterOf(4, 4, 0, 0x700000, 0x40);
+        Assert.Contains("serial=2 ", writer);
+        Assert.Contains("op=0/1 kind=dispatch queue=0 programs=[00000000000000C0]", writer);
+    }
+
+    [Fact]
     public void ACensusFindsTheWriterOpAndTheLastWriterOfItsInputsInStreamOrder()
     {
         var watches = new FakeWatches();
@@ -225,7 +249,7 @@ public sealed class InFlightOverlapTrackerTests
         var image = tracker.LastWriterOf(1, 3, 0, 0x500000, 0x1000);
         Assert.Contains("serial=2 vs_present=1 op=0/1 kind=draw queue=0 programs=[00000000000000A0]", image);
         Assert.Contains("how=image_target", image);
-        Assert.Contains("last_writer=none_in_window", tracker.LastWriterOf(1, 3, 0, 0x600000, 0x40));
+        Assert.Contains("last_writer=none_in_history", tracker.LastWriterOf(1, 3, 0, 0x600000, 0x40));
 
         // The guest loads the result before buffer 3 completes: the census keeps the range for its value.
         Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x200010, out _));

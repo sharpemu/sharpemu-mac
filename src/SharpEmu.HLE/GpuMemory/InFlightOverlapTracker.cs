@@ -238,6 +238,14 @@ public sealed class InFlightOverlapTracker : IDisposable
             var record = _open;
             _open = new Record();
             record.Serial = serial;
+            // Every committed buffer, sampled or not, for the census's last-writer search: a buffer early in
+            // the frame being built reads what the previous frame's tail wrote, and that tail belongs to an
+            // unsampled window.
+            _history.Add(record);
+            if (_history.Count > HistoryBuffers)
+            {
+                _history.RemoveAt(0);
+            }
             // Frame F (F % K == 0) arms its own buffers (committed while F-1 presents were seen) and its post-flip ones.
             long? frame = _frames % _sampleEvery == 0 ? _frames : (_frames + 1) % _sampleEvery == 0 ? _frames + 1 : null;
             if (frame is { } index && index > 0 && serial > _completedSerial &&
@@ -1030,13 +1038,23 @@ public sealed class InFlightOverlapTracker : IDisposable
         }
     }
 
+    // The last HistoryBuffers committed buffers in stream order (about three gameplay frames).
+    private const int HistoryBuffers = 192;
+    private readonly List<Record> _history = new();
+
     private string LastWriter(Window window, Record record, int op, ulong address, ulong size)
     {
         var end = address + size;
-        var start = window.Records.IndexOf(record);
+        var start = _history.IndexOf(record);
+        var source = start >= 0 ? _history : window.Records;
+        if (start < 0)
+        {
+            start = window.Records.IndexOf(record);
+        }
+
         for (var at = start; at >= 0; at--)
         {
-            var candidate = window.Records[at];
+            var candidate = source[at];
             var limit = ReferenceEquals(candidate, record) ? op : int.MaxValue;
             (int Op, string How, ulong Program)? best = null;
             foreach (var write in candidate.Writes)
@@ -1061,7 +1079,9 @@ public sealed class InFlightOverlapTracker : IDisposable
             }
         }
 
-        return "last_writer=none_in_window (an earlier frame, the CPU, or a GPU image never written by these buffers)";
+        return source == _history
+            ? $"last_writer=none_in_history (no write in the {start + 1} buffers back to serial {_history[0].Serial}: the CPU or older)"
+            : "last_writer=none_in_window (an earlier frame, the CPU, or a GPU image never written by these buffers)";
     }
 
     private void Census(Window window, Record record, int writeIndex, ulong address, int era, double ms)
