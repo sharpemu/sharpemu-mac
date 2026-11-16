@@ -133,6 +133,32 @@ public sealed class FrameOverlapTrackerTests
     }
 
     [Fact]
+    public void ArmedAtCommitTheWatchesCoverTheGpuTailAndAreNotArmedTwice()
+    {
+        var watches = new FakeWatches();
+        var tracker = new FrameOverlapTracker(watches, () => _now, 1, 1000, armReads: true, startThread: false) { ArmAtCommit = true };
+        tracker.MarkRead(0x10000, 0x1000, OverlapRead.InPlace);
+        tracker.OnBoundaryAdmitted(0, 0);
+        _now = 10 * Millisecond;
+        tracker.OnFrameCommitted(1);
+        tracker.DrainRequests();
+        Assert.Equal(1, watches.Live);
+
+        // A guest store while the GPU still runs the frame: counted before the completion.
+        _now = 20 * Millisecond;
+        Assert.True(tracker.TryHandleFault(FaultKind.Write, 0x10000, out _));
+        _now = 40 * Millisecond;
+        tracker.OnCompleted(1);
+        tracker.DrainRequests();
+        Assert.Equal(0, watches.Live);
+        tracker.OnBoundaryAdmitted(0, 0);
+        tracker.DrainRequests();
+        var line = tracker.TakeWindowLine();
+        Assert.Contains("rs_written=1/1", line);
+        Assert.Contains("first_fault_ms=-20/-20", line);
+    }
+
+    [Fact]
     public void AReadWatchedPageIsSkippedAndTheCapIsCounted()
     {
         var watches = new FakeWatches();

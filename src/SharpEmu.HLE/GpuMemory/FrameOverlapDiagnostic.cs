@@ -92,6 +92,16 @@ public static class FrameOverlapDiagnostic
     public static readonly int MaxArmedPages =
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_FRAME_OVERLAP_MAX_PAGES"), out var cap) && cap >= 1 ? cap : 65536;
 
+    /// <summary>
+    /// SHARPEMU_DIAG_FRAME_OVERLAP_ARM=commit: arm a sampled frame when its last serial is committed
+    /// instead of when it completes. Arming ~200k pages takes longer than the guest's build of the
+    /// next frame (r ovl2: 7-9 ms for 64k pages against a boundary ~7.5 ms after completion), so
+    /// armed at completion the watches see only the build's tail; the guest waits on the GPU fence
+    /// between commit and completion, which leaves the ~38 ms of the GPU tail to arm in.
+    /// </summary>
+    public static readonly bool ArmAtCommit =
+        Environment.GetEnvironmentVariable("SHARPEMU_DIAG_FRAME_OVERLAP_ARM") == "commit";
+
     /// <summary>SHARPEMU_DIAG_FRAME_OVERLAP_READS=0: arm write watches only (no read traps on the write set).</summary>
     public static readonly bool ArmReads =
         Environment.GetEnvironmentVariable("SHARPEMU_DIAG_FRAME_OVERLAP_READS") != "0";
@@ -117,13 +127,13 @@ public static class FrameOverlapDiagnostic
         var previous = Interlocked.Exchange(ref _tracker, guard is null
             ? null
             : new FrameOverlapTracker(new PageGuardOverlapWatches(guard), Stopwatch.GetTimestamp, SampleEvery, MaxArmedPages,
-                ArmReads && !readWatchesShared, startThread: true));
+                ArmReads && !readWatchesShared, startThread: true) { ArmAtCommit = ArmAtCommit });
         previous?.Dispose();
         if (guard is not null)
         {
             Console.Error.WriteLine(
                 $"[METAL-V2][OVERLAP-DIAG] on: every={SampleEvery} max_pages={MaxArmedPages} " +
-                $"read_watches={(ArmReads && !readWatchesShared ? 1 : 0)}" +
+                $"read_watches={(ArmReads && !readWatchesShared ? 1 : 0)} arm_at={(ArmAtCommit ? "commit" : "completion")}" +
                 (ArmReads && readWatchesShared ? " (off: single-copy holds the read-watch bit)" : string.Empty));
         }
     }
@@ -315,6 +325,9 @@ public sealed class FrameOverlapTracker : IDisposable
         }
     }
 
+    /// <summary>Arm a sampled frame at its commit rather than at its completion.</summary>
+    public bool ArmAtCommit { get; init; }
+
     internal sealed class Frame(long index)
     {
         public readonly long Index = index;
@@ -331,7 +344,7 @@ public sealed class FrameOverlapTracker : IDisposable
         public int DaPlanned, DaUnplanned, GdsStores, GpuValued, Unbounded;
         public ulong LastSerial;
         public long CommittedTicks, CompletedTicks, FirstAdmitTicks, ArmStartTicks, ArmedTicks, FirstFaultTicks;
-        public bool Sampled, Finalized;
+        public bool Sampled, Finalized, ArmPosted;
 
         // Trap results (under the watch gate).
         public readonly Dictionary<ulong, byte> Pages = new();
@@ -470,6 +483,12 @@ public sealed class FrameOverlapTracker : IDisposable
             frame.Sampled = frame.Index % _sampleEvery == 0;
             _inFlight.Add(frame);
             _recording = new Frame(++_recordedFrames);
+            if (frame.Sampled && ArmAtCommit)
+            {
+                frame.ArmPosted = true;
+                Post(arm: true, frame);
+            }
+
             CompleteLocked(now);
         }
     }
@@ -504,8 +523,9 @@ public sealed class FrameOverlapTracker : IDisposable
             }
 
             frame.CompletedTicks = now;
-            if (frame.Sampled)
+            if (frame.Sampled && !frame.ArmPosted)
             {
+                frame.ArmPosted = true;
                 Post(arm: true, frame);
             }
         }
@@ -1097,7 +1117,7 @@ public sealed class FrameOverlapTracker : IDisposable
         {
             foreach (var pair in _topDetach.OrderByDescending(pair => pair.Value.Hits * (long)Math.Min(pair.Value.Size, long.MaxValue)).Take(10))
             {
-                builder.Append(CultureInfo.InvariantCulture, $" 0x{pair.Key:X}+0x{pair.Value.Size:X}x{pair.Value.Hits}");
+                builder.Append(CultureInfo.InvariantCulture, $" 0x{pair.Key:X}+0x{pair.Value.Size:X}*{pair.Value.Hits}");
             }
         }
 
@@ -1106,7 +1126,7 @@ public sealed class FrameOverlapTracker : IDisposable
         {
             foreach (var pair in _topWaits.OrderByDescending(pair => pair.Value.Hits).Take(10))
             {
-                builder.Append(CultureInfo.InvariantCulture, $" 0x{pair.Key:X}:{OriginNames[pair.Value.Origin]}x{pair.Value.Hits}");
+                builder.Append(CultureInfo.InvariantCulture, $" 0x{pair.Key:X}:{OriginNames[pair.Value.Origin]}*{pair.Value.Hits}");
             }
         }
 
