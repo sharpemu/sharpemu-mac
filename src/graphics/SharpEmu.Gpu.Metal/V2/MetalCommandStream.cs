@@ -3010,7 +3010,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         // Before and after, so an upload that replaces a composited frame with the bytes
         // that were in guest memory before it shows up as the two differing.
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-before-refresh"); }
-        _imageCache.RefreshImage(imageIdentifier);
+        _imageCache.RefreshImage(imageIdentifier, readRole: "present");
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-after-refresh"); }
         SampleFlipLuma(image.Texture);
         var texture = PresentationViewOf(imageIdentifier, image, in request);

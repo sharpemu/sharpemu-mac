@@ -118,6 +118,8 @@ internal sealed partial class MetalImageCache
             image.NoteUse(_owner.CurrentSerial);
         }
 
+        NoteRefusedEnded(image, released: true);
+
         if (image.Description.HasMetadata)
         {
             var metadataAddress = image.Description.Metadata.Range.Address;
@@ -2490,6 +2492,7 @@ internal sealed partial class MetalImageCache
         var width = Math.Max(image.Description.Extent.Width >> (int)range.BaseLevel, 1);
         var height = Math.Max(image.Description.Extent.Height >> (int)range.BaseLevel, 1);
         _owner.ClearTextureColor(texture, image.Shape.PixelFormat, in clearRange, width, height, in clear);
+        NoteRefusedRewrite(image, fullImage);
         image.RefreshComplete();
         image.MarkGpuModified();
         NoteLinearGpuWrite(image);
@@ -2573,6 +2576,8 @@ internal sealed partial class MetalImageCache
                 in color);
         }
 
+        // Every level and layer (the range above).
+        NoteRefusedRewrite(image, whole: true);
         image.RefreshComplete();
         image.MarkGpuModified();
         NoteLinearGpuWrite(image);

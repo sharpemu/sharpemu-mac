@@ -1363,6 +1363,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         if (!other.IsPublished(start, end) &&
+            NoteRefusedReadThrough(other, start, end) &&
             !TryWriteBackRun(other, start, end, MetalWritebackCause.ImageOverlap, out declined))
         {
             return false;
@@ -1561,6 +1562,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: true, role: "storage");
             RefreshFromGuest(image);
+            // Read or written is not known here: counted as a read (conservative).
+            NoteRefusedRead(image, RefusedRead.Storage, "bind");
             image.Uses.Storage = true;
             image.MarkGpuModified();
             NoteLinearGpuWrite(image);
@@ -1591,6 +1594,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: false, role: "texture");
             RefreshFromGuest(image);
+            NoteRefusedSampled(image);
             image.Uses.Texture = true;
             image.NoteUse(_owner.CurrentSerial);
         }
@@ -2035,6 +2039,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // alone keeps whatever the texture held before.
         SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
         RefreshFromGuest(image);
+        // A resolve or depth copy writes one subresource, perhaps not all of it.
+        NoteRefusedRewrite(image, whole: false);
         image.MarkGpuModified();
         NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
@@ -2057,7 +2063,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         EnsureSparseBacked(image);
     }
 
-    public void RefreshImage(ResourceSlotIdentifier imageIdentifier)
+    public void RefreshImage(ResourceSlotIdentifier imageIdentifier, string? readRole = null)
     {
         using var held = _lock.Hold();
         DrainDeferredRefreshesLocked();
@@ -2066,6 +2072,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
             RefreshFromGuest(image);
+            if (readRole is not null)
+            {
+                NoteRefusedRead(image, RefusedRead.Transfer, readRole);
+            }
         }
     }
 
@@ -2353,6 +2363,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return MetalAliasFallbackReason.None;
         }
 
+        NoteRefusedRead(other, RefusedRead.Writeback, "alias-run", start, end);
         if (!TryWriteBackRun(other, start, end, MetalWritebackCause.ImageOverlap, out var failure))
         {
             WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
@@ -2971,12 +2982,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             // stays stale rather than costing them - which serves the texture's older
             // bytes there, so it is counted (alias_run_refresh_refused) and warned about.
             Interlocked.Increment(ref _aliasRunRefreshRefused);
+            var refusal = NoteRunRefusal(image);
             MetalV2Diagnostics.WarnOnce(
                 $"alias-run-refresh:{description.PixelFormat}:{description.Extent.Width}x{description.Extent.Height}",
                 "A GPU-written image stale over an alias run could not reload just that run, so it keeps " +
                 $"its texture there: {description.PixelFormat} {description.Extent.Width}x{description.Extent.Height} " +
                 $"0x{description.Data.Address:X16}+0x{description.Data.Size:X} " +
-                $"dirty=0x{image.DirtyStart:X}..0x{image.DirtyEnd:X}.");
+                $"dirty=0x{image.DirtyStart:X}..0x{image.DirtyEnd:X} runs={image.StaleRuns.Length} " +
+                $"reason={RunRefusalNames[(int)refusal]} levels={description.Resources.Levels} " +
+                $"layers={description.TransferLayers}.");
             return;
         }
 
@@ -3042,6 +3056,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             context.ProfileEncoded(ProfileLabel("upload", in description));
         }
+
+        NoteRefusedEnded(image, released: false);
         image.RefreshComplete();
         Interlocked.Increment(ref _uploads);
     }
@@ -3063,6 +3079,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var residentEnd = image.ResidentEnd;
         if (!SubRangeTransfersEnabled || description.HasStencil)
         {
+            _runRefusal = !SubRangeTransfersEnabled ? MetalRunRefusal.SubRangeOff : MetalRunRefusal.Stencil;
             return false;
         }
 
@@ -3083,6 +3100,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var overHalf = stale > (residentEnd - residentStart) / 2;
         if (count == 0 || (overHalf && !NarrowRefreshPastHalf(image)))
         {
+            _runRefusal = count == 0 ? MetalRunRefusal.NoResidentRun : MetalRunRefusal.OverHalf;
             return false;
         }
 
@@ -3090,6 +3108,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             if (!TryCoveringRun(in description, runs[index].Start, runs[index].End, out var start, out var end))
             {
+                _runRefusal = MetalRunRefusal.NoCoveringRun;
                 return false;
             }
 
@@ -3137,6 +3156,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 var source = ResolveUploadSource(description.Data.Address + start, end - start);
                 if (!source.IsValid || source.Size < end - start)
                 {
+                    _runRefusal = MetalRunRefusal.SourceInvalid;
                     NoteHoistedUse(image, anyHoisted);
                     return false;
                 }
@@ -3152,6 +3172,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             if (!moved)
             {
                 // Nothing of this run reached the texture; the whole refresh decides what becomes of the image.
+                _runRefusal = MetalRunRefusal.NotMoved;
                 NoteHoistedUse(image, anyHoisted);
                 return false;
             }
@@ -3174,6 +3195,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             {
                 image.RefreshComplete(start, end);
             }
+
+            NoteRefusedReloadedRun(image, start, end);
 
             Interlocked.Increment(ref _uploads);
         }
@@ -3475,6 +3498,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         RefreshBeforeWriteback(image);
+        NoteRefusedRead(image, RefusedRead.Writeback, cause.ToString());
         ref readonly var description = ref image.Description;
         if (TraceBigWritebackBytes != 0 && description.Data.Size >= TraceBigWritebackBytes)
         {

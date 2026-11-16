@@ -254,6 +254,12 @@ internal sealed partial class MetalImageCache
         {
             SynchronizeAliases(entry.Identifier, takesGpuOwnership: true, role: overwritten ? "rt-overwrite" : "rt-load");
         }
+        if (overwritten)
+        {
+            // The pass overwrites what it binds; every texel only for a one-subresource image.
+            NoteRefusedRewrite(image, whole: SingleSubresource(image));
+        }
+
         if (overwritten && image.IsCpuDirty)
         {
             Interlocked.Increment(ref _refreshesSkipped);

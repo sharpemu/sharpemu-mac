@@ -74,7 +74,8 @@ internal sealed partial class MetalImageCache
             $"round-trip:{Mb(counts.RoundTripBytes)}] " +
             $"alias_moved_mib=[wb:{Mb(Interlocked.Exchange(ref _aliasMovedWritebackBytes, 0))}," +
             $"blit:{Mb(Interlocked.Exchange(ref _aliasMovedBlitBytes, 0))}] " +
-            $"alias_run_refresh_refused={Interlocked.Exchange(ref _aliasRunRefreshRefused, 0)} {TakeAliasRunText()} " +
+            $"alias_run_refresh_refused={Interlocked.Exchange(ref _aliasRunRefreshRefused, 0)} {TakeRefusedStaleText()} " +
+            $"{TakeAliasRunText()} " +
             $"layer_refresh_skipped=[{layerSkips.Layers},{Mb(layerSkips.Bytes)}] layer_stale_kept={TakeLayerStaleKept()} " +
             $"alias_subset_verify=[checked:{Interlocked.Exchange(ref _aliasSubsetVerified, 0)}," +
             $"mismatch:{Interlocked.Read(ref _aliasSubsetMismatches)},unverified:{Interlocked.Exchange(ref _aliasSubsetUnverified, 0)}] " +

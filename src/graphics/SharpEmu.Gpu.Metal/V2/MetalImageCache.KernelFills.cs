@@ -300,6 +300,7 @@ internal sealed partial class MetalImageCache
     // owed to the texture, and guest memory is owed a writeback. Caller holds the lock.
     private void CompleteKernelWriteLocked(MetalCachedImage image)
     {
+        NoteRefusedRewrite(image, whole: true);
         image.RefreshComplete();
         image.MarkGpuModified();
         NoteLinearGpuWrite(image);

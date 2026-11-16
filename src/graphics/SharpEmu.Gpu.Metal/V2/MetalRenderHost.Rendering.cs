@@ -1121,6 +1121,13 @@ internal sealed partial class MetalRenderHost
                     NoteColorTargetRebuilt(index);
                 }
 
+                if (index < _attachmentCount)
+                {
+                    _imageCache.NoteRefusedAttachmentOpened(
+                        _attachmentTextures[index], _attachmentRealLevels[index], _attachmentRealLayers[index],
+                        loads: !clears && !elided, depth: false);
+                }
+
                 if (index < ownAttachments)
                 {
                     NoteColorTargetDrawn(index);
@@ -1151,6 +1158,9 @@ internal sealed partial class MetalRenderHost
 
             if (depthStencil.HasDepth && depthStencil.View.Handle != 0)
             {
+                _imageCache.NoteRefusedAttachmentOpened(
+                    _depthAttachmentTexture, _depthAttachmentRealLevel, _depthAttachmentRealLayer,
+                    loads: !depthStencil.DepthClear, depth: true);
                 attached = true;
                 var depth = MetalNative.Send(descriptor, SelDepthAttachment);
                 MetalNative.SendVoid(depth, SelSetTexture, depthTexture);

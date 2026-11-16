@@ -374,7 +374,7 @@ internal sealed partial class MetalRenderHost
         GpuImageAspect aspects)
     {
         _ = aspects;
-        _imageCache.RefreshImage(source);
+        _imageCache.RefreshImage(source, readRole: "copy-source");
         _imageCache.RefreshImage(destination);
         if (!_imageCache.TryGetImage(source, out var sourceImage) ||
             !_imageCache.TryGetImage(destination, out var destinationImage) ||
