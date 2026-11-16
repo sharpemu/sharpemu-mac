@@ -79,10 +79,12 @@ public sealed class FrameOverlapTrackerTests
         Assert.False(watches.Counts.ContainsKey((0x20000, false)));
         Assert.Equal(4, watches.Live);
 
-        // The first fault on a page is counted and lets the page go; the second is someone else's.
+        // The first fault on a page is counted and lets the page go; a second one (another thread that
+        // faulted before the release was applied) is retried without being counted again.
         Assert.True(tracker.TryHandleFault(FaultKind.Write, 0x10010, out var blocked));
         Assert.False(blocked);
-        Assert.False(tracker.TryHandleFault(FaultKind.Write, 0x10020, out _));
+        Assert.True(tracker.TryHandleFault(FaultKind.Write, 0x10020, out _));
+        Assert.False(tracker.TryHandleFault(FaultKind.Write, 0x90000, out _));
         _now = 52 * Millisecond;
         tracker.OnAdmission(0x50000, 0x100);
         Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x40010, out _));
@@ -214,12 +216,31 @@ public sealed class FrameOverlapTrackerTests
         tracker.DrainRequests();
         Assert.Equal(0, watches.Live);
 
-        // The guest read the page before the given-back protection reached it.
+        // The guest read the page before the given-back protection reached it (two threads at once).
         Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x40000, out var blocked));
         Assert.False(blocked);
-        Assert.False(tracker.TryHandleFault(FaultKind.Read, 0x40000, out _));
+        Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x40000, out _));
         Assert.False(tracker.TryHandleFault(FaultKind.Read, 0x50000, out _));
-        Assert.Contains("late_faults=1", tracker.TakeWindowLine());
+        Assert.Contains("late_faults=2", tracker.TakeWindowLine());
+    }
+
+    [Fact]
+    public void ASecondThreadFaultingOnAPageAnotherThreadReleasedIsRetried()
+    {
+        var watches = new FakeWatches();
+        var tracker = Create(watches);
+        tracker.NoteWrite(0x40000, 8, OverlapWrite.Storage);
+        tracker.OnBoundaryAdmitted(0, 0);
+        tracker.OnFrameCommitted(1);
+        tracker.OnCompleted(1);
+        tracker.DrainRequests();
+        Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x40000, out _));
+        Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x40004, out _));
+        tracker.OnBoundaryAdmitted(0, 0);
+        tracker.DrainRequests();
+        var line = tracker.TakeWindowLine();
+        Assert.Contains("ws_read=1/1", line);
+        Assert.Contains("late_faults=1", line);
     }
 
     [Fact]

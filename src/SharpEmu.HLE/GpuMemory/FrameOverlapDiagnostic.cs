@@ -310,7 +310,6 @@ public sealed class FrameOverlapTracker : IDisposable
     private const byte ReadArmed = 16;
     private const byte Armed = 32;
     private const byte ManagedSeen = 64;
-    private const byte Retried = 128;
 
     private readonly IFrameOverlapWatches _watches;
     private readonly Func<long> _clock;
@@ -343,6 +342,12 @@ public sealed class FrameOverlapTracker : IDisposable
     // the disarm gave back was applied there is answered once per page (retry), not declined.
     private Frame? _released;
     private long _lateFaults;
+
+    // Retries answered per page: several guest threads can fault on one page at once (r ovl3: six job
+    // workers reading one read-watched page; the first released it, the other five were declined and
+    // the run died). Bounded so a page some other protection holds cannot loop forever.
+    private const int MaxRetriesPerPage = 256;
+    private readonly Dictionary<ulong, int> _retries = new();
 
     private readonly Window _window = new();
     private readonly Dictionary<ulong, (ulong Size, long Hits)> _topDetach = new();
@@ -759,6 +764,7 @@ public sealed class FrameOverlapTracker : IDisposable
 
         lock (_watchGate)
         {
+            _retries.Clear();
             Volatile.Write(ref _armed, frame);
             foreach (var block in blocks)
             {
@@ -898,14 +904,22 @@ public sealed class FrameOverlapTracker : IDisposable
         {
             if (_armed is not { } frame || !frame.Pages.TryGetValue(page, out var flags) || (flags & Armed) == 0)
             {
-                // Released already, but the access faulted on the protection the watch had: once
-                // the release is applied the access goes through, so it is retried, once a page.
-                if (_released is { } released && released.Pages.TryGetValue(page, out var old) && (old & Retried) == 0 &&
-                    !_watches.StillBlocks(page, kind))
+                // Released already (by another thread's fault on the page, or by the disarm), but the
+                // access faulted on the protection the watch had: once the release is applied the
+                // access goes through, so it is retried.
+                var owned = (_armed is { } current && current.Pages.ContainsKey(page)) ||
+                    (_released is { } released && released.Pages.ContainsKey(page));
+                if (owned && !_watches.StillBlocks(page, kind))
                 {
-                    released.Pages[page] = (byte)(old | Retried);
-                    Interlocked.Increment(ref _lateFaults);
-                    return true;
+                    var retries = _retries.GetValueOrDefault(page);
+                    if (retries < MaxRetriesPerPage)
+                    {
+                        _retries[page] = retries + 1;
+                        Interlocked.Increment(ref _lateFaults);
+                        return true;
+                    }
+
+                    Console.Error.WriteLine($"[METAL-V2][OVERLAP-DIAG][WARN] page 0x{page:X}: {MaxRetriesPerPage} retries answered, declining the fault");
                 }
 
                 return false;
