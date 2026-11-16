@@ -237,135 +237,157 @@ internal sealed class GraphicsResolveMemo
         PixelOutputBlendBits blendBits)
     {
         FillSerial++;
-        var key = _key.AsSpan();
+        ref var key = ref MemoryMarshal.GetArrayDataReference(_key);
         var at = 0;
         var vertex = banks.Shader.Vertex;
         var pixel = banks.Shader.Pixel;
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
 
-        Put(key, ref at, flags);
-        Put(key, ref at, targetExportMapping.Length);
-        PutSpan(key, ref at, targetExportMapping);
+        at = Put(ref key, at, flags);
+        at = Put(ref key, at, targetExportMapping.Length);
+        at = PutSpan(ref key, at, targetExportMapping);
 
         // The vertex stage: every plain register (the hull, legacy and export user scalars are not read).
-        Put(key, ref at, vertex.ExportAddress);
-        Put(key, ref at, vertex.LocalAddress);
-        Put(key, ref at, vertex.HullAddress);
-        Put(key, ref at, vertex.HullUserDataAddress);
-        Put(key, ref at, vertex.HullResource1);
-        Put(key, ref at, vertex.HullResource2);
-        Put(key, ref at, vertex.GeometryAddress);
-        Put(key, ref at, vertex.GeometryUserDataAddress);
-        Put(key, ref at, vertex.GeometryResource1);
-        Put(key, ref at, vertex.GeometryResource2);
-        Put(key, ref at, vertex.ExportResource1);
-        Put(key, ref at, vertex.ExportResource2);
-        Put(key, ref at, vertex.LegacyVertexAddress);
-        Put(key, ref at, vertex.LegacyVertexResource1);
-        Put(key, ref at, vertex.LegacyVertexResource2);
-        Put(key, ref at, vertex.GeometryUserScalars.Count);
+        at = Put(ref key, at, vertex.ExportAddress);
+        at = Put(ref key, at, vertex.LocalAddress);
+        at = Put(ref key, at, vertex.HullAddress);
+        at = Put(ref key, at, vertex.HullUserDataAddress);
+        at = Put(ref key, at, vertex.HullResource1);
+        at = Put(ref key, at, vertex.HullResource2);
+        at = Put(ref key, at, vertex.GeometryAddress);
+        at = Put(ref key, at, vertex.GeometryUserDataAddress);
+        at = Put(ref key, at, vertex.GeometryResource1);
+        at = Put(ref key, at, vertex.GeometryResource2);
+        at = Put(ref key, at, vertex.ExportResource1);
+        at = Put(ref key, at, vertex.ExportResource2);
+        at = Put(ref key, at, vertex.LegacyVertexAddress);
+        at = Put(ref key, at, vertex.LegacyVertexResource1);
+        at = Put(ref key, at, vertex.LegacyVertexResource2);
+        at = Put(ref key, at, vertex.GeometryUserScalars.Count);
         if (flags.PixelActive)
         {
-            Put(key, ref at, pixel.Address);
-            Put(key, ref at, pixel.UserDataAddress);
-            Put(key, ref at, pixel.AuxiliaryTableAddress);
-            Put(key, ref at, pixel.Resource1);
-            Put(key, ref at, pixel.Resource2);
-            Put(key, ref at, pixel.UserScalars.Count);
+            at = Put(ref key, at, pixel.Address);
+            at = Put(ref key, at, pixel.UserDataAddress);
+            at = Put(ref key, at, pixel.AuxiliaryTableAddress);
+            at = Put(ref key, at, pixel.Resource1);
+            at = Put(ref key, at, pixel.Resource2);
+            at = Put(ref key, at, pixel.UserScalars.Count);
         }
 
         // The context registers the resolution reads (ShaderPipelineCache, HostViewportTransform, ColorTargetResolver,
         // PixelExportRouting): the blend state as the bits it resolves from (PixelOutputBlend), the viewport's transform.
-        Put(key, ref at, context.ShaderStages);
-        Put(key, ref at, context.RenderTargetMask);
-        PutSpan(key, ref at, context.ColorTargets.AsSpan());
-        Put(key, ref at, blendBits.Value);
-        Put(key, ref at, context.Clip);
-        Put(key, ref at, context.DepthRenderOverride);
-        Put(key, ref at, context.DepthTarget.ZInfo);
-        Put(key, ref at, context.ScreenViewport.TransformControl);
+        at = Put(ref key, at, context.ShaderStages);
+        at = Put(ref key, at, context.RenderTargetMask);
+        at = PutSpan(ref key, at, context.ColorTargets.AsSpan());
+        at = Put(ref key, at, blendBits.Value);
+        at = Put(ref key, at, context.Clip);
+        at = Put(ref key, at, context.DepthRenderOverride);
+        at = Put(ref key, at, context.DepthTarget.ZInfo);
+        at = Put(ref key, at, context.ScreenViewport.TransformControl);
         ref readonly var viewport = ref context.ScreenViewport.Primary;
-        Put(key, ref at, viewport.MinDepth);
-        Put(key, ref at, viewport.MaxDepth);
-        Put(key, ref at, viewport.XScale);
-        Put(key, ref at, viewport.XOffset);
-        Put(key, ref at, viewport.YScale);
-        Put(key, ref at, viewport.YOffset);
-        Put(key, ref at, viewport.ZScale);
-        Put(key, ref at, viewport.ZOffset);
-        PutSpan(key, ref at, context.UserClipPlanes.AsSpan());
+        at = Put(ref key, at, viewport.MinDepth);
+        at = Put(ref key, at, viewport.MaxDepth);
+        at = Put(ref key, at, viewport.XScale);
+        at = Put(ref key, at, viewport.XOffset);
+        at = Put(ref key, at, viewport.YScale);
+        at = Put(ref key, at, viewport.YOffset);
+        at = Put(ref key, at, viewport.ZScale);
+        at = Put(ref key, at, viewport.ZOffset);
+        at = PutSpan(ref key, at, context.UserClipPlanes.AsSpan());
 
         // The whole shader interface.
-        Put(key, ref at, shaderInterface.VertexOutputConfiguration);
-        Put(key, ref at, shaderInterface.PositionExportFormat);
-        Put(key, ref at, shaderInterface.VertexOutputControl);
-        PutSpan(key, ref at, shaderInterface.PixelInterpolatorSettings.AsSpan());
-        Put(key, ref at, shaderInterface.PixelInterpolatorWritten);
-        Put(key, ref at, shaderInterface.IndexExportFormat);
-        Put(key, ref at, shaderInterface.PrimitiveShaderSubgroupControl);
-        Put(key, ref at, shaderInterface.GeometryInstanceCount);
-        Put(key, ref at, shaderInterface.GeometryOnChipControl);
-        Put(key, ref at, shaderInterface.MaxTessellationLevel);
-        Put(key, ref at, shaderInterface.MinTessellationLevel);
-        Put(key, ref at, shaderInterface.MaxOutputPerSubgroup);
-        Put(key, ref at, shaderInterface.ExportRingItemSize);
-        Put(key, ref at, shaderInterface.GeometryMaxVerticesOut);
-        Put(key, ref at, shaderInterface.GeometryOutputPrimitiveType);
-        Put(key, ref at, shaderInterface.PrimitiveIdEnable);
-        Put(key, ref at, shaderInterface.VertexReuseOff);
-        Put(key, ref at, shaderInterface.TessellationDistribution);
-        Put(key, ref at, shaderInterface.LocalHullConfiguration);
-        Put(key, ref at, shaderInterface.TessellationFactorParameter);
-        Put(key, ref at, shaderInterface.DepthExportFormat);
-        PutSpan(key, ref at, shaderInterface.TargetOutputModes.AsSpan());
-        Put(key, ref at, shaderInterface.PixelInputEnable);
-        Put(key, ref at, shaderInterface.PixelInputAddress);
-        Put(key, ref at, shaderInterface.PixelInputControl);
-        Put(key, ref at, shaderInterface.BarycentricControl);
-        Put(key, ref at, shaderInterface.ColorShaderMask);
-        Put(key, ref at, shaderInterface.ScanShaderControl);
-        Put(key, ref at, shaderInterface.DepthShaderControl);
+        at = Put(ref key, at, shaderInterface.VertexOutputConfiguration);
+        at = Put(ref key, at, shaderInterface.PositionExportFormat);
+        at = Put(ref key, at, shaderInterface.VertexOutputControl);
+        at = PutSpan(ref key, at, shaderInterface.PixelInterpolatorSettings.AsSpan());
+        at = Put(ref key, at, shaderInterface.PixelInterpolatorWritten);
+        at = Put(ref key, at, shaderInterface.IndexExportFormat);
+        at = Put(ref key, at, shaderInterface.PrimitiveShaderSubgroupControl);
+        at = Put(ref key, at, shaderInterface.GeometryInstanceCount);
+        at = Put(ref key, at, shaderInterface.GeometryOnChipControl);
+        at = Put(ref key, at, shaderInterface.MaxTessellationLevel);
+        at = Put(ref key, at, shaderInterface.MinTessellationLevel);
+        at = Put(ref key, at, shaderInterface.MaxOutputPerSubgroup);
+        at = Put(ref key, at, shaderInterface.ExportRingItemSize);
+        at = Put(ref key, at, shaderInterface.GeometryMaxVerticesOut);
+        at = Put(ref key, at, shaderInterface.GeometryOutputPrimitiveType);
+        at = Put(ref key, at, shaderInterface.PrimitiveIdEnable);
+        at = Put(ref key, at, shaderInterface.VertexReuseOff);
+        at = Put(ref key, at, shaderInterface.TessellationDistribution);
+        at = Put(ref key, at, shaderInterface.LocalHullConfiguration);
+        at = Put(ref key, at, shaderInterface.TessellationFactorParameter);
+        at = Put(ref key, at, shaderInterface.DepthExportFormat);
+        at = PutSpan(ref key, at, shaderInterface.TargetOutputModes.AsSpan());
+        at = Put(ref key, at, shaderInterface.PixelInputEnable);
+        at = Put(ref key, at, shaderInterface.PixelInputAddress);
+        at = Put(ref key, at, shaderInterface.PixelInputControl);
+        at = Put(ref key, at, shaderInterface.BarycentricControl);
+        at = Put(ref key, at, shaderInterface.ColorShaderMask);
+        at = Put(ref key, at, shaderInterface.ScanShaderControl);
+        at = Put(ref key, at, shaderInterface.DepthShaderControl);
 
         // The user data words each stage resolves with (ShaderPipelineCache.UserData): its declared count, else the
         // registers the guest wrote.
         _userDataStart = at;
-        if (!PutUserData(key, ref at, vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount) ||
-            (flags.PixelActive && !PutUserData(key, ref at, pixel.UserScalars, pixel.Resource2.UserScalarCount)))
+        at = PutUserData(ref key, at, vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount);
+        if (at >= 0 && flags.PixelActive)
+        {
+            at = PutUserData(ref key, at, pixel.UserScalars, pixel.Resource2.UserScalarCount);
+        }
+
+        if (at < 0)
         {
             return false;
         }
 
         _keyLength = at;
-        Hash = XxHash3.HashToUInt64(key[..at]);
+        Hash = XxHash3.HashToUInt64(_key.AsSpan(0, at));
         return true;
     }
 
-    private static bool PutUserData(Span<byte> key, ref int at, UserScalarRegisters registers, uint declared)
+    // The key's offset after the user data, or -1 when the count is over the bank. The writers take the key's first byte
+    // and return the offset rather than take a span and a ref to the offset: the offset's address and a span per field
+    // put every field's write through memory (the inlined spans were more locals than the JIT keeps in registers).
+    // Each write still stops at the key's end.
+    private static int PutUserData(ref byte key, int at, UserScalarRegisters registers, uint declared)
     {
         var count = declared != 0 ? declared : registers.Count;
         if (count > UserScalarRegisters.Capacity)
         {
-            return false;
+            return -1;
         }
 
-        Put(key, ref at, count);
-        PutSpan(key, ref at, registers.ValueSpan((int)count));
-        return true;
+        at = Put(ref key, at, count);
+        return PutSpan(ref key, at, registers.ValueSpan((int)count));
     }
 
-    private static void Put<T>(Span<byte> key, ref int at, in T value) where T : unmanaged
+    private static int Put<T>(ref byte key, int at, T value) where T : unmanaged
     {
-        MemoryMarshal.Write(key[at..], in value);
-        at += System.Runtime.CompilerServices.Unsafe.SizeOf<T>();
+        var size = System.Runtime.CompilerServices.Unsafe.SizeOf<T>();
+        if ((ulong)(uint)at + (ulong)size > MaxKeyBytes)
+        {
+            ThrowKeyOverflow();
+        }
+
+        System.Runtime.CompilerServices.Unsafe.WriteUnaligned(ref System.Runtime.CompilerServices.Unsafe.Add(ref key, at), value);
+        return at + size;
     }
 
-    private static void PutSpan<T>(Span<byte> key, ref int at, ReadOnlySpan<T> values) where T : unmanaged
+    private static int PutSpan<T>(ref byte key, int at, ReadOnlySpan<T> values) where T : unmanaged
     {
         var bytes = MemoryMarshal.AsBytes(values);
-        bytes.CopyTo(key[at..]);
-        at += bytes.Length;
+        if ((ulong)(uint)at + (ulong)(uint)bytes.Length > MaxKeyBytes)
+        {
+            ThrowKeyOverflow();
+        }
+
+        bytes.CopyTo(MemoryMarshal.CreateSpan(ref System.Runtime.CompilerServices.Unsafe.Add(ref key, at), bytes.Length));
+        return at + bytes.Length;
     }
+
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    private static void ThrowKeyOverflow() => throw new InvalidOperationException("The resolve memo key is over its buffer.");
 
     // The entry with the filled key, or null.
     public Entry? Find()
