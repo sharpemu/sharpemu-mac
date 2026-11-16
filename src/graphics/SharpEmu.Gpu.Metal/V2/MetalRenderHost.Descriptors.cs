@@ -270,7 +270,9 @@ internal sealed partial class MetalRenderHost
         DisarmPendingCopy();
         _pendingGraphicsPipeline = null;
         _pendingComputePipeline = null;
+        _pendingComputeState = 0;
         NoteBufferWordStages(null, null);
+        NoteBufferWordComputeStage(null, []);
         _vertexBufferCount = 0;
         _indexBuffer = 0;
         _acquisitionSequence++;
@@ -1586,11 +1588,16 @@ internal sealed partial class MetalRenderHost
 
     public void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
     {
-        _ = RequirePipelineEntry(in pipeline);
+        var committed = RequirePipelineEntry(in pipeline);
         if (bindPoint == GpuBindPoint.Graphics)
         {
             NoteJoinStages(stages);
             NoteBufferWordStages(stages);
+        }
+        else
+        {
+            // The stage whose words BindPipeline(Compute) chooses this dispatch's state by.
+            NoteBufferWordComputeStage(committed, stages);
         }
 
         Span<uint> pushData = stackalloc uint[(int)PushData.DwordCount];

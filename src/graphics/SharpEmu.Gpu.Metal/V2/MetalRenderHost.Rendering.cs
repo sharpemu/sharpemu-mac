@@ -1547,14 +1547,19 @@ internal sealed partial class MetalRenderHost
         return _computeEncoder;
     }
 
-    // An encoder opened again after the pipeline was bound has no pipeline state.
+    // An encoder opened again after the pipeline was bound has no pipeline state. The bound
+    // dispatch's pipeline binds the state BindPipeline chose for its buffer words (the
+    // variant, once built; MetalRenderHost.BufferWordVariants), any other its generic state.
     private void EnsureComputePipelineState(nint encoder, MetalPipelineEntry entry)
     {
         UsePipelineState(entry);
-        if (_boundComputePipeline != entry.State)
+        var state = _pendingComputeState != 0 && ReferenceEquals(entry, _pendingComputePipeline)
+            ? _pendingComputeState
+            : entry.State;
+        if (_boundComputePipeline != state)
         {
-            MetalNative.SendVoid(encoder, SelSetComputePipelineState, entry.State);
-            _boundComputePipeline = entry.State;
+            MetalNative.SendVoid(encoder, SelSetComputePipelineState, state);
+            _boundComputePipeline = state;
             SignpostPipeline(encoder, entry);
         }
     }
@@ -1613,8 +1618,12 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        EnsureComputePipelineState(EnsureComputeEncoder(), entry);
+        var encoder = EnsureComputeEncoder();
+        // Once per dispatch: the variant made for the words the committed stage holds, once
+        // built, else the generic state (zero), with the reason counted.
         _pendingComputePipeline = entry;
+        _pendingComputeState = ComputeStateOf(entry);
+        EnsureComputePipelineState(encoder, entry);
     }
 
     private MetalPipelineEntry? _pendingComputePipeline;

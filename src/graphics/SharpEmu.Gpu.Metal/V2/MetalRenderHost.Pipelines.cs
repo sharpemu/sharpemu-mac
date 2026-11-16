@@ -132,6 +132,11 @@ internal sealed partial class MetalRenderHost
         // variant builder the first time a variant needs them (RetainSpecializedFunction).
         public Dictionary<SpecializationKey, nint>? SpecializedFunctions;
 
+        // The library those functions are made from: the module's MSL compiled again without
+        // asking the archive, whose library holds the function with its constants already
+        // resolved (RetainSpecializableLibrary). Made with the first variant that needs it.
+        public nint SpecializationLibrary;
+
         // The binary archive keys of the library and of the rectangle-list library (zero
         // with no archive): the pipeline made from them stores them under these.
         public UInt128 ArchiveKey;
@@ -1562,16 +1567,18 @@ internal sealed partial class MetalRenderHost
     private static bool _prefetchingPipeline;
 
     // Runs on the compile pool: MTLDevice is thread safe, and nothing here touches
-    // the host's own state.
-    private nint BuildComputePipelineState(nint function, ulong hash, UInt128 archiveKey)
+    // the host's own state. A buffer-word variant (variant) compiles at prewarm priority, as
+    // its builder holds a prewarm slot, and is never stood in for by the empty kernel: it
+    // fails instead, and its dispatches keep the generic state, which computes the same.
+    private nint BuildComputePipelineState(nint function, ulong hash, UInt128 archiveKey, bool variant = false)
     {
         nint error = 0;
-        using var runtime = MetalCompileScheduler.Shared.Runtime();
+        using var runtime = variant ? default : MetalCompileScheduler.Shared.Runtime();
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var state = NewComputePipelineState(function, archiveKey, ref error);
         if (state == 0)
         {
-            state = RecoverComputePipelineState(function, archiveKey, hash, ref error);
+            state = RecoverComputePipelineState(function, archiveKey, hash, ref error, emptyKernel: !variant);
         }
 
         Interlocked.Add(ref _pipelineTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
@@ -1706,6 +1713,9 @@ internal sealed partial class MetalRenderHost
             VertexHash = module.Hash,
             ComputeDescription = description,
             LastUsedTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+            // Dispatches bind the variant made for their buffer words (MetalRenderHost.BufferWordVariants).
+            DeclaresBufferWords = module.Shader.BufferWordConstants.Count != 0,
+            BufferWordVariants = ComputeBufferWordVariantsFor(module),
         };
         _pipelineEntries[entry.Id] = entry;
         Interlocked.Increment(ref _residentPipelines);

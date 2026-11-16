@@ -70,9 +70,11 @@ internal sealed partial class MetalRenderHost
     /// <summary>
     /// What a failed compute build turns into: the same build tried again while the compiler
     /// service keeps going away, then an empty kernel. Returns 0 when the failure is a different
-    /// kind, or when <c>SHARPEMU_METAL_V2_COMPILER_FAILURE_FATAL=1</c> is set after the retries.
+    /// kind, or when <c>SHARPEMU_METAL_V2_COMPILER_FAILURE_FATAL=1</c> is set after the retries,
+    /// or without <paramref name="emptyKernel"/> (a buffer-word variant, whose generic pipeline
+    /// computes the same) after the retries.
     /// </summary>
-    private nint RecoverComputePipelineState(nint function, UInt128 archiveKey, ulong hash, ref nint error)
+    private nint RecoverComputePipelineState(nint function, UInt128 archiveKey, ulong hash, ref nint error, bool emptyKernel = true)
     {
         var what = $"compute pipeline 0x{hash:X16}";
         var state = RetryAfterCompilerServiceFailure(
@@ -84,7 +86,8 @@ internal sealed partial class MetalRenderHost
             },
             what,
             ref error);
-        if (state != 0 || CompilerFailureFatal || error == 0 || !IsCompilerServiceFailure(MetalNative.DescribeError(error)))
+        if (state != 0 || !emptyKernel || CompilerFailureFatal || error == 0 ||
+            !IsCompilerServiceFailure(MetalNative.DescribeError(error)))
         {
             return state;
         }
