@@ -162,9 +162,11 @@ public sealed partial class RenderExecutor
                 continue;
             }
 
-            if (ColorTargetResolver.Resolve(context, slot, DrawLayerOffset, ignoreTargetMask: false, out var resolvedSlot) is { } resolution)
+            // Read in place: the resolution is a few hundred bytes, and a pattern match copied all of it again for one field.
+            var resolution = ColorTargetResolver.Resolve(context, slot, DrawLayerOffset, ignoreTargetMask: false, out var resolvedSlot);
+            if (resolution.HasValue)
             {
-                mapping[(int)resolvedSlot] = resolution.ExportMapping;
+                mapping[(int)resolvedSlot] = Nullable.GetValueRefOrDefaultRef(in resolution).ExportMapping;
             }
         }
 
