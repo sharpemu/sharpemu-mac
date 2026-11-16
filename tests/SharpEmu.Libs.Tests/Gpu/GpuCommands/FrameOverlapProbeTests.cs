@@ -10,9 +10,10 @@ namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
 
 /// <summary>
 /// SHARPEMU_FRAME_OVERLAP_PROBE's publication rules on the managed host, with a fake GPU timeline
-/// standing in for the Metal completion queue: a frame publishes at its commit once the frame
-/// before it really completed, in stream order behind anything older; never two frames ahead;
-/// a refused frame waits for its real completion; real-completion-only work never runs early.
+/// standing in for the Metal completion queue: a buffer's publications land at its commit, in
+/// stream order, while no flip but the newest committed one is still on the GPU; the bound holds
+/// the rest until that flip completes; a refused buffer and everything behind it wait for their
+/// real completion; real-completion-only work never runs early.
 /// </summary>
 public sealed class FrameOverlapProbeTests
 {
@@ -117,13 +118,13 @@ public sealed class FrameOverlapProbeTests
         public void Interrupt(int eventId, ulong destination = 0) =>
             RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.InterruptOnly, 0, Destination: destination, EventId: eventId));
 
-        public override void Flush() => OpenSerial++;
+        public override void Flush() => Commit();
 
-        // FlushFrame: the frame's last buffer is committed with the open serial.
-        public void CommitFrame()
+        // A command buffer is committed with the open serial.
+        public void Commit()
         {
-            var last = OpenSerial++;
-            Probe.OnFrameCommitted(last);
+            var serial = OpenSerial++;
+            Probe.OnCommit(serial);
         }
     }
 
@@ -140,75 +141,80 @@ public sealed class FrameOverlapProbeTests
     }
 
     [Fact]
-    public void AFramePublishesAtItsCommitOnceThePreviousFrameIsDone()
+    public void ABufferLandsAtItsCommitWhileNoEarlierFlipIsOutstanding()
     {
         var host = new ProbeHost(_gpu, _log);
         host.Interrupt(1);
-        host.Flush();
-        host.Interrupt(2);
-        host.CommitFrame();
+        host.Commit();
         _gpu.Pump();
-
-        Assert.Equal(["interrupt 1", "interrupt 2"], _log.Entries);
-
-        // The real completion finds them published and does not publish them again.
-        _gpu.Signal(2);
-        Assert.Equal(["interrupt 1", "interrupt 2"], _log.Entries);
-        var line = host.Probe.TakeWindowLine();
-        Assert.Equal("1", Counter(line, "published_early"));
-        Assert.Equal("2", Counter(line, "items_early"));
-        Assert.Equal("1", Counter(line, "depth_max"));
-    }
-
-    [Fact]
-    public void TheNextFrameWaitsForThePublishedFrameToReallyComplete()
-    {
-        var host = new ProbeHost(_gpu, _log);
-        host.Interrupt(1);
-        host.CommitFrame();
-        _gpu.Pump();
-        host.Interrupt(2);
-        host.CommitFrame();
-        _gpu.Pump();
-
-        // Frame 0 is published and still on the GPU: frame 1 is not published, the guest is one ahead.
         Assert.Equal(["interrupt 1"], _log.Entries);
 
-        // Frame 0 completes after frame 1's commit: frame 1 publishes at that completion, still early.
-        _gpu.Signal(1);
+        host.Interrupt(2);
+        host.Commit();
+        _gpu.Pump();
         Assert.Equal(["interrupt 1", "interrupt 2"], _log.Entries);
-        var line = host.Probe.TakeWindowLine();
-        Assert.Equal("2", Counter(line, "published_early"));
-        Assert.Equal("1", Counter(line, "prev_running_at_commit"));
-        Assert.Equal("1", Counter(line, "depth_max"));
 
+        // The real completions find them published and do not publish them again.
         _gpu.Signal(2);
         Assert.Equal(["interrupt 1", "interrupt 2"], _log.Entries);
+        var line = host.Probe.TakeWindowLine();
+        Assert.Equal("2", Counter(line, "at_commit"));
+        Assert.Equal("2", Counter(line, "published_early"));
+        Assert.Equal("0", Counter(line, "held_by_bound"));
     }
 
     [Fact]
-    public void ARefusedFramePublishesAtItsRealCompletionAndStreamOrderHolds()
+    public void TheBoundHoldsWorkWhileTheFlipBeforeTheNewestIsStillOnTheGpu()
+    {
+        var host = new ProbeHost(_gpu, _log);
+        host.RecordFlip(requestId: 7, eventId: 10);
+        host.Commit();                   // serial 1: flip 1
+        host.Interrupt(1);
+        host.Commit();                   // serial 2: after flip 1, nothing older outstanding
+        _gpu.Pump();
+        Assert.Equal(["interrupt 10", "interrupt 1"], _log.Entries);
+
+        host.RecordFlip(requestId: 8, eventId: 11);
+        host.Commit();                   // serial 3: flip 2, while flip 1 still runs
+        host.Interrupt(2);
+        host.Commit();                   // serial 4: after flip 2
+        _gpu.Pump();
+
+        // Flip 1 is still on the GPU: what follows flip 2 waits for it.
+        Assert.Equal(["interrupt 10", "interrupt 1"], _log.Entries);
+
+        // Flip 1 completes: its own real-completion work, then the held buffers in stream order.
+        _gpu.Signal(1);
+        Assert.Equal(["interrupt 10", "interrupt 1", "flip 7", "interrupt 11", "interrupt 2"], _log.Entries);
+        var line = host.Probe.TakeWindowLine();
+        Assert.Equal("2", Counter(line, "held_by_bound"));
+        Assert.Equal("4", Counter(line, "published_early"));
+        Assert.Equal("1", Counter(line, "flips_outstanding_max"));
+
+        _gpu.Signal(4);
+        Assert.Equal(["interrupt 10", "interrupt 1", "flip 7", "interrupt 11", "interrupt 2", "flip 8"], _log.Entries);
+    }
+
+    [Fact]
+    public void ARefusedBufferAndTheBuffersBehindItPublishAtTheirRealCompletionInStreamOrder()
     {
         var host = new ProbeHost(_gpu, _log);
         host.Interrupt(1);
         host.Probe.Refuse(FrameOverlapRefusal.GdsStore, 0x1000);
         host.Interrupt(2);
-        host.CommitFrame();
-        _gpu.Pump();
-        Assert.Empty(_log.Entries);
-
+        host.Commit();
         host.Interrupt(3);
-        host.Interrupt(4);
-        host.CommitFrame();
+        host.Commit();
         _gpu.Pump();
         Assert.Empty(_log.Entries);
 
-        // Frame 0 completes: its own completions run, then frame 1 publishes behind them.
         _gpu.Signal(1);
-        Assert.Equal(["interrupt 1", "interrupt 2", "interrupt 3", "interrupt 4"], _log.Entries);
+        Assert.Equal(["interrupt 1", "interrupt 2"], _log.Entries);
+        _gpu.Signal(2);
+        Assert.Equal(["interrupt 1", "interrupt 2", "interrupt 3"], _log.Entries);
         var line = host.Probe.TakeWindowLine();
-        Assert.Equal("1", Counter(line, "refused_frames"));
-        Assert.Equal("1", Counter(line, "published_early"));
+        Assert.Equal("1", Counter(line, "refused"));
+        Assert.Equal("1", Counter(line, "behind_refusal"));
         Assert.Equal("1", Counter(line, "gds_store"));
     }
 
@@ -218,10 +224,10 @@ public sealed class FrameOverlapProbeTests
         var host = new ProbeHost(_gpu, _log);
         host.Interrupt(1);
         host.RecordFlip(requestId: 7, eventId: 2);
-        host.CommitFrame();
+        host.Commit();
         _gpu.Pump();
 
-        // The flip's interrupt goes out with the frame; the flip's GPU completion does not.
+        // The flip's interrupt goes out with the buffer; the flip's GPU completion does not.
         Assert.Equal(["interrupt 1", "interrupt 2"], _log.Entries);
         _gpu.Signal(1);
         Assert.Equal(["interrupt 1", "interrupt 2", "flip 7"], _log.Entries);
@@ -230,27 +236,24 @@ public sealed class FrameOverlapProbeTests
     }
 
     [Fact]
-    public void AParkOnBytesACompletionStillOwesRefusesTheFrame()
+    public void AParkOnBytesACompletionStillOwesRefusesTheOpenBuffer()
     {
         var host = new ProbeHost(_gpu, _log);
         host.Interrupt(1, destination: 0x2000);
+        host.Commit();
+        host.Interrupt(2, destination: 0x2100);
+        host.Probe.NoteSuspendedWalk(CommandWaitCondition.Memory(0x2000, 4));
         host.Probe.NoteSuspendedWalk(CommandWaitCondition.Memory(0x3000, 4));
-        host.CommitFrame();
+        host.Commit();
         _gpu.Pump();
         Assert.Equal(["interrupt 1"], _log.Entries);
-
-        host.Interrupt(2, destination: 0x2100);
-        host.Probe.NoteSuspendedWalk(CommandWaitCondition.Memory(0x2100, 4));
-        host.CommitFrame();
-        _gpu.Signal(1);
-        Assert.Empty(_log.Entries.Skip(1));
 
         _gpu.Signal(2);
         Assert.Equal(["interrupt 1", "interrupt 2"], _log.Entries);
         var line = host.Probe.TakeWindowLine();
         Assert.Equal("1", Counter(line, "suspended_walk"));
         Assert.Equal("1", Counter(line, "suspended_other"));
-        Assert.Equal("1", Counter(line, "refused_frames"));
+        Assert.Equal("1", Counter(line, "refused"));
     }
 
     // The probe's queue side: a pending label noted with no completion tick (the Metal host's tick under
@@ -302,21 +305,23 @@ public sealed class FrameOverlapProbeTests
     }
 
     [Fact]
-    public void ARefusedFramesQueuedBytesStayOwedUntilItsRealCompletion()
+    public void QueuedBytesStayOwedUntilTheyArePublished()
     {
         var host = new ProbeHost(_gpu, _log);
         host.Interrupt(1, destination: 0x2000);
         host.Probe.Refuse(FrameOverlapRefusal.GdsStore);
-        host.CommitFrame();
-        _gpu.Pump();
+        host.Commit();
         host.Interrupt(2, destination: 0x3000);
-        host.CommitFrame();
+        host.Commit();
+        _gpu.Pump();
 
-        // A copy reading 0x2000 two frames on must still be queued behind the refused frame's write.
+        // A copy reading either range must still be queued behind the write.
         Assert.True(host.Probe.Owes(0x2000, 4));
         Assert.True(host.Probe.Owes(0x3000, 4));
         _gpu.Signal(1);
         Assert.False(host.Probe.Owes(0x2000, 4));
+        Assert.True(host.Probe.Owes(0x3000, 4));
+        _gpu.Signal(2);
         Assert.False(host.Probe.Owes(0x3000, 4));
         Assert.Equal(["interrupt 1", "interrupt 2"], _log.Entries);
     }

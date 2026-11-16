@@ -29,14 +29,16 @@ public enum FrameOverlapRefusal
 
 /// <summary>
 /// SHARPEMU_FRAME_OVERLAP_PROBE=1: an UNGUARDED measurement probe, default off, never to be
-/// shipped. The host-side publications a frame queues for its GPU completion (host-landed
-/// labels, end-of-pipe label slots, command-processor writes, end-of-pipe interrupts) are
-/// published together, in stream order, once the frame is fully walked and committed and the
-/// frame before it has really completed on the GPU, instead of when the frame itself completes.
-/// The guest is then at most one frame ahead of the GPU. Nothing protects what the unfinished
-/// frame still reads or writes: rendering and guest memory may be corrupted. A frame that queued
-/// a publication the probe cannot make early (see <see cref="FrameOverlapRefusal"/>) is
-/// published by its real completion, as without the switch.
+/// shipped. The host-side publications the stream queues for a GPU completion (host-landed
+/// labels, end-of-pipe label slots, command-processor writes, end-of-pipe interrupts, copies of
+/// those) land per command buffer: when the buffer that carries them is committed, in stream
+/// order, instead of when the GPU completes it. The bound: a buffer's publications land early
+/// only once every flip but the newest committed one has really completed on the GPU, so at most
+/// one flip's worth of GPU work is outstanding behind what the guest has seen; a buffer held by
+/// the bound lands when that flip completes. Nothing protects what unfinished GPU work still reads
+/// or writes: rendering and guest memory may be corrupted. A buffer that queued a publication the
+/// probe cannot make early (see <see cref="FrameOverlapRefusal"/>), and every buffer after it until
+/// it completes, is published by its real completion, as without the switch.
 /// </summary>
 /// <remarks>
 /// The probe only reorders work the host already queues. <c>enqueueAtSerial</c> runs an action
@@ -50,12 +52,11 @@ public sealed class FrameOverlapProbe
         Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE"), "1", StringComparison.Ordinal);
 
     // SHARPEMU_FRAME_OVERLAP_PROBE_WAITS=count: a park on owed bytes is counted (suspended_owed)
-    // instead of refusing the frame. By the frame's commit the walk is past the wait, so this measures
-    // what the refusal costs.
+    // instead of refusing the buffer.
     public static readonly bool CountOwedWaitsOnly = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE_WAITS"), "count", StringComparison.Ordinal);
 
-    // SHARPEMU_FRAME_OVERLAP_PROBE_AFTER_S=<seconds>: frames publish early only that long after the probe
+    // SHARPEMU_FRAME_OVERLAP_PROBE_AFTER_S=<seconds>: publications land early only that long after the probe
     // started (boot and menus publish at real completion); the other probe rules apply from the start.
     private static readonly double ArmAfterSeconds =
         double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE_AFTER_S"),
@@ -76,32 +77,36 @@ public sealed class FrameOverlapProbe
     private readonly Func<ulong> _completedSerial;
     private readonly Func<long> _clock;
     private readonly object _gate = new();
-    private Frame _open = new(0, 1);
-    private Frame? _committed;
-    // Committed frames whose real completion has not run yet, oldest first.
-    private readonly List<Frame> _unfinished = new();
+    private Batch _open = new(0);
+    // Committed batches whose real completion has not run yet, oldest first.
+    private readonly List<Batch> _unfinished = new();
+    // Serials of the committed buffers that carried a flip, newest last (the last two are kept).
+    private ulong _lastFlipSerial;
+    private ulong _flipBeforeLastSerial;
     private readonly long _armAt;
-    private long _framesUnarmed;
-    private long _queuedCopies;
-    private Frame? _lastVisibleFlip;
-    private int _depth;
     private int _refusalReports;
 
     // Window counters, guarded by _gate.
-    private long _frames;
-    private long _framesEarly;
-    private long _framesAtCompletion;
-    private long _framesRefused;
-    private long _framesWaited;
+    private long _commits;
+    private long _batches;
+    private long _batchesAtCommit;
+    private long _batchesHeld;
+    private long _batchesEarly;
+    private long _batchesAtCompletion;
+    private long _batchesRefused;
+    private long _batchesBehindRefusal;
+    private long _batchesUnarmed;
     private long _itemsEarly;
-    private long _flipsEarly;
+    private long _itemsHeld;
     private long _flips;
-    private int _depthMax;
+    private long _flipsEarly;
     private long _suspendedOther;
     private long _suspendedOwed;
+    private long _queuedCopies;
+    private int _flipsOutstandingMax;
     private readonly long[] _refusals = new long[RefusalCount];
     private readonly List<double> _earlyMs = new();
-    private readonly List<double> _periodMs = new();
+    private readonly List<double> _flipsOutstanding = new();
 
     public FrameOverlapProbe(Action<ulong, Action> enqueueAtSerial, Func<ulong> completedSerial, Func<long>? clock = null)
     {
@@ -111,38 +116,8 @@ public sealed class FrameOverlapProbe
         _armAt = ArmAfterSeconds > 0 ? _clock() + (long)(ArmAfterSeconds * Stopwatch.Frequency) : long.MinValue;
     }
 
-    /// <summary>A copy whose source is a queued publication was queued behind it.</summary>
-    public void NoteQueuedCopy() => Interlocked.Increment(ref _queuedCopies);
-
-    /// <summary>Whether a publication still queued (not yet run) writes any of these bytes.</summary>
-    public bool Owes(ulong address, ulong size)
-    {
-        lock (_gate)
-        {
-            return OwesLocked(address, size);
-        }
-    }
-
-    private bool OwesLocked(ulong address, ulong size)
-    {
-        if (Owes(_open, address, size))
-        {
-            return true;
-        }
-
-        foreach (var frame in _unfinished)
-        {
-            if (Owes(frame, address, size))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     /// <summary>
-    /// A publication the open frame queued for its completion. The result is what the real
+    /// A publication the open buffer queued for its completion. The result is what the real
     /// completion runs: the publication unless it already ran early, then
     /// <paramref name="atRealCompletion"/>, which is never published early.
     /// </summary>
@@ -163,7 +138,7 @@ public sealed class FrameOverlapProbe
             };
     }
 
-    /// <summary>The open frame carries a flip.</summary>
+    /// <summary>The open buffer carries a flip.</summary>
     public void NoteFlip()
     {
         lock (_gate)
@@ -172,7 +147,10 @@ public sealed class FrameOverlapProbe
         }
     }
 
-    /// <summary>The first serial the open frame's work can carry.</summary>
+    /// <summary>A copy whose source is a queued publication was queued behind it.</summary>
+    public void NoteQueuedCopy() => Interlocked.Increment(ref _queuedCopies);
+
+    /// <summary>The first serial the open buffer's work can carry.</summary>
     public ulong OpenFrameFirstSerial
     {
         get
@@ -184,7 +162,34 @@ public sealed class FrameOverlapProbe
         }
     }
 
-    /// <summary>The open frame queued something the probe cannot publish early.</summary>
+    /// <summary>Whether a publication still queued (not yet run) writes any of these bytes.</summary>
+    public bool Owes(ulong address, ulong size)
+    {
+        lock (_gate)
+        {
+            return OwesLocked(address, size);
+        }
+    }
+
+    private bool OwesLocked(ulong address, ulong size)
+    {
+        if (Owes(_open, address, size))
+        {
+            return true;
+        }
+
+        foreach (var batch in _unfinished)
+        {
+            if (Owes(batch, address, size))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The open buffer queued something the probe cannot publish early.</summary>
     public void Refuse(FrameOverlapRefusal reason, ulong address = 0)
     {
         lock (_gate)
@@ -196,15 +201,15 @@ public sealed class FrameOverlapProbe
             {
                 _refusalReports++;
                 Console.Error.WriteLine(
-                    $"[METAL-V2][OVERLAP-PROBE] refused frame={_open.Index} reason={Name(reason)} address=0x{address:X16}; " +
-                    "it publishes at its real completion");
+                    $"[METAL-V2][OVERLAP-PROBE] refused buffer={_open.Index} reason={Name(reason)} address=0x{address:X16}; " +
+                    "it and the buffers after it publish at their real completion");
             }
         }
     }
 
     /// <summary>
-    /// The command walk parked a submission of the open frame. A wait on bytes a queued, not yet
-    /// published completion writes is released only by a completion: the frame is refused.
+    /// The command walk parked a submission. A wait on bytes a queued, not yet published
+    /// completion writes is released only by a completion: the open buffer is refused.
     /// </summary>
     public void NoteSuspendedWalk(in CommandWaitCondition wait)
     {
@@ -239,60 +244,86 @@ public sealed class FrameOverlapProbe
     }
 
     /// <summary>
-    /// Everything the open frame recorded is committed; <paramref name="lastSerial"/> finishes it.
-    /// Its publications go out once the frame before it has really completed, and the next
-    /// frame's wait for this one's real completion: the guest is at most one frame ahead.
+    /// A command buffer was committed with <paramref name="serial"/>: what the stream queued since
+    /// the previous commit is carried by it. It lands now if every flip but the newest committed one
+    /// has completed, else when the flip before the newest completes (or at its own completion).
     /// </summary>
-    public void OnFrameCommitted(ulong lastSerial)
+    public void OnCommit(ulong serial)
     {
-        Frame frame;
-        ulong previousLast;
+        Batch batch;
+        ulong gate;
         lock (_gate)
         {
-            frame = _open;
-            frame.LastSerial = Math.Max(lastSerial, frame.FirstSerial - 1);
-            frame.CommittedAt = _clock();
-            previousLast = _committed?.LastSerial ?? 0;
-            _committed = frame;
-            _unfinished.Add(frame);
-            _open = new Frame(frame.Index + 1, frame.LastSerial + 1);
-            _frames++;
-            if (previousLast > _completedSerial())
+            _commits++;
+            batch = _open;
+            _open = new Batch(batch.Index + 1) { FirstSerial = serial + 1 };
+            if (batch.Items.Count == 0 && !batch.HasFlip)
             {
-                _framesWaited++;
+                return;
+            }
+
+            batch.Serial = serial;
+            if (batch.HasFlip)
+            {
+                _flipBeforeLastSerial = _lastFlipSerial;
+                _lastFlipSerial = serial;
+                _flips++;
+            }
+
+            gate = _flipBeforeLastSerial;
+            _unfinished.Add(batch);
+            _batches++;
+            if (gate > _completedSerial())
+            {
+                _batchesHeld++;
+                _itemsHeld += batch.Items.Count;
+            }
+            else
+            {
+                _batchesAtCommit++;
             }
         }
 
-        _enqueueAtSerial(previousLast, () => Publish(frame));
-        _enqueueAtSerial(frame.LastSerial, () => Completed(frame));
+        _enqueueAtSerial(gate, () => Publish(batch));
+        _enqueueAtSerial(serial, () => Completed(batch));
     }
 
-    // Runs once the frame before it has really completed (completion thread).
-    private void Publish(Frame frame)
+    // Runs once the bound allows it (completion thread).
+    private void Publish(Batch batch)
     {
-        if (frame.Refusal is not null)
+        lock (_gate)
         {
-            lock (_gate)
+            if (batch.Refusal is not null)
             {
-                _framesRefused++;
+                _batchesRefused++;
+                return;
             }
 
-            return;
-        }
-
-        if (_clock() < _armAt)
-        {
-            lock (_gate)
+            foreach (var earlier in _unfinished)
             {
-                _framesUnarmed++;
+                if (earlier == batch)
+                {
+                    break;
+                }
+
+                if (earlier.Refusal is not null)
+                {
+                    // Landing now would overtake publications that wait for the GPU.
+                    _batchesBehindRefusal++;
+                    return;
+                }
             }
 
-            return;
+            if (_clock() < _armAt)
+            {
+                _batchesUnarmed++;
+                return;
+            }
         }
 
-        var early = _completedSerial() < frame.LastSerial;
+        var early = _completedSerial() < batch.Serial;
         var ran = 0;
-        foreach (var item in frame.Items)
+        foreach (var item in batch.Items)
         {
             if (item.Run())
             {
@@ -304,56 +335,49 @@ public sealed class FrameOverlapProbe
         {
             if (!early)
             {
-                _framesAtCompletion++;
+                _batchesAtCompletion++;
                 return;
             }
 
-            frame.PublishedEarly = true;
-            frame.VisibleAt = _clock();
-            _framesEarly++;
+            batch.PublishedEarly = true;
+            batch.PublishedAt = _clock();
+            _batchesEarly++;
             _itemsEarly += ran;
-            _flipsEarly += frame.HasFlip ? 1 : 0;
-            _depth++;
-            _depthMax = Math.Max(_depthMax, _depth);
+            _flipsEarly += batch.HasFlip ? 1 : 0;
+            // The flips committed and not yet completed behind what the guest now sees.
+            var outstanding = 0;
+            foreach (var pending in _unfinished)
+            {
+                outstanding += pending.HasFlip ? 1 : 0;
+            }
+
+            _flipsOutstanding.Add(outstanding);
+            _flipsOutstandingMax = Math.Max(_flipsOutstandingMax, outstanding);
         }
     }
 
-    // Runs once the frame has really completed (completion thread), after all its items.
-    private void Completed(Frame frame)
+    // Runs once the buffer has really completed (completion thread), after all its items.
+    private void Completed(Batch batch)
     {
         var now = _clock();
         lock (_gate)
         {
-            if (frame.PublishedEarly)
+            if (batch.PublishedEarly && ran(batch))
             {
-                _depth--;
-                _earlyMs.Add((now - frame.VisibleAt) * 1000.0 / Stopwatch.Frequency);
-            }
-            else
-            {
-                frame.VisibleAt = now;
-            }
-
-            if (frame.HasFlip)
-            {
-                _flips++;
-                if (_lastVisibleFlip is { } previous)
-                {
-                    _periodMs.Add((frame.VisibleAt - previous.VisibleAt) * 1000.0 / Stopwatch.Frequency);
-                }
-
-                _lastVisibleFlip = frame;
+                _earlyMs.Add((now - batch.PublishedAt) * 1000.0 / Stopwatch.Frequency);
             }
 
             // Every item has run: none is owed to a wait any more.
-            frame.Items.Clear();
-            _unfinished.Remove(frame);
+            batch.Items.Clear();
+            _unfinished.Remove(batch);
         }
+
+        static bool ran(Batch done) => done.Items.Count != 0;
     }
 
-    private static bool Owes(Frame frame, ulong address, ulong size)
+    private static bool Owes(Batch batch, ulong address, ulong size)
     {
-        foreach (var item in frame.Items)
+        foreach (var item in batch.Items)
         {
             if (item.Bytes != 0 && !item.HasRun && address < item.Address + item.Bytes && item.Address < address + size)
             {
@@ -383,20 +407,22 @@ public sealed class FrameOverlapProbe
             var refusals = string.Join(' ', Enumerable.Range(0, RefusalCount).Select(index =>
                 $"{Name((FrameOverlapRefusal)index)}={_refusals[index]}"));
             var line =
-                $"[METAL-V2][OVERLAP-PROBE] frames={_frames} published_early={_framesEarly} " +
-                $"published_at_completion={_framesAtCompletion} refused_frames={_framesRefused} unarmed={_framesUnarmed} " +
-                $"queued_copies={Interlocked.Exchange(ref _queuedCopies, 0)} " +
-                $"prev_running_at_commit={_framesWaited} items_early={_itemsEarly} " +
+                $"[METAL-V2][OVERLAP-PROBE] commits={_commits} batches={_batches} at_commit={_batchesAtCommit} " +
+                $"held_by_bound={_batchesHeld} items_held={_itemsHeld} published_early={_batchesEarly} " +
+                $"published_at_completion={_batchesAtCompletion} refused={_batchesRefused} " +
+                $"behind_refusal={_batchesBehindRefusal} unarmed={_batchesUnarmed} items_early={_itemsEarly} " +
                 $"ms_early_p50={Percentile(_earlyMs, 0.5):F1} ms_early_p90={Percentile(_earlyMs, 0.9):F1} " +
-                $"depth_max={_depthMax} flips={_flips} flips_early={_flipsEarly} " +
-                $"flip_period_p50={Percentile(_periodMs, 0.5):F1} flip_period_p90={Percentile(_periodMs, 0.9):F1} " +
+                $"flips={_flips} flips_early={_flipsEarly} " +
+                $"flips_outstanding_p50={Percentile(_flipsOutstanding, 0.5):F0} flips_outstanding_max={_flipsOutstandingMax} " +
+                $"queued_copies={Interlocked.Exchange(ref _queuedCopies, 0)} " +
                 $"suspended_other={_suspendedOther} suspended_owed={_suspendedOwed} refusals: {refusals}";
-            _frames = _framesEarly = _framesAtCompletion = _framesRefused = _framesWaited = _framesUnarmed = 0;
-            _itemsEarly = _flipsEarly = _flips = _suspendedOther = _suspendedOwed = 0;
-            _depthMax = _depth;
+            _commits = _batches = _batchesAtCommit = _batchesHeld = _batchesEarly = _batchesAtCompletion = 0;
+            _batchesRefused = _batchesBehindRefusal = _batchesUnarmed = _itemsEarly = _itemsHeld = 0;
+            _flips = _flipsEarly = _suspendedOther = _suspendedOwed = 0;
+            _flipsOutstandingMax = 0;
             Array.Clear(_refusals);
             _earlyMs.Clear();
-            _periodMs.Clear();
+            _flipsOutstanding.Clear();
             return line;
         }
     }
@@ -412,17 +438,16 @@ public sealed class FrameOverlapProbe
         return values[Math.Min(values.Count - 1, (int)(fraction * values.Count))];
     }
 
-    private sealed class Frame(long index, ulong firstSerial)
+    private sealed class Batch(long index)
     {
         public long Index { get; } = index;
-        public ulong FirstSerial { get; } = firstSerial;
-        public ulong LastSerial { get; set; }
+        public ulong FirstSerial { get; init; } = 1;
+        public ulong Serial { get; set; }
         public List<Item> Items { get; } = new();
         public FrameOverlapRefusal? Refusal { get; set; }
         public bool HasFlip { get; set; }
         public bool PublishedEarly { get; set; }
-        public long CommittedAt { get; set; }
-        public long VisibleAt { get; set; }
+        public long PublishedAt { get; set; }
     }
 
     private sealed class Item(Action publish, ulong address, ulong bytes)

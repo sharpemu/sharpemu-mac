@@ -755,6 +755,12 @@ internal sealed partial class MetalRenderHost :
         _lazyLabelRanges.Clear();
         Interlocked.Increment(ref _flushes);
         _completions.Publish(serial);
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            // SHARPEMU_FRAME_OVERLAP_PROBE=1 (unguarded): what this buffer carries may land now.
+            _overlapProbe!.OnCommit(serial);
+        }
+
         return serial;
     }
 

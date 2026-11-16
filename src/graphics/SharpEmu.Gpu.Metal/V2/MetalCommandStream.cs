@@ -128,11 +128,6 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnFrameCommitted(Volatile.Read(ref _submittedSerial));
         }
 
-        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
-        {
-            // SHARPEMU_FRAME_OVERLAP_PROBE=1 (unguarded): the frame's publications may go out early.
-            _overlapProbe!.OnFrameCommitted(Volatile.Read(ref _submittedSerial));
-        }
     }
 
     // ---- command-buffer coalescing (SHARPEMU_METAL_V2_FLUSH_COALESCE) ----
