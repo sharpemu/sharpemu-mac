@@ -2335,7 +2335,12 @@ internal sealed partial class MetalRenderHost
     private nuint[] _encoderResidentUsage = new nuint[64];
     private nuint[] _encoderResidentStages = new nuint[64];
     private int _encoderResidentCount;
-    private readonly Dictionary<nint, int> _encoderResidentIndex = new();
+    // The resources' positions by hash, open addressing, at most half full: a slot is live when its stamp is the
+    // current one (moved with every encoder), so a new encoder starts empty without a clear. Looked up for every used
+    // resource of every draw.
+    private int[] _encoderResidentSlots = new int[128];
+    private long[] _encoderResidentSlotStamps = new long[128];
+    private long _encoderResidentStamp = 1;
     private long _residencyCallsSkipped;
     // Resources an encoder was told (not skipped), and compute encoders opened: what re-declaring the submission's
     // residents to every new compute encoder costs (the WAITS line's residency_named and compute_encoders).
@@ -2345,11 +2350,7 @@ internal sealed partial class MetalRenderHost
     private void ForgetResidentResources()
     {
         _encoderEpoch++;
-        if (_encoderResidentCount != 0)
-        {
-            _encoderResidentIndex.Clear();
-        }
-
+        _encoderResidentStamp++;
         _encoderResidentCount = 0;
     }
 
@@ -2512,7 +2513,24 @@ internal sealed partial class MetalRenderHost
 
     private bool TryNoteResident(nint resource, nuint usage, nuint stages)
     {
-        if (_encoderResidentIndex.TryGetValue(resource, out var index))
+        var slots = _encoderResidentSlots;
+        var slotStamps = _encoderResidentSlotStamps;
+        var mask = slots.Length - 1;
+        var slot = UsedResourceHash(resource) & mask;
+        var index = -1;
+        while (slotStamps[slot] == _encoderResidentStamp)
+        {
+            var position = slots[slot] - 1;
+            if (_encoderResidentResources[position] == resource)
+            {
+                index = position;
+                break;
+            }
+
+            slot = (slot + 1) & mask;
+        }
+
+        if (index >= 0)
         {
             // A wider usage or a new stage has to be named again; the same one need not.
             if ((_encoderResidentUsage[index] & usage) == usage &&
@@ -2535,13 +2553,38 @@ internal sealed partial class MetalRenderHost
             Array.Resize(ref _encoderResidentStages, _encoderResidentCount * 2);
         }
 
-        _encoderResidentIndex[resource] = _encoderResidentCount;
         _encoderResidentResources[_encoderResidentCount] = resource;
         _encoderResidentUsage[_encoderResidentCount] = usage;
         _encoderResidentStages[_encoderResidentCount] = stages;
         _encoderResidentCount++;
+        slotStamps[slot] = _encoderResidentStamp;
+        slots[slot] = _encoderResidentCount;
+        if (_encoderResidentCount * 2 > slots.Length)
+        {
+            GrowEncoderResidentIndex();
+        }
+
         _residencyCallsNamed++;
         return true;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void GrowEncoderResidentIndex()
+    {
+        _encoderResidentSlots = new int[_encoderResidentSlots.Length * 2];
+        _encoderResidentSlotStamps = new long[_encoderResidentSlots.Length];
+        var mask = _encoderResidentSlots.Length - 1;
+        for (var position = 0; position < _encoderResidentCount; position++)
+        {
+            var slot = UsedResourceHash(_encoderResidentResources[position]) & mask;
+            while (_encoderResidentSlotStamps[slot] == _encoderResidentStamp)
+            {
+                slot = (slot + 1) & mask;
+            }
+
+            _encoderResidentSlotStamps[slot] = _encoderResidentStamp;
+            _encoderResidentSlots[slot] = position + 1;
+        }
     }
 
     private void BindStageBuffers(nint encoder, int stageIndex, nint setBufferSelector)
