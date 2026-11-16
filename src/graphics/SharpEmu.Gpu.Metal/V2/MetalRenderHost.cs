@@ -207,6 +207,10 @@ internal sealed partial class MetalRenderHost :
             _imageCache.StagedRanges = _stagedRanges;
         }
         _completions = new MetalCompletionQueue(_sharedEvent);
+        if (GateHoistProbe)
+        {
+            InitGateHoist(device);
+        }
         if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
         {
             Console.Error.WriteLine("[METAL-V2][OVERLAP-PROBE][WARN] " + SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.WarningLine);
@@ -359,6 +363,11 @@ internal sealed partial class MetalRenderHost :
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private nint OpenCommandBuffer()
     {
+        if (GateHoistProbe)
+        {
+            BeginGateHoistBuffer(_nextSerial + 1);
+        }
+
         _commandBuffer = NewCommandBuffer();
         MetalMemoryTelemetry.CommandBuffers.Add();
         if (_commandBuffer == 0)
@@ -675,8 +684,8 @@ internal sealed partial class MetalRenderHost :
         // this watch exists for was lost twice.
         _slotTrap?.Verify(CompletedSerial);
         var serial = _submissionSerial;
-        MetalV2Native.SendEventValue(_commandBuffer, SelEncodeSignalEvent, _sharedEvent, serial);
-        if (_completions.WantsCompletionHandler)
+        MetalV2Native.SendEventValue(_commandBuffer, SelEncodeSignalEvent, _openOnHoist ? _hoistEvent : _sharedEvent, serial);
+        if (_completions.WantsCompletionHandler && !_openOnHoist)
         {
             // The handler is a global block with no state: it only wakes whoever waits
             // on the shared event, which the signal above has already advanced.
@@ -695,6 +704,11 @@ internal sealed partial class MetalRenderHost :
         MetalMemoryTelemetry.Commits.Add();
         Volatile.Write(ref _submittedSerial, serial);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
+        if (GateHoistProbe)
+        {
+            AfterGateHoistCommit(serial, cause == PassEndCause.Present);
+        }
+
         if (DsTrace.Gpu && DsTrace.Armed)
         {
             DsTrace.Emit(DsEv.MCOMMIT, serial, (ulong)cause, _pendingLabelWrites,
@@ -3252,6 +3266,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _completions.Dispose();
+        _hoistCompletions?.Dispose();
         DisposeNativeOcclusion();
         DisposeLabelScatter();
         DisposeThreadDispatch();

@@ -1900,6 +1900,7 @@ internal sealed partial class MetalRenderHost
     {
         using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
         _overlapProbe?.NoteDraw();
+        _drawsInBuffer++;
         var started = DrawTimingStart();
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
@@ -1954,6 +1955,7 @@ internal sealed partial class MetalRenderHost
     {
         using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
         _overlapProbe?.NoteDraw();
+        _drawsInBuffer++;
         var started = DrawTimingStart();
         if (_indexBuffer == 0)
         {
@@ -2018,6 +2020,7 @@ internal sealed partial class MetalRenderHost
     {
         using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
         _overlapProbe?.NoteDraw();
+        _drawsInBuffer++;
         var started = DrawTimingStart();
         // The guest's argument layout is (vertexCount, instanceCount, firstVertex,
         // firstInstance), which is exactly MTLDrawPrimitivesIndirectArguments.
@@ -2085,6 +2088,7 @@ internal sealed partial class MetalRenderHost
     {
         using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
         _overlapProbe?.NoteDraw();
+        _drawsInBuffer++;
         var started = DrawTimingStart();
         if (_indexBuffer == 0)
         {
