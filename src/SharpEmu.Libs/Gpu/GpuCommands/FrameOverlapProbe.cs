@@ -55,6 +55,14 @@ public sealed class FrameOverlapProbe
     public static readonly bool CountOwedWaitsOnly = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE_WAITS"), "count", StringComparison.Ordinal);
 
+    // SHARPEMU_FRAME_OVERLAP_PROBE_AFTER_S=<seconds>: frames publish early only that long after the probe
+    // started (boot and menus publish at real completion); the other probe rules apply from the start.
+    private static readonly double ArmAfterSeconds =
+        double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE_AFTER_S"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds) && seconds > 0
+            ? seconds
+            : 0;
+
     public const string WarningLine =
         "unguarded frame-overlap probe: rendering and guest memory are not protected; measurement only";
 
@@ -70,6 +78,10 @@ public sealed class FrameOverlapProbe
     private readonly object _gate = new();
     private Frame _open = new(0, 1);
     private Frame? _committed;
+    // Committed frames whose real completion has not run yet, oldest first.
+    private readonly List<Frame> _unfinished = new();
+    private readonly long _armAt;
+    private long _framesUnarmed;
     private Frame? _lastVisibleFlip;
     private int _depth;
     private int _refusalReports;
@@ -95,6 +107,34 @@ public sealed class FrameOverlapProbe
         _enqueueAtSerial = enqueueAtSerial;
         _completedSerial = completedSerial;
         _clock = clock ?? Stopwatch.GetTimestamp;
+        _armAt = ArmAfterSeconds > 0 ? _clock() + (long)(ArmAfterSeconds * Stopwatch.Frequency) : long.MinValue;
+    }
+
+    /// <summary>Whether a publication still queued (not yet run) writes any of these bytes.</summary>
+    public bool Owes(ulong address, ulong size)
+    {
+        lock (_gate)
+        {
+            return OwesLocked(address, size);
+        }
+    }
+
+    private bool OwesLocked(ulong address, ulong size)
+    {
+        if (Owes(_open, address, size))
+        {
+            return true;
+        }
+
+        foreach (var frame in _unfinished)
+        {
+            if (Owes(frame, address, size))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -169,7 +209,7 @@ public sealed class FrameOverlapProbe
             bool owed;
             lock (_gate)
             {
-                owed = Owes(_open, wait.Address, wait.Size) || (_committed is { } last && Owes(last, wait.Address, wait.Size));
+                owed = OwesLocked(wait.Address, wait.Size);
                 if (!owed)
                 {
                     _suspendedOther++;
@@ -210,6 +250,7 @@ public sealed class FrameOverlapProbe
             frame.CommittedAt = _clock();
             previousLast = _committed?.LastSerial ?? 0;
             _committed = frame;
+            _unfinished.Add(frame);
             _open = new Frame(frame.Index + 1, frame.LastSerial + 1);
             _frames++;
             if (previousLast > _completedSerial())
@@ -230,6 +271,16 @@ public sealed class FrameOverlapProbe
             lock (_gate)
             {
                 _framesRefused++;
+            }
+
+            return;
+        }
+
+        if (_clock() < _armAt)
+        {
+            lock (_gate)
+            {
+                _framesUnarmed++;
             }
 
             return;
@@ -292,6 +343,7 @@ public sealed class FrameOverlapProbe
 
             // Every item has run: none is owed to a wait any more.
             frame.Items.Clear();
+            _unfinished.Remove(frame);
         }
     }
 
@@ -328,13 +380,13 @@ public sealed class FrameOverlapProbe
                 $"{Name((FrameOverlapRefusal)index)}={_refusals[index]}"));
             var line =
                 $"[METAL-V2][OVERLAP-PROBE] frames={_frames} published_early={_framesEarly} " +
-                $"published_at_completion={_framesAtCompletion} refused_frames={_framesRefused} " +
+                $"published_at_completion={_framesAtCompletion} refused_frames={_framesRefused} unarmed={_framesUnarmed} " +
                 $"prev_running_at_commit={_framesWaited} items_early={_itemsEarly} " +
                 $"ms_early_p50={Percentile(_earlyMs, 0.5):F1} ms_early_p90={Percentile(_earlyMs, 0.9):F1} " +
                 $"depth_max={_depthMax} flips={_flips} flips_early={_flipsEarly} " +
                 $"flip_period_p50={Percentile(_periodMs, 0.5):F1} flip_period_p90={Percentile(_periodMs, 0.9):F1} " +
                 $"suspended_other={_suspendedOther} suspended_owed={_suspendedOwed} refusals: {refusals}";
-            _frames = _framesEarly = _framesAtCompletion = _framesRefused = _framesWaited = 0;
+            _frames = _framesEarly = _framesAtCompletion = _framesRefused = _framesWaited = _framesUnarmed = 0;
             _itemsEarly = _flipsEarly = _flips = _suspendedOther = _suspendedOwed = 0;
             _depthMax = _depth;
             Array.Clear(_refusals);

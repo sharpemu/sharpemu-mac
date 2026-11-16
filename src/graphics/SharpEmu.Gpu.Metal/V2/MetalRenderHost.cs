@@ -1786,6 +1786,18 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled && _overlapProbe!.Owes(source, size))
+        {
+            // SHARPEMU_FRAME_OVERLAP_PROBE=1: the source is a publication still queued, so the copy is one
+            // too, made on the host behind it in stream order.
+            QueueCompletion(() =>
+            {
+                CopyGuestBytesOnHost(destination, source, size);
+                _imageCache.InvalidateMemory(destination, size);
+            }, probeRange: (destination, (int)Math.Min(size, int.MaxValue)));
+            return;
+        }
+
         var target = _guestMemory.ResolveWritable(destination, size);
         var origin = _guestMemory.Resolve(source, size);
         // A source too large to stage resolves to a prefix, which a blit of the whole
@@ -2873,7 +2885,7 @@ internal sealed partial class MetalRenderHost :
 
         if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
         {
-            Console.Error.WriteLine(_overlapProbe!.TakeWindowLine());
+            Console.Error.WriteLine(_overlapProbe!.TakeWindowLine() + $" pending_labels={_commandStream?.PendingLabelCount ?? 0}");
         }
 
         _slowWaitReports = 0;

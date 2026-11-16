@@ -252,4 +252,72 @@ public sealed class FrameOverlapProbeTests
         Assert.Equal("1", Counter(line, "suspended_other"));
         Assert.Equal("1", Counter(line, "refused_frames"));
     }
+
+    // The probe's queue side: a pending label noted with no completion tick (the Metal host's tick under
+    // the probe) answers waits and parse-time reads until its publication lands it, not when a tick passes.
+    [Fact]
+    public void AQueuedPublicationAnswersWaitsUntilItLandsNotWhenATickPasses()
+    {
+        const ulong label = StreamRunner.LabelAddress;
+        var host = new RecordingCommandStreamHost { PendingLabelTick = ulong.MaxValue };
+        var queue = new CommandStreamQueue(host);
+        var interpreter = queue.GetInterpreter(0);
+        interpreter.PendingLabelRecorded!(label, 4, 7);
+
+        // Every submission completes on the GPU: the label is still only queued, and still answers.
+        queue.NotifyCompletedGpuTick(1_000_000);
+        Assert.True(interpreter.PendingLabelLookup!(label, false, out var queued));
+        Assert.Equal(7UL, queued);
+
+        // Its publication has not written memory yet: landing keeps it.
+        queue.LandPendingLabels(label, 4, host.Memory);
+        Assert.Equal(1, queue.PendingLabelCount);
+
+        // Published: memory holds the value, and memory answers from now on.
+        Assert.True(host.Memory.TryWrite(label, BitConverter.GetBytes(7u)));
+        queue.LandPendingLabels(label, 4, host.Memory);
+        Assert.Equal(0, queue.PendingLabelCount);
+        Assert.False(interpreter.PendingLabelLookup!(label, false, out _));
+    }
+
+    [Fact]
+    public void LandingAnOlderPublicationKeepsTheNewerQueuedValue()
+    {
+        const ulong label = StreamRunner.LabelAddress;
+        var host = new RecordingCommandStreamHost { PendingLabelTick = ulong.MaxValue };
+        var queue = new CommandStreamQueue(host);
+        var interpreter = queue.GetInterpreter(0);
+        interpreter.PendingLabelRecorded!(label, 8, 1);
+        interpreter.PendingLabelRecorded!(label, 8, 2);
+
+        // The first publication wrote 1; the stream's newest write (2) is still queued.
+        Assert.True(host.Memory.TryWrite(label, BitConverter.GetBytes(1UL)));
+        queue.LandPendingLabels(label, 8, host.Memory);
+        Assert.True(interpreter.PendingLabelLookup!(label, true, out var newest));
+        Assert.Equal(2UL, newest);
+
+        Assert.True(host.Memory.TryWrite(label, BitConverter.GetBytes(2UL)));
+        queue.LandPendingLabels(label, 8, host.Memory);
+        Assert.False(interpreter.PendingLabelLookup!(label, true, out _));
+    }
+
+    [Fact]
+    public void ARefusedFramesQueuedBytesStayOwedUntilItsRealCompletion()
+    {
+        var host = new ProbeHost(_gpu, _log);
+        host.Interrupt(1, destination: 0x2000);
+        host.Probe.Refuse(FrameOverlapRefusal.GdsStore);
+        host.CommitFrame();
+        _gpu.Pump();
+        host.Interrupt(2, destination: 0x3000);
+        host.CommitFrame();
+
+        // A copy reading 0x2000 two frames on must still be queued behind the refused frame's write.
+        Assert.True(host.Probe.Owes(0x2000, 4));
+        Assert.True(host.Probe.Owes(0x3000, 4));
+        _gpu.Signal(1);
+        Assert.False(host.Probe.Owes(0x2000, 4));
+        Assert.False(host.Probe.Owes(0x3000, 4));
+        Assert.Equal(["interrupt 1", "interrupt 2"], _log.Entries);
+    }
 }

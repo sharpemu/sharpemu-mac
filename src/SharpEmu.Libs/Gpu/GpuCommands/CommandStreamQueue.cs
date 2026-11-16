@@ -1186,6 +1186,88 @@ public sealed class CommandStreamQueue
         return count;
     }
 
+    /// <summary>How many pending labels the queue holds (SHARPEMU_FRAME_OVERLAP_PROBE's leak check).</summary>
+    public int PendingLabelCount
+    {
+        get
+        {
+            lock (_labelGate)
+            {
+                return _pendingLabels.Count;
+            }
+        }
+    }
+
+    /// <summary>
+    /// SHARPEMU_FRAME_OVERLAP_PROBE=1: a host that notes pending labels with no completion tick lands them
+    /// here once its publication wrote the bytes. An entry overlapping the range whose value memory now
+    /// holds is dropped; one a newer write replaced (memory holds something else) stays.
+    /// </summary>
+    public void LandPendingLabels(ulong address, ulong size, SharpEmu.HLE.ICpuMemory memory)
+    {
+        if (size == 0 || address > ulong.MaxValue - size)
+        {
+            return;
+        }
+
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        var end = address + size;
+        lock (_labelGate)
+        {
+            if (_pendingLabels.Count == 0)
+            {
+                return;
+            }
+
+            if (size <= 256)
+            {
+                for (var at = address >= sizeof(uint) ? (address - sizeof(uint)) & ~3UL : 0; at < end; at += sizeof(uint))
+                {
+                    if (_pendingLabels.TryGetValue(at, out var label) && Written(memory, bytes, at, label.Value, label.Size))
+                    {
+                        _landedLabels.Add(at);
+                    }
+                }
+            }
+            else
+            {
+                foreach (var (at, label) in _pendingLabels)
+                {
+                    if (Written(memory, bytes, at, label.Value, label.Size))
+                    {
+                        _landedLabels.Add(at);
+                    }
+                }
+            }
+
+            foreach (var at in _landedLabels)
+            {
+                _pendingLabels.Remove(at);
+            }
+
+            _landedLabels.Clear();
+        }
+
+        bool Written(SharpEmu.HLE.ICpuMemory source, Span<byte> scratch, ulong at, ulong value, int labelSize)
+        {
+            if (at >= end || at + (ulong)labelSize <= address)
+            {
+                return false;
+            }
+
+            var span = scratch[..labelSize];
+            if (!source.TryRead(at, span))
+            {
+                return false;
+            }
+
+            var held = labelSize == sizeof(ulong)
+                ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(span)
+                : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span);
+            return held == value;
+        }
+    }
+
     private bool TryGetPendingLabel(ulong address, bool is64Bit, out ulong value)
     {
         lock (_labelGate)

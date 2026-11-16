@@ -2718,7 +2718,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // On the command thread the buffer the label will ride is not open yet: the worker's serial is a
     // provisional tick (too early only makes a wait read memory again), and the worker gives the real
     // one when it records the label (RecordEndOfPipe).
-    public ulong PendingLabelTick => !PendingLabelsVisible ? 0 : OnCommandThread ? Volatile.Read(ref _submissionSerial) : SubmissionSerial;
+    // SHARPEMU_FRAME_OVERLAP_PROBE=1: no completion tick lands a host-published label; its publication does
+    // (QueueCompletion lands it in the queue once it wrote the bytes).
+    public ulong PendingLabelTick => !PendingLabelsVisible ? 0 :
+        SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled ? ulong.MaxValue :
+        OnCommandThread ? Volatile.Read(ref _submissionSerial) : SubmissionSerial;
 
     private static readonly bool PendingLabelsVisible =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PENDING_LABELS") != "0";
@@ -2889,6 +2893,19 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         Action? atRealCompletion = null,
         (ulong Address, int Bytes) probeRange = default)
     {
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled && probeRange.Bytes > 0)
+        {
+            // SHARPEMU_FRAME_OVERLAP_PROBE=1: the queue holds what these bytes will be (a pending label with
+            // no completion tick) until this publication has written them, whenever it runs.
+            var publish = work;
+            var landed = probeRange;
+            work = () =>
+            {
+                publish();
+                _commandStream?.LandPendingLabels(landed.Address, (ulong)landed.Bytes, _memory);
+            };
+        }
+
         if (InlineCompletions && LastWorkSerial <= CompletedSerial && _completions.PendingCount == 0)
         {
             Interlocked.Increment(ref _inlineCompletionCount);
@@ -2918,6 +2935,20 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         var serial = SubmissionSerial;
         Enqueue(serial);
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            // SHARPEMU_FRAME_OVERLAP_PROBE=1: a record-time-known publication never commits the buffer for
+            // itself; it rides the next commit (stream coalescing, the frame flush, the worker parking, a poll).
+            if (probeRange.Bytes > 0)
+            {
+                _lazyLabelRanges.Add(probeRange);
+            }
+
+            _pendingLabelWrites++;
+            Interlocked.Increment(ref _lazyLabelCompletions);
+            return;
+        }
+
         if (lazyLabel is { } open && pending == serial)
         {
             // The work before it is in the open buffer, which some commit takes out anyway.
