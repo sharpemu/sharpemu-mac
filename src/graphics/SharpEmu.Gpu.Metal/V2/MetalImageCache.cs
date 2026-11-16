@@ -1562,8 +1562,11 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: true, role: "storage");
             RefreshFromGuest(image);
-            // Read or written is not known here: counted as a read (conservative).
-            NoteRefusedRead(image, RefusedRead.Storage, "bind");
+            // Read or written is not known here: counted as a read (conservative), and as a write of unknown extent.
+            NoteRefusedRead(
+                image, RefusedRead.Storage, "bind",
+                layerMask: LayerMask(request.View.BaseLayer, Math.Max(request.View.LayerCount, 1)));
+            NoteRefusedRewrite(image, whole: false);
             image.Uses.Storage = true;
             image.MarkGpuModified();
             NoteLinearGpuWrite(image);
@@ -1594,7 +1597,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: false, role: "texture");
             RefreshFromGuest(image);
-            NoteRefusedSampled(image);
+            NoteRefusedSampled(image, request.View.BaseLayer, request.View.LayerCount);
             image.Uses.Texture = true;
             image.NoteUse(_owner.CurrentSerial);
         }
