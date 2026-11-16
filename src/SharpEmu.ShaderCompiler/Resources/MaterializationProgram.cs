@@ -125,6 +125,9 @@ internal sealed class MaterializationProgram
         public ulong[] ReadAddresses = new ulong[64];
         public uint[] ReadWords = new uint[64];
         public int ReadCount;
+        // Where ReadProof.Build merges the reads' address-ordered runs.
+        public ulong[] MergeAddresses = new ulong[64];
+        public uint[] MergeWords = new uint[64];
         public readonly List<ulong> Unreadable = [];
 
         public void NoteRead(ulong address, uint word)
@@ -591,7 +594,7 @@ internal sealed class MaterializationProgram
             var count = scratch.ReadCount;
             var addresses = scratch.ReadAddresses;
             var words = scratch.ReadWords;
-            Array.Sort(addresses, words, 0, count);
+            SortReads(scratch, count);
             var unique = 0;
             var ranges = 0;
             for (var index = 0; index < count; index++)
@@ -676,6 +679,75 @@ internal sealed class MaterializationProgram
                 Unreadable = scratch.Unreadable.Count == 0 ? [] : sameRest ? previous!.Unreadable : [.. scratch.Unreadable],
                 ActiveSources = activeSources,
             };
+        }
+
+        // Most runs of recorded reads to merge rather than sort: each level records its reads in address order.
+        private const int MaxMergedRuns = 16;
+
+        // The recorded reads in address order. A level's reads are recorded in address order (ReadLevel sorts them, a
+        // fixed plan reads its runs in offset order), so the reads are a few ascending runs, merged here one into the
+        // ordered prefix before it; more runs than that are sorted. Equal addresses may end in any order: Build refuses
+        // them when their words differ and keeps one when they are the same.
+        private static void SortReads(Scratch scratch, int count)
+        {
+            var addresses = scratch.ReadAddresses;
+            var words = scratch.ReadWords;
+            var runs = 1;
+            for (var index = 1; index < count; index++)
+            {
+                if (addresses[index] < addresses[index - 1] && ++runs > MaxMergedRuns)
+                {
+                    Array.Sort(addresses, words, 0, count);
+                    return;
+                }
+            }
+
+            if (runs == 1)
+            {
+                return;
+            }
+
+            if (scratch.MergeAddresses.Length < count)
+            {
+                scratch.MergeAddresses = new ulong[Math.Max(count, scratch.MergeAddresses.Length * 2)];
+                scratch.MergeWords = new uint[scratch.MergeAddresses.Length];
+            }
+
+            var mergedAddresses = scratch.MergeAddresses;
+            var mergedWords = scratch.MergeWords;
+            var ordered = 1;
+            while (ordered < count && addresses[ordered] >= addresses[ordered - 1]) ordered++;
+            while (ordered < count)
+            {
+                var end = ordered + 1;
+                while (end < count && addresses[end] >= addresses[end - 1]) end++;
+                // Merge [0, ordered) and [ordered, end) into the merge buffers, then back.
+                int left = 0, right = ordered, at = 0;
+                while (left < ordered && right < end)
+                {
+                    if (addresses[right] < addresses[left])
+                    {
+                        mergedAddresses[at] = addresses[right];
+                        mergedWords[at++] = words[right++];
+                    }
+                    else
+                    {
+                        mergedAddresses[at] = addresses[left];
+                        mergedWords[at++] = words[left++];
+                    }
+                }
+
+                while (left < ordered)
+                {
+                    mergedAddresses[at] = addresses[left];
+                    mergedWords[at++] = words[left++];
+                }
+
+                // The rest of the right run is already in place after the merged part.
+                Array.Copy(mergedAddresses, addresses, at);
+                Array.Copy(mergedWords, words, at);
+                ordered = end;
+            }
         }
 
         // Whether the unique sorted addresses form exactly the proof's ranges.
