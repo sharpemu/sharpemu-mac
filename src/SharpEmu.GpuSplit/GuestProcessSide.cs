@@ -77,9 +77,6 @@ internal sealed class GuestProcessSide : ISplitGuestSide
             case GpuSplitFlipEvent.Completed:
                 VideoOutBackendServices.CompleteFlip(requestId);
                 break;
-            case GpuSplitFlipEvent.Recorded:
-                VideoOutBackendServices.NoteFlipRecorded(requestId);
-                break;
         }
     }
 

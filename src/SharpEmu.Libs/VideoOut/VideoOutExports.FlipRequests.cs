@@ -47,18 +47,6 @@ public static partial class VideoOutExports
         public int FlipEventCount;
         public FlipRequestState State;
         public FlipOutcome Outcome;
-
-        // SHARPEMU_FLIP_AHEAD (see VideoOutExports.FlipAhead.cs). The GPU host recorded the flip,
-        // committed the buffer carrying it and handed the presenter a copy of its frame.
-        public bool AheadRecorded;
-        // The GPU really finished the submission carrying the flip (CompleteFlipOnGpu ran).
-        public bool GpuCompleted;
-        // The flip events of the published flip have been triggered.
-        public bool EventsTriggered;
-        // When the guest-visible completion was published ahead of the GPU; zero otherwise.
-        public long AheadPublishedAt;
-        // The GPU-queued flip reserved before this one on the same handle, until this one is published.
-        public FlipRequest? AheadPrevious;
     }
 
     private static readonly Dictionary<ulong, FlipRequest> _flipRequests = new();
@@ -158,10 +146,6 @@ public static partial class VideoOutExports
             }
 
             _flipRequests.Add(request.RequestId, request);
-            if (gpuQueued && FlipAheadEnabled)
-            {
-                NoteGpuQueuedFlipLocked(request);
-            }
         }
 
         if (bufferIndex >= 0 && TryGetDisplayBufferInfo(handle, bufferIndex, out var displayBuffer))
@@ -253,11 +237,10 @@ public static partial class VideoOutExports
             }
 
             ReleaseGpuQueueSlotLocked(request);
-            request.GpuCompleted = true;
             PublishFlipLocked(request);
         }
 
-        TriggerPublishedFlip(request);
+        TriggerFlipEvents(request);
     }
 
     /// <summary>
@@ -270,49 +253,25 @@ public static partial class VideoOutExports
     internal static void CompleteFlipOnGpu(ulong requestId)
     {
         FlipRequest request;
-        var aheadAlready = false;
         lock (_stateGate)
         {
-            if (!_flipRequests.TryGetValue(requestId, out request!))
+            if (!_flipRequests.TryGetValue(requestId, out request!) || request.State != FlipRequestState.Reserved)
             {
                 return;
             }
 
-            if (request.State != FlipRequestState.Reserved)
+            ReleaseGpuQueueSlotLocked(request);
+            if (request.Outcome == FlipOutcome.Pending)
             {
-                // A flip published ahead still owes its GPU-side state; the guest was told already,
-                // so neither the counters nor the events are published again.
-                if (request.AheadPublishedAt == 0 || request.GpuCompleted)
-                {
-                    return;
-                }
-
-                CompleteAheadFlipOnGpuLocked(request);
-                aheadAlready = true;
+                request.State = FlipRequestState.GpuDone;
+                Monitor.PulseAll(_stateGate);
+                return;
             }
-            else
-            {
-                ReleaseGpuQueueSlotLocked(request);
-                request.GpuCompleted = true;
-                if (request.Outcome == FlipOutcome.Pending)
-                {
-                    request.State = FlipRequestState.GpuDone;
-                    Monitor.PulseAll(_stateGate);
-                    return;
-                }
 
-                PublishFlipLocked(request);
-            }
+            PublishFlipLocked(request);
         }
 
-        if (aheadAlready)
-        {
-            // The flip after this one may be waiting for this real completion.
-            DrainFlipAhead(request.Handle, noticed: 0);
-            return;
-        }
-
-        TriggerPublishedFlip(request);
+        TriggerFlipEvents(request);
     }
 
     // Caller holds the state gate. The GPU no longer holds the request.
@@ -329,7 +288,6 @@ public static partial class VideoOutExports
     private static void PublishFlipLocked(FlipRequest request)
     {
         request.State = FlipRequestState.Completed;
-        request.AheadPrevious = null;
         if (_ports.TryGetValue(request.Handle, out var port))
         {
             port.FlipCount++;
@@ -427,7 +385,7 @@ public static partial class VideoOutExports
 
         if (published is not null)
         {
-            TriggerPublishedFlip(published);
+            TriggerFlipEvents(published);
         }
 
         return true;
@@ -436,9 +394,7 @@ public static partial class VideoOutExports
     // Both responsibilities are done: the retirement ran and the presenter released the frame.
     private static void RemoveIfFinishedLocked(FlipRequest request)
     {
-        // A flip published ahead of the GPU stays until its real completion has released its GPU slot.
-        if (request.State == FlipRequestState.Completed && request.Outcome != FlipOutcome.Pending &&
-            (request.AheadPublishedAt == 0 || request.GpuCompleted))
+        if (request.State == FlipRequestState.Completed && request.Outcome != FlipOutcome.Pending)
         {
             _flipRequests.Remove(request.RequestId);
         }
@@ -505,14 +461,6 @@ public static partial class VideoOutExports
                 request.FlipEvents = null;
             }
         }
-        else if (request.AheadPublishedAt != 0 && !request.GpuCompleted && request.GpuQueued &&
-            _ports.TryGetValue(request.Handle, out var aheadPort))
-        {
-            // Published ahead of the GPU: the guest was told, the GPU slot was still held.
-            aheadPort.GpuQueueCount = Math.Max(0, aheadPort.GpuQueueCount - 1);
-        }
-
-        request.AheadPrevious = null;
         // Completed requests leave event-array ownership with the completion caller.
         request.Outcome = FlipOutcome.Cancelled;
         _flipRequests.Remove(request.RequestId);

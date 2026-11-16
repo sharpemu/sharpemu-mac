@@ -43,9 +43,6 @@ public enum GpuSplitFlipEvent : uint
 
     /// <summary><c>CompleteFlip</c>.</summary>
     Completed = 6,
-
-    /// <summary><c>NoteFlipRecorded</c> (SHARPEMU_FLIP_AHEAD).</summary>
-    Recorded = 7,
 }
 
 /// <summary>The kinds of <see cref="GpuRemoteMessage.VideoOutNotice"/>.</summary>
