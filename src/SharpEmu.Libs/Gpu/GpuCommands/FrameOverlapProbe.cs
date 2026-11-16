@@ -1,0 +1,380 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Diagnostics;
+
+namespace SharpEmu.Libs.Gpu.GpuCommands;
+
+/// <summary>Why a frame's publications were left to its real completion.</summary>
+public enum FrameOverlapRefusal
+{
+    /// <summary>An end-of-pipe GDS store: the words are whatever the GPU left in the data share.</summary>
+    GdsStore,
+
+    /// <summary>A write whose value only the GPU (or its completion) can produce.</summary>
+    GpuValued,
+
+    /// <summary>A GPU write with no bounds: the frame's write set is everything.</summary>
+    Unbounded,
+
+    /// <summary>An end-of-pipe atomic add into memory the frame's GPU work writes.</summary>
+    AtomicIntoWriteSet,
+
+    /// <summary>The walk parked on a wait that only a completion of this stream releases.</summary>
+    SuspendedWalk,
+
+    /// <summary>A command-processor copy whose source the GPU still produces.</summary>
+    CopyFromGpu,
+}
+
+/// <summary>
+/// SHARPEMU_FRAME_OVERLAP_PROBE=1: an UNGUARDED measurement probe, default off, never to be
+/// shipped. The host-side publications a frame queues for its GPU completion (host-landed
+/// labels, end-of-pipe label slots, command-processor writes, end-of-pipe interrupts) are
+/// published together, in stream order, once the frame is fully walked and committed and the
+/// frame before it has really completed on the GPU, instead of when the frame itself completes.
+/// The guest is then at most one frame ahead of the GPU. Nothing protects what the unfinished
+/// frame still reads or writes: rendering and guest memory may be corrupted. A frame that queued
+/// a publication the probe cannot make early (see <see cref="FrameOverlapRefusal"/>) is
+/// published by its real completion, as without the switch.
+/// </summary>
+/// <remarks>
+/// The probe only reorders work the host already queues. <c>enqueueAtSerial</c> runs an action
+/// once the GPU signalled a serial, in serial order and, among equal serials, in the order queued
+/// (the Metal completion queue); every publication then runs on that one thread, so a publication
+/// that ran early is skipped by its real completion without a lock around the work itself.
+/// </remarks>
+public sealed class FrameOverlapProbe
+{
+    public static readonly bool Enabled = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_FRAME_OVERLAP_PROBE"), "1", StringComparison.Ordinal);
+
+    public const string WarningLine =
+        "unguarded frame-overlap probe: rendering and guest memory are not protected; measurement only";
+
+    /// <summary>The probe the command stream reports into (one GPU host per process).</summary>
+    public static FrameOverlapProbe? Active { get; set; }
+
+    private const int RefusalCount = (int)FrameOverlapRefusal.CopyFromGpu + 1;
+    private const int MaxRefusalReports = 24;
+
+    private readonly Action<ulong, Action> _enqueueAtSerial;
+    private readonly Func<ulong> _completedSerial;
+    private readonly Func<long> _clock;
+    private readonly object _gate = new();
+    private Frame _open = new(0, 1);
+    private Frame? _committed;
+    private Frame? _lastVisibleFlip;
+    private int _depth;
+    private int _refusalReports;
+
+    // Window counters, guarded by _gate.
+    private long _frames;
+    private long _framesEarly;
+    private long _framesAtCompletion;
+    private long _framesRefused;
+    private long _framesWaited;
+    private long _itemsEarly;
+    private long _flipsEarly;
+    private long _flips;
+    private int _depthMax;
+    private long _suspendedOther;
+    private readonly long[] _refusals = new long[RefusalCount];
+    private readonly List<double> _earlyMs = new();
+    private readonly List<double> _periodMs = new();
+
+    public FrameOverlapProbe(Action<ulong, Action> enqueueAtSerial, Func<ulong> completedSerial, Func<long>? clock = null)
+    {
+        _enqueueAtSerial = enqueueAtSerial;
+        _completedSerial = completedSerial;
+        _clock = clock ?? Stopwatch.GetTimestamp;
+    }
+
+    /// <summary>
+    /// A publication the open frame queued for its completion. The result is what the real
+    /// completion runs: the publication unless it already ran early, then
+    /// <paramref name="atRealCompletion"/>, which is never published early.
+    /// </summary>
+    public Action Track(Action publish, Action? atRealCompletion = null, ulong address = 0, ulong bytes = 0)
+    {
+        var item = new Item(publish, address, bytes);
+        lock (_gate)
+        {
+            _open.Items.Add(item);
+        }
+
+        return atRealCompletion is null
+            ? () => item.Run()
+            : () =>
+            {
+                item.Run();
+                atRealCompletion();
+            };
+    }
+
+    /// <summary>The open frame carries a flip.</summary>
+    public void NoteFlip()
+    {
+        lock (_gate)
+        {
+            _open.HasFlip = true;
+        }
+    }
+
+    /// <summary>The first serial the open frame's work can carry.</summary>
+    public ulong OpenFrameFirstSerial
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _open.FirstSerial;
+            }
+        }
+    }
+
+    /// <summary>The open frame queued something the probe cannot publish early.</summary>
+    public void Refuse(FrameOverlapRefusal reason, ulong address = 0)
+    {
+        lock (_gate)
+        {
+            _refusals[(int)reason]++;
+            var first = _open.Refusal is null;
+            _open.Refusal ??= reason;
+            if (first && _refusalReports < MaxRefusalReports)
+            {
+                _refusalReports++;
+                Console.Error.WriteLine(
+                    $"[METAL-V2][OVERLAP-PROBE] refused frame={_open.Index} reason={Name(reason)} address=0x{address:X16}; " +
+                    "it publishes at its real completion");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The command walk parked a submission of the open frame. A wait on bytes a queued, not yet
+    /// published completion writes is released only by a completion: the frame is refused.
+    /// </summary>
+    public void NoteSuspendedWalk(in CommandWaitCondition wait)
+    {
+        if (wait.Kind == CommandWaitKind.GuestMemory && wait.Size != 0)
+        {
+            bool owed;
+            lock (_gate)
+            {
+                owed = Owes(_open, wait.Address, wait.Size) || (_committed is { } last && Owes(last, wait.Address, wait.Size));
+                if (!owed)
+                {
+                    _suspendedOther++;
+                }
+            }
+
+            if (owed)
+            {
+                Refuse(FrameOverlapRefusal.SuspendedWalk, wait.Address);
+            }
+
+            return;
+        }
+
+        lock (_gate)
+        {
+            _suspendedOther++;
+        }
+    }
+
+    /// <summary>
+    /// Everything the open frame recorded is committed; <paramref name="lastSerial"/> finishes it.
+    /// Its publications go out once the frame before it has really completed, and the next
+    /// frame's wait for this one's real completion: the guest is at most one frame ahead.
+    /// </summary>
+    public void OnFrameCommitted(ulong lastSerial)
+    {
+        Frame frame;
+        ulong previousLast;
+        lock (_gate)
+        {
+            frame = _open;
+            frame.LastSerial = Math.Max(lastSerial, frame.FirstSerial - 1);
+            frame.CommittedAt = _clock();
+            previousLast = _committed?.LastSerial ?? 0;
+            _committed = frame;
+            _open = new Frame(frame.Index + 1, frame.LastSerial + 1);
+            _frames++;
+            if (previousLast > _completedSerial())
+            {
+                _framesWaited++;
+            }
+        }
+
+        _enqueueAtSerial(previousLast, () => Publish(frame));
+        _enqueueAtSerial(frame.LastSerial, () => Completed(frame));
+    }
+
+    // Runs once the frame before it has really completed (completion thread).
+    private void Publish(Frame frame)
+    {
+        if (frame.Refusal is not null)
+        {
+            lock (_gate)
+            {
+                _framesRefused++;
+            }
+
+            return;
+        }
+
+        var early = _completedSerial() < frame.LastSerial;
+        var ran = 0;
+        foreach (var item in frame.Items)
+        {
+            if (item.Run())
+            {
+                ran++;
+            }
+        }
+
+        lock (_gate)
+        {
+            if (!early)
+            {
+                _framesAtCompletion++;
+                return;
+            }
+
+            frame.PublishedEarly = true;
+            frame.VisibleAt = _clock();
+            _framesEarly++;
+            _itemsEarly += ran;
+            _flipsEarly += frame.HasFlip ? 1 : 0;
+            _depth++;
+            _depthMax = Math.Max(_depthMax, _depth);
+        }
+    }
+
+    // Runs once the frame has really completed (completion thread), after all its items.
+    private void Completed(Frame frame)
+    {
+        var now = _clock();
+        lock (_gate)
+        {
+            if (frame.PublishedEarly)
+            {
+                _depth--;
+                _earlyMs.Add((now - frame.VisibleAt) * 1000.0 / Stopwatch.Frequency);
+            }
+            else
+            {
+                frame.VisibleAt = now;
+            }
+
+            if (frame.HasFlip)
+            {
+                _flips++;
+                if (_lastVisibleFlip is { } previous)
+                {
+                    _periodMs.Add((frame.VisibleAt - previous.VisibleAt) * 1000.0 / Stopwatch.Frequency);
+                }
+
+                _lastVisibleFlip = frame;
+            }
+
+            // Every item has run: none is owed to a wait any more.
+            frame.Items.Clear();
+        }
+    }
+
+    private static bool Owes(Frame frame, ulong address, ulong size)
+    {
+        foreach (var item in frame.Items)
+        {
+            if (item.Bytes != 0 && !item.HasRun && address < item.Address + item.Bytes && item.Address < address + size)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static string Name(FrameOverlapRefusal reason) => reason switch
+    {
+        FrameOverlapRefusal.GdsStore => "gds_store",
+        FrameOverlapRefusal.GpuValued => "gpu_valued",
+        FrameOverlapRefusal.Unbounded => "unbounded",
+        FrameOverlapRefusal.AtomicIntoWriteSet => "atomic_write_set",
+        FrameOverlapRefusal.SuspendedWalk => "suspended_walk",
+        FrameOverlapRefusal.CopyFromGpu => "copy_from_gpu",
+        _ => reason.ToString(),
+    };
+
+    /// <summary>The window's counters as one line, then reset.</summary>
+    public string TakeWindowLine()
+    {
+        lock (_gate)
+        {
+            var refusals = string.Join(' ', Enumerable.Range(0, RefusalCount).Select(index =>
+                $"{Name((FrameOverlapRefusal)index)}={_refusals[index]}"));
+            var line =
+                $"[METAL-V2][OVERLAP-PROBE] frames={_frames} published_early={_framesEarly} " +
+                $"published_at_completion={_framesAtCompletion} refused_frames={_framesRefused} " +
+                $"prev_running_at_commit={_framesWaited} items_early={_itemsEarly} " +
+                $"ms_early_p50={Percentile(_earlyMs, 0.5):F1} ms_early_p90={Percentile(_earlyMs, 0.9):F1} " +
+                $"depth_max={_depthMax} flips={_flips} flips_early={_flipsEarly} " +
+                $"flip_period_p50={Percentile(_periodMs, 0.5):F1} flip_period_p90={Percentile(_periodMs, 0.9):F1} " +
+                $"suspended_other={_suspendedOther} refusals: {refusals}";
+            _frames = _framesEarly = _framesAtCompletion = _framesRefused = _framesWaited = 0;
+            _itemsEarly = _flipsEarly = _flips = _suspendedOther = 0;
+            _depthMax = _depth;
+            Array.Clear(_refusals);
+            _earlyMs.Clear();
+            _periodMs.Clear();
+            return line;
+        }
+    }
+
+    private static double Percentile(List<double> values, double fraction)
+    {
+        if (values.Count == 0)
+        {
+            return 0;
+        }
+
+        values.Sort();
+        return values[Math.Min(values.Count - 1, (int)(fraction * values.Count))];
+    }
+
+    private sealed class Frame(long index, ulong firstSerial)
+    {
+        public long Index { get; } = index;
+        public ulong FirstSerial { get; } = firstSerial;
+        public ulong LastSerial { get; set; }
+        public List<Item> Items { get; } = new();
+        public FrameOverlapRefusal? Refusal { get; set; }
+        public bool HasFlip { get; set; }
+        public bool PublishedEarly { get; set; }
+        public long CommittedAt { get; set; }
+        public long VisibleAt { get; set; }
+    }
+
+    private sealed class Item(Action publish, ulong address, ulong bytes)
+    {
+        private int _ran;
+
+        public ulong Address { get; } = address;
+        public ulong Bytes { get; } = bytes;
+        public bool HasRun => Volatile.Read(ref _ran) != 0;
+
+        // Runs the publication once, whoever gets there first; true when this call ran it.
+        public bool Run()
+        {
+            if (Interlocked.Exchange(ref _ran, 1) != 0)
+            {
+                return false;
+            }
+
+            publish();
+            return true;
+        }
+    }
+}

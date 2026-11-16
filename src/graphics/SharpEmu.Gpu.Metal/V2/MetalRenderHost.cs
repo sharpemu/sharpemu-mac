@@ -90,6 +90,8 @@ internal sealed partial class MetalRenderHost :
     private readonly IMetalImageTransfer _transfer;
     private readonly MetalGpuWorkerRelay _relay;
     private readonly MetalCompletionQueue _completions;
+    // SHARPEMU_FRAME_OVERLAP_PROBE=1 only (unguarded measurement probe).
+    private readonly SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe? _overlapProbe;
 
     private nint _commandBuffer;
     private nint _previousCommandBuffer;
@@ -201,6 +203,13 @@ internal sealed partial class MetalRenderHost :
             _imageCache.StagedRanges = _stagedRanges;
         }
         _completions = new MetalCompletionQueue(_sharedEvent);
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            Console.Error.WriteLine("[METAL-V2][OVERLAP-PROBE][WARN] " + SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.WarningLine);
+            _overlapProbe = new SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe(
+                (serial, action) => _completions.Enqueue(serial, action), () => CompletedSerial);
+            SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Active = _overlapProbe;
+        }
         RegisterMemoryTelemetry();
     }
 
@@ -1810,6 +1819,13 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled &&
+            (_imageCache.HasGpuModifiedImageBytes(source, size) || PendingSerialHinted(source, size) != 0))
+        {
+            // SHARPEMU_FRAME_OVERLAP_PROBE=1: the GPU still produces what this copy reads.
+            _overlapProbe!.Refuse(SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapRefusal.CopyFromGpu, source);
+        }
+
         FlushGpuWrites(source, size, MetalWritebackCause.GuestCopy);
         // A label held for the commit over the source or the destination lands first, as a boundary used to land it.
         OrderAfterDeferredCopies(source, size, LabelLandCause.Transfer);
@@ -2853,6 +2869,11 @@ internal sealed partial class MetalRenderHost :
         if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.TakeWindowLine() is { } overlapLine)
         {
             Console.Error.WriteLine(overlapLine);
+        }
+
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            Console.Error.WriteLine(_overlapProbe!.TakeWindowLine());
         }
 
         _slowWaitReports = 0;

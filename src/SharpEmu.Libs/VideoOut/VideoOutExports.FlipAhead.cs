@@ -16,8 +16,10 @@ namespace SharpEmu.Libs.VideoOut;
 // the notice (switch off, or a flip whose frame was not copied) nothing here runs.
 public static partial class VideoOutExports
 {
+    // SHARPEMU_FRAME_OVERLAP_PROBE=1 (the unguarded measurement probe) turns it on too.
     internal static bool FlipAheadEnabled { get; set; } = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_FLIP_AHEAD"), "1", StringComparison.Ordinal);
+        Environment.GetEnvironmentVariable("SHARPEMU_FLIP_AHEAD"), "1", StringComparison.Ordinal) ||
+        SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled;
 
     // The last GPU-queued request reserved on each handle. Guarded by the state gate.
     private static readonly Dictionary<int, FlipRequest> _lastGpuQueuedFlip = new();

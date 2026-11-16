@@ -1690,6 +1690,11 @@ public sealed class CommandStreamQueue
 
                 submission.BlockedPacketAddress = packetAddress;
                 submission.Wait = submission.Commands.SuspendCondition;
+                if (FrameOverlapProbe.Enabled && !raced)
+                {
+                    // SHARPEMU_FRAME_OVERLAP_PROBE=1: a park on bytes only a completion writes refuses the frame.
+                    FrameOverlapProbe.Active?.NoteSuspendedWalk(submission.Wait);
+                }
                 if (submission.Wait.Watched)
                 {
                     // What the packet saw, not what memory holds now: a store that landed

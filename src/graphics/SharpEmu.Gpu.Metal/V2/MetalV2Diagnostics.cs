@@ -156,7 +156,9 @@ internal static class MetalV2Diagnostics
     // SHARPEMU_FLIP_AHEAD=1 (experimental, default off): a GPU flip hands the presenter a copy of its
     // frame, blitted in the stream at the flip, and tells video-out the flip is recorded, so the guest
     // may learn of it before the GPU finishes it (VideoOutExports.FlipAhead.cs, MetalFlipCopyPool).
-    public static readonly bool FlipAhead = Environment.GetEnvironmentVariable("SHARPEMU_FLIP_AHEAD") == "1";
+    // SHARPEMU_FRAME_OVERLAP_PROBE=1 turns it on too.
+    public static readonly bool FlipAhead = Environment.GetEnvironmentVariable("SHARPEMU_FLIP_AHEAD") == "1" ||
+        SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled;
 
     public static readonly int EarlyLabelProbe =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EARLY_LABEL_PROBE") switch

@@ -506,6 +506,11 @@ internal sealed class MetalGpuWriteRanges
             SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(0, 0, SharpEmu.HLE.GpuMemory.OverlapWrite.Unbounded);
         }
 
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Active?.Refuse(SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapRefusal.Unbounded);
+        }
+
         BeginMutation();
         try
         {

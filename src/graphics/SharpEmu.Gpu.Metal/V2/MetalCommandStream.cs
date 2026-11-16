@@ -127,6 +127,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // Everything the frame recorded is committed: this serial finishes it.
             SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnFrameCommitted(Volatile.Read(ref _submittedSerial));
         }
+
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            // SHARPEMU_FRAME_OVERLAP_PROBE=1 (unguarded): the frame's publications may go out early.
+            _overlapProbe!.OnFrameCommitted(Volatile.Read(ref _submittedSerial));
+        }
     }
 
     // ---- command-buffer coalescing (SHARPEMU_METAL_V2_FLUSH_COALESCE) ----
@@ -888,6 +894,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             label = write with { ReferenceClock = false };
         }
 
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled &&
+            RecordEndOfPipeForOverlapProbe(in write, in label, encoded, owed))
+        {
+            return;
+        }
+
         switch (write.Kind)
         {
             case EndOfPipeWriteKind.InterruptOnly:
@@ -938,11 +950,54 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
                 if (!encoded)
                 {
                     QueueCompletion(() => PublishHostLabel(in label, owed),
-                        lazy ? (label.Destination, EndOfPipeLabelBytes(label.Kind)) : null);
+                        lazy ? (label.Destination, EndOfPipeLabelBytes(label.Kind)) : null,
+                        probeRange: (label.Destination, EndOfPipeLabelBytes(label.Kind)));
                 }
 
                 break;
         }
+    }
+
+    // SHARPEMU_FRAME_OVERLAP_PROBE=1 (unguarded, measurement only). Refuses the open frame for an
+    // end-of-pipe write the probe cannot publish before the GPU finishes it, and records a flip with
+    // its label and interrupt published by the probe while the flip's own GPU completion stays at the
+    // real completion (flip ahead tells video-out about the flip). True when the flip was recorded here.
+    private bool RecordEndOfPipeForOverlapProbe(in EndOfPipeWrite write, in EndOfPipeWrite label, bool encoded, bool owed)
+    {
+        var probe = _overlapProbe!;
+        if (write.Kind == EndOfPipeWriteKind.GdsWrite32)
+        {
+            probe.Refuse(SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapRefusal.GdsStore, write.Destination);
+        }
+        else if (label.ReferenceClock || (encoded && EndOfPipeLabelBytes(write.Kind) != 0))
+        {
+            // A clock sampled at completion, or a label the GPU writes itself: its value is the GPU's.
+            probe.Refuse(SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapRefusal.GpuValued, write.Destination);
+        }
+
+        if (write.Kind is not (EndOfPipeWriteKind.Flip or EndOfPipeWriteKind.FlipWithWrite32 or
+            EndOfPipeWriteKind.FlipWithInterruptWriteBack32))
+        {
+            return false;
+        }
+
+        probe.NoteFlip();
+        NoteFlipSerialForEarlyLabels();
+        var published = label;
+        var requestId = write.FlipRequestId;
+        var eventId = write.EventId;
+        var interrupt = write.Kind == EndOfPipeWriteKind.FlipWithInterruptWriteBack32;
+        QueueCompletion(() =>
+        {
+            if (!encoded) PublishHostLabel(in published, owed);
+            if (interrupt) TriggerInterrupt(eventId, 0);
+        }, atRealCompletion: () =>
+        {
+            VideoOutBackendServices.CompleteFlipOnGpu(requestId);
+            MetalV2Presenter.SignalFlipPacer();
+        }, probeRange: (published.Destination, EndOfPipeLabelBytes(published.Kind)));
+        NoteFlipRecordedIfEligible(requestId);
+        return true;
     }
 
     /// <summary>The interpreter leaves end-of-pipe GDS stores to this host (RecordEndOfPipeGdsWrite).</summary>
@@ -1006,7 +1061,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             {
                 Interlocked.Decrement(ref _owedHostLabels);
             }
-        });
+        }, probeRange: (destinationAddress, (int)bytes));
     }
 
     /// <summary>
@@ -1057,6 +1112,12 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         var address = write.Destination;
         var addend = (uint)write.Value;
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled &&
+            _gpuWrites.WrittenSince(address, sizeof(uint), _overlapProbe!.OpenFrameFirstSerial))
+        {
+            _overlapProbe.Refuse(SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapRefusal.AtomicIntoWriteSet, address);
+        }
+
         Interlocked.Increment(ref _owedHostLabels);
         QueueCompletion(() =>
         {
@@ -1073,7 +1134,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             {
                 Interlocked.Decrement(ref _owedHostLabels);
             }
-        });
+        }, probeRange: (address, sizeof(uint)));
     }
 
     /// <summary>
@@ -1502,7 +1563,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             {
                 Interlocked.Decrement(ref _owedHostLabels);
             }
-        }, lazy ? (address, bytes.Length) : null);
+        }, lazy ? (address, bytes.Length) : null, probeRange: (address, bytes.Length));
     }
 
     // SHARPEMU_METAL_V2_EARLY_LABEL_PROBE (MetalV2Diagnostics.EarlyLabelProbe): the serial whose completion
@@ -2635,8 +2696,10 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     // finished, so a title that writes a label per render pass pays both per pass:
     // measured at 9.5 fps against 24. The GPU writing the label where its packet sits
     // says the same thing and costs neither, which is why it is the default.
+    // SHARPEMU_FRAME_OVERLAP_PROBE=1 forces host-landed labels: the probe publishes what completions land.
     private static readonly bool GpuTimedLabels =
-        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GPU_LABELS") != "0";
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GPU_LABELS") != "0" &&
+        !SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled;
 
     /// <summary>
     /// The interpreter must never publish label bytes itself on this host: it parses a
@@ -2815,13 +2878,29 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     /// <see cref="RidesNextCommit"/>): the worker commits it when it parks, and a wait
     /// packet polling these bytes commits it through the Poll cause.
     /// </param>
-    private void QueueCompletion(Action work, (ulong Address, int Bytes)? lazyLabel = null)
+    /// <param name="atRealCompletion">
+    /// SHARPEMU_FRAME_OVERLAP_PROBE=1 only: work that runs at the real completion, after
+    /// <paramref name="work"/>, and is never published early.
+    /// </param>
+    /// <param name="probeRange">SHARPEMU_FRAME_OVERLAP_PROBE=1 only: the bytes the work writes.</param>
+    private void QueueCompletion(
+        Action work,
+        (ulong Address, int Bytes)? lazyLabel = null,
+        Action? atRealCompletion = null,
+        (ulong Address, int Bytes) probeRange = default)
     {
         if (InlineCompletions && LastWorkSerial <= CompletedSerial && _completions.PendingCount == 0)
         {
             Interlocked.Increment(ref _inlineCompletionCount);
             work();
+            atRealCompletion?.Invoke();
             return;
+        }
+
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            // SHARPEMU_FRAME_OVERLAP_PROBE=1 (unguarded): the open frame may publish it early.
+            work = _overlapProbe!.Track(work, atRealCompletion, probeRange.Address, (ulong)Math.Max(0, probeRange.Bytes));
         }
 
         // Nothing has been recorded since the last flush, so everything this completion
