@@ -40,6 +40,9 @@ public enum OverlapWrite
     Unbounded,
     CpWrite,
     EopDestination,
+
+    /// <summary>An end-of-pipe destination whose value only the GPU knows: a clock sample, a GDS store, an atomic add.</summary>
+    EopGpuValued,
 }
 
 /// <summary>The page watches the diagnostic arms; a seam so the bookkeeping runs without a guard.</summary>
@@ -138,9 +141,23 @@ public static class FrameOverlapDiagnostic
         }
     }
 
-    public static void MarkGpuRead(ulong address, ulong size, OverlapRead kind) => Tracker?.MarkRead(address, size, kind);
+    public static void MarkGpuRead(ulong address, ulong size, OverlapRead kind, ulong program = 0) => Tracker?.MarkRead(address, size, kind, program);
 
-    public static void NoteGpuWrite(ulong address, ulong size, OverlapWrite origin) => Tracker?.NoteWrite(address, size, origin);
+    public static void NoteGpuWrite(ulong address, ulong size, OverlapWrite origin) =>
+        Tracker?.NoteWrite(address, size, origin, origin is OverlapWrite.Storage or OverlapWrite.Binding or OverlapWrite.DeviceAddress ? TakeWriter() : 0);
+
+    [ThreadStatic]
+    private static ulong t_writer;
+
+    /// <summary>The program whose store the next storage or device-address write note on this thread records (consumed by it).</summary>
+    public static void SetWriter(ulong programHash) => t_writer = programHash;
+
+    private static ulong TakeWriter()
+    {
+        var writer = t_writer;
+        t_writer = 0;
+        return writer;
+    }
 
     public static void NoteDeviceAddressProgram(bool planned) => Tracker?.NoteDeviceAddressProgram(planned);
 
@@ -259,9 +276,31 @@ public sealed class FrameOverlapTracker : IDisposable
     // A single range above this is counted, not walked page by page (a whole window or table).
     internal const ulong HugeRangeBytes = 256UL << 20;
     private const ulong PageBytes = TrackerLayout.PageBytes;
-    private const int OriginCount = (int)OverlapWrite.EopDestination + 1;
+    private const int OriginCount = (int)OverlapWrite.EopGpuValued + 1;
     private static readonly string[] OriginNames =
-        ["storage", "binding", "device_address", "fill", "copy", "writeback", "eop_label", "unbounded", "cp_write", "eop_dest"];
+        ["storage", "binding", "device_address", "fill", "copy", "writeback", "eop_label", "unbounded", "cp_write", "eop_dest", "eop_gpu_valued"];
+
+    // Writes whose bytes are known when the packet is recorded: an overlapped frame lands them on
+    // the CPU at publication, so a guest read of them is not a wait.
+    private static bool KnownAtRecord(int origin) =>
+        origin is (int)OverlapWrite.EopLabel or (int)OverlapWrite.CpWrite or (int)OverlapWrite.EopDestination;
+
+    /// <summary>What a fault's address meets on its page (the fault reports the first byte touched; the access width is not decoded, so 1 byte is assumed).</summary>
+    internal enum Hit
+    {
+        Neighbour,
+        Label,
+        GpuValued,
+    }
+
+    private sealed class PageReport
+    {
+        public long Faults;
+        public readonly List<string> Ranges = new();
+        public readonly List<string> Accesses = new();
+    }
+
+    private readonly Dictionary<ulong, PageReport> _pageReports = new();
 
     // Page flags of an armed frame.
     private const byte InRead = 1;
@@ -338,6 +377,11 @@ public sealed class FrameOverlapTracker : IDisposable
         public readonly OverlapPageSet[] ByOrigin = Enumerable.Range(0, OriginCount).Select(_ => new OverlapPageSet()).ToArray();
         public readonly long[] OriginBytes = new long[OriginCount];
         public readonly List<(ulong Address, ulong Size)> ReadRanges = new();
+        public readonly List<(ulong Address, ulong Size, ulong Program)> DeviceRanges = new();
+        public readonly List<(ulong Address, ulong Size, int Origin, ulong Program)> WriteRanges = new();
+        public readonly List<ulong> ReadHitAddresses = new();
+        public int RsHit, RsNeighbour, WsReadLabel, WsReadGpu, WsReadNeighbour, WsWriteLabel, WsWriteGpu, WsWriteNeighbour, DaOnlyHit, DaOnlyNeighbour;
+        public long FirstRealWaitTicks, FirstK6Ticks;
         public readonly List<ulong> Labels = new();
         public readonly List<ulong> AtomicTargets = new();
         public long InPlaceBytes, StagedBytes, UploadBytes, DeviceAddressBytes, HugeRanges;
@@ -366,14 +410,17 @@ public sealed class FrameOverlapTracker : IDisposable
         public readonly List<double> InPlacePages = new(), InPlaceMb = new(), StagedMb = new(), UploadMb = new(), DaPages = new(),
             WrittenPages = new(), LabelsInCb = new(), DrainMs = new(), OverlapMs = new(), CompleteToAdmitMs = new(), ArmMs = new(),
             ArmedPages = new(), RsWritten = new(), DetachMb = new(), WsRead = new(), WsWritten = new(), LabelTouched = new(), CbTouched = new(),
-            DaOnly = new(), Managed = new(), FirstFaultMs = new();
+            DaOnly = new(), Managed = new(), FirstFaultMs = new(),
+            RsHit = new(), RsNb = new(), WsRLabel = new(), WsRGpu = new(), WsRNb = new(), WsWLabel = new(), WsWGpu = new(), WsWNb = new(),
+            DaHit = new(), DaNb = new(), RealTrap = new(), RealWait = new(), DetachHitMb = new(), K6Ms = new(), RealWaitMs = new(), OverlapUntilWait = new();
+        public int ArmedBeforeComplete, K6Frames, K6BeforeSubmit, RealWaitBeforeSubmit;
         public readonly double[] OriginPages = new double[OriginCount];
         public long DaPlanned, DaUnplanned, Gds, GpuValued, Unbounded, AtomicInWrites, Huge, Skipped, Faults;
     }
 
     // ---- recording side -----------------------------------------------------------------
 
-    public void MarkRead(ulong address, ulong size, OverlapRead kind)
+    public void MarkRead(ulong address, ulong size, OverlapRead kind, ulong program = 0)
     {
         if (size == 0 || size > ulong.MaxValue - address)
         {
@@ -398,6 +445,7 @@ public sealed class FrameOverlapTracker : IDisposable
                 case OverlapRead.DeviceAddress:
                     frame.DeviceAddressBytes += (long)size;
                     frame.DeviceAddress.Add(address, size);
+                    frame.DeviceRanges.Add((address, size, program));
                     break;
                 default:
                     if (kind == OverlapRead.Upload)
@@ -413,7 +461,7 @@ public sealed class FrameOverlapTracker : IDisposable
         }
     }
 
-    public void NoteWrite(ulong address, ulong size, OverlapWrite origin)
+    public void NoteWrite(ulong address, ulong size, OverlapWrite origin, ulong program = 0)
     {
         lock (_gate)
         {
@@ -438,6 +486,7 @@ public sealed class FrameOverlapTracker : IDisposable
             frame.OriginBytes[(int)origin] += (long)size;
             frame.ByOrigin[(int)origin].Add(address, size);
             frame.Written.Add(address, size);
+            frame.WriteRanges.Add((address, size, (int)origin, program));
             if (origin is OverlapWrite.CpWrite or OverlapWrite.EopDestination)
             {
                 frame.Labels.Add(address);
@@ -867,6 +916,7 @@ public sealed class FrameOverlapTracker : IDisposable
             mask.Set((int)((page & (TrackerLayout.BlockBytes - 1)) / PageBytes));
             frame.Pages[page] = (byte)(flags & ~Armed);
             Count(frame, page, flags, write: kind != FaultKind.Read);
+            Attribute(frame, address, flags, write: kind != FaultKind.Read);
             _watches.Remove(page & ~(TrackerLayout.BlockBytes - 1), mask, reads);
             stillBlocked = _watches.StillBlocks(page, kind);
             return true;
@@ -899,6 +949,145 @@ public sealed class FrameOverlapTracker : IDisposable
                     else frame.ManagedRead++;
                 }
             }
+        }
+    }
+
+    /// <summary>Which GPU ranges on the page the faulting address itself lies in.</summary>
+    internal static Hit ClassifyWrite(List<(ulong Address, ulong Size, int Origin, ulong Program)> ranges, ulong address, out int origin, out ulong program)
+    {
+        var hit = Hit.Neighbour;
+        origin = -1;
+        program = 0;
+        foreach (var range in ranges)
+        {
+            if (address < range.Address || address - range.Address >= range.Size)
+            {
+                continue;
+            }
+
+            if (!KnownAtRecord(range.Origin))
+            {
+                origin = range.Origin;
+                program = range.Program;
+                return Hit.GpuValued;
+            }
+
+            hit = Hit.Label;
+            origin = range.Origin;
+        }
+
+        return hit;
+    }
+
+    private static bool Inside(List<(ulong Address, ulong Size)> ranges, ulong address)
+    {
+        foreach (var range in ranges)
+        {
+            if (address >= range.Address && address - range.Address < range.Size) return true;
+        }
+
+        return false;
+    }
+
+    private int _reported;
+
+    // The first 60 real waits and device-address-only stores of the run, one line each: when, and before or
+    // after the guest's first submission of the next frame (none yet at the fault means before).
+    private void Report(string what, Frame frame, ulong address, bool write, int origin, ulong program, long now)
+    {
+        if (Interlocked.Increment(ref _reported) > 60)
+        {
+            return;
+        }
+
+        var frequency = (double)Stopwatch.Frequency;
+        var sinceComplete = frame.CompletedTicks == 0 ? 0 : (now - frame.CompletedTicks) * 1000.0 / frequency;
+        Console.Error.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[METAL-V2][OVERLAP-DIAG-HIT] {what} frame={frame.Index} {(write ? "write" : "read")} 0x{address:X} origin={(origin >= 0 ? OriginNames[origin] : "-")} " +
+            $"prog=0x{program:X16} ms_after_complete={(frame.CompletedTicks == 0 ? "before" : sinceComplete.ToString("F2", CultureInfo.InvariantCulture))} " +
+            $"ms_after_commit={(now - frame.CommittedTicks) * 1000.0 / frequency:F2} before_first_submit={(frame.FirstAdmitTicks == 0 || now < frame.FirstAdmitTicks ? 1 : 0)}"));
+    }
+
+    private void Attribute(Frame frame, ulong address, byte flags, bool write)
+    {
+        var now = _clock();
+        var page = address & ~(PageBytes - 1);
+        var what = new StringBuilder();
+        if ((flags & InWrite) != 0)
+        {
+            var hit = ClassifyWrite(frame.WriteRanges, address, out var origin, out var program);
+            if (hit == Hit.GpuValued)
+            {
+                if (write) frame.WsWriteGpu++; else frame.WsReadGpu++;
+                if (frame.FirstRealWaitTicks == 0) frame.FirstRealWaitTicks = now;
+                if (!write && frame.FirstK6Ticks == 0) frame.FirstK6Ticks = now;
+                Report("K6", frame, address, write, origin, program, now);
+            }
+            else if (hit == Hit.Label)
+            {
+                if (write) frame.WsWriteLabel++; else frame.WsReadLabel++;
+            }
+            else
+            {
+                if (write) frame.WsWriteNeighbour++; else frame.WsReadNeighbour++;
+            }
+
+            what.Append(hit switch { Hit.GpuValued => "gpu_hit", Hit.Label => "label_hit", _ => "neighbour" });
+            if (origin >= 0) what.Append(':').Append(OriginNames[origin]);
+            if (program != 0) what.Append(CultureInfo.InvariantCulture, $":prog=0x{program:X16}");
+        }
+
+        if ((flags & InRead) != 0 && write)
+        {
+            var hit = Inside(frame.ReadRanges, address);
+            if (hit) { frame.RsHit++; frame.ReadHitAddresses.Add(address); } else frame.RsNeighbour++;
+            what.Append(what.Length != 0 ? "," : string.Empty).Append(hit ? "read_set_hit" : "read_set_neighbour");
+        }
+
+        if ((flags & DeviceAddressOnly) != 0 && write)
+        {
+            var hit = false;
+            ulong program = 0;
+            foreach (var range in frame.DeviceRanges)
+            {
+                if (address >= range.Address && address - range.Address < range.Size) { hit = true; program = range.Program; break; }
+            }
+
+            if (hit) frame.DaOnlyHit++; else frame.DaOnlyNeighbour++;
+            Report(hit ? "K3-hit" : "K3-neighbour", frame, address, write, (int)OverlapWrite.DeviceAddress, program, now);
+            what.Append(what.Length != 0 ? "," : string.Empty).Append(hit ? "da_only_hit" : "da_only_neighbour");
+            if (program != 0) what.Append(CultureInfo.InvariantCulture, $":prog=0x{program:X16}");
+        }
+
+        lock (_pageReports)
+        {
+            if (!_pageReports.TryGetValue(page, out var report))
+            {
+                report = new PageReport();
+                _pageReports[page] = report;
+                foreach (var range in frame.WriteRanges)
+                {
+                    if (report.Ranges.Count < 8 && range.Address < page + PageBytes && page < range.Address + range.Size)
+                        report.Ranges.Add(string.Create(CultureInfo.InvariantCulture,
+                            $"{OriginNames[range.Origin]}:0x{range.Address:X}+0x{range.Size:X}{(range.Program != 0 ? $":prog=0x{range.Program:X16}" : string.Empty)}"));
+                }
+
+                foreach (var range in frame.ReadRanges)
+                {
+                    if (report.Ranges.Count < 8 && range.Address < page + PageBytes && page < range.Address + range.Size)
+                        report.Ranges.Add(string.Create(CultureInfo.InvariantCulture, $"read:0x{range.Address:X}+0x{range.Size:X}"));
+                }
+
+                foreach (var range in frame.DeviceRanges)
+                {
+                    if (report.Ranges.Count < 8 && range.Address < page + PageBytes && page < range.Address + range.Size)
+                        report.Ranges.Add(string.Create(CultureInfo.InvariantCulture, $"da_read:0x{range.Address:X}+0x{range.Size:X}:prog=0x{range.Program:X16}"));
+                }
+            }
+
+            report.Faults++;
+            var access = string.Create(CultureInfo.InvariantCulture, $"0x{address & (PageBytes - 1):X3}{(write ? "w" : "r")}={what}");
+            if (report.Accesses.Count < 8 && !report.Accesses.Contains(access)) report.Accesses.Add(access);
         }
     }
 
@@ -988,6 +1177,20 @@ public sealed class FrameOverlapTracker : IDisposable
         }
 
         // Bytes of the bound ranges the guest wrote while it built the next frame: what would be detached.
+        // Bound ranges that contain a written address itself (not just its page).
+        long detachHitBytes = 0;
+        foreach (var range in frame.ReadRanges)
+        {
+            foreach (var address in frame.ReadHitAddresses)
+            {
+                if (address >= range.Address && address - range.Address < range.Size)
+                {
+                    detachHitBytes += (long)range.Size;
+                    break;
+                }
+            }
+        }
+
         long detachBytes = 0;
         if (frame.ReadWrittenPages.Count != 0)
         {
@@ -1066,6 +1269,35 @@ public sealed class FrameOverlapTracker : IDisposable
                     window.FirstFaultMs.Add(Ms(frame.CompletedTicks, frame.FirstFaultTicks));
                     if (frame.FirstAdmitTicks == 0 || frame.FirstFaultTicks < frame.FirstAdmitTicks) window.TrapBeforeSubmitFrames++;
                 }
+
+                if (frame.ArmedTicks < frame.CompletedTicks) window.ArmedBeforeComplete++;
+                window.RsHit.Add(frame.RsHit); window.RsNb.Add(frame.RsNeighbour);
+                window.WsRLabel.Add(frame.WsReadLabel); window.WsRGpu.Add(frame.WsReadGpu); window.WsRNb.Add(frame.WsReadNeighbour);
+                window.WsWLabel.Add(frame.WsWriteLabel); window.WsWGpu.Add(frame.WsWriteGpu); window.WsWNb.Add(frame.WsWriteNeighbour);
+                window.DaHit.Add(frame.DaOnlyHit); window.DaNb.Add(frame.DaOnlyNeighbour);
+                window.RealTrap.Add(frame.RsHit + frame.WsReadGpu + frame.WsWriteGpu + frame.DaOnlyHit);
+                window.RealWait.Add(frame.WsReadGpu + frame.WsWriteGpu);
+                window.DetachHitMb.Add(detachHitBytes / 1048576.0);
+                var available = Ms(frame.CommittedTicks, frame.CompletedTicks);
+                if (frame.FirstK6Ticks != 0)
+                {
+                    window.K6Frames++;
+                    window.K6Ms.Add(Ms(frame.CompletedTicks, frame.FirstK6Ticks));
+                    if (frame.FirstAdmitTicks == 0 || frame.FirstK6Ticks < frame.FirstAdmitTicks) window.K6BeforeSubmit++;
+                }
+
+                if (frame.FirstRealWaitTicks != 0)
+                {
+                    var wait = Ms(frame.CompletedTicks, frame.FirstRealWaitTicks);
+                    window.RealWaitMs.Add(wait);
+                    if (frame.FirstAdmitTicks == 0 || frame.FirstRealWaitTicks < frame.FirstAdmitTicks) window.RealWaitBeforeSubmit++;
+                    // Build work done before the first real wait is what an overlap would hide.
+                    window.OverlapUntilWait.Add(Math.Clamp(wait, 0, double.IsNaN(available) ? 0 : available));
+                }
+                else
+                {
+                    window.OverlapUntilWait.Add(available);
+                }
             }
         }
     }
@@ -1097,7 +1329,12 @@ public sealed class FrameOverlapTracker : IDisposable
             builder.Append(culture, $"trap: armed_pages={Mx(w.ArmedPages)} arm_ms={P(w.ArmMs)} late_arms={w.LateArms} late_faults={Interlocked.Exchange(ref _lateFaults, 0)} cap_frames={w.CapFrames} skipped_read_watched={w.Skipped} ");
             builder.Append($"rs_written={Mx(w.RsWritten)} detach_mb={Mx(w.DetachMb)} ws_read={Mx(w.WsRead)} ws_written={Mx(w.WsWritten)} ");
             builder.Append($"label_touched={Mx(w.LabelTouched)} cb_touched={Mx(w.CbTouched)} da_only_written={Mx(w.DaOnly)} managed={Mx(w.Managed)} first_fault_ms={P(w.FirstFaultMs)} ");
-            builder.Append(culture, $"trap_before_submit_frames={w.TrapBeforeSubmitFrames} ws_read_frames={w.WriteSetReadFrames}");
+            builder.Append(culture, $"trap_before_submit_frames={w.TrapBeforeSubmitFrames} ws_read_frames={w.WriteSetReadFrames} | ");
+            builder.Append(culture, $"bytes: armed_before_complete={w.ArmedBeforeComplete} rs_hit={Mx(w.RsHit)} rs_nb={Mx(w.RsNb)} detach_hit_mb={Mx(w.DetachHitMb)} ");
+            builder.Append($"ws_read label={Mx(w.WsRLabel)} gpu={Mx(w.WsRGpu)} nb={Mx(w.WsRNb)} ws_write label={Mx(w.WsWLabel)} gpu={Mx(w.WsWGpu)} nb={Mx(w.WsWNb)} ");
+            builder.Append($"da_only hit={Mx(w.DaHit)} nb={Mx(w.DaNb)} real_trap_pages={Mx(w.RealTrap)} real_wait_pages={Mx(w.RealWait)} ");
+            builder.Append(culture, $"k6_frames={w.K6Frames} k6_ms={P(w.K6Ms)} k6_before_submit={w.K6BeforeSubmit} ");
+            builder.Append(culture, $"real_wait_ms={P(w.RealWaitMs)} real_wait_before_submit={w.RealWaitBeforeSubmit} overlap_until_wait_ms={P(w.OverlapUntilWait)}");
             _window.Frames = 0;
             ResetWindow();
         }
@@ -1121,6 +1358,15 @@ public sealed class FrameOverlapTracker : IDisposable
             }
         }
 
+        lock (_pageReports)
+        {
+            foreach (var pair in _pageReports.OrderByDescending(pair => pair.Value.Faults).Take(10))
+            {
+                builder.Append(CultureInfo.InvariantCulture, $"\n[METAL-V2][OVERLAP-DIAG-PAGE] 0x{pair.Key:X} faults={pair.Value.Faults} ranges=[{string.Join(' ', pair.Value.Ranges)}] accesses=[{string.Join(' ', pair.Value.Accesses)}]");
+            }
+        }
+
+        builder.Append("\n[METAL-V2][OVERLAP-DIAG-TOP]");
         builder.Append(" | wait (GPU-written pages the guest touched):");
         lock (_topWaits)
         {
@@ -1138,6 +1384,13 @@ public sealed class FrameOverlapTracker : IDisposable
         var w = _window;
         w.Frames = w.Sampled = w.CapFrames = w.UnfinishedFrames = w.BlockedFrames = w.RefusedFrames = w.TrapBeforeSubmitFrames = 0;
         w.WriteSetReadFrames = w.LateArms = 0;
+        w.ArmedBeforeComplete = w.K6Frames = w.K6BeforeSubmit = w.RealWaitBeforeSubmit = 0;
+        foreach (var list in new[] { w.RsHit, w.RsNb, w.WsRLabel, w.WsRGpu, w.WsRNb, w.WsWLabel, w.WsWGpu, w.WsWNb, w.DaHit, w.DaNb,
+                     w.RealTrap, w.RealWait, w.DetachHitMb, w.K6Ms, w.RealWaitMs, w.OverlapUntilWait })
+        {
+            list.Clear();
+        }
+
         w.DaPlanned = w.DaUnplanned = w.Gds = w.GpuValued = w.Unbounded = w.AtomicInWrites = w.Huge = w.Skipped = w.Faults = 0;
         Array.Clear(w.OriginPages);
         foreach (var list in new[] { w.InPlacePages, w.InPlaceMb, w.StagedMb, w.UploadMb, w.DaPages, w.WrittenPages, w.LabelsInCb,

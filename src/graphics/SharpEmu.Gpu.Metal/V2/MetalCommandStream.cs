@@ -1016,20 +1016,24 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private static void NoteEndOfPipeForOverlapDiagnostic(in EndOfPipeWrite write)
     {
         var bytes = (ulong)EndOfPipeLabelBytes(write.Kind);
+        var origin = SharpEmu.HLE.GpuMemory.OverlapWrite.EopDestination;
         switch (write.Kind)
         {
             case EndOfPipeWriteKind.GdsWrite32:
                 SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteRefusal(gds: true);
                 bytes = (ulong)write.GdsWordCount * sizeof(uint);
+                origin = SharpEmu.HLE.GpuMemory.OverlapWrite.EopGpuValued;
                 break;
             case EndOfPipeWriteKind.AtomicAdd32:
                 SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteEndOfPipeAtomicAdd(write.Destination);
                 bytes = sizeof(uint);
+                origin = SharpEmu.HLE.GpuMemory.OverlapWrite.EopGpuValued;
                 break;
             default:
                 if (IsClockLabel(in write))
                 {
                     SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteRefusal(gds: false);
+                    origin = SharpEmu.HLE.GpuMemory.OverlapWrite.EopGpuValued;
                 }
 
                 break;
@@ -1037,7 +1041,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
 
         if (write.Destination != 0 && bytes != 0)
         {
-            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(write.Destination, bytes, SharpEmu.HLE.GpuMemory.OverlapWrite.EopDestination);
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(write.Destination, bytes, origin);
         }
     }
 

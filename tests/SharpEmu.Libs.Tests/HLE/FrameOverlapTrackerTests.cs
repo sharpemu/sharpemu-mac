@@ -223,6 +223,62 @@ public sealed class FrameOverlapTrackerTests
     }
 
     [Fact]
+    public void FaultsAreSplitIntoHitsNeighboursAndRecordTimeLabels()
+    {
+        var watches = new FakeWatches();
+        var tracker = Create(watches);
+        tracker.MarkRead(0x10000, 0x100, OverlapRead.InPlace);
+        tracker.MarkRead(0x20000, 0x100, OverlapRead.InPlace);
+        tracker.MarkRead(0x60000, 0x10, OverlapRead.DeviceAddress, program: 0xDA);
+        tracker.NoteWrite(0x30000, 0x100, OverlapWrite.Storage, program: 0xABC);
+        tracker.NoteWrite(0x31800, 0x10, OverlapWrite.Storage);
+        tracker.NoteWrite(0x40008, 8, OverlapWrite.CpWrite);
+        tracker.OnBoundaryAdmitted(0, 0);
+        _now = 10 * Millisecond;
+        tracker.OnFrameCommitted(1);
+        _now = 50 * Millisecond;
+        tracker.OnCompleted(1);
+        tracker.DrainRequests();
+
+        _now = 53 * Millisecond;
+        Assert.True(tracker.TryHandleFault(FaultKind.Write, 0x10F00, out _)); // read set, other bytes of the page
+        Assert.True(tracker.TryHandleFault(FaultKind.Write, 0x20010, out _)); // read set, inside the bound range
+        Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x30010, out _));  // GPU-valued store: a real wait
+        Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x31000, out _));  // shares the page only
+        Assert.True(tracker.TryHandleFault(FaultKind.Read, 0x4000C, out _));  // a CP write: landed at publication
+        Assert.True(tracker.TryHandleFault(FaultKind.Write, 0x60008, out _)); // device-address reach itself
+        _now = 55 * Millisecond;
+        tracker.OnAdmission(0x90000, 0x40);
+        tracker.OnBoundaryAdmitted(0, 0);
+        tracker.DrainRequests();
+
+        var line = tracker.TakeWindowLine();
+        Assert.Contains("armed_before_complete=0", line);
+        Assert.Contains("rs_hit=1/1 rs_nb=1/1", line);
+        Assert.Contains("ws_read label=1/1 gpu=1/1 nb=1/1", line);
+        Assert.Contains("da_only hit=1/1 nb=0/0", line);
+        Assert.Contains("real_trap_pages=3/3 real_wait_pages=1/1", line);
+        Assert.Contains("k6_frames=1 k6_ms=3/3 k6_before_submit=1", line);
+        Assert.Contains("overlap_until_wait_ms=3/3", line);
+        var pages = tracker.TopRanges();
+        Assert.Contains("0x30000 faults=1 ranges=[storage:0x30000+0x100:prog=0x0000000000000ABC] accesses=[0x010r=gpu_hit:storage:prog=0x0000000000000ABC]", pages);
+        Assert.Contains("0x008w=da_only_hit:prog=0x00000000000000DA", pages);
+    }
+
+    [Fact]
+    public void AGpuValuedRangeOutranksALabelOverTheSameBytes()
+    {
+        var ranges = new List<(ulong, ulong, int, ulong)>
+        {
+            (0x1000, 8, (int)OverlapWrite.EopLabel, 0),
+            (0x1000, 8, (int)OverlapWrite.EopGpuValued, 0),
+        };
+        Assert.Equal(FrameOverlapTracker.Hit.GpuValued, FrameOverlapTracker.ClassifyWrite(ranges, 0x1004, out _, out _));
+        Assert.Equal(FrameOverlapTracker.Hit.Label, FrameOverlapTracker.ClassifyWrite(ranges.Take(1).ToList(), 0x1004, out _, out _));
+        Assert.Equal(FrameOverlapTracker.Hit.Neighbour, FrameOverlapTracker.ClassifyWrite(ranges, 0x1008, out _, out _));
+    }
+
+    [Fact]
     public void ThePageSetCountsDistinctPagesAcrossBlocks()
     {
         var set = new OverlapPageSet();

@@ -1112,6 +1112,11 @@ internal sealed partial class MetalRenderHost
 
                 using (var noteScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenNote))
                 {
+                    if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+                    {
+                        SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.SetWriter(stage.Program.Hash);
+                    }
+
                     NoteGuestMemoryWrite(descriptor.Address, size, MetalGpuWriteOrigin.StorageBuffer);
                 }
             }
@@ -1221,7 +1226,7 @@ internal sealed partial class MetalRenderHost
             var size = ClampMappedSize(range.Base, range.Size);
             if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
             {
-                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.MarkGpuRead(range.Base, size, SharpEmu.HLE.GpuMemory.OverlapRead.DeviceAddress);
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.MarkGpuRead(range.Base, size, SharpEmu.HLE.GpuMemory.OverlapRead.DeviceAddress, stage.Program.Hash);
             }
 
             if (_traceBufferUserAddress != 0)
@@ -1256,6 +1261,11 @@ internal sealed partial class MetalRenderHost
             }
 
             _imageCache.InvalidateMemoryFromGpu(range.Base, size);
+            if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+            {
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.SetWriter(stage.Program.Hash);
+            }
+
             NoteGuestMemoryWrite(range.Base, size, MetalGpuWriteOrigin.DeviceAddress);
             _slotTrap?.NoteBinding(
                 $"device_address handle={range.Handle} hash=0x{stage.Program.Hash:X16} written",
