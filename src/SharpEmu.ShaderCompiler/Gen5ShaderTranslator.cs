@@ -103,8 +103,21 @@ public static partial class Gen5ShaderTranslator
             memory = wrapper.Inner;
         }
 
-        return _fusedProgramsByMemory.GetValue(memory, static _ => new FusedProgramRegistry());
+        // The memory looked up last and its registry: every draw stage looks its code address up here, and the table's
+        // lookup was most of that. The table never drops a registry while its memory lives, and this holds the memory.
+        if (Volatile.Read(ref _lastFusedPrograms) is { } last && ReferenceEquals(last.Memory, memory))
+        {
+            return last.Registry;
+        }
+
+        var registry = _fusedProgramsByMemory.GetValue(memory, static _ => new FusedProgramRegistry());
+        Volatile.Write(ref _lastFusedPrograms, new LastFusedPrograms(memory, registry));
+        return registry;
     }
+
+    private sealed record LastFusedPrograms(ICpuMemory Memory, FusedProgramRegistry Registry);
+
+    private static LastFusedPrograms? _lastFusedPrograms;
 
     /// <summary>
     /// Records the two code objects that AGC joins into one hardware shader.

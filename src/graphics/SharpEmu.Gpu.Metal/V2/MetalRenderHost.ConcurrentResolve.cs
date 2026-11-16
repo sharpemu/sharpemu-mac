@@ -580,9 +580,13 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     internal void BeginConcurrentResolve()
     {
         ConcurrentAssumptions? pooled = null;
+        // A plain read first: an empty slot costs no exchange.
         for (var slot = 0; slot < _assumptionPool.Length && pooled is null; slot++)
         {
-            pooled = Interlocked.Exchange(ref _assumptionPool[slot], null);
+            if (Volatile.Read(ref _assumptionPool[slot]) is not null)
+            {
+                pooled = Interlocked.Exchange(ref _assumptionPool[slot], null);
+            }
         }
 
         // Read before the versions and every guest byte: a write logged after this is one the resolution may have missed.
@@ -608,7 +612,9 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // Slots taken and filled with an exchange each: the resolving thread takes one per draw and the worker
     // returns one per draw, and a lock both took per draw was contended on every one (Demon's Souls, ~7000 a frame).
     private readonly ConcurrentAssumptions?[] _assumptionPool = new ConcurrentAssumptions?[MaxPooledAssumptions];
-    private const int MaxPooledAssumptions = 32;
+    // Above the jobs a resolving thread can have resolved ahead of the worker (the command thread's queue of 64 items),
+    // so a resolver ahead of the worker still finds one rather than allocating it with its lists empty.
+    private const int MaxPooledAssumptions = 96;
     private const int MaxPooledAnswers = 4096;
 
     internal void ReleaseConcurrentAssumptions(object assumptionsObject)
@@ -620,7 +626,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
         for (var slot = 0; slot < _assumptionPool.Length; slot++)
         {
-            if (Interlocked.CompareExchange(ref _assumptionPool[slot], assumptions, null) is null)
+            if (Volatile.Read(ref _assumptionPool[slot]) is null && Interlocked.CompareExchange(ref _assumptionPool[slot], assumptions, null) is null)
             {
                 return;
             }
