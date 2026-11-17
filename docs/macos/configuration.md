@@ -121,6 +121,7 @@ undoes an optimization to isolate a miscompile:
 | `SHARPEMU_METAL_V2_PROFILE_SHADERS=1` | Gives every draw and dispatch its own command buffer and prints GPU time per shader hash (`[METAL-V2][SHADER-PROF]`). It serializes the GPU, so only ratios are meaningful. |
 | `SHARPEMU_METAL_V2_PROFILE_TOP=<n>` | Entries per profile report. Default 8. |
 | `SHARPEMU_METAL_V2_PROFILE_PASSES=1` | Per-encoder GPU time (`[METAL-V2][PASS-PROF]`). Blit encoders (`k=blit`), the tiler's compute encoders (`k=tiler-compute`) and the host's other compute encoders (`k=host-compute`) are recorded too, named for the transfer that opened them, so `gap_us` is time no encoder ran; the `sub` line sums GPU time per kind (`kind_us=`). |
+| `SHARPEMU_DIAG_SKIP_ALL_DRAWS_AFTER_S=<seconds>` | Diagnostic. From that many seconds after the GPU process translated its first draw, every draw is dropped before it is resolved or recorded; dispatches, labels and flips go on. Shows the frame time a draw path of no cost would leave. The picture is wrong by design; logged once when it starts. |
 | `SHARPEMU_PROFILE_RENDER=1` | Per-phase timing of the draw translation path on the GPU worker, reported at each flip. |
 | `SHARPEMU_METAL_V2_DUMP_TARGETS=<dir>` | Writes each render pass's color target and each presented frame as PNG. Waits for the GPU after each dump. `1` writes to `metal-targets` under the logs folder. |
 | `SHARPEMU_METAL_V2_DUMP_MAX=<n>` | Maximum dumps. Default 240. |

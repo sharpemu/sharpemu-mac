@@ -681,6 +681,38 @@ public static partial class AgcExports
             }
         }
 
+        // SHARPEMU_DIAG_SKIP_ALL_DRAWS_AFTER_S=<seconds>: from that many seconds after this process started, every draw
+        // is dropped at translation, before its program is resolved or anything is recorded. Dispatches, labels and
+        // flips go on. It measures the frame time a draw path of no cost would leave; the picture is wrong by design.
+        private static class DrawFloorProbe
+        {
+            private static readonly long Started = Environment.TickCount64;
+            private static readonly long AfterMilliseconds =
+                double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_SKIP_ALL_DRAWS_AFTER_S"),
+                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds) && seconds >= 0
+                    ? (long)(seconds * 1000)
+                    : -1;
+            private static int _announced;
+
+            public static bool Active
+            {
+                get
+                {
+                    if (AfterMilliseconds < 0 || Environment.TickCount64 - Started < AfterMilliseconds)
+                    {
+                        return false;
+                    }
+
+                    if (Interlocked.Exchange(ref _announced, 1) == 0)
+                    {
+                        Console.Error.WriteLine("[GPU][DIAG] SHARPEMU_DIAG_SKIP_ALL_DRAWS_AFTER_S: every draw is dropped from now on; the picture is wrong by design.");
+                    }
+
+                    return true;
+                }
+            }
+        }
+
         private bool TryRunExecutorDraw(ulong submitId, SubmittedDcbState state, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
         {
             Diagnostics.DispatchRunTally.NoteDraw();
@@ -699,6 +731,14 @@ public static partial class AgcExports
 
             state.FrameDrawCount++;
             state.SawIndexedDraw |= indexed;
+            if (DrawFloorProbe.Active)
+            {
+                // Diagnostic floor: the draw is dropped before it is resolved or recorded (the picture is wrong).
+                state.CurrentIndexSnapshot = null;
+                state.CurrentVertexSnapshot = null;
+                return true;
+            }
+
             if (_defersWholeWork && (_parallel is not null || producing))
             {
                 var snapshot = banks.Snapshot();
