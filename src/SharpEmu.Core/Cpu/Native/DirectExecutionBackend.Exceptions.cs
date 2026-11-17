@@ -1274,16 +1274,21 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		var entries = spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-		DumpFaultExpressionPass("now", entries, registers);
+		var ranges = new List<(ulong Start, ulong Size, string Label)>();
+		DumpFaultExpressionPass("now", entries, registers, ranges);
+		// SHARPEMU_GPU_WRITE_RING=1: which recorded host/GPU writes covered the dumped bytes.
+		SharpEmu.HLE.GpuWriteRing.ReportFaultRanges(ranges);
 		if (int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FAULT_DUMP_REPEAT_MS"), out var repeatMs) &&
 			repeatMs > 0)
 		{
 			Thread.Sleep(Math.Min(repeatMs, 5000));
-			DumpFaultExpressionPass($"after {repeatMs} ms", entries, registers);
+			DumpFaultExpressionPass($"after {repeatMs} ms", entries, registers, ranges: null);
 		}
 	}
 
-	private void DumpFaultExpressionPass(string pass, string[] entries, Dictionary<string, ulong> registers)
+	private void DumpFaultExpressionPass(
+		string pass, string[] entries, Dictionary<string, ulong> registers,
+		List<(ulong Start, ulong Size, string Label)>? ranges)
 	{
 		foreach (var entry in entries)
 		{
@@ -1307,6 +1312,7 @@ public sealed partial class DirectExecutionBackend
 			}
 
 			DumpPointerWindow($"fault-dump[{pass}] {label}={expression}", address, (int)length);
+			ranges?.Add((address, length, $"{label}={expression}"));
 		}
 		Console.Error.Flush();
 	}

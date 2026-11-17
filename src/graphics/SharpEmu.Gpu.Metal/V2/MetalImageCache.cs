@@ -4027,7 +4027,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         $"{direction} format={description.PixelFormat} type={description.Type} " +
         $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} " +
         $"levels={description.Resources.Levels} layers={description.TransferLayers} " +
-        $"tile={description.TileMode} samples={description.Samples} bytes=0x{description.Data.Size:X}";
+        $"tile={description.TileMode} samples={description.Samples} addr=0x{description.Data.Address:X} " +
+        $"bytes=0x{description.Data.Size:X}";
 
     // Linear images the GPU wrote since the last end-of-pipe write. Linear is the layout a
     // guest CPU reads in place - a readback staging surface - so these are the GPU writes

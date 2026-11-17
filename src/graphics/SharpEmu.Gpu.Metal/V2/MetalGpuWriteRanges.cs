@@ -59,6 +59,10 @@ internal static class MetalGpuWriteOrigins
 
     public static readonly string[] Names =
         ["storage", "binding", "device_address", "fill", "copy", "writeback", "eop_label", "unbounded"];
+
+    // The same names as GpuWriteRing kinds: each one a GPU command encoded for later.
+    public static readonly string[] RingKinds =
+        ["gpu:storage", "gpu:binding", "gpu:device_address", "gpu:fill", "gpu:copy", "gpu:writeback", "gpu:eop_label", "gpu:unbounded"];
 }
 
 /// <summary>

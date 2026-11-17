@@ -863,6 +863,21 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             return false;
         }
 
+        if (SharpEmu.HLE.GpuWriteRing.Enabled)
+        {
+            // The guest bytes this piece stands for, whether the retile lands there or in a
+            // scratch the caller copies back: the image that owned them is what a clobber names.
+            SharpEmu.HLE.GpuWriteRing.Record(
+                description.Data.Address + guestBase, pieceSize, context.SubmissionSerial, "gpu:image-texels",
+                $"image addr=0x{description.Data.Address:X} bytes=0x{description.Data.Size:X} " +
+                $"format={description.PixelFormat} type={description.Type} " +
+                $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} " +
+                $"tile={description.TileMode} pitch={description.Pitch} levels={range.BaseLevel}+{range.LevelCount}/{description.Resources.Levels} " +
+                $"layers={range.BaseLayer}+{range.LayerCount} firstLevel={textureFirstLevel} " +
+                $"piece=+0x{guestBase:X}..+0x{guestBase + pieceSize:X} " +
+                $"dest={(destination.Buffer == 0 ? "?" : "window")}+0x{destination.Offset:X}");
+        }
+
         var plan = PlanFor(description);
         if (plan.DepthStencil)
         {

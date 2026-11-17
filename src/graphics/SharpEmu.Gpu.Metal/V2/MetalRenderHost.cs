@@ -1421,6 +1421,15 @@ internal sealed partial class MetalRenderHost :
             NoteLabelStagedReadsWrite(address, size);
         }
 
+        if (SharpEmu.HLE.GpuWriteRing.Enabled)
+        {
+            // Producer strings by reference: the transfer's label, or the draw/dispatch's kind and label.
+            var transfer = origin is MetalGpuWriteOrigin.Fill or MetalGpuWriteOrigin.Copy or MetalGpuWriteOrigin.ImageWriteback;
+            SharpEmu.HLE.GpuWriteRing.Record(
+                address, size, SubmissionSerial, MetalGpuWriteOrigins.RingKinds[(int)origin],
+                transfer ? _lastTransferLabel : _lastWorkKind, transfer ? null : _lastWorkLabel);
+        }
+
         if (_guard is not null && size != 0)
         {
             // A fill, copy or writeback has just been encoded, so the last transfer label
@@ -1769,6 +1778,7 @@ internal sealed partial class MetalRenderHost :
 
     private void WriteGuestPattern(ulong address, ulong size, uint value)
     {
+        SharpEmu.HLE.GpuWriteRing.Record(address, size, SubmissionSerial, "host-fill", "fill pattern");
         if (_guard is null)
         {
             WriteGuestPatternCore(address, size, value);
@@ -1948,6 +1958,8 @@ internal sealed partial class MetalRenderHost :
         SupersedeKernelCopyChecks(destination, size);
         _cpOverlay.Forget(destination, size);
         _labelOverlay.Forget(destination, size);
+        SharpEmu.HLE.GpuWriteRing.Record(destination, size, SubmissionSerial, "host-copy",
+            SharpEmu.HLE.GpuWriteRing.Enabled ? $"from=0x{source:X16}" : null);
         if (_guard is null)
         {
             CopyGuestBytesOnHostCore(destination, source, size);
