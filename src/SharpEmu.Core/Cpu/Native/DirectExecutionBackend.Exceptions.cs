@@ -360,6 +360,13 @@ public sealed partial class DirectExecutionBackend
 				Console.Error.WriteLine("[LOADER][WARNING]   Could not walk RBP frame chain.");
 			}
 
+			DumpFaultExpressions(new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase)
+			{
+				["rax"] = rax, ["rbx"] = rbx, ["rcx"] = rcx, ["rdx"] = rdx, ["rsi"] = rsi, ["rdi"] = rdi,
+				["rbp"] = rbp, ["rsp"] = rsp, ["rip"] = rip, ["r8"] = r8, ["r9"] = r9, ["r10"] = r10,
+				["r11"] = r11, ["r12"] = r12, ["r13"] = r13, ["r14"] = r14, ["r15"] = r15,
+			});
+
 			switch (exceptionCode)
 			{
 				case 3221225477u:
@@ -1250,6 +1257,110 @@ public sealed partial class DirectExecutionBackend
 
 			Console.Error.WriteLine($"[LOADER][INFO]     +0x{offset:X2}: {FormatPointerWithNearestSymbol(value)}");
 		}
+	}
+
+	// SHARPEMU_FAULT_DUMP=label=expr:len[,label=expr:len...] dumps guest memory the
+	// fixed register windows cannot reach, such as a caller's locals or a structure
+	// two pointers away. expr: register | hex | [expr] (qword load) joined by + or -,
+	// for example elem=[[rbp]-0x360]:0x60. SHARPEMU_FAULT_DUMP_REPEAT_MS=<n> dumps the
+	// same windows again after n ms, so bytes another thread is still writing show up
+	// as a difference between the two passes.
+	private void DumpFaultExpressions(Dictionary<string, ulong> registers)
+	{
+		var spec = Environment.GetEnvironmentVariable("SHARPEMU_FAULT_DUMP");
+		if (string.IsNullOrWhiteSpace(spec))
+		{
+			return;
+		}
+
+		var entries = spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		DumpFaultExpressionPass("now", entries, registers);
+		if (int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FAULT_DUMP_REPEAT_MS"), out var repeatMs) &&
+			repeatMs > 0)
+		{
+			Thread.Sleep(Math.Min(repeatMs, 5000));
+			DumpFaultExpressionPass($"after {repeatMs} ms", entries, registers);
+		}
+	}
+
+	private void DumpFaultExpressionPass(string pass, string[] entries, Dictionary<string, ulong> registers)
+	{
+		foreach (var entry in entries)
+		{
+			var equals = entry.IndexOf('=');
+			var colon = entry.LastIndexOf(':');
+			if (equals <= 0 || colon <= equals ||
+				!TryParseFaultHex(entry[(colon + 1)..], out var length) || length == 0 || length > 0x1000)
+			{
+				Console.Error.WriteLine($"[LOADER][WARN]   fault-dump: malformed entry '{entry}'");
+				continue;
+			}
+
+			var label = entry[..equals];
+			var expression = entry[(equals + 1)..colon];
+			var position = 0;
+			if (!TryEvaluateFaultExpression(expression, ref position, registers, out var address) ||
+				position != expression.Length)
+			{
+				Console.Error.WriteLine($"[LOADER][INFO]   fault-dump[{pass}] {label}: '{expression}' unresolved");
+				continue;
+			}
+
+			DumpPointerWindow($"fault-dump[{pass}] {label}={expression}", address, (int)length);
+		}
+		Console.Error.Flush();
+	}
+
+	internal static bool TryEvaluateFaultExpression(
+		string text, ref int position, Dictionary<string, ulong> registers, out ulong value)
+	{
+		value = 0;
+		var sign = 1;
+		var first = true;
+		while (position < text.Length && text[position] != ']')
+		{
+			if (!first)
+			{
+				if (text[position] == '+') sign = 1;
+				else if (text[position] == '-') sign = -1;
+				else return false;
+				position++;
+			}
+			first = false;
+
+			ulong term;
+			if (position < text.Length && text[position] == '[')
+			{
+				position++;
+				if (!TryEvaluateFaultExpression(text, ref position, registers, out var inner) ||
+					position >= text.Length || text[position] != ']' ||
+					!TryReadDiagnosticHostQword(inner, out term))
+				{
+					return false;
+				}
+				position++;
+			}
+			else
+			{
+				var start = position;
+				while (position < text.Length && char.IsLetterOrDigit(text[position])) position++;
+				var token = text[start..position];
+				if (!registers.TryGetValue(token, out term) && !TryParseFaultHex(token, out term))
+				{
+					return false;
+				}
+			}
+
+			value = sign > 0 ? value + term : value - term;
+		}
+
+		return !first;
+	}
+
+	private static bool TryParseFaultHex(string text, out ulong value)
+	{
+		var digits = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text;
+		return ulong.TryParse(digits, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out value);
 	}
 
 	private unsafe bool TryReadQword(ulong address, out ulong value)
