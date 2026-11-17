@@ -548,6 +548,10 @@ public sealed partial class DsDrawCostBenchTests(ITestOutputHelper output) : Sce
         // at _GAME_DRAWS and _CHURN_EVERY=1, every draw has a mesh of its own whose table changes every round.
         var meshRepeat = Setting("MESH_REPEAT", 2);
         var dispatchEvery = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_DISPATCH_EVERY"), out var every) && every > 0 ? every : 0;
+        // SHARPEMU_DS_DRAW_BENCH_DISPATCH_REBIND=1: those dispatches run each program over the four tables in turn, so a
+        // dispatch's user data differs from the last of its program and its kept program is rebound (Demon's Souls: ~95%
+        // of dispatches rebound, ~2% kept, ~2.5% resolved); without it each program keeps one table and is kept.
+        var dispatchRebind = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_DISPATCH_REBIND") == "1";
         // SHARPEMU_DS_DRAW_BENCH_BURST=1: a round's game streams are all submitted before the worker records any, as
         // Demon's Souls submits ~13 command buffers at once, so the collector call after each submission lies between
         // draws (and is looked ahead of with SHARPEMU_PREFETCH_DRAW_LOOKAHEAD); one commit and one copy arming a round,
@@ -653,10 +657,11 @@ public sealed partial class DsDrawCostBenchTests(ITestOutputHelper output) : Sce
                 if (dispatchEvery != 0 && draw % dispatchEvery == dispatchEvery - 1)
                 {
                     var dispatch = draw / dispatchEvery % dispatchTables.Length;
+                    var program = dispatchRebind ? draw / dispatchEvery / dispatchTables.Length % computePrograms.Length : dispatch % computePrograms.Length;
                     var compute = new SceneState(1, 1);
                     compute.Context.Clear();
                     compute.Uconfig.Clear();
-                    compute.ComputeShader(computePrograms[dispatch % computePrograms.Length], 8, 8, 1,
+                    compute.ComputeShader(computePrograms[program], 8, 8, 1,
                         [Descriptors.Lo(dispatchTables[dispatch]), Descriptors.Hi(dispatchTables[dispatch])], true, true, false, 1, 0);
                     compute.Emit(pm4!);
                     pm4!.DispatchDirect(StorageEdge / 8, StorageEdge / 8, 1);

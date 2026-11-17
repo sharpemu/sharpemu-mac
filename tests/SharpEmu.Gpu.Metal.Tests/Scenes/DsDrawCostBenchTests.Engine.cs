@@ -87,6 +87,11 @@ public sealed partial class DsDrawCostBenchTests
         // =spin: the bench thread spins on each job's state instead of sleeping in WaitIdle (whose waiter makes every finish
         // pulse the prefetch lock); the game's command thread never waits for the whole frame.
         var spinDrain = Environment.GetEnvironmentVariable("SHARPEMU_DS_SHARD_BENCH_DRAIN") == "spin";
+        // =pipeline: as in the game, a taker thread (the worker) takes each job in order once it is resolved, inside the
+        // timed part, and the submitter (the command thread) stays at most _WINDOW (64) jobs ahead of it; the takes hand
+        // the assumptions back, so the resolvers draw from the host's pool as in game instead of allocating a frame's worth.
+        var pipeline = Environment.GetEnvironmentVariable("SHARPEMU_DS_SHARD_BENCH_DRAIN") == "pipeline";
+        var window = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_SHARD_BENCH_WINDOW"), out var parsedWindow) && parsedWindow > 0 ? parsedWindow : 64;
         var armResults = new List<(int Count, double JobsPerSecond, double WallMedianMs, string Report, ulong Fingerprint, string Creations,
             long Taken, long Refused)>();
         foreach (var count in arms)
@@ -102,6 +107,33 @@ public sealed partial class DsDrawCostBenchTests
             var submitted = new ParallelProgramPrefetch.Job[jobs.Length];
             var total = warmFrames + frames;
             var wall = new double[total];
+            var took = new bool[jobs.Length];
+            var takenStages = new (ShaderStageResources First, ShaderStageResources? Second)[jobs.Length];
+
+            // The worker's take of job at; the stages it handed out are fingerprinted afterwards, untimed.
+            bool Take(int at, int frameIndex)
+            {
+                var job = jobs[at];
+                prefetch.Current = submitted[at];
+                bool result;
+                if (job.Compute is { } arguments)
+                {
+                    result = prefetch.TryTakeCompute(job.Banks, arguments.Initiator, arguments.GroupsX, arguments.GroupsY, arguments.GroupsZ,
+                        arguments.Indirect, out var program);
+                    takenStages[at] = result ? (program.Input.Stage, null) : default;
+                }
+                else
+                {
+                    var inputs = RenderExecutor.ProgramInputsOf(job.Banks, renderHost.FormatSupport, renderHost.Fatal, job.Inputs.Indexed,
+                        job.Inputs.StartInstanceUserData);
+                    result = prefetch.TryTakeGraphics(job.Banks, in inputs, out var programs);
+                    takenStages[at] = result ? (programs.VertexInput.Stage, inputs.PixelActive ? programs.PixelInput.Stage : null) : default;
+                }
+
+                prefetch.Current = null;
+                return result;
+            }
+
             var fingerprint = 0xCBF29CE484222325UL;
             // Every arm replays the same frames (the churn and the pixel-constant copies follow the frame number), so the
             // fingerprints of all arms must match.
@@ -122,14 +154,41 @@ public sealed partial class DsDrawCostBenchTests
                 var contended = Monitor.LockContentionCount;
                 var collected = GC.CollectionCount(0);
                 var pausedBefore = GC.GetTotalPauseDuration();
+                var frameIndex = index;
+                var submittedCount = 0;
+                var takenCount = 0;
+                Thread? taker = null;
+                if (pipeline)
+                {
+                    taker = new Thread(() =>
+                    {
+                        for (var at = 0; at < jobs.Length; at++)
+                        {
+                            while (Volatile.Read(ref submittedCount) <= at) Thread.SpinWait(8);
+                            while (JobState(submitted[at]) == 0) Thread.SpinWait(8);
+                            took[at] = Take(at, frameIndex);
+                            Volatile.Write(ref takenCount, at + 1);
+                        }
+                    });
+                    taker.Start();
+                }
+
                 var started = Stopwatch.GetTimestamp();
                 for (var at = 0; at < jobs.Length; at++)
                 {
+                    if (pipeline)
+                    {
+                        while (at - Volatile.Read(ref takenCount) >= window) Thread.SpinWait(8);
+                    }
+
                     var job = jobs[at];
                     submitted[at] = job.Compute is { } arguments
                         ? prefetch.SubmitCompute(job.Banks, 0, arguments.Initiator, arguments.GroupsX, arguments.GroupsY, arguments.GroupsZ, arguments.Indirect)
                         : prefetch.Submit(job.Banks, 0, job.Inputs.Indexed, job.Inputs.StartInstanceUserData);
+                    Volatile.Write(ref submittedCount, at + 1);
                 }
+
+                taker?.Join();
 
                 if (spinDrain)
                 {
@@ -150,34 +209,25 @@ public sealed partial class DsDrawCostBenchTests
                     paused += GC.GetTotalPauseDuration() - pausedBefore;
                 }
 
-                // The worker's takes, untimed: they hand the assumptions back, and the measured frames' programs are fingerprinted.
+                // Without pipeline, the worker's takes, untimed: they hand the assumptions back. The measured frames' programs
+                // are fingerprinted untimed either way, in stream order.
                 for (var at = 0; at < jobs.Length; at++)
                 {
-                    var job = jobs[at];
-                    prefetch.Current = submitted[at];
-                    bool took;
-                    if (job.Compute is { } arguments)
-                    {
-                        took = prefetch.TryTakeCompute(job.Banks, arguments.Initiator, arguments.GroupsX, arguments.GroupsY, arguments.GroupsZ,
-                            arguments.Indirect, out var program);
-                        if (took && index >= warmFrames) fingerprint = FingerprintStage(fingerprint, program.Input.Stage);
-                    }
-                    else
-                    {
-                        var inputs = RenderExecutor.ProgramInputsOf(job.Banks, renderHost.FormatSupport, renderHost.Fatal, job.Inputs.Indexed,
-                            job.Inputs.StartInstanceUserData);
-                        took = prefetch.TryTakeGraphics(job.Banks, in inputs, out var programs);
-                        if (took && index >= warmFrames)
-                        {
-                            fingerprint = FingerprintStage(fingerprint, programs.VertexInput.Stage);
-                            if (inputs.PixelActive) fingerprint = FingerprintStage(fingerprint, programs.PixelInput.Stage);
-                        }
-                    }
-
+                    if (!pipeline) took[at] = Take(at, index);
                     if (index >= warmFrames)
                     {
-                        if (took) taken++;
+                        if (took[at]) taken++;
                         else refused++;
+                    }
+                }
+
+                if (index >= warmFrames)
+                {
+                    for (var at = 0; at < jobs.Length; at++)
+                    {
+                        if (!took[at]) continue;
+                        fingerprint = FingerprintStage(fingerprint, takenStages[at].First);
+                        if (takenStages[at].Second is { } second) fingerprint = FingerprintStage(fingerprint, second);
                     }
                 }
 
@@ -197,7 +247,10 @@ public sealed partial class DsDrawCostBenchTests
             var sorted = measured.Order().ToArray();
             var jobsPerSecond = frames * jobs.Length / (measured.Sum() / 1000.0);
             armResults.Add((count, jobsPerSecond, sorted[sorted.Length / 2], report, fingerprint, creations, taken, refused));
-            var shards = System.Text.RegularExpressions.Regex.Match(report, @"shards=\([^)]*\)").Value;
+            var shards = System.Text.RegularExpressions.Regex.Match(report, @"shards=\(.*?rebind_shared_by=\([^)]*\)\)").Value;
+            // The resolvers' allocation per job, sampled, and by how each job was answered.
+            shards += " " + System.Text.RegularExpressions.Regex.Match(report, @"alloc_b_per_job=\d+ alloc_by_path=\([^)]*\) alloc_by_step=\([^)]*\)").Value;
+            shards += " " + System.Text.RegularExpressions.Regex.Match(report, @"resolver_idle_ms=\S+ gate_sleep_ms=\S+ idle_wakes=\d+ idle_spin_takes=\d+").Value;
             Output.WriteLine($"engine N={count}: {jobsPerSecond / 1000.0:F0}k jobs/s, wall median {sorted[sorted.Length / 2]:F2} ms/frame (min {sorted[0]:F2}), " +
                 $"taken {taken} refused {refused}, fingerprint {fingerprint:X16}, {creations}, " +
                 $"monitor contentions {contentions / (double)(frames * jobs.Length):F3}/job, gc {collections} collections {paused.TotalMilliseconds:F1} ms paused, " +
