@@ -15,7 +15,9 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 public static class ResolveShards
 {
     public const int Maximum = 8;
-    private const int DefaultCount = 2;
+    // One by default: in Demon's Souls two shards took ~2 ms/frame off the worker's wait on the resolver but did not
+    // move the frame time, for ~45% more resolver CPU and 8-9 ms/frame spent waiting on the shared lock (2026-11-17).
+    private const int DefaultCount = 1;
 
     public static readonly int Default = Parse(Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_SHARDS"), out _);
 

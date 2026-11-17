@@ -253,12 +253,13 @@ public sealed class ParallelProgramPrefetchShardTests
     }
 
     [Theory]
-    [InlineData(null, 2, false)]
+    [InlineData(null, 1, false)]
+    [InlineData("2", 2, false)]
     [InlineData("1", 1, false)]
     [InlineData("3", 3, false)]
     [InlineData("0", 1, true)]
     [InlineData("64", ResolveShards.Maximum, true)]
-    [InlineData("two", 2, true)]
+    [InlineData("two", 1, true)]
     public void TheShardCountIsClampedAndNamesWhatItRefused(string? value, int count, bool problem)
     {
         Assert.Equal(count, ResolveShards.Parse(value, out var refused));

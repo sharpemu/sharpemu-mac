@@ -69,7 +69,7 @@ them for measurements or to isolate a problem.
 | `SHARPEMU_METAL_V2_BINARY_ARCHIVE_BUDGET_MB` | `8192` | Size bound of the archives on disk. |
 | `SHARPEMU_METAL_V2_ASYNC_PIPELINES` | on | `0` builds pipeline states on the GPU worker thread. |
 | `SHARPEMU_METAL_V2_ASYNC_LIBRARIES` | on | `0` compiles each shader library on the thread that needs it, not on the compile pool. |
-| `SHARPEMU_RESOLVE_SHARDS` | `2` | Threads that resolve draw and dispatch programs ahead of the GPU worker, 1 to 8. Each has its own queue and its own part of the resolve memo; a draw always goes to the same one. `1` restores the single resolver. Logged once at start; per-thread counts and the shared-lock wait are in the `shards=(...)` field of the `[METAL-V2][PERF]` prefetch counters. |
+| `SHARPEMU_RESOLVE_SHARDS` | `1` | Threads that resolve draw and dispatch programs ahead of the GPU worker, 1 to 8. With more than one, each has its own queue and its own part of the resolve memo, and a draw always goes to the same one. `1` is the single resolver; `2` measured no frame-time gain in Demon's Souls for more resolver CPU. Logged once at start; per-thread counts and the shared-lock wait are in the `shards=(...)` field of the `[METAL-V2][PERF]` prefetch counters. |
 | `SHARPEMU_METAL_V2_PIPELINE_LIMIT` | `8192` | Pipeline states kept before idle ones are released. `0` is unlimited. |
 | `SHARPEMU_METAL_V2_MODULE_LIMIT` | `2048` | The same for shader modules. |
 | `SHARPEMU_METAL_V2_SHADER_EVICTION` | on | `0` keeps every pipeline and module. |
