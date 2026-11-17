@@ -59,7 +59,9 @@ internal sealed partial class MetalRenderHost
         }
 
         EndEncoders(PassEndCause.Present);
-        var encoder = MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(EnsureCommandBuffer(), MetalProfiledEncoder.Blit, $"flip-copy {width}x{height}")
+            : MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {

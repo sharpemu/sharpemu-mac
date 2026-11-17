@@ -285,7 +285,9 @@ internal sealed partial class MetalRenderHost
 
     private unsafe void EncodeLodStatisticsPack(nint commandBuffer, in MetalGuestRange target, bool reset)
     {
-        var encoder = MetalNative.Send(commandBuffer, SelLodStatsComputeEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(commandBuffer, MetalProfiledEncoder.HostCompute, "lod-stats")
+            : MetalNative.Send(commandBuffer, SelLodStatsComputeEncoder);
         MetalMemoryTelemetry.ComputeEncoders.Add();
         if (encoder == 0)
         {

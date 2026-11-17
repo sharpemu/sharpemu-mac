@@ -2308,7 +2308,9 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         EncodeLabelBarrier(commandBuffer, copies);
-        var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(commandBuffer, MetalProfiledEncoder.Blit, $"label-copies n={copies.Length}")
+            : MetalNative.Send(commandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
@@ -2512,7 +2514,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             NoteLabelLanding(held, cause);
             EncodeLabelCopies(EnsureCommandBuffer(), held);
             ClearHeldLabelCopies();
-            // The barrier and the blit encoder are gap the pass profile cannot sample.
+            // Names the blit or scatter encoder's own record; the event barrier before it is gap.
             if (PassProfileEnabled)
             {
                 PassProfileNoteBetween($"label-copies n={copies}");

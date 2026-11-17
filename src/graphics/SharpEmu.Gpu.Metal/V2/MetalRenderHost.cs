@@ -416,6 +416,9 @@ internal sealed partial class MetalRenderHost :
         if (PassProfileEnabled)
         {
             _ppTransferCause = $"transfer:{cause}";
+            // A new transfer: the encoders it opens are named for its cause until it labels them.
+            _ppUnlabelled.Clear();
+            _ppEncoderCause = PassProfileCauseNames[(int)cause];
         }
 
         if (_preparation is null)
@@ -1700,7 +1703,9 @@ internal sealed partial class MetalRenderHost :
         }
 
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestFill);
-        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(context.CommandBuffer, MetalProfiledEncoder.Blit, "GuestFill")
+            : MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
@@ -1876,7 +1881,9 @@ internal sealed partial class MetalRenderHost :
         }
 
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
-        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(context.CommandBuffer, MetalProfiledEncoder.Blit, "GuestCopy")
+            : MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {

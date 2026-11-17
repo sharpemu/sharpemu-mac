@@ -71,7 +71,9 @@ internal sealed partial class MetalRenderHost
         }
 
         EncodeLabelBarrier(commandBuffer, copies);
-        var encoder = RetainEncoder(MetalNative.Send(commandBuffer, SelComputeEncoder));
+        var encoder = RetainEncoder(PassProfileEnabled
+            ? PassProfileOpenEncoder(commandBuffer, MetalProfiledEncoder.HostCompute, $"label-scatter n={copies.Length}")
+            : MetalNative.Send(commandBuffer, SelComputeEncoder));
         if (encoder == 0)
         {
             throw Fatal("A Metal compute encoder could not be created for held label copies.");

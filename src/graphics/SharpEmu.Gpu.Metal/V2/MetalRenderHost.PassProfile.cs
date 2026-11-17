@@ -15,13 +15,16 @@ namespace SharpEmu.Gpu.Metal.V2;
 // as it is and asks the GPU for timestamps at the stage boundaries of every render pass
 // and compute encoder (MTLCounterSamplingPointAtStageBoundary, which Apple silicon
 // supports), so a pass's time includes its real loads and stores and the frame keeps
-// its real shape. Encoders this does not sample (transfers, clears, staged stores,
-// label copies) show up as the gap before the next sampled encoder, charged to the
-// transfers recorded in between. One line per encoder, resolved when its submission
+// its real shape. Every other encoder the host opens on the command buffer being recorded
+// (transfer blits, the tiler's compute encoders, clears, fills, staged stores, label copies)
+// is opened through its pass descriptor with timestamps at its start and end
+// (PassProfileOpenEncoder) and gets a record of its own, so a gap left between two records
+// is time no encoder was running. One line per encoder, resolved when its submission
 // completes; scripts aggregate them by frame and by pass.
 internal sealed partial class MetalRenderHost
 {
-    internal static readonly bool PassProfileEnabled = string.Equals(
+    // Settable for the device tests, which turn it on around one host.
+    internal static bool PassProfileEnabled { get; set; } = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PROFILE_PASSES"), "1", StringComparison.Ordinal);
 
     private const nuint PassProfileSamples = 4096;
@@ -38,6 +41,8 @@ internal sealed partial class MetalRenderHost
     private static readonly nint SelSetEndOfEncoderSampleIndex = MetalNative.Selector("setEndOfEncoderSampleIndex:");
     private static readonly nint SelComputeEncoderWithDescriptor =
         MetalNative.Selector("computeCommandEncoderWithDescriptor:");
+    private static readonly nint SelBlitEncoderWithDescriptor = MetalNative.Selector("blitCommandEncoderWithDescriptor:");
+    private static readonly nint SelSetDispatchType = MetalNative.Selector("setDispatchType:");
     private static readonly nint SelResolveCounterRange = MetalNative.Selector("resolveCounterRange:");
     private static readonly nint SelSampleTimestamps = MetalNative.Selector("sampleTimestamps:gpuTimestamp:");
 
@@ -90,6 +95,20 @@ internal sealed partial class MetalRenderHost
     private ulong _ppCalGpu;
     private double _ppNsPerTick = 1.0;
     private bool _ppCalibrated;
+    // Records of encoders PassProfileOpenEncoder opened since the last transfer named itself
+    // (PassProfileNoteBetween): that label is theirs.
+    private readonly List<PassRecord> _ppUnlabelled = new();
+    // The cause of the transfer being encoded (BeginTransfer), the name of the encoders it opens.
+    private string? _ppEncoderCause;
+    private static readonly string[] PassProfileCauseNames = Enum.GetNames<MetalTransferCause>();
+    // Encoders recorded with no samples because the ring had wrapped onto unread ones.
+    private long _ppUnsampled;
+
+    /// <summary>Device tests: receives what the profile prints for each completed submission.</summary>
+    internal Action<string>? PassProfileOutputForTest { get; set; }
+
+    /// <summary>Device tests: shared compute encoders opened, each of which the profile records as k=compute.</summary>
+    internal long ComputeEncodersOpenedForTest => Interlocked.Read(ref _computeEncodersOpened);
 
     private bool PassProfileReady()
     {
@@ -110,6 +129,17 @@ internal sealed partial class MetalRenderHost
             Console.Error.WriteLine("[METAL-V2][PASS-PROF] stage-boundary counter sampling is not supported.");
             return false;
         }
+
+        // MTLCounterSamplingPoint: stage 0, draw 1, dispatch 2, tile dispatch 3, blit 4. Every
+        // encoder is sampled at its stage boundaries, through its pass descriptor's sample
+        // buffer attachments, which needs only the first.
+        var supportsSelector = MetalNative.Selector("supportsCounterSampling:");
+        Console.Error.WriteLine(
+            "[METAL-V2][PASS-PROF] counter sampling: stage=1 " +
+            $"draw={(MetalNative.SendBool(_device, supportsSelector, 1) ? 1 : 0)} " +
+            $"dispatch={(MetalNative.SendBool(_device, supportsSelector, 2) ? 1 : 0)} " +
+            $"tile_dispatch={(MetalNative.SendBool(_device, supportsSelector, 3) ? 1 : 0)} " +
+            $"blit={(MetalNative.SendBool(_device, supportsSelector, 4) ? 1 : 0)}");
 
         var sets = MetalNative.Send(_device, MetalNative.Selector("counterSets"));
         var count = sets == 0 ? 0 : MetalV2Native.SendValue(sets, MetalNative.Selector("count"));
@@ -186,8 +216,10 @@ internal sealed partial class MetalRenderHost
         return buffer;
     }
 
-    // Reserves sample indices for one encoder of the submission being recorded.
-    private PassRecord? PassProfileReserve(string kind, int samples)
+    // Reserves sample indices for one encoder of the submission being recorded. With
+    // keepUnsampled an encoder the ring has no samples for is still recorded, with none,
+    // so it is named and placed in the submission (us=?).
+    private PassRecord? PassProfileReserve(string kind, int samples, bool keepUnsampled = false)
     {
         if (!PassProfileReady())
         {
@@ -214,7 +246,25 @@ internal sealed partial class MetalRenderHost
             {
                 // The ring has wrapped onto samples not yet read: this encoder goes unsampled.
                 _ppSkipped++;
-                return null;
+                if (!keepUnsampled)
+                {
+                    return null;
+                }
+
+                _ppUnsampled++;
+                MetalV2Diagnostics.WarnOnce("pass-profile-unsampled",
+                    "[METAL-V2][PASS-PROF] the counter sample ring has wrapped onto unread samples: encoders are " +
+                    "recorded with us=? and counted as unsampled= on the sub line.");
+                var unsampled = new PassRecord
+                {
+                    Frame = _ppFrame,
+                    Index = submission.Records.Count,
+                    Kind = kind,
+                    Buffer = -1,
+                };
+                PassProfileTakeLeading(submission);
+                submission.Records.Add(unsampled);
+                return unsampled;
             }
 
             _ppCursorBuffer = next;
@@ -232,20 +282,89 @@ internal sealed partial class MetalRenderHost
         };
         _ppNextSample += samples;
         _ppOutstanding[_ppCursorBuffer]++;
+        PassProfileTakeLeading(submission);
+        submission.Records.Add(record);
+        return record;
+    }
+
+    private void PassProfileTakeLeading(PassSubmission submission)
+    {
         if (_ppLeading is not null && submission.Records.Count == 0)
         {
             submission.Leading = string.Join(',', _ppLeading);
             _ppLeading = null;
         }
-
-        submission.Records.Add(record);
-        return record;
     }
+
+    /// <summary>
+    /// Opens an encoder of the open command buffer with timestamps at its start and end and a
+    /// record of its own, named for site, or for the transfer being encoded when site is null.
+    /// Called only with the profile on, in place of the plain call. An encoder of another
+    /// command buffer (a prelude, a private one) is opened plain and not recorded: its records
+    /// would be resolved with a submission it is not part of. One the ring has no samples for
+    /// is opened plain and recorded unsampled.
+    /// </summary>
+    private nint PassProfileOpenEncoder(nint commandBuffer, MetalProfiledEncoder kind, string? site, bool concurrent = false)
+    {
+        var name = kind switch
+        {
+            MetalProfiledEncoder.Blit => "blit",
+            MetalProfiledEncoder.TilerCompute => "tiler-compute",
+            _ => "host-compute",
+        };
+        var record = commandBuffer == _commandBuffer && commandBuffer != 0
+            ? PassProfileReserve(name, 2, keepUnsampled: true)
+            : null;
+        if (record is not null)
+        {
+            if (site is not null)
+            {
+                // Its own operation: the encoders before it are done waiting for a label.
+                _ppUnlabelled.Clear();
+            }
+
+            record.Shape = site ?? _ppEncoderCause ?? "transfer";
+            record.End = "end";
+            _ppUnlabelled.Add(record);
+            _ppLast = record;
+        }
+
+        if (record is null || record.Buffer < 0)
+        {
+            return kind == MetalProfiledEncoder.Blit
+                ? MetalNative.Send(commandBuffer, SelBlitEncoder)
+                : concurrent
+                    ? MetalNative.Send(commandBuffer, SelComputeEncoderWithDispatchType, DispatchTypeConcurrent)
+                    : MetalNative.Send(commandBuffer, SelComputeEncoder);
+        }
+
+        var descriptor = kind == MetalProfiledEncoder.Blit
+            ? MetalNative.Send(MetalNative.Class("MTLBlitPassDescriptor"), MetalNative.Selector("blitPassDescriptor"))
+            : MetalNative.Send(MetalNative.Class("MTLComputePassDescriptor"), MetalNative.Selector("computePassDescriptor"));
+        var attachments = MetalNative.Send(descriptor, SelSampleBufferAttachments);
+        var slot = MetalNative.SendAtIndex(attachments, SelObjectAtIndex, 0);
+        MetalNative.SendVoid(slot, SelSetSampleBuffer, _ppBuffers[record.Buffer]);
+        MetalV2Native.SendVoidValue(slot, SelSetStartOfEncoderSampleIndex, (nuint)record.FirstSample);
+        MetalV2Native.SendVoidValue(slot, SelSetEndOfEncoderSampleIndex, (nuint)record.FirstSample + 1);
+        if (kind == MetalProfiledEncoder.Blit)
+        {
+            return MetalNative.Send(commandBuffer, SelBlitEncoderWithDescriptor, descriptor);
+        }
+
+        // MTLDispatchType: serial 0, concurrent 1, as the plain call would have opened it.
+        MetalV2Native.SendVoidValue(descriptor, SelSetDispatchType, concurrent ? (nuint)DispatchTypeConcurrent : 0);
+        return MetalNative.Send(commandBuffer, SelComputeEncoderWithDescriptor, descriptor);
+    }
+
+    nint IMetalSubmissionContext.OpenProfiledEncoder(
+        nint commandBuffer, MetalProfiledEncoder kind, string? site, bool concurrent) =>
+        PassProfileOpenEncoder(commandBuffer, kind, site, concurrent);
 
     /// <summary>Attaches stage-boundary timestamps to a render pass about to be encoded.</summary>
     private void PassProfileAttachRender(nint descriptor)
     {
         _ppOpen = null;
+        _ppUnlabelled.Clear();
         var record = PassProfileReserve("render", 4);
         if (record is null)
         {
@@ -318,6 +437,7 @@ internal sealed partial class MetalRenderHost
     /// <summary>Opens a sampled compute encoder, or returns 0 to let the caller open a plain one.</summary>
     private nint PassProfileComputeEncoder(nint commandBuffer)
     {
+        _ppUnlabelled.Clear();
         var record = PassProfileReserve("compute", 2);
         if (record is null)
         {
@@ -473,6 +593,19 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
+        if (_ppUnlabelled.Count > 0)
+        {
+            // The transfer, clear or copy that opened them: what they did and on how much.
+            foreach (var record in _ppUnlabelled)
+            {
+                record.Shape = $"{record.Shape} {what}";
+            }
+
+            _ppUnlabelled.Clear();
+            _ppEncoderCause = null;
+            return;
+        }
+
         if (_ppLast is not null && _ppCurrent is not null && _ppCurrent.Records.Contains(_ppLast))
         {
             (_ppLast.After ??= new List<string>()).Add(what);
@@ -492,6 +625,8 @@ internal sealed partial class MetalRenderHost
         }
 
         _ppOpen = null;
+        _ppUnlabelled.Clear();
+        _ppEncoderCause = null;
         if (_ppCurrent is not null)
         {
             _ppInFlight[serial] = _ppCurrent;
@@ -543,9 +678,24 @@ internal sealed partial class MetalRenderHost
         ulong lastEnd = 0;
         ulong firstStart = ulong.MaxValue;
         var lines = new System.Text.StringBuilder();
+        var kindMicroseconds = new SortedDictionary<string, double>(StringComparer.Ordinal);
+        var gaps = 0.0;
+        var unsampled = 0;
         foreach (var record in submission.Records)
         {
             Array.Clear(values);
+            if (record.Buffer < 0)
+            {
+                // Recorded with no samples (the ring had wrapped): named and placed, not timed.
+                unsampled++;
+                lines.Append(string.Create(
+                    culture,
+                    $"[METAL-V2][PASS-PROF] f={submission.Frame} s={serial} i={record.Index} k={record.Kind} " +
+                    $"us=? gap_us=? draws={record.Draws} tg=0 ld_mb=0.0 st_mb=0.0 end={record.End} " +
+                    $"a=[{record.Shape}] sh=[-] after=[-] n_after={record.After?.Count ?? 0} joins=0")).Append('\n');
+                continue;
+            }
+
             var data = MetalV2Native.SendRange(
                 _ppBuffers[record.Buffer], SelResolveCounterRange, (nuint)record.FirstSample, (nuint)record.SampleCount);
             _ppOutstanding[record.Buffer]--;
@@ -591,6 +741,8 @@ internal sealed partial class MetalRenderHost
             }
 
             sum += microseconds;
+            gaps += Math.Max(gap, 0.0);
+            kindMicroseconds[record.Kind] = kindMicroseconds.GetValueOrDefault(record.Kind) + microseconds;
             var shaders = record.Shaders is null
                 ? "-"
                 : string.Join(';', record.Shaders.OrderByDescending(pair => pair.Value).Take(6)
@@ -613,7 +765,11 @@ internal sealed partial class MetalRenderHost
             culture,
             $"[METAL-V2][PASS-PROF] sub f={submission.Frame} s={serial} encoders={submission.Records.Count} " +
             $"enc_ms={sum / 1000.0:F2} span_ms={span / 1000.0:F2} gpu_ms={gpuSeconds * 1000.0:F2} " +
-            $"skipped={_ppSkipped} leading=[{submission.Leading}]"));
-        Console.Error.WriteLine(lines.ToString());
+            $"skipped={_ppSkipped} leading=[{submission.Leading}] " +
+            $"kind_us=[{string.Join(',', kindMicroseconds.Select(pair => string.Create(culture, $"{pair.Key}:{pair.Value:F0}")))}] " +
+            $"gaps_us={gaps:F0} unsampled={unsampled} unsampled_total={_ppUnsampled}"));
+        var text = lines.ToString();
+        Console.Error.WriteLine(text);
+        PassProfileOutputForTest?.Invoke(text);
     }
 }

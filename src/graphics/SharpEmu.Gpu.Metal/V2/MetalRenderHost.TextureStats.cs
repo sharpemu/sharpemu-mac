@@ -87,7 +87,9 @@ internal sealed partial class MetalRenderHost
         try
         {
             EndEncoders(PassEndCause.Other);
-            var encoder = MetalNative.Send(EnsureCommandBuffer(), SelLodStatsComputeEncoder);
+            var encoder = PassProfileEnabled
+                ? PassProfileOpenEncoder(EnsureCommandBuffer(), MetalProfiledEncoder.HostCompute, "texture-stats")
+                : MetalNative.Send(EnsureCommandBuffer(), SelLodStatsComputeEncoder);
             if (encoder == 0)
             {
                 return;

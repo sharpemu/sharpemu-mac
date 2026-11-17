@@ -369,7 +369,10 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
 
                 if (encoder == 0)
                 {
-                    encoder = MetalNative.Send(commandBuffer, SelComputeEncoder);
+                    encoder = MetalRenderHost.PassProfileEnabled
+                        ? MetalTiler.ProfiledEncoder(
+                            ordering, commandBuffer, MetalProfiledEncoder.HostCompute, "staged-store-writeback", false)
+                        : MetalNative.Send(commandBuffer, SelComputeEncoder);
                     MetalMemoryTelemetry.ComputeEncoders.Add();
                     if (encoder == 0)
                     {
@@ -541,7 +544,9 @@ internal sealed unsafe class MetalStagedStorage(MetalGuestMemory memory, MetalSt
 
     private static nint BlitEncoder(nint commandBuffer, IMetalSubmissionContext? ordering)
     {
-        var encoder = MetalNative.Send(commandBuffer, SelBlitEncoder);
+        var encoder = MetalRenderHost.PassProfileEnabled
+            ? MetalTiler.ProfiledEncoder(ordering, commandBuffer, MetalProfiledEncoder.Blit, "staged-storage", false)
+            : MetalNative.Send(commandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {

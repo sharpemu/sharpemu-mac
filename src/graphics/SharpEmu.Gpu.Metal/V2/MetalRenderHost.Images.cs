@@ -409,7 +409,9 @@ internal sealed partial class MetalRenderHost
             MetalTransferCause.ImageCopy, source.Texture, destination.Texture);
         // A copy rewrites the destination whether or not its caller marks it written.
         destination.NoteContentChanged();
-        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(context.CommandBuffer, MetalProfiledEncoder.Blit, "ImageCopy")
+            : MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {

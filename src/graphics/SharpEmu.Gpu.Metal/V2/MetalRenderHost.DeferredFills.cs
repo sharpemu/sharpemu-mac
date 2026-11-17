@@ -209,7 +209,9 @@ internal sealed partial class MetalRenderHost
         _encodingDeferredFills = true;
         try
         {
-            var encoder = MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
+            var encoder = PassProfileEnabled
+                ? PassProfileOpenEncoder(EnsureCommandBuffer(), MetalProfiledEncoder.Blit, $"deferred-fills n={_deferredFills.Count}")
+                : MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
             MetalMemoryTelemetry.BlitEncoders.Add();
             if (encoder == 0)
             {

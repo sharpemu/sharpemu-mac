@@ -397,7 +397,9 @@ internal sealed partial class MetalRenderHost
         }
 
         var readback = _guestMemory.CreateReportBuffer(total * depth, "SharpEmu TargetSnapshot", out var contents, out _);
-        var blit = MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
+        var blit = PassProfileEnabled
+            ? PassProfileOpenEncoder(EnsureCommandBuffer(), MetalProfiledEncoder.Blit, "target-snapshot")
+            : MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (blit == 0)
         {
@@ -748,7 +750,9 @@ internal sealed partial class MetalRenderHost
             try
             {
                 EndEncoders(PassEndCause.Other);
-                var blit = MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
+                var blit = PassProfileEnabled
+                    ? PassProfileOpenEncoder(EnsureCommandBuffer(), MetalProfiledEncoder.Blit, "target-dump")
+                    : MetalNative.Send(EnsureCommandBuffer(), SelBlitEncoder);
                 MetalMemoryTelemetry.BlitEncoders.Add();
                 if (blit == 0)
                 {
