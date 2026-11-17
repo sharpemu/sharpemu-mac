@@ -162,6 +162,72 @@ public sealed partial class MetalImageBudgetTests
         Assert.Equal(expected, rig.ReadGuest(GuestBase, ImageSize));
     }
 
+    // Another store's publish had the worker recording the image's writeback - the cache lock
+    // held, nothing fenced yet - when this managed write asked about fences; it reached the cache
+    // behind it, where the image was no longer GPU-written. Demon's Souls read an animation file
+    // into a reused 2048x2048 render target's memory that way: the read landed under the
+    // target's writeback, and Havok loaded texels.
+    [Fact]
+    public void AManagedWriteThatReachesTheCacheBehindAWritebackBeingRecordedWaitsForIt()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        _ = AGpuWrittenImageOverStaleMemory(rig, GuestBase, 0x5A, out _);
+        IGuestImageStore store = rig.Cache;
+        rig.CacheOwner.RunOnWorker = work =>
+        {
+            work();
+            return true;
+        };
+
+        var first = Environment.CurrentManagedThreadId;
+        Task<bool>? second = null;
+        ulong writebackSerial = 0;
+        ulong secondWaitedFor = 0;
+        var fencedAtTransfer = -1;
+        using var landed = new ManualResetEventSlim();
+        rig.CacheOwner.OnBeginTransfer = () =>
+        {
+            if (second is not null)
+            {
+                return;
+            }
+
+            // The first store's writeback is about to be recorded, under the cache lock.
+            fencedAtTransfer = rig.Cache.FencedWritebackCount;
+            writebackSerial = rig.Harness.SubmissionSerial;
+            _ = rig.Cache.TakeLockedCpuWrites();
+            second = Task.Run(() => store.MarkPreciseCpuWrite(GuestBase + StoreOffset, 8));
+            // Until the second write is past its question about fences and waits for that lock.
+            long reached = 0;
+            _ = SpinWait.SpinUntil(() => (reached += rig.Cache.TakeLockedCpuWrites().Owner) != 0, TimeSpan.FromSeconds(10));
+        };
+        rig.CacheOwner.WaitOffWorker = (serial, _) =>
+        {
+            if (Environment.CurrentManagedThreadId != first)
+            {
+                Volatile.Write(ref secondWaitedFor, serial);
+                return landed.Wait(TimeSpan.FromSeconds(10));
+            }
+
+            // The GPU reaches the writeback only once the second write has waited for it, or
+            // has gone ahead without.
+            var other = second!;
+            SpinWait.SpinUntil(() => other.IsCompleted || Volatile.Read(ref secondWaitedFor) != 0, TimeSpan.FromSeconds(10));
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            landed.Set();
+            return true;
+        };
+
+        Assert.True(store.MarkPreciseCpuWrite(GuestBase + 0x40, 8));
+        Assert.NotNull(second);
+        Assert.True(second.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(0, fencedAtTransfer);
+        Assert.NotEqual(0UL, writebackSerial);
+        Assert.Equal(writebackSerial, Volatile.Read(ref secondWaitedFor));
+    }
+
     // The GPU worker making a managed write cannot wait for a submission it may still be
     // recording: it commits and waits for the GPU instead, and never deadlocks on itself.
     [Fact]
