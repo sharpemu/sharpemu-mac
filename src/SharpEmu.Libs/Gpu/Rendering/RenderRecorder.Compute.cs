@@ -87,8 +87,8 @@ internal sealed partial class RenderRecorder
     // Each program and HTILE surface NoteHtileStores reported, once.
     private readonly HashSet<(ulong Hash, ulong Address)> _loggedHtileStores = new();
 
-    // Told when a dispatch is consumed by a host fill or copy (ParallelProgramPrefetch.NoteDispatchEffect).
-    public Action? DispatchEffect { get; set; }
+    // Told when a dispatch is consumed by a host fill or copy, and which (ParallelProgramPrefetch.NoteDispatchEffect).
+    public Action<DispatchEffectKind>? DispatchEffect { get; set; }
 
     public void Record(ResolvedDispatch record)
     {
@@ -147,9 +147,10 @@ internal sealed partial class RenderRecorder
         if (record.IndirectArgumentsAddress == 0 && !record.Retried)
         {
             bool consumed;
+            DispatchEffectKind effect;
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DispatchConsume))
             {
-                consumed = TryConsume(record, program, out var disposition);
+                consumed = TryConsume(record, program, out var disposition, out effect);
                 if (consumed)
                 {
                     RenderExecutor.TraceFrameDispatch(_host, disposition!, shader, program.Hash, record.GroupsX, record.GroupsY, record.GroupsZ, 0);
@@ -166,7 +167,7 @@ internal sealed partial class RenderRecorder
             if (consumed)
             {
                 // A host fill or copy in its place: a dispatch resolved ahead of it does not stand (ParallelProgramPrefetch).
-                DispatchEffect?.Invoke();
+                DispatchEffect?.Invoke(effect);
                 _host.ResetBindings();
                 return;
             }
@@ -319,13 +320,15 @@ internal sealed partial class RenderRecorder
 
     // The host consumers, in the order the dispatch is offered to them. disposition names the one
     // that took it, for the frame trace.
-    private bool TryConsume(ResolvedDispatch record, ShaderProgramInfo program, out string? disposition)
+    private bool TryConsume(ResolvedDispatch record, ShaderProgramInfo program, out string? disposition, out DispatchEffectKind effect)
     {
         disposition = null;
+        effect = DispatchEffectKind.Unknown;
         if (record.MetadataClearCount != 0 &&
             TryClearMetadata(record.MetadataClear, program, program.Frontend is not null && program.StoresUniformValues))
         {
             disposition = "metadata-clear";
+            effect = DispatchEffectKind.MetadataClear;
             return true;
         }
 
@@ -341,6 +344,7 @@ internal sealed partial class RenderRecorder
             if (consumed)
             {
                 disposition = "constant-fill";
+                effect = DispatchEffectKind.ConstantFill;
                 return true;
             }
         }
@@ -348,8 +352,9 @@ internal sealed partial class RenderRecorder
         if (record.BoundedFill is { } bounded)
         {
             ReadOnlySpan<uint> pattern = bounded.Pattern;
-            var consumed = (bounded.Uniform && _host.TryFillDccMetadata(bounded.Address, bounded.Size, bounded.Value)) ||
-                           _host.TryClearImageFromKernelFill(bounded.Address, bounded.Size, pattern[..bounded.PatternLength]);
+            // Which of the two took it: a DCC metadata fill and a kernel fill change different host state.
+            var dcc = bounded.Uniform && _host.TryFillDccMetadata(bounded.Address, bounded.Size, bounded.Value);
+            var consumed = dcc || _host.TryClearImageFromKernelFill(bounded.Address, bounded.Size, pattern[..bounded.PatternLength]);
             if (RenderTrace.Enabled && RenderTrace.MetadataClear())
             {
                 RenderTrace.Write($"Bounded fill: shader=0x{program.Hash:X16} address=0x{bounded.Address:X16} size=0x{bounded.Size:X} value=0x{bounded.Value:X8} consumed={consumed}");
@@ -358,6 +363,7 @@ internal sealed partial class RenderRecorder
             if (consumed)
             {
                 disposition = "bounded-fill";
+                effect = dcc ? DispatchEffectKind.DccFill : DispatchEffectKind.KernelFill;
                 return true;
             }
         }
@@ -375,6 +381,7 @@ internal sealed partial class RenderRecorder
             {
                 record.Program.KnownWrite?.Release();
                 disposition = "bounded-copy";
+                effect = DispatchEffectKind.KernelCopy;
                 return true;
             }
 
@@ -401,6 +408,7 @@ internal sealed partial class RenderRecorder
                 if (registered || filledOnHost)
                 {
                     disposition = "image-clear";
+                    effect = DispatchEffectKind.ImageClear;
                     return true;
                 }
 
@@ -413,6 +421,7 @@ internal sealed partial class RenderRecorder
             }
 
             disposition = "image-clear";
+            effect = DispatchEffectKind.ImageClear;
             return true;
         }
 

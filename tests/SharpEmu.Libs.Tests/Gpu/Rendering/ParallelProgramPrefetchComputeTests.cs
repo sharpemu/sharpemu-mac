@@ -46,6 +46,8 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         internal bool Raced;
         private int _crossChecksSinceRace;
         internal int Checks, CrossChecks;
+        internal bool FillWritesLogged = true;
+        public bool KernelFillWritesLogged => FillWritesLogged;
         public void BeginConcurrentResolve() { }
         public object EndConcurrentResolve() => this;
         public bool IsStillCurrent(object assumptions)
@@ -163,6 +165,81 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         Assert.False(Take(banks, ahead));
         Assert.Equal(1, Refused(ParallelProgramPrefetch.ComputeRefusal.Effects));
         Assert.True(Take(banks, behind));
+    }
+
+    // A kernel fill or copy on a host that logs its write (KernelFillWritesLogged) does not refuse a job resolved ahead of
+    // it for itself: the take's ownership check, which tests the host's write log over what the job read, decides. A job
+    // whose reads the logged write covers is refused (Ownership); one whose reads it does not cover is taken.
+    [Theory]
+    [InlineData(DispatchEffectKind.KernelFill, false)]
+    [InlineData(DispatchEffectKind.KernelFill, true)]
+    [InlineData(DispatchEffectKind.KernelCopy, false)]
+    [InlineData(DispatchEffectKind.KernelCopy, true)]
+    public void AKernelFillOrCopyRefusesOnlyAJobWhoseReadsItsLoggedWriteCovers(DispatchEffectKind kind, bool covers)
+    {
+        var banks = Banks().Snapshot();
+        var ahead = Resolved(banks, gate: 3);
+        // Item 3 is the dispatch consumed as the fill or copy; the host logged its write over the destination, which
+        // covers what the job read or not.
+        _prefetch.NoteDispatchEffect(kind);
+        _concurrent.CurrentAcrossDispatches = !covers;
+        _prefetch.AdvanceGate(4);
+        Assert.Equal(!covers, Take(banks, ahead));
+        Assert.Equal(1, _concurrent.CrossChecks);
+        var refused = _prefetch.TakeComputeCounters().Refused;
+        Assert.Equal(0, refused[(int)ParallelProgramPrefetch.ComputeRefusal.Effects]);
+        Assert.Equal(covers ? 1 : 0, refused[(int)ParallelProgramPrefetch.ComputeRefusal.Ownership]);
+        var report = _prefetch.TakeComputeReport();
+        Assert.Contains($"{(kind == DispatchEffectKind.KernelFill ? "kernel_fill" : "kernel_copy")}=1", report);
+        Assert.Contains($"exact_effects=(mode=on,refused={(covers ? 1 : 0)},taken={(covers ? 0 : 1)})", report);
+    }
+
+    // The blunt rule stands for every other kind, for a kernel fill or copy with SHARPEMU_PREFETCH_EXACT_EFFECTS=0 (the
+    // property), and on a host that does not log them: the job is refused for the effect, unchecked.
+    [Theory]
+    [InlineData(DispatchEffectKind.KernelFill, false, true)]
+    [InlineData(DispatchEffectKind.KernelCopy, false, true)]
+    [InlineData(DispatchEffectKind.KernelCopy, true, false)]
+    [InlineData(DispatchEffectKind.Unknown, true, true)]
+    [InlineData(DispatchEffectKind.Consumed, true, true)]
+    [InlineData(DispatchEffectKind.ImageCopy, true, true)]
+    [InlineData(DispatchEffectKind.KnownWrite, true, true)]
+    [InlineData(DispatchEffectKind.MetadataClear, true, true)]
+    [InlineData(DispatchEffectKind.ConstantFill, true, true)]
+    [InlineData(DispatchEffectKind.DccFill, true, true)]
+    [InlineData(DispatchEffectKind.ImageClear, true, true)]
+    public void TheBluntRuleRefusesEveryOtherKindAndAllOfThemWhenExactEffectsAreOff(DispatchEffectKind kind, bool exact, bool logged)
+    {
+        _prefetch.ExactEffects = exact;
+        _concurrent.FillWritesLogged = logged;
+        var banks = Banks().Snapshot();
+        var ahead = Resolved(banks, gate: 3);
+        var behind = _prefetch.SubmitCompute(banks, 4, Initiator, 4, 2, 1, false);
+        _prefetch.NoteDispatchEffect(kind);
+        _prefetch.AdvanceGate(4);
+        _prefetch.WaitIdle();
+        Assert.False(Take(banks, ahead));
+        Assert.Equal(0, _concurrent.CrossChecks);
+        Assert.Equal(1, Refused(ParallelProgramPrefetch.ComputeRefusal.Effects));
+        Assert.True(Take(banks, behind));
+        Assert.Contains($"exact_effects=(mode={(exact && logged ? "on" : "off")},refused=0,taken=0)", _prefetch.TakeComputeReport());
+    }
+
+    // =verify resolves a job taken across a kernel fill again and finds the same program.
+    [Fact]
+    public void VerifyPassesAJobTakenAcrossAKernelFill()
+    {
+        _prefetch.LookaheadMode = ParallelProgramPrefetch.DrawLookaheadMode.Verify;
+        var banks = Banks().Snapshot();
+        var ahead = Resolved(banks, gate: 3);
+        _prefetch.NoteDispatchEffect(DispatchEffectKind.KernelFill);
+        _prefetch.AdvanceGate(4);
+        var resolutions = _pipelines.ComputeAheadResolutions;
+        Assert.True(Take(banks, ahead));
+        Assert.Equal(resolutions + 1, _pipelines.ComputeAheadResolutions);
+        var report = _prefetch.TakeComputeReport();
+        Assert.Contains("exact_effects=(mode=on,refused=0,taken=1)", report);
+        Assert.EndsWith("dispatch_verify=(verified=1,raced=0,failed=0)", report);
     }
 
     // A collector call that noted an effect refuses the dispatch jobs resolved ahead of it as a dispatch's effect does;

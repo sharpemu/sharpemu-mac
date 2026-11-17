@@ -100,6 +100,13 @@ public interface IConcurrentResolveHost
     // its take checked with IsStillCurrentAcrossDispatches; only a host whose check covers what those dispatches write.
     bool PrefetchedDrawsCrossDispatches => false;
 
+    // A dispatch the recorder consumed as a kernel fill or copy (DispatchEffectKind.KernelFill, KernelCopy: the host's
+    // TryClearImageFromKernelFill, TryCopyWordsOnHost) changed what a resolution reads only as a recorded GPU write
+    // over its destination does, and logged that write where IsStillCurrentAcrossDispatches finds it, or wrote
+    // nothing. A dispatch job resolved ahead of such a dispatch is then checked as across any other dispatch, instead
+    // of refused for the effect (ParallelProgramPrefetch.ExactEffects). False keeps the blunt refusal.
+    bool KernelFillWritesLogged => false;
+
     // On the render thread, for a dispatch's resolution that may have read guest memory before the dispatches ahead of
     // it ran: the answers hold, and none of the GPU writes those dispatches recorded covers what it read.
     bool IsStillCurrentAcrossDispatches(object assumptions) => IsStillCurrent(assumptions);
@@ -116,6 +123,32 @@ public interface IConcurrentResolveHost
     void PrepareBindingsAhead(in ShaderStageResources stage, bool dispatch)
     {
     }
+}
+
+// What a dispatch did beyond encoding GPU work (IProgramPrefetch.NoteDispatchEffect).
+public enum DispatchEffectKind : byte
+{
+    // A caller that names no kind.
+    Unknown,
+    // RenderExecutor.Dispatch: the provider ran the kernel itself (a CPU prediction consumed, a masked dword copy).
+    Consumed,
+    // RenderExecutor.Dispatch: a frontend image copy.
+    ImageCopy,
+    // RenderExecutor.Dispatch: CPU-predicted writes.
+    KnownWrite,
+    // RenderRecorder.TryConsume: a metadata clear.
+    MetadataClear,
+    // RenderRecorder.TryConsume: a constant fill as an image clear or an absorbed DCC fill.
+    ConstantFill,
+    // RenderRecorder.TryConsume: a bounded uniform fill of DCC metadata (TryFillDccMetadata).
+    DccFill,
+    // RenderRecorder.TryConsume: a bounded fill as a kernel fill (TryClearImageFromKernelFill).
+    KernelFill,
+    // RenderRecorder.TryConsume: a bounded copy (TryCopyWordsOnHost).
+    KernelCopy,
+    // RenderRecorder.TryConsume: a compute image clear.
+    ImageClear,
+    Count,
 }
 
 // Program resolutions computed ahead of their draws. A draw takes one only when it was resolved
@@ -136,6 +169,10 @@ public interface IProgramPrefetch
     void NoteDispatchEffect()
     {
     }
+
+    // As NoteDispatchEffect, naming what the dispatch did (ParallelProgramPrefetch counts each kind and refuses some
+    // exactly rather than bluntly).
+    void NoteDispatchEffect(DispatchEffectKind kind) => NoteDispatchEffect();
 
     // The dispatch running now resolved this program (the look-ahead verify names the dispatches a draw looked over).
     void NoteDispatchProgram(ComputeProgram program)

@@ -74,6 +74,39 @@ public sealed unsafe partial class MetalClearFoldingTests
         concurrent.ReleaseAssumptions(assumptions);
     }
 
+    // A kernel copy consumed because its destination already holds the result writes nothing, so a resolution that read
+    // the destination before it stands across it (KernelFillWritesLogged: the take leaves a consumed kernel fill or copy
+    // to this check); a store logged over the destination, as an intercepted fill or copy logs, refuses it.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AResolutionStandsAcrossAnIdenticalKernelCopyOfWhatItReadButNotAcrossALoggedFill(bool fill)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.HostKernelCopyMode = MetalHostKernelCopyMode.Identical;
+        WriteKernelSource(rig);
+        WriteKernelResult(rig);
+        var concurrent = (IConcurrentResolveHost)host;
+        Assert.True(concurrent.KernelFillWritesLogged);
+        var assumptions = ResolveWordConcurrently(host, KernelDestination + 5 * sizeof(uint));
+
+        if (fill)
+        {
+            // What TryInterceptKernelFill notes for the bytes it clears.
+            host.NoteGuestMemoryWrite(KernelDestination, KernelBytes, MetalGpuWriteOrigin.Fill);
+        }
+        else
+        {
+            Assert.True(host.TryCopyWordsOnHost(KernelDestination, KernelSource, KernelPeriod, KernelWords));
+            Assert.Equal(1, host.KernelCopiesElided);
+        }
+
+        Assert.Equal(!fill, concurrent.IsStillCurrentAcrossDispatches(assumptions));
+        concurrent.ReleaseAssumptions(assumptions);
+    }
+
     // A resolution (a draw's resolved ahead of dispatches, ParallelProgramPrefetch.SubmitDrawAhead, or a dispatch's) read
     // a destination word as the source of the pending copy that writes it, dropping the copy's owned answer. A dispatch
     // it was resolved ahead of then stores: over the word read (that store, not the copy, is now the word's latest

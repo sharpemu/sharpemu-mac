@@ -61,6 +61,13 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // and the copies read through as a dispatch's does (IsConcurrentResolveStillCurrentAcrossDispatches).
     bool IConcurrentResolveHost.PrefetchedDrawsCrossDispatches => true;
 
+    // A consumed kernel fill or copy (TryClearImageFromKernelFill, TryCopyWordsOnHost; MetalRenderHost.KernelFills) is
+    // either intercepted, which does the bookkeeping a storage store into its destination would and logs that write
+    // (TryInterceptKernelFill, TryInterceptKernelCopy: NoteGuestMemoryWrite -> MetalGpuWriteRanges.Note -> LogWrite),
+    // or found identical, which writes nothing (TakeIdenticalKernel). So IsConcurrentResolveStillCurrent sees it as it
+    // sees a dispatch's store. A DCC or constant fill and an image clear are not logged this way and stay blunt.
+    bool IConcurrentResolveHost.KernelFillWritesLogged => true;
+
     bool IConcurrentResolveHost.IsStillCurrentAcrossDispatches(object assumptions) => IsConcurrentResolveStillCurrentAcrossDispatches(assumptions);
 
     private long _writeLogRefusals;

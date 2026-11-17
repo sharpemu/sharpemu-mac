@@ -48,6 +48,7 @@ public sealed class ParallelProgramPrefetchDrawLookaheadTests : IDisposable
         internal bool CurrentAcrossDispatches = true;
         internal int Checks, CrossChecks;
         public bool PrefetchedDrawsCrossDispatches => true;
+        public bool KernelFillWritesLogged => true;
         public void BeginConcurrentResolve() { }
         public object EndConcurrentResolve() => this;
         public bool IsStillCurrent(object assumptions)
@@ -160,6 +161,22 @@ public sealed class ParallelProgramPrefetchDrawLookaheadTests : IDisposable
         var counters = Counters();
         Assert.Equal((2L, 1L), (counters.Jobs, counters.Taken));
         Assert.Equal(1, counters.Refused[(int)ParallelProgramPrefetch.DrawLookaheadRefusal.Effects]);
+    }
+
+    // A draw's take keeps the blunt rule for a kernel fill or copy the host logs, which a dispatch's take leaves to its
+    // ownership check (ParallelProgramPrefetch.ExactEffects).
+    [Theory]
+    [InlineData(DispatchEffectKind.KernelFill)]
+    [InlineData(DispatchEffectKind.KernelCopy)]
+    public void AKernelFillOrCopyStillRefusesTheDrawsResolvedAheadOfIt(DispatchEffectKind kind)
+    {
+        var banks = Banks().Snapshot();
+        var ahead = Resolved(banks, gate: 0, fullGate: 1);
+        _prefetch.NoteDispatchEffect(kind);
+        _prefetch.AdvanceGate(1);
+        Assert.False(Take(banks, ahead));
+        Assert.Equal(1, Counters().Refused[(int)ParallelProgramPrefetch.DrawLookaheadRefusal.Effects]);
+        Assert.Equal(0, _concurrent.CrossChecks);
     }
 
     [Fact]
