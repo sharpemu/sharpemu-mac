@@ -469,7 +469,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // (IConcurrentResolveHost.KernelFillWritesLogged) are noted apart (_lastExactDispatchEffect): a dispatch job resolved
     // ahead of one is not refused for it, since the take's IsStillCurrentAcrossDispatches already refuses a job whose
     // reads a write logged since its resolution began covers, the fill's or copy's as any dispatch's store. Every
-    // other kind keeps the blunt refusal. A draw's take still refuses on either (TryTakeGraphics).
+    // other kind keeps the blunt refusal. A draw's take over them follows the same rule (ExactDrawEffects): its
+    // resolution's reads are answers of the same kind, and its take makes the same check.
     public void NoteDispatchEffect(DispatchEffectKind kind)
     {
         Interlocked.Increment(ref _dispatchEffects[(int)kind]);
@@ -485,6 +486,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // SHARPEMU_PREFETCH_EXACT_EFFECTS=0 refuses dispatch jobs for every effect kind again. Tests set it on one instance.
     internal bool ExactEffects { get; set; } = ExactEffectsDefault;
 
+    // SHARPEMU_PREFETCH_EXACT_EFFECTS=dispatch keeps the blunt rule for a draw's take only (and =0 for both).
+    internal bool ExactDrawEffects { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_PREFETCH_EXACT_EFFECTS") != "dispatch";
+
     // The last kernel fill or copy noted exactly (NoteDispatchEffect), as _lastDispatchEffect; -1 while none was.
     private long _lastExactDispatchEffect = -1;
 
@@ -492,6 +497,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // refused them) that the take refused anyway (ownership or write log) or took.
     private readonly long[] _dispatchEffects = new long[(int)DispatchEffectKind.Count];
     private long _exactEffectRefused, _exactEffectTaken;
+    private long _exactDrawEffectRefused, _exactDrawEffectTaken;
 
     private static readonly string[] DispatchEffectNames =
         ["unknown", "consumed", "image_copy", "known_write", "metadata_clear", "constant_fill", "dcc_fill", "kernel_fill", "kernel_copy", "image_clear"];
@@ -791,11 +797,18 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             : !lookedAhead ? (_concurrent.IsStillCurrent(job.Assumptions!) ? DrawLookaheadRefusal.Count : DrawLookaheadRefusal.Ownership)
             // A collector call or a dispatch that ran after the resolution began (gate above ExecutedAtStart) noted an effect.
             : Volatile.Read(ref _lastCollectEffect) >= job.ExecutedAtStart ? DrawLookaheadRefusal.CollectEffects
-            // Exact effects too: the draw's take keeps the blunt rule (NoteDispatchEffect).
-            : Math.Max(Volatile.Read(ref _lastDispatchEffect), Volatile.Read(ref _lastExactDispatchEffect)) >= job.ExecutedAtStart
+            // A logged kernel fill or copy is left to the ownership check below, as for a dispatch's take (ExactDrawEffects).
+            : Math.Max(Volatile.Read(ref _lastDispatchEffect), ExactDrawEffects ? -1 : Volatile.Read(ref _lastExactDispatchEffect)) >= job.ExecutedAtStart
                 ? DrawLookaheadRefusal.Effects
             : !_concurrent.IsStillCurrentAcrossDispatches(job.Assumptions!) ? DrawLookaheadRefusal.Ownership
             : DrawLookaheadRefusal.Count;
+        // A kernel fill or copy the blunt rule would have refused the draw for: the ownership check decided instead.
+        if (lookedAhead && ExactDrawEffects && refusal is DrawLookaheadRefusal.Count or DrawLookaheadRefusal.Ownership &&
+            Volatile.Read(ref _lastExactDispatchEffect) >= job.ExecutedAtStart)
+        {
+            Interlocked.Increment(ref refusal == DrawLookaheadRefusal.Count ? ref _exactDrawEffectTaken : ref _exactDrawEffectRefused);
+        }
+
         // =verify keeps a taken look-ahead's assumptions to its comparison (VerifyLookahead): a difference whose answers
         // changed after the take is a race, not a hole.
         var verifies = refusal == DrawLookaheadRefusal.Count && lookedAhead && LookaheadMode == DrawLookaheadMode.Verify;
@@ -1214,7 +1227,10 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
         return builder.Append(") exact_effects=(mode=").Append(ExactEffects && _concurrent.KernelFillWritesLogged ? "on" : "off")
             .Append(",refused=").Append(Interlocked.Exchange(ref _exactEffectRefused, 0))
-            .Append(",taken=").Append(Interlocked.Exchange(ref _exactEffectTaken, 0)).Append(')').ToString();
+            .Append(",taken=").Append(Interlocked.Exchange(ref _exactEffectTaken, 0))
+            .Append(",draws=").Append(ExactDrawEffects ? "on" : "off")
+            .Append(",draw_refused=").Append(Interlocked.Exchange(ref _exactDrawEffectRefused, 0))
+            .Append(",draw_taken=").Append(Interlocked.Exchange(ref _exactDrawEffectTaken, 0)).Append(')').ToString();
     }
 
     // Why a draw's job was not resolved when its draw took it: still gated on the work before it, the resolving

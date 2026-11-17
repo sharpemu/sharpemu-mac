@@ -191,7 +191,7 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         Assert.Equal(covers ? 1 : 0, refused[(int)ParallelProgramPrefetch.ComputeRefusal.Ownership]);
         var report = _prefetch.TakeComputeReport();
         Assert.Contains($"{(kind == DispatchEffectKind.KernelFill ? "kernel_fill" : "kernel_copy")}=1", report);
-        Assert.Contains($"exact_effects=(mode=on,refused={(covers ? 1 : 0)},taken={(covers ? 0 : 1)})", report);
+        Assert.Contains($"exact_effects=(mode=on,refused={(covers ? 1 : 0)},taken={(covers ? 0 : 1)},", report);
     }
 
     // The blunt rule stands for every other kind, for a kernel fill or copy with SHARPEMU_PREFETCH_EXACT_EFFECTS=0 (the
@@ -222,7 +222,7 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         Assert.Equal(0, _concurrent.CrossChecks);
         Assert.Equal(1, Refused(ParallelProgramPrefetch.ComputeRefusal.Effects));
         Assert.True(Take(banks, behind));
-        Assert.Contains($"exact_effects=(mode={(exact && logged ? "on" : "off")},refused=0,taken=0)", _prefetch.TakeComputeReport());
+        Assert.Contains($"exact_effects=(mode={(exact && logged ? "on" : "off")},refused=0,taken=0,", _prefetch.TakeComputeReport());
     }
 
     // =verify resolves a job taken across a kernel fill again and finds the same program.
@@ -238,7 +238,7 @@ public sealed class ParallelProgramPrefetchComputeTests : IDisposable
         Assert.True(Take(banks, ahead));
         Assert.Equal(resolutions + 1, _pipelines.ComputeAheadResolutions);
         var report = _prefetch.TakeComputeReport();
-        Assert.Contains("exact_effects=(mode=on,refused=0,taken=1)", report);
+        Assert.Contains("exact_effects=(mode=on,refused=0,taken=1,", report);
         Assert.EndsWith("dispatch_verify=(verified=1,raced=0,failed=0)", report);
     }
 

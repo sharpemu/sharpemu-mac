@@ -163,13 +163,45 @@ public sealed class ParallelProgramPrefetchDrawLookaheadTests : IDisposable
         Assert.Equal(1, counters.Refused[(int)ParallelProgramPrefetch.DrawLookaheadRefusal.Effects]);
     }
 
-    // A draw's take keeps the blunt rule for a kernel fill or copy the host logs, which a dispatch's take leaves to its
-    // ownership check (ParallelProgramPrefetch.ExactEffects).
+    // A kernel fill or copy the host logs does not refuse the draws resolved ahead of it by itself: the take's ownership
+    // check decides, as for a dispatch's take (ParallelProgramPrefetch.ExactDrawEffects).
     [Theory]
     [InlineData(DispatchEffectKind.KernelFill)]
     [InlineData(DispatchEffectKind.KernelCopy)]
-    public void AKernelFillOrCopyStillRefusesTheDrawsResolvedAheadOfIt(DispatchEffectKind kind)
+    public void AKernelFillOrCopyLeavesTheDrawsResolvedAheadOfItToTheOwnershipCheck(DispatchEffectKind kind)
     {
+        var banks = Banks().Snapshot();
+        var ahead = Resolved(banks, gate: 0, fullGate: 1);
+        _prefetch.NoteDispatchEffect(kind);
+        _prefetch.AdvanceGate(1);
+        Assert.True(Take(banks, ahead));
+        Assert.Equal(0, Counters().Refused[(int)ParallelProgramPrefetch.DrawLookaheadRefusal.Effects]);
+        Assert.Equal(1, _concurrent.CrossChecks);
+    }
+
+    [Theory]
+    [InlineData(DispatchEffectKind.KernelFill)]
+    [InlineData(DispatchEffectKind.KernelCopy)]
+    public void AKernelFillOrCopyOverWhatTheDrawReadRefusesItForOwnership(DispatchEffectKind kind)
+    {
+        var banks = Banks().Snapshot();
+        var ahead = Resolved(banks, gate: 0, fullGate: 1);
+        _prefetch.NoteDispatchEffect(kind);
+        _prefetch.AdvanceGate(1);
+        _concurrent.CurrentAcrossDispatches = false;
+        Assert.False(Take(banks, ahead));
+        Assert.Equal(1, Counters().Refused[(int)ParallelProgramPrefetch.DrawLookaheadRefusal.Ownership]);
+    }
+
+    // SHARPEMU_PREFETCH_EXACT_EFFECTS=dispatch (and =0): the draw's take refuses on a kernel fill or copy as on any effect.
+    [Theory]
+    [InlineData(DispatchEffectKind.KernelFill, false, true)]
+    [InlineData(DispatchEffectKind.KernelCopy, false, true)]
+    [InlineData(DispatchEffectKind.KernelFill, true, false)]
+    public void TheBluntRuleForDrawsRefusesOnAKernelFillOrCopy(DispatchEffectKind kind, bool exactDraws, bool exact)
+    {
+        _prefetch.ExactDrawEffects = exactDraws;
+        _prefetch.ExactEffects = exact;
         var banks = Banks().Snapshot();
         var ahead = Resolved(banks, gate: 0, fullGate: 1);
         _prefetch.NoteDispatchEffect(kind);
