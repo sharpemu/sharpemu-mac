@@ -362,17 +362,80 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     [ThreadStatic]
     private static int t_shardedDepth;
 
+    // How this thread's last resolution was answered, for the prefetch's allocation sample by path (alloc_by_path=).
+    internal enum ResolvePath : byte
+    {
+        Other,          // refused, abandoned, or a path not named here
+        DrawHit,        // the shard memo's entry, revalidated
+        DrawRebuilt,    // the entry rebuilt from its words revalidation
+        DrawFull,       // a full graphics resolution (memo miss)
+        ComputeKept,    // the kept compute program
+        ComputeRebound, // the kept program rebound to new user data
+        ComputeResolve, // a full compute resolution
+        Count,
+    }
+
+    internal static readonly string[] ResolvePathNames = ["other", "draw_hit", "draw_rebuilt", "draw_full", "compute_kept", "compute_rebound", "compute_resolve"];
+
+    [ThreadStatic]
+    internal static ResolvePath t_resolvePath;
+
+    // Why a resolution took the shared tier (shared_by= and shared_wait_by= in TakeShardReport).
+    internal enum SharedReason
+    {
+        DrawNew,        // a draw whose key the shard's memo does not hold
+        DrawMiss,       // a draw whose memo entry missed for another reason, or that cannot be kept (uncacheable)
+        DrawUnsharded,  // a draw resolved without a shard's memo (memo off)
+        Nested,         // a draw resolved inside another resolution on one thread (ResolveNestedShared)
+        Verify,         // RESOLVE_MEMO=verify's full resolutions
+        ComputeResolve, // a dispatch with no kept program of its shape: resolved in full
+        ComputeRebind,  // a kept program's rebinding that the shared tier has to make (rebind_shared_by=)
+        ComputeWorker,  // a dispatch resolved where the kernel may be predicted (the worker with predictions on)
+        ComputeRetry,   // a dispatch that may suspend on its pipeline (ComputeProgramRetry)
+        Other,          // tessellation, mesh and register-form resolutions, frontend fallback compiles
+        Count,
+    }
+
+    private static readonly string[] SharedReasonNames =
+        ["draw_new", "draw_miss", "draw_unsharded", "nested", "verify", "compute_resolve", "compute_rebind", "compute_worker", "compute_retry", "other"];
+
+    private static readonly ThreadCounter[] _sharedTakesBy = Enumerable.Range(0, (int)SharedReason.Count).Select(_ => new ThreadCounter()).ToArray();
+    private static readonly ThreadCounter[] _sharedWaitTicksBy = Enumerable.Range(0, (int)SharedReason.Count).Select(_ => new ThreadCounter()).ToArray();
+
+    // Dispatches answered off the shared tier with shards (kept, rebound), and the rebindings it had to make, by why.
+    private static readonly ThreadCounter _unsharedComputeKept = new();
+    private static readonly ThreadCounter _unsharedComputeRebound = new();
+    private static readonly ThreadCounter[] _rebindSharedBy =
+        Enumerable.Range(0, (int)ShaderProgramCache.UnsharedRefusal.Count).Select(_ => new ThreadCounter()).ToArray();
+
     public static string TakeShardReport()
     {
         static string Milliseconds(long ticks) =>
             (ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+        var by = new System.Text.StringBuilder();
+        var waitBy = new System.Text.StringBuilder();
+        for (var index = 0; index < (int)SharedReason.Count; index++)
+        {
+            var separator = index == 0 ? "" : ",";
+            by.Append(separator).Append(SharedReasonNames[index]).Append('=').Append(_sharedTakesBy[index].Take());
+            waitBy.Append(separator).Append(SharedReasonNames[index]).Append('=').Append(Milliseconds(_sharedWaitTicksBy[index].Take()));
+        }
+
+        var rebind = new System.Text.StringBuilder();
+        for (var index = 0; index < (int)ShaderProgramCache.UnsharedRefusal.Count; index++)
+        {
+            rebind.Append(index == 0 ? "" : ",").Append(ShaderProgramCache.UnsharedRefusalNames[index]).Append('=').Append(_rebindSharedBy[index].Take());
+        }
+
         return FormattableString.Invariant($"shared_takes={_sharedTakes.Take()} shared_wait_ms={Milliseconds(_sharedWaitTicks.Take())} ") +
             FormattableString.Invariant($"shard_wait_ms={Milliseconds(_shardWaitTicks.Take())} sharded_draws={_shardedDraws.Take()} ") +
-            FormattableString.Invariant($"nested_shared={_nestedShared.Take()} materialization_shared={ShaderProgramCache.TakeMaterializationGateTakes()}");
+            FormattableString.Invariant($"nested_shared={_nestedShared.Take()} materialization_shared={ShaderProgramCache.TakeMaterializationGateTakes()} ") +
+            FormattableString.Invariant($"shared_by=({by}) shared_wait_by=({waitBy}) ") +
+            FormattableString.Invariant($"unshared_compute=(kept={_unsharedComputeKept.Take()},rebound={_unsharedComputeRebound.Take()}) rebind_shared_by=({rebind})");
     }
 
-    // The shared tier's gate; timed and counted with shards (with one shard, exactly the lock it always was).
-    private void EnterShared()
+    // The shared tier's gate; timed and counted by reason with shards (with one shard, exactly the lock it always was).
+    private void EnterShared(SharedReason reason)
     {
         if (_shards.Length == 1)
         {
@@ -381,6 +444,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         _sharedTakes.Increment();
+        _sharedTakesBy[(int)reason].Increment();
         if (Monitor.TryEnter(_resolveGate))
         {
             return;
@@ -388,13 +452,28 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         Monitor.Enter(_resolveGate);
-        _sharedWaitTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        var waited = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+        _sharedWaitTicks.Add(waited);
+        _sharedWaitTicksBy[(int)reason].Add(waited);
+    }
+
+    // EnterShared for a block (using): the forms that held the gate with a lock statement.
+    private SharedScope EnterSharedScope(SharedReason reason)
+    {
+        EnterShared(reason);
+        return new SharedScope(_resolveGate);
+    }
+
+    private readonly ref struct SharedScope(object gate)
+    {
+        public void Dispose() => Monitor.Exit(gate);
     }
 
     // A full resolution under the shared tier (with one shard the caller already holds it: re-entered).
-    private GraphicsPrograms ResolveFullShared(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    private GraphicsPrograms ResolveFullShared(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags,
+        SharedReason reason)
     {
-        EnterShared();
+        EnterShared(reason);
         try
         {
             return ResolveFull(banks, targetExportMapping, flags);
@@ -444,7 +523,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         _graphicsResolved.Increment();
-        return ResolveFullShared(banks, targetExportMapping, flags);
+        return ResolveFullShared(banks, targetExportMapping, flags, SharedReason.Nested);
     }
 
     // The draw's programs (IShaderPipelineProvider). A draw whose registers, user data, targets and resolved
@@ -472,7 +551,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
-        EnterShared();
+        EnterShared(SharedReason.DrawUnsharded);
         try
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
@@ -619,6 +698,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         var cacheable = false;
         var fillSerial = 0L;
+        var sharedReason = SharedReason.DrawMiss;
         if (_registry.HasFrontend)
         {
             GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Frontend);
@@ -644,10 +724,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                         // A words miss answered from its revalidation: counted as the miss it is, not resolved again.
                         GraphicsResolveMemo.NoteMiss(ResolveMemoMiss.Words);
                         GraphicsResolveMemo.NoteRebuilt();
+                        t_resolvePath = ResolvePath.DrawRebuilt;
                     }
                     else
                     {
                         GraphicsResolveMemo.NoteHit();
+                        t_resolvePath = ResolvePath.DrawHit;
                     }
 
                     return memo.Mode == ResolveMemoMode.Verify
@@ -660,6 +742,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             else
             {
                 GraphicsResolveMemo.NoteMiss(ResolveMemoMiss.New);
+                sharedReason = SharedReason.DrawNew;
                 GraphicsResolveMemo.NoteKeyMiss(memo.ClassifyMiss());
                 // GraphicsResolveMemo.DefaultAdmitSeen: a key's first miss resolves in full without being kept.
                 if (memo.AdmitSeen && !memo.SeenBefore())
@@ -671,9 +754,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         _graphicsResolved.Increment();
+        t_resolvePath = ResolvePath.DrawFull;
         // The miss: the full resolution and its store read and fill the shared tier (the last sources StoreResolveMemo
         // reads are the ones this resolution's PrepareSource left), so both run under it (re-entered with one shard).
-        EnterShared();
+        EnterShared(sharedReason);
         try
         {
             var deviceDataGeneration = DeviceDataLoads.Generation;
@@ -1040,7 +1124,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private GraphicsPrograms VerifyResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, GraphicsPrograms memoPrograms,
         ulong fingerprint, RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
     {
-        var full = ResolveFullShared(banks, targetExportMapping, flags);
+        var full = ResolveFullShared(banks, targetExportMapping, flags, SharedReason.Verify);
         GraphicsResolveMemo.NoteVerified();
         var difference = GraphicsProgramsComparer.Difference(memoPrograms, full);
         if (difference is null)
@@ -1072,7 +1156,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return full;
         }
 
-        var again = ResolveFullShared(banks, targetExportMapping, flags);
+        var again = ResolveFullShared(banks, targetExportMapping, flags, SharedReason.Verify);
         if (GraphicsProgramsComparer.Difference(memoPrograms, again) is not { } againDifference)
         {
             GraphicsResolveMemo.NoteVerifyRaced(ResolveMemoVerifyRace.CameAndWent);
@@ -1392,7 +1476,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             TessellationMaxFactor(shaderInterface.MaxTessellationLevel),
             quad);
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.Other))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             var started = TraceTessellationPrograms ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
@@ -1533,7 +1617,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         MeshDrawConfiguration? mesh)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.Other))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return ResolveGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
@@ -2195,8 +2279,24 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         refusal = ComputePrefetchRefusal.None;
         var compute = banks.Shader.Compute;
+        var sharedReason = retry is not null ? SharedReason.ComputeRetry : SharedReason.ComputeResolve;
+        // With shards, a dispatch whose kept program holds or rebinds off the shared tier never takes it (the kept programs
+        // are this thread's own); the worker's form only where it predicts nothing (WithPrediction returns the program).
+        if (_shards.Length > 1 && UnsharedCompute && retry is null && !Monitor.IsEntered(_resolveGate))
+        {
+            if (!ahead && PredictsKernels)
+            {
+                sharedReason = SharedReason.ComputeWorker;
+            }
+            else if (TryGetComputeProgramUnshared(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect, ahead,
+                         out var unshared, out refusal, ref sharedReason))
+            {
+                return unshared;
+            }
+        }
+
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        EnterShared();
+        EnterShared(sharedReason);
         try
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
@@ -2237,6 +2337,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     SameUserScalars(previousRegisters.UserScalars, compute.UserScalars, compute.UserScalarCount) && _programs.Revalidate(previous.Input.Stage))
                 {
                     _computeKept.Increment();
+                    t_resolvePath = ResolvePath.ComputeKept;
                     return ahead
                         ? Ahead(previous, kept.Kernel, kept.Source, out refusal)
                         : WithPrediction(previous, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
@@ -2245,6 +2346,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 if (kept.Entry is { } entry && ++kept.Rebinds % IdentityRecheckPeriod != 0)
                 {
                     _computeRebound.Increment();
+                    t_resolvePath = ResolvePath.ComputeRebound;
                     var rebound = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
                     KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
                     return ahead
@@ -2254,6 +2356,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             _computeResolved.Increment();
+            t_resolvePath = ResolvePath.ComputeResolve;
             var program = GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null,
                 out var source, out var systemRegisters, out var decoded, ahead);
             if (program.ImageCopy is not null)
@@ -2284,6 +2387,119 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             Monitor.Exit(_resolveGate);
         }
     }
+
+    // GetComputeProgramKept's kept and rebound answers without the shared tier (shards only): true with the answer, false
+    // with why the shared tier must make it (reason), having changed nothing the shared path reads differently.
+    private bool TryGetComputeProgramUnshared(ComputeStageRegisters compute, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ,
+        bool indirect, bool ahead, out ComputeProgram? result, out ComputePrefetchRefusal refusal, ref SharedReason reason)
+    {
+        result = null;
+        refusal = ComputePrefetchRefusal.None;
+        if (ahead && _registry.HasFrontend)
+        {
+            refusal = ComputePrefetchRefusal.Frontend;
+            return true;
+        }
+
+        if (DrawReuseDisabled || _registry.HasFrontend)
+        {
+            return false;
+        }
+
+        var registrations = ShaderHeaderRegistry.Registrations;
+        ClaimKeptPrograms();
+        if (_keptComputes is not { } all || !all.TryGetValue(compute.Address, out var keptList))
+        {
+            return false;
+        }
+
+        KeptComputeProgram? kept = null;
+        foreach (var candidate in keptList)
+        {
+            if (candidate.Registrations == registrations && candidate.DispatchInitiator == dispatchInitiator && SameComputeShape(candidate.Registers, compute))
+            {
+                kept = candidate;
+                break;
+            }
+        }
+
+        if (kept is null)
+        {
+            return false;
+        }
+
+        if (kept.Program is { } previous && kept.Registers is { } previousRegisters && kept.DimensionX == dimensionX &&
+            kept.DimensionY == dimensionY && kept.DimensionZ == dimensionZ &&
+            SameUserScalars(previousRegisters.UserScalars, compute.UserScalars, compute.UserScalarCount) && _programs.Revalidate(previous.Input.Stage))
+        {
+            _computeKept.Increment();
+            t_resolvePath = ResolvePath.ComputeKept;
+            _unsharedComputeKept.Increment();
+            result = ahead
+                ? Ahead(previous, kept.Kernel, kept.Source, out refusal)
+                : WithPrediction(previous, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+            return true;
+        }
+
+        if (kept.Entry is not { } entry)
+        {
+            return false;
+        }
+
+        reason = SharedReason.ComputeRebind;
+        if ((kept.Rebinds + 1) % IdentityRecheckPeriod == 0)
+        {
+            _rebindSharedBy[(int)ShaderProgramCache.UnsharedRefusal.Recheck].Increment();
+            return false;
+        }
+
+        var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute", ref t_computeUserData);
+        var source = kept.Source! with { UserData = userData };
+        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
+        var options = t_computeOptions ??= StageCompileOptions.CreateReusable();
+        options.ComputeInfo = input;
+        options.ComputeSystemRegisters = kept.SystemRegisters;
+        options.Tessellation = null;
+        var pushDataCursor = 0u;
+        bool completed;
+        ShaderProgram handle;
+        ShaderStageResources stage;
+        ShaderProgramCache.UnsharedRefusal refused;
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation))
+        {
+            completed = _programs.TryCompleteProgramUnshared(entry, source, options, ref pushDataCursor, out handle, out stage, out refused);
+        }
+
+        options.ComputeInfo = null;
+        if (!completed)
+        {
+            _rebindSharedBy[(int)refused].Increment();
+            return false;
+        }
+
+        // What GetComputeProgramKept's rebinding leaves behind, with the same program.
+        kept.Rebinds++;
+        kept.Source = source;
+        input.Stage = stage;
+        var rebound = new ComputeProgram { Program = handle, Input = input };
+        _computeRebound.Increment();
+        t_resolvePath = ResolvePath.ComputeRebound;
+        _unsharedComputeRebound.Increment();
+        KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
+        result = ahead
+            ? Ahead(rebound, kept.Kernel, kept.Source, out refusal)
+            : WithPrediction(rebound, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+        return true;
+    }
+
+    // SHARPEMU_RESOLVE_UNSHARED_COMPUTE=0: with shards, every dispatch takes the shared tier as with one resolver.
+    internal static bool UnsharedCompute { get; set; } = Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_UNSHARED_COMPUTE") != "0";
+
+    // This thread's user data memo and lookup options for unshared rebindings (the cache's own are the shared tier's).
+    [ThreadStatic]
+    private static uint[]? t_computeUserData;
+    [ThreadStatic]
+    private static StageCompileOptions? t_computeOptions;
 
     // A program resolved ahead stands for the dispatch's own only where the dispatch would take it unchanged:
     // WithPrediction returns it as it is, and no frontend or consumption had a say.
@@ -2362,7 +2578,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // A frontend image copy's fallback program, compiled when the executor cannot copy: outside any resolution.
     private ComputeProgram CompileComputeProgram(ShaderSource source, ComputeInputInfo input, Gen5ComputeSystemRegisters systemRegisters)
     {
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.Other))
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             ShaderProgram handle;
@@ -2395,7 +2611,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionZ)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.Other))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             // Predicted on the CPU like the bank form (upstream's register form does the same).
@@ -2418,7 +2634,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionZ)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.Other))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null, out _, out _, out _, ahead: true);
@@ -2438,7 +2654,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ComputeProgramRetry retry)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.ComputeRetry))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry, out _, out _, out _);

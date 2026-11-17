@@ -1194,6 +1194,64 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // gates, the bytes it allocated per job (sampled every AllocationSamplePeriod jobs), and its CPU time.
     private long _idleTicks, _gateTicks, _idleWakes, _idleSpinTakes, _sampledBytes, _sampledJobs;
 
+    // The sampled jobs' allocation by how their resolution was answered (ShaderPipelineCache.ResolvePath):
+    // name=bytes per job/sampled jobs.
+    private readonly long[] _sampledBytesByPath = new long[(int)SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.ResolvePath.Count];
+    private readonly long[] _sampledJobsByPath = new long[(int)SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.ResolvePath.Count];
+
+    // The sampled jobs' allocation by step of ResolveCore (alloc_by_step=, bytes per sampled job).
+    private enum AllocationStep { Begin, Inputs, Programs, Assumptions, Bindings, Count }
+
+    private static readonly string[] AllocationStepNames = ["begin", "inputs", "programs", "assumptions", "bindings"];
+    private readonly long[] _sampledBytesByStep = new long[(int)AllocationStep.Count];
+
+    [ThreadStatic]
+    private static bool t_allocationSampled;
+
+    // The thread's allocated bytes now, adding what was allocated since mark to step (sampled jobs only).
+    private long MarkAllocation(AllocationStep step, long mark)
+    {
+        if (!t_allocationSampled)
+        {
+            return 0;
+        }
+
+        var now = GC.GetAllocatedBytesForCurrentThread();
+        if (step != AllocationStep.Begin)
+        {
+            Interlocked.Add(ref _sampledBytesByStep[(int)step], now - mark);
+        }
+
+        return now;
+    }
+
+    private string TakeAllocationByStep(long sampledJobs)
+    {
+        var text = new System.Text.StringBuilder();
+        for (var step = 1; step < (int)AllocationStep.Count; step++)
+        {
+            var bytes = Interlocked.Exchange(ref _sampledBytesByStep[step], 0);
+            text.Append(step == 1 ? "" : ",").Append(AllocationStepNames[step]).Append('=')
+                .Append((sampledJobs == 0 ? 0 : bytes / (double)sampledJobs).ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        return text.ToString();
+    }
+
+    private string TakeAllocationByPath()
+    {
+        var text = new System.Text.StringBuilder();
+        for (var path = 0; path < _sampledBytesByPath.Length; path++)
+        {
+            var bytes = Interlocked.Exchange(ref _sampledBytesByPath[path], 0);
+            var jobs = Interlocked.Exchange(ref _sampledJobsByPath[path], 0);
+            text.Append(path == 0 ? "" : ",").Append(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.ResolvePathNames[path]).Append('=')
+                .Append(jobs == 0 ? "0" : (bytes / (double)jobs).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)).Append('/').Append(jobs);
+        }
+
+        return text.ToString();
+    }
+
     // SHARPEMU_RESOLVER_IDLE_SPIN=0: the idle worker sleeps at once, as before.
     private static readonly bool IdleSpin = SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOLVER_IDLE_SPIN");
     private const int IdleSpins = 32;
@@ -1233,6 +1291,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             $"gate_sleep_ms={Milliseconds(Interlocked.Exchange(ref _gateTicks, 0)).ToString("F1", culture)} idle_wakes={Interlocked.Exchange(ref _idleWakes, 0)} " +
             $"idle_spin_takes={Interlocked.Exchange(ref _idleSpinTakes, 0)} " +
             $"alloc_b_per_job={(sampledJobs == 0 ? 0 : sampledBytes / (double)sampledJobs).ToString("F0", culture)} " +
+            $"alloc_by_path=({TakeAllocationByPath()}) alloc_by_step=({TakeAllocationByStep(sampledJobs)}) " +
             $"resolver_cpu_ms={cpuMs.ToString("F1", culture)} {TakeShardReport(shardCpu)} " +
             SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeGraphicsResolveReport();
     }
@@ -1531,6 +1590,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
             var sampled = (Interlocked.Increment(ref shard.ResolverJobs) & (AllocationSamplePeriod - 1)) == 0;
             var allocatedBefore = sampled ? GC.GetAllocatedBytesForCurrentThread() : 0;
+            if (sampled) SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.t_resolvePath = default;
+            t_allocationSampled = sampled;
             try
             {
                 Resolve(job, shard);
@@ -1539,8 +1600,12 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             {
                 if (sampled)
                 {
-                    Interlocked.Add(ref _sampledBytes, GC.GetAllocatedBytesForCurrentThread() - allocatedBefore);
+                    var bytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+                    Interlocked.Add(ref _sampledBytes, bytes);
                     Interlocked.Increment(ref _sampledJobs);
+                    var path = (int)SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.t_resolvePath;
+                    Interlocked.Add(ref _sampledBytesByPath[path], bytes);
+                    Interlocked.Increment(ref _sampledJobsByPath[path]);
                 }
 
                 FinishJob(shard, worker: true);
@@ -1593,19 +1658,24 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
                 // Before the lookup, as for a draw: a take under another stamp is refused (ComputeRefusal.Replanned).
                 job.ProgramState = _executor.ProgramState;
+                var mark = MarkAllocation(AllocationStep.Begin, 0);
                 job.ComputeResult = _executor.ResolveComputeProgramAhead(job.Banks, compute.DispatchInitiator, compute.GroupsX,
                     compute.GroupsY, compute.GroupsZ, compute.Indirect, out job.ComputeRefusal);
+                mark = MarkAllocation(AllocationStep.Programs, mark);
                 if (RecordsForVerify)
                 {
                     job.ResolveState = _executor.DescribeProgramState();
                 }
 
                 job.Assumptions = _concurrent.EndConcurrentResolve();
+                mark = MarkAllocation(AllocationStep.Assumptions, mark);
                 // The dispatch's binding decode joins its resolution (IConcurrentResolveHost.PrepareBindingsAhead).
                 if (job.ComputeResult is { Available: true, Consumed: false, ImageCopy: null } resolved)
                 {
                     _concurrent.PrepareBindingsAhead(resolved.Input.Stage, dispatch: true);
                 }
+
+                MarkAllocation(AllocationStep.Bindings, mark);
 
                 job.ResolveTicks = System.Diagnostics.Stopwatch.GetTimestamp() - started;
                 Interlocked.Increment(ref _resolvedCount);
@@ -1614,10 +1684,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 return;
             }
 
+            var drawMark = MarkAllocation(AllocationStep.Begin, 0);
             job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, WorkerScratch.Enabled ? _fatal : _host.Fatal, job.Indexed,
                 job.StartInstanceUserData);
+            drawMark = MarkAllocation(AllocationStep.Inputs, drawMark);
             job.ProgramState = _executor.ProgramState;
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);
+            drawMark = MarkAllocation(AllocationStep.Programs, drawMark);
             if (RecordsForVerify)
             {
                 job.ResolveState = _executor.DescribeProgramState();
@@ -1627,10 +1700,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             }
 
             job.Assumptions = _concurrent.EndConcurrentResolve();
+            drawMark = MarkAllocation(AllocationStep.Assumptions, drawMark);
             if (job.Programs is { Available: true } programs)
             {
                 PrepareGraphicsBindingsAhead(programs, job.Inputs.PixelActive);
             }
+
+            MarkAllocation(AllocationStep.Bindings, drawMark);
 
             Interlocked.Increment(ref _resolvedCount);
             Interlocked.Increment(ref _shards[job.Shard].Resolved);

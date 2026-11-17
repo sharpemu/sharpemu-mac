@@ -516,7 +516,21 @@ internal sealed class ShaderProgramCache
 
     // Where the preparation running now logs what it reads of guest memory, for a dispatch
     // that may run again without preparing again (ComputeProgramRetry); null logs nothing.
-    internal GuestReadLog? ReadLog { get; set; }
+    // Bound to the thread that set it: with resolver shards, other threads read guest words through this cache's readers
+    // (a memo hit's revalidation, an unshared rebinding) while the worker logs a retry's reads, and those are not the
+    // retry's. With one thread, the log as it always was.
+    internal GuestReadLog? ReadLog
+    {
+        get => _readLog is { } log && _readLogThread == Environment.CurrentManagedThreadId ? log : null;
+        set
+        {
+            _readLogThread = value is null ? 0 : Environment.CurrentManagedThreadId;
+            _readLog = value;
+        }
+    }
+
+    private GuestReadLog? _readLog;
+    private int _readLogThread;
 
     private bool ReadGuestWord(ulong address, out uint word)
     {
@@ -752,6 +766,140 @@ internal sealed class ShaderProgramCache
 
     internal static ProgramSourceEntry? LastEntry => _lastEntry;
 
+    // Why a cached entry's program for new user data had to be made under the shared tier (TryCompleteProgramUnshared).
+    internal enum UnsharedRefusal
+    {
+        DeviceData,   // a device data load since the plan was made: it is planned again (CompleteProgram)
+        Linked,       // shader calls or run-time call records: linking reads and fills the call caches
+        Traced,       // the lookup logs or traces its reads (TracesLookups)
+        NotFast,      // the plan materializes through the materialization cache, which only the shared tier uses
+        Failed,       // the fast materialization failed: the shared tier reports it
+        Permutation,  // no permutation of this specialization yet: translation
+        Recheck,      // the periodic identity recheck of a rebound program (ShaderPipelineCache.IdentityRecheckPeriod)
+        Count,
+    }
+
+    internal static readonly string[] UnsharedRefusalNames = ["device_data", "linked", "traced", "not_fast", "failed", "permutation", "recheck"];
+
+    // This thread's runtime inputs for unshared lookups, with the cache whose readers they hold. A fast snapshot keeps the
+    // inputs object and copies the draw values it was evaluated with (ResourceMaterializer.FastOrigin), as for _inputs.
+    [ThreadStatic]
+    private static ShaderProgramCache? t_unsharedInputsOwner;
+    [ThreadStatic]
+    private static ResourceRuntimeInputs? t_unsharedInputs;
+
+    // CompleteProgram for a cached entry, off the shared tier: only where it reads nothing that tier owns and fills
+    // nothing in it, that is a fast plan with no shader calls, nothing traced, no replan pending and a permutation of
+    // the specialization already made. Anything else is refused (refusal), and the caller makes the lookup under the
+    // shared tier, where CompleteProgram does all of it as before. The same inputs, readers, tally and permutation choice
+    // as CompleteProgram; the inputs object is this thread's own instead of the shared one.
+    internal bool TryCompleteProgramUnshared(ProgramSourceEntry entry, ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
+        out ShaderProgram program, out ShaderStageResources stage, out UnsharedRefusal refusal)
+    {
+        program = default;
+        stage = default;
+        refusal = UnsharedRefusal.Count;
+        if (_dataWritePending is not null && entry.DeviceDataGeneration != DeviceDataLoads.Generation)
+        {
+            refusal = UnsharedRefusal.DeviceData;
+            return false;
+        }
+
+        if ((entry.HasShaderCalls && _compiler.LinkedShaderCallsSupported) || entry.RuntimeCallRecords)
+        {
+            refusal = UnsharedRefusal.Linked;
+            return false;
+        }
+
+        if (TracesLookups)
+        {
+            refusal = UnsharedRefusal.Traced;
+            return false;
+        }
+
+        if (!ResourceMaterializer.CanMaterializeFast(entry.Plan))
+        {
+            refusal = UnsharedRefusal.NotFast;
+            return false;
+        }
+
+        if (!ReferenceEquals(t_unsharedInputsOwner, this) || t_unsharedInputs is null)
+        {
+            t_unsharedInputsOwner = this;
+            t_unsharedInputs = new ResourceRuntimeInputs
+            {
+                ReadMemory = _readGuestWord,
+                ReadCleanMemory = _readCleanGuestWord,
+                TraceImageCandidate = null,
+                ReadResidentMemory = _prefetchResidentGuestBytes,
+                CompareResidentMemory = _compareResidentGuestBytes,
+                CompareGuestWords = _compareGuestWords,
+                ReadsSuperseded = _readsSuperseded,
+                DataWritePending = _dataWritePending,
+                NullsOffClassLoopRecords = NullsOffClassLoopRecords,
+            };
+        }
+
+        var inputs = t_unsharedInputs;
+        inputs.UserData = source.UserData;
+        inputs.ShaderBase = source.Address;
+        inputs.ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
+            ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
+                Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
+                computeState.LocalDataShareDwords, computeState.ThreadIdCount)
+            : null;
+        ResourceSnapshot snapshot = null!;
+        ResourceSpecialization specialization = null!;
+        MaterializingShader.Hash = source.Hash;
+        bool materialized;
+        MaterializationTally.Outcome outcome;
+        long started;
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
+        {
+            started = MaterializationTally.StartTiming();
+            _host.BeginGuestWordReads();
+            try
+            {
+                materialized = ResourceMaterializer.MaterializeFast(entry.Plan, inputs, ref snapshot, ref specialization, out _);
+                outcome = ResourceMaterializer.LastFastOutcome;
+            }
+            finally
+            {
+                _host.EndGuestWordReads();
+                MaterializingShader.Hash = 0;
+            }
+        }
+
+        if (!materialized)
+        {
+            refusal = UnsharedRefusal.Failed;
+            return false;
+        }
+
+        snapshot = snapshot.WithUserData(source.UserData);
+        var permutation = Volatile.Read(ref entry.LastPermutation) is { } last && ReferenceEquals(last.Specialization, specialization) &&
+            last.Bindings.PushDataStartDword == PushDataStart(last.Bindings, pushDataCursor)
+            ? last
+            : FindPermutation(entry, specialization, pushDataCursor);
+        if (permutation is null)
+        {
+            refusal = UnsharedRefusal.Permutation;
+            return false;
+        }
+
+        MaterializationTally.Note(outcome, MaterializationTally.ElapsedTicks(started), snapshot);
+        _lastEntry = entry;
+        if (ReferenceEquals(permutation.Specialization, specialization))
+        {
+            Volatile.Write(ref entry.LastPermutation, permutation);
+        }
+
+        stage = CreateStageResources(permutation.Program, snapshot, source, options, [], [], null, null);
+        permutation.Bindings.AdvancePushData(ref pushDataCursor);
+        program = permutation.Handle;
+        return true;
+    }
+
     internal bool TryGetProgramForEntry(ProgramSourceEntry entry, ShaderSource source, StageCompileOptions options, bool strictShaders,
         ref uint pushDataCursor, out ShaderProgram program, out ShaderStageResources stage, out string rejection)
     {
@@ -896,7 +1044,7 @@ internal sealed class ShaderProgramCache
 
         // One inputs object refilled per lookup: the materialization reads it during the call
         // and keeps nothing of it (a miss copies what its entry needs). Lookups run one at a time
-        // (ShaderPipelineCache._resolveGate).
+        // (ShaderPipelineCache._resolveGate); an unshared lookup uses its thread's own (TryCompleteProgramUnshared).
         var inputs = _inputs ??= new ResourceRuntimeInputs
         {
             ReadMemory = _readGuestWord,

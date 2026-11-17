@@ -9,7 +9,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 
 [Collection(SchedulingStateCollection.Name)]
-public sealed class ComputeProgramReuseTests
+public sealed partial class ComputeProgramReuseTests
 {
     private const ulong CodeAddress = PipelineTestGuest.MemoryBase + 0x1000;
     private const ulong HeaderAddress = PipelineTestGuest.MemoryBase + 0x8000;
