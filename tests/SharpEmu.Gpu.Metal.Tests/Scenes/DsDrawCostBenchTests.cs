@@ -22,7 +22,7 @@ namespace SharpEmu.Gpu.Metal.Tests.Scenes;
 /// load five sampled T#s, two storage T#s, two S#s and four V#s from a table of their own; each stores two images and
 /// a buffer of its own and samples what the dispatch sixteen before stored, a CS partial flush after every sixteenth.
 /// </summary>
-public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBase(output)
+public sealed partial class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBase(output)
 {
     private const uint Rgba8 = 56;
     private const uint Rgba32F = 77;
@@ -249,14 +249,31 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
     {
         var path = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_OUTPUT");
         if (path is null) return;
+        Measure(path, shardBench: false);
+    }
+
+    // SHARPEMU_DS_SHARD_BENCH_OUTPUT=<path>: the resolver alone, as N independent shards on N threads (RunShardBench).
+    // Builds the game stream of _VARIATION (GameWords by default) with the SHARPEMU_DS_DRAW_BENCH_* settings, records
+    // _WARM rounds on the worker (20 by default here), captures the program resolutions the last of them takes, and
+    // replays those without the worker.
+    [Fact]
+    public void MeasureShardedResolutionWhenRequested()
+    {
+        var path = Environment.GetEnvironmentVariable("SHARPEMU_DS_SHARD_BENCH_OUTPUT");
+        if (path is null) return;
+        Measure(path, shardBench: true);
+    }
+
+    private void Measure(string path, bool shardBench)
+    {
         Environment.SetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE", "1");
         int Setting(string name, int fallback) =>
             int.TryParse(Environment.GetEnvironmentVariable($"SHARPEMU_DS_DRAW_BENCH_{name}"), out var value) && value > 0 ? value : fallback;
         var drawCount = Setting("DRAWS", 1024);
         var dispatchCount = Setting("DISPATCHES", 256);
         var rounds = Setting("ROUNDS", 40);
-        var warm = Setting("WARM", 150);
-        var only = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_VARIATION");
+        var warm = Setting("WARM", shardBench ? 20 : 150);
+        var only = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_VARIATION") ?? (shardBench ? nameof(Variation.GameWords) : null);
         // _REBIND=n: every nth draw of a pass writes its targets and depth state again with the values they hold (no
         // flush), as a title's material binds do; 0 (the default) writes them only at a pass's first draw.
         var rebind = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_REBIND"), out var rebindEvery) && rebindEvery > 0 ? rebindEvery : 0;
@@ -694,8 +711,54 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             long allAllocated = 0;
             long passes = 0;
             var collections = 0;
+            // The shard bench takes the resolutions of the worker's last warm round (its program takes, in order).
+            var translation = shardBench ? TranslationField.GetValue(rig.Host)! : null;
+            var liveExecutor = translation is not null ? (SharpEmu.Libs.Gpu.Rendering.RenderExecutor)TranslationExecutor.GetValue(translation)! : null;
+            var capture = liveExecutor is not null
+                ? new CapturingPrefetch(liveExecutor.Prefetch ?? throw new InvalidOperationException("The shard bench needs the parallel resolver."))
+                : null;
+            if (capture is not null) liveExecutor!.Prefetch = capture;
             for (var round = 0; round < warm + rounds; round++)
             {
+                if (capture is not null)
+                {
+                    if (round == warm)
+                    {
+                        liveExecutor!.Prefetch = capture.Inner;
+                        Output.WriteLine($"captured round, worker resolver: {PrefetchCounters.Invoke(rig.Host, null)}");
+                        // SHARPEMU_DS_SHARD_BENCH_NEW_EVERY=n: one draw in n more takes per-frame pixel constants (a new key every
+                        // frame), on top of the stream's every 32nd.
+                        var newEvery = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_SHARD_BENCH_NEW_EVERY"), out var everyNew) && everyNew > 0 ? everyNew : 0;
+                        var jobs = CapturedJobs(capture.Jobs!, Descriptors.Lo(pixelConstantCopies[(warm - 1) % PixelConstantCopies]), Descriptors.Lo(pixelConstants), newEvery);
+                        results.Add(RunShardBench(rig, translation!, variation.ToString(), jobs,
+                            frame =>
+                            {
+                                // The replay resolves every job while the tables' copy is pending, so each read goes through to
+                                // the copy's source: the churn is written there too (Demon's Souls' copy source changes per frame).
+                                foreach (var (address, even, odd) in game.WordChurn ?? [])
+                                {
+                                    rig.Memory.Write<uint>(address, frame % 2 == 0 ? even : odd);
+                                    if (copyWords != 0) rig.Memory.Write<uint>(copySource + (address - copyDestination), frame % 2 == 0 ? even : odd);
+                                }
+
+                                foreach (var job in capture.Jobs!.Where(job => job.KeyWord >= 0))
+                                    job.Banks.Shader.Pixel.UserScalars.Values[job.KeyWord] = Descriptors.Lo(pixelConstantCopies[frame % PixelConstantCopies]);
+                                ArmCopiedTables();
+                            },
+                            () =>
+                            {
+                                rig.Host.FlushCommandBuffer();
+                                rig.Drain();
+                            },
+                            firstFrame: warm));
+                        break;
+                    }
+
+                    capture.Jobs = round == warm - 1 ? [] : null;
+                    // The worker's own resolver counters over the captured round (the single-resolver mix in situ).
+                    if (round == warm - 1) _ = PrefetchCounters.Invoke(rig.Host, null);
+                }
+
                 if (round == warm)
                 {
                     _ = SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport();
@@ -777,6 +840,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 }
             }
 
+            if (capture is not null) continue;
             var prefetch = (string)PrefetchCounters.Invoke(rig.Host, null)!;
             // The recorder's target reuse over the measured rounds, and the render passes of the last one.
             var inPlace = SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport();
