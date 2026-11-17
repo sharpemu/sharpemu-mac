@@ -1236,6 +1236,7 @@ public static partial class AmprExports
 
         var result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out var bytesRead);
         SharpEmu.HLE.GuestLoadProgress.NoteAmprRead((long)bytesRead);
+        SharpEmu.HLE.GpuWriteRing.RecordHle(destination, bytesRead, fileOffset, "hle:ampr-read", hostPath);
         TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, hostPath, result);
         if (result != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {

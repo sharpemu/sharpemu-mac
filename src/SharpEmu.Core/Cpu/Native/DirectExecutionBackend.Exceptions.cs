@@ -1265,6 +1265,12 @@ public sealed partial class DirectExecutionBackend
 	// for example elem=[[rbp]-0x360]:0x60. SHARPEMU_FAULT_DUMP_REPEAT_MS=<n> dumps the
 	// same windows again after n ms, so bytes another thread is still writing show up
 	// as a difference between the two passes.
+	//
+	// A label starting with "find" searches instead of dumping: the len bytes at expr are
+	// looked for in every mapped backing byte, and each other guest address holding them is
+	// printed (SHARPEMU_FAULT_FIND_ALL=1 also reads pages the host reports as not resident).
+	// SHARPEMU_FAULT_ALIASES=1 prints, for each dumped window, the backing bytes it maps and
+	// every other guest range mapping the same bytes.
 	private void DumpFaultExpressions(Dictionary<string, ulong> registers)
 	{
 		var spec = Environment.GetEnvironmentVariable("SHARPEMU_FAULT_DUMP");
@@ -1278,6 +1284,20 @@ public sealed partial class DirectExecutionBackend
 		DumpFaultExpressionPass("now", entries, registers, ranges);
 		// SHARPEMU_GPU_WRITE_RING=1: which recorded host/GPU writes covered the dumped bytes.
 		SharpEmu.HLE.GpuWriteRing.ReportFaultRanges(ranges);
+		if (Environment.GetEnvironmentVariable("SHARPEMU_FAULT_ALIASES") == "1")
+		{
+			foreach (var (start, size, label) in ranges)
+			{
+				Console.Error.WriteLine($"[LOADER][INFO]   fault-aliases {label} [0x{start:X16}, 0x{start + size:X16}):");
+				foreach (var line in SharpEmu.HLE.GuestMemory.GuestBackingForensics.DescribeAliases(start, size))
+				{
+					Console.Error.WriteLine($"[LOADER][INFO]     {line}");
+				}
+			}
+
+			Console.Error.Flush();
+		}
+
 		if (int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FAULT_DUMP_REPEAT_MS"), out var repeatMs) &&
 			repeatMs > 0)
 		{
@@ -1311,9 +1331,39 @@ public sealed partial class DirectExecutionBackend
 				continue;
 			}
 
+			if (label.StartsWith("find", StringComparison.OrdinalIgnoreCase))
+			{
+				if (ranges is not null)
+				{
+					FindFaultBytes($"fault-find {label}={expression}", address, (int)length);
+				}
+
+				continue;
+			}
+
 			DumpPointerWindow($"fault-dump[{pass}] {label}={expression}", address, (int)length);
 			ranges?.Add((address, length, $"{label}={expression}"));
 		}
+		Console.Error.Flush();
+	}
+
+	private void FindFaultBytes(string name, ulong address, int length)
+	{
+		var needle = new byte[length];
+		if (!_cpuContext.Memory.TryRead(address, needle))
+		{
+			Console.Error.WriteLine($"[LOADER][INFO]   {name} @0x{address:X16}: <unreadable>");
+			return;
+		}
+
+		Console.Error.WriteLine(
+			$"[LOADER][INFO]   {name} @0x{address:X16} len=0x{length:X} bytes={Convert.ToHexString(needle, 0, Math.Min(length, 64))}:");
+		var scanAll = Environment.GetEnvironmentVariable("SHARPEMU_FAULT_FIND_ALL") == "1";
+		foreach (var line in SharpEmu.HLE.GuestMemory.GuestBackingForensics.FindBytes(needle, scanAll: scanAll))
+		{
+			Console.Error.WriteLine($"[LOADER][INFO]     {line}");
+		}
+
 		Console.Error.Flush();
 	}
 

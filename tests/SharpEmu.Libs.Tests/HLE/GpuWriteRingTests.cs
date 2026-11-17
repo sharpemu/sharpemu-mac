@@ -27,7 +27,8 @@ public sealed class GpuWriteRingTests
 
             Assert.Equal(2, lines.Count);
             Assert.Contains("kind=gpu:storage producer=dispatch cs#1", lines[0]);
-            Assert.Contains("serial=7 kind=gpu:image-texels", lines[1]);
+            Assert.Contains("serial=7 src=0x0", lines[1]);
+            Assert.Contains("kind=gpu:image-texels", lines[1]);
             Assert.Empty(GpuWriteRing.Describe(Base + 0x0C10, Base + 0x2000));
 
             // A label-sized write is not kept.
@@ -37,6 +38,33 @@ public sealed class GpuWriteRingTests
         finally
         {
             GpuWriteRing.Enabled = was;
+        }
+    }
+
+    [Fact]
+    public void HleWritesNameTheirSourceAndThreadAndFollowTheirOwnSwitch()
+    {
+        var was = GpuWriteRing.HleEnabled;
+        try
+        {
+            GpuWriteRing.HleEnabled = false;
+            GpuWriteRing.RecordHle(Base + 0xB000, 0x400, 0x1234, "hle:memcpy", null);
+            Assert.Empty(GpuWriteRing.Describe(Base + 0xB000, Base + 0xB400));
+
+            GpuWriteRing.HleEnabled = true;
+            GpuWriteRing.RecordHle(Base + 0xB000, 0x400, 0x1234, "hle:memcpy", null);
+            GpuWriteRing.RecordHle(Base + 0xB400, 0x8000, 0x20000, "hle:ampr-read", "/game/data.bin");
+
+            var lines = GpuWriteRing.Describe(Base + 0xB3F0, Base + 0xB410);
+
+            Assert.Equal(2, lines.Count);
+            Assert.Contains("src=0x20000", lines[0]);
+            Assert.Contains("kind=hle:ampr-read producer=/game/data.bin", lines[0]);
+            Assert.Contains($"src=0x1234 tid={Environment.CurrentManagedThreadId} kind=hle:memcpy", lines[1]);
+        }
+        finally
+        {
+            GpuWriteRing.HleEnabled = was;
         }
     }
 

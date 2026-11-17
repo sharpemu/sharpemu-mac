@@ -149,6 +149,10 @@ public static partial class KernelMemoryCompatExports
             }
 
             SharpEmu.HLE.GuestLoadProgress.NoteFileRead(read);
+            if (read > 0 && SharpEmu.HLE.GpuWriteRing.HleEnabled)
+            {
+                SharpEmu.HLE.GpuWriteRing.RecordHle(bufferAddress, (ulong)read, unchecked((ulong)offset), "hle:pread", OpenFileName(stream));
+            }
 
             if (read > 0 && buffer is not null && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
             {

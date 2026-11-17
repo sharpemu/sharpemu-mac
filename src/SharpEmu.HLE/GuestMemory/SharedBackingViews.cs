@@ -581,6 +581,28 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
 
+    // Fault forensics (GuestBackingForensics): a copy of every view record. A fault dump may run
+    // while another thread holds the lock, so it waits a second at most and then gives up.
+    internal bool TrySnapshotViews(out ViewRecord[] records)
+    {
+        records = [];
+        if (!Monitor.TryEnter(_lock, TimeSpan.FromSeconds(1)))
+        {
+            return false;
+        }
+
+        try
+        {
+            records = new ViewRecord[_views.Count];
+            _views.Values.CopyTo(records, 0);
+            return true;
+        }
+        finally
+        {
+            Monitor.Exit(_lock);
+        }
+    }
+
     // The lock-free single-view read only; false (with nothing read) for anything else.
     public bool TryReadSingleView(ulong address, Span<byte> data)
     {

@@ -25,6 +25,12 @@ namespace SharpEmu.HLE;
 /// <see cref="FaultRangesPath"/> (keyed by its pid) and the GPU host, once it sees that process
 /// gone, prints the entries that intersect them (<see cref="ReportFaultRangesOf"/>) into the same
 /// log.
+///
+/// <c>SHARPEMU_HLE_WRITE_RING=1</c> records the guest process's own bulk HLE writes into the same
+/// ring (<see cref="RecordHle"/>): file reads into guest memory (AMPR, read, pread) with the file
+/// and its offset, and the libc memcpy/memmove import with its source. Those are the host writes a
+/// fault over foreign bytes has to tell apart from GPU work, and the guest process's fault dump
+/// prints them directly.
 /// </summary>
 public static class GpuWriteRing
 {
@@ -39,6 +45,8 @@ public static class GpuWriteRing
         public ulong Address;
         public ulong Size;
         public ulong Serial;
+        public ulong Source;
+        public int Thread;
         public string? Kind;
         public string? ProducerA;
         public string? ProducerB;
@@ -68,6 +76,10 @@ public static class GpuWriteRing
     public static bool Enabled { get; set; } = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_GPU_WRITE_RING"), "1", StringComparison.Ordinal);
 
+    /// <summary>True while the guest process's bulk HLE writes are recorded (<see cref="RecordHle"/>).</summary>
+    public static bool HleEnabled { get; set; } = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_HLE_WRITE_RING"), "1", StringComparison.Ordinal);
+
     /// <summary>How many writes have been recorded since startup.</summary>
     public static long Recorded => Volatile.Read(ref _sequence);
 
@@ -83,6 +95,26 @@ public static class GpuWriteRing
             return;
         }
 
+        Store(address, size, serial, source: 0, kind, producerA, producerB);
+    }
+
+    /// <summary>
+    /// Notes an HLE write of [address, address + size) made by the guest process itself:
+    /// <paramref name="source"/> is the guest source address of a copy or the file offset of a
+    /// read, and <paramref name="producer"/> the file read (null for a copy).
+    /// </summary>
+    public static void RecordHle(ulong address, ulong size, ulong source, string kind, string? producer)
+    {
+        if (!HleEnabled || size < MinimumSize)
+        {
+            return;
+        }
+
+        Store(address, size, serial: 0, source, kind, producer, producerB: null);
+    }
+
+    private static void Store(ulong address, ulong size, ulong serial, ulong source, string kind, string? producerA, string? producerB)
+    {
         var sequence = Interlocked.Increment(ref _sequence);
         ref var entry = ref Entries[(int)(sequence & (Capacity - 1))];
         // Sequence last: a reader that sees it sees the rest (or skips an entry being rewritten).
@@ -91,6 +123,8 @@ public static class GpuWriteRing
         entry.Address = address;
         entry.Size = size;
         entry.Serial = serial;
+        entry.Source = source;
+        entry.Thread = Environment.CurrentManagedThreadId;
         entry.Kind = kind;
         entry.ProducerA = producerA;
         entry.ProducerB = producerB;
@@ -125,7 +159,7 @@ public static class GpuWriteRing
             lines.Add(
                 $"#{sequence} age={ageMs.ToString("F1", CultureInfo.InvariantCulture)}ms " +
                 $"[0x{entry.Address:X16}, 0x{entryEnd:X16}) size=0x{entry.Size:X} serial={entry.Serial} " +
-                $"kind={entry.Kind} producer={producer ?? "?"}");
+                $"src=0x{entry.Source:X} tid={entry.Thread} kind={entry.Kind} producer={producer ?? "?"}");
         }
 
         return lines;
@@ -136,17 +170,22 @@ public static class GpuWriteRing
         Path.Combine(Path.GetTempPath(), $"sharpemu-fault-ranges-{processId}.txt");
 
     /// <summary>
-    /// Prints the entries intersecting each range here, and (with the ring on) leaves the ranges
-    /// for a GPU host process to answer: one "start size label" line per range.
+    /// Prints the entries intersecting each range here, and (with the GPU ring on) leaves the
+    /// ranges for a GPU host process to answer: one "start size label" line per range.
     /// </summary>
     public static void ReportFaultRanges(IReadOnlyList<(ulong Start, ulong Size, string Label)> ranges)
     {
-        if (!Enabled || ranges.Count == 0)
+        if ((!Enabled && !HleEnabled) || ranges.Count == 0)
         {
             return;
         }
 
         Print("local", ranges);
+        if (!Enabled)
+        {
+            return;
+        }
+
         try
         {
             var text = new StringBuilder();
