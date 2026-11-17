@@ -224,6 +224,12 @@ public sealed partial class DsDrawCostBenchTests
     private object RunShardBench(SceneRig rig, object translation, string variation, CapturedJob[] jobs, Action<int> prepareFrame, Action finishFrame,
         int firstFrame)
     {
+        // SHARPEMU_DS_SHARD_BENCH_ENGINE=1: the real engine path instead (RunEngineShardBench).
+        if (Environment.GetEnvironmentVariable("SHARPEMU_DS_SHARD_BENCH_ENGINE") == "1")
+        {
+            return RunEngineShardBench(rig, translation, variation, jobs, prepareFrame, finishFrame, firstFrame);
+        }
+
         int Setting(string name, int fallback) =>
             int.TryParse(Environment.GetEnvironmentVariable($"SHARPEMU_DS_SHARD_BENCH_{name}"), out var value) && value > 0 ? value : fallback;
         var frames = Setting("FRAMES", 8);
