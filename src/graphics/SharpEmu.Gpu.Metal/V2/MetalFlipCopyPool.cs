@@ -6,10 +6,11 @@ using System.Runtime.InteropServices;
 namespace SharpEmu.Gpu.Metal.V2;
 
 /// <summary>
-/// SHARPEMU_FLIP_AHEAD: the presenter-owned textures a GPU flip's frame is copied into, in the
-/// stream at the flip (MetalRenderHost.FlipCopy.cs). Without the copy the presenter samples the
-/// display image's own texture until the next frame replaces it, so a guest told of flip N before
-/// N is shown could render the next frame into the buffer still on screen.
+/// The presenter-owned textures a flip's frame is copied into, in the stream at the flip
+/// (MetalRenderHost.FlipCopy.cs; SHARPEMU_METAL_V2_PRESENT_SNAPSHOT, and SHARPEMU_FLIP_AHEAD for GPU
+/// flips). Without the copy the presenter samples the display image's own texture until the next
+/// frame replaces it, so a guest that renders into the buffer still on screen (told it is safe once
+/// its flip was shown, or of flip N before N is shown) has its half-drawn frame presented.
 /// <para>A texture goes back to the pool only once the presenter can no longer read it: it is not
 /// the presented frame, not queued, not being encoded by a presentation, and the last
 /// presentation command buffer that sampled it has completed.</para>

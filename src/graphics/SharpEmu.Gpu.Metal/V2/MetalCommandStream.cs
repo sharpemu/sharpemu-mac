@@ -3172,11 +3172,17 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         if (_dumpThisFlip) { DumpTexture(image.Texture, "flip-after-refresh"); }
         SampleFlipLuma(image.Texture);
         var texture = PresentationViewOf(imageIdentifier, image, in request);
-        // SHARPEMU_FLIP_AHEAD: the presenter gets a copy taken here, in the stream, instead of
-        // the display image the guest may render into once it hears of the flip.
+        // The presenter gets a copy taken here, in the stream, instead of the display image the
+        // guest may render into while it is on screen (MetalRenderHost.FlipCopy.cs).
         var presented = texture;
-        var copied = MetalV2Diagnostics.FlipAhead && gpuQueued && _flipTarget is not null && texture != 0 &&
-            TryCopyFlipFrame(texture, out presented);
+        var copied = false;
+        if (_flipTarget is not null && texture != 0)
+        {
+            presented = FlipFrameForPresenter(texture, gpuQueued, out copied);
+        }
+
+        // The serial of the command buffer holding the copy: the presenter promotes the frame
+        // only once it completed, so it never samples a copy still being written.
         var serial = SubmissionSerial;
         FlushCommandBuffer(PassEndCause.Present);
         if (_flipTarget is null || texture == 0)
@@ -3209,7 +3215,8 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             VideoOutBackendServices.IsHdrPixelFormat(displayBuffer.PixelFormat));
         if (MetalV2Diagnostics.FlipAhead)
         {
-            NoteFlipFrameCaptured(requestId, copied);
+            // Only GPU flips are published ahead; a CPU flip counts as live, as before the snapshot.
+            NoteFlipFrameCaptured(requestId, copied && gpuQueued);
         }
 
         VideoOutBackendServices.TraceGpuFlip(
