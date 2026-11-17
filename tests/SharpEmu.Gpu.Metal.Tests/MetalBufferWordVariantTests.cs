@@ -139,6 +139,38 @@ public sealed unsafe class MetalBufferWordVariantTests(ITestOutputHelper output)
 
         Assert.Equal((vertex, pixel), MetalBinaryArchive.LibraryFileKeys(vertex, pixel, specialized: false));
         Assert.Equal((default(UInt128), default(UInt128)), MetalBinaryArchive.LibraryFileKeys(vertex, pixel, specialized: true));
+        // A variant's stages are written under their own keys, a module's under its own only.
+        var vertexFile = MetalRenderHost.StageBufferWordArchiveKey(vertex, null, [12, 0x1000]);
+        var pixelFile = MetalRenderHost.StageBufferWordArchiveKey(pixel, true, [8]);
+        Assert.Equal((vertexFile, pixelFile), MetalBinaryArchive.LibraryFileKeys(vertex, pixel, specialized: true, vertexFile, pixelFile));
+        Assert.Equal((vertex, pixel), MetalBinaryArchive.LibraryFileKeys(vertex, pixel, specialized: false, vertexFile, pixelFile));
+    }
+
+    [Fact]
+    public void AStagesVariantFileKeyNamesItsModuleSwitchAndEveryValue()
+    {
+        var library = new UInt128(0x1111, 0x2222);
+        uint[] first = [12, 0x1000];
+        UInt128 Key(UInt128 module, bool? mip, uint[] values) => MetalRenderHost.StageBufferWordArchiveKey(module, mip, values);
+
+        var key = Key(library, null, first);
+        Assert.NotEqual(default, key);
+        Assert.NotEqual(library, key);
+        Assert.Equal(key, Key(library, null, [12, 0x1000]));
+        // Every value is in the key, and so are their order and count.
+        Assert.NotEqual(key, Key(library, null, [12, 0x1001]));
+        Assert.NotEqual(key, Key(library, null, [0x1000, 12]));
+        Assert.NotEqual(key, Key(library, null, [12, 0x1000, 0]));
+        // Another program's function of the same values is another file.
+        Assert.NotEqual(key, Key(new UInt128(0x3333, 0x4444), null, first));
+        // No switch, the switch off, the switch on: three functions.
+        Assert.Equal(3, new[] { (bool?)null, false, true }.Select(mip => Key(library, mip, first)).Distinct().Count());
+        // Not the files of the module's LOD statistics pair, a compute variant, or a pair key.
+        Assert.NotEqual(key, MetalBinaryArchive.LodStatisticsKey(library, counters: true));
+        Assert.NotEqual(key, MetalRenderHost.ComputeBufferWordArchiveKey(library, key));
+        // A module with no key and a stage with no buffer words store nothing.
+        Assert.Equal(default, Key(default, null, first));
+        Assert.Equal(default, Key(library, true, []));
     }
 
     [Fact]
@@ -397,6 +429,166 @@ public sealed unsafe class MetalBufferWordVariantTests(ITestOutputHelper output)
         {
             gate.Set();
             MetalNative.SendVoid(buffer, MetalNative.Selector("release"));
+        }
+    }
+
+    /// <summary>
+    /// A render variant built in one archive session is built in the next from its stage's
+    /// library file and the pipeline its pair is listed under: no MSL compiled (no library
+    /// missed the archive) and no pipeline compiled, with the values it was written with (the
+    /// variant draws what the generic pipeline draws, the layout's colour where the records
+    /// put it). With the variant files gone, the module's archive library cannot be
+    /// specialized, so its MSL is compiled once more and the variants are written again. Also
+    /// the bench of the three sources: the wall time to drain the builders' queue, per variant.
+    /// </summary>
+    [Fact]
+    public void TheNextHostBuildsRenderVariantsFromTheirFilesWithoutCompilingMsl()
+    {
+        if (!RequireDevice()) return;
+        const int Pipelines = 4;
+        var root = Path.Combine(Path.GetTempPath(), $"sharpemu-render-buffer-words-{Guid.NewGuid():N}");
+        try
+        {
+            var cold = RunSession(root, Pipelines);
+            output.WriteLine($"cold: {cold}");
+            var variants = Pipelines * MetalRenderHost.MaxBufferWordVariantsPerPipeline;
+            // This process compiled the modules from MSL: their libraries are specialized directly.
+            Assert.Equal((0L, (long)variants, 0L, 0L), (cold.Sources.FromFile, cold.Sources.FromLibrary, cold.Sources.FromRecompile, cold.Sources.Recompiles));
+            // The two modules' files and one file per variant's vertex stage (the pixel stage declares none).
+            Assert.Equal(2 + variants, cold.Archive.LibrariesWritten);
+
+            var warm = RunSession(root, Pipelines);
+            output.WriteLine($"warm: {warm}");
+            Assert.Equal(((long)variants, 0L, 0L, 0L, 0L, 0L), (warm.Sources.FromFile, warm.Sources.FromLibrary,
+                warm.Sources.FromRecompile, warm.Sources.Recompiles, warm.Sources.PipelinesCompiled, warm.Sources.FilesRejected));
+            // No library missed the archive (nothing compiled from MSL): the two modules' and
+            // every variant's from their files; every pipeline from the segments; nothing written.
+            Assert.Equal((2 + variants, 0, 0), (warm.Archive.LibraryHits, warm.Archive.LibraryMisses, warm.Archive.LibrariesWritten));
+            Assert.Equal((1 + variants, 0), (warm.Archive.PipelineHits, warm.Archive.PipelineMisses));
+
+            // The variants' files go; the modules' stay.
+            var deleted = 0;
+            for (var pipeline = 0; pipeline < Pipelines; pipeline++)
+            {
+                for (var index = 0; index < MetalRenderHost.MaxBufferWordVariantsPerPipeline; index++)
+                {
+                    var layout = BenchLayout(pipeline, index);
+                    var key = MetalRenderHost.StageBufferWordArchiveKey(
+                        MetalBinaryArchive.LibraryKey(VertexSource, usesPerVertexInputs: false), null, [layout.Stride, layout.Word3]);
+                    var path = Path.Combine(warm.LibraryDirectory, key.ToString("x32", System.Globalization.CultureInfo.InvariantCulture) + MetalBinaryArchive.Extension);
+                    if (File.Exists(path))
+                    {
+                        File.Delete(path);
+                        deleted++;
+                    }
+                }
+            }
+
+            Assert.Equal(variants, deleted);
+            var recompiled = RunSession(root, Pipelines);
+            output.WriteLine($"recompiled: {recompiled}");
+            // One second compile per module (each pipeline's vertex program is a module of its own).
+            Assert.Equal((0L, 0L, (long)variants, (long)Pipelines), (recompiled.Sources.FromFile, recompiled.Sources.FromLibrary,
+                recompiled.Sources.FromRecompile, recompiled.Sources.Recompiles));
+            Assert.Equal(variants, recompiled.Archive.LibrariesWritten);
+
+            foreach (var (name, session) in new[] { ("cold (this process's library)", cold), ("warm (files)", warm), ("recompiled (MSL again)", recompiled) })
+            {
+                output.WriteLine(
+                    $"{name}: variants={variants} drain_ms={session.DrainMilliseconds:F1} " +
+                    $"wall_ms_per_variant={session.DrainMilliseconds / variants:F2} " +
+                    $"build_ms_per_variant={session.Sources.BuildMilliseconds / variants:F2} builders={MetalRenderHost.DefaultBufferWordBuilders}");
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private readonly record struct Session(
+        (int LibraryHits, int LibraryMisses, int Rejected, int LibrariesWritten,
+            int PipelineHits, int PipelineMisses, int PipelinesAdded, int LoadedSegments) Archive,
+        (long FromFile, long FromLibrary, long FromRecompile, long Recompiles, long PipelinesCompiled,
+            long FilesRejected, long Unresident, double BuildMilliseconds) Sources,
+        double DrainMilliseconds,
+        string LibraryDirectory);
+
+    // A layout of its own for each pipeline and index: the same records, another format word,
+    // so the pipelines' variants are distinct functions and distinct pipeline states.
+    private static VertexLayout BenchLayout(int pipeline, int index) =>
+        Layout(Float32x2, 8, 0x100) with { Word3 = (Float32x2 << 12) | (uint)(0x100 + pipeline * 0x20 + index) };
+
+    // One archive session: every pipeline draws each of its layouts generic while the builders
+    // are held, then the builders drain the queue (timed), then each layout draws again through
+    // its variant, which must draw the same pixels.
+    private Session RunSession(string root, int pipelines)
+    {
+        var archive = MetalBinaryArchive.Open(root, Device.Value, "translator-a", 256L << 20);
+        Assert.True(archive.WaitLoaded(TimeSpan.FromSeconds(30)));
+        var previous = MetalBinaryArchive.Install(archive);
+        try
+        {
+            Session session;
+            using (var rig = new MetalPassRig(Device.Value, 1024 * 1024))
+            using (var gate = new ManualResetEventSlim(false))
+            {
+                rig.Host.BeforeBufferWordVariantBuild = () => gate.Wait(BuildTimeout);
+                var buffer = NewBuffer(BenchLayout(0, 0));
+                try
+                {
+                    var handles = Enumerable.Range(0, pipelines).Select(index => Pipeline(rig, 0x7400_0000UL + (ulong)index * 0x10)).ToArray();
+                    var generic = new byte[pipelines, MetalRenderHost.MaxBufferWordVariantsPerPipeline][];
+                    for (var pipeline = 0; pipeline < pipelines; pipeline++)
+                    {
+                        for (var index = 0; index < MetalRenderHost.MaxBufferWordVariantsPerPipeline; index++)
+                        {
+                            var layout = BenchLayout(pipeline, index);
+                            generic[pipeline, index] = DrawInto(rig, handles[pipeline], FirstTarget, buffer, Stage(layout, unread: 0));
+                            AssertDrawn(generic[pipeline, index], layout);
+                        }
+                    }
+
+                    var variants = pipelines * MetalRenderHost.MaxBufferWordVariantsPerPipeline;
+                    Assert.Equal(variants, rig.Host.BufferWordVariantsPending);
+                    var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    gate.Set();
+                    Assert.True(rig.Host.WaitForBufferWordVariants(BuildTimeout));
+                    var drain = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+                    var before = rig.Host.BufferWordCounters;
+                    for (var pipeline = 0; pipeline < pipelines; pipeline++)
+                    {
+                        for (var index = 0; index < MetalRenderHost.MaxBufferWordVariantsPerPipeline; index++)
+                        {
+                            var layout = BenchLayout(pipeline, index);
+                            Assert.Equal(generic[pipeline, index], DrawInto(rig, handles[pipeline], FirstTarget + 0x1000, buffer, Stage(layout, unread: 0)));
+                        }
+                    }
+
+                    var after = rig.Host.BufferWordCounters;
+                    Assert.Equal((long)variants, after.Built);
+                    Assert.Equal((long)variants, after.DrawsVariant - before.DrawsVariant);
+                    Assert.Equal((0L, 0L), (after.Failed, after.Capped));
+                    session = new Session(default, rig.Host.BufferWordSources(), drain, archive.LibraryDirectory);
+                }
+                finally
+                {
+                    gate.Set();
+                    MetalNative.SendVoid(buffer, MetalNative.Selector("release"));
+                }
+            }
+
+            archive.Flush(wait: true);
+            return session with { Archive = archive.Counters };
+        }
+        finally
+        {
+            MetalBinaryArchive.Install(previous);
+            archive.Dispose();
         }
     }
 

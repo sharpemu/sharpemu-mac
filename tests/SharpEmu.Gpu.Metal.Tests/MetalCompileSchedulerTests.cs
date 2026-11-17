@@ -230,9 +230,38 @@ public sealed class MetalCompileSchedulerTests
         Assert.Equal(0, MetalCompileScheduler.TakeThreadPrewarmWait());
     }
 
-    private static Task<MetalCompileScheduler.PrewarmScope> Enter(MetalCompileScheduler scheduler) =>
+    // Buffer-word variants compile in a lane of their own: a prewarm holding every one of its
+    // slots does not hold them back, they hold none of its slots, and the game's compiles
+    // hold them back as they do the prewarm.
+    [Fact]
+    public void VariantCompilesHaveTheirOwnSlotsAndStillGiveWayToTheGame()
+    {
+        var scheduler = new MetalCompileScheduler(1, TimeSpan.Zero, Forever, variantSlots: 2);
+        using var prewarm = scheduler.EnterPrewarm(static () => false);
+        var first = scheduler.EnterVariant(static () => false);
+        Assert.True(first.Entered);
+        using var second = scheduler.EnterVariant(static () => false);
+        Assert.Equal((1, 2), (scheduler.PrewarmInFlight, scheduler.VariantInFlight));
+        var third = Enter(scheduler, variant: true);
+        Assert.False(third.Wait(Held));
+
+        first.Dispose();
+        Assert.True(third.Wait(Released));
+        third.Result.Dispose();
+        Assert.Equal(1, scheduler.VariantInFlight);
+
+        scheduler.RuntimeStarted();
+        var held = Enter(scheduler, variant: true);
+        Assert.False(held.Wait(Held));
+        scheduler.RuntimeDone();
+        Assert.True(held.Wait(Released));
+        held.Result.Dispose();
+        Assert.Equal(1, scheduler.PrewarmInFlight);
+    }
+
+    private static Task<MetalCompileScheduler.PrewarmScope> Enter(MetalCompileScheduler scheduler, bool variant = false) =>
         Task.Factory.StartNew(
-            () => scheduler.EnterPrewarm(static () => false),
+            () => variant ? scheduler.EnterVariant(static () => false) : scheduler.EnterPrewarm(static () => false),
             CancellationToken.None,
             TaskCreationOptions.LongRunning,
             TaskScheduler.Default);
