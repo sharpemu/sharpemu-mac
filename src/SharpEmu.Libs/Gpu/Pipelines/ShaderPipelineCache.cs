@@ -74,6 +74,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             input.Stage = stage;
             return TryCreateComputePipeline(input, program, out _);
         };
+        CreateShards(ResolveShards.Default);
     }
 
     public bool SupportsPrimitiveShaderMeshPipelines => _compiler.SupportsPrimitiveShaderMeshPipelines;
@@ -289,7 +290,162 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // Program resolution runs on the render thread and on a thread resolving draws ahead of it;
     // the program, decode and materialization caches it updates are used under this lock only.
     // A pipeline lookup takes no lock, so it does not wait for a resolution.
+    // With resolver shards (ResolveShards), the shared tier only: what every shard's resolution shares (the program,
+    // decode and materialization caches, the vertex tables, the user data memos and last sources a full resolution
+    // fills, translation and links). A shard's memo hit or words rebuild does not take it; its miss does, inside the
+    // shard's own gate (lock order: shard gate, then this; never a shard gate while holding this).
     private readonly object _resolveGate = new();
+
+    // One resolver shard: a part of the resolve memo's keys (ResolveShards.DrawRoute) and the lock its memo is used
+    // under. With one shard, its gate is _resolveGate itself and its memo _resolveMemo: everything as before.
+    private sealed class ResolveShard
+    {
+        public required object Gate;
+        public GraphicsResolveMemo? Memo;
+    }
+
+    private ResolveShard[] _shards = [];
+
+    private void CreateShards(int count)
+    {
+        var shards = new ResolveShard[count];
+        shards[0] = new ResolveShard { Gate = count == 1 ? _resolveGate : new object(), Memo = _resolveMemo };
+        for (var index = 1; index < count; index++)
+        {
+            shards[index] = new ResolveShard { Gate = new object(), Memo = NewMemoLike(_resolveMemo) };
+        }
+
+        _shards = shards;
+        // A memo hit's revalidation of a cached (not fast) materialization reads the materialization cache, which only
+        // the shared tier may use.
+        _programs.MaterializationGate = count == 1 ? null : _resolveGate;
+    }
+
+    private static GraphicsResolveMemo? NewMemoLike(GraphicsResolveMemo? memo) =>
+        memo is null ? null : new GraphicsResolveMemo(memo.Mode, GraphicsResolveMemo.DefaultCapacity)
+        {
+            Rebuild = memo.Rebuild,
+            HoldChurn = memo.HoldChurn,
+            AdmitSeen = memo.AdmitSeen,
+        };
+
+    // The resolver shards (IShaderPipelineProvider.ResolveShardCount), ResolveShards.Default unless a test or bench sets
+    // it before the first resolution.
+    public int ResolveShardCount
+    {
+        get => _shards.Length;
+        internal set
+        {
+            lock (_resolveGate)
+            {
+                CreateShards(Math.Clamp(value, 1, ResolveShards.Maximum));
+            }
+        }
+    }
+
+    public int ResolveShardOf(RegisterBanks banks, bool compute) =>
+        _shards.Length == 1 ? 0
+        : ResolveShards.ShardOf(compute ? ResolveShards.ComputeRoute(banks) : ResolveShards.DrawRoute(banks, RenderExecutor.PixelStageActive(banks)),
+            _shards.Length);
+
+    // The sharded paths' use of the shared tier and of their own gates, for the prefetch line (TakeShardReport): shared
+    // gate takes and wait, shard gate wait (a shard's thread against the worker resolving a job of that shard), draws
+    // resolved through a shard's memo, and nested resolutions that went to the shared tier whole.
+    private static readonly ThreadCounter _sharedTakes = new();
+    private static readonly ThreadCounter _sharedWaitTicks = new();
+    private static readonly ThreadCounter _shardWaitTicks = new();
+    private static readonly ThreadCounter _shardedDraws = new();
+    private static readonly ThreadCounter _nestedShared = new();
+    private static int _nestedReports;
+
+    // Depth of sharded draw resolutions on this thread (any cache): a resolution inside one never waits for a shard gate.
+    [ThreadStatic]
+    private static int t_shardedDepth;
+
+    public static string TakeShardReport()
+    {
+        static string Milliseconds(long ticks) =>
+            (ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+        return FormattableString.Invariant($"shared_takes={_sharedTakes.Take()} shared_wait_ms={Milliseconds(_sharedWaitTicks.Take())} ") +
+            FormattableString.Invariant($"shard_wait_ms={Milliseconds(_shardWaitTicks.Take())} sharded_draws={_shardedDraws.Take()} ") +
+            FormattableString.Invariant($"nested_shared={_nestedShared.Take()} materialization_shared={ShaderProgramCache.TakeMaterializationGateTakes()}");
+    }
+
+    // The shared tier's gate; timed and counted with shards (with one shard, exactly the lock it always was).
+    private void EnterShared()
+    {
+        if (_shards.Length == 1)
+        {
+            Monitor.Enter(_resolveGate);
+            return;
+        }
+
+        _sharedTakes.Increment();
+        if (Monitor.TryEnter(_resolveGate))
+        {
+            return;
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        Monitor.Enter(_resolveGate);
+        _sharedWaitTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - started);
+    }
+
+    // A full resolution under the shared tier (with one shard the caller already holds it: re-entered).
+    private GraphicsPrograms ResolveFullShared(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    {
+        EnterShared();
+        try
+        {
+            return ResolveFull(banks, targetExportMapping, flags);
+        }
+        finally
+        {
+            Monitor.Exit(_resolveGate);
+        }
+    }
+
+    // A draw through its shard's memo, under the shard's gate; a miss takes the shared tier inside (ResolveThroughMemo).
+    private GraphicsPrograms GetGraphicsProgramsSharded(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    {
+        var shard = _shards[ResolveShards.ShardOf(ResolveShards.DrawRoute(banks, flags.PixelActive), _shards.Length)];
+        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
+        if (!Monitor.TryEnter(shard.Gate))
+        {
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            Monitor.Enter(shard.Gate);
+            _shardWaitTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        }
+
+        t_shardedDepth++;
+        try
+        {
+            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            _shardedDraws.Increment();
+            return ResolveThroughMemo(shard.Memo!, banks, targetExportMapping, flags);
+        }
+        finally
+        {
+            t_shardedDepth--;
+            Monitor.Exit(shard.Gate);
+        }
+    }
+
+    // A draw resolved inside another resolution on this thread (a guest read that runs deferred work), with shards: it
+    // must not wait for a shard gate while this thread holds the shared tier or another shard's gate, so it resolves in
+    // full under the shared tier and leaves every memo alone. Counted and named once; the programs are the same.
+    private GraphicsPrograms ResolveNestedShared(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    {
+        _nestedShared.Increment();
+        if (Interlocked.Increment(ref _nestedReports) == 1)
+        {
+            Console.Error.WriteLine("[GPU][PREFETCH] a draw resolved inside another resolution on one thread: resolved in full on the shared tier, " +
+                $"not through a resolver shard's memo (vs=0x{banks.Shader.Vertex.ExportAddress:X16} ps=0x{banks.Shader.Pixel.Address:X16}; counted as nested_shared)");
+        }
+
+        _graphicsResolved.Increment();
+        return ResolveFullShared(banks, targetExportMapping, flags);
+    }
 
     // The draw's programs (IShaderPipelineProvider). A draw whose registers, user data, targets and resolved
     // inputs are those of the last draw this thread resolved keeps its programs after their resources revalidate
@@ -307,8 +463,17 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var vertex = banks.Shader.Vertex;
         var pixel = banks.Shader.Pixel;
         var context = banks.Context;
+        if (_shards.Length > 1 && _resolveMemo is { Mode: ResolveMemoMode.On or ResolveMemoMode.Verify })
+        {
+            var shardedFlags = new KeptGraphicsFlags(pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, startInstanceUserData);
+            return t_shardedDepth != 0 || Monitor.IsEntered(_resolveGate)
+                ? ResolveNestedShared(banks, targetExportMapping, shardedFlags)
+                : GetGraphicsProgramsSharded(banks, targetExportMapping, shardedFlags);
+        }
+
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
-        lock (_resolveGate)
+        EnterShared();
+        try
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             var flags = new KeptGraphicsFlags(pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, startInstanceUserData);
@@ -340,6 +505,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             if (shadowMiss) _resolveMemo!.Store();
             return programs;
         }
+        finally
+        {
+            Monitor.Exit(_resolveGate);
+        }
     }
 
     // Shader header registrations are in the stamp too: a header registered at a code address changes what a lookup there
@@ -365,6 +534,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             lock (_resolveGate)
             {
                 _resolveMemo = value == ResolveMemoMode.Off ? null : new GraphicsResolveMemo(value, GraphicsResolveMemo.DefaultCapacity);
+                CreateShards(_shards.Length);
             }
         }
     }
@@ -378,6 +548,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             lock (_resolveGate)
             {
                 if (_resolveMemo is { } memo) memo.Rebuild = value;
+                CreateShards(_shards.Length);
             }
         }
     }
@@ -391,6 +562,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             lock (_resolveGate)
             {
                 if (_resolveMemo is { } memo) memo.HoldChurn = value;
+                CreateShards(_shards.Length);
             }
         }
     }
@@ -404,6 +576,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             lock (_resolveGate)
             {
                 if (_resolveMemo is { } memo) memo.AdmitSeen = value;
+                CreateShards(_shards.Length);
             }
         }
     }
@@ -498,22 +671,32 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         _graphicsResolved.Increment();
-        var deviceDataGeneration = DeviceDataLoads.Generation;
-        var contentEpoch = _programs.ContentEpoch;
-        var linkedLookups = _programs.LinkedLookups;
-        var tablesGeneration = _vertexTables.Generation;
-        var programs = ResolveFull(banks, targetExportMapping, flags);
-        if (cacheable && memo.FillSerial != fillSerial)
+        // The miss: the full resolution and its store read and fill the shared tier (the last sources StoreResolveMemo
+        // reads are the ones this resolution's PrepareSource left), so both run under it (re-entered with one shard).
+        EnterShared();
+        try
         {
-            // The memo holds another draw's key now: this result has no key to be stored under.
-            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Changed);
-        }
-        else if (cacheable)
-        {
-            StoreResolveMemo(memo, banks, programs, flags.PixelActive, deviceDataGeneration, contentEpoch, linkedLookups, tablesGeneration);
-        }
+            var deviceDataGeneration = DeviceDataLoads.Generation;
+            var contentEpoch = _programs.ContentEpoch;
+            var linkedLookups = _programs.LinkedLookups;
+            var tablesGeneration = _vertexTables.Generation;
+            var programs = ResolveFull(banks, targetExportMapping, flags);
+            if (cacheable && memo.FillSerial != fillSerial)
+            {
+                // The memo holds another draw's key now: this result has no key to be stored under.
+                GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Changed);
+            }
+            else if (cacheable)
+            {
+                StoreResolveMemo(memo, banks, programs, flags.PixelActive, deviceDataGeneration, contentEpoch, linkedLookups, tablesGeneration);
+            }
 
-        return programs;
+            return programs;
+        }
+        finally
+        {
+            Monitor.Exit(_resolveGate);
+        }
     }
 
     private GraphicsPrograms ResolveFull(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags) =>
@@ -602,6 +785,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             if (!stageRebuilt) return ResolveMemoMiss.Generation;
             GraphicsResolveMemo.NoteRebuildRefused(ResolveMemoRebuildRefusal.Generation);
             return ResolveMemoMiss.Words;
+        }
+
+        // With shards, a hit runs beside other shards' misses on the shared tier: a program entry replaced or the vertex
+        // tables dropped while its words were read makes it a miss, as a load learned meanwhile does above. With one
+        // shard nothing moves them while the gate is held.
+        if (_shards.Length > 1 && (entry.ContentEpoch != _programs.ContentEpoch || entry.TablesGeneration != _vertexTables.Generation))
+        {
+            return ResolveMemoMiss.Epoch;
         }
 
         if (!stageRebuilt)
@@ -849,7 +1040,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private GraphicsPrograms VerifyResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, GraphicsPrograms memoPrograms,
         ulong fingerprint, RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
     {
-        var full = ResolveFull(banks, targetExportMapping, flags);
+        var full = ResolveFullShared(banks, targetExportMapping, flags);
         GraphicsResolveMemo.NoteVerified();
         var difference = GraphicsProgramsComparer.Difference(memoPrograms, full);
         if (difference is null)
@@ -881,7 +1072,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return full;
         }
 
-        var again = ResolveFull(banks, targetExportMapping, flags);
+        var again = ResolveFullShared(banks, targetExportMapping, flags);
         if (GraphicsProgramsComparer.Difference(memoPrograms, again) is not { } againDifference)
         {
             GraphicsResolveMemo.NoteVerifyRaced(ResolveMemoVerifyRace.CameAndWent);
@@ -2005,7 +2196,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         refusal = ComputePrefetchRefusal.None;
         var compute = banks.Shader.Compute;
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        EnterShared();
+        try
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             if (retry is not null)
@@ -2086,6 +2278,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return ahead
                 ? Ahead(program, kept.Kernel, source, out refusal)
                 : WithPrediction(program, kept.Kernel, source, systemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+        }
+        finally
+        {
+            Monitor.Exit(_resolveGate);
         }
     }
 

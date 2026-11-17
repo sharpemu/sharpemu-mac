@@ -119,8 +119,7 @@ public sealed partial class ParallelProgramPrefetchCallerTests
         var job = f.Prefetch.Submit(banks, gate: 1);
         var follower = Banks();
         var next = f.Prefetch.Submit(follower, gate: 1);
-        var claim = typeof(ParallelProgramPrefetch).GetField("_workerClaimed", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Assert.True(SpinWait.SpinUntil(() => { lock (f.QueueLock) return (bool)claim.GetValue(f.Prefetch)!; }, TimeSpan.FromSeconds(10)));
+        Assert.True(SpinWait.SpinUntil(() => f.Prefetch.IsWorkerClaimed(0), TimeSpan.FromSeconds(10)));
         lock (f.QueueLock)
         {
             // Closed gate: still nobody's to resolve.

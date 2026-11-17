@@ -83,8 +83,8 @@ internal enum ResolveMemoRebuildRefusal
 
 // The graphics programs of draws already resolved, keyed by everything their resolution reads from the registers and
 // the draw (ResolveKey), many per frame: a draw whose key matches an entry takes its programs once every guest read the
-// full resolution makes still gives the same answer (ShaderPipelineCache.TryTakeResolveMemo). Used under the pipeline
-// cache's _resolveGate only.
+// full resolution makes still gives the same answer (ShaderPipelineCache.TryTakeResolveMemo). Used under its resolver
+// shard's gate only (one memo per shard; with one shard that gate is the pipeline cache's _resolveGate).
 internal sealed class GraphicsResolveMemo
 {
     internal static readonly ResolveMemoMode DefaultMode = ParseMode(Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_MEMO"));

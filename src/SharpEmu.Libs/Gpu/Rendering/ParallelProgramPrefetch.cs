@@ -8,9 +8,9 @@ using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
-// Resolves the programs of deferred draws on a worker thread, in issue order, while the render
-// thread interprets and records. The render thread takes a result for the draw it runs only when
-// the resolution completed, used the inputs the draw derives and still matches the host's
+// Resolves the programs of deferred draws on resolving threads (one per resolver shard, SHARPEMU_RESOLVE_SHARDS), each
+// in issue order of its own jobs, while the render thread interprets and records. The render thread takes a result for
+// the draw it runs only when the resolution completed, used the inputs the draw derives and still matches the host's
 // GPU-ownership state; otherwise it resolves the draw itself.
 public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 {
@@ -31,6 +31,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         internal long ResolveTicks;
         // The jobs submitted before this one.
         internal long Index;
+        // The resolver shard whose queue holds it (ResolveShards): its resolution runs under that shard's state.
+        internal int Shard;
         // 0 queued, 1 resolved, 2 abandoned.
         internal volatile int State;
         // The resolving thread (or the caller) has taken it from the queue; it found its gate still closed when it got to it.
@@ -246,19 +248,44 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             DispatchInitiator == dispatchInitiator && GroupsX == groupsX && GroupsY == groupsY && GroupsZ == groupsZ && Indirect == indirect;
     }
     private readonly object _lock = new();
-    private readonly Queue<Job> _queue = new();
-    private readonly SharpEmu.HLE.Host.HostHelperThread _thread;
+
+    // One resolving thread and its FIFO queue per resolver shard (ResolveShards, IShaderPipelineProvider.ResolveShardCount):
+    // a job goes to the queue of the shard its provider names (ResolveShardOf), and each shard resolves its own jobs in
+    // submission order, one at a time, its thread or the caller. Jobs of different shards finish out of order; _finished
+    // is the finished prefix over all of them (FinishedPrefix), so whatever waits for the jobs before an item waits for
+    // exactly those. Everything here is under _lock unless read with Volatile as a hint. With one shard, the single
+    // resolver as before.
+    private sealed class ResolverShard(int index)
+    {
+        public readonly int Index = index;
+        public readonly Queue<Job> Queue = new();
+        public SharpEmu.HLE.Host.HostHelperThread? Thread;
+        // A resolution of this shard's head runs (its thread's or the caller's), and the job it resolves.
+        public bool Running;
+        public Job? Resolving;
+        // The shard's thread owns the head even while it releases the lock to wait for its gate.
+        public bool WorkerClaimed;
+        // The shard's thread waits for jobs or an active caller.
+        public bool IdleForJobs;
+        // Set while the shard's thread sleeps because of a pause.
+        public bool WaitingOnPause;
+        // The gate the shard's thread sleeps on; long.MaxValue while it does not.
+        public long SleepingOnGate = long.MaxValue;
+        // Its thread only: jobs taken (allocation sampling, resolver_jobs).
+        public long ResolverJobs;
+        // Since the last report: jobs its thread or the caller resolved, and its thread's resolving time (resolve_ms).
+        public long Resolved;
+        public long ResolveTicks;
+        public ulong ThreadId;
+        public long LastCpu = -1;
+    }
+
+    private readonly ResolverShard[] _shards;
     private int _outstanding;
+    // The finished prefix: every job with a lower Index is finished (FinishedPrefix).
     private long _finished;
     private long _executedGate;
-    // The gate the worker sleeps on; long.MaxValue while it does not.
-    private long _sleepingOnGate = long.MaxValue;
     private bool _paused;
-    // Set while the worker sleeps because of a pause, under _lock.
-    private bool _waitingOnPause;
-    private bool _running;
-    // The worker owns the head even while it releases the lock to wait for its gate.
-    private bool _workerClaimed;
     private readonly bool _allowCallerResolution;
     // Long bursts give the resolver useful lead; racing it for each head adds handoffs.
     // Short queues are the query/barrier pattern where the renderer otherwise waits
@@ -279,18 +306,87 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         _fatal = host.Fatal;
         _concurrent = concurrent;
         _allowCallerResolution = allowCallerResolution;
-        // The worker waits on this thread per draw: it runs at the worker's class, with the
-        // worker's stack, since it resolves what the worker would resolve itself.
-        _thread = SharpEmu.HLE.Host.HostHelperThread.Start("SharpEmu program resolve", 16 * 1024 * 1024, Run);
+        var count = Math.Clamp(executor.ResolveShardCount, 1, ResolveShards.Maximum);
+        _shards = new ResolverShard[count];
+        for (var index = 0; index < count; index++)
+        {
+            _shards[index] = new ResolverShard(index);
+        }
+
+        ResolveShards.LogOnce(count);
+        // The worker waits on these threads per draw: they run at the worker's class, with the
+        // worker's stack, since they resolve what the worker would resolve itself.
+        foreach (var shard in _shards)
+        {
+            shard.Thread = SharpEmu.HLE.Host.HostHelperThread.Start(count == 1 ? "SharpEmu program resolve" : $"SharpEmu program resolve {shard.Index}",
+                16 * 1024 * 1024, () => Run(shard));
+        }
+    }
+
+    internal int ShardCount => _shards.Length;
+
+    // For tests: whether a shard's thread holds its head's claim (under _lock).
+    internal bool IsWorkerClaimed(int shard)
+    {
+        lock (_lock)
+        {
+            return _shards[shard].WorkerClaimed;
+        }
+    }
+
+    private ResolverShard ShardFor(Job job)
+    {
+        if (_shards.Length == 1)
+        {
+            return _shards[0];
+        }
+
+        var index = _executor.ResolveShardOf(job.Banks, job.Compute is not null);
+        if ((uint)index >= (uint)_shards.Length)
+        {
+            throw _fatal($"The pipeline provider routed a job to resolver shard {index} of {_shards.Length}.");
+        }
+
+        return _shards[index];
+    }
+
+    // Under _lock: the lowest Index not finished (a shard's running job, else its queue's head), or Submitted.
+    private long FinishedPrefix()
+    {
+        var prefix = Submitted;
+        foreach (var shard in _shards)
+        {
+            if (shard.Resolving is { } running)
+            {
+                prefix = Math.Min(prefix, running.Index);
+            }
+            else if (shard.Queue.TryPeek(out var head))
+            {
+                prefix = Math.Min(prefix, head.Index);
+            }
+        }
+
+        return prefix;
+    }
+
+    // Under _lock.
+    private bool AnyRunning()
+    {
+        foreach (var shard in _shards)
+        {
+            if (shard.Running)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // The job of the draw the render thread runs now; set around each deferred draw.
     public Job? Current { get; set; }
 
     public long Submitted { get; private set; }
-
-    // The worker waits for jobs or an active caller (read and written under _lock).
-    private bool _idleForJobs;
 
     // What became of the jobs since the last TakeCounters: resolved, abandoned (the resolution threw),
     // taken by their draw, refused when taken (inputs or ownership changed), and the worker's wait.
@@ -473,16 +569,18 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     private Job Enqueue(Job job)
     {
+        var shard = ShardFor(job);
+        job.Shard = shard.Index;
         lock (_lock)
         {
             job.Index = Submitted;
-            _queue.Enqueue(job);
+            shard.Queue.Enqueue(job);
             Submitted++;
             _outstanding++;
-            // Only the worker asleep on an empty queue waits for a job: the others on this lock wait
-            // for jobs to finish, which the worker signals. A pulse per draw was a wake for nothing
-            // while the worker was busy resolving the draws before.
-            if (_idleForJobs)
+            // Only the shard's thread asleep on an empty queue waits for this job: the others on this lock wait
+            // for jobs to finish, which the resolving threads signal. A pulse per draw was a wake for nothing
+            // while the thread was busy resolving the draws before.
+            if (shard.IdleForJobs)
             {
                 Monitor.PulseAll(_lock);
             }
@@ -525,19 +623,24 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     public void AdvanceGate(long executed)
     {
         Interlocked.Exchange(ref _executedGate, executed);
-        // Only a worker asleep on a gate this reaches needs a wake: one per item costs the render
+        // Only a resolving thread asleep on a gate this reaches needs a wake: one per item costs the render
         // thread a kernel call each.
-        if (Volatile.Read(ref _sleepingOnGate) <= executed)
+        foreach (var shard in _shards)
         {
-            lock (_lock)
+            if (Volatile.Read(ref shard.SleepingOnGate) <= executed)
             {
-                Monitor.PulseAll(_lock);
+                lock (_lock)
+                {
+                    Monitor.PulseAll(_lock);
+                }
+
+                return;
             }
         }
     }
 
-    // Returns once the worker finished the first count jobs it was given, so a non-draw item runs
-    // with no resolution of the draws before it still reading.
+    // Returns once the first count jobs submitted are finished, on whichever shard (the finished prefix), so a
+    // non-draw item runs with no resolution of the draws before it still reading.
     public void WaitFinished(long count)
     {
         if (Volatile.Read(ref _finished) >= count)
@@ -564,7 +667,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         lock (_lock)
         {
             _paused = true;
-            while (_running)
+            // Every shard's running resolution, its thread's or the caller's.
+            while (AnyRunning())
             {
                 _waiters++;
                 Monitor.Wait(_lock);
@@ -580,9 +684,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         lock (_lock)
         {
             _paused = false;
-            if (_waitingOnPause)
+            foreach (var shard in _shards)
             {
-                Monitor.PulseAll(_lock);
+                if (shard.WaitingOnPause)
+                {
+                    Monitor.PulseAll(_lock);
+                    break;
+                }
             }
         }
     }
@@ -606,7 +714,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             // Caller work is reported separately, not disguised as a shorter resolver wait.
             // Keep long queues out of the claim routine's lock/finally frame.
             if (!_allowCallerResolution ||
-                (Volatile.Read(ref _outstanding) > MaximumCallerOutstanding && !(ClaimSteal && Volatile.Read(ref _workerClaimed))) ||
+                (Volatile.Read(ref _outstanding) > MaximumCallerOutstanding && !(ClaimSteal && Volatile.Read(ref _shards[job.Shard].WorkerClaimed))) ||
                 !TryResolveOnCaller(job))
             {
                 WaitFor(job);
@@ -905,7 +1013,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         {
             var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             if (!_allowCallerResolution ||
-                (Volatile.Read(ref _outstanding) > MaximumCallerOutstanding && !(ClaimSteal && Volatile.Read(ref _workerClaimed))) ||
+                (Volatile.Read(ref _outstanding) > MaximumCallerOutstanding && !(ClaimSteal && Volatile.Read(ref _shards[job.Shard].WorkerClaimed))) ||
                 !TryResolveOnCaller(job))
             {
                 WaitFor(job);
@@ -1065,7 +1173,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         behind = Submitted > job.Index + 1;
         Interlocked.Increment(ref behind ? ref _unresolvedBehind : ref _unresolvedFrontier);
         if (job.Gate > Volatile.Read(ref _executedGate)) Interlocked.Increment(ref _unresolvedGated);
-        else if (Volatile.Read(ref _running)) Interlocked.Increment(ref _unresolvedBusy);
+        else if (Volatile.Read(ref _shards[job.Shard].Running)) Interlocked.Increment(ref _unresolvedBusy);
         else Interlocked.Increment(ref _unresolvedQueued);
         var kind = GateKindOf(job.Gate);
         Interlocked.Increment(ref _unresolvedByGate[(int)kind]);
@@ -1084,16 +1192,15 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     // The resolving thread's idle time in its queue wait and its wakes from it, its time spinning and sleeping on job
     // gates, the bytes it allocated per job (sampled every AllocationSamplePeriod jobs), and its CPU time.
-    private long _idleTicks, _gateTicks, _idleWakes, _idleSpinTakes, _sampledBytes, _sampledJobs, _resolverJobs;
+    private long _idleTicks, _gateTicks, _idleWakes, _idleSpinTakes, _sampledBytes, _sampledJobs;
 
     // SHARPEMU_RESOLVER_IDLE_SPIN=0: the idle worker sleeps at once, as before.
     private static readonly bool IdleSpin = SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_RESOLVER_IDLE_SPIN");
     private const int IdleSpins = 32;
 
-    private bool WorkReadyHint() => Volatile.Read(ref _stopping) || (_queue.Count != 0 && !Volatile.Read(ref _running));
+    private bool WorkReadyHint(ResolverShard shard) =>
+        Volatile.Read(ref _stopping) || (shard.Queue.Count != 0 && !Volatile.Read(ref shard.Running));
     private const int AllocationSamplePeriod = 64;
-    private ulong _resolverThreadId;
-    private long _lastResolverCpu = -1;
 
     public string TakeResolverReport()
     {
@@ -1101,9 +1208,19 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         static double Milliseconds(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         var sampledJobs = Interlocked.Exchange(ref _sampledJobs, 0);
         var sampledBytes = Interlocked.Exchange(ref _sampledBytes, 0);
-        var cpu = ResolverCpuNanoseconds();
-        var lastCpu = Interlocked.Exchange(ref _lastResolverCpu, cpu);
-        var cpuMs = cpu < 0 || lastCpu < 0 ? -1.0 : (cpu - lastCpu) / 1e6;
+        // Per shard: its thread's CPU time since the last report, jobs resolved (its thread's and the caller's), and its
+        // thread's resolving time; resolver_cpu_ms is the sum (-1 when a thread's cannot be read).
+        var cpuMs = 0.0;
+        var resolverJobs = 0L;
+        var shardCpu = new double[_shards.Length];
+        foreach (var shard in _shards)
+        {
+            var cpu = ResolverCpuNanoseconds(shard);
+            var lastCpu = Interlocked.Exchange(ref shard.LastCpu, cpu);
+            shardCpu[shard.Index] = cpu < 0 || lastCpu < 0 ? -1.0 : (cpu - lastCpu) / 1e6;
+            cpuMs = cpuMs < 0 || shardCpu[shard.Index] < 0 ? -1.0 : cpuMs + shardCpu[shard.Index];
+            resolverJobs += Interlocked.Exchange(ref shard.ResolverJobs, 0);
+        }
         return $"takes_unresolved=(busy={Interlocked.Exchange(ref _unresolvedBusy, 0)},gated={Interlocked.Exchange(ref _unresolvedGated, 0)}," +
             $"queued={Interlocked.Exchange(ref _unresolvedQueued, 0)},started={Interlocked.Exchange(ref _unresolvedStarted, 0)}," +
             $"frontier={Interlocked.Exchange(ref _unresolvedFrontier, 0)},behind={Interlocked.Exchange(ref _unresolvedBehind, 0)}," +
@@ -1111,19 +1228,38 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             $"behind_wait_ms={Milliseconds(Interlocked.Exchange(ref _unresolvedBehindWaitTicks, 0)).ToString("F1", culture)}) " +
             $"unresolved_by_gate=({FormatByKind(_unresolvedByGate)}) gate_bound_by_gate=({FormatByKind(_gateBoundByGate)}) " +
             $"unresolved_wait_ms_by_gate=({FormatByKind(_unresolvedWaitTicksByGate, ticks => Milliseconds(ticks).ToString("F1", culture))}) " +
-            $"draw_gate_raises=({FormatByKind(_drawGateRaises)}) {TakeDrawLookaheadReport()} resolver_jobs={Interlocked.Exchange(ref _resolverJobs, 0)} " +
+            $"draw_gate_raises=({FormatByKind(_drawGateRaises)}) {TakeDrawLookaheadReport()} resolver_jobs={resolverJobs} " +
             $"resolver_idle_ms={Milliseconds(Interlocked.Exchange(ref _idleTicks, 0)).ToString("F1", culture)} " +
             $"gate_sleep_ms={Milliseconds(Interlocked.Exchange(ref _gateTicks, 0)).ToString("F1", culture)} idle_wakes={Interlocked.Exchange(ref _idleWakes, 0)} " +
             $"idle_spin_takes={Interlocked.Exchange(ref _idleSpinTakes, 0)} " +
             $"alloc_b_per_job={(sampledJobs == 0 ? 0 : sampledBytes / (double)sampledJobs).ToString("F0", culture)} " +
-            $"resolver_cpu_ms={cpuMs.ToString("F1", culture)} " +
+            $"resolver_cpu_ms={cpuMs.ToString("F1", culture)} {TakeShardReport(shardCpu)} " +
             SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeGraphicsResolveReport();
     }
 
-    // The resolving thread's CPU time (user and system), or -1 where it cannot be read.
-    private long ResolverCpuNanoseconds()
+    // shards=(n=,resolved=a/b,resolve_ms=a/b,cpu_ms=a/b, then the pipeline cache's shared tier: its gate's takes and wait
+    // from the sharded paths, the shard gates' wait, draws resolved through a shard's memo, nested resolutions).
+    private string TakeShardReport(double[] shardCpu)
     {
-        var thread = Volatile.Read(ref _resolverThreadId);
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var resolved = new string[_shards.Length];
+        var resolveMs = new string[_shards.Length];
+        var cpu = new string[_shards.Length];
+        foreach (var shard in _shards)
+        {
+            resolved[shard.Index] = Interlocked.Exchange(ref shard.Resolved, 0).ToString(culture);
+            resolveMs[shard.Index] = (Interlocked.Exchange(ref shard.ResolveTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1", culture);
+            cpu[shard.Index] = shardCpu[shard.Index].ToString("F1", culture);
+        }
+
+        return $"shards=(n={_shards.Length},resolved={string.Join('/', resolved)},resolve_ms={string.Join('/', resolveMs)},cpu_ms={string.Join('/', cpu)}," +
+            $"{SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeShardReport().Replace(' ', ',')})";
+    }
+
+    // A resolving thread's CPU time (user and system), or -1 where it cannot be read.
+    private static long ResolverCpuNanoseconds(ResolverShard shard)
+    {
+        var thread = Volatile.Read(ref shard.ThreadId);
         if (thread == 0 || !OperatingSystem.IsMacOS())
             return -1;
         Span<ulong> info = stackalloc ulong[ThreadInfoBytes / sizeof(ulong)];
@@ -1191,17 +1327,19 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // the claim with the worker.
     internal bool TryResolveOnCaller(Job job)
     {
-        if (!_allowCallerResolution || job.State != 0 || Volatile.Read(ref _running))
+        var shard = _shards[job.Shard];
+        if (!_allowCallerResolution || job.State != 0 || Volatile.Read(ref shard.Running))
             return false;
         lock (_lock)
         {
-            var claimed = _workerClaimed;
-            if (_stopping || _paused || _running || job.State != 0 ||
+            var claimed = shard.WorkerClaimed;
+            if (_stopping || _paused || shard.Running || job.State != 0 ||
                 (claimed ? !ClaimSteal : _outstanding > MaximumCallerOutstanding) ||
-                job.Gate > Volatile.Read(ref _executedGate) || !_queue.TryPeek(out var head) || !ReferenceEquals(head, job))
+                job.Gate > Volatile.Read(ref _executedGate) || !shard.Queue.TryPeek(out var head) || !ReferenceEquals(head, job))
                 return false;
-            _queue.Dequeue();
-            _running = true;
+            shard.Queue.Dequeue();
+            shard.Running = true;
+            shard.Resolving = job;
             job.Started = true;
             if (claimed)
             {
@@ -1221,7 +1359,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             GpuFatal.ThrowOnFatal = speculative;
             Interlocked.Add(ref _callerResolveTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
             Interlocked.Increment(ref _callerResolves);
-            FinishJob(worker: false);
+            FinishJob(shard, worker: false);
         }
         return true;
     }
@@ -1252,36 +1390,38 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // or pause (under _lock). FinishJob wakes only when one waits: a pulse per job was a kernel call per draw for nobody.
     private int _waiters;
 
-    private void FinishJob(bool worker)
+    private void FinishJob(ResolverShard shard, bool worker)
     {
         lock (_lock)
         {
             _outstanding--;
-            _finished++;
-            _running = false;
-            if (worker) _workerClaimed = false;
-            // The worker idle in Run waits for _running to fall after a caller's resolution as well as for jobs.
-            if (_waiters != 0 || _idleForJobs)
+            shard.Running = false;
+            shard.Resolving = null;
+            Volatile.Write(ref _finished, FinishedPrefix());
+            if (worker) shard.WorkerClaimed = false;
+            // The shard's thread idle in Run waits for Running to fall after a caller's resolution as well as for jobs.
+            if (_waiters != 0 || shard.IdleForJobs)
             {
                 Monitor.PulseAll(_lock);
             }
         }
     }
 
-    private void Run()
+    private void Run(ResolverShard shard)
     {
         GpuFatal.ThrowOnFatal = true;
         if (OperatingSystem.IsMacOS() && PthreadThreadId(0, out var threadId) == 0)
         {
-            Volatile.Write(ref _resolverThreadId, threadId);
+            Volatile.Write(ref shard.ThreadId, threadId);
         }
 
+        var queue = shard.Queue;
         while (true)
         {
             Job job;
             lock (_lock)
             {
-                if ((_queue.Count == 0 || _running) && !_stopping)
+                if ((queue.Count == 0 || shard.Running) && !_stopping)
                 {
                     var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                     if (IdleSpin)
@@ -1292,7 +1432,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                         try
                         {
                             var spinner = new SpinWait();
-                            for (var spin = 0; spin < IdleSpins && !WorkReadyHint(); spin++)
+                            for (var spin = 0; spin < IdleSpins && !WorkReadyHint(shard); spin++)
                             {
                                 spinner.SpinOnce(sleep1Threshold: -1);
                             }
@@ -1302,17 +1442,17 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                             Monitor.Enter(_lock);
                         }
 
-                        if ((_queue.Count != 0 && !_running) || _stopping)
+                        if ((queue.Count != 0 && !shard.Running) || _stopping)
                         {
                             _idleSpinTakes++;
                         }
                     }
 
-                    while ((_queue.Count == 0 || _running) && !_stopping)
+                    while ((queue.Count == 0 || shard.Running) && !_stopping)
                     {
-                        _idleForJobs = true;
+                        shard.IdleForJobs = true;
                         Monitor.Wait(_lock);
-                        _idleForJobs = false;
+                        shard.IdleForJobs = false;
                         _idleWakes++;
                     }
 
@@ -1324,8 +1464,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                     return;
                 }
 
-                job = _queue.Peek();
-                _workerClaimed = true;
+                job = queue.Peek();
+                shard.WorkerClaimed = true;
                 if (job.Gate > Volatile.Read(ref _executedGate))
                 {
                     job.GateWaited = true;
@@ -1352,20 +1492,20 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
                 while ((_paused || job.Gate > Volatile.Read(ref _executedGate)) && !_stopping)
                 {
-                    Interlocked.Exchange(ref _sleepingOnGate, _paused ? long.MaxValue : job.Gate);
+                    Interlocked.Exchange(ref shard.SleepingOnGate, _paused ? long.MaxValue : job.Gate);
                     if (!_paused && job.Gate <= Volatile.Read(ref _executedGate))
                     {
                         break;
                     }
 
-                    _waitingOnPause = _paused;
+                    shard.WaitingOnPause = _paused;
                     _waiters++;
                     Monitor.Wait(_lock, 50);
                     _waiters--;
-                    _waitingOnPause = false;
+                    shard.WaitingOnPause = false;
                 }
 
-                Volatile.Write(ref _sleepingOnGate, long.MaxValue);
+                Volatile.Write(ref shard.SleepingOnGate, long.MaxValue);
                 if (gateStarted != 0)
                 {
                     Interlocked.Add(ref _gateTicks, System.Diagnostics.Stopwatch.GetTimestamp() - gateStarted);
@@ -1377,22 +1517,23 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 }
 
                 // The caller took the head while this thread waited for its gate (TryResolveOnCaller).
-                if (_running || !_queue.TryPeek(out var head) || !ReferenceEquals(head, job))
+                if (shard.Running || !queue.TryPeek(out var head) || !ReferenceEquals(head, job))
                 {
-                    _workerClaimed = false;
+                    shard.WorkerClaimed = false;
                     continue;
                 }
 
-                _queue.Dequeue();
-                _running = true;
+                queue.Dequeue();
+                shard.Running = true;
+                shard.Resolving = job;
                 job.Started = true;
             }
 
-            var sampled = (++_resolverJobs & (AllocationSamplePeriod - 1)) == 0;
+            var sampled = (Interlocked.Increment(ref shard.ResolverJobs) & (AllocationSamplePeriod - 1)) == 0;
             var allocatedBefore = sampled ? GC.GetAllocatedBytesForCurrentThread() : 0;
             try
             {
-                Resolve(job);
+                Resolve(job, shard);
             }
             finally
             {
@@ -1402,18 +1543,18 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                     Interlocked.Increment(ref _sampledJobs);
                 }
 
-                FinishJob(worker: true);
+                FinishJob(shard, worker: true);
             }
         }
     }
 
     private long _resolveTicks;
 
-    // The resolving thread's busy time since the last call.
+    // The resolving threads' busy time since the last call (each shard's is in its own count too, TakeShardReport).
     public double TakeResolveMilliseconds() =>
         Interlocked.Exchange(ref _resolveTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
-    private void Resolve(Job job)
+    private void Resolve(Job job, ResolverShard shard)
     {
         // resolve_ms only: sampled like the materialization timings (MaterializationTally.StartTiming).
         var started = SharpEmu.ShaderCompiler.Resources.MaterializationTally.StartTiming();
@@ -1425,7 +1566,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         {
             if (started != 0)
             {
-                Interlocked.Add(ref _resolveTicks, SharpEmu.ShaderCompiler.Resources.MaterializationTally.ElapsedTicks(started));
+                var ticks = SharpEmu.ShaderCompiler.Resources.MaterializationTally.ElapsedTicks(started);
+                Interlocked.Add(ref _resolveTicks, ticks);
+                Interlocked.Add(ref shard.ResolveTicks, ticks);
             }
         }
     }
@@ -1466,6 +1609,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
                 job.ResolveTicks = System.Diagnostics.Stopwatch.GetTimestamp() - started;
                 Interlocked.Increment(ref _resolvedCount);
+                Interlocked.Increment(ref _shards[job.Shard].Resolved);
                 job.State = 1;
                 return;
             }
@@ -1489,6 +1633,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             }
 
             Interlocked.Increment(ref _resolvedCount);
+            Interlocked.Increment(ref _shards[job.Shard].Resolved);
             job.State = 1;
         }
         catch (Exception exception)

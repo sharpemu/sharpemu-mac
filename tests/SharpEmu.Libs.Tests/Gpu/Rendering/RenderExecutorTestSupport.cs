@@ -653,6 +653,13 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
 
     public List<ColorComponentMap[]> ExportMappings { get; } = new();
 
+    // Resolver shards (IShaderPipelineProvider.ResolveShardCount); ShardOf routes a job (shard 0 without it).
+    public int ResolveShardCount { get; set; } = 1;
+
+    internal Func<RegisterBanks, bool, int>? ShardOf { get; set; }
+
+    public int ResolveShardOf(RegisterBanks banks, bool compute) => ShardOf?.Invoke(banks, compute) ?? 0;
+
     public GraphicsPrograms GetGraphicsPrograms(
         RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
@@ -664,8 +671,13 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         int startInstanceUserData)
     {
         BeforeGraphicsResolve?.Invoke(banks.Shader.Vertex);
-        Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
-        ExportMappings.Add(targetExportMapping.ToArray());
+        // Resolver shards call in from several threads at once.
+        lock (Calls)
+        {
+            Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
+            ExportMappings.Add(targetExportMapping.ToArray());
+        }
+
         return !pixelActive && GraphicsWithoutPixel is { } withoutPixel ? withoutPixel : Graphics;
     }
 

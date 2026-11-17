@@ -173,6 +173,13 @@ public interface IShaderPipelineProvider
     // under another stamp may hold the entry a lookup made now would not find (ParallelProgramPrefetch refuses it).
     ProgramStateStamp ProgramState => default;
 
+    // How many resolver shards the provider's resolution state is split into (ResolveShards): ParallelProgramPrefetch
+    // runs one resolving thread per shard. 1 resolves everything under one lock, as before.
+    int ResolveShardCount => 1;
+
+    // The shard a draw's (or a dispatch's) resolution runs under: a stable function of the provider's per-shard key.
+    int ResolveShardOf(RegisterBanks banks, bool compute) => 0;
+
     // Optional capture of rejected stage inputs; it never admits or executes the draw.
     void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context) { }
 

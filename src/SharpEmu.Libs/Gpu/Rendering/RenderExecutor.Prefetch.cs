@@ -190,6 +190,14 @@ public sealed partial class RenderExecutor
 
     public ProgramStateStamp ProgramState => _pipelines.ProgramState;
 
+    // The provider's resolver shards (IShaderPipelineProvider.ResolveShardCount) and a job's shard among them.
+    public int ResolveShardCount => _pipelines.ResolveShardCount;
+
+    public int ResolveShardOf(RegisterBanks banks, bool compute) => _pipelines.ResolveShardOf(banks, compute);
+
+    // As ProgramInputsOf decides it, for routing a draw before its inputs are derived.
+    public static bool PixelStageActive(RegisterBanks banks) => HasActivePixelShader(banks);
+
     // The programs of a draw with these banks and inputs, as ResolveShaderPrograms resolves them.
     public GraphicsPrograms ResolveGraphicsPrograms(RegisterBanks banks, in GraphicsProgramInputs inputs)
     {

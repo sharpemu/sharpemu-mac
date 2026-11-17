@@ -353,6 +353,34 @@ internal sealed class ShaderProgramCache
         _spirvDumpEnabled || ReadLog is not null || Diagnostics.GpuReadTrace.Enabled || SharpEmu.Libs.Gpu.Images.ImageClearTrace.Enabled ||
         RenderTrace.Enabled;
 
+    // With resolver shards (ShaderPipelineCache.ResolveShardCount above 1), the shared tier's gate: a memo hit revalidates
+    // outside it, and a snapshot of the materialization cache (not single-threaded: lookups fill and refresh its entries)
+    // is revalidated under it. Null with one shard, where every caller already holds that gate.
+    internal object? MaterializationGate { get; set; }
+
+    private static long _materializationGateTakes;
+
+    internal static long TakeMaterializationGateTakes() => Interlocked.Exchange(ref _materializationGateTakes, 0);
+
+    private bool RevalidateMaterialization(ResourceSnapshot snapshot)
+    {
+        if (Materializations is not { } materializations)
+        {
+            return false;
+        }
+
+        if (MaterializationGate is not { } gate)
+        {
+            return materializations.Revalidate(snapshot, _readResidentGuestBytes);
+        }
+
+        Interlocked.Increment(ref _materializationGateTakes);
+        lock (gate)
+        {
+            return materializations.Revalidate(snapshot, _readResidentGuestBytes);
+        }
+    }
+
     public bool Revalidate(in ShaderStageResources stage)
     {
         if (stage.Program is null)
@@ -371,7 +399,7 @@ internal sealed class ShaderProgramCache
             throw GpuFatal.VerifyFailed(DescribeMismatch(mismatch));
         }
 
-        var current = fast ?? (Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes));
+        var current = fast ?? RevalidateMaterialization(stage.Resources);
         var outcome = current ? MaterializationTally.Outcome.KeptRevalidated
             : fast is not null && ResourceMaterializer.LastRevalidateRefused ? MaterializationTally.Outcome.RevalidateRefused
             : MaterializationTally.Outcome.KeptStale;
@@ -419,7 +447,7 @@ internal sealed class ShaderProgramCache
         if (fast == ResourceMaterializer.FastRevalidation.NotFast)
         {
             // A cached materialization: revalidated as before, never rebuilt here.
-            var current = Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes);
+            var current = RevalidateMaterialization(stage.Resources);
             MaterializationTally.Note(current ? MaterializationTally.Outcome.KeptRevalidated : MaterializationTally.Outcome.KeptStale,
                 MaterializationTally.ElapsedTicks(started), stage.Resources);
             return current ? ResourceMaterializer.FastRevalidation.Current : ResourceMaterializer.FastRevalidation.NotFast;
