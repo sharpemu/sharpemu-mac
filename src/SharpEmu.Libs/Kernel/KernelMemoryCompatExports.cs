@@ -1235,7 +1235,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        SharpEmu.HLE.GpuWriteRing.RecordHle(destination, (ulong)count, source, "hle:memcpy", null);
+        SharpEmu.HLE.GpuWriteRing.RecordHle(destination, (ulong)count, source, SharpEmu.HLE.GpuWriteRing.CopyKind, null);
         if (count > 0 && !ctx.Memory.TryCopy(destination, source, (ulong)count))
         {
             var payload = GC.AllocateUninitializedArray<byte>(count);

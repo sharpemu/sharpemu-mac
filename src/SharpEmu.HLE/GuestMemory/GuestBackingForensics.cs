@@ -18,7 +18,18 @@ public static unsafe class GuestBackingForensics
     private static SharedBackingViews? _views;
 
     // The newest backing views constructed in this process: the guest's, in a running game.
-    internal static void Register(SharedBackingViews views) => Volatile.Write(ref _views, views);
+    internal static void Register(SharedBackingViews views)
+    {
+        Volatile.Write(ref _views, views);
+        if (GpuWriteRing.HleEnabled)
+        {
+            // SHARPEMU_HLE_WRITE_RING=1: each recorded write keeps the backing its address maps now.
+            GpuWriteRing.BackingResolver = address =>
+                views.AliasBase is var aliasBase and not 0 && views.TryResolveAlias(address, 1, out var alias)
+                    ? alias - aliasBase
+                    : ulong.MaxValue;
+        }
+    }
 
     /// <summary>
     /// For each view the guest range [address, address + size) lies in: its backing bytes, and
@@ -32,6 +43,30 @@ public static unsafe class GuestBackingForensics
         }
 
         return DescribeAliases(records, address, size, limit);
+    }
+
+    /// <summary>The backing bytes the guest range [address, address + size) maps now, one run per view.</summary>
+    public static List<(ulong Start, ulong Size)> BackingSpansOf(ulong address, ulong size)
+    {
+        var spans = new List<(ulong Start, ulong Size)>();
+        if (Volatile.Read(ref _views) is not { } views || !views.TrySnapshotViews(out var records))
+        {
+            return spans;
+        }
+
+        var end = address + size;
+        foreach (var view in records)
+        {
+            if (view.Address + view.Size <= address || view.Address >= end)
+            {
+                continue;
+            }
+
+            var from = Math.Max(address, view.Address);
+            spans.Add((view.Offset + (from - view.Address), Math.Min(end, view.Address + view.Size) - from));
+        }
+
+        return spans;
     }
 
     internal static List<string> DescribeAliases(IReadOnlyList<ViewRecord> records, ulong address, ulong size, int limit)

@@ -267,6 +267,12 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
         _aliasBase = aliasBase;
         _aliasSize = aliasSize;
+        if (SharpEmu.HLE.GpuWriteRing.Enabled)
+        {
+            // SHARPEMU_GPU_WRITE_RING=1: each recorded write also keeps the backing offset its address resolves to now.
+            SharpEmu.HLE.GpuWriteRing.BackingResolver = address =>
+                _backing.TryResolveBackingAliasSpan(address, 1, out var alias) && InAlias(alias, 1) ? alias - _aliasBase : ulong.MaxValue;
+        }
         _granuleBits = System.Numerics.BitOperations.TrailingZeroCount(granuleBytes);
         _granuleBytes = granuleBytes;
         _granuleCount = checked((int)((aliasSize + granuleBytes - 1) >> _granuleBits));

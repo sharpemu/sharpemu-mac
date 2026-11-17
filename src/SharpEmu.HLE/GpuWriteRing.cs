@@ -35,6 +35,14 @@ namespace SharpEmu.HLE;
 public static class GpuWriteRing
 {
     private const ulong MinimumSize = 16;
+
+    // SHARPEMU_HLE_WRITE_RING_MIN=<bytes>: the smallest HLE write kept. The default keeps every
+    // libc copy, which costs enough to move the timing of a race; 65536 keeps file reads and
+    // bulk copies only.
+    private static readonly ulong HleMinimumSize =
+        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_HLE_WRITE_RING_MIN"), out var minimum) && minimum > MinimumSize
+            ? minimum
+            : MinimumSize;
     private static readonly int Capacity = ReadCapacity();
     private const int MaxReportedPerRange = 64;
 
@@ -46,6 +54,8 @@ public static class GpuWriteRing
         public ulong Size;
         public ulong Serial;
         public ulong Source;
+        public ulong Backing;
+        public ulong SourceBacking;
         public int Thread;
         public string? Kind;
         public string? ProducerA;
@@ -72,6 +82,16 @@ public static class GpuWriteRing
     }
     private static long _sequence;
 
+    private const ulong NoBacking = ulong.MaxValue;
+
+    /// <summary>
+    /// The backing offset a guest address resolves to in this process when a write is recorded
+    /// (ulong.MaxValue for none), set by the owner of the views. A write lands where its address
+    /// resolved then, which is no longer the address's bytes once the guest has moved the mapping,
+    /// so a fault range is also matched by the backing bytes it maps now.
+    /// </summary>
+    public static Func<ulong, ulong>? BackingResolver { get; set; }
+
     /// <summary>True while writes are recorded.</summary>
     public static bool Enabled { get; set; } = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_GPU_WRITE_RING"), "1", StringComparison.Ordinal);
@@ -95,7 +115,7 @@ public static class GpuWriteRing
             return;
         }
 
-        Store(address, size, serial, source: 0, kind, producerA, producerB);
+        Store(address, size, serial, source: 0, NoBacking, kind, producerA, producerB);
     }
 
     /// <summary>
@@ -105,15 +125,82 @@ public static class GpuWriteRing
     /// </summary>
     public static void RecordHle(ulong address, ulong size, ulong source, string kind, string? producer)
     {
-        if (!HleEnabled || size < MinimumSize)
+        if (!HleEnabled || size < HleMinimumSize)
         {
             return;
         }
 
-        Store(address, size, serial: 0, source, kind, producer, producerB: null);
+        // A copy's source is a guest address, and where it was mapped is known only now.
+        var sourceBacking = ReferenceEquals(kind, CopyKind) && BackingResolver is { } resolver ? resolver(source) : NoBacking;
+        Store(address, size, serial: 0, source, sourceBacking, kind, producer, producerB: null);
     }
 
-    private static void Store(ulong address, ulong size, ulong serial, ulong source, string kind, string? producerA, string? producerB)
+    /// <summary>Where in a write a sample is taken, and how many bytes of it.</summary>
+    public const int SampleOffset = 0x20000;
+
+    public const int SampleLength = 16;
+
+    /// <summary>
+    /// Notes what the bytes at <see cref="SampleOffset"/> of an HLE write's destination hold at
+    /// this moment (before or after the write): which of two racing writers came last is what
+    /// those bytes say when both are recorded.
+    /// </summary>
+    public static void RecordHleSample(ulong address, ReadOnlySpan<byte> destination, string kind)
+    {
+        if (!HleEnabled || (ulong)destination.Length < HleMinimumSize || destination.Length < SampleOffset + SampleLength)
+        {
+            return;
+        }
+
+        Store(address, (ulong)destination.Length, serial: 0, source: 0, NoBacking, kind,
+            "sample=" + Convert.ToHexString(destination.Slice(SampleOffset, SampleLength)), producerB: null);
+    }
+
+    /// <summary>The GPU process's sample of the same bytes, with what it knows of the wait.</summary>
+    public static void RecordSample(ulong address, ulong size, ulong serial, string kind, ReadOnlySpan<byte> sample, string detail)
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        Store(address, size, serial, source: 0, NoBacking, kind, "sample=" + Convert.ToHexString(sample), detail);
+    }
+
+    /// <summary>The kind a libc copy is recorded under; its source is a guest address.</summary>
+    public const string CopyKind = "hle:memcpy";
+
+    /// <summary>
+    /// The source bytes of each recorded copy that wrote into [start, end), newest first: the
+    /// guest range the intersecting part was copied from and the backing it mapped then
+    /// (ulong.MaxValue when unknown). Bytes a copy brought were written at its source.
+    /// </summary>
+    public static List<(ulong Start, ulong Size, ulong Backing)> CopySourcesOf(ulong start, ulong end, int limit = 4)
+    {
+        var sources = new List<(ulong Start, ulong Size, ulong Backing)>();
+        var newest = Volatile.Read(ref _sequence);
+        for (var sequence = newest; sequence > 0 && sequence > newest - Capacity && sources.Count < limit; sequence--)
+        {
+            ref var entry = ref Entries[(int)(sequence & (Capacity - 1))];
+            if (Volatile.Read(ref entry.Sequence) != sequence || !ReferenceEquals(entry.Kind, CopyKind) ||
+                entry.Address + entry.Size <= start || entry.Address >= end)
+            {
+                continue;
+            }
+
+            var from = Math.Max(start, entry.Address);
+            var delta = from - entry.Address;
+            sources.Add((
+                entry.Source + delta,
+                Math.Min(end, entry.Address + entry.Size) - from,
+                entry.SourceBacking == NoBacking ? NoBacking : entry.SourceBacking + delta));
+        }
+
+        return sources;
+    }
+
+    private static void Store(
+        ulong address, ulong size, ulong serial, ulong source, ulong sourceBacking, string kind, string? producerA, string? producerB)
     {
         var sequence = Interlocked.Increment(ref _sequence);
         ref var entry = ref Entries[(int)(sequence & (Capacity - 1))];
@@ -124,6 +211,8 @@ public static class GpuWriteRing
         entry.Size = size;
         entry.Serial = serial;
         entry.Source = source;
+        entry.Backing = BackingResolver is { } resolver ? resolver(address) : NoBacking;
+        entry.SourceBacking = sourceBacking;
         entry.Thread = Environment.CurrentManagedThreadId;
         entry.Kind = kind;
         entry.ProducerA = producerA;
@@ -135,7 +224,15 @@ public static class GpuWriteRing
     /// The recorded writes intersecting [start, end), newest first, at most
     /// <paramref name="limit"/>, each formatted on one line with its age at the time of the call.
     /// </summary>
-    public static List<string> Describe(ulong start, ulong end, int limit = MaxReportedPerRange)
+    public static List<string> Describe(ulong start, ulong end, int limit = MaxReportedPerRange) =>
+        Describe(start, end, byBacking: false, limit);
+
+    /// <summary>
+    /// As <see cref="Describe(ulong, ulong, int)"/>; with <paramref name="byBacking"/> the range is
+    /// backing offsets and a write matches by where its first byte resolved when it was recorded
+    /// (taken as one run of the backing, which a write across two mappings is not).
+    /// </summary>
+    public static List<string> Describe(ulong start, ulong end, bool byBacking, int limit = MaxReportedPerRange)
     {
         var lines = new List<string>();
         var newest = Volatile.Read(ref _sequence);
@@ -149,20 +246,71 @@ public static class GpuWriteRing
             }
 
             var entryEnd = entry.Address + entry.Size;
-            if (entryEnd <= start || entry.Address >= end)
+            if (byBacking
+                    ? entry.Backing == NoBacking || entry.Backing + entry.Size <= start || entry.Backing >= end
+                    : entryEnd <= start || entry.Address >= end)
             {
                 continue;
             }
 
-            var ageMs = (now - entry.Ticks) * 1000.0 / Stopwatch.Frequency;
-            var producer = entry.ProducerB is null ? entry.ProducerA : $"{entry.ProducerA} {entry.ProducerB}";
-            lines.Add(
-                $"#{sequence} age={ageMs.ToString("F1", CultureInfo.InvariantCulture)}ms " +
-                $"[0x{entry.Address:X16}, 0x{entryEnd:X16}) size=0x{entry.Size:X} serial={entry.Serial} " +
-                $"src=0x{entry.Source:X} tid={entry.Thread} kind={entry.Kind} producer={producer ?? "?"}");
+            lines.Add(Format(sequence, in entry, now));
         }
 
         return lines;
+    }
+
+    // t is the raw monotonic timestamp (ns on macOS and Linux), comparable between the guest
+    // process and the GPU host, whose ages are taken at different moments.
+    private static string Format(long sequence, in Entry entry, long now)
+    {
+        var entryEnd = entry.Address + entry.Size;
+        var ageMs = (now - entry.Ticks) * 1000.0 / Stopwatch.Frequency;
+        var producer = entry.ProducerB is null ? entry.ProducerA : $"{entry.ProducerA} {entry.ProducerB}";
+        return
+                $"#{sequence} t={entry.Ticks} age={ageMs.ToString("F1", CultureInfo.InvariantCulture)}ms " +
+                $"[0x{entry.Address:X16}, 0x{entryEnd:X16}) size=0x{entry.Size:X} " +
+                $"backing={(entry.Backing == NoBacking ? "?" : $"0x{entry.Backing:X}")} serial={entry.Serial} " +
+                $"src=0x{entry.Source:X}{(entry.SourceBacking == NoBacking ? string.Empty : $" src_backing=0x{entry.SourceBacking:X}")} " +
+                $"tid={entry.Thread} kind={entry.Kind} producer={producer ?? "?"}";
+    }
+
+    /// <summary>The newest <paramref name="count"/> recorded writes, newest first.</summary>
+    public static List<string> Tail(int count)
+    {
+        var lines = new List<string>();
+        var newest = Volatile.Read(ref _sequence);
+        var now = Stopwatch.GetTimestamp();
+        for (var sequence = newest; sequence > 0 && sequence > newest - Capacity && lines.Count < count; sequence--)
+        {
+            ref var entry = ref Entries[(int)(sequence & (Capacity - 1))];
+            if (Volatile.Read(ref entry.Sequence) == sequence)
+            {
+                lines.Add(Format(sequence, in entry, now));
+            }
+        }
+
+        return lines;
+    }
+
+    /// <summary>
+    /// Each recorded write whose producer names <paramref name="text"/> (a file, for a read),
+    /// newest first: its range and the backing it mapped then (ulong.MaxValue when unknown).
+    /// </summary>
+    public static List<(ulong Start, ulong Size, ulong Backing)> RangesOfProducer(string text, int limit = 8)
+    {
+        var found = new List<(ulong Start, ulong Size, ulong Backing)>();
+        var newest = Volatile.Read(ref _sequence);
+        for (var sequence = newest; sequence > 0 && sequence > newest - Capacity && found.Count < limit; sequence--)
+        {
+            ref var entry = ref Entries[(int)(sequence & (Capacity - 1))];
+            if (Volatile.Read(ref entry.Sequence) == sequence && entry.ProducerA is { } producer &&
+                producer.Contains(text, StringComparison.OrdinalIgnoreCase) && !found.Contains((entry.Address, entry.Size, entry.Backing)))
+            {
+                found.Add((entry.Address, entry.Size, entry.Backing));
+            }
+        }
+
+        return found;
     }
 
     /// <summary>The file a guest process with this pid hands its fault ranges over in.</summary>
@@ -173,14 +321,68 @@ public static class GpuWriteRing
     /// Prints the entries intersecting each range here, and (with the GPU ring on) leaves the
     /// ranges for a GPU host process to answer: one "start size label" line per range.
     /// </summary>
-    public static void ReportFaultRanges(IReadOnlyList<(ulong Start, ulong Size, string Label)> ranges)
+    public static void ReportFaultRanges(
+        IReadOnlyList<(ulong Start, ulong Size, string Label)> ranges,
+        IReadOnlyList<(ulong Start, ulong Size, string Label)>? backingRanges = null)
     {
         if ((!Enabled && !HleEnabled) || ranges.Count == 0)
         {
             return;
         }
 
-        Print("local", ranges);
+        Print("local", ranges, byBacking: false);
+        if (backingRanges is not null)
+        {
+            Print("local by backing", backingRanges, byBacking: true);
+        }
+
+        // Bytes a recorded copy brought into a range were written at the copy's source: its
+        // address and the backing it mapped then join the ranges, here and for the GPU host.
+        var followed = new List<(ulong Start, ulong Size, string Label)>();
+        var followedBacking = new List<(ulong Start, ulong Size, string Label)>();
+        foreach (var (start, size, label) in ranges)
+        {
+            foreach (var (sourceStart, sourceSize, sourceBacking) in CopySourcesOf(start, start + size))
+            {
+                followed.Add((sourceStart, sourceSize, $"copy source of {label}"));
+                if (sourceBacking != NoBacking)
+                {
+                    followedBacking.Add((sourceBacking, sourceSize, $"copy source of {label}"));
+                }
+            }
+        }
+
+        // SHARPEMU_FAULT_RING_PRODUCER=<text>: the writes of that producer (a file's reads) join the
+        // ranges too, for bytes that reached a fault range by a copy nothing recorded.
+        if (Environment.GetEnvironmentVariable("SHARPEMU_FAULT_RING_PRODUCER") is { Length: > 0 } producerText)
+        {
+            foreach (var (producerStart, producerSize, producerBacking) in RangesOfProducer(producerText))
+            {
+                followed.Add((producerStart, producerSize, $"write of {producerText}"));
+                if (producerBacking != NoBacking)
+                {
+                    followedBacking.Add((producerBacking, producerSize, $"write of {producerText}"));
+                }
+            }
+        }
+
+        // SHARPEMU_WRITE_RING_TAIL=<n>: the newest n records of this process, whatever they wrote.
+        if (int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_WRITE_RING_TAIL"), out var tail) && tail > 0)
+        {
+            foreach (var line in Tail(tail))
+            {
+                Console.Error.WriteLine($"[GPU-WRITE-RING][INFO] local tail: {line}");
+            }
+        }
+
+        if (followed.Count != 0)
+        {
+            Print("local", followed, byBacking: false);
+            Print("local by backing", followedBacking, byBacking: true);
+            ranges = [.. ranges, .. followed];
+            backingRanges = [.. backingRanges ?? [], .. followedBacking];
+        }
+
         if (!Enabled)
         {
             return;
@@ -192,6 +394,12 @@ public static class GpuWriteRing
             foreach (var (start, size, label) in ranges)
             {
                 text.Append(CultureInfo.InvariantCulture, $"{start:X} {size:X} {label}\n");
+            }
+
+            // '@' lines are backing offsets: the bytes the ranges above map at the fault.
+            foreach (var (start, size, label) in backingRanges ?? [])
+            {
+                text.Append(CultureInfo.InvariantCulture, $"@{start:X} {size:X} {label}\n");
             }
 
             File.WriteAllText(FaultRangesPath(Environment.ProcessId), text.ToString());
@@ -221,28 +429,31 @@ public static class GpuWriteRing
         }
 
         var ranges = new List<(ulong Start, ulong Size, string Label)>();
+        var backingRanges = new List<(ulong Start, ulong Size, string Label)>();
         foreach (var line in File.ReadAllLines(path))
         {
-            var parts = line.Split(' ', 3);
+            var byBacking = line.StartsWith('@');
+            var parts = (byBacking ? line[1..] : line).Split(' ', 3);
             if (parts.Length >= 2 &&
                 ulong.TryParse(parts[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var start) &&
                 ulong.TryParse(parts[1], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var size))
             {
-                ranges.Add((start, size, parts.Length > 2 ? parts[2] : string.Empty));
+                (byBacking ? backingRanges : ranges).Add((start, size, parts.Length > 2 ? parts[2] : string.Empty));
             }
         }
 
-        Print($"gpu-host for pid {processId}", ranges);
+        Print($"gpu-host for pid {processId}", ranges, byBacking: false);
+        Print($"gpu-host for pid {processId} by backing", backingRanges, byBacking: true);
         try { File.Delete(path); } catch (IOException) { }
     }
 
-    private static void Print(string side, IReadOnlyList<(ulong Start, ulong Size, string Label)> ranges)
+    private static void Print(string side, IReadOnlyList<(ulong Start, ulong Size, string Label)> ranges, bool byBacking)
     {
         foreach (var (start, size, label) in ranges)
         {
-            var lines = Describe(start, start + size);
+            var lines = Describe(start, start + size, byBacking);
             Console.Error.WriteLine(
-                $"[GPU-WRITE-RING][INFO] {side}: {label} [0x{start:X16}, 0x{start + size:X16}) " +
+                $"[GPU-WRITE-RING][INFO] {side}: {label} {(byBacking ? "backing " : string.Empty)}[0x{start:X16}, 0x{start + size:X16}) " +
                 $"writes={lines.Count}{(lines.Count == MaxReportedPerRange ? "+" : string.Empty)} recorded={Recorded}");
             foreach (var line in lines)
             {

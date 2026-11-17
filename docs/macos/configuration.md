@@ -139,6 +139,23 @@ undoes an optimization to isolate a miscompile:
 | `SHARPEMU_FRAME_TIMES=<path>` | Writes one timestamp line per guest flip. `1` writes `frame-times-<timestamp>.txt` under the logs folder. |
 | `SHARPEMU_INPUT_FILE=<path>` | Test automation: the file lists the keys held right now; it is polled every 30 ms and works without window focus. |
 
+### Finding what overwrote guest memory
+
+These cost nothing until the game faults. When it does, the crash report names
+the writes that covered the bytes you asked about.
+
+| Variable | Effect |
+| --- | --- |
+| `SHARPEMU_FAULT_DUMP=<label>=<expr>:<len>,...` | At a guest fault, dumps `len` bytes at each expression. An expression is a register or number with `+`/`-` offsets, and `[x]` reads the pointer at `x` (`e0=[[rbp]-0x360]:0x1000`). A label starting `find` also searches all mapped guest memory for those bytes; one starting `save` writes them (up to 64 MiB) to a file instead. |
+| `SHARPEMU_FAULT_SAVE_DIR=<dir>` | Where `save` labels write `fault-<label>-<address>.bin`. |
+| `SHARPEMU_FAULT_ALIASES=1` | For each dumped range, prints its backing offset and every other guest view of the same backing. |
+| `SHARPEMU_FAULT_FIND_ALL=1` | `find` labels list every hit, not only the first few. |
+| `SHARPEMU_FAULT_DUMP_REPEAT_MS=<ms>` | Repeats the dump after that long, to show bytes still changing. |
+| `SHARPEMU_GPU_WRITE_RING=1` | The GPU process keeps a ring of its writes to guest memory (image write-backs, fills, copies, shader stores of 16 bytes or more) with time, submission and producer, and prints the ones over each dumped range, by address and by backing. `SHARPEMU_GPU_WRITE_RING_ENTRIES=<n>` sets its size. It also records what a managed write found and waited for (`gpu:store-enter`, `gpu:store-return`, `gpu:store-landed`, each with 16 bytes sampled at +0x20000 of the write). |
+| `SHARPEMU_HLE_WRITE_RING=1` | The same ring in the game process for file reads and `memcpy` made by the emulator's libraries, with the file and offset or the copy's source; a copy into a dumped range adds its source to the search. AMPR reads also record the sampled bytes as the fill starts and ends (`hle:ampr-fill-start`, `hle:ampr-fill-end`). `SHARPEMU_HLE_WRITE_RING_MIN=<bytes>` drops smaller writes: recording every small copy changes thread timing enough to hide a race. |
+| `SHARPEMU_FAULT_RING_PRODUCER=<text>` | Adds the ranges of recorded writes whose producer contains the text (a file name, for example) to the search. |
+| `SHARPEMU_WRITE_RING_TAIL=<n>` | Also prints the last `n` records of each ring. |
+
 The Metal source also reads many narrower switches that exist to bisect a
 single optimization (for example `SHARPEMU_METAL_V2_FLUSH_COALESCE`,
 `SHARPEMU_METAL_V2_FOLD_CLEARS` and `SHARPEMU_METAL_V2_KERNEL_FILLS`, all on by

@@ -1269,6 +1269,8 @@ public sealed partial class DirectExecutionBackend
 	// A label starting with "find" searches instead of dumping: the len bytes at expr are
 	// looked for in every mapped backing byte, and each other guest address holding them is
 	// printed (SHARPEMU_FAULT_FIND_ALL=1 also reads pages the host reports as not resident).
+	// A label starting with "save" writes the bytes to a file (SHARPEMU_FAULT_SAVE_DIR, up to
+	// 64 MiB) instead of printing them.
 	// SHARPEMU_FAULT_ALIASES=1 prints, for each dumped window, the backing bytes it maps and
 	// every other guest range mapping the same bytes.
 	private void DumpFaultExpressions(Dictionary<string, ulong> registers)
@@ -1282,8 +1284,19 @@ public sealed partial class DirectExecutionBackend
 		var entries = spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 		var ranges = new List<(ulong Start, ulong Size, string Label)>();
 		DumpFaultExpressionPass("now", entries, registers, ranges);
-		// SHARPEMU_GPU_WRITE_RING=1: which recorded host/GPU writes covered the dumped bytes.
-		SharpEmu.HLE.GpuWriteRing.ReportFaultRanges(ranges);
+		// SHARPEMU_GPU_WRITE_RING=1: which recorded host/GPU writes covered the dumped bytes, by
+		// guest address and by the backing bytes those addresses map now (a write recorded for an
+		// address the guest has since moved lands in the backing, under whatever maps it next).
+		var backingRanges = new List<(ulong Start, ulong Size, string Label)>();
+		foreach (var (start, size, label) in ranges)
+		{
+			foreach (var (backingStart, backingSize) in SharpEmu.HLE.GuestMemory.GuestBackingForensics.BackingSpansOf(start, size))
+			{
+				backingRanges.Add((backingStart, backingSize, label));
+			}
+		}
+
+		SharpEmu.HLE.GpuWriteRing.ReportFaultRanges(ranges, backingRanges);
 		if (Environment.GetEnvironmentVariable("SHARPEMU_FAULT_ALIASES") == "1")
 		{
 			foreach (var (start, size, label) in ranges)
@@ -1314,8 +1327,11 @@ public sealed partial class DirectExecutionBackend
 		{
 			var equals = entry.IndexOf('=');
 			var colon = entry.LastIndexOf(':');
+			// A label starting with "save" is written to a file whole, so it may be large.
+			var saves = entry.StartsWith("save", StringComparison.OrdinalIgnoreCase);
 			if (equals <= 0 || colon <= equals ||
-				!TryParseFaultHex(entry[(colon + 1)..], out var length) || length == 0 || length > 0x1000)
+				!TryParseFaultHex(entry[(colon + 1)..], out var length) || length == 0 ||
+				length > (saves ? 0x4000000UL : 0x1000UL))
 			{
 				Console.Error.WriteLine($"[LOADER][WARN]   fault-dump: malformed entry '{entry}'");
 				continue;
@@ -1335,7 +1351,18 @@ public sealed partial class DirectExecutionBackend
 			{
 				if (ranges is not null)
 				{
-					FindFaultBytes($"fault-find {label}={expression}", address, (int)length);
+					FindFaultBytes($"fault-find {label}={expression}", address, (int)length, ranges);
+				}
+
+				continue;
+			}
+
+			if (saves)
+			{
+				if (ranges is not null)
+				{
+					SaveFaultBytes(label, expression, address, (int)length);
+					ranges.Add((address, length, $"{label}={expression}"));
 				}
 
 				continue;
@@ -1347,7 +1374,32 @@ public sealed partial class DirectExecutionBackend
 		Console.Error.Flush();
 	}
 
-	private void FindFaultBytes(string name, ulong address, int length)
+	// SHARPEMU_FAULT_SAVE_DIR (default: the temporary directory) receives fault-<label>-<address>.bin.
+	private void SaveFaultBytes(string label, string expression, ulong address, int length)
+	{
+		var bytes = new byte[length];
+		if (!_cpuContext.Memory.TryRead(address, bytes))
+		{
+			Console.Error.WriteLine($"[LOADER][INFO]   fault-save {label}={expression} @0x{address:X16} len=0x{length:X}: <unreadable>");
+			return;
+		}
+
+		try
+		{
+			var directory = Environment.GetEnvironmentVariable("SHARPEMU_FAULT_SAVE_DIR");
+			var path = Path.Combine(
+				string.IsNullOrWhiteSpace(directory) ? Path.GetTempPath() : directory, $"fault-{label}-{address:X}.bin");
+			File.WriteAllBytes(path, bytes);
+			Console.Error.WriteLine($"[LOADER][INFO]   fault-save {label}={expression} @0x{address:X16} len=0x{length:X} -> {path}");
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			Console.Error.WriteLine($"[LOADER][WARN]   fault-save {label}: {exception.Message}");
+		}
+	}
+
+	// Each other guest address holding the bytes joins the ranges, so the write ring says who wrote them there.
+	private void FindFaultBytes(string name, ulong address, int length, List<(ulong Start, ulong Size, string Label)> ranges)
 	{
 		var needle = new byte[length];
 		if (!_cpuContext.Memory.TryRead(address, needle))
@@ -1359,9 +1411,18 @@ public sealed partial class DirectExecutionBackend
 		Console.Error.WriteLine(
 			$"[LOADER][INFO]   {name} @0x{address:X16} len=0x{length:X} bytes={Convert.ToHexString(needle, 0, Math.Min(length, 64))}:");
 		var scanAll = Environment.GetEnvironmentVariable("SHARPEMU_FAULT_FIND_ALL") == "1";
+		var others = 0;
 		foreach (var line in SharpEmu.HLE.GuestMemory.GuestBackingForensics.FindBytes(needle, scanAll: scanAll))
 		{
 			Console.Error.WriteLine($"[LOADER][INFO]     {line}");
+			var at = line.IndexOf("= guest 0x", StringComparison.Ordinal);
+			if (at >= 0 && others < 4 && line.Length >= at + 26 &&
+				ulong.TryParse(line.AsSpan(at + 10, 16), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var hit) &&
+				hit != address)
+			{
+				others++;
+				ranges.Add((hit, (ulong)length, $"{name} other holder"));
+			}
 		}
 
 		Console.Error.Flush();

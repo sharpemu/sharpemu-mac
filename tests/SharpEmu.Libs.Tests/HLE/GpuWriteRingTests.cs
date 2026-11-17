@@ -42,6 +42,60 @@ public sealed class GpuWriteRingTests
     }
 
     [Fact]
+    public void AWriteIsAlsoFoundByTheBackingItsAddressResolvedToWhenRecorded()
+    {
+        var was = GpuWriteRing.Enabled;
+        var resolver = GpuWriteRing.BackingResolver;
+        GpuWriteRing.Enabled = true;
+        try
+        {
+            // The address maps backing 0x9_0000_0000 when the write is recorded, and nothing afterwards.
+            GpuWriteRing.BackingResolver = address => address - (Base + 0xC000) + 0x9_0000_0000;
+            GpuWriteRing.Record(Base + 0xC800, 0x400, 11, "gpu:image-texels", "image addr=0x3");
+            GpuWriteRing.BackingResolver = _ => ulong.MaxValue;
+            GpuWriteRing.Record(Base + 0xD800, 0x400, 12, "gpu:image-texels", "image addr=0x4");
+
+            var lines = GpuWriteRing.Describe(0x9_0000_0A00, 0x9_0000_0A40, byBacking: true);
+
+            Assert.Single(lines);
+            Assert.Contains($"[0x{Base + 0xC800:X16}", lines[0]);
+            Assert.Contains("backing=0x900000800 serial=11", lines[0]);
+            Assert.Empty(GpuWriteRing.Describe(0x9_0000_0C00, 0x9_0000_1000, byBacking: true));
+            Assert.Contains("backing=? serial=12", Assert.Single(GpuWriteRing.Describe(Base + 0xD800, Base + 0xD810)));
+        }
+        finally
+        {
+            GpuWriteRing.BackingResolver = resolver;
+            GpuWriteRing.Enabled = was;
+        }
+    }
+
+    [Fact]
+    public void ACopyIntoARangeNamesTheSourceBytesAndTheBackingTheyMappedThen()
+    {
+        var was = GpuWriteRing.HleEnabled;
+        var resolver = GpuWriteRing.BackingResolver;
+        GpuWriteRing.HleEnabled = true;
+        try
+        {
+            GpuWriteRing.BackingResolver = address => address - Base + 0x5_0000_0000;
+            GpuWriteRing.RecordHle(Base + 0x20000, 0x8000, Base + 0x90000, GpuWriteRing.CopyKind, null);
+            GpuWriteRing.RecordHle(Base + 0x20000, 0x8000, 0x1234, "hle:ampr-read", "/game/data.bin");
+
+            var sources = GpuWriteRing.CopySourcesOf(Base + 0x21000, Base + 0x21400);
+
+            var source = Assert.Single(sources);
+            Assert.Equal((Base + 0x91000, 0x400UL, 0x5_0009_1000UL), source);
+            Assert.Empty(GpuWriteRing.CopySourcesOf(Base + 0x28000, Base + 0x29000));
+        }
+        finally
+        {
+            GpuWriteRing.BackingResolver = resolver;
+            GpuWriteRing.HleEnabled = was;
+        }
+    }
+
+    [Fact]
     public void HleWritesNameTheirSourceAndThreadAndFollowTheirOwnSwitch()
     {
         var was = GpuWriteRing.HleEnabled;
