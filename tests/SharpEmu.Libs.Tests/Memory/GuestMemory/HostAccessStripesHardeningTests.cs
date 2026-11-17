@@ -175,6 +175,15 @@ public sealed class HostAccessStripesHardeningTests
                 started.Signal();
                 while (Volatile.Read(ref stop) == 0)
                 {
+                    // As the backing's admission does, no entry starts once the flag is seen: only an entrant
+                    // that raced the flag still backs out. Ten threads entering and backing out without this
+                    // leave a three-core machine no instant at which every cell reads zero.
+                    if (Volatile.Read(ref flag) != 0)
+                    {
+                        Thread.Yield();
+                        continue;
+                    }
+
                     var cell = stripes.Enter(0);
                     if (Volatile.Read(ref flag) != 0)
                     {
