@@ -26,6 +26,12 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// So that the prewarm is not starved forever while the game compiles continuously, a
 /// prewarm thread that has waited for <see cref="StarvationLimit"/> may start one compile
 /// whenever no other prewarm compile is in the driver: a trickle of one.
+///
+/// Buffer-word variants (MetalRenderHost.BufferWordVariants) compile through a lane of their
+/// own (<see cref="EnterVariant"/>): the same rule against the game's compiles, but their own
+/// slots, so the static precompile, which can hold every prewarm slot for many minutes, does
+/// not starve them, and they take none of its slots either. A variant that loads from the
+/// title's archive enters no lane at all.
 /// </summary>
 internal sealed class MetalCompileScheduler
 {
@@ -36,14 +42,17 @@ internal sealed class MetalCompileScheduler
     private int _runtimePending;
     private long _lastRuntimeDoneTicks;
     private int _prewarmInFlight;
+    private readonly int _variantSlots;
+    private int _variantInFlight;
     private int _waiters;
     private long _heldTicks;
     private long _trickled;
     private long _runtimeCompiles;
 
-    public MetalCompileScheduler(int prewarmSlots, TimeSpan quiet, TimeSpan starvationLimit)
+    public MetalCompileScheduler(int prewarmSlots, TimeSpan quiet, TimeSpan starvationLimit, int variantSlots = DefaultVariantSlots)
     {
         _prewarmSlots = Math.Max(1, prewarmSlots);
+        _variantSlots = Math.Max(1, variantSlots);
         _quietTicks = (long)(quiet.TotalSeconds * Stopwatch.Frequency);
         _starvationTicks = (long)(starvationLimit.TotalSeconds * Stopwatch.Frequency);
         StarvationLimit = starvationLimit;
@@ -57,7 +66,16 @@ internal sealed class MetalCompileScheduler
     public static MetalCompileScheduler Shared { get; } = new(
         MetalShaderPrewarm.WorkerCount, TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(1));
 
+    /// <summary>
+    /// Variant compiles in the driver at once: the two the variant builders compiled with when
+    /// they shared the prewarm's slots.
+    /// </summary>
+    public const int DefaultVariantSlots = 2;
+
     public TimeSpan StarvationLimit { get; }
+
+    /// <summary>Variant compiles in the driver right now.</summary>
+    public int VariantInFlight => Volatile.Read(ref _variantInFlight);
 
     /// <summary>Runtime compiles asked for and not yet done.</summary>
     public int RuntimePending => Volatile.Read(ref _runtimePending);
@@ -97,10 +115,19 @@ internal sealed class MetalCompileScheduler
     /// slot until the returned scope is disposed. A default scope when <paramref name="stopping"/>
     /// turned true while waiting; the caller then compiles nothing.
     /// </summary>
-    public PrewarmScope EnterPrewarm(Func<bool> stopping)
+    public PrewarmScope EnterPrewarm(Func<bool> stopping) => Enter(stopping, variant: false);
+
+    /// <summary>
+    /// As <see cref="EnterPrewarm"/>, a slot of the buffer-word variants' own lane: the same
+    /// wait for the game's compiles, but none for the prewarm's.
+    /// </summary>
+    public PrewarmScope EnterVariant(Func<bool> stopping) => Enter(stopping, variant: true);
+
+    private PrewarmScope Enter(Func<bool> stopping, bool variant)
     {
         var started = Stopwatch.GetTimestamp();
         var waited = false;
+        var slots = variant ? _variantSlots : _prewarmSlots;
         lock (_sync)
         {
             _waiters++;
@@ -113,15 +140,16 @@ internal sealed class MetalCompileScheduler
                         return default;
                     }
 
+                    var inFlight = variant ? _variantInFlight : _prewarmInFlight;
                     var now = Stopwatch.GetTimestamp();
                     var quiet = Volatile.Read(ref _runtimePending) == 0 &&
                                 now - Volatile.Read(ref _lastRuntimeDoneTicks) >= _quietTicks;
-                    if (quiet && _prewarmInFlight < _prewarmSlots)
+                    if (quiet && inFlight < slots)
                     {
                         break;
                     }
 
-                    if (!quiet && _prewarmInFlight == 0 && now - started >= _starvationTicks)
+                    if (!quiet && inFlight == 0 && now - started >= _starvationTicks)
                     {
                         Interlocked.Increment(ref _trickled);
                         break;
@@ -133,7 +161,14 @@ internal sealed class MetalCompileScheduler
                     Monitor.Wait(_sync, 10);
                 }
 
-                _prewarmInFlight++;
+                if (variant)
+                {
+                    _variantInFlight++;
+                }
+                else
+                {
+                    _prewarmInFlight++;
+                }
             }
             finally
             {
@@ -146,14 +181,22 @@ internal sealed class MetalCompileScheduler
             Interlocked.Add(ref _heldTicks, Stopwatch.GetTimestamp() - started);
         }
 
-        return new PrewarmScope(this);
+        return new PrewarmScope(this, variant);
     }
 
-    private void PrewarmDone()
+    private void PrewarmDone(bool variant)
     {
         lock (_sync)
         {
-            _prewarmInFlight--;
+            if (variant)
+            {
+                _variantInFlight--;
+            }
+            else
+            {
+                _prewarmInFlight--;
+            }
+
             Monitor.PulseAll(_sync);
         }
     }
@@ -172,12 +215,12 @@ internal sealed class MetalCompileScheduler
         public void Dispose() => scheduler?.RuntimeDone();
     }
 
-    public readonly struct PrewarmScope(MetalCompileScheduler? scheduler) : IDisposable
+    public readonly struct PrewarmScope(MetalCompileScheduler? scheduler, bool variant = false) : IDisposable
     {
         /// <summary>False when the prewarm stopped while waiting: nothing may be compiled.</summary>
         public bool Entered => scheduler is not null;
 
-        public void Dispose() => scheduler?.PrewarmDone();
+        public void Dispose() => scheduler?.PrewarmDone(variant);
     }
 
     [ThreadStatic]

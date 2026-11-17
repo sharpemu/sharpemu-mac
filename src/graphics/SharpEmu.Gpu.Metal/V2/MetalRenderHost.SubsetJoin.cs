@@ -344,7 +344,7 @@ internal sealed partial class MetalRenderHost
                 var slot = output < 8 ? (int)((remap >> (output * 4)) & 0xF) - 1 : -1;
                 return slot < 0 ? match.Value : $"[[color({slot})";
             });
-            var library = CompileLibrary(source, module.Hash, shader.UsesPerVertexInputs, prewarmable: true, out var archiveKey, out _);
+            var library = CompileLibrary(source, module.Hash, shader.UsesPerVertexInputs, prewarmable: true, out var archiveKey, out _, out _);
             // Its buffer words stay generic (MetalRenderHost.BufferWordVariants).
             var function = NewTranslatedFunction(library, shader, mipStatistics: counters, out var error);
             if (function == 0)

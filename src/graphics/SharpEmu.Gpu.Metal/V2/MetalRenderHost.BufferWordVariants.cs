@@ -24,8 +24,14 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// </summary>
 /// <remarks>
 /// The first draw of a layout draws through the generic pipeline, as today, and queues the
-/// variant on a background builder that compiles at prewarm priority (MetalCompileScheduler);
-/// later draws take the variant once it is ready. Nothing is skipped or waited for. A pipeline
+/// variant on a background builder; later draws take the variant once it is ready. Nothing is
+/// skipped or waited for. A variant a past session built loads from the title's archive: each
+/// specialized stage's function from a library file of its own (StageBufferWordArchiveKey),
+/// the pipeline from the segment its pair is listed in, no compiler run. Anything else
+/// compiles in the variants' own lane of MetalCompileScheduler (EnterVariant), which gives way
+/// to the game's compiles but not to the prewarm's, and specializes the module's own library
+/// when this process compiled it from MSL, its MSL compiled again only when that library came
+/// from the archive (RetainSpecializableLibrary). A pipeline
 /// keeps at most <see cref="MaxBufferWordVariantsPerPipeline"/> variants and a module at most
 /// <see cref="MaxBufferWordSpecializationsPerModule"/> specialized functions; past either the
 /// draw stays on the generic pipeline and is counted. Mesh, rectangle-list and tessellation
@@ -81,6 +87,15 @@ internal sealed partial class MetalRenderHost
     /// footprint limit".
     /// </summary>
     internal const int MaxBufferWordSpecializationsPerModule = 64;
+
+    /// <summary>
+    /// Threads that build variants: a variant from files is a few file reads and lookups, so
+    /// the builders outnumber the variants' compile slots (MetalCompileScheduler.DefaultVariantSlots).
+    /// </summary>
+    internal const int DefaultBufferWordBuilders = 4;
+
+    /// <summary>The builder threads this host starts with its first variant; tests set it before.</summary>
+    internal int BufferWordBuilderCount { get; set; } = DefaultBufferWordBuilders;
 
     private static readonly nint SelBufferWordRetain = MetalNative.Selector("retain");
     private const int BufferWordVariantSlots = 32;
@@ -183,6 +198,33 @@ internal sealed partial class MetalRenderHost
         values == default ? pixelPairKey : pixelPairKey ^ values ^ new UInt128(0x4255464645525F57UL, 0x4F5244535F564152UL);
 
     /// <summary>
+    /// The archive key of the library file a render variant's specialized stage is stored
+    /// under and loaded from: a hash of the stage module's library key (its MSL and compile
+    /// options), the LOD statistics switch the function was made with (none for a stage that
+    /// does not declare it) and every buffer-word value of the stage, so a file is only ever
+    /// loaded for exactly the function it holds. None (zero) when the module has no key (the
+    /// values alone would name the same file for every program) or the stage declares no
+    /// buffer words (it keeps its generic function and file); never the module's own key.
+    /// </summary>
+    internal static UInt128 StageBufferWordArchiveKey(UInt128 libraryKey, bool? mipStatistics, ReadOnlySpan<uint> values)
+    {
+        if (libraryKey == default || values.IsEmpty)
+        {
+            return default;
+        }
+
+        Span<byte> head = stackalloc byte[24];
+        MemoryMarshal.Write(head, in libraryKey);
+        // A tag no compute or pair key mixes in, then the switch: none, off, on.
+        MemoryMarshal.Write(head[16..], 0x4247_5354_5F57_4253UL ^ (ulong)(mipStatistics is null ? 0 : mipStatistics.Value ? 2 : 1));
+        var hash = new XxHash128(0x5354_4147_455F_4257L);
+        hash.Append(head);
+        hash.Append(MemoryMarshal.AsBytes(values));
+        var key = hash.GetCurrentHashAsUInt128();
+        return key == default || key == libraryKey ? default : key;
+    }
+
+    /// <summary>
     /// The archive key a compute variant's library file (library and pipeline binary,
     /// MetalBinaryArchive.CaptureCompute) is stored under: the module's library key mixed with
     /// the variant's values, apart from the generic pipeline's file and from every other
@@ -204,6 +246,7 @@ internal sealed partial class MetalRenderHost
         public readonly uint[] Scratch = new uint[vertex.Length + pixel.Length];
         public readonly BufferWordVariant?[] Table = new BufferWordVariant?[BufferWordVariantSlots];
         public int Count;
+        public bool CapWarned;
     }
 
     // One variant: the values (vertex constants first), their hash, the archive key, and the
@@ -218,8 +261,73 @@ internal sealed partial class MetalRenderHost
         public int Status;
     }
 
-    // The specialized functions a variant pipeline is made from; zero takes the generic one.
-    private sealed record BufferWordPipeline(nint VertexFunction, nint PixelFunction, uint[] Values, int VertexCount, UInt128 ArchiveKey);
+    // The specialized functions a variant pipeline is made from (zero takes the generic one),
+    // the library file keys of the specialized stages, and the build they belong to.
+    private sealed record BufferWordPipeline(
+        nint VertexFunction, nint PixelFunction, uint[] Values, int VertexCount, UInt128 ArchiveKey,
+        UInt128 VertexFile, UInt128 PixelFile, BufferWordBuild Build);
+
+    // Where a specialized function came from, cheapest first: a variant counts its costliest.
+    private enum BufferWordSource : byte
+    {
+        None,
+        // Its own library file in the title's archive: no compiler run.
+        File,
+        // The module's library, compiled from its MSL in this process.
+        Library,
+        // The module's MSL compiled a second time (its library came from the archive).
+        Recompiled,
+    }
+
+    // One variant build on a builder thread: its compile slot of the variants' lane, taken
+    // the first time the build has to compile (an archive miss), and what it took.
+    private sealed class BufferWordBuild(MetalRenderHost host, BufferWordTally tally) : IDisposable
+    {
+        private MetalCompileScheduler.PrewarmScope _slot;
+        private bool _entered;
+        public readonly BufferWordTally Tally = tally;
+        public BufferWordSource Source;
+        public bool PipelineCompiled;
+        public long WaitTicks;
+
+        public void Note(BufferWordSource source)
+        {
+            if (source > Source)
+            {
+                Source = source;
+            }
+        }
+
+        // Before any compile: waits for a slot of the variants' lane (the game's compiles
+        // first); throws when the host stops meanwhile.
+        public void EnterCompile(bool pipeline = false)
+        {
+            PipelineCompiled |= pipeline;
+            if (_entered)
+            {
+                return;
+            }
+
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            _slot = MetalCompileScheduler.Shared.EnterVariant(() => host._bufferWordStopping);
+            WaitTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            if (!_slot.Entered)
+            {
+                throw new OperationCanceledException("The host is stopping.");
+            }
+
+            _entered = true;
+        }
+
+        public void Dispose()
+        {
+            if (_entered)
+            {
+                _entered = false;
+                _slot.Dispose();
+            }
+        }
+    }
 
     // A module's specialized function, by its values (and the LOD statistics switch of a pixel function).
     private sealed class SpecializationKey(bool? mipStatistics, uint[] values) : IEquatable<SpecializationKey>
@@ -278,6 +386,19 @@ internal sealed partial class MetalRenderHost
         public long GenericUnreadable;
         public long GenericFailed;
         public long GenericOff;
+        // Built variants by their costliest function's source, the module MSL compiled a second
+        // time, pipelines the archive missed, variant files that failed to load, variants
+        // refused because a module was not resident, and builder time spent building and
+        // waiting for a compile slot.
+        public long FromFile;
+        public long FromLibrary;
+        public long FromRecompile;
+        public long Recompiles;
+        public long PipelinesCompiled;
+        public long FilesRejected;
+        public long Unresident;
+        public long BuildTicks;
+        public long WaitTicks;
     }
 
     private readonly BufferWordTally _bufferWordRender = new();
@@ -299,6 +420,22 @@ internal sealed partial class MetalRenderHost
     /// <summary>The compute variant counters since the host started (dispatches for draws), for tests.</summary>
     internal (long Built, long Failed, long Capped, long DrawsVariant, long DrawsGeneric, long DrawsPending, long DrawsCapped) BufferWordComputeCounters =>
         CountersOf(_bufferWordCompute);
+
+    /// <summary>
+    /// Where the built variants of a kind came from (render, or compute with
+    /// <paramref name="compute"/>), for tests: by their costliest function's source, the
+    /// module MSL compiled again, pipelines the archive missed, and the builders' build time.
+    /// </summary>
+    internal (long FromFile, long FromLibrary, long FromRecompile, long Recompiles, long PipelinesCompiled,
+        long FilesRejected, long Unresident, double BuildMilliseconds) BufferWordSources(bool compute = false)
+    {
+        var tally = compute ? _bufferWordCompute : _bufferWordRender;
+        return (Interlocked.Read(ref tally.FromFile), Interlocked.Read(ref tally.FromLibrary),
+            Interlocked.Read(ref tally.FromRecompile), Interlocked.Read(ref tally.Recompiles),
+            Interlocked.Read(ref tally.PipelinesCompiled), Interlocked.Read(ref tally.FilesRejected),
+            Interlocked.Read(ref tally.Unresident),
+            Interlocked.Read(ref tally.BuildTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+    }
 
     /// <summary>Compute dispatches of declaring programs that ran generic because the compute switch was off, for tests.</summary>
     internal long BufferWordComputeDispatchesOff => _bufferWordCompute.GenericOff;
@@ -503,11 +640,17 @@ internal sealed partial class MetalRenderHost
         if (variants.Count >= MaxBufferWordVariantsPerPipeline)
         {
             tally.GenericCapped++;
-            MetalV2Diagnostics.WarnOnce(
-                entry.Graphics ? "buffer-word-variant-cap" : "buffer-word-compute-variant-cap",
-                $"A pipeline {(entry.Graphics ? "drew" : "dispatched")} more buffer-word layouts than it keeps variants for; " +
-                $"the rest run generic: pipeline={entry.Id} {(entry.Graphics ? "vertex" : "compute")}=0x{entry.VertexHash:X16} " +
-                $"variants={variants.Count}.");
+            if (!variants.CapWarned)
+            {
+                // Once per pipeline: the line is not formatted again for its later draws.
+                variants.CapWarned = true;
+                MetalV2Diagnostics.WarnOnce(
+                    entry.Graphics ? "buffer-word-variant-cap" : "buffer-word-compute-variant-cap",
+                    $"A pipeline {(entry.Graphics ? "drew" : "dispatched")} more buffer-word layouts than it keeps variants for; " +
+                    $"the rest run generic: pipeline={entry.Id} {(entry.Graphics ? "vertex" : "compute")}=0x{entry.VertexHash:X16} " +
+                    $"variants={variants.Count}.");
+            }
+
             return 0;
         }
 
@@ -559,8 +702,8 @@ internal sealed partial class MetalRenderHost
     {
         if (_bufferWordBuilders is null)
         {
-            // Two builders: a variant waits behind the game's compiles anyway (EnterPrewarm).
-            _bufferWordBuilders = new MetalCompileThread[2];
+            // Mostly file loads on a warm start; compiles are bounded by the lane's slots.
+            _bufferWordBuilders = new MetalCompileThread[Math.Max(1, BufferWordBuilderCount)];
             for (var index = 0; index < _bufferWordBuilders.Length; index++)
             {
                 _bufferWordBuilders[index] = MetalCompileThread.Start(
@@ -605,6 +748,9 @@ internal sealed partial class MetalRenderHost
         nint state = 0;
         nint vertexFunction = 0;
         nint pixelFunction = 0;
+        var tally = TallyOf(entry);
+        var build = new BufferWordBuild(this, tally);
+        long started = 0;
         try
         {
             if (_bufferWordStopping || Volatile.Read(ref variant.Status) != BufferWordVariantPending)
@@ -614,63 +760,66 @@ internal sealed partial class MetalRenderHost
             }
 
             BeforeBufferWordVariantBuild?.Invoke();
-            using var slot = MetalCompileScheduler.Shared.EnterPrewarm(() => _bufferWordStopping);
-            if (!slot.Entered)
-            {
-                status = BufferWordVariantAbandoned;
-                return;
-            }
-
-            // Made from now on: the bound keeps a module it made a pipeline from in the last
-            // seconds (TrimModules), as it does for the compiler threads' builds.
-            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            started = System.Diagnostics.Stopwatch.GetTimestamp();
             if (!entry.Graphics)
             {
                 var compute = entry.ComputeDescription ??
                     throw new InvalidOperationException($"A compute buffer-word variant has no description: pipeline={entry.Id}.");
-                var module = RequireModule(compute.Program, onWorker: false);
-                module.LastUsedTicks = now;
+                if (!TryResidentModule(compute.Program, started, out var module))
+                {
+                    Interlocked.Increment(ref tally.Unresident);
+                    return;
+                }
+
                 // Made as the module's own function is: with the LOD statistics switch off.
                 var computeMip = module.Shader.UsesMipStatisticsConstant ? false : (bool?)null;
                 // Its own library file in the archive (library and pipeline binary), made from
                 // it again when a past session stored it.
                 var archiveKey = ComputeBufferWordArchiveKey(module.ArchiveKey, variant.ArchiveKey);
-                if ((vertexFunction = RetainSpecializedFunction(module, computeMip, variants.Vertex, variant.Values, archiveKey)) == 0)
+                if ((vertexFunction = RetainSpecializedFunction(module, computeMip, variants.Vertex, variant.Values, archiveKey, build)) == 0)
                 {
                     status = BufferWordVariantCapped;
                     return;
                 }
 
                 // No empty-kernel stand-in when the compiler fails: the generic state runs instead.
-                state = BuildComputePipelineState(vertexFunction, compute.Stage.Hash, archiveKey, variant: true);
+                state = BuildComputePipelineState(vertexFunction, compute.Stage.Hash, archiveKey, build);
                 status = BufferWordVariantReady;
                 return;
             }
 
             var description = entry.GraphicsDescription ??
                 throw new InvalidOperationException($"A buffer-word variant has no description: pipeline={entry.Id}.");
-            var vertexModule = RequireModule(description.VertexProgram, onWorker: false);
-            var pixelModule = description.PixelStage is not null && description.PixelProgram.IsValid
-                ? RequireModule(description.PixelProgram, onWorker: false)
-                : null;
-            vertexModule.LastUsedTicks = now;
-            if (pixelModule is not null)
+            MetalShaderModule? pixelModule = null;
+            var pixelProgram = description.PixelStage is not null && description.PixelProgram.IsValid;
+            if (!TryResidentModule(description.VertexProgram, started, out var vertexModule) ||
+                (pixelProgram && !TryResidentModule(description.PixelProgram, started, out pixelModule)) ||
+                (pixelModule is not null && variants.Pixel.Length == 0 && !GenericPixelFunctionReady(pixelModule, description)))
             {
-                pixelModule.LastUsedTicks = now;
+                // Building or rebuilding a module (or a function of it) here would hold its
+                // lock across a compile the GPU worker may need meanwhile: the draws of this
+                // layout stay generic, counted.
+                Interlocked.Increment(ref tally.Unresident);
+                return;
             }
 
             var vertexCount = variants.Vertex.Length;
+            var vertexValues = variant.Values[..vertexCount];
+            var vertexFile = StageBufferWordArchiveKey(vertexModule.ArchiveKey, null, vertexValues);
             if (vertexCount != 0 &&
-                (vertexFunction = RetainSpecializedFunction(vertexModule, null, variants.Vertex, variant.Values[..vertexCount])) == 0)
+                (vertexFunction = RetainSpecializedFunction(vertexModule, null, variants.Vertex, vertexValues, vertexFile, build)) == 0)
             {
                 status = BufferWordVariantCapped;
                 return;
             }
 
+            var pixelFile = default(UInt128);
             if (variants.Pixel.Length != 0)
             {
                 var mip = pixelModule!.Shader.UsesMipStatisticsConstant ? description.LodStatistics : (bool?)null;
-                if ((pixelFunction = RetainSpecializedFunction(pixelModule, mip, variants.Pixel, variant.Values[vertexCount..])) == 0)
+                var pixelValues = variant.Values[vertexCount..];
+                pixelFile = StageBufferWordArchiveKey(pixelModule.ArchiveKey, mip, pixelValues);
+                if ((pixelFunction = RetainSpecializedFunction(pixelModule, mip, variants.Pixel, pixelValues, pixelFile, build)) == 0)
                 {
                     status = BufferWordVariantCapped;
                     return;
@@ -679,7 +828,9 @@ internal sealed partial class MetalRenderHost
 
             state = CreateRenderPipelineState(
                 description, vertexModule, pixelModule, null, false, Mtl.ControlPointIndexTypeNone, out _,
-                new BufferWordPipeline(vertexFunction, pixelFunction, variant.Values, vertexCount, variant.ArchiveKey));
+                new BufferWordPipeline(
+                    vertexFunction, pixelFunction, variant.Values, vertexCount, variant.ArchiveKey,
+                    vertexCount != 0 ? vertexFile : default, pixelFunction != 0 ? pixelFile : default, build));
             status = BufferWordVariantReady;
         }
         catch (Exception exception)
@@ -699,6 +850,7 @@ internal sealed partial class MetalRenderHost
         }
         finally
         {
+            build.Dispose();
             foreach (var function in (ReadOnlySpan<nint>)[vertexFunction, pixelFunction])
             {
                 if (function != 0)
@@ -707,13 +859,73 @@ internal sealed partial class MetalRenderHost
                 }
             }
 
-            var tally = TallyOf(entry);
-            PublishBufferWordVariant(variant, status, state, tally);
+            if (started != 0)
+            {
+                Interlocked.Add(ref tally.WaitTicks, build.WaitTicks);
+                Interlocked.Add(ref tally.BuildTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started - build.WaitTicks);
+            }
+
+            if (PublishBufferWordVariant(variant, status, state, tally) && status == BufferWordVariantReady)
+            {
+                if (build.Source == BufferWordSource.Recompiled)
+                {
+                    Interlocked.Increment(ref tally.FromRecompile);
+                }
+                else if (build.Source == BufferWordSource.Library)
+                {
+                    Interlocked.Increment(ref tally.FromLibrary);
+                }
+                else
+                {
+                    Interlocked.Increment(ref tally.FromFile);
+                }
+
+                if (build.PipelineCompiled)
+                {
+                    Interlocked.Increment(ref tally.PipelinesCompiled);
+                }
+            }
+
             Interlocked.Decrement(ref tally.Pending);
         }
     }
 
-    private void PublishBufferWordVariant(BufferWordVariant variant, int status, nint state, BufferWordTally tally)
+    // The module of a program when its library and function are there now, marked as used
+    // (the bound keeps a module it made a pipeline from in the last seconds, TrimModules).
+    // A builder never compiles or waits for a module: RequireModule would run a queued
+    // compile or a rebuild here, holding the module while the GPU worker may need it.
+    private bool TryResidentModule(in ShaderProgram program, long now, out MetalShaderModule module)
+    {
+        if (!TryPublishedModule(program.Module, out module) ||
+            module.Compiling is { IsCompletedSuccessfully: false } ||
+            Volatile.Read(ref module.Function) == 0)
+        {
+            return false;
+        }
+
+        module.LastUsedTicks = now;
+        return true;
+    }
+
+    // Whether the pixel function a variant whose pixel stage declares no buffer words draws
+    // with is made already (CreateRenderPipelineState then only takes it): the generic
+    // pipeline made it, unless the module was released and built again since.
+    private static bool GenericPixelFunctionReady(MetalShaderModule module, GraphicsPipelineDescription description)
+    {
+        var counters = description.LodStatistics && module.Shader.UsesMipStatisticsConstant;
+        lock (module)
+        {
+            if (description.ColorRemap != 0)
+            {
+                return module.RemappedFunctions?.ContainsKey((description.ColorRemap, counters)) == true;
+            }
+
+            return !counters || module.LodFunction != 0;
+        }
+    }
+
+    // Whether this build's outcome is the variant's (false when the entry let go of it first).
+    private bool PublishBufferWordVariant(BufferWordVariant variant, int status, nint state, BufferWordTally tally)
     {
         if (status == BufferWordVariantReady)
         {
@@ -731,7 +943,7 @@ internal sealed partial class MetalRenderHost
             }
 
             Interlocked.CompareExchange(ref variant.Status, BufferWordVariantAbandoned, BufferWordVariantPending);
-            return;
+            return false;
         }
 
         if (status == BufferWordVariantReady)
@@ -746,18 +958,24 @@ internal sealed partial class MetalRenderHost
         {
             Interlocked.Increment(ref tally.Failed);
         }
+
+        return true;
     }
 
     /// <summary>
     /// The function of <paramref name="module"/> specialized with <paramref name="values"/>,
     /// made once and kept with the module like its LOD statistics function, retained for the
     /// caller; zero once the module has made <see cref="MaxBufferWordSpecializationsPerModule"/>.
-    /// The function is made outside the module's lock: the worker takes it to release an idle
+    /// From the library file stored under <paramref name="storedVariant"/> when a past session
+    /// stored it (no compiler run); else, in a compile slot of the variants' lane, from a
+    /// library that can still be specialized (RetainSpecializableLibrary). A file that does
+    /// not load or holds no such function is counted and the function is built instead. The
+    /// function is made outside the module's lock: the worker takes it to release an idle
     /// module, and must not wait for a specialization meanwhile.
     /// </summary>
     private nint RetainSpecializedFunction(
         MetalShaderModule module, bool? mipStatistics, Gen5MslShader.BufferWordConstant[] declared, uint[] values,
-        UInt128 storedVariant = default)
+        UInt128 storedVariant, BufferWordBuild build)
     {
         var key = new SpecializationKey(mipStatistics, values);
         lock (module)
@@ -765,8 +983,9 @@ internal sealed partial class MetalRenderHost
             RequireResidentModule(module);
             if (module.SpecializedFunctions?.TryGetValue(key, out var known) == true)
             {
-                MetalNative.Send(known, SelBufferWordRetain);
-                return known;
+                MetalNative.Send(known.Function, SelBufferWordRetain);
+                build.Note(known.Source);
+                return known.Function;
             }
 
             if ((module.SpecializedFunctions?.Count ?? 0) >= MaxBufferWordSpecializationsPerModule)
@@ -775,27 +994,46 @@ internal sealed partial class MetalRenderHost
             }
         }
 
-        // A compute variant a past session stored (storedVariant): its file's library is the
-        // function as specialized with these values, and its pipeline binary is in the same
-        // file, so neither the front end nor the back end runs. Otherwise a library that still
-        // has the constants.
-        var library = storedVariant != default && MetalBinaryArchive.For(_device) is { } archive && archive.IsStored(storedVariant)
-            ? archive.TryLoadLibrary(storedVariant)
-            : 0;
-        if (library == 0)
+        // A variant a past session stored: its file's library is the function as specialized
+        // with these values (the key names them), and the pipeline's binary is in the
+        // archive, so neither the front end nor the back end runs.
+        nint function = 0;
+        nint error = 0;
+        var source = BufferWordSource.File;
+        if (storedVariant != default && MetalBinaryArchive.For(_device) is { } archive && archive.IsStored(storedVariant))
         {
-            library = RetainSpecializableLibrary(module);
+            var stored = archive.TryLoadLibrary(storedVariant);
+            if (stored != 0)
+            {
+                try
+                {
+                    function = NewTranslatedFunction(stored, module.Shader.EntryPoint, mipStatistics, declared, values, out error);
+                }
+                finally
+                {
+                    MetalNative.SendVoid(stored, SelRelease);
+                }
+            }
+
+            if (function == 0)
+            {
+                // Rejected by the archive (deleted there) or without the function: built below.
+                Interlocked.Increment(ref build.Tally.FilesRejected);
+            }
         }
 
-        nint function;
-        nint error;
-        try
+        if (function == 0)
         {
-            function = NewTranslatedFunction(library, module.Shader.EntryPoint, mipStatistics, declared, values, out error);
-        }
-        finally
-        {
-            MetalNative.SendVoid(library, SelRelease);
+            build.EnterCompile();
+            var library = RetainSpecializableLibrary(module, build.Tally, out source);
+            try
+            {
+                function = NewTranslatedFunction(library, module.Shader.EntryPoint, mipStatistics, declared, values, out error);
+            }
+            finally
+            {
+                MetalNative.SendVoid(library, SelRelease);
+            }
         }
 
         if (function == 0)
@@ -818,14 +1056,15 @@ internal sealed partial class MetalRenderHost
             {
                 // Another builder made the same one first.
                 MetalNative.SendVoid(function, SelRelease);
-                function = winner;
+                (function, source) = winner;
             }
             else
             {
-                module.SpecializedFunctions.Add(key, function);
+                module.SpecializedFunctions.Add(key, (function, source));
             }
 
             MetalNative.Send(function, SelBufferWordRetain);
+            build.Note(source);
             return function;
         }
 
@@ -840,15 +1079,44 @@ internal sealed partial class MetalRenderHost
 
     /// <summary>
     /// A library of <paramref name="module"/> whose functions can still be specialized,
-    /// retained for the caller. The module's own library is not one when it came from the
-    /// title's archive (TryCompileLibrary asks the archive first, so on every start after the
-    /// first): a library file holds the AIR of the function the pipeline that stored it was
-    /// made with, its constants already resolved, and a function made from it with buffer
-    /// words reads the shader data as the generic one does (measured: the values are ignored).
-    /// So the module's MSL is compiled once more, without asking the archive, on the variant
-    /// builder, and kept with the module.
+    /// retained for the caller. The module's own library is one when this process compiled it
+    /// from its MSL (LibraryFromSource): it is specialized directly. It is not one when it came
+    /// from the title's archive (TryCompileLibrary asks the archive first, so on every start
+    /// after the first): a library file holds the AIR of the function the pipeline that
+    /// stored it was made with, its constants already resolved, and a function made from it
+    /// with buffer words reads the shader data as the generic one does (measured: the values
+    /// are ignored). So the module's MSL is compiled once more, without asking the archive, on
+    /// the variant builder, and kept with the module.
     /// </summary>
-    private nint RetainSpecializableLibrary(MetalShaderModule module)
+    private nint RetainSpecializableLibrary(MetalShaderModule module, BufferWordTally tally, out BufferWordSource source)
+    {
+        lock (module)
+        {
+            if (module.Library != 0 && module.LibraryFromSource)
+            {
+                source = BufferWordSource.Library;
+                MetalNative.Send(module.Library, SelBufferWordRetain);
+                return module.Library;
+            }
+
+            if (module.SpecializationLibrary != 0)
+            {
+                source = BufferWordSource.Recompiled;
+                MetalNative.Send(module.SpecializationLibrary, SelBufferWordRetain);
+                return module.SpecializationLibrary;
+            }
+        }
+
+        source = BufferWordSource.Recompiled;
+        lock (module.SpecializationGate)
+        {
+            return CompileSpecializableLibrary(module, tally);
+        }
+    }
+
+    // Under the module's SpecializationGate: the library another builder compiled meanwhile,
+    // or the module's MSL compiled once more.
+    private nint CompileSpecializableLibrary(MetalShaderModule module, BufferWordTally tally)
     {
         lock (module)
         {
@@ -867,6 +1135,7 @@ internal sealed partial class MetalRenderHost
                 $"The module's library could not be compiled for specialization: hash=0x{module.Hash:X16} {error}");
         }
 
+        Interlocked.Increment(ref tally.Recompiles);
         lock (module)
         {
             if (module.Library == 0 || module.Function == 0)
@@ -904,7 +1173,7 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        foreach (var function in functions.Values)
+        foreach (var (function, _) in functions.Values)
         {
             MetalNative.SendVoid(function, SelRelease);
         }
@@ -965,7 +1234,11 @@ internal sealed partial class MetalRenderHost
     // The PERF line's view: variants built, queued or compiling, and refused at a module's cap
     // or failed; then draws of programs that declare buffer words on a variant, on the generic
     // pipeline, and of those why: variant not ready, a pipeline's cap, a kind that stays
-    // generic, words not readable, or a variant that failed or was capped.
+    // generic, words not readable, or a variant that failed or was capped. Then, since the
+    // host started, where the built variants came from (their costliest function: their own
+    // archive files, this process's library, the module's MSL compiled again), the second MSL
+    // compiles, pipelines the archive missed, variant files rejected, variants refused for a
+    // module that was not resident, and the builders' time building and waiting for a slot.
     private string FormatBufferWordCounters() => FormatBufferWordCounters(_bufferWordRender, "draws");
 
     // The same for compute pipelines, per dispatch, and the dispatches the compute switch
@@ -984,5 +1257,11 @@ internal sealed partial class MetalRenderHost
             $"generic_capped={Interlocked.Exchange(ref tally.GenericCapped, 0)} " +
             $"generic_kind={Interlocked.Exchange(ref tally.GenericKind, 0)} " +
             $"generic_unreadable={Interlocked.Exchange(ref tally.GenericUnreadable, 0)} " +
-            $"generic_failed={Interlocked.Exchange(ref tally.GenericFailed, 0)}");
+            $"generic_failed={Interlocked.Exchange(ref tally.GenericFailed, 0)} " +
+            $"from_file={Interlocked.Read(ref tally.FromFile)} from_library={Interlocked.Read(ref tally.FromLibrary)} " +
+            $"from_msl={Interlocked.Read(ref tally.FromRecompile)} msl_compiles={Interlocked.Read(ref tally.Recompiles)} " +
+            $"pipelines_compiled={Interlocked.Read(ref tally.PipelinesCompiled)} " +
+            $"files_rejected={Interlocked.Read(ref tally.FilesRejected)} unresident={Interlocked.Read(ref tally.Unresident)} " +
+            $"build_ms={Interlocked.Read(ref tally.BuildTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F0} " +
+            $"wait_ms={Interlocked.Read(ref tally.WaitTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F0}");
 }
