@@ -711,7 +711,7 @@ internal static partial class MetalV2Presenter
                 if (presented != 0)
                 {
                     MetalNative.Send(presented, MetalNative.Selector("retain"));
-                    if (MetalV2Diagnostics.FlipAhead)
+                    if (MetalV2Diagnostics.FlipCopies)
                     {
                         // A flip copy being encoded is not handed back to the pool (IsFlipCopyHeld).
                         _encodingTexture = presented;
@@ -787,7 +787,7 @@ internal static partial class MetalV2Presenter
                 MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
                 MetalMemoryTelemetry.Commits.Add();
                 MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
-                if (MetalV2Diagnostics.FlipAhead && presented != 0 && texture == presented)
+                if (MetalV2Diagnostics.FlipCopies && presented != 0 && texture == presented)
                 {
                     MetalFlipCopyPool.NoteSampled(presented, commandBuffer);
                 }
@@ -800,7 +800,7 @@ internal static partial class MetalV2Presenter
             {
                 if (presented != 0)
                 {
-                    if (MetalV2Diagnostics.FlipAhead)
+                    if (MetalV2Diagnostics.FlipCopies)
                     {
                         lock (_frameGate)
                         {
@@ -836,11 +836,11 @@ internal static partial class MetalV2Presenter
 
     private static readonly AutoResetEvent _flipPacerSignal = new(false);
 
-    // SHARPEMU_FLIP_AHEAD: the presented frame PresentFrame is encoding outside the frame gate.
+    // Flip copies (snapshot or flip-ahead): the presented frame PresentFrame is encoding outside the frame gate.
     private static nint _encodingTexture;
 
     /// <summary>
-    /// SHARPEMU_FLIP_AHEAD: whether the presenter may still read this flip copy from the CPU
+    /// Flip copies (snapshot or flip-ahead): whether the presenter may still read this flip copy from the CPU
     /// side: it is the presented frame, a queued one, or the one a presentation is encoding.
     /// The pool checks the presentation command buffers that sampled it itself.
     /// </summary>
@@ -1339,7 +1339,7 @@ internal static partial class MetalV2Presenter
             $"flip_attempts={flips.Attempts} flip_no_buffer={flips.WithoutBuffer} " +
             $"flip_discarded={flips.Discarded} flip_published={flips.Published} " +
             $"flip_refreshed={flips.Refreshed} {DescribeGpuMemory()}" +
-            (MetalV2Diagnostics.FlipAhead ? " " + MetalFlipCopyPool.TakeReport() : ""));
+            (MetalV2Diagnostics.FlipCopies ? " " + MetalFlipCopyPool.TakeReport() : ""));
     }
 
     private static readonly nint SelCurrentAllocatedSize = MetalNative.Selector("currentAllocatedSize");

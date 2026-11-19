@@ -5,8 +5,9 @@ using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
-// SHARPEMU_FLIP_AHEAD: a GPU flip's frame is copied, in the stream at the flip, into a texture
-// only the presenter reads (MetalFlipCopyPool), and video-out is told once the flip is recorded
+// A flip's frame is copied, in the stream at the flip, into a texture only the presenter reads
+// (MetalFlipCopyPool; SHARPEMU_METAL_V2_PRESENT_SNAPSHOT, default on). SHARPEMU_FLIP_AHEAD needs
+// that copy for GPU flips, and video-out is told once the flip is recorded
 // and the buffer carrying it committed, so it may publish the flip to the guest before the GPU
 // finishes it (VideoOutExports.FlipAhead.cs).
 internal sealed partial class MetalRenderHost
@@ -23,6 +24,19 @@ internal sealed partial class MetalRenderHost
     // flip, a refused copy) is the display image itself, which stays on screen until the next
     // frame is promoted: the guest must not hear of that next flip before it is shown.
     private bool _previousFlipFrameCopied = true;
+
+    // The frame a flip hands the presenter. With the snapshot (SHARPEMU_METAL_V2_PRESENT_SNAPSHOT,
+    // any flip) or flip-ahead (GPU flips) it is a pool copy blitted here, in the stream, after the
+    // passes that drew the frame and before anything the guest records after the flip, so a later
+    // redraw of the display buffer cannot reach what the window thread samples. Otherwise, or when
+    // the copy is refused, it is the display image itself.
+    internal nint FlipFrameForPresenter(nint texture, bool gpuQueued, out bool copied)
+    {
+        var presented = texture;
+        copied = (MetalV2Diagnostics.PresentSnapshot || (MetalV2Diagnostics.FlipAhead && gpuQueued)) &&
+            TryCopyFlipFrame(texture, out presented);
+        return presented;
+    }
 
     // Copies the flip's presented view into a pool texture at this point of the stream. False
     // (refused, logged once and counted) leaves the frame to be presented live, as today.
@@ -103,8 +117,9 @@ internal sealed partial class MetalRenderHost
         MetalFlipCopyPool.NoteRefusal(refusal);
         MetalV2Diagnostics.WarnOnce(
             $"flip-copy-{MetalFlipCopyPool.RefusalName(refusal)}",
-            $"Flip ahead: a flip's frame could not be copied for the presenter ({MetalFlipCopyPool.RefusalName(refusal)}: " +
-            $"{detail}); it is presented live and published to the guest at presentation, as without the switch.");
+            $"A flip's frame could not be copied for the presenter ({MetalFlipCopyPool.RefusalName(refusal)}: " +
+            $"{detail}); the display image is presented live, so a guest redraw of it while on screen can show, " +
+            $"and under flip-ahead the flip is published to the guest at presentation.");
         return false;
     }
 

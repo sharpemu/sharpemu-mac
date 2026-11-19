@@ -10,7 +10,7 @@ using Xunit.Abstractions;
 namespace SharpEmu.Gpu.Metal.Tests;
 
 /// <summary>
-/// SHARPEMU_FLIP_AHEAD: the frame a flip hands the presenter is a copy taken in the stream at the
+/// SHARPEMU_METAL_V2_PRESENT_SNAPSHOT / SHARPEMU_FLIP_AHEAD: the frame a flip hands the presenter is a copy taken in the stream at the
 /// flip, so a draw into the display image recorded after the flip does not reach it.
 /// </summary>
 public sealed class MetalFlipCopyTests(ITestOutputHelper output)
@@ -50,6 +50,53 @@ public sealed class MetalFlipCopyTests(ITestOutputHelper output)
         var frame = ReadTexture(Device.Value, captured);
         var next = ReadTexture(Device.Value, host.ImageCache.GetImage(target.State.Image).Texture);
         output.WriteLine($"captured=0x{BitConverter.ToUInt32(frame, 0):X8} display=0x{BitConverter.ToUInt32(next, 0):X8}");
+        for (var texel = 0; texel < frame.Length; texel += 4)
+        {
+            Assert.Equal<byte>([0xFF, 0x00, 0x00, 0xFF], frame.AsSpan(texel, 4).ToArray());
+            Assert.Equal<byte>([0x00, 0xFF, 0x00, 0xFF], next.AsSpan(texel, 4).ToArray());
+        }
+    }
+
+    // SHARPEMU_METAL_V2_PRESENT_SNAPSHOT (default on): any flip, a CPU flip too, hands the presenter
+    // a copy, so the guest redrawing the buffer still on screen does not reach the presented frame.
+    [Fact]
+    public void TheSnapshotHandsThePresenterAFrameARedrawOfTheDisplayBufferDoesNotChange()
+    {
+        if (!RequireDevice()) return;
+        if (!MetalV2Diagnostics.PresentSnapshot)
+        {
+            output.WriteLine("SHARPEMU_METAL_V2_PRESENT_SNAPSHOT=0: flips are presented live.");
+            return;
+        }
+
+        using var rig = new MetalPassRig(Device.Value, 1024 * 1024);
+        var host = rig.Host;
+        var formats = new[] { GpuFormat.R8G8B8A8Unorm };
+        var red = rig.Pipeline(formats, ["1.0f, 0.0f, 0.0f, 1.0f"]);
+        var green = rig.Pipeline(formats, ["0.0f, 1.0f, 0.0f, 1.0f"]);
+        var target = rig.MakeTarget(Address, GpuFormat.R8G8B8A8Unorm, Side, Side);
+
+        using (host.BeginPreparation())
+        {
+            rig.Draw(red, [target]);
+            host.EndRendering();
+        }
+
+        var display = host.ImageCache.GetImage(target.State.Image).Texture;
+        var presented = host.FlipFrameForPresenter(display, gpuQueued: false, out var copied);
+        Assert.True(copied);
+        Assert.NotEqual(display, presented);
+
+        using (host.BeginPreparation())
+        {
+            rig.Draw(green, [target]);
+            host.EndRendering();
+        }
+
+        host.FlushAndWaitForGpu(MetalWaitReason.Synchronize);
+        var frame = ReadTexture(Device.Value, presented);
+        var next = ReadTexture(Device.Value, host.ImageCache.GetImage(target.State.Image).Texture);
+        output.WriteLine($"presented=0x{BitConverter.ToUInt32(frame, 0):X8} display=0x{BitConverter.ToUInt32(next, 0):X8}");
         for (var texel = 0; texel < frame.Length; texel += 4)
         {
             Assert.Equal<byte>([0xFF, 0x00, 0x00, 0xFF], frame.AsSpan(texel, 4).ToArray());

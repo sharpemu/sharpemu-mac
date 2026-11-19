@@ -160,6 +160,18 @@ internal static class MetalV2Diagnostics
     public static readonly bool FlipAhead = Environment.GetEnvironmentVariable("SHARPEMU_FLIP_AHEAD") == "1" ||
         SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled;
 
+    // SHARPEMU_METAL_V2_PRESENT_SNAPSHOT=0 (default on): every flip, GPU or CPU, hands the presenter
+    // a copy of its frame blitted in the stream at the flip (MetalFlipCopyPool), not the display
+    // image itself. The guest may render into a display buffer while it is still on screen (its
+    // safe-for-rendering wait is answered once the buffer's own flip was shown), and the window
+    // thread samples on its own queue, unordered against that rendering: a present landing after
+    // the redraw began showed the half-drawn (cleared) frame. 0 presents the display image live.
+    public static readonly bool PresentSnapshot =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_PRESENT_SNAPSHOT"), "0", StringComparison.Ordinal);
+
+    // Whether flips may hand the presenter pool copies, so the presenter tracks what it samples.
+    public static readonly bool FlipCopies = PresentSnapshot || FlipAhead;
+
     public static readonly int EarlyLabelProbe =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EARLY_LABEL_PROBE") switch
         {
