@@ -9,7 +9,9 @@ namespace SharpEmu.Libs.Gpu.Images;
 // A texture streamed into its address range maps only its resident mips. A tiled chain puts
 // the mip tail and small levels at the start and level 0 at the end, so the resident part is
 // a backed prefix. The GPU samples only resident levels; the unmapped rest reads as zero.
-internal static class ResidentImageBacking
+// Public for the Metal image cache, which reads guest image bytes with the same policy (no InternalsVisibleTo
+// for extracted backends).
+public static class ResidentImageBacking
 {
     private const ulong Page = 1UL << 12;
 
@@ -22,10 +24,17 @@ internal static class ResidentImageBacking
     // Reads image bytes from CPU-visible backing or PRT backing. A streamed texture's image holds only its
     // resident levels and its upload reads only their bytes, so an unmapped byte inside them is an error,
     // not a level to zero; SHARPEMU_IMAGE_BACKING_HOLES=1 still zero-fills the unmapped pages instead.
-    internal static bool TryRead(IGuestBackedSpace backing, ulong address, Span<byte> destination) =>
+    public static bool TryRead(IGuestBackedSpace backing, ulong address, Span<byte> destination) =>
+        TryRead(backing, address, destination, AllowHoles);
+
+    // SHARPEMU_IMAGE_BACKING_HOLES as this process read it; a caller with its own test switch passes that instead.
+    public static bool HolesAllowed => AllowHoles;
+
+    // TryRead with the hole policy given rather than read from the environment.
+    public static bool TryRead(IGuestBackedSpace backing, ulong address, Span<byte> destination, bool allowHoles) =>
         backing.TryReadBacking(address, destination) ||
         KernelMemoryCompatExports.TryReadPrtBacking(backing, address, destination) ||
-        AllowHoles && TryReadResidentPrefix(backing, address, destination, allowHoles: true);
+        allowHoles && TryReadResidentPrefix(backing, address, destination, allowHoles: true);
 
     // Copies the backed prefix page by page and zero-fills the unmapped tail. A backed page
     // after a hole is not a mip chain, so it is rejected unless allowHoles.

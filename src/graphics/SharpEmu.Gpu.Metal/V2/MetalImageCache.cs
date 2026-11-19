@@ -259,6 +259,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// </summary>
     public ResourceSlotIdentifier FindImage(ref ImageRequest request, bool exactFormat = false)
     {
+        // A texture described from its first resident level is looked up as its whole chain
+        // (MetalImageCache.ResidentLevels.cs); the request comes back that way, its view on guest levels.
+        TakeWholeChain(ref request);
         ValidateRequest(in request);
         if (ImageDescription.IsEmptyRange(request.Description.Data))
         {
@@ -290,6 +293,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     private ResourceSlotIdentifier LookUpImageLocked(ref ImageRequest request, bool exactFormat)
     {
         var candidates = FindImagesInRange(request.Description.Data.Address, request.Description.Data.Size, pageOverlap: false);
+        // Whether a new sampled texture may start at its binding's level while the chain is not mapped (ResidentLevels.cs).
+        var gpuContents = request.Role == ImageRole.Texture && request.View.BaseLevel != 0 && PartialMipChains &&
+            CandidatesHoldGpuContents(in candidates);
         var result = ResourceSlotIdentifier.Invalid;
         foreach (var candidate in candidates)
         {
@@ -360,7 +366,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var sampledOnly = request.Role == ImageRole.Texture;
             result = InsertImage(
                 request.Description, sampledOnly, request.Role,
-                sampledOnly ? DesiredFirstLevel(in request.Description, request.View.BaseLevel) : 0,
+                sampledOnly ? InsertFirstLevel(in request, gpuContents) : 0,
                 lossyAllowed: sampledOnly && ViewKeepsLossy(in request));
         }
 
@@ -3366,9 +3372,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // command buffers), a face came back as whatever the transient memory held before - stale bytes
     // read as half floats, NaN and Inf that the sky light and Lumen's history then kept, tinting the
     // characters of the Erlang cinematic white, purple, red, green or blue in about half the runs.
+    // A staged copy reads guest memory with the resident-backing policy (ImageRead, MetalImageCache.ResidentLevels.cs).
     private MetalGuestRange ResolveUploadSource(ulong address, ulong size, bool whole = false)
     {
-        var source = _guestMemory.Resolve(address, size, whole);
+        var source = _guestMemory.Resolve(address, size, whole, ImageRead);
         if (UploadGatherEnabled && source.IsValid && !_guestMemory.IsInPlace(source))
         {
             var staged = Math.Min(size, source.Size);

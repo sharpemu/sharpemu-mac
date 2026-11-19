@@ -32,6 +32,10 @@ public static class MetalGpuBackend
     internal static void ConfigureSharedGpuCode()
     {
         SharpEmu.Libs.Gpu.Images.ImageRequestBuilders.NativeColorClearMetadata = false;
+        // The image cache takes textures described from their first resident level (MetalImageCache.ResidentLevels.cs).
+        // This is the process that runs the request builders and the cache alike: the guest process with one process,
+        // the GPU host with two (GpuHostMain.ComposeMetal), which reads the same environment.
+        SharpEmu.Libs.Gpu.Images.ImageRequestBuilders.PartialMipChains = V2.MetalImageCache.PartialMipChains;
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.CompiledTransactions = CompiledTransactionsDefault();
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.SpecializationGuards = false;
         SharpEmu.ShaderCompiler.Resources.ResourceTracker.UnvalidatedAddressWordsAreMemory = false;
