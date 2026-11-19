@@ -279,7 +279,9 @@ internal static class MetalGuestFormats
             (5, 4, _) => MtlPixelFormat.Rg16Uint,
             (5, 5, _) => MtlPixelFormat.Rg16Sint,
             (5, 7, _) => MtlPixelFormat.Rg16Float,
-            (6, 7, _) or (7, 7, _) => MtlPixelFormat.Rg11B10Float,
+            // 11_11_10 holds unsigned floats whatever the number type; the image path maps its UNORM
+            // variant to the same host format (upstream 99f9fe930, GuestPixelFormats.HostFormats).
+            (6, 7, _) or (7, 7, _) or (6, 0, _) => MtlPixelFormat.Rg11B10Float,
             (9, _, 1) => MtlPixelFormat.Bgr10A2Unorm,
             (9, _, _) => MtlPixelFormat.Rgb10A2Unorm,
             (10, 1, _) => MtlPixelFormat.Rgba8Snorm,
@@ -307,6 +309,10 @@ internal static class MetalGuestFormats
             (1, 6 or 9, _) => GuestPixelFormats.NarrowSrgbFormats ? MtlPixelFormat.R8UnormSrgb : MtlPixelFormat.R8Unorm,
             (3, 6 or 9, _) => GuestPixelFormats.NarrowSrgbFormats ? MtlPixelFormat.Rg8UnormSrgb : MtlPixelFormat.Rg8Unorm,
             (1, 4, _) or (49, 0, _) => MtlPixelFormat.R8Uint,
+            // Narrow integer targets (upstream 99f9fe930): the image path gives them these formats.
+            (1, 5, _) => MtlPixelFormat.R8Sint,
+            (3, 4, _) => MtlPixelFormat.Rg8Uint,
+            (3, 5, _) => MtlPixelFormat.Rg8Sint,
             (1, 1, _) => MtlPixelFormat.R8Snorm,
             (3, 0, _) => MtlPixelFormat.Rg8Unorm,
             (3, 1, _) => MtlPixelFormat.Rg8Snorm,
@@ -333,10 +339,11 @@ internal static class MetalGuestFormats
 
         var outputKind = format switch
         {
-            MtlPixelFormat.R8Uint or MtlPixelFormat.R16Uint or MtlPixelFormat.R32Uint or
+            MtlPixelFormat.R8Uint or MtlPixelFormat.R16Uint or MtlPixelFormat.R32Uint or MtlPixelFormat.Rg8Uint or
                 MtlPixelFormat.Rg16Uint or MtlPixelFormat.Rg32Uint or MtlPixelFormat.Rgba8Uint or
                 MtlPixelFormat.Rgba16Uint or MtlPixelFormat.Rgba32Uint => Gen5PixelOutputKind.Uint,
-            MtlPixelFormat.R16Sint or MtlPixelFormat.R32Sint or MtlPixelFormat.Rg16Sint or
+            MtlPixelFormat.R8Sint or MtlPixelFormat.R16Sint or MtlPixelFormat.R32Sint or MtlPixelFormat.Rg8Sint or
+                MtlPixelFormat.Rg16Sint or
                 MtlPixelFormat.Rg32Sint or MtlPixelFormat.Rgba8Sint or MtlPixelFormat.Rgba16Sint =>
                 Gen5PixelOutputKind.Sint,
             _ => Gen5PixelOutputKind.Float,

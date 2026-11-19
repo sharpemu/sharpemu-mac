@@ -87,6 +87,23 @@ public sealed class MetalRenderTargetFormatParityTests
         Assert.Equal(MtlPixelFormat.R8Uint, format.Format);
     }
 
+    // The narrow targets upstream 99f9fe930 added to the Vulkan table, with the format and pixel output kind each
+    // decodes to: an integer target written as a float would store garbage, and a refused one stops the title.
+    [Theory]
+    [InlineData(1u, 5u, (uint)MtlPixelFormat.R8Sint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Sint)]
+    [InlineData(3u, 4u, (uint)MtlPixelFormat.Rg8Uint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint)]
+    [InlineData(3u, 5u, (uint)MtlPixelFormat.Rg8Sint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Sint)]
+    [InlineData(1u, 4u, (uint)MtlPixelFormat.R8Uint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint)]
+    [InlineData(1u, 1u, (uint)MtlPixelFormat.R8Snorm, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    [InlineData(6u, 0u, (uint)MtlPixelFormat.Rg11B10Float, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    public void NarrowTargetsDecodeToTheirFormatAndOutputKind(
+        uint dataFormat, uint numberType, uint expected, SharpEmu.ShaderCompiler.Gen5PixelOutputKind kind)
+    {
+        Assert.True(MetalGuestFormats.TryDecodeRenderTargetFormat(dataFormat, numberType, 0, out var format));
+        Assert.Equal((MtlPixelFormat)expected, format.Format);
+        Assert.Equal(kind, format.OutputKind);
+    }
+
     // The two encodings Metal genuinely cannot represent: it has no scaled pixel formats,
     // where Vulkan has R16Uscaled and R16Sscaled. Listed so the gap stays deliberate and a
     // future reader does not take it for more drift.
