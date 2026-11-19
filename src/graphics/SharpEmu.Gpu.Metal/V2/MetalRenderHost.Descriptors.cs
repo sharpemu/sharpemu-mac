@@ -636,7 +636,35 @@ internal sealed partial class MetalRenderHost
 
         // Each written image's store channel map, from its bound T# (RuntimeImageSwizzle).
         RuntimeImageSwizzle.WriteStoreMaps(shaderData, layout, info.Images, snapshot.Images);
+        WriteStoreComponentWidths(shaderData, layout, info.Images, snapshot.Images);
         return true;
+    }
+
+    // An integer image store keeps the low bits of each register (a write-only 16_SINT image is stored as unsigned bits
+    // through its R16Uint view, upstream 99f9fe930), where a Metal write saturates a value its format cannot hold. The
+    // MSL store narrows each component itself from the width code its T# gives (Gen5MslTranslator
+    // StoreComponentWidthCode), carried in bits 12-13 of the image's store channel map, above the map's 12 bits.
+    internal static void WriteStoreComponentWidths(uint[] shaderData, BindingLayout layout, IReadOnlyList<ImageResource> images,
+        IReadOnlyList<uint[]> descriptors)
+    {
+        if (layout.StorageImageSwizzleCount == 0)
+        {
+            return;
+        }
+
+        for (var index = 0; index < images.Count; index++)
+        {
+            var slot = RuntimeImageSwizzle.Slot(images, index);
+            if (slot < 0 || slot >= layout.StorageImageSwizzleCount || index >= descriptors.Count ||
+                descriptors[index] is not { Length: >= 8 } words)
+            {
+                continue;
+            }
+
+            var code = SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.StoreComponentWidthCode(GuestImageFormat.FormatOf(words));
+            shaderData[(int)layout.StorageImageSwizzlesDword + (slot / 2)] |=
+                code << (SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.StoreWidthCodeShift + (slot % 2 * 16));
+        }
     }
 
     private Exception UserRegisterOutsideUserData(ShaderProgramInfo program, BindingLayout layout, ResourceSnapshot snapshot)

@@ -9,6 +9,37 @@ namespace SharpEmu.ShaderCompiler.Metal;
 
 public static partial class Gen5MslTranslator
 {
+    /// <summary>Bit position of a storage image's store width code in its store channel map (whose maps use 12 bits).</summary>
+    public const int StoreWidthCodeShift = 12;
+
+    /// <summary>
+    /// The width code of an image store's components for a T# format, which the host puts in the image's store channel map
+    /// (MetalRenderHost.WriteStoreComponentWidths): 1 for 8-bit, 2 for 16-bit, 3 for 10_10_10_2 (X, Y, Z 10, W 2)
+    /// components; 0 for any other format, whose components the store passes whole.
+    /// </summary>
+    public static uint StoreComponentWidthCode(uint imageFormat)
+    {
+        if (!Gfx10UnifiedFormat.TryDecode(GuestImageFormat.Remap(imageFormat), out var dataFormat, out _))
+        {
+            return 0;
+        }
+
+        var count = Gfx10UnifiedFormat.ComponentCount(dataFormat);
+        var widths = new uint[count];
+        for (var component = 0u; component < count; component++)
+        {
+            if (!Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out _, out _, out widths[component]))
+            {
+                return 0;
+            }
+        }
+
+        if (count == 0) return 0;
+        if (widths.All(width => width == 8)) return 1;
+        if (widths.All(width => width == 16)) return 2;
+        return count == 4 && widths[0] == 10 && widths[1] == 10 && widths[2] == 10 && widths[3] == 2 ? 3u : 0u;
+    }
+
     private sealed partial class CompilationContext
     {
 
@@ -769,10 +800,26 @@ public static partial class Gen5MslTranslator
             var words = Temp("uint4", $"uint4({string.Join(", ", logical)})");
             var map = Temp("uint",
                 $"{ShaderDataDword(_request.Bindings.StorageImageSwizzlesDword + (uint)slot / 2)} >> {(uint)slot % 2 * 16}u");
+            // An integer store keeps the low bits of each register, where a Metal write saturates: each component is
+            // narrowed to the width its T# format gives (the map's bits 12-13, StoreComponentWidthCode) first, a signed
+            // one sign-extended from it.
+            var width = kind == "float" ? null : Temp("uint", $"(({map}) >> {StoreWidthCodeShift}u) & 3u");
             for (var channel = 0u; channel < 4; channel++)
             {
                 var code = Temp("uint", $"((({map}) >> {channel * 3}u) & 7u) ^ {channel}u");
-                components[channel] = ImageTexelComponent(kind, $"({code} < 4u ? {words}[{code} & 3u] : 0u)");
+                var raw = $"({code} < 4u ? {words}[{code} & 3u] : 0u)";
+                if (width is null)
+                {
+                    components[channel] = ImageTexelComponent(kind, raw);
+                    continue;
+                }
+
+                var bits = Temp("uint",
+                    $"{width} == 1u ? 8u : {width} == 2u ? 16u : {width} == 3u ? {(channel == 3 ? 2 : 10)}u : 32u");
+                var value = Temp("uint", raw);
+                components[channel] = kind == "int"
+                    ? $"({bits} == 32u ? as_type<int>({value}) : extract_bits(as_type<int>({value}), 0u, {bits}))"
+                    : $"({bits} == 32u ? {value} : extract_bits({value}, 0u, {bits}))";
             }
         }
 
