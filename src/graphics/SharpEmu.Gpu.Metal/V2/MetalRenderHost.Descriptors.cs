@@ -424,6 +424,7 @@ internal sealed partial class MetalRenderHost
     private void RememberTexture(MetalStageBindings stage, int index, ResourceSlotIdentifier identifier, in ImageRequest request,
         in MetalImageCache.TextureMemoStamp stamp)
     {
+        NoteReplayStamped(stage, index);
         var key = stage.MemoKeys[index];
         if (!_textureMemo.TryGetValue(key, out var entry))
         {
@@ -471,6 +472,7 @@ internal sealed partial class MetalRenderHost
         var shaderDwords = checked((int)layout.ShaderDataDwordCount);
         prepared.EnsureCapacity(info.Images.Count, info.Samplers.Count, info.Buffers.Count, shaderDwords);
         _preparedStageMask |= 1 << stageIndex;
+        _stagePrepares[stageIndex]++;
         var movie = FindHostMovieBindings(info, snapshot);
         prepared.MovieLuma = movie.Luma;
         prepared.MovieChroma = movie.Chroma;
@@ -952,6 +954,7 @@ internal sealed partial class MetalRenderHost
         var info = stage.Program.Resources!.Info;
         var snapshot = stage.StageResources.Resources;
         NoteBindShape(stage, snapshot);
+        NoteReplayBindStart(stage);
         // A staged label read checks the stage's other bindings for writes over it (MetalRenderHost.LabelStagedReads.cs).
         BeginLabelStagedStage(stage.Program.Stage == ShaderStageKind.Compute ? stage : null);
         for (var index = 0; index < stage.ImageCount; index++)
@@ -1025,126 +1028,7 @@ internal sealed partial class MetalRenderHost
 
         for (var index = 0; index < stage.BufferCount; index++)
         {
-            var words = snapshot.Buffers[index];
-            if (words.Length < 4)
-            {
-                throw Fatal(
-                    $"A buffer descriptor is too short: buffer={index} words={words.Length} hash=0x{stage.Program.Hash:X16}.");
-            }
-
-            var descriptor = BufferDescriptorWords.From(words);
-            var requested = descriptor.Footprint() ?? throw Fatal(
-                $"A storage buffer descriptor footprint overflows: buffer={index} stride={descriptor.Stride} " +
-                $"records={descriptor.RecordCount} hash=0x{stage.Program.Hash:X16}.");
-            if (descriptor.Address == 0 || requested == 0)
-            {
-                stage.Buffers[index] = default;
-                stage.BufferLengths[index] = 0;
-                continue;
-            }
-
-            var written = info.Buffers[index].Written;
-            var computeStage = stage.Program.Stage == ShaderStageKind.Compute;
-            using var overlapTag = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(
-                written ? SharpEmu.HLE.GpuMemory.OverlapTag.StorageWritten
-                : info.Buffers[index].Scalar ? SharpEmu.HLE.GpuMemory.OverlapTag.Constant
-                : SharpEmu.HLE.GpuMemory.OverlapTag.StorageRead);
-            if (written)
-            {
-                _writtenBufferBinds++;
-            }
-            else
-            {
-                _readOnlyBufferBinds++;
-                // A range bound read-only before, whose binding still stands (MetalRenderHost.ReadBindingMemo.cs):
-                // mapped whole, nothing to flush or order, the same window.
-                if (TryReadBindingMemo(descriptor.Address, requested, computeStage, out var memo))
-                {
-                    if (ReadBindingMemoVerify)
-                    {
-                        VerifyReadBinding(descriptor.Address, requested, computeStage, MetalWritebackCause.StorageDescriptor, memo);
-                    }
-
-                    stage.Buffers[index] = memo;
-                    stage.BufferLengths[index] = BoundBufferBytes(requested, memo);
-                    continue;
-                }
-            }
-
-            // A range mapped whole - nearly every binding - is answered by one query; ClampMappedSize
-            // asks again from its first byte only for a range that runs past its mapping.
-            bool readable;
-            bool mappedWhole;
-            using (var checkScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingBufferCheck))
-            {
-                var inRange = requested <= ulong.MaxValue - descriptor.Address;
-                mappedWhole = inRange && _memory.CanRead(descriptor.Address, requested);
-                readable = mappedWhole || (inRange && _memory.CanRead(descriptor.Address, 1));
-            }
-
-            if (!readable)
-            {
-                var resource = info.Buffers[index];
-                throw Fatal(
-                    $"The buffer range starts in unmapped memory: address=0x{descriptor.Address:X16} size=0x{requested:X16} " +
-                    $"stage={stage.Program.Stage} hash=0x{stage.Program.Hash:X16} shader=0x{stage.StageResources.ShaderBase:X16} " +
-                    $"buffer={index} source={resource.Source} pc=0x{resource.FirstUsePc:X} written={resource.Written} " +
-                    $"descriptor=[{string.Join(',', words.ToArray().Select(word => $"{word:X8}"))}] " +
-                    $"user_data=[{string.Join(',', snapshot.UserData.ToArray().Select(word => $"{word:X8}"))}].");
-            }
-
-            var size = mappedWhole ? requested : ClampMappedSize(descriptor.Address, requested);
-            var memoStamp = !written && mappedWhole && ReadBindingMemoEnabled ? ReadBindingStamp() : default;
-            var flushFoundImage = _imageCache.FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
-            var range = ResolveStorageBuffer(descriptor.Address, size, written, computeStage, out var inPlaceAlias, out var inPlaceWindow);
-            if (!written && mappedWhole && ReadBindingMemoEnabled)
-            {
-                StoreReadBinding(descriptor.Address, size, computeStage, memoStamp, flushFoundImage, inPlaceAlias, inPlaceWindow, range);
-            }
-
-            // The text is built only when the trace is on: this runs per storage buffer per draw.
-            if (_traceBufferUserAddress != 0)
-            {
-                TraceBufferUser(stage, $"storage[{index}]{(written ? " written" : string.Empty)}", descriptor.Address, size);
-            }
-
-            TraceRecordChain(stage, index, descriptor.Address, size);
-            TraceBufferAtCompletion(stage, index, descriptor.Address, size);
-            if (written)
-            {
-                using var writtenScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenBuffer);
-                // The text is built only when the trace prints it: this runs per written buffer per draw.
-                if (MetalImageCache.TracesDccWriter(descriptor.Address, size))
-                {
-                    _imageCache.TraceDccWriter(
-                        descriptor.Address, size,
-                        $"program=0x{stage.Program.Hash:X16} buffer={index} stride={descriptor.Stride} records={descriptor.RecordCount} " +
-                        $"format={descriptor.Format} buffers={stage.BufferCount} user_data=[{string.Join(',', snapshot.UserData.ToArray().Select(word => $"{word:X8}"))}]");
-                }
-
-                using (var invalidateScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenInvalidate))
-                {
-                    _imageCache.InvalidateMemoryFromGpu(descriptor.Address, size);
-                }
-
-                using (var noteScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenNote))
-                {
-                    if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
-                    {
-                        SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.SetWriter(stage.Program.Hash);
-                    }
-
-                    NoteGuestMemoryWrite(descriptor.Address, size, MetalGpuWriteOrigin.StorageBuffer);
-                }
-            }
-
-            using var reportScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingReport);
-            _slotTrap?.NoteBinding(
-                $"storage[{index}] hash=0x{stage.Program.Hash:X16}{(written ? " written" : string.Empty)}",
-                descriptor.Address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
-            stage.Buffers[index] = range;
-            stage.BufferLengths[index] = BoundBufferBytes(size, range);
-            ReportBufferBinding(stage, index, in descriptor, requested, size, range);
+            BindStageStorageBuffer(stage, index, info, snapshot);
         }
 
         using (var deviceScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingDeviceAddresses))
@@ -1155,6 +1039,133 @@ internal sealed partial class MetalRenderHost
         {
             BindBindlessImages(stage, info, snapshot);
         }
+    }
+
+    // One storage buffer of a stage, as BindResources binds it: a read-only range the binding before it answered
+    // (MetalRenderHost.ReadBindingMemo.cs), or the whole chain (flush, resolve, and for a written range its
+    // invalidation and write record). A replayed dispatch that writes takes it again for every buffer (MetalRenderHost.Replay.cs).
+    private void BindStageStorageBuffer(MetalStageBindings stage, int index, ShaderResourceInfo info, ResourceSnapshot snapshot)
+    {
+        var words = snapshot.Buffers[index];
+        if (words.Length < 4)
+        {
+            throw Fatal(
+                $"A buffer descriptor is too short: buffer={index} words={words.Length} hash=0x{stage.Program.Hash:X16}.");
+        }
+
+        var descriptor = BufferDescriptorWords.From(words);
+        var requested = descriptor.Footprint() ?? throw Fatal(
+            $"A storage buffer descriptor footprint overflows: buffer={index} stride={descriptor.Stride} " +
+            $"records={descriptor.RecordCount} hash=0x{stage.Program.Hash:X16}.");
+        if (descriptor.Address == 0 || requested == 0)
+        {
+            stage.Buffers[index] = default;
+            stage.BufferLengths[index] = 0;
+            return;
+        }
+
+        var written = info.Buffers[index].Written;
+        var computeStage = stage.Program.Stage == ShaderStageKind.Compute;
+        using var overlapTag = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(
+            written ? SharpEmu.HLE.GpuMemory.OverlapTag.StorageWritten
+            : info.Buffers[index].Scalar ? SharpEmu.HLE.GpuMemory.OverlapTag.Constant
+            : SharpEmu.HLE.GpuMemory.OverlapTag.StorageRead);
+        if (written)
+        {
+            _writtenBufferBinds++;
+        }
+        else
+        {
+            _readOnlyBufferBinds++;
+            // A range bound read-only before, whose binding still stands (MetalRenderHost.ReadBindingMemo.cs):
+            // mapped whole, nothing to flush or order, the same window.
+            if (TryReadBindingMemo(descriptor.Address, requested, computeStage, out var memo))
+            {
+                if (ReadBindingMemoVerify)
+                {
+                    VerifyReadBinding(descriptor.Address, requested, computeStage, MetalWritebackCause.StorageDescriptor, memo);
+                }
+
+                stage.Buffers[index] = memo;
+                stage.BufferLengths[index] = BoundBufferBytes(requested, memo);
+                return;
+            }
+        }
+
+        // A range mapped whole - nearly every binding - is answered by one query; ClampMappedSize
+        // asks again from its first byte only for a range that runs past its mapping.
+        bool readable;
+        bool mappedWhole;
+        using (var checkScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingBufferCheck))
+        {
+            var inRange = requested <= ulong.MaxValue - descriptor.Address;
+            mappedWhole = inRange && _memory.CanRead(descriptor.Address, requested);
+            readable = mappedWhole || (inRange && _memory.CanRead(descriptor.Address, 1));
+        }
+
+        if (!readable)
+        {
+            var resource = info.Buffers[index];
+            throw Fatal(
+                $"The buffer range starts in unmapped memory: address=0x{descriptor.Address:X16} size=0x{requested:X16} " +
+                $"stage={stage.Program.Stage} hash=0x{stage.Program.Hash:X16} shader=0x{stage.StageResources.ShaderBase:X16} " +
+                $"buffer={index} source={resource.Source} pc=0x{resource.FirstUsePc:X} written={resource.Written} " +
+                $"descriptor=[{string.Join(',', words.ToArray().Select(word => $"{word:X8}"))}] " +
+                $"user_data=[{string.Join(',', snapshot.UserData.ToArray().Select(word => $"{word:X8}"))}].");
+        }
+
+        var size = mappedWhole ? requested : ClampMappedSize(descriptor.Address, requested);
+        var memoStamp = !written && mappedWhole && ReadBindingMemoEnabled ? ReadBindingStamp() : default;
+        var flushFoundImage = _imageCache.FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
+        var range = ResolveStorageBuffer(descriptor.Address, size, written, computeStage, out var inPlaceAlias, out var inPlaceWindow);
+        if (!written && mappedWhole && ReadBindingMemoEnabled)
+        {
+            StoreReadBinding(descriptor.Address, size, computeStage, memoStamp, flushFoundImage, inPlaceAlias, inPlaceWindow, range);
+        }
+
+        // The text is built only when the trace is on: this runs per storage buffer per draw.
+        if (_traceBufferUserAddress != 0)
+        {
+            TraceBufferUser(stage, $"storage[{index}]{(written ? " written" : string.Empty)}", descriptor.Address, size);
+        }
+
+        TraceRecordChain(stage, index, descriptor.Address, size);
+        TraceBufferAtCompletion(stage, index, descriptor.Address, size);
+        if (written)
+        {
+            using var writtenScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenBuffer);
+            // The text is built only when the trace prints it: this runs per written buffer per draw.
+            if (MetalImageCache.TracesDccWriter(descriptor.Address, size))
+            {
+                _imageCache.TraceDccWriter(
+                    descriptor.Address, size,
+                    $"program=0x{stage.Program.Hash:X16} buffer={index} stride={descriptor.Stride} records={descriptor.RecordCount} " +
+                    $"format={descriptor.Format} buffers={stage.BufferCount} user_data=[{string.Join(',', snapshot.UserData.ToArray().Select(word => $"{word:X8}"))}]");
+            }
+
+            using (var invalidateScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenInvalidate))
+            {
+                _imageCache.InvalidateMemoryFromGpu(descriptor.Address, size);
+            }
+
+            using (var noteScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenNote))
+            {
+                if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+                {
+                    SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.SetWriter(stage.Program.Hash);
+                }
+
+                NoteGuestMemoryWrite(descriptor.Address, size, MetalGpuWriteOrigin.StorageBuffer);
+            }
+        }
+
+        using var reportScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingReport);
+        _slotTrap?.NoteBinding(
+            $"storage[{index}] hash=0x{stage.Program.Hash:X16}{(written ? " written" : string.Empty)}",
+            descriptor.Address, size, (ulong)range.Buffer, range.Offset, range.GpuAddress);
+        stage.Buffers[index] = range;
+        stage.BufferLengths[index] = BoundBufferBytes(size, range);
+        ReportBufferBinding(stage, index, in descriptor, requested, size, range);
     }
 
     /// <summary>
@@ -1641,36 +1652,46 @@ internal sealed partial class MetalRenderHost
 
         if (hasPushData)
         {
-            var pushBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(pushData);
-            MetalGuestRange range;
-            if (gpuLimitsPushDword >= 0)
-            {
-                range = _guestMemory.Allocate(PushData.ByteSize, 256, out var span);
-                pushBytes.CopyTo(span);
-                _threadLimitsTarget = range with
-                {
-                    Offset = range.Offset + ((ulong)gpuLimitsPushDword * sizeof(uint)),
-                    Size = 3 * sizeof(uint),
-                };
-            }
-            else if (ArgumentBufferReuse && _pushRegions.TryFind(pushBytes, _submissionSerial, out var found))
-            {
-                range = found;
-            }
-            else
-            {
-                range = _guestMemory.Allocate(PushData.ByteSize, 256, out var span);
-                pushBytes.CopyTo(span);
-                if (ArgumentBufferReuse)
-                {
-                    _pushRegions.Add(pushBytes, _submissionSerial, in range);
-                }
-            }
-
-            _pushBuffer = range.Buffer;
-            _pushOffset = range.Offset;
-            _hasPushData = true;
+            PublishPushData(pushData, gpuLimitsPushDword);
         }
+
+        CaptureBindingReplay(bindPoint, stages, gpuLimitsPushDword);
+    }
+
+    // The push-data block of the committed stages as one buffer range (_pushBuffer, _pushOffset): one this command
+    // buffer already holds when its bytes are the same (ArgumentBufferReuse), else a new ring range. A dispatch whose
+    // thread limits the GPU writes gets a range of its own. A replayed draw or dispatch publishes its block here too.
+    private void PublishPushData(ReadOnlySpan<uint> pushData, int gpuLimitsPushDword)
+    {
+        var pushBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(pushData);
+        MetalGuestRange range;
+        if (gpuLimitsPushDword >= 0)
+        {
+            range = _guestMemory.Allocate(PushData.ByteSize, 256, out var span);
+            pushBytes.CopyTo(span);
+            _threadLimitsTarget = range with
+            {
+                Offset = range.Offset + ((ulong)gpuLimitsPushDword * sizeof(uint)),
+                Size = 3 * sizeof(uint),
+            };
+        }
+        else if (ArgumentBufferReuse && _pushRegions.TryFind(pushBytes, _submissionSerial, out var found))
+        {
+            range = found;
+        }
+        else
+        {
+            range = _guestMemory.Allocate(PushData.ByteSize, 256, out var span);
+            pushBytes.CopyTo(span);
+            if (ArgumentBufferReuse)
+            {
+                _pushRegions.Add(pushBytes, _submissionSerial, in range);
+            }
+        }
+
+        _pushBuffer = range.Buffer;
+        _pushOffset = range.Offset;
+        _hasPushData = true;
     }
 
     // The stage's Tier 2 argument buffer, mirroring the binding layout in descriptor order.
