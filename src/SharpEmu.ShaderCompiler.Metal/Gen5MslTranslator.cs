@@ -574,6 +574,43 @@ public static partial class Gen5MslTranslator
         /// functions only for kernel and fragment functions (MSL spec 6.10) and gives a
         /// vertex function no [[thread_index_in_simdgroup]], so there is no supported
         /// lane index to shuffle or ballot against.</summary>
+        /// <summary>The draw parameters of a vertex program (SupportsDrawParameters, as the SPIR-V
+        /// translator reads them): the guest's instance index counts from 0 and the draw's start
+        /// instance reaches it only through the user data an indirect packet names
+        /// (StartInstanceUserData); the vertex index counts from the draw's base vertex when an
+        /// indirect packet names user data for that (BaseVertexUserData), which then holds it.
+        /// Metal's vertex_id and instance_id include the draw's base vertex and base instance.
+        /// A domain program is a post-tessellation function with a launch of its own.</summary>
+        private bool UsesDrawParameters =>
+            _request.SupportsDrawParameters &&
+            _stage is Gen5MslStage.Vertex or Gen5MslStage.Mesh &&
+            _request.Tessellation is not { Role: Gen5TessellationRole.Domain };
+
+        private bool StoresBaseVertex => UsesDrawParameters && _request.BaseVertexUserData >= 0;
+
+        private bool StoresStartInstance => UsesDrawParameters && _request.StartInstanceUserData >= 0;
+
+        // The user-data SGPR an indirect packet names, as the SPIR-V translator stores it
+        // (UserDataBase + index); one past the register file has nowhere to go.
+        private string? DrawParameterScalar(int userData)
+        {
+            var register = _request.UserDataBase + (uint)userData;
+            return register < ScalarRegisterFileCount ? $"s[{register}]" : null;
+        }
+
+        private void EmitDrawParameterStores(StringBuilder source, string baseVertex, string baseInstance)
+        {
+            if (StoresBaseVertex && DrawParameterScalar(_request.BaseVertexUserData) is { } vertexScalar)
+            {
+                source.AppendLine($"    {vertexScalar} = {baseVertex};");
+            }
+
+            if (StoresStartInstance && DrawParameterScalar(_request.StartInstanceUserData) is { } instanceScalar)
+            {
+                source.AppendLine($"    {instanceScalar} = {baseInstance};");
+            }
+        }
+
         private bool HasRealWaveLanes =>
             _stage is Gen5MslStage.Compute or Gen5MslStage.Mesh ||
             (_stage == Gen5MslStage.Pixel && _request.EnableGraphicsSubgroupOperations);
@@ -1063,6 +1100,15 @@ public static partial class Gen5MslTranslator
             {
                 source.AppendLine("    uint sharpemu_vertex_id [[vertex_id]],");
                 source.AppendLine("    uint sharpemu_instance_id [[instance_id]],");
+                if (StoresBaseVertex)
+                {
+                    source.AppendLine("    uint sharpemu_base_vertex [[base_vertex]],");
+                }
+
+                if (UsesDrawParameters)
+                {
+                    source.AppendLine("    uint sharpemu_base_instance [[base_instance]],");
+                }
             }
             else if (_stage == Gen5MslStage.Compute && IsWave64)
             {
@@ -1608,6 +1654,7 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"    uint s[{ScalarRegisterFileCount}] = {{}};");
             source.AppendLine($"    uint v[{VectorRegisterFileCount}] = {{}};");
             source.AppendLine("    bool exec = true;");
+            DeclareGuestExec(source);
             if (_usesPixelValidMask)
             {
                 source.AppendLine("    bool pixel_valid_mask_active = true;");
@@ -1627,7 +1674,7 @@ public static partial class Gen5MslTranslator
 
             if (_stage == Gen5MslStage.Compute && _request.Tessellation is { Role: Gen5TessellationRole.Hull } hull)
             {
-                EmitHullLaunchState(source, hull);
+                EmitHullLaunchState(source, hull, _request.SupportsDrawParameters);
             }
             else if (_stage == Gen5MslStage.Compute)
             {
@@ -1668,9 +1715,16 @@ public static partial class Gen5MslTranslator
             }
             else if (_stage == Gen5MslStage.Vertex)
             {
-                // Hardware-selected VGPRs for the vertex and instance indices.
-                source.AppendLine("    v[5] = sharpemu_vertex_id;");
-                source.AppendLine("    v[8] = sharpemu_instance_id;");
+                // Hardware-selected VGPRs for the vertex and instance indices. With draw
+                // parameters they count from the draw's base vertex (when user data holds it)
+                // and base instance, as Gen5SpirvTranslator's vertex entry does.
+                source.AppendLine(StoresBaseVertex
+                    ? "    v[5] = sharpemu_vertex_id - sharpemu_base_vertex;"
+                    : "    v[5] = sharpemu_vertex_id;");
+                source.AppendLine(UsesDrawParameters
+                    ? "    v[8] = sharpemu_instance_id - sharpemu_base_instance;"
+                    : "    v[8] = sharpemu_instance_id;");
+                EmitDrawParameterStores(source, "sharpemu_base_vertex", "sharpemu_base_instance");
             }
             else if (_stage == Gen5MslStage.Mesh)
             {
@@ -1698,6 +1752,7 @@ public static partial class Gen5MslTranslator
             {
                 source.AppendLine($"    s[{ExecLoRegister}] = sharpemu_ballot(true);");
                 source.AppendLine($"    s[{ExecHiRegister}] = 0u;");
+                InitializeGuestExec(source);
             }
         }
 
@@ -1708,7 +1763,7 @@ public static partial class Gen5MslTranslator
         // within its instance, v1 the patch within the group and the control point, v2 the local
         // half's vertex index, v3 its thread within the group (its LDS slot), v5 the instance. s[0:1]
         // and the user data come from the layout like any user data.
-        private static void EmitHullLaunchState(StringBuilder source, Gen5TessellationLaunch hull)
+        private static void EmitHullLaunchState(StringBuilder source, Gen5TessellationLaunch hull, bool instancesFromZero)
         {
             var patches = hull.PatchesPerGroup;
             var points = hull.ControlPoints;
@@ -1728,7 +1783,12 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    v[2] = sharpemu_hull_lane < sharpemu_hull_points");
             source.AppendLine($"        ? sharpemu_hull_vertices[sharpemu_hull_instance_patch * {points}u + sharpemu_hull_lane % {points}u] : 0u;");
             source.AppendLine("    v[3] = sharpemu_hull_lane;");
-            source.AppendLine("    v[5] = sharpemu_hull_launch[1] + sharpemu_hull_patch / sharpemu_hull_instance_patches;");
+            // The hardware numbers a draw's instances from zero; a start instance reaches the program only
+            // through the user data its draw packet names (upstream 7cf0ac568, Gen5SpirvTranslator.Tessellation).
+            // Without draw parameters (SHARPEMU_METAL_DRAW_PARAMETERS=0) the draw's first instance is added, as before.
+            source.AppendLine(instancesFromZero
+                ? "    v[5] = sharpemu_hull_patch / sharpemu_hull_instance_patches;"
+                : "    v[5] = sharpemu_hull_launch[1] + sharpemu_hull_patch / sharpemu_hull_instance_patches;");
             source.AppendLine("    active = true;");
         }
 
@@ -4754,6 +4814,12 @@ public static partial class Gen5MslTranslator
 
                 case ExecLoRegister:
                 {
+                    if (HostSubgroupMayBePartial)
+                    {
+                        expression = Temp("uint", expression);
+                        RecordGuestExecLow(expression);
+                    }
+
                     var value = Temp("uint", ClampExecToLanes(expression));
                     Line($"s[{ExecLoRegister}] = {value};");
                     Line($"exec = {LowHalfWriteBit(value, "exec", ScalarExpression(ExecHiRegister))};");
@@ -4763,6 +4829,12 @@ public static partial class Gen5MslTranslator
                 case VccHiRegister:
                 case ExecHiRegister:
                 {
+                    if (register == ExecHiRegister && HostSubgroupMayBePartial)
+                    {
+                        expression = Temp("uint", expression);
+                        RecordGuestExecHigh(expression);
+                    }
+
                     var value = Temp("uint", register == ExecHiRegister && (ClampsExecToLanes || IsNarrowWave64) ? "0u" : expression);
                     Line($"s[{register}] = {value};");
                     if (IsWave64)

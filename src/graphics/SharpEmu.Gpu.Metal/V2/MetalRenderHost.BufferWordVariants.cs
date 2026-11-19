@@ -76,7 +76,11 @@ internal sealed partial class MetalRenderHost
 
     /// <summary>The translation switches that decide the MSL, for the stamps of what is stored by them.</summary>
     internal static string TranslationSwitchStamp =>
-        $"portable={(PortableBuffers ? 1 : 0)},buffer_word_constants={(BufferWordConstants ? 1 : 0)}";
+        $"portable={(PortableBuffers ? 1 : 0)},buffer_word_constants={(BufferWordConstants ? 1 : 0)}," +
+        $"draw_parameters={(DrawParameters ? 1 : 0)}," +
+        $"runtime_image_swizzle={(RuntimeImageSwizzle.Enabled ? 1 : 0)}" +
+        // ShaderCompileRequest.GraphicsPartialSubgroupLanes takes its default from this variable.
+        (Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_PARTIAL_LANES") == "1" ? ",graphics_partial_lanes=1" : "");
 
     /// <summary>Variants one pipeline entry keeps; a draw of another layout past them draws generic.</summary>
     internal const int MaxBufferWordVariantsPerPipeline = 16;

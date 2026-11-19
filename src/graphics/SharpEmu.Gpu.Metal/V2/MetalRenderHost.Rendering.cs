@@ -2380,12 +2380,13 @@ internal sealed partial class MetalRenderHost
             _boundVertexOffsets[binding] = (ulong)offset;
         }
 
-        // vertex_base, vertex_offset, index_type, first_index; see Gen5RectDraw.
+        // vertex_base, vertex_offset, index_type, first_index, base_vertex; see Gen5RectDraw.
         Span<uint> block = stackalloc uint[(int)(Gen5MslRectangleList.DrawInfoByteSize / sizeof(uint))];
         block[0] = indexed ? 0 : firstVertex;
         block[1] = unchecked((uint)vertexOffset);
         block[2] = indexed ? index32 ? 2u : 1u : 0u;
         block[3] = indexed ? firstIndex : 0;
+        block[4] = indexed ? unchecked((uint)vertexOffset) : firstVertex;
         unsafe
         {
             fixed (uint* words = block)

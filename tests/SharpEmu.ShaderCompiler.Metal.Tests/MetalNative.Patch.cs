@@ -120,10 +120,11 @@ internal static partial class MetalNative
             SendSetBuffer(encoder, setVertexBuffer, SharedBuffer(positionBytes), 0, 2);
         }
 
-        // Gen5RectDraw: vertex_base, vertex_offset, index_type, first_index.
+        // Gen5RectDraw: vertex_base, vertex_offset, index_type, first_index, base_vertex.
         var drawBlock = new byte[Gen5MslRectangleList.DrawInfoByteSize];
         BitConverter.TryWriteBytes(drawBlock.AsSpan(0), indices is null ? vertexBase : 0u);
         BitConverter.TryWriteBytes(drawBlock.AsSpan(8), indices is null ? 0u : 1u);
+        BitConverter.TryWriteBytes(drawBlock.AsSpan(16), indices is null ? vertexBase : 0u);
         SendSetBuffer(encoder, setVertexBuffer, SharedBuffer(drawBlock), 0, Gen5MslRectangleList.DrawInfoBufferIndex);
         var indexBytes = new byte[Math.Max(((indices?.Length ?? 0) * sizeof(ushort) + 3) & ~3, 16)];
         if (indices is not null)

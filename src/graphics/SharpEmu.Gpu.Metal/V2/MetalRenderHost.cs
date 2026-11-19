@@ -305,6 +305,7 @@ internal sealed partial class MetalRenderHost :
     internal const bool PrewarmSharedInt64Atomics = false;
     internal const bool PrewarmSignedZeroInfNanPreserve = true;
     internal const bool PrewarmExecGuardElision = true;
+    internal const bool PrewarmRuntimeImageSwizzles = true;
 
     public ShaderPrewarmList? ShaderPrewarm => MetalShaderPrewarm.List;
     public GraphicsPrewarmList? GraphicsPrewarm => MetalShaderPrewarm.Graphics;
@@ -315,6 +316,23 @@ internal sealed partial class MetalRenderHost :
 
     // Tessellated draws are emulated (hull kernel + post-tessellation vertex function), never native stages.
     public bool TessellationStagesSupported => false;
+
+    // A vertex function has [[base_vertex]] and [[base_instance]] on every Apple GPU, so the
+    // translator counts the guest's vertex and instance indices from the draw's base and stores
+    // the base an indirect packet names in user data there (ShaderCompileRequest.BaseVertexUserData,
+    // StartInstanceUserData), which the command processor then leaves unwritten.
+    // SHARPEMU_METAL_DRAW_PARAMETERS=0 keeps Metal's ids (which include both bases) and stores
+    // neither, as before.
+    public bool ShaderDrawParametersSupported => DrawParameters;
+
+    internal static readonly bool DrawParameters =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_DRAW_PARAMETERS") != "0";
+
+    // The translator reads a storage image's store channel map from shader data, which the
+    // descriptor path writes from the bound T# (WriteStageShaderData), so one module serves every
+    // destination select. SHARPEMU_RUNTIME_IMAGE_SWIZZLE=0 bakes the select into the module again
+    // (ShaderProgramCache applies the switch on top of this answer).
+    public bool RuntimeImageSwizzlesSupported => PrewarmRuntimeImageSwizzles;
 
     public GpuSampleCount NoAttachmentSampleCounts => GpuSampleCount.Count1Bit;
 

@@ -61,9 +61,15 @@ internal sealed partial class MetalRenderHost
 
     private const string RectangleRebaseFunction = "sharpemu_rect_rebase";
 
+    // The patch draw's Gen5RectDraw follows the patch arguments in the same allocation, at
+    // this dword, where the rebase draw writes its base vertex.
+    private const uint RebaseRectDrawWord = 8;
+
     private const string RectangleRebaseSource = """
         #include <metal_stdlib>
         using namespace metal;
+
+        constant uint RectDrawWord = 8u;
 
         struct SharpEmuRectRebase
         {
@@ -103,6 +109,9 @@ internal sealed partial class MetalRenderHost
                 patch_arguments[1] = record[1];
                 patch_arguments[2] = 0u;
                 patch_arguments[3] = record[4];
+                // Gen5RectDraw's base_vertex: the control points carry the vertex offset, so
+                // the patch draw's block has none, and the program's base vertex comes here.
+                patch_arguments[RectDrawWord + 4u] = base_instance;
             }
         }
         """;
@@ -133,13 +142,19 @@ internal sealed partial class MetalRenderHost
         }
 
         var controlPoints = _guestMemory.Allocate(Math.Max(limit, 1u) * (ulong)sizeof(uint), 256, out _);
-        var patchArguments = _guestMemory.Allocate(4 * sizeof(uint), 256, out var patchArgumentBytes);
+        var patchArguments = _guestMemory.Allocate(
+            (RebaseRectDrawWord * 4u) + Gen5MslRectangleList.DrawInfoByteSize, 256, out var patchArgumentBytes);
         if (!controlPoints.IsValid || !patchArguments.IsValid)
         {
             throw Fatal($"An indirect rectangle list has no ring space for its control points: limit={limit}.");
         }
 
         patchArgumentBytes.Clear();
+        // The patch draw's block: a 32-bit indexed draw from index 0 with no vertex offset
+        // (the control points carry it); the rebase draw fills in base_vertex.
+        var rectDraw = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(patchArgumentBytes)
+            .Slice((int)RebaseRectDrawWord, (int)(Gen5MslRectangleList.DrawInfoByteSize / sizeof(uint)));
+        rectDraw[2] = 2;
         var rebase = RectangleRebasePipeline();
         MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, rebase);
         _boundRenderState = rebase;
@@ -174,21 +189,12 @@ internal sealed partial class MetalRenderHost
         var state = RectangleState(entry, 2);
         MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, state);
         _boundRenderState = state;
-        Span<uint> draw = stackalloc uint[(int)(Gen5MslRectangleList.DrawInfoByteSize / sizeof(uint))];
-        draw.Clear();
-        draw[2] = 2;
-        unsafe
-        {
-            fixed (uint* words = draw)
-            {
-                MetalV2Native.SendSetBytes(
-                    _renderEncoder,
-                    SelSetVertexBytes,
-                    (nint)words,
-                    Gen5MslRectangleList.DrawInfoByteSize,
-                    Gen5MslRectangleList.DrawInfoBufferIndex);
-            }
-        }
+        MetalNative.SendSetBuffer(
+            _renderEncoder,
+            SelSetVertexBuffer,
+            patchArguments.Buffer,
+            (nuint)patchArguments.Offset + (RebaseRectDrawWord * 4u),
+            Gen5MslRectangleList.DrawInfoBufferIndex);
 
         MetalNative.SendSetBuffer(
             _renderEncoder,

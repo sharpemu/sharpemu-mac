@@ -28,7 +28,7 @@ internal static partial class MetalNative
     /// <summary>Draws <paramref name="vertexCount"/> vertices as a triangle list into a
     /// width x height x layers RGBA32Float array target and returns its texels, layer after
     /// layer. The stage resources at buffer 0 are zero-filled; the viewports default to the
-    /// whole target.</summary>
+    /// whole target. <paramref name="draw"/>, when given, encodes the draw instead.</summary>
     public static bool TryRenderVertices(
         nint library,
         string vertexEntryPoint,
@@ -40,7 +40,8 @@ internal static partial class MetalNative
         uint layers,
         IReadOnlyList<MtlViewport>? viewports,
         out float[] pixels,
-        out string error)
+        out string error,
+        Action<nint>? draw = null)
     {
         pixels = [];
         error = string.Empty;
@@ -115,7 +116,15 @@ internal static partial class MetalNative
             }
         }
 
-        SendDrawPrimitives(encoder, Selector("drawPrimitives:vertexStart:vertexCount:"), 3, 0, vertexCount); // Triangle
+        if (draw is null)
+        {
+            SendDrawPrimitives(encoder, Selector("drawPrimitives:vertexStart:vertexCount:"), 3, 0, vertexCount); // Triangle
+        }
+        else
+        {
+            draw(encoder);
+        }
+
         SendVoid(encoder, Selector("endEncoding"));
         SendVoid(commandBuffer, Selector("commit"));
         SendVoid(commandBuffer, Selector("waitUntilCompleted"));

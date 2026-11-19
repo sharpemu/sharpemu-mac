@@ -25,6 +25,8 @@ public sealed record ShaderCorpusHostFlags
     public bool ExecGuardElision { get; init; }
     public bool ComputeWave64SubgroupNative { get; init; }
     public bool ComputeRunsOn32LaneSubgroups { get; init; }
+    public bool DrawParameters { get; init; }
+    public bool RuntimeImageSwizzles { get; init; }
 }
 
 // One program as the translator was about to see it. Options is null when the guest code did not
