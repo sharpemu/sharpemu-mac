@@ -1815,15 +1815,16 @@ internal sealed partial class MetalRenderHost
 
             if (stencilEnabled)
             {
+                var (front, back) = StencilOperationsOf(entry.StaticParameters, in state);
                 ConfigureStencil(
                     descriptor,
                     MetalNative.Selector("setFrontFaceStencil:"),
-                    parameters!.StencilFront,
+                    front,
                     state.FrontStencil);
                 ConfigureStencil(
                     descriptor,
                     MetalNative.Selector("setBackFaceStencil:"),
-                    parameters.StencilBack,
+                    back,
                     state.BackStencil);
             }
 
@@ -1885,6 +1886,23 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    // The draw's stencil operations, as the shared recorder resolved them into its dynamic state (upstream keeps them
+    // dynamic and sets them with vkCmdSetStencilOp; here they go into the depth/stencil state). The pipeline's static
+    // parameters carry the same operations for the draw the pipeline was resolved for; the dynamic state is the
+    // draw's own. SHARPEMU_METAL_V2_DYNAMIC_STENCIL_OPS=0 reads the pipeline's again.
+    internal static (StencilOperations Front, StencilOperations Back) StencilOperationsOf(
+        PipelineStaticParameters? pipeline, in DynamicDrawState state) =>
+        DynamicStencilOperations || pipeline is null
+            ? (state.FrontStencilOperations, state.BackStencilOperations)
+            : (pipeline.StencilFront, pipeline.StencilBack);
+
+    // The depth/stencil state a draw with this pipeline state and dynamic state gets (tests).
+    internal nint DepthStencilStateForTest(bool hasDepth, bool hasStencil, PipelineStaticParameters parameters, in DynamicDrawState state) =>
+        GetDepthStencilState(new MetalPipelineEntry { HasDepth = hasDepth, HasStencil = hasStencil, StaticParameters = parameters }, in state);
+
+    private static readonly bool DynamicStencilOperations =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DYNAMIC_STENCIL_OPS") != "0";
+
     private static ulong MixDepthStencilKey(MetalPipelineEntry entry, in DynamicDrawState state, bool stencilEnabled)
     {
         var hash = 14695981039346656037UL;
@@ -1896,16 +1914,17 @@ internal sealed partial class MetalRenderHost
         Mix(MetalV2Diagnostics.LoosensEqualFor(entry.VertexHash) ? 1UL : 0UL);
         Mix(MetalV2Diagnostics.PassesDepthFor(entry.VertexHash) ? 1UL : 0UL);
         Mix(stencilEnabled ? 1UL : 0UL);
-        if (stencilEnabled && entry.StaticParameters is { } parameters)
+        if (stencilEnabled && entry.StaticParameters is not null)
         {
-            Mix((ulong)parameters.StencilFront.Compare);
-            Mix((ulong)parameters.StencilFront.FailOperation);
-            Mix((ulong)parameters.StencilFront.PassOperation);
-            Mix((ulong)parameters.StencilFront.DepthFailOperation);
-            Mix((ulong)parameters.StencilBack.Compare);
-            Mix((ulong)parameters.StencilBack.FailOperation);
-            Mix((ulong)parameters.StencilBack.PassOperation);
-            Mix((ulong)parameters.StencilBack.DepthFailOperation);
+            var (front, back) = StencilOperationsOf(entry.StaticParameters, in state);
+            Mix((ulong)front.Compare);
+            Mix((ulong)front.FailOperation);
+            Mix((ulong)front.PassOperation);
+            Mix((ulong)front.DepthFailOperation);
+            Mix((ulong)back.Compare);
+            Mix((ulong)back.FailOperation);
+            Mix((ulong)back.PassOperation);
+            Mix((ulong)back.DepthFailOperation);
             Mix(state.FrontStencil.CompareMask | ((ulong)state.FrontStencil.WriteMask << 32));
             Mix(state.BackStencil.CompareMask | ((ulong)state.BackStencil.WriteMask << 32));
         }
