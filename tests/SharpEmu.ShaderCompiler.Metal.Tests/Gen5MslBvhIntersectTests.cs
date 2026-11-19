@@ -270,6 +270,47 @@ public sealed class Gen5MslBvhIntersectTests(ITestOutputHelper output)
         Assert.Equal(0u, faults[mappedPage >> 5] & (1u << (int)(mappedPage & 31)));
     }
 
+    // A node is loaded only when each of its 64-byte units is mapped (upstream 7cf0ac568): a float32 box whose second
+    // unit is on the unmapped page after the guest, and a box16 and a triangle on an unmapped page, return what the
+    // hardware returns for no node (four invalid ids; a triangle's +inf / 1 and an invalid id), not a node of zeros.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ANodeWithAUnitOnAnUnmappedPageIsNotLoaded(bool bvh64)
+    {
+        var guest = BuildGuest();
+        var node = guest.AsSpan((int)LastNode * 64, 64);
+        node.Clear();
+        uint[] children = [0x10, 0x20, 0x30, 0x40];
+        float[][] firstUnitBoxes = [[0f, 0f, 0f, 1f, 1f, 1f], [0f, 0f, 0f, 2f, 1f, 1f]];
+        for (var child = 0; child < 4; child++)
+            BinaryPrimitives.WriteUInt32LittleEndian(node[(child * 4)..], children[child]);
+        for (var child = 0; child < 2; child++)
+        for (var component = 0; component < 6; component++)
+            BinaryPrimitives.WriteSingleLittleEndian(node[(16 + (child * 6 + component) * 4)..], firstUnitBoxes[child][component]);
+
+        var descriptor = Descriptor();
+        descriptor[2] = 2000;
+        const uint Unmapped = 1000;
+        var rays = new[]
+        {
+            AlongX(Pointer(LastNode, TypeBox32)),
+            AlongX(Pointer(Unmapped, TypeBox16)),
+            AlongX(Pointer(Unmapped, TypeBox32)),
+            new Ray(Pointer(Unmapped, 0), 100f, [0.25f, 0.25f, 2f], [0f, 0f, -1f]),
+            AlongX(Pointer(Box32, TypeBox32)),
+        };
+        var results = Run(guest, new Variant(bvh64, false, descriptor), rays, out var faults);
+        if (results is null) return;
+
+        for (var lane = 0; lane < 3; lane++)
+            Assert.Equal([Invalid, Invalid, Invalid, Invalid], results[lane]);
+        Assert.Equal([0x7F80_0000u, 0x3F80_0000u, Invalid, 0u], results[3]);
+        Assert.Equal([0x30u, 0x10u, 0x20u, Invalid], results[4]);
+        var page = (uint)((GuestBase + GuestBytes) >> DeviceAddressPaging.PageBits);
+        Assert.NotEqual(0u, faults[page >> 5] & (1u << (int)(page & 31)));
+    }
+
     // Random boxes and triangles around the origin against random rays, some axis-aligned
     // (zero direction components, infinite inverse), in every variant.
     [Theory]
@@ -540,7 +581,7 @@ public sealed class Gen5MslBvhIntersectTests(ITestOutputHelper output)
             for (var word = 0; word < words.Length; word++)
                 BinaryPrimitives.WriteUInt32LittleEndian(input.AsSpan(lane * LaneBytes + word * 4), words[word]);
             expected[lane] = Gen5BvhReference.Intersect(ReadGuest, variant.Descriptor, rays[lane].Pointer, rays[lane].Extent,
-                rays[lane].Origin, direction, inverse);
+                rays[lane].Origin, direction, inverse, address => address >= GuestBase && address - GuestBase < GuestBytes);
         }
 
         if (!RequireDevice()) return null;
