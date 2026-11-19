@@ -22,6 +22,12 @@ public sealed class Gen5MslAluParityTests(ITestOutputHelper output)
         new object[] { "VFmaMixhiF16", 0x00003E00u, 0x00004000u, 0x00003C00u, 0xABCD1234u, 0u, 7u, 0u, 0u, false, 0x44001234u },
         new object[] { "VFmaMixF32", 0x0000BE00u, 0x00004000u, 0x3F800000u, 0u, 0u, 3u, 1u, 1u, false, 0xC0000000u }, // abs then negate: -1.5*2+1 = -2
         new object[] { "VFmaMixloF16", 0x7FC00000u, 0x3F800000u, 0u, 0xABCDFFFFu, 0u, 0u, 0u, 0u, true, 0xABCD0000u }, // clamp NaN -> 0
+        // A NaN narrows to 0x7E00 with its sign, whatever its payload (upstream 7cf0ac568,
+        // NativeFloat16ConversionDeviceTests): x * 1 + -0 of a quiet, a payload and a signalling NaN.
+        new object[] { "VFmaMixloF16", 0x7FC00000u, 0x3F800000u, 0x80000000u, 0xABCD1234u, 0u, 0u, 0u, 0u, false, 0xABCD7E00u },
+        new object[] { "VFmaMixloF16", 0x7FC12345u, 0x3F800000u, 0x80000000u, 0xABCD1234u, 0u, 0u, 0u, 0u, false, 0xABCD7E00u },
+        new object[] { "VFmaMixloF16", 0x7F800001u, 0x3F800000u, 0x80000000u, 0xABCD1234u, 0u, 0u, 0u, 0u, false, 0xABCD7E00u },
+        new object[] { "VFmaMixhiF16", 0xFFC12345u, 0x3F800000u, 0x80000000u, 0xABCD1234u, 0u, 0u, 0u, 0u, false, 0xFE001234u },
         new object[] { "VPkFmaF16", 0x3E003E00u, 0x3C013C01u, 0x80018001u, 0u, 0u, 7u, 0u, 0u, false, 0x3E013E01u }, // exact result just below midpoint; float fma + half incorrectly gives 3E02
         new object[] { "VPkFmacF16", 0x3E003E00u, 0x3C013C01u, 0u, 0x80018001u, 0u, 0u, 0u, 0u, false, 0x3E013E01u },
         new object[] { "VPkAddF16", 0x40003C00u, 0x44004200u, 0u, 0u, 0u, 3u, 0u, 0u, false, 0x46004400u }, // (1+3, 2+4)

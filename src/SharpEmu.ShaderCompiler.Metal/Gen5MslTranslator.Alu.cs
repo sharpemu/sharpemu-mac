@@ -1274,7 +1274,11 @@ public static partial class Gen5MslTranslator
                 return AsUInt($"({value})");
             }
 
-            var packed = $"((uint)as_type<ushort>(half({value})))";
+            // A NaN narrows to 0x7E00 with its sign, whatever its payload (upstream 7cf0ac568); Metal's
+            // half() keeps the payload's top bits.
+            var wide = Temp("float", value);
+            var packed = $"(((as_type<uint>({wide}) & 0x7FFFFFFFu) > 0x7F800000u) " +
+                $"? (((as_type<uint>({wide}) >> 16) & 0x8000u) | 0x7E00u) : (uint)as_type<ushort>(half({wide})))";
             return instruction.Opcode == "VFmaMixloF16"
                 ? $"((v[{destination}] & 0xFFFF0000u) | {packed})"
                 : $"((v[{destination}] & 0x0000FFFFu) | ({packed} << 16))";

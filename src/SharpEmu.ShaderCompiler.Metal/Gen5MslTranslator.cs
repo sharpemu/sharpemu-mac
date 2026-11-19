@@ -1674,7 +1674,7 @@ public static partial class Gen5MslTranslator
 
             if (_stage == Gen5MslStage.Compute && _request.Tessellation is { Role: Gen5TessellationRole.Hull } hull)
             {
-                EmitHullLaunchState(source, hull);
+                EmitHullLaunchState(source, hull, _request.SupportsDrawParameters);
             }
             else if (_stage == Gen5MslStage.Compute)
             {
@@ -1763,7 +1763,7 @@ public static partial class Gen5MslTranslator
         // within its instance, v1 the patch within the group and the control point, v2 the local
         // half's vertex index, v3 its thread within the group (its LDS slot), v5 the instance. s[0:1]
         // and the user data come from the layout like any user data.
-        private static void EmitHullLaunchState(StringBuilder source, Gen5TessellationLaunch hull)
+        private static void EmitHullLaunchState(StringBuilder source, Gen5TessellationLaunch hull, bool instancesFromZero)
         {
             var patches = hull.PatchesPerGroup;
             var points = hull.ControlPoints;
@@ -1783,7 +1783,12 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    v[2] = sharpemu_hull_lane < sharpemu_hull_points");
             source.AppendLine($"        ? sharpemu_hull_vertices[sharpemu_hull_instance_patch * {points}u + sharpemu_hull_lane % {points}u] : 0u;");
             source.AppendLine("    v[3] = sharpemu_hull_lane;");
-            source.AppendLine("    v[5] = sharpemu_hull_launch[1] + sharpemu_hull_patch / sharpemu_hull_instance_patches;");
+            // The hardware numbers a draw's instances from zero; a start instance reaches the program only
+            // through the user data its draw packet names (upstream 7cf0ac568, Gen5SpirvTranslator.Tessellation).
+            // Without draw parameters (SHARPEMU_METAL_DRAW_PARAMETERS=0) the draw's first instance is added, as before.
+            source.AppendLine(instancesFromZero
+                ? "    v[5] = sharpemu_hull_patch / sharpemu_hull_instance_patches;"
+                : "    v[5] = sharpemu_hull_launch[1] + sharpemu_hull_patch / sharpemu_hull_instance_patches;");
             source.AppendLine("    active = true;");
         }
 
