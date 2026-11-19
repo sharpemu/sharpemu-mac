@@ -305,6 +305,7 @@ internal sealed partial class MetalRenderHost :
     internal const bool PrewarmSharedInt64Atomics = false;
     internal const bool PrewarmSignedZeroInfNanPreserve = true;
     internal const bool PrewarmExecGuardElision = true;
+    internal const bool PrewarmRuntimeImageSwizzles = true;
 
     public ShaderPrewarmList? ShaderPrewarm => MetalShaderPrewarm.List;
     public GraphicsPrewarmList? GraphicsPrewarm => MetalShaderPrewarm.Graphics;
@@ -326,6 +327,12 @@ internal sealed partial class MetalRenderHost :
 
     internal static readonly bool DrawParameters =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_DRAW_PARAMETERS") != "0";
+
+    // The translator reads a storage image's store channel map from shader data, which the
+    // descriptor path writes from the bound T# (WriteStageShaderData), so one module serves every
+    // destination select. SHARPEMU_RUNTIME_IMAGE_SWIZZLE=0 bakes the select into the module again
+    // (ShaderProgramCache applies the switch on top of this answer).
+    public bool RuntimeImageSwizzlesSupported => PrewarmRuntimeImageSwizzles;
 
     public GpuSampleCount NoAttachmentSampleCounts => GpuSampleCount.Count1Bit;
 

@@ -164,6 +164,10 @@ public static partial class Gen5MslTranslator
                         return false;
                     }
                 }
+                else if (StoreChannelMapSlot(resourceIndex) is var slot && slot >= 0)
+                {
+                    EmitRuntimeSwizzleStoreTexel(image, kind, slot, components);
+                }
                 else
                 {
                     for (var component = 0; component < 4; component++)
@@ -739,6 +743,37 @@ public static partial class Gen5MslTranslator
             return kind == "int"
                 ? $"(uint)extract_bits(as_type<int>({low}), 0u, 16u)"
                 : low;
+        }
+
+        // The slot of an image's store channel map in shader data (RuntimeImageSwizzle.Slot), or -1 when its stores
+        // follow the select the module was specialized with.
+        private int StoreChannelMapSlot(int resourceIndex) =>
+            _request.Bindings.StorageImageSwizzleCount == 0 || resourceIndex < 0
+                ? -1
+                : RuntimeImageSwizzle.Slot(_request.Resources.Info.Images, resourceIndex);
+
+        // A store's texel when the image's select is shader data (RuntimeImageSwizzle), as Gen5SpirvTranslator's
+        // RuntimeSwizzleStoreTexel builds it: the words of the components the dmask enables, in data-register order (zero
+        // for the others), each moved to the physical channel its slot's map names (a code xor its channel; 4 stores
+        // zero), which is where GetImageStoreSourceIndex places them for a select baked into the module.
+        private void EmitRuntimeSwizzleStoreTexel(Gen5ImageControl image, string kind, int slot, string[] components)
+        {
+            var dmask = (image.Dmask & 0xFu) == 0 ? 1u : image.Dmask & 0xFu;
+            var logical = new string[4];
+            var source = 0u;
+            for (var component = 0; component < logical.Length; component++)
+            {
+                logical[component] = (dmask & (1u << component)) != 0 ? ImageStoreComponent(image, kind, source++) : "0u";
+            }
+
+            var words = Temp("uint4", $"uint4({string.Join(", ", logical)})");
+            var map = Temp("uint",
+                $"{ShaderDataDword(_request.Bindings.StorageImageSwizzlesDword + (uint)slot / 2)} >> {(uint)slot % 2 * 16}u");
+            for (var channel = 0u; channel < 4; channel++)
+            {
+                var code = Temp("uint", $"((({map}) >> {channel * 3}u) & 7u) ^ {channel}u");
+                components[channel] = ImageTexelComponent(kind, $"({code} < 4u ? {words}[{code} & 3u] : 0u)");
+            }
         }
 
         private static string ImageTexelComponent(string kind, string raw) => kind switch

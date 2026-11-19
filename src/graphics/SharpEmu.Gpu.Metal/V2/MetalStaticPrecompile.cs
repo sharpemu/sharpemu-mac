@@ -534,7 +534,8 @@ internal static class MetalStaticPrecompile
             {
                 if (ShaderPrewarmCompiler.TryCompilePrewarm(compute, build.ComputeCode!, compiler,
                         MetalRenderHost.PrewarmSharedInt64Atomics, MetalRenderHost.PrewarmExecGuardElision,
-                        MetalRenderHost.PrewarmSignedZeroInfNanPreserve, out var compiled, out _, out _) &&
+                        MetalRenderHost.PrewarmSignedZeroInfNanPreserve, out var compiled, out _, out _,
+                        runtimeImageSwizzles: MetalRenderHost.PrewarmRuntimeImageSwizzles) &&
                     compiled is MetalCompiledGuestShader metal)
                 {
                     shaders.Add(metal.Shader);

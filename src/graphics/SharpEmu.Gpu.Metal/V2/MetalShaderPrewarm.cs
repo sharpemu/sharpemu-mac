@@ -853,7 +853,8 @@ internal static class MetalShaderPrewarm
                 MetalRenderHost.PrewarmSignedZeroInfNanPreserve,
                 out var compiled,
                 out _,
-                out var error))
+                out var error,
+                runtimeImageSwizzles: MetalRenderHost.PrewarmRuntimeImageSwizzles))
         {
             NoteFailure(record, error);
             return;

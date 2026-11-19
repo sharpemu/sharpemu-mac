@@ -77,7 +77,9 @@ internal static class Gen5ImageFixtures
         bool unorm = false,
         uint[]? samplerWords = null,
         int resultRegisters = 4,
-        Func<Gen5ImageControl, Gen5ImageControl>? configure = null)
+        Func<Gen5ImageControl, Gen5ImageControl>? configure = null,
+        bool? runtimeImageSwizzles = null,
+        Action<ShaderCompileRequest, ResourceSnapshot>? inspect = null)
     {
         var isArray = arrayed ?? descriptorType is ImageType1DArray or ImageType2DArray or ImageTypeCube or ImageType2DMsaaArray;
         var dimension = instructionDimension ?? descriptorType switch
@@ -154,7 +156,8 @@ internal static class Gen5ImageFixtures
         instructions.Add(end with { Pc = pc });
         var program = new Gen5ShaderProgram(ShaderAddress, instructions);
 
-        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, 0, UserDataCount);
+        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, 0, UserDataCount,
+            runtimeImageSwizzles: runtimeImageSwizzles);
         var userData = new uint[UserDataCount];
         WriteDescriptor(userData, descriptorType, unifiedFormat, dstSelect);
         if (addressValues is not null) userData[18] = 1u << 26;
@@ -183,6 +186,7 @@ internal static class Gen5ImageFixtures
             PixelOutputs = stage == ShaderStage.Pixel ? [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)] : [],
         };
 
+        inspect?.Invoke(request, snapshot);
         var compiled = Gen5MslTranslator.TryCompileProgram(request, out var result, out error);
         shader = compiled ? result : null;
         return compiled;

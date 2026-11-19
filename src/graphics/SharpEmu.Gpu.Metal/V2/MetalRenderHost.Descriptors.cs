@@ -634,6 +634,8 @@ internal sealed partial class MetalRenderHost
             MipStatistics.WriteImageFields(shaderData, layout, info, snapshot.Images);
         }
 
+        // Each written image's store channel map, from its bound T# (RuntimeImageSwizzle).
+        RuntimeImageSwizzle.WriteStoreMaps(shaderData, layout, info.Images, snapshot.Images);
         return true;
     }
 
