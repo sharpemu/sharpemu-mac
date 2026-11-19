@@ -770,6 +770,7 @@ public static partial class Gen5MslTranslator
             }
 
             source.AppendLine("    bool exec = true;");
+            DeclareGuestExec(source);
             if (_usesPixelValidMask)
             {
                 source.AppendLine("    bool pixel_valid_mask_active = true;");

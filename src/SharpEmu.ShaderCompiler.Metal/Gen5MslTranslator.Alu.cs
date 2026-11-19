@@ -140,6 +140,14 @@ public static partial class Gen5MslTranslator
                     }
 
                     var lane = Temp("uint", $"({RawSource(instruction, 1)}) & 31u");
+                    if (HostSubgroupMayBePartial)
+                    {
+                        // The selected lane whatever its EXEC state; a lane the host never launched reads
+                        // as the reading lane.
+                        StoreScalar(instruction.Destinations[0].Value, ReadGraphicsLane(Temp("uint", value), lane));
+                        return true;
+                    }
+
                     if (_stage == Gen5MslStage.Pixel && !IsSingleLaneStage)
                     {
                         // A fragment that was never launched has no thread to shuffle from
@@ -1466,6 +1474,14 @@ public static partial class Gen5MslTranslator
             var stored = Temp("uint", value);
             var (targetLane, inRange) = EmitDppSourceLane(control);
             var safeTarget = Temp("uint", $"(({inRange}) ? {targetLane} : sharpemu_lane) & 31u");
+            if (HostSubgroupMayBePartial)
+            {
+                var read = ReadGraphicsLane(stored, safeTarget);
+                return control.FetchInactive
+                    ? Temp("uint", $"({inRange}) ? {read} : 0u")
+                    : Temp("uint", $"(({inRange}) && {IsGraphicsLaneUsable(safeTarget)}) ? {read} : 0u");
+            }
+
             var shuffled = Temp("uint", ShuffleLane(stored, safeTarget));
             if (control.FetchInactive)
             {
@@ -1485,6 +1501,12 @@ public static partial class Gen5MslTranslator
                 "uint",
                 $"({control.LaneSelectors}u >> ((sharpemu_lane & 7u) * 3u)) & 7u");
             var targetLane = Temp("uint", $"((sharpemu_lane & 0xFFFFFFF8u) + {selector}) & 31u");
+            if (HostSubgroupMayBePartial)
+            {
+                var read = ReadGraphicsLane(stored, targetLane);
+                return control.FetchInactive ? read : Temp("uint", $"{IsGraphicsLaneUsable(targetLane)} ? {read} : 0u");
+            }
+
             var shuffled = Temp("uint", ShuffleLane(stored, targetLane));
             if (control.FetchInactive)
             {
@@ -1516,6 +1538,10 @@ public static partial class Gen5MslTranslator
                 ? "true"
                 : control.FetchInactive
                     ? inRange
+                    // A graphics source lane the host never launched is disabled unless whole-wave code
+                    // turned it on in the guest mask (HostSubgroupMayBePartial).
+                    : HostSubgroupMayBePartial
+                        ? $"({inRange}) && {IsGraphicsLaneUsable(Temp("uint", $"(({inRange}) ? {targetLane} : sharpemu_lane) & 31u"))}"
                     // The ballot sits in its own statement: under the && only some lanes would run it.
                     : $"({inRange}) && {Temp("bool", LaneActiveExpression(Temp("uint", $"(({inRange}) ? {targetLane} : sharpemu_lane) & 31u")))}";
             return Temp("bool", $"({rowEnabled}) && ({bankEnabled}) && ({sourceAllows})");
@@ -1920,6 +1946,12 @@ public static partial class Gen5MslTranslator
                     Line($"s[{hiRegister}] = 0u;");
                 }
 
+                if (loRegister == ExecLoRegister)
+                {
+                    // A compare's EXEC holds only lanes that ran it.
+                    RecordGuestExec64($"(ulong)s[{ExecLoRegister}]");
+                }
+
                 return;
             }
 
@@ -1981,8 +2013,19 @@ public static partial class Gen5MslTranslator
                 ? "((sharpemu_lane & 0xFFFFFFF0u) ^ 16u)"
                 : "(sharpemu_lane & 0xFFFFFFF0u)";
             var targetLane = Temp("uint", $"({rowBase} + {selector}) & 31u");
-            var shuffled = Temp("uint", ShuffleLane(value, targetLane));
             var fetchInactive = (control.OperandSelect & 1) != 0;
+            if (HostSubgroupMayBePartial)
+            {
+                // ISA: a disabled source lane gives zero with BOUND_CTRL (OP_SEL[1]) set and keeps the old
+                // destination with it clear.
+                var read = ReadGraphicsLane(value, targetLane);
+                return fetchInactive
+                    ? read
+                    : Temp("uint", $"{IsGraphicsLaneUsable(targetLane)} ? {read} : " +
+                        $"{((control.OperandSelect & 2) != 0 ? "0u" : $"v[{DestinationVector(instruction)}]")}");
+            }
+
+            var shuffled = Temp("uint", ShuffleLane(value, targetLane));
             if (fetchInactive)
             {
                 return shuffled;
@@ -2264,6 +2307,12 @@ public static partial class Gen5MslTranslator
                 {
                     error = $"unsupported scalar 32-bit saveexec opcode {instruction.Opcode}";
                     return false;
+                }
+
+                if (HostSubgroupMayBePartial)
+                {
+                    combined = Temp("uint", combined);
+                    RecordGuestExecLow(combined);
                 }
 
                 var mask = Temp("uint", ClampExecToLanes(combined));
@@ -2725,6 +2774,12 @@ public static partial class Gen5MslTranslator
                 {
                     error = $"unsupported scalar 64-bit saveexec opcode {instruction.Opcode}";
                     return false;
+                }
+
+                if (HostSubgroupMayBePartial)
+                {
+                    combined = Temp("ulong", combined);
+                    RecordGuestExec64(combined);
                 }
 
                 var mask = Temp("ulong", ClampExecToLanes64(combined));

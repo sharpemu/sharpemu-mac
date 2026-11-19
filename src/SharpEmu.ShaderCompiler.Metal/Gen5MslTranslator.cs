@@ -1654,6 +1654,7 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"    uint s[{ScalarRegisterFileCount}] = {{}};");
             source.AppendLine($"    uint v[{VectorRegisterFileCount}] = {{}};");
             source.AppendLine("    bool exec = true;");
+            DeclareGuestExec(source);
             if (_usesPixelValidMask)
             {
                 source.AppendLine("    bool pixel_valid_mask_active = true;");
@@ -1751,6 +1752,7 @@ public static partial class Gen5MslTranslator
             {
                 source.AppendLine($"    s[{ExecLoRegister}] = sharpemu_ballot(true);");
                 source.AppendLine($"    s[{ExecHiRegister}] = 0u;");
+                InitializeGuestExec(source);
             }
         }
 
@@ -4807,6 +4809,12 @@ public static partial class Gen5MslTranslator
 
                 case ExecLoRegister:
                 {
+                    if (HostSubgroupMayBePartial)
+                    {
+                        expression = Temp("uint", expression);
+                        RecordGuestExecLow(expression);
+                    }
+
                     var value = Temp("uint", ClampExecToLanes(expression));
                     Line($"s[{ExecLoRegister}] = {value};");
                     Line($"exec = {LowHalfWriteBit(value, "exec", ScalarExpression(ExecHiRegister))};");
@@ -4816,6 +4824,12 @@ public static partial class Gen5MslTranslator
                 case VccHiRegister:
                 case ExecHiRegister:
                 {
+                    if (register == ExecHiRegister && HostSubgroupMayBePartial)
+                    {
+                        expression = Temp("uint", expression);
+                        RecordGuestExecHigh(expression);
+                    }
+
                     var value = Temp("uint", register == ExecHiRegister && (ClampsExecToLanes || IsNarrowWave64) ? "0u" : expression);
                     Line($"s[{register}] = {value};");
                     if (IsWave64)

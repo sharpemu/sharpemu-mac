@@ -856,9 +856,14 @@ public static partial class Gen5MslTranslator
             {
                 var source = Temp("ulong", RawSource64(instruction, 0));
                 var oldExec = Temp("ulong", Scalar64Expression(ExecLoRegister));
-                var mask = Temp(
-                    "ulong",
-                    ClampExecToLanes64(andn1 ? $"(~{source} & {oldExec})" : $"({source} & ~{oldExec})"));
+                var written = andn1 ? $"(~{source} & {oldExec})" : $"({source} & ~{oldExec})";
+                if (HostSubgroupMayBePartial)
+                {
+                    written = Temp("ulong", written);
+                    RecordGuestExec64(written);
+                }
+
+                var mask = Temp("ulong", ClampExecToLanes64(written));
                 Line($"s[{ExecLoRegister}] = (uint){mask};");
                 Line(IsNarrowWave64
                     ? $"s[{ExecHiRegister}] = 0u;"
@@ -871,7 +876,14 @@ public static partial class Gen5MslTranslator
 
             var left = Temp("uint", RawSource(instruction, 0));
             var old = Temp("uint", $"s[{ExecLoRegister}]");
-            var narrow = Temp("uint", ClampExecToLanes(andn1 ? $"(~{left} & {old})" : $"({left} & ~{old})"));
+            var writtenLow = andn1 ? $"(~{left} & {old})" : $"({left} & ~{old})";
+            if (HostSubgroupMayBePartial)
+            {
+                writtenLow = Temp("uint", writtenLow);
+                RecordGuestExecLow(writtenLow);
+            }
+
+            var narrow = Temp("uint", ClampExecToLanes(writtenLow));
             Line($"s[{ExecLoRegister}] = {narrow};");
             Line($"s[{ExecHiRegister}] = 0u;");
             Line($"exec = (({narrow} >> sharpemu_lane) & 1u) != 0u;");

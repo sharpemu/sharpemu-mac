@@ -67,6 +67,7 @@ them for measurements or to isolate a problem.
 | `SHARPEMU_METAL_MESH_SHADERS` | on | `0` disables mesh pipelines for primitive-shader draws. |
 | `SHARPEMU_METAL_DRAW_PARAMETERS` | on | `0` turns off draw parameters in translated vertex programs. By default a vertex program's instance index counts from the draw's base instance, and when an indirect draw names a user-data register for its base vertex or start instance, the program counts its vertex index from the base vertex and stores both bases there (the command processor no longer writes those registers). `0` gives the program Metal's ids, which include both bases, and stores nothing. |
 | `SHARPEMU_RUNTIME_IMAGE_SWIZZLE` | on | `0` bakes each storage image's destination select into the translated program, one program per select. By default a store reads the image's channel map from shader data, which the host writes from the bound descriptor. |
+| `SHARPEMU_GRAPHICS_PARTIAL_LANES` | off | `1` makes pixel-shader lane reads (DPP, DPP8, PERMLANE16, V_READLANE) of a lane the fragment simdgroup never launched read the reading lane's own value, and treats such a lane as active when the guest EXEC mask has its bit. Off by default, as upstream: it changes every pixel shader with cross-lane operations. |
 | `SHARPEMU_METAL_MESHLETS` | on | `0` disables the meshlet cache. |
 | `SHARPEMU_METAL_V2_BINARY_ARCHIVE` | on | `0` disables the on-disk library and pipeline archives. |
 | `SHARPEMU_METAL_V2_BINARY_ARCHIVE_BUDGET_MB` | `8192` | Size bound of the archives on disk. |
