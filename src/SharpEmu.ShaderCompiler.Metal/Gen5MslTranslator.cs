@@ -3215,6 +3215,29 @@ public static partial class Gen5MslTranslator
             if (run > 0)
             {
                 inBounds = ElementInBounds(bindingIndex, byteAddress, $"{run * sizeof(uint)}u");
+                if (_options.FormatLoadComponentBounds)
+                {
+                    // Each selected component is in range on its own, at its own 32-bit address
+                    // (upstream 7cf0ac568): when the run does not fit, a component past the top of
+                    // the byte space wraps to the binding's first bytes, which the run's per-dword
+                    // path (sharpemu_load_word at addr + 4i) reads. A run that fits implies every
+                    // component does, so the common case is the one compare before ||.
+                    var bytes = BufferBytes(bindingIndex);
+                    var selected = new SortedSet<uint>();
+                    for (uint destination = 0; destination < componentCount; destination++)
+                    {
+                        var selector = (word3 >> (int)(destination * 3)) & 7u;
+                        if (selector >= 4 && selector - 4 < formatComponents)
+                        {
+                            selected.Add(selector - 4);
+                        }
+                    }
+
+                    var components = selected.Select(component =>
+                        $"({byteAddress} + {component * sizeof(uint)}u) <= {bytes} - 4u");
+                    inBounds = Temp("bool", $"{inBounds} || (4u <= {bytes} && {string.Join(" && ", components)})");
+                }
+
                 _usesCoherentLoads |= glc;
                 words = Temp(
                     "uint4",
