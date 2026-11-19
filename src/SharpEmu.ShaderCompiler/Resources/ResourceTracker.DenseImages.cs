@@ -49,6 +49,11 @@ public sealed partial class ResourceTracker
         if (bufferHeap && ValidateSource(MakeSource(handle, 8, false, false, pc), out _))
             return false;
 
+        // A host that binds a bindless heap reads such a descriptor at run time as a heap record (PlanHeapRecords);
+        // the enumerated V# table is for hosts without one.
+        if (bufferHeap && _bindlessHeap)
+            return false;
+
         // A V# table is read through texture handles, which only sampled reads take. Stores
         // and atomics through one keep the descriptor resolution they had before.
         if (bufferHeap && !OnlySampledReadsThrough(handle))

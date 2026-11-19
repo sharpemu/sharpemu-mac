@@ -47,6 +47,9 @@ public sealed class BufferResource
     public uint Source { get; set; }
     public uint FirstUsePc { get; set; }
     public uint MaxByteExtent { get; set; }
+    // The V#'s stride (bits 0-13), SWIZZLE_ENABLE (bit 14), INDEX_STRIDE (bits 16-17) and ADD_TID_ENABLE (bit 20) as the
+    // specialization holds them (BufferSpecialization.PackedStride). The MSL translator addresses buffers by it; the SPIR-V
+    // translator reads an indexed buffer's stride from shader data instead (UsesIndexedBuffers).
     public uint PackedStride { get; set; }
     public uint DescriptorFormat { get; set; } = DescriptorConstants.InvalidFormat;
     public uint DescriptorSwizzle { get; set; } = DescriptorConstants.IdentityDestinationSelect;
@@ -197,7 +200,13 @@ public sealed class BufferCandidateTableInfo
 public sealed class ShaderResourceInfo
 {
     public const int MaxBuffers = 32;
+    // Without a bindless heap a table binds every candidate it selects among (Ghost of Tsushima's 265-entry material
+    // table); a host with the heap reads a larger table through heap records instead (ShaderResourcePlan.BindlessHeap).
     public const int MaxIndirectImageCandidates = 256;
+    public const int HeapHostIndirectImageCandidates = 64;
+
+    public static int IndirectImageCandidateLimit(bool bindlessHeap) =>
+        bindlessHeap ? HeapHostIndirectImageCandidates : MaxIndirectImageCandidates;
     public const int NoScalarRegister = -1;
 
     public List<BufferResource> Buffers { get; set; } = [];
@@ -228,6 +237,10 @@ public sealed class ShaderResourceInfo
     // Some image access reads its image or sampler from a bindless heap through descriptor set 1.
     public bool UsesBindlessHeap { get; set; }
 
+    // The heap views of those accesses (ShaderResourcePlan.HeapRecordSources); the layout carries where each one's
+    // elements are as shader data (BindingLayout.HeapViewsDword).
+    public uint HeapViewCount { get; set; }
+
     // Some image access reads its image or sampler through a linked callee's record argument (see CallRecordSelector).
     public bool UsesCallRecords { get; set; }
 
@@ -237,6 +250,14 @@ public sealed class ShaderResourceInfo
     // The program reads device addresses through the compact lowering (it has shader calls, or CompactMemoryAccessPolicy
     // chose it): it binds DescriptorBindingKind.DeviceAddressFallback.
     public bool UsesDeviceAddressFallback { get; set; }
+
+    // Some access indexes a buffer binding (idxen): the layout carries every buffer binding's V# stride as shader data
+    // (BindingLayout.BufferStridesDword), which the access multiplies the index by.
+    public bool UsesIndexedBuffers { get; set; }
+
+    // Storage images take their destination select from shader data (RuntimeImageSwizzle); the layout carries the store
+    // channel map of each written one (BindingLayout.StorageImageSwizzlesDword).
+    public bool UsesRuntimeImageSwizzles { get; set; }
 
     public ShaderResourceInfo Clone() => new()
     {
@@ -256,9 +277,12 @@ public sealed class ShaderResourceInfo
         UsesDeviceAddresses = UsesDeviceAddresses,
         WritesDeviceAddresses = WritesDeviceAddresses,
         UsesBindlessHeap = UsesBindlessHeap,
+        HeapViewCount = HeapViewCount,
         UsesCallRecords = UsesCallRecords,
         UsesCallMarks = UsesCallMarks,
         UsesDeviceAddressFallback = UsesDeviceAddressFallback,
+        UsesIndexedBuffers = UsesIndexedBuffers,
+        UsesRuntimeImageSwizzles = UsesRuntimeImageSwizzles,
     };
 }
 
@@ -271,6 +295,9 @@ public sealed record IndirectImageSelector(
     uint KeyArgument)
 {
     public IndirectSelectorValues? SelectorValues { get; init; }
+
+    // An inclusive upper bound the shader's own clamps prove for the selector, when one exists.
+    public uint? SelectorBound { get; init; }
     public IReadOnlyList<DirectImageCandidate>? DirectCandidates { get; init; }
     public bool Dense { get; init; }
     public uint TableOffset { get; init; }
@@ -320,6 +347,7 @@ public sealed class DescriptorSource
     public ScalarValue[] Dwords { get; init; } = [];
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
+    public HeapRecordSelector? Heap { get; init; }
     public CallRecordSelector? CallRecord { get; init; }
 }
 

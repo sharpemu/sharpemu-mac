@@ -183,6 +183,8 @@ public sealed class PageGuard : IDisposable
         return false;
     }
 
+    public GuestWriteReservations ManagedWrites { get; } = new();
+
     public void Dispose()
     {
         foreach (var block in _blocks)

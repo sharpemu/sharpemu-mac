@@ -100,14 +100,18 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains("create_graphics_pipeline colors=1 depth=False topology=TriangleList restart=False", _pipelines.Calls);
     }
 
-    [Fact]
-    public void ADrawRepeatingThePreviousTargetsInItsScopeKeepsTheirAcquisitions()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ADrawRepeatingThePreviousTargetsInItsScopeKeepsTheirAcquisitions(bool markWritten)
     {
         _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
         _host.Scope = new DrawScopeToken(1, 1, 1);
         var banks = Banks();
         _executor.DrawIndexed(7, banks, Indexed(6));
         _host.Calls.Clear();
+        if (markWritten)
+            banks.MarkWritten(1u << (int)RegisterStamp.ColorTargets);
         _executor.DrawIndexed(8, banks, Indexed(6));
 
         Assert.DoesNotContain(_host.Calls, call => call.StartsWith("find_image", StringComparison.Ordinal) || call.StartsWith("acquire_color", StringComparison.Ordinal));
@@ -115,7 +119,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
-    public void ADrawAcquiresItsTargetsAgainOnceTheScopeOrTheRegistersChange()
+    public void ADrawAcquiresItsTargetsAgainOnceTheScopeOrTheTargetChanges()
     {
         _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
         _host.Scope = new DrawScopeToken(1, 1, 1);
@@ -128,9 +132,10 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
 
         _host.Calls.Clear();
+        banks.Context.ColorTargets[0] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.MarkWritten(1u << (int)RegisterStamp.ColorTargets);
         _executor.DrawIndexed(9, banks, Indexed(6));
-        Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
+        Assert.Contains("acquire_color 0 100100000 image=2", _host.Calls);
     }
 
     private const uint TargetStampBits =
@@ -250,6 +255,58 @@ public sealed class RenderExecutorDrawTests : IDisposable
 
     private const ulong IndirectArguments = RecordingRenderHost.MemoryBase + 0x60_0000;
 
+    // A GPU-culled automatic draw of a mesh program reads its counts on the GPU; without the
+    // indirect mesh command it reads them here and draws from them.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AutoIndirectMeshDrawReadsItsArgumentsOnTheGpu(bool gpuIndirect)
+    {
+        _host.SupportsIndirectMeshDraw = gpuIndirect;
+        _pipelines.MeshShadersSupported = true;
+        _pipelines.Graphics = new GraphicsPrograms
+        {
+            Vertex = new ShaderProgram(0x11), Pixel = new ShaderProgram(0x22),
+            VertexInput = new VertexInputInfo { Stage = Stage(Program(ShaderStageKind.Mesh)) },
+            PixelInput = new PixelInputInfo { Stage = Stage(Program(ShaderStageKind.Pixel)) },
+            MeshInput = new MeshDrawConfiguration
+            {
+                Geometry = new GuestGeometryConfiguration { InputPrimitiveCountPerWorkgroup = 1, InputPointList = true },
+                Execution = new MeshExecutionLimits
+                {
+                    MaxGroupCountX = 65535, MaxGroupCountY = 65535, MaxGroupTotalCount = 65535,
+                },
+            },
+        };
+        MeshDrawParameters? parameters = null;
+        _host.PreparationFailure = stage =>
+        {
+            if (stage.Program?.Stage == ShaderStageKind.Mesh) parameters = stage.MeshDraw;
+            return null;
+        };
+        var banks = Banks(primitiveType: 1, withDepth: true);
+        banks.Context.ShaderStages = 0x2030u;
+        WriteIndirectArguments(6, 2, 4, 5);
+
+        _executor.DrawAuto(1, banks, Auto(0, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments });
+
+        if (gpuIndirect)
+        {
+            Assert.Equal(0, _host.GuestReads);
+            var request = _host.IndirectMeshRequest!.Value;
+            Assert.True(request.Automatic);
+            Assert.Equal((IndirectArguments, true, 1u), (request.ArgumentsAddress, request.PointList, request.PrimitivesPerGroup));
+            Assert.Equal(new MeshDrawParameters(0, 0, 0, uint.MaxValue, 0x9000), parameters);
+            AssertOrder("preparation_begin", "acquire_indirect_mesh", "prepare_bindings",
+                "prepare_indirect_mesh", "draw_indirect_mesh", "dispose_indirect_mesh", "preparation_end");
+            return;
+        }
+
+        Assert.Null(_host.IndirectMeshRequest);
+        Assert.Equal(new MeshDrawParameters(6, 4, 5, 0, 0), parameters);
+        AssertOrder("preparation_begin", "prepare_bindings", "draw_mesh 6 2 1", "preparation_end");
+    }
+
     private void WriteIndirectArguments(params uint[] words)
     {
         var bytes = new byte[words.Length * 4];
@@ -312,6 +369,27 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Equal(!cpu, _host.Calls.Any(c => c.StartsWith("draw_indexed_indirect", StringComparison.Ordinal)));
     }
 
+    // A GPU-culled automatic draw reads its four arguments on the GPU, so nothing here waits for the culling pass. So does a
+    // triangle strip whose state cannot make it a metadata clear quad (RenderExecutorAdaptationTests).
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void IndirectAutoDraw_LetsTheGpuReadTheArguments(bool strip)
+    {
+        WriteIndirectArguments(6, 2, 4, 3);
+        var arguments = Auto(0, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, strip ? Banks(PrimitiveTriangleStrip) : Banks(), arguments);
+
+        Assert.Equal(0, _host.GuestReads);
+        AssertOrder(
+            "obtain 100600000 10 written=False",
+            "begin_rendering",
+            "bind_pipeline Graphics A1",
+            "draw_indirect",
+            "reset_bindings");
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw ", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void IndirectIndexedStrip_ReadsTheArgumentsOnTheCpu()
     {
@@ -324,7 +402,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
-    public void IndirectAutoDraw_LetsTheGpuReadTheArguments()
+    public void IndirectAutoDraw_PreparesTheIndirectArgumentsForTheGpu()
     {
         var arguments = Auto(uint.MaxValue, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
         _executor.DrawAuto(7, Banks(), arguments);
@@ -373,13 +451,24 @@ public sealed class RenderExecutorDrawTests : IDisposable
     {
         WriteIndirectArguments(6, 2, 4, 1);
         var arguments = Auto(uint.MaxValue, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
-        _executor.DrawAuto(7, Banks(PrimitiveTriangleStrip), arguments);
+        _executor.DrawAuto(7, MetadataClearQuadCandidateStrip(), arguments);
         Assert.Contains("draw 6 2 4 1", _host.Calls);
 
         _host.Calls.Clear();
         WriteIndirectArguments(6, 0, 4, 1);
-        _executor.DrawAuto(8, Banks(PrimitiveTriangleStrip), arguments);
+        _executor.DrawAuto(8, MetadataClearQuadCandidateStrip(), arguments);
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw", StringComparison.Ordinal));
+    }
+
+    // A strip whose state may make it a metadata clear quad (a DCC target under a premultiplied fill blend): its count
+    // decides, so it is read on the CPU. Any other strip leaves its arguments on the GPU (IndirectAutoDraw_LetsTheGpuReadTheArguments).
+    private RegisterBanks MetadataClearQuadCandidateStrip()
+    {
+        var banks = Banks(PrimitiveTriangleStrip);
+        var words = banks.Context.ColorTargets[0];
+        banks.Context.ColorTargets[0] = words with { Info = words.Info | (1u << 28) };
+        banks.Context.BlendControls[0] = new BlendRegisters { Enable = true, ColorSourceFactor = 1, ColorDestinationFactor = 5, ColorFunction = 0 };
+        return banks;
     }
 
     [Fact]
@@ -449,9 +538,8 @@ public sealed class RenderExecutorDrawTests : IDisposable
 
         if (totalLimit < (triangleStrip ? 8u : 4u))
         {
-            var error = Assert.Throws<RenderExecutorFatalException>(() =>
-                _executor.DrawAuto(1, banks, Auto(30, instances: 2, firstVertex: 5)));
-            Assert.Contains("total=8/7", error.Message);
+            // A draw over the device group limits is left out, as the GPU preparation leaves out an indirect one.
+            _executor.DrawAuto(1, banks, Auto(30, instances: 2, firstVertex: 5));
             Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw_mesh", StringComparison.Ordinal));
             return;
         }
@@ -1563,7 +1651,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     [Fact]
     public void ShaderBufferWrites_EndRenderingAndBarrierAfterTheDraw()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         var descriptor = BufferDescriptor(VertexBase, 4, 16);
         _pipelines.Graphics = Programs(
             vertexStage: Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [descriptor]),
@@ -1778,7 +1866,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     [Fact]
     public void ShaderBufferWrites_WithoutAnAddressOrFootprintNeedNoBarrier()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Graphics = Programs(vertexStage: Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [BufferDescriptor(0, 4, 16)]));
         _executor.DrawIndexed(1, Banks(), Indexed(3));
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("write_barrier", StringComparison.Ordinal));

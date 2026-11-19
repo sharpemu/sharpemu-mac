@@ -296,15 +296,15 @@ public static class KernelPthreadBarrierCancelCompatExports
     }
 
     /// <summary>
-    /// pthread_exit / cancellation: TLS-key destructors, then the runtime's thread_atexit
-    /// callback, on the still-running thread. Recorded so the entry-return hook that follows
-    /// the unwind does not run them a second time.
+    /// pthread_exit / cancellation: the C++ thread_local destructors the guest's libc registered
+    /// (_sceLibcInternalThreadAtexit), then the TLS-key destructors, then the runtime's
+    /// thread_atexit callback, on the still-running thread. Recorded so the entry-return hook that
+    /// follows the unwind does not run them a second time.
     /// </summary>
     internal static void RunThreadExitDestructors(CpuContext ctx)
     {
         _exitDestructorsRan[KernelPthreadState.GetCurrentThreadHandle()] = 0;
-        KernelPthreadExtendedCompatExports.RunThreadLocalDestructors(ctx);
-        KernelMemoryCompatExports.RunThreadDtors(ctx);
+        RunExitDestructors(ctx);
     }
 
     // A start routine that returns exits the thread exactly like pthread_exit.
@@ -317,6 +317,12 @@ public static class KernelPthreadBarrierCancelCompatExports
             return;
         }
 
+        RunExitDestructors(ctx);
+    }
+
+    private static void RunExitDestructors(CpuContext ctx)
+    {
+        LibcInternal.LibcInternalExports.RunThreadAtexitDestructors(ctx);
         KernelPthreadExtendedCompatExports.RunThreadLocalDestructors(ctx);
         KernelMemoryCompatExports.RunThreadDtors(ctx);
     }

@@ -17,7 +17,9 @@ public sealed class DeviceDataLoadTests
     private const int DataOffset = 32;
 
     // s[8:11] is a V# loaded from the table (a binding read); s16 is a dword loaded from
-    // the same table that the shader only stores (a data read).
+    // the same table that the shader only stores (a data read). Every plan here is made with the
+    // host-flattened table (scalarDataOnDevice: false): with upstream's SHARPEMU_GPU_SCALAR_DATA policy on, a
+    // compute data read stays in the shader from the first plan and there is nothing to learn.
     private static Gen5ShaderProgram BindingAndDataProgram() => Program(
         ScalarLoad(0, 0, destination: 8, count: 4),
         ScalarLoad(8, 0, destination: 16, immediateOffset: DataOffset),
@@ -29,7 +31,7 @@ public sealed class DeviceDataLoadTests
     public void LearnedDataLoad_IsLeftToTheDevice_WhileBindingReadsStayFlattened()
     {
         var program = BindingAndDataProgram();
-        var flattened = ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash, 0, 2);
+        var flattened = ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash, 0, 2, scalarDataOnDevice: false);
         Assert.True(flattened.Memory.TryGetIndex(8, 0, out var dataMemory));
         Assert.Equal(5, flattened.TableReads.Count);
         Assert.Equal(4, flattened.DataSlotStart);
@@ -51,7 +53,7 @@ public sealed class DeviceDataLoadTests
         Assert.Equal(1, DeviceDataLoads.CountFor(LearnedHash));
         Assert.True(DeviceDataLoads.Contains(LearnedHash, dataMemory));
 
-        var replanned = ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash, 0, 2);
+        var replanned = ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash, 0, 2, scalarDataOnDevice: false);
         Assert.Equal(4, replanned.TableReads.Count);
         Assert.Empty(replanned.DeviceDataSlots);
         Assert.False(replanned.Memory[dataMemory].PlanningOnly);
@@ -84,7 +86,7 @@ public sealed class DeviceDataLoadTests
     public void BindingReads_AreNeverLearned()
     {
         var program = BindingAndDataProgram();
-        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash + 1, 0, 2);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash + 1, 0, 2, scalarDataOnDevice: false);
         var memory = new TestWordMemory { Base = TableBase, Words = new uint[16] };
         var inputs = new ResourceRuntimeInputs
         {
@@ -95,7 +97,7 @@ public sealed class DeviceDataLoadTests
         };
         Assert.True(RuntimeValueEvaluator.FlattenResourceTable(plan, inputs, out _));
         Assert.Equal(1, DeviceDataLoads.CountFor(LearnedHash + 1));
-        Assert.Equal(5 - 1, ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash + 1, 0, 2).TableReads.Count);
+        Assert.Equal(5 - 1, ShaderResourcePlan.Extract(program, ShaderStage.Compute, LearnedHash + 1, 0, 2, scalarDataOnDevice: false).TableReads.Count);
     }
 
     // The compiled transactions read the table themselves, so the learning probe is made
@@ -107,7 +109,7 @@ public sealed class DeviceDataLoadTests
     {
         var hash = LearnedHash + 0x10 + (ulong)offset;
         var program = BindingAndDataProgram();
-        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, 0, 2);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, 0, 2, scalarDataOnDevice: false);
         plan.CompileEvaluatorNow();
         var dataSlot = Assert.Single(plan.DeviceDataSlots);
         var memory = new TestWordMemory { Base = TableBase, Words = new uint[16] };
@@ -154,7 +156,7 @@ public sealed class DeviceDataLoadTests
     public void CompiledPaths_LearnNothingWhenNoDataWordIsPending()
     {
         var hash = LearnedHash + 0x20;
-        var plan = ShaderResourcePlan.Extract(BindingAndDataProgram(), ShaderStage.Compute, hash, 0, 2);
+        var plan = ShaderResourcePlan.Extract(BindingAndDataProgram(), ShaderStage.Compute, hash, 0, 2, scalarDataOnDevice: false);
         plan.CompileEvaluatorNow();
         Assert.NotNull(plan.CompiledTableTransaction);
         var memory = new TestWordMemory { Base = TableBase, Words = new uint[16] };

@@ -59,7 +59,7 @@ public sealed partial class GuestImageCache
                     var length = (int)Math.Min((ulong)chunk.Length, tile.TiledSize - done);
                     var span = chunk.AsSpan(0, length);
                     var pieceAddress = address + tile.TiledOffset + done;
-                    if (!_backing.TryReadBacking(pieceAddress, span) && !SharpEmu.Libs.Gpu.GuestBackingServices.TryReadPrtBacking(_backing, pieceAddress, span))
+                    if (!ResidentImageBacking.TryRead(_backing, pieceAddress, span))
                     {
                         Interlocked.Exchange(ref failed, 1);
                         state.Stop();

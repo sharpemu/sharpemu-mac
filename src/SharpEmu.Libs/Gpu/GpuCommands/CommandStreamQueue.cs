@@ -132,6 +132,25 @@ public sealed class CommandStreamQueue
 
     public BlockedSnapshot DsIdleSnapshot { get; private set; }
 
+    // SHARPEMU_END_OF_PIPE_SOFT_WAITS: every queue's releases; null when off. Tests set it before the first interpreter.
+    private EndOfPipeLandings? _landings = EndOfPipeLandings.Configured ? new EndOfPipeLandings() : null;
+
+    internal EndOfPipeLandings? Landings
+    {
+        get => _landings;
+        set
+        {
+            lock (_gate)
+            {
+                _landings = value;
+                foreach (var interpreter in _interpreters)
+                {
+                    if (interpreter is not null) interpreter.Landings = value;
+                }
+            }
+        }
+    }
+
     public CommandStreamQueue(ICommandStreamHost host) : this(host, DefaultBoundariesInFlight)
     {
     }
@@ -225,6 +244,7 @@ public sealed class CommandStreamQueue
                 PendingLabelLookup = TryGetPendingLabel,
                 QueuedSubmissionsLookup = CollectQueuedSubmissions,
                 SyntheticOcclusionCounterBank = _syntheticOcclusionCounters,
+                Landings = _landings,
             };
             _interpreters[queueId] = created;
             return created;
@@ -1371,6 +1391,8 @@ public sealed class CommandStreamQueue
     {
         lock (_gate)
         {
+            // A wake event like any other: a slice running now has not parked yet and stays runnable (WakesRacedWithSlice).
+            _wakeGeneration++;
             var ds = DsTrace.Gpu && DsTrace.Armed;
             var dsWoken = 0UL;
             var dsOldest = 0L;
@@ -1569,6 +1591,10 @@ public sealed class CommandStreamQueue
         var dsSlice = DsTrace.Gpu && DsTrace.Armed;
         var dsStarted = dsSlice ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
         var dsCpuStarted = dsSlice ? DsTrace.SelfCpuNs() : 0UL;
+        // SHARPEMU_END_OF_PIPE_SOFT_WAITS: whether this slice may wait softly for a release, and the
+        // completion it reads landings against; both read under the gate below.
+        var mayDeferForLanding = false;
+        ulong completedGpuTick = 0;
         lock (_gate)
         {
             if (_processing)
@@ -1602,6 +1628,11 @@ public sealed class CommandStreamQueue
                         $"blocked={submission.Blocked} left={queue.Count}");
                 _submissionCount--;
                 _nextQueue = (selected + 1) % QueueCount;
+                if (_landings is not null)
+                {
+                    mayDeferForLanding = HasOtherRunnableLocked(selected);
+                    completedGpuTick = _lastCompletedGpuTick;
+                }
             }
 
             _processing = true;
@@ -1697,7 +1728,7 @@ public sealed class CommandStreamQueue
                 completionHost.BeginSubmissionCompletionCapture(submission!.QueueId, submission.SubmissionId);
                 captureStarted = true;
             }
-            complete = RunSlice(submission!);
+            complete = RunSlice(submission!, mayDeferForLanding, completedGpuTick);
             if (captureStarted)
             {
                 prefixCompletion = completionHost!.EndSubmissionCompletionCapture(complete);
@@ -1746,15 +1777,22 @@ public sealed class CommandStreamQueue
             }
             else if (!complete)
             {
+                // A soft wait for a release keeps the head runnable behind the other queues (SelectQueueLocked).
+                long deferredSince = 0;
+                var deferral = _landings is null ? null : _interpreters[submission!.QueueId]?.TakeLandingDeferral(out deferredSince);
+                submission!.Deferral = deferral;
+                submission.DeferredSinceTicks = deferral is null ? 0 : deferredSince;
+
                 // A wake that arrived while this slice ran was delivered to a head that was
                 // not parked yet, so parking now would sleep until the retry timer: the
                 // slice re-runs instead and reads what changed. Polling a label the GPU is
                 // about to write is exactly this race, and the timer is a hundred
-                // milliseconds against a submission that completes in one.
-                var raced = _wakeGeneration != sliceWakeGeneration &&
-                    submission!.RacedWakeGeneration != _wakeGeneration;
-                submission!.Blocked = !raced;
-                if (!raced)
+                // milliseconds against a submission that completes in one. A soft wait
+                // does not park, so it has no wake to miss.
+                var raced = deferral is null && _wakeGeneration != sliceWakeGeneration &&
+                    submission.RacedWakeGeneration != _wakeGeneration;
+                submission.Blocked = deferral is null && !raced;
+                if (submission.Blocked)
                 {
                     _blockedHeadsPossible = true;
                 }
@@ -1777,7 +1815,7 @@ public sealed class CommandStreamQueue
 
                 submission.BlockedPacketAddress = packetAddress;
                 submission.Wait = submission.Commands.SuspendCondition;
-                if (FrameOverlapProbe.Enabled && !raced)
+                if (FrameOverlapProbe.Enabled && submission.Blocked)
                 {
                     // SHARPEMU_FRAME_OVERLAP_PROBE=1: a park on bytes only a completion writes refuses the frame.
                     FrameOverlapProbe.Active?.NoteSuspendedWalk(submission.Wait);
@@ -1949,7 +1987,7 @@ public sealed class CommandStreamQueue
             DsTrace.SelfCpuNs() - cpuStarted);
     }
 
-    private bool RunSlice(CommandSubmission submission)
+    private bool RunSlice(CommandSubmission submission, bool mayDeferForLanding = false, ulong completedGpuTick = 0)
     {
         if (submission.Kind == CommandSubmissionKind.FlipPreparation)
         {
@@ -1993,6 +2031,8 @@ public sealed class CommandStreamQueue
 
         SlicesRun++;
         var sliceStarted = PacketProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        processor.MayDeferForLanding = mayDeferForLanding;
+        processor.CompletedGpuTick = completedGpuTick;
         _host.BeginSubmission(submission.QueueId, submission.SubmissionId, submission.GeometrySnapshots);
         processor.ConstantEngineComplete = true;
         if (firstSlice)
@@ -2332,13 +2372,53 @@ public sealed class CommandStreamQueue
         for (var offset = 0; offset < QueueCount; offset++)
         {
             var queueId = (_nextQueue + offset) % QueueCount;
-            if (_queues[queueId].First is { } head && !head.Value.Blocked)
+            if (_queues[queueId].First is { } head && !head.Value.Blocked && DeferralReadyLocked(head.Value))
             {
                 return queueId;
             }
         }
 
+        // SHARPEMU_END_OF_PIPE_SOFT_WAITS: a head waiting softly for a release runs once no other head can.
+        if (_landings is not null)
+        {
+            for (var offset = 0; offset < QueueCount; offset++)
+            {
+                var queueId = (_nextQueue + offset) % QueueCount;
+                if (_queues[queueId].First is { } head && !head.Value.Blocked)
+                {
+                    return queueId;
+                }
+            }
+        }
+
         return -1;
+    }
+
+    // A head without a soft wait, or whose release completed on the GPU, whose deadline passed, or any head once the queue
+    // stops.
+    private bool DeferralReadyLocked(CommandSubmission submission) =>
+        submission.Deferral is not { } landing || _landings is not { } landings || landing.IsComplete(_lastCompletedGpuTick) ||
+        _stopping || !_accepting ||
+        System.Diagnostics.Stopwatch.GetTimestamp() - submission.DeferredSinceTicks >= landings.CapTicks;
+
+    // Another queue's head may run now without a soft wait of its own: a slice of the selected queue may then wait softly.
+    private bool HasOtherRunnableLocked(int selected)
+    {
+        if (_controlBarriers.Count != 0 || _stopping || !_accepting)
+        {
+            return false;
+        }
+
+        for (var queueId = 0; queueId < QueueCount; queueId++)
+        {
+            if (queueId != selected && _queues[queueId].First is { } head && !head.Value.Blocked &&
+                DeferralReadyLocked(head.Value))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private bool HasRunnableWorkLocked() => IsControlBarrierReadyLocked() || SelectQueueLocked() >= 0;

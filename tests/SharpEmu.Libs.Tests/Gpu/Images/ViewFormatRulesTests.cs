@@ -79,6 +79,7 @@ public sealed class ViewFormatRulesTests
         var replicated = ViewFormatRules.PackDestinationSelect(4, 4, 4, 4);
         Assert.True(ViewFormatRules.IsSupportedSampledDepthView(GpuFormat.D32Sfloat, GpuFormat.R32Sfloat, replicated));
         Assert.True(ViewFormatRules.IsSupportedSampledDepthView(GpuFormat.D16Unorm, GpuFormat.R16Unorm, ViewFormatRules.PackDestinationSelect(4, 0, 0, 1)));
+        Assert.True(ViewFormatRules.IsSupportedSampledDepthView(GpuFormat.D16Unorm, GpuFormat.R16Unorm, ViewFormatRules.PackDestinationSelect(4, 4, 4, 1)));
         Assert.True(ViewFormatRules.IsSupportedSampledDepthView(GpuFormat.D32Sfloat, GpuFormat.R32Sfloat, ViewFormatRules.PackDestinationSelect(4, 5, 6, 7)));
         Assert.False(ViewFormatRules.IsSupportedSampledDepthView(GpuFormat.D32Sfloat, GpuFormat.R32Sfloat, ViewFormatRules.PackDestinationSelect(5, 0, 0, 1)));
         Assert.False(ViewFormatRules.IsSupportedSampledDepthView(GpuFormat.R32Sfloat, GpuFormat.R32Sfloat, replicated));

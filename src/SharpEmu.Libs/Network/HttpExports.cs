@@ -9,19 +9,22 @@ namespace SharpEmu.Libs.Network;
 /// <summary>
 /// libSceHttp in "offline" mode. The handle hierarchy (context, template, connection, request)
 /// is tracked faithfully so that init-before-use, bad ids and double deletes behave like the
-/// SDK, but no request ever reaches a network: sending fails with SCE_HTTP_ERROR_NETWORK and
-/// every response query reports the same error with zeroed outputs.
+/// SDK, but no request ever reaches a network: sending fails as on a console whose host name never
+/// resolves (SCE_HTTP_ERROR_RESOLVER_ENODNS), and every response query reports that no response
+/// exists (SCE_HTTP_ERROR_BEFORE_SEND) with zeroed outputs.
 /// </summary>
 /// <remarks>
-/// Error codes come from the two references that agree (BEFORE_INIT, OUT_OF_MEMORY, NETWORK,
-/// ABORTED, INVALID_ID, INVALID_VALUE, INVALID_URL). Arguments the SDK documents as invalid
+/// Error codes come from the two references that agree (BEFORE_INIT, OUT_OF_MEMORY, ABORTED,
+/// INVALID_ID, INVALID_VALUE, INVALID_URL); the offline send and response codes (RESOLVER_ENODNS,
+/// BEFORE_SEND) are upstream SharpEmu's. Arguments the SDK documents as invalid
 /// but whose dedicated code no reference pins (an unknown scheme, a bad method) report
 /// SCE_HTTP_ERROR_INVALID_VALUE, the generic documented code.
 /// </remarks>
 public static partial class HttpExports
 {
     private const int HttpErrorBeforeInit = unchecked((int)0x80431001);
-    private const int HttpErrorNetwork = unchecked((int)0x80431063);
+    private const int HttpErrorBeforeSend = unchecked((int)0x80431065);
+    private const int HttpErrorResolverNoDns = unchecked((int)0x80436002);
     private const int HttpErrorAborted = unchecked((int)0x80431080);
     private const int HttpErrorInvalidId = unchecked((int)0x80431100);
     private const int HttpErrorInvalidValue = unchecked((int)0x804311FE);
@@ -202,7 +205,8 @@ public static partial class HttpExports
                 return ctx.SetReturn(error);
             }
 
-            if (userAgentAddress == 0 || httpVersion is < 0 or > 2 || autoProxyConfig is < 0 or > 1)
+            // A null user agent is accepted (as upstream does); nothing is ever sent, so it is never read.
+            if (httpVersion is < 0 or > 2 || autoProxyConfig is < 0 or > 1)
             {
                 return ctx.SetReturn(HttpErrorInvalidValue);
             }
@@ -330,7 +334,8 @@ public static partial class HttpExports
         LibraryName = "libSceHttp")]
     public static int HttpDeleteRequest(CpuContext ctx) => DeleteNode(ctx, NodeKind.Request);
 
-    // (requestId, postData, size). Offline: the request is marked sent and fails with NETWORK.
+    // (requestId, postData, size). Offline: the request is marked sent and fails because the host
+    // name never resolves.
     [SysAbiExport(
         Nid = "1e2BNwI-XzE",
         ExportName = "sceHttpSendRequest",
@@ -358,8 +363,8 @@ public static partial class HttpExports
             }
 
             request.Sent = true;
-            TraceHttp("send_request", requestId, ctx[CpuRegister.Rsi], ctx[CpuRegister.Rdx], 0, 0);
-            return ctx.SetReturn(HttpErrorNetwork);
+            TraceHttp("send_request_no_network", requestId, ctx[CpuRegister.Rsi], ctx[CpuRegister.Rdx], 0, 0);
+            return ctx.SetReturn(HttpErrorResolverNoDns);
         }
     }
 
@@ -974,7 +979,8 @@ public static partial class HttpExports
             WriteZeros(ctx, ctx[register], size);
         }
 
-        return ctx.SetReturn(HttpErrorNetwork);
+        // No send ever completes, so no response exists to read.
+        return ctx.SetReturn(HttpErrorBeforeSend);
     }
 
     private static int ClearCaList(CpuContext ctx)

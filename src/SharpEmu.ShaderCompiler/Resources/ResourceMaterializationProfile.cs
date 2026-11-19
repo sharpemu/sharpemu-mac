@@ -52,6 +52,7 @@ public static class ResourceMaterializationProfile
         HitValidation,
         InPlaceComparison,
         HitSnapshot,
+        CompiledBranchEvaluation,
         Count,
     }
 

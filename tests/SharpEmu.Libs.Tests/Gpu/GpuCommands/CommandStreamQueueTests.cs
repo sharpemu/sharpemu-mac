@@ -773,6 +773,71 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
     }
 
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    public void RetryNotificationDuringWaitRead_IsRetainedAndRechecksPredicate(int notification, bool labelReady)
+    {
+        var (host, queue) = NewQueue();
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(9));
+        host.AfterWaitOperandRead = address =>
+        {
+            Assert.Equal(Label, address);
+            host.AfterWaitOperandRead = null;
+            if (labelReady) host.WriteDword(Label, 1);
+            switch (notification)
+            {
+                case 0: queue.NotifyCompletedGpuTick(1); break;
+                case 1: queue.RetryBlocked(); break;
+                case 2: queue.NotifyPublicationCompleted(); break;
+                default: throw new ArgumentOutOfRangeException(nameof(notification));
+            }
+        };
+
+        // The first look still contains zero. An unmet first look reads again, committing the work that may write
+        // the label, before the wait sleeps (GpuCommandInterpreter.Waits): that second look sees a label written
+        // meanwhile; otherwise the notification keeps the head runnable for the next attempt.
+        if (labelReady)
+        {
+            Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+            Assert.Equal(2, host.OperandReads.Count(address => address == Label));
+            Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
+            Assert.Equal(SliceResult.NoWork, queue.ProcessOne());
+        }
+        else
+        {
+            Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+            Assert.Equal(0, queue.BlockedQueueCount);
+            Assert.True(queue.HasUnblockedPending);
+            Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+            Assert.Equal(4, host.OperandReads.Count(address => address == Label));
+            // A wake is not permission to skip WAIT_REG_MEM or busy-retry indefinitely.
+            Assert.Equal(1, queue.BlockedQueueCount);
+            Assert.Equal(SliceResult.AllBlocked, queue.ProcessOne());
+            Assert.NotEqual(9u, queue.GetInterpreter(0).InstanceCount);
+        }
+    }
+
+    [Fact]
+    public void RepeatedGpuTickDuringWaitRead_DoesNotCreateAnotherRetry()
+    {
+        var (host, queue) = NewQueue();
+        queue.NotifyCompletedGpuTick(1);
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, WaitEqual(Label, 1));
+        host.AfterWaitOperandRead = _ => queue.NotifyCompletedGpuTick(1);
+
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(1, queue.BlockedQueueCount);
+        Assert.False(queue.HasUnblockedPending);
+        Assert.Equal(SliceResult.AllBlocked, queue.ProcessOne());
+    }
+
     [Fact]
     public void CompletedGpuTick_RetriesBlockedWaitWithoutTheTimeout()
     {

@@ -363,24 +363,23 @@ public sealed class DirectImageTableTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void MixedDimensionsRetainEveryCandidateAndUseSeparateBindings(bool arrayFirst)
+    public void MixedDimensionsRetainEveryCandidateAsArrayReads(bool arrayFirst)
     {
         var (snapshot, request) = PrepareMixedDimensions(1, arrayFirst);
         Assert.Equal(3, snapshot.Images.Length);
         var images = request.Resources.Info.Images;
         Assert.Equal(3, images[0].IndirectResources.Count);
-        Assert.Contains(images, image => image.Dimension == ImageDimension.Dim2D);
-        Assert.Contains(images, image => image.Dimension == ImageDimension.Dim2DArray);
+        Assert.All(images, image => Assert.Equal(ImageDimension.Dim2DArray, image.Dimension));
         var mapping = (int)images[0].IndirectMappingOffset;
         Assert.Equal(32u, snapshot.FlattenedResourceTable[mapping]);
         Assert.Equal(344u + 31 * 32, snapshot.FlattenedResourceTable[mapping + 63]);
         Assert.Equal(2u, snapshot.FlattenedResourceTable[mapping + 64]);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
 
-        // Both backends declare one image class per dimension, so a candidate list that
-        // mixes 2D and 2D-array descriptors translates across the two binding classes.
+        // The array instruction reads every candidate, the 2D T#s included, as a 2D array (upstream
+        // SampledArrayRead), so the MSL declares the 2D-array class only.
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
-        Assert.Contains("_2d [[id(", metal.Source);
+        Assert.DoesNotContain("_2d [[id(", metal.Source);
         Assert.Contains("_2d_array [[id(", metal.Source);
     }
 

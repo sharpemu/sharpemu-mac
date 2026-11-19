@@ -176,6 +176,7 @@ internal static class GraphicsProgramsComparer
         if (memo.PositionExportControl != full.PositionExportControl) return "vertex.position_export";
         if (!SameClipSpace(memo.ClipSpace, full.ClipSpace)) return "vertex.clip_space";
         if (memo.StartInstanceUserData != full.StartInstanceUserData) return "vertex.start_instance";
+        if (memo.BaseVertexUserData != full.BaseVertexUserData) return "vertex.base_vertex";
         return StageDifference("vertex", memo.Stage, full.Stage);
     }
 
@@ -244,7 +245,9 @@ internal static class GraphicsProgramsComparer
     {
         if (!ReferenceEquals(memo.Program, full.Program)) return stage + ".program";
         if (memo.ShaderBase != full.ShaderBase) return stage + ".shader_base";
-        if (memo.ThreadLimits != full.ThreadLimits || memo.MeshDraw != full.MeshDraw) return stage + ".launch";
+        if (memo.ThreadLimits != full.ThreadLimits || memo.GpuThreadLimits != full.GpuThreadLimits || memo.MeshDraw != full.MeshDraw)
+            return stage + ".launch";
+        if (!Equals(memo.CompileFallback, full.CompileFallback)) return stage + ".compile_fallback";
         if (!SameArray(memo.TessellationData, full.TessellationData)) return stage + ".tessellation_data";
         if (!SameArray(memo.CallArguments, full.CallArguments) || !SameArray(memo.CallTargets, full.CallTargets) ||
             !SameArray(memo.CallRecords, full.CallRecords) || !SameArray(memo.CallRecordRanges, full.CallRecordRanges))
@@ -263,6 +266,7 @@ internal static class GraphicsProgramsComparer
         if (!memo.UserData.AsSpan().SequenceEqual(full.UserData)) return stage + ".user_data";
         if (!memo.DeviceAddressRanges.AsSpan().SequenceEqual(full.DeviceAddressRanges)) return stage + ".ranges";
         if (!SameArray(memo.MipStatistics, full.MipStatistics)) return stage + ".mip_statistics";
+        if (!memo.Heaps.AsSpan().SequenceEqual(full.Heaps)) return stage + ".heaps";
         if (memo.BindlessImages.Length != full.BindlessImages.Length) return stage + ".bindless";
         for (var index = 0; index < memo.BindlessImages.Length; index++)
         {
@@ -315,6 +319,7 @@ internal static class GraphicsProgramsComparer
             MixWords(snapshot.UserData);
             MixWords(snapshot.MipStatistics ?? []);
             foreach (var range in snapshot.DeviceAddressRanges) Mix((ulong)range.GetHashCode());
+            foreach (var heap in snapshot.Heaps) Mix((ulong)heap.GetHashCode());
         }
 
         Mix(programs.Vertex.Id);
@@ -325,6 +330,7 @@ internal static class GraphicsProgramsComparer
         foreach (var attribute in vertex.Attributes) Mix((ulong)attribute.GetHashCode());
         Mix((ulong)(vertex.ClipSpace with { UserClipPlanes = null }).GetHashCode());
         Mix((uint)vertex.StartInstanceUserData);
+        Mix((uint)vertex.BaseVertexUserData);
         Mix((vertex.IeeeMode ? 1u : 0u) | (vertex.Dx10Clamp ? 2u : 0u) | ((ulong)vertex.FloatMode << 8));
         MixStage(vertex.Stage);
         var pixel = programs.PixelInput;

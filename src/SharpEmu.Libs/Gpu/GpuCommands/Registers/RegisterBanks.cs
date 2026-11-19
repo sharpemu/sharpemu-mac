@@ -115,6 +115,9 @@ public sealed class RegisterBanks
     // Raised by every writer hook below; lowered when a snapshot is taken.
     private bool _writtenSinceSnapshot = true;
 
+    // Only Snapshot publishes the read-only banks used by deferred draws.
+    internal bool IsSnapshot { get; private set; }
+
     // A read-only copy that shares every part with the live banks until they next write it: a
     // deferred draw takes one per draw, and between draws only a few parts change.
     public RegisterBanks Snapshot() => SnapshotCore(null, reuse: true);
@@ -157,6 +160,7 @@ public sealed class RegisterBanks
             snapshot._lastSnapshot = null;
         }
 
+        snapshot.IsSnapshot = true;
         snapshot.CompositeDepthSizeXy = CompositeDepthSizeXy;
         snapshot.UserDataMarker = UserDataMarker;
         snapshot.IndexTypeAndSize = IndexTypeAndSize;

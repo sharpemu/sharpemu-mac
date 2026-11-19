@@ -194,10 +194,13 @@ public sealed class CompiledResourceTransactionTests
         Assert.Equal(expected, specialization);
         Assert.Equal(memory.DescriptorAddress, snapshot.Buffers[0][0]);
         Assert.NotEqual(previous.Buffers[0][0], snapshot.Buffers[0][0]);
+        // Without portable buffers (PortableBufferWord.Enabled) the stride is specialized (PackedStride, which the MSL
+        // translator addresses the buffer by), so a new stride takes a new guard and specialization.
         memory.DescriptorStride = 16u << 16;
         Assert.True(ResourceMaterializer.Materialize(plan, memory.Inputs(false), ref snapshot, ref specialization));
         Assert.NotSame(guard, plan.SpecializationGuard);
         Assert.NotEqual(expected, specialization);
+        Assert.Equal(16u << 16, snapshot.Buffers[0][1]);
         var saved = snapshot;
         var savedSpecialization = specialization;
         var savedGuard = plan.SpecializationGuard;

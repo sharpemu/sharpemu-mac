@@ -673,6 +673,21 @@ public sealed unsafe partial class DirectExecutionBackend
 	}
 
 	/// <summary>
+	/// With r10 = cursor end minus cursor (bytes), leaves r10 = the available dwords exactly as
+	/// <c>AgcExports.GetRemainingCommandDwords</c> computes them before the reserve: the signed byte
+	/// distance divided by four (toward zero), truncated to 32 bits. An end below the cursor (a null
+	/// end) therefore still has room, as titles rely on. Uses r11; changes the flags.
+	/// </summary>
+	private static void EmitAgcAvailableDwords(List<byte> code)
+	{
+		code.AddRange([0x4D, 0x8D, 0x5A, 0x03]);   // lea r11, [r10+3]
+		code.AddRange([0x4D, 0x85, 0xD2]);         // test r10, r10
+		code.AddRange([0x4D, 0x0F, 0x48, 0xD3]);   // cmovs r10, r11       a negative span rounds toward zero
+		code.AddRange([0x49, 0xC1, 0xFA, 0x02]);   // sar r10, 2
+		code.AddRange([0x45, 0x89, 0xD2]);         // mov r10d, r10d       truncated to 32 bits
+	}
+
+	/// <summary>
 	/// An sceAgc builder that appends one fixed-shape packet, as guest-side code: with the command
 	/// buffer in RDI it reads the cursor, the end and the reserve, declines (jumps to the import's
 	/// trampoline, with every argument register intact) unless the buffer is non-null and has the room
@@ -708,11 +723,7 @@ public sealed unsafe partial class DirectExecutionBackend
 		Emit(0x48, 0x8B, 0x47, CursorUpOffset);                // mov rax, [rdi+0x10]      cursor
 		Emit(0x4C, 0x8B, 0x57, CursorDownOffset);              // mov r10, [rdi+0x18]      end
 		Emit(0x49, 0x29, 0xC2);                                // sub r10, rax
-		EmitBranchToSlowPath(0x72);                            // jb slow: end below the cursor
-		Emit(0x49, 0xC1, 0xEA, 0x02);                          // shr r10, 2               available dwords
-		Emit(0x41, 0xBB); EmitImm32(0xFFFF_FFFFu);             // mov r11d, 0xFFFFFFFF
-		Emit(0x4D, 0x39, 0xDA);                                // cmp r10, r11
-		EmitBranchToSlowPath(0x77);                            // ja slow: the export clamps the span to 32 bits
+		EmitAgcAvailableDwords(code);                          // r10 = available dwords, as the export truncates them
 		Emit(0x44, 0x8B, 0x5F, ReservedDwordsOffset);          // mov r11d, [rdi+0x30]     reserve
 		Emit(0x49, 0x83, 0xC3, checked((byte)spec.SizeDwords)); // add r11, size
 		Emit(0x4D, 0x39, 0xDA);                                // cmp r10, r11
@@ -761,6 +772,20 @@ public sealed unsafe partial class DirectExecutionBackend
 			Emit(0xF7, (byte)(0xC0 | (source & 7))); EmitImm32(slot.EnableMask);
 			Emit(0x74, 0);
 			var disabledFixup = code.Count - 1;
+			var vgprFixup = -1;
+			if (slot.DisableMask != 0)
+			{
+				// test reg32, disableMask / jnz disabled (the values come in VGPRs: no slot)
+				if (source >= 8)
+				{
+					Emit(0x41);
+				}
+
+				Emit(0xF7, (byte)(0xC0 | (source & 7))); EmitImm32(slot.DisableMask);
+				Emit(0x75, 0);
+				vgprFixup = code.Count - 1;
+			}
+
 			if (slot.FieldShift < 0)
 			{
 				Emit(0x41, 0xBA); EmitImm32(1);                                                 // mov r10d, 1
@@ -786,6 +811,11 @@ public sealed unsafe partial class DirectExecutionBackend
 
 			Emit(0xEB, 0x06);                                                                   // jmp done
 			code[disabledFixup] = checked((byte)(code.Count - (disabledFixup + 1)));
+			if (vgprFixup >= 0)
+			{
+				code[vgprFixup] = checked((byte)(code.Count - (vgprFixup + 1)));
+			}
+
 			Emit(0x41, 0xBA); EmitImm32(slot.Disabled);                                         // disabled: mov r10d, imm32
 			if (slot.ShiftLeft != 0)
 			{
@@ -996,11 +1026,7 @@ public sealed unsafe partial class DirectExecutionBackend
 		Emit(0x48, 0x8B, 0x47, CursorUpOffset);                       // mov rax, [rdi+0x10]      cursor
 		Emit(0x4C, 0x8B, 0x57, CursorDownOffset);                     // mov r10, [rdi+0x18]      end
 		Emit(0x49, 0x29, 0xC2);                                       // sub r10, rax
-		EmitBranchToSlowPath(0x72);                                   // jb slow
-		Emit(0x49, 0xC1, 0xEA, 0x02);                                 // shr r10, 2               available dwords
-		Emit(0x41, 0xBB); EmitImm32(0xFFFF_FFFFu);                    // mov r11d, 0xFFFFFFFF
-		Emit(0x4D, 0x39, 0xDA);                                       // cmp r10, r11
-		EmitBranchToSlowPath(0x77);                                   // ja slow
+		EmitAgcAvailableDwords(code);                                 // r10 = available dwords, as the export truncates them
 		Emit(0x44, 0x8B, 0x5F, ReservedDwordsOffset);                 // mov r11d, [rdi+0x30]     reserve
 		if (range)
 		{

@@ -37,6 +37,8 @@ public sealed class SaveDataMountValidationTests : IDisposable
     private const int NoSpaceFs = unchecked((int)0x809F000A);
     private const int BadMounted = unchecked((int)0x809F000D);
     private const int InvalidLoginUser = unchecked((int)0x809F0011);
+    private const int ResourceInvalid = unchecked((int)0x809F001C);
+    private const int NoNeedConvert = unchecked((int)0x809F001E);
     private const uint ModeReadOnly = 1;
     private const uint ModeReadWrite = 2;
     private const uint ModeCreate = 4;
@@ -258,7 +260,8 @@ public sealed class SaveDataMountValidationTests : IDisposable
         Directory.CreateDirectory(SlotDir);
         File.WriteAllBytes(Path.Combine(SlotDir, "data.bin"), [1, 2, 3]);
         WriteConvert(DirName);
-        Assert.Equal(0, SaveDataExports.SaveDataConvert(Reg(rdi: ConvertParam)));
+        // An existing save needs no conversion: NO_NEED_CONVERT, which titles treat as "mount as usual".
+        Assert.Equal(NoNeedConvert, SaveDataExports.SaveDataConvert(Reg(rdi: ConvertParam)));
         Assert.Equal(0, SaveDataExports.SaveDataGetConvertProgress(Reg(rdi: ProgressOut)));
         Assert.Equal(1.0f, ReadProgress());
         Assert.Equal([1, 2, 3], File.ReadAllBytes(Path.Combine(SlotDir, "data.bin")));
@@ -277,7 +280,8 @@ public sealed class SaveDataMountValidationTests : IDisposable
         Assert.Equal(NotFound, SaveDataExports.SaveDataCheckBackupData(Reg(rdi: BackupParam)));
         Assert.Equal(NotFound, SaveDataExports.SaveDataRestoreBackupData(Reg(rdi: BackupParam)));
         Assert.Equal(ParameterError, SaveDataExports.SaveDataCheckBackupData(Reg(rdi: 0)));
-        Assert.Equal(0, SaveDataExports.SaveDataCancel(Reg()));
+        // Cancel releases a prepared transaction resource; resource 0 was never created.
+        Assert.Equal(ResourceInvalid, SaveDataExports.SaveDataCancel(Reg()));
     }
 
     private void WriteConvert(string dirName)

@@ -106,6 +106,8 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [Fact]
     public void LinkedProgram_SkipsItsDispatchWhileTheModuleCompiles()
     {
+        // With no linked compile wait, the dispatch is skipped at once.
+        _executor.LinkedCompileWait = 0;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _pipelines.PendingComputeCompletion = completion.Task;
         var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x1234, Bindings = new BindingLayout { CallTargetCount = 1 } };
@@ -120,6 +122,133 @@ public sealed class RenderExecutorComputeTests : IDisposable
         completion.SetResult();
         _executor.Dispatch(6, Banks(), 4, 2, 1, 0x41);
         AssertDispatched(4, 2, 1);
+    }
+
+    [Fact]
+    public void LinkedProgram_WaitsForAModuleThatCompilesWithinTheBound()
+    {
+        _executor.LinkedCompileWait = System.Diagnostics.Stopwatch.Frequency * 5;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pipelines.PendingComputeCompletion = completion.Task;
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x1235, Bindings = new BindingLayout { CallTargetCount = 1 } };
+        _pipelines.Compute = ComputeProgram(Stage(program));
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(50);
+            completion.SetResult();
+        });
+        _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41);
+        AssertDispatched(4, 2, 1);
+    }
+
+    [Fact]
+    public void LinkedProgram_WhoseCompileOutlastsTheBoundIsSkippedWithoutAnotherWait()
+    {
+        _executor.LinkedCompileWait = System.Diagnostics.Stopwatch.Frequency / 20;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pipelines.PendingComputeCompletion = completion.Task;
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x1236, Bindings = new BindingLayout { CallTargetCount = 1 } };
+        _pipelines.Compute = ComputeProgram(Stage(program));
+        _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41);
+        AssertNotDispatched();
+        var attempts = _pipelines.ComputePipelineAttempts;
+        Assert.True(attempts > 1);
+
+        _executor.Dispatch(6, Banks(), 4, 2, 1, 0x41);
+        AssertNotDispatched();
+        Assert.Equal(attempts + 1, _pipelines.ComputePipelineAttempts);
+
+        completion.SetResult();
+        _executor.Dispatch(7, Banks(), 4, 2, 1, 0x41);
+        AssertDispatched(4, 2, 1);
+    }
+
+    [Fact]
+    public void LinkedProgram_KnownToCompileForMinutes_WaitsOnlyTheShortBound()
+    {
+        // A session recorded the program slow, so the 5 s bound is not spent on a compile that outlasts it.
+        _executor.LinkedCompileWait = System.Diagnostics.Stopwatch.Frequency * 5;
+        _executor.KnownSlowLinkedCompileWait = System.Diagnostics.Stopwatch.Frequency / 20;
+        _pipelines.PendingComputeCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously).Task;
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x1237, Bindings = new BindingLayout { CallTargetCount = 1 } };
+        _pipelines.SlowLinkedPrograms.Add(program.Hash);
+        _pipelines.Compute = ComputeProgram(Stage(program));
+        _executor.SlowLinkedCompileRecordTicks = System.Diagnostics.Stopwatch.Frequency / 10;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41);
+        AssertNotDispatched();
+        Assert.True(System.Diagnostics.Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(2));
+
+        // Still compiling past the record threshold: already known, so nothing new is recorded.
+        Thread.Sleep(150);
+        _executor.Dispatch(6, Banks(), 4, 2, 1, 0x41);
+        AssertNotDispatched();
+        Assert.Empty(_pipelines.RecordedLinkedCompiles);
+    }
+
+    [Fact]
+    public void LinkedProgram_KnownSlowButReadyWithinTheShortBound_IsDispatched()
+    {
+        // A module created from stored data is ready within the short bound: the dispatch runs and nothing is recorded.
+        _executor.LinkedCompileWait = System.Diagnostics.Stopwatch.Frequency * 5;
+        _executor.KnownSlowLinkedCompileWait = System.Diagnostics.Stopwatch.Frequency * 2;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pipelines.PendingComputeCompletion = completion.Task;
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x1238, Bindings = new BindingLayout { CallTargetCount = 1 } };
+        _pipelines.SlowLinkedPrograms.Add(program.Hash);
+        _pipelines.Compute = ComputeProgram(Stage(program));
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(20);
+            completion.SetResult();
+        });
+        _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41);
+        AssertDispatched(4, 2, 1);
+        Assert.Empty(_pipelines.RecordedLinkedCompiles);
+    }
+
+    [Fact]
+    public void LinkedProgram_StillCompilingAfterTheRecordThreshold_IsRecordedSlowOnce()
+    {
+        _executor.LinkedCompileWait = System.Diagnostics.Stopwatch.Frequency / 50;
+        _executor.SlowLinkedCompileRecordTicks = System.Diagnostics.Stopwatch.Frequency / 10;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pipelines.PendingComputeCompletion = completion.Task;
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x1239, Bindings = new BindingLayout { CallTargetCount = 1 } };
+        _pipelines.Compute = ComputeProgram(Stage(program));
+        _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41);
+        AssertNotDispatched();
+        Assert.Empty(_pipelines.RecordedLinkedCompiles);
+
+        Thread.Sleep(150);
+        _executor.Dispatch(6, Banks(), 4, 2, 1, 0x41);
+        _executor.Dispatch(7, Banks(), 4, 2, 1, 0x41);
+        AssertNotDispatched();
+        Assert.Equal(new[] { (program.Hash, true) }, _pipelines.RecordedLinkedCompiles);
+
+        completion.SetResult();
+        _executor.Dispatch(8, Banks(), 4, 2, 1, 0x41);
+        AssertDispatched(4, 2, 1);
+        Assert.Single(_pipelines.RecordedLinkedCompiles);
+    }
+
+    [Fact]
+    public void LinkedProgram_KnownSlowWhoseCompileEndsWithinTheNormalBound_IsRecordedFastAgain()
+    {
+        _executor.LinkedCompileWait = System.Diagnostics.Stopwatch.Frequency * 5;
+        _executor.KnownSlowLinkedCompileWait = System.Diagnostics.Stopwatch.Frequency / 50;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pipelines.PendingComputeCompletion = completion.Task;
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x123A, Bindings = new BindingLayout { CallTargetCount = 1 } };
+        _pipelines.SlowLinkedPrograms.Add(program.Hash);
+        _pipelines.Compute = ComputeProgram(Stage(program));
+        _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41);
+        AssertNotDispatched();
+
+        completion.SetResult();
+        _executor.Dispatch(6, Banks(), 4, 2, 1, 0x41);
+        AssertDispatched(4, 2, 1);
+        Assert.Equal(new[] { (program.Hash, false) }, _pipelines.RecordedLinkedCompiles);
     }
 
     private static BufferResourceInfo ClearResource(bool read = false, bool formatted = true, bool written = true, uint maxByteExtent = 16, uint packedStride = 16) =>
@@ -243,7 +372,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [Fact]
     public void StorageWrites_InsertTheHazardBarrierBeforeThePipelineBind()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written]), buffers: [BufferDescriptor(VertexBase, 4, 16)]));
         _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
         Assert.True(_host.Calls.IndexOf("write_hazard_barrier") < _host.Calls.IndexOf("bind_pipeline Compute C1"));
@@ -336,8 +465,8 @@ public sealed class RenderExecutorComputeTests : IDisposable
         var source = BufferDescriptor(valueAddress, 0, 1);
         var program = Program(ShaderStageKind.Compute, buffers:
         [
-            new BufferResourceInfo(Read: true, Written: false, Atomic: false, Formatted: false, Scalar: true, MaxByteExtent: 4, PackedStride: 0),
-            ClearResource(maxByteExtent: 4, packedStride: 4),
+            new BufferResourceInfo(Read: true, Written: false, Atomic: false, Formatted: false, Scalar: true, MaxByteExtent: 4),
+            ClearResource(maxByteExtent: 4),
         ]);
         _pipelines.Compute = ComputeProgram(Stage(program, buffers: [source, target], userData: [.. target, .. source]));
     }
@@ -385,10 +514,10 @@ public sealed class RenderExecutorComputeTests : IDisposable
         { "read-modify-write", ClearResource(read: true), BufferDescriptor(MetadataAddress, 16, 256) },
         { "unformatted", ClearResource(formatted: false), BufferDescriptor(MetadataAddress, 16, 256) },
         { "narrow extent", ClearResource(maxByteExtent: 4), BufferDescriptor(MetadataAddress, 16, 256) },
-        { "stride mismatch", ClearResource(packedStride: 8), BufferDescriptor(MetadataAddress, 8, 256) },
+        { "stride mismatch", ClearResource(), BufferDescriptor(MetadataAddress, 8, 256) },
         { "other format", ClearResource(), BufferDescriptor(MetadataAddress, 16, 256, format: 10) },
-        { "swizzled", ClearResource(packedStride: 16 | (1u << 14)), BufferDescriptor(MetadataAddress, 16, 256, swizzle: true) },
-        { "thread id added", ClearResource(packedStride: 16 | (1u << 20)), BufferDescriptor(MetadataAddress, 16, 256, addThreadId: true) },
+        { "swizzled", ClearResource(), BufferDescriptor(MetadataAddress, 16, 256, swizzle: true) },
+        { "thread id added", ClearResource(), BufferDescriptor(MetadataAddress, 16, 256, addThreadId: true) },
     };
 
     [Theory]
@@ -448,7 +577,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     {
         _host.MetadataAddresses.Add(MetadataAddress);
         _host.ClearableMetadata.Add(MetadataAddress);
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written]), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
         _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
 
@@ -462,7 +591,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     {
         _host.MetadataAddresses.Add(MetadataAddress);
         _host.ClearableMetadata.Add(MetadataAddress);
-        var readWrite = new BufferResourceInfo(true, true, false, false, false, 4, 0);
+        var readWrite = new BufferResourceInfo(true, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [readWrite]), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
         _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
 
@@ -532,7 +661,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     public void MetadataClear_RefusesAProgramWithBitwiseExclusiveOr()
     {
         _host.ClearableMetadata.Add(MetadataAddress);
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written], exclusiveOr: true), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
         _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
 
@@ -543,7 +672,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [Fact]
     public void MetadataClear_WithAMismatchedBufferCountIsFatal()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written])));
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41));
         Assert.Contains("descriptors=0 program=1", fatal.Message);
@@ -552,7 +681,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [Fact]
     public void ShortBufferDescriptor_IsFatal()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written]), buffers: [[1, 2]]));
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41));
         Assert.Contains("index=0 words=2", fatal.Message);

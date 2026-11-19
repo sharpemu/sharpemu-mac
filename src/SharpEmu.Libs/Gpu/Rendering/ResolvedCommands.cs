@@ -41,11 +41,13 @@ internal struct DrawState
     public RenderingState Rendering;
     public GraphicsPrograms Programs;
     public int StartInstanceUserData;
+    public int BaseVertexUserData;
 
-    public static DrawState Create() => new() { PixelActive = true, Programs = null!, StartInstanceUserData = -1 };
+    public static DrawState Create() => new() { PixelActive = true, Programs = null!, StartInstanceUserData = -1, BaseVertexUserData = -1 };
 
-    public void Begin(int startInstanceUserData)
+    public void Begin(int startInstanceUserData, int baseVertexUserData = -1)
     {
+        BaseVertexUserData = baseVertexUserData;
         ColorCount = 0;
         Depth = default;
         DepthResolved = false;
@@ -134,6 +136,7 @@ internal sealed class ResolvedDraw
 
     public void Reset()
     {
+        var previous = Kind;
         TessellationHull = null;
         Sequence = 0;
         Kind = ResolvedDrawKind.Skipped;
@@ -164,7 +167,12 @@ internal sealed class ResolvedDraw
         MustExecute = false;
         IndexedTrace = null;
         PacketAddress = 0;
-        Clear = default;
+        if (previous == ResolvedDrawKind.ClearColorTargets)
+        {
+            Clear = default;
+        }
+
+        // The resolve and copy fields: written by those kinds only, and flagged when they are (TargetCopyFieldsWritten).
         if (TargetCopyFieldsWritten)
         {
             ResolveSource = default;
@@ -227,6 +235,10 @@ internal sealed class ResolvedDispatch
     // array stays with the pooled record.
     public MetadataClearProbe[] MetadataClearBuffer = [];
     public int MetadataClearCount;
+
+    // The indirect arguments count threads the GPU converts to groups (IRenderHost.PrepareThreadDispatch, the Vulkan
+    // host's form; ThreadsOnGpu is the Metal host's).
+    public bool GpuThreadCounts;
     public ConstantFillCandidate? ConstantFill;
     public KernelFillCandidate? BoundedFill;
     public BoundedCopyCandidate? BoundedCopy;
@@ -255,6 +267,7 @@ internal sealed class ResolvedDispatch
         Suspensions = null;
         Retried = false;
         MetadataClearCount = 0;
+        GpuThreadCounts = false;
         ConstantFill = null;
         BoundedFill = null;
         BoundedCopy = null;

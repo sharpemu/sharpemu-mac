@@ -408,7 +408,7 @@ public sealed partial class KeptStageInputsTests
 
         Assert.Equal(["Available", "DisableBlending", "DropUnwrittenColorTargets", "MeshInput", "Pixel", "PixelInput", "PositionStream",
             "SolidClear", "Tessellation", "Vertex", "VertexInput"], Names(typeof(GraphicsPrograms)));
-        Assert.Equal(["Attributes", "Buffers", "ClipSpace", "Dx10Clamp", "FetchAttributeRegister", "FetchBufferRegister", "FetchEmbedded",
+        Assert.Equal(["Attributes", "BaseVertexUserData", "Buffers", "ClipSpace", "Dx10Clamp", "FetchAttributeRegister", "FetchBufferRegister", "FetchEmbedded",
             "FloatMode", "IeeeMode", "PositionExportControl", "ScratchDwords", "Stage", "StartInstanceUserData", "Tessellation"],
             Names(typeof(VertexInputInfo)));
         Assert.Equal(["CustomInterpolationMask", "DepthExportEnable", "DepthExportFormat", "Dx10Clamp", "EarlyDepth", "ExecuteOnNoop",
@@ -416,10 +416,10 @@ public sealed partial class KeptStageInputsTests
             "NoPerspective", "PerspectiveCenterRegister", "PositionW", "PositionX", "PositionY", "PositionZ", "SampleMaskExportEnable",
             "SampleShading", "ScratchDwords", "Stage", "StencilExportEnable", "SystemInputBase", "TargetExportFormats",
             "TargetExportMappings", "TargetOutputModes"], Names(typeof(PixelInputInfo)));
-        Assert.Equal(["CallArguments", "CallRecordRanges", "CallRecords", "CallTargets", "MeshDraw", "Program", "Resources", "ShaderBase",
-            "TessellationData", "ThreadLimits"], Names(typeof(ShaderStageResources)));
+        Assert.Equal(["CallArguments", "CallRecordRanges", "CallRecords", "CallTargets", "CompileFallback", "GpuThreadLimits", "MeshDraw",
+            "Program", "Resources", "ShaderBase", "TessellationData", "ThreadLimits"], Names(typeof(ShaderStageResources)));
         // Origin and BindingPacket are the snapshot's bookkeeping, not what the draw binds.
-        Assert.Equal(["BindingPacket", "BindlessImages", "Buffers", "DeviceAddressRanges", "FlattenedResourceTable", "Images",
+        Assert.Equal(["BindingPacket", "BindlessImages", "Buffers", "DeviceAddressRanges", "FlattenedResourceTable", "Heaps", "Images",
             "MipStatistics", "Origin", "Samplers", "UserData"], Names(typeof(ResourceSnapshot)));
     }
 }

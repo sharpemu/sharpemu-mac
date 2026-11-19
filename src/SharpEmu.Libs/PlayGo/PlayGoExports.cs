@@ -572,10 +572,18 @@ public static class PlayGoExports
 
         TracePlayGo($"get_progress entries={numberOfEntries}");
         Span<byte> progress = stackalloc byte[sizeof(ulong) * 2];
-        // Every chunk is installed, so installed size equals total size. Report a
-        // non-zero pair so a title computing progress / total sees 100%, not 0/0.
-        BinaryPrimitives.WriteUInt64LittleEndian(progress, 1);
-        BinaryPrimitives.WriteUInt64LittleEndian(progress[sizeof(ulong)..], 1);
+        bool pgmChunks;
+        lock (_stateGate)
+        {
+            pgmChunks = _metadata.ChunkIdKnowledge == PlayGoChunkIdKnowledge.Assumed;
+        }
+
+        // Every chunk is installed, so installed size equals total size. A title whose chunks come
+        // from playgo.pgm gets a non-zero pair, so progress / total reads 100%, not 0/0; every other
+        // title keeps the 0/0 it always read.
+        var size = pgmChunks ? 1ul : 0ul;
+        BinaryPrimitives.WriteUInt64LittleEndian(progress, size);
+        BinaryPrimitives.WriteUInt64LittleEndian(progress[sizeof(ulong)..], size);
         return ctx.Memory.TryWrite(outProgress, progress)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -801,18 +809,6 @@ public static class PlayGoExports
         var scenarioJson = GameFileOverlay.ResolveFile(Path.Combine(app0Root, "sce_sys", "playgo-scenario.json"));
         var chunkDefsXml = GameFileOverlay.ResolveFile(Path.Combine(app0Root, "playgo-chunkdefs.xml"));
         App0Archive.Extract(chunkDefsXml);
-        App0Archive.Extract(playGoPgm);
-
-        // PS5 titles ship cache_ps5/playgo.pgm. It carries the chunk count, which
-        // beats guessing from pak files: Ghost of Yotei has no sidecar and no
-        // pakchunk files, so the fallback reported chunk 0 only and the title
-        // exited on the resulting PlayGo errors.
-        var pgmChunkIds = LoadPlayGoPgmChunkIds(playGoPgm);
-        if (pgmChunkIds.Length > 0)
-        {
-            TracePlayGo($"metadata_pgm chunks={pgmChunkIds.Length}");
-            return new PlayGoMetadata(true, pgmChunkIds, PlayGoChunkIdKnowledge.Assumed);
-        }
 
         var hasMetadata = File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml);
         if (!hasMetadata)
@@ -834,15 +830,33 @@ public static class PlayGoExports
             // NotSupportPlayGo (fatal PS5-component init failure for UE titles).
             // Ids outside the discovered set still return BAD_CHUNK_ID, so
             // title-side chunk enumeration still terminates.
-            var installedChunkIds = DiscoverInstalledChunkIds(app0Root);
-            TracePlayGo($"metadata_missing; fully-installed chunks=[{string.Join(',', installedChunkIds)}]");
-            return new PlayGoMetadata(
-                true,
-                installedChunkIds,
-                PlayGoChunkIdKnowledge.Authoritative);
+            var fallback = DiscoverFallbackChunks(app0Root, playGoPgm);
+            if (fallback.ChunkIdKnowledge == PlayGoChunkIdKnowledge.Authoritative)
+            {
+                TracePlayGo($"metadata_missing; fully-installed chunks=[{string.Join(',', fallback.ChunkIds)}]");
+            }
+
+            return fallback;
         }
 
         var chunkIds = LoadChunkIds(chunkDefsXml);
+        if (chunkIds.Length == 0)
+        {
+            chunkIds = LoadChunkDatChunkIds(playGoDat);
+        }
+
+        if (chunkIds.Length == 0 && !disableMetadataFallback)
+        {
+            // A sidecar that carries no chunk list (Ghost of Yotei ships only
+            // playgo-scenario.json) says nothing about the chunks: use the same
+            // pakchunk then pgm discovery as a title without sidecars.
+            var fallback = DiscoverFallbackChunks(app0Root, playGoPgm);
+            if (fallback.ChunkIds.Length > 1 || fallback.ChunkIdKnowledge == PlayGoChunkIdKnowledge.Assumed)
+            {
+                return fallback;
+            }
+        }
+
         if (chunkIds.Length == 0)
         {
             // Metadata that defines no chunks (a playgo-scenario.json alone, an unreadable
@@ -862,6 +876,26 @@ public static class PlayGoExports
             true,
             chunkIds,
             PlayGoChunkIdKnowledge.Authoritative);
+    }
+
+    private static PlayGoMetadata DiscoverFallbackChunks(string app0Root, string playGoPgm)
+    {
+        var installedChunkIds = DiscoverInstalledChunkIds(app0Root);
+        if (installedChunkIds.Length == 1)
+        {
+            // No pakchunk files either. PS5 titles ship cache_ps5/playgo.pgm, which carries the
+            // chunk count: Ghost of Yotei has nothing else, and with chunk 0 only its PlayGo
+            // queries failed and it exited at boot.
+            App0Archive.Extract(playGoPgm);
+            var pgmChunkIds = LoadPlayGoPgmChunkIds(playGoPgm);
+            if (pgmChunkIds.Length > 0)
+            {
+                TracePlayGo($"metadata_pgm chunks={pgmChunkIds.Length}");
+                return new PlayGoMetadata(true, pgmChunkIds, PlayGoChunkIdKnowledge.Assumed);
+            }
+        }
+
+        return new PlayGoMetadata(true, installedChunkIds, PlayGoChunkIdKnowledge.Authoritative);
     }
 
     // playgo.pgm header: "DMGP" magic at 0x00, little-endian chunk count at 0x10,
@@ -978,6 +1012,47 @@ public static class PlayGoExports
             return Array.Empty<ushort>();
         }
         catch (System.Xml.XmlException)
+        {
+            return Array.Empty<ushort>();
+        }
+    }
+
+    // The chunk count from the playgo-chunk.dat header ("plgo" on PS4, "plgx" on PS5): magic, two version halves, the
+    // image count, the chunk count, two more counts and the file size. Chunks are numbered from 0. A header that does
+    // not match its file leaves the ids unknown.
+    private static ushort[] LoadChunkDatChunkIds(string playGoDat)
+    {
+        const uint MagicPs4 = 0x6F676C70;
+        const uint MagicPs5 = 0x78676C70;
+        try
+        {
+            if (!File.Exists(playGoDat))
+            {
+                return Array.Empty<ushort>();
+            }
+
+            using var stream = File.OpenRead(playGoDat);
+            Span<byte> header = stackalloc byte[0x14];
+            if (stream.ReadAtLeast(header, header.Length, throwOnEndOfStream: false) < header.Length ||
+                BinaryPrimitives.ReadUInt32LittleEndian(header) is not (MagicPs4 or MagicPs5) ||
+                BinaryPrimitives.ReadUInt32LittleEndian(header[0x10..]) != stream.Length)
+            {
+                return Array.Empty<ushort>();
+            }
+
+            var chunkIds = new ushort[BinaryPrimitives.ReadUInt16LittleEndian(header[0x0A..])];
+            for (var index = 0; index < chunkIds.Length; index++)
+            {
+                chunkIds[index] = (ushort)index;
+            }
+
+            return chunkIds;
+        }
+        catch (IOException)
+        {
+            return Array.Empty<ushort>();
+        }
+        catch (UnauthorizedAccessException)
         {
             return Array.Empty<ushort>();
         }

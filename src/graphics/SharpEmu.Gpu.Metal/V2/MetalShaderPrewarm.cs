@@ -669,15 +669,17 @@ internal static class MetalShaderPrewarm
     /// <summary>
     /// The pending computes in the order the prewarm compiles them, and how many from the
     /// front the guest is held for: those the last session created before its first frame
-    /// (in list order, which is the order a session first used them), then the rest. With no
-    /// first-frame list yet, every one is held for. Demon's Souls records some 1400 computes
+    /// (in the first-frame list's recorded order, ShaderPrewarmList.ReadFirstFrameComputes,
+    /// whatever order the pending ones come in), then the rest in pending order (LoadedComputes:
+    /// the soonest needed first). With no first-frame list yet, every one is held for, in
+    /// pending order. Demon's Souls records some 1400 computes
     /// across its scenes and creates about a hundred before its first frame; a cold start
     /// held it for all of them, 126 s at the splash screen (run 20261017-075343-ds-base-boot),
     /// while the rest can compile behind the logos and the intro.
     /// </summary>
     internal static List<(ComputePrewarmRecord Record, ShaderCodeCapture Code, bool Held)> HoldFirst(
         IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> pending,
-        IReadOnlySet<ulong>? firstFrame,
+        IReadOnlyList<ulong>? firstFrame,
         out int held)
     {
         if (firstFrame is null)
@@ -686,13 +688,22 @@ internal static class MetalShaderPrewarm
             return pending.Select(item => (item.Record, item.Code, true)).ToList();
         }
 
+        var rank = new Dictionary<ulong, int>(firstFrame.Count);
+        for (var index = 0; index < firstFrame.Count; index++)
+        {
+            rank.TryAdd(firstFrame[index], index);
+        }
+
         var ordered = new List<(ComputePrewarmRecord, ShaderCodeCapture, bool)>(pending.Count);
+        // OrderBy is stable: a pending duplicate of one identity keeps its pending order.
         ordered.AddRange(pending
-            .Where(item => firstFrame.Contains(ShaderPrewarmList.Identity(item.Record)))
-            .Select(item => (item.Record, item.Code, true)));
+            .Select(item => (Item: item, Rank: rank.TryGetValue(ShaderPrewarmList.Identity(item.Record), out var at) ? at : -1))
+            .Where(entry => entry.Rank >= 0)
+            .OrderBy(entry => entry.Rank)
+            .Select(entry => (entry.Item.Record, entry.Item.Code, true)));
         held = ordered.Count;
         ordered.AddRange(pending
-            .Where(item => !firstFrame.Contains(ShaderPrewarmList.Identity(item.Record)))
+            .Where(item => !rank.ContainsKey(ShaderPrewarmList.Identity(item.Record)))
             .Select(item => (item.Record, item.Code, false)));
         return ordered;
     }

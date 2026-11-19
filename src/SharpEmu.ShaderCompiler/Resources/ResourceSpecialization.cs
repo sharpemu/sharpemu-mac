@@ -6,7 +6,16 @@ using System.Linq;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
-public readonly record struct BufferSpecialization(uint PackedStride, uint DescriptorFormat, uint DescriptorSwizzle);
+// The SPIR-V translator reads an indexed buffer's stride from the binding's V# at run time (BindingLayout.BufferStridesDword)
+// and ignores PackedStride; the MSL translator addresses buffers by it (BufferResource.PackedStride), which PortableBufferWord
+// narrows to the addressing-mode bits when the stride itself is shader data.
+public readonly record struct BufferSpecialization(uint PackedStride, uint DescriptorFormat, uint DescriptorSwizzle)
+{
+    // No stride specialized: what a caller that leaves the stride to the run time records.
+    public BufferSpecialization(uint descriptorFormat, uint descriptorSwizzle) : this(0, descriptorFormat, descriptorSwizzle)
+    {
+    }
+}
 
 // The module-affecting layout of one bounded runtime V# table. Candidate descriptors
 // themselves are appended to Buffers; this names their contiguous run and the flattened
@@ -52,6 +61,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
 {
     // The plan's base buffer count; Buffers beyond it are materialized candidates.
     public int BaseBufferCount { get; init; }
+    public bool StableImageBindings { get; init; }
     // The lists start empty on first read rather than in the constructor: every draw builds one
     // of these with all of them set, and eager initializers allocated six lists it replaced.
     public List<BufferSpecialization> Buffers { get => _buffers ??= []; init => _buffers = value; }
@@ -73,7 +83,8 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     private List<SamplerSpecialization>? _samplers;
 
     public bool Equals(ResourceSpecialization? other) =>
-        ReferenceEquals(this, other) || other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
+        ReferenceEquals(this, other) || other is not null && StableImageBindings == other.StableImageBindings &&
+        BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
         Images.SequenceEqual(other.Images) && BufferCandidateTables.SequenceEqual(other.BufferCandidateTables) &&
         ImageDescriptorGroups.SequenceEqual(other.ImageDescriptorGroups) &&
         SamplerDescriptorGroups.SequenceEqual(other.SamplerDescriptorGroups) &&
@@ -112,6 +123,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     {
         var hash = new HashCode();
         hash.Add(BaseBufferCount);
+        hash.Add(StableImageBindings);
         foreach (var buffer in Buffers)
         {
             hash.Add(buffer);
@@ -136,6 +148,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public ResourceSpecialization Clone() => new()
     {
         BaseBufferCount = BaseBufferCount,
+        StableImageBindings = StableImageBindings,
         Buffers = [.. Buffers],
         Images = [.. Images],
         BufferCandidateTables = [.. BufferCandidateTables],

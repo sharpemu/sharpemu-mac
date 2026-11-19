@@ -42,6 +42,14 @@ public static partial class Gen5MslTranslator
             return false;
         }
 
+        // A storage image whose stores take their channel map from shader data (RuntimeImageSwizzle) was specialized with
+        // the identity select; the MSL emitter does not read the map, so its stores would ignore the T#'s select.
+        if (request.Bindings.StorageImageSwizzleCount != 0)
+        {
+            error = "Metal does not support storage image channel maps in shader data (RuntimeImageSwizzle).";
+            return false;
+        }
+
         // The guest mesh stage (Vulkan's task/mesh path) has no MSL emission; the Metal mesh path
         // compiles NGG primitive shaders as Vertex requests with PrimitiveShader set instead.
         if (request.Stage == ShaderStage.Mesh)

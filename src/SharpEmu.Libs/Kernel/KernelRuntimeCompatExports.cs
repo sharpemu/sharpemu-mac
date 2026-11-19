@@ -1159,6 +1159,8 @@ public static partial class KernelRuntimeCompatExports
     {
         if (size == 0 || address > ulong.MaxValue - size)
             return false;
+        if (Ampr.AmprExports.ContainsAmmRange(address, size))
+            return true;
         address = GuestVaHole.TranslateRange(address, size);
         lock (_prtApertureGate)
         {

@@ -23,7 +23,14 @@ public static class NpEntitlementAccessExports
 
     private const int NpEntitlementAccessErrorParameter = unchecked((int)0x817D0002);
     private const int NpEntitlementAccessErrorNoEntitlement = unchecked((int)0x817D0007);
+    private const int NpEntitlementAccessErrorSignedOut = unchecked((int)0x817D0014);
+    private const int NpEntitlementAccessErrorRequestNotFound = unchecked((int)0x817D0015);
+    private const int NpEntitlementAccessPollFinished = 0;
     private const int EntitlementKeySize = 16;
+
+    // Asynchronous requests by id, with the result each one finished with.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, int> Requests = new();
+    private static long _nextRequestId;
 
     // Offline entitlements queried by titles through NpEntitlementAccess.
     // GTA V Enhanced (PPSA04264) gates Story Mode on these three labels; without
@@ -287,38 +294,23 @@ public static class NpEntitlementAccessExports
             : NpEntitlementAccessErrorNoEntitlement);
     }
 
-    // The service/unified entitlement requests and the consume requests are server round
-    // trips that need a PSN session. The offline profile is signed out, so every Request*
-    // call fails at the request stage with SCE_NP_ERROR_SIGNED_OUT (the code sceNpGetState
-    // and sceNpCheckNpReachability agree on), writes nothing and never creates a request.
-    // Because no request is ever created, there is nothing for Poll* to complete and it
-    // reports the same error. Neither reference knows the argument lists of these calls
-    // (anyps5 declares them without parameters), so no argument is read or validated.
-    // Whether a console fails at the request or at the poll when signed out is unverified.
-    private const int NpErrorSignedOut = unchecked((int)0x80550006);
-
-    private static int SignedOut(CpuContext ctx) => ctx.SetReturn(NpErrorSignedOut);
-
-    [SysAbiExport(
-        Nid = "HFcQl9TMcFQ",
-        ExportName = "sceNpEntitlementAccessAbortRequest",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNpEntitlementAccess")]
-    public static int NpEntitlementAccessAbortRequest(CpuContext ctx) =>
-        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
-
-    [SysAbiExport(
-        Nid = "Z0eQj8m7XA8",
-        ExportName = "sceNpEntitlementAccessDeleteRequest",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNpEntitlementAccess")]
-    public static int NpEntitlementAccessDeleteRequest(CpuContext ctx) =>
-        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    // Entitlement requests are server round trips that need a PSN session, and the offline profile
+    // is signed out (as in libSceNpManager). The library has one request lifecycle and one error
+    // model, upstream's: a request whose arguments are known is created, finishes at once with the
+    // library's SIGNED_OUT result and no entitlements, is polled for that result, and is gone once
+    // deleted (RequestUnifiedEntitlementInfoList / RequestServiceEntitlementInfoList and their polls,
+    // DeleteRequest, AbortRequest). Silent Hill: The Short Message calls the service list pair with
+    // the same arguments as the unified pair (userId, serviceLabel, list, listNum, param,
+    // requestId out; poll: requestId, result out, list, listNum, hitNum out, next out, previous out
+    // on the stack), which pins their layout. The single-entitlement and consume requests and their
+    // polls have no reference or title that shows where their request id goes, so they create no
+    // request: they fail at once with the library's SIGNED_OUT and write nothing.
+    private static int SignedOut(CpuContext ctx) => ctx.SetReturn(NpEntitlementAccessErrorSignedOut);
 
     /// <summary>
     /// One output pointer for the transaction id. A null pointer is the library's PARAMETER
-    /// error; otherwise the id would come from the server, so it fails SIGNED_OUT without
-    /// writing (anyps5).
+    /// error; otherwise the id would come from the server, so it fails with the library's
+    /// SIGNED_OUT without writing.
     /// </summary>
     [SysAbiExport(
         Nid = "IQtb-TaIjSM",
@@ -370,15 +362,12 @@ public static class NpEntitlementAccessExports
 
     [SysAbiExport(Nid = "brbRxzr7qyI", ExportName = "sceNpEntitlementAccessRequestServiceEntitlementInfoList",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
-    public static int NpEntitlementAccessRequestServiceEntitlementInfoList(CpuContext ctx) => SignedOut(ctx);
+    public static int NpEntitlementAccessRequestServiceEntitlementInfoList(CpuContext ctx) =>
+        RequestEntitlementInfoList(ctx, "request_service_list");
 
     [SysAbiExport(Nid = "jautSRs4OdQ", ExportName = "sceNpEntitlementAccessRequestUnifiedEntitlementInfo",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
     public static int NpEntitlementAccessRequestUnifiedEntitlementInfo(CpuContext ctx) => SignedOut(ctx);
-
-    [SysAbiExport(Nid = "uCZf2L27th8", ExportName = "sceNpEntitlementAccessRequestUnifiedEntitlementInfoList",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
-    public static int NpEntitlementAccessRequestUnifiedEntitlementInfoList(CpuContext ctx) => SignedOut(ctx);
 
     [SysAbiExport(Nid = "ShGBFuoSSsQ", ExportName = "sceNpEntitlementAccessPollServiceEntitlementInfo",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
@@ -386,15 +375,100 @@ public static class NpEntitlementAccessExports
 
     [SysAbiExport(Nid = "aFv8qms6XTM", ExportName = "sceNpEntitlementAccessPollServiceEntitlementInfoList",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
-    public static int NpEntitlementAccessPollServiceEntitlementInfoList(CpuContext ctx) => SignedOut(ctx);
+    public static int NpEntitlementAccessPollServiceEntitlementInfoList(CpuContext ctx) => PollEntitlementInfoList(ctx);
 
     [SysAbiExport(Nid = "M4XlLFnzQaQ", ExportName = "sceNpEntitlementAccessPollUnifiedEntitlementInfo",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
     public static int NpEntitlementAccessPollUnifiedEntitlementInfo(CpuContext ctx) => SignedOut(ctx);
 
-    [SysAbiExport(Nid = "nAEqawEZG5s", ExportName = "sceNpEntitlementAccessPollUnifiedEntitlementInfoList",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpEntitlementAccess")]
-    public static int NpEntitlementAccessPollUnifiedEntitlementInfoList(CpuContext ctx) => SignedOut(ctx);
+    // Unified and service entitlements are kept on the PSN servers. The user is signed out, as in libSceNpManager, so a
+    // request finishes at once with that result and no entitlements.
+    [SysAbiExport(
+        Nid = "uCZf2L27th8",
+        ExportName = "sceNpEntitlementAccessRequestUnifiedEntitlementInfoList",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessRequestUnifiedEntitlementInfoList(CpuContext ctx) =>
+        RequestEntitlementInfoList(ctx, "request_unified_list");
+
+    private static int RequestEntitlementInfoList(CpuContext ctx, string trace)
+    {
+        // userId, serviceLabel, label list (null for every label), list size, parameters, request id out.
+        var listAddress = ctx[CpuRegister.Rdx];
+        var listNum = unchecked((uint)ctx[CpuRegister.Rcx]);
+        var requestIdAddress = ctx[CpuRegister.R9];
+        if (requestIdAddress == 0 || (listAddress == 0 && listNum != 0))
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorParameter);
+        }
+
+        var requestId = Interlocked.Increment(ref _nextRequestId);
+        if (!ctx.TryWriteUInt64(requestIdAddress, unchecked((ulong)requestId)))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        Requests[requestId] = NpEntitlementAccessErrorSignedOut;
+        TraceNpEntitlementAccess($"{trace} id={requestId} labels={listNum}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "nAEqawEZG5s",
+        ExportName = "sceNpEntitlementAccessPollUnifiedEntitlementInfoList",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessPollUnifiedEntitlementInfoList(CpuContext ctx) => PollEntitlementInfoList(ctx);
+
+    private static int PollEntitlementInfoList(CpuContext ctx)
+    {
+        // requestId, result out, info list, list size, hit count out, next offset out, previous offset out (stack).
+        var requestId = unchecked((long)ctx[CpuRegister.Rdi]);
+        var resultAddress = ctx[CpuRegister.Rsi];
+        var hitNumAddress = ctx[CpuRegister.R8];
+        var nextOffsetAddress = ctx[CpuRegister.R9];
+        if (!Requests.TryGetValue(requestId, out var result))
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorRequestNotFound);
+        }
+
+        if (resultAddress == 0)
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorParameter);
+        }
+
+        _ = ctx.TryGetImportStackArgument(0, out var previousOffsetAddress);
+        if (!ctx.TryWriteInt32(resultAddress, result) ||
+            (hitNumAddress != 0 && !ctx.TryWriteUInt32(hitNumAddress, 0)) ||
+            (nextOffsetAddress != 0 && !ctx.TryWriteInt32(nextOffsetAddress, 0)) ||
+            (previousOffsetAddress != 0 && !ctx.TryWriteInt32(previousOffsetAddress, 0)))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ctx.SetReturn(NpEntitlementAccessPollFinished);
+    }
+
+    [SysAbiExport(
+        Nid = "Z0eQj8m7XA8",
+        ExportName = "sceNpEntitlementAccessDeleteRequest",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessDeleteRequest(CpuContext ctx) =>
+        ctx.SetReturn(Requests.TryRemove(unchecked((long)ctx[CpuRegister.Rdi]), out _)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : NpEntitlementAccessErrorRequestNotFound);
+
+    // Every request has finished by the time the title can abort it.
+    [SysAbiExport(
+        Nid = "HFcQl9TMcFQ",
+        ExportName = "sceNpEntitlementAccessAbortRequest",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessAbortRequest(CpuContext ctx) =>
+        ctx.SetReturn(Requests.ContainsKey(unchecked((long)ctx[CpuRegister.Rdi]))
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : NpEntitlementAccessErrorRequestNotFound);
 
     private static bool TryWriteAddcontEntitlementInfo(
         CpuContext ctx,

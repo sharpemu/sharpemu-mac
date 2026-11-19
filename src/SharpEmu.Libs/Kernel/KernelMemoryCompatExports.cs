@@ -2628,75 +2628,6 @@ public static partial class KernelMemoryCompatExports
             : PosixFailure(ctx, result);
     }
 
-    // sceKernelUtimes(path, const SceKernelTimeval times[2]): access time, then
-    // modification time, each { int64 sec; int64 usec }. A null array means "now".
-    [SysAbiExport(
-        Nid = "0Cq8ipKr9n0",
-        ExportName = "sceKernelUtimes",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelUtimes(CpuContext ctx)
-    {
-        if (!TryReadNullTerminatedUtf8(ctx, ctx[CpuRegister.Rdi], MaxGuestStringLength, out var guestPath))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        var hostPath = ResolveGuestPath(guestPath);
-        if (!File.Exists(hostPath) && !Directory.Exists(hostPath))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
-
-        if (IsReadOnlyGuestMutationPath(guestPath))
-        {
-            // The read-only mounts are the game's own files: their times stay as shipped.
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
-        var access = DateTime.UtcNow;
-        var modified = access;
-        var timesAddress = ctx[CpuRegister.Rsi];
-        if (timesAddress != 0)
-        {
-            Span<byte> times = stackalloc byte[32];
-            if (!ctx.Memory.TryRead(timesAddress, times))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-
-            static DateTime FromTimeval(ReadOnlySpan<byte> value) =>
-                DateTime.UnixEpoch
-                    .AddSeconds(System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(value))
-                    .AddTicks(System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(value[8..]) * 10);
-
-            access = FromTimeval(times[..16]);
-            modified = FromTimeval(times[16..]);
-        }
-
-        try
-        {
-            if (Directory.Exists(hostPath))
-            {
-                Directory.SetLastAccessTimeUtc(hostPath, access);
-                Directory.SetLastWriteTimeUtc(hostPath, modified);
-            }
-            else
-            {
-                File.SetLastAccessTimeUtc(hostPath, access);
-                File.SetLastWriteTimeUtc(hostPath, modified);
-            }
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentOutOfRangeException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
     [SysAbiExport(
         Nid = "naInUjYt3so",
         ExportName = "sceKernelRmdir",
@@ -6816,7 +6747,7 @@ public static partial class KernelMemoryCompatExports
         return result;
     }
 
-    private static int InvokeKernelMemoryOperation(
+    internal static int InvokeKernelMemoryOperation(
         CpuContext ctx,
         Func<CpuContext, int> operation,
         ulong rdi = 0,
@@ -9193,6 +9124,111 @@ public static partial class KernelMemoryCompatExports
         }
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // utimes: times[0] is the access time and times[1] the modification time, each a timeval of seconds and
+    // microseconds; a null array sets both to the current time.
+    [SysAbiExport(
+        Nid = "0Cq8ipKr9n0",
+        ExportName = "sceKernelUtimes",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUtimes(CpuContext ctx)
+    {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        var timesAddress = ctx[CpuRegister.Rsi];
+        if (pathAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var hostPath = ResolveGuestPath(guestPath);
+        var isFile = File.Exists(hostPath);
+        if (!isFile && !Directory.Exists(hostPath))
+        {
+            AddNegativeStatCacheForGuestPath(guestPath);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        if (IsReadOnlyGuestMutationPath(guestPath))
+        {
+            // The app mounts are read-only filesystems: the path resolves, then setting its attributes fails with
+            // EROFS, as FreeBSD's ufs_setattr reports on an MNT_RDONLY mount (and as unlink, rename and a writing
+            // open here do).
+            LogOpenTrace($"utimes readonly path='{guestPath}' host='{hostPath}'");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_EROFS;
+        }
+
+        DateTime accessed;
+        DateTime modified;
+        if (timesAddress == 0)
+        {
+            accessed = modified = DateTime.UtcNow;
+        }
+        else if (!TryReadTimeval(ctx, timesAddress, out accessed, out var accessValid) ||
+                 !TryReadTimeval(ctx, timesAddress + 16, out modified, out var modifiedValid))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+        else if (!accessValid || !modifiedValid)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        try
+        {
+            if (isFile)
+            {
+                File.SetLastAccessTimeUtc(hostPath, accessed);
+                File.SetLastWriteTimeUtc(hostPath, modified);
+            }
+            else
+            {
+                Directory.SetLastAccessTimeUtc(hostPath, accessed);
+                Directory.SetLastWriteTimeUtc(hostPath, modified);
+            }
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // Host file times start in 1601.
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            LogOpenTrace($"utimes failed path='{guestPath}' host='{hostPath}' error={exception.Message}");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+
+        LogOpenTrace($"utimes path='{guestPath}' host='{hostPath}' accessed={accessed:O} modified={modified:O}");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+
+        static bool TryReadTimeval(CpuContext ctx, ulong address, out DateTime time, out bool valid)
+        {
+            time = default;
+            valid = false;
+            if (!ctx.TryReadUInt64(address, out var seconds) || !ctx.TryReadUInt64(address + 8, out var microseconds))
+            {
+                return false;
+            }
+
+            var secondsValue = unchecked((long)seconds);
+            var microsecondsValue = unchecked((long)microseconds);
+            valid = microsecondsValue is >= 0 and < 1_000_000 &&
+                    secondsValue >= DateTimeOffset.MinValue.ToUnixTimeSeconds() &&
+                    secondsValue < DateTimeOffset.MaxValue.ToUnixTimeSeconds();
+            if (valid)
+            {
+                time = DateTimeOffset.FromUnixTimeSeconds(secondsValue).AddTicks(microsecondsValue * 10).UtcDateTime;
+            }
+
+            return true;
+        }
     }
     private static bool TryCompareStringsCaseInsensitive(
         CpuContext ctx,

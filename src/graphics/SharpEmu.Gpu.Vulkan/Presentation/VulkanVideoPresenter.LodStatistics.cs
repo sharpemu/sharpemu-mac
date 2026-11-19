@@ -44,6 +44,12 @@ internal static unsafe partial class VulkanVideoPresenter
 
         bool SharpEmu.Libs.Gpu.Pipelines.IShaderPipelineHost.MipStatisticsSubgroupReduction => FragmentSubgroupArithmetic && GraphicsSubgroupOperationsEnabled;
 
+        bool SharpEmu.Libs.Gpu.Pipelines.IShaderPipelineHost.PixelSubgroupArithmetic =>
+            VulkanGraphicsSubgroupPolicy.ShouldUsePixelSubgroupArithmetic(
+                unchecked((uint)Volatile.Read(ref _nativeSubgroupSize)),
+                GraphicsSubgroupOperationsEnabled,
+                FragmentSubgroupArithmetic);
+
         bool SharpEmu.Libs.Gpu.GpuCommands.ICommandStreamHost.TryRecordLodStatistics(ulong destination, uint size)
         {
             if (!ResourceMaterializer.RecordMipStatistics)

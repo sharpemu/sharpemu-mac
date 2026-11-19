@@ -50,6 +50,9 @@ public interface IGuestGpuBackend
     /// checks that the buffer is mapped.</summary>
     bool ConsumesSubmittedCommandBytes => true;
 
+    // The shader of a translation the translation disk cache kept (TranslationDiskCache); null when the backend keeps none.
+    IGuestCompiledShader? CreateCachedShader(byte[] payload, uint? inputLocationMask) => null;
+
     // The vertex stage a tessellated pipeline requires and the control stage that feeds the guest's hull factors to the tessellator.
     (IGuestCompiledShader Vertex, IGuestCompiledShader Control) CompileTessellationBridge(
         SharpEmu.ShaderCompiler.Resources.BindingLayout layout, Gen5TessellationDomain domain) =>

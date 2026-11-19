@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.ShaderCompiler.Resources;
 using Silk.NET.Vulkan;
 using Xunit;
 
@@ -16,7 +17,7 @@ public sealed class GuestPixelFormatsTests
         Assert.Equal(4u, GuestPixelFormats.BytesPerElement(GuestPixelFormat.Bits8_8_8_8UNorm));
         Assert.Equal(8u, GuestPixelFormats.BytesPerElement(GuestPixelFormat.Bits16_16_16_16Float));
         Assert.Equal(2u, GuestPixelFormats.BytesPerElement(GuestPixelFormat.Bits8_8UScaled));
-        Assert.Equal(0u, GuestPixelFormats.BytesPerElement(GuestPixelFormat.Bits8SNorm));
+        Assert.Equal(1u, GuestPixelFormats.BytesPerElement(GuestPixelFormat.Bits8SNorm));
         Assert.Equal(0u, GuestPixelFormats.BytesPerElement(GuestPixelFormat.Invalid));
         Assert.Equal(0u, GuestPixelFormats.BytesPerElement((GuestPixelFormat)200));
         Assert.Equal(0u, GuestPixelFormats.BytesPerElement((GuestPixelFormat)0xFFFF_FFFF));
@@ -38,7 +39,8 @@ public sealed class GuestPixelFormatsTests
         Assert.Equal(TextureNumericClass.Sint, GuestPixelFormats.SampledNumericClass(GuestPixelFormat.Bits8_8_8_8SInt));
         Assert.Equal(TextureNumericClass.Float, GuestPixelFormats.SampledNumericClass(GuestPixelFormat.Bits8_8_8_8UNorm));
         Assert.Equal(TextureNumericClass.Float, GuestPixelFormats.SampledNumericClass(GuestPixelFormat.Bits8_8UScaled));
-        Assert.Equal(TextureNumericClass.Unsupported, GuestPixelFormats.SampledNumericClass(GuestPixelFormat.Bits8SNorm));
+        Assert.Equal(TextureNumericClass.Float, GuestPixelFormats.SampledNumericClass(GuestPixelFormat.Bits8SNorm));
+        Assert.Equal(GpuFormat.R8SNorm, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8SNorm));
         Assert.Equal(GuestPixelFormat.Bits32UInt, GuestPixelFormats.RemapTextureFormat(GuestPixelFormat.Bits11_11_10UInt));
         Assert.Equal(GuestPixelFormat.Bc7Srgb, GuestPixelFormats.RemapTextureFormat(GuestPixelFormat.Bc7Srgb));
         Assert.Equal(GpuFormat.R8G8B8A8Unorm, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8_8_8_8UNorm));
@@ -72,6 +74,18 @@ public sealed class GuestPixelFormatsTests
         {
             GuestPixelFormats.NarrowSrgbFormats = saved;
         }
+    }
+
+    // An 8-bit signed integer texture is sampled like the 16-bit and 32-bit ones: foliage passes load
+    // a 128x128 map of this format, which had no host format and read as null.
+    [Fact]
+    public void AnEightBitSignedIntegerTextureIsSampledAsSigned()
+    {
+        Assert.Equal(TextureNumericClass.Sint, GuestPixelFormats.SampledNumericClass(GuestPixelFormat.Bits8SInt));
+        Assert.Equal(GpuFormat.R8Sint, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8SInt));
+        Assert.Equal(1u, GuestPixelFormats.BytesPerElement(GuestPixelFormat.Bits8SInt));
+        Assert.Equal(1u, GuestPixelFormats.RenderTargetBytesPerElement(GuestPixelFormat.Bits8SInt));
+        Assert.Equal(ImageNumericClass.Sint, GuestImageFormat.SampledNumericClass((uint)GuestPixelFormat.Bits8SInt));
     }
 
     [Fact]

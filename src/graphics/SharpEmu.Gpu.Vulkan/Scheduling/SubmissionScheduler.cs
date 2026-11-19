@@ -159,7 +159,16 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
     internal bool PriorityWorkerAlive => _priorityThread.IsAlive;
 
-    internal static Exception Fatal(string message) => GpuFatal.Fatal(message);
+    internal static Exception Fatal(string message)
+    {
+        // SHARPEMU_DEVICE_FAULT_REPORT=1: on a lost device, print the driver's fault report before the process ends.
+        if (!GpuFatal.IsSpeculative && message.Contains("DeviceLost", StringComparison.Ordinal))
+        {
+            DeviceFaultReport.Write();
+        }
+
+        return GpuFatal.Fatal(message);
+    }
 
     // Whether this thread does work ahead of the render thread (GpuFatal.Speculatively): there a
     // fatal condition only abandons that work.

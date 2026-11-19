@@ -215,6 +215,34 @@ public interface IShaderPipelineProvider
         bool pixelActive,
         bool depthBound) => new() { Available = false };
 
+    // The same with baseVertexUserData: the vertex user data register an indirect draw names for its base vertex,
+    // where the program stores gl_BaseVertex (DrawIndexedArguments.BaseVertexUserData), or -1. A provider that does not
+    // take it resolves the draw as before the field existed; the interpreter then still passes the base vertex in the
+    // draw and writes nothing to that register, so the draw renders as it did without it.
+    GraphicsPrograms GetGraphicsPrograms(
+        RegisterBanks banks,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool depthAspectBound,
+        bool stencilAspectBound,
+        bool triangleList,
+        int startInstanceUserData,
+        int baseVertexUserData) =>
+        GetGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList,
+            startInstanceUserData);
+
+    // taskLaunch: an automatic indirect draw launched by the task stage (MeshTaskLaunch). Providers without task launches
+    // never see it: the decision is made only while MeshTaskLaunch is active.
+    GraphicsPrograms GetMeshGraphicsPrograms(
+        RegisterBanks banks,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool taskLaunch) =>
+        GetMeshGraphicsPrograms(banks, userConfig, targetExportMapping, pixelActive, depthBound);
+
     PipelineHandle CreateGraphicsPipeline(
         ReadOnlySpan<ColorTargetState> colors,
         in DepthAttachmentState depth,
@@ -327,9 +355,23 @@ public interface IShaderPipelineProvider
             ? GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect)
             : GetComputeProgram(banks.Shader.Compute, banks.Context.ShaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry);
 
+    // gpuThreadCounts: the thread counts are in GPU memory (the dimensions are zero); the program reads its thread limits
+    // from shader data the GPU writes (ComputeInputInfo.IndirectThreadCounts).
+    ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect,
+        bool gpuThreadCounts) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect);
+
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 
     Task? GetComputePipelineCompletion(ShaderProgram program) => null;
+
+    // Whether a session saw this linked program's module compile for minutes (ShaderPrewarmList.IsSlowLinkedCompile).
+    bool IsSlowLinkedCompile(ulong hash) => false;
+
+    // Records what this session learned about a linked program's module compile.
+    void RecordLinkedCompile(ulong hash, bool slow, long milliseconds)
+    {
+    }
 
     // False means the host is still compiling this pipeline; asking again returns it once
     // the compile finishes, without starting a second one.

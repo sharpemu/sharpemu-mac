@@ -283,6 +283,8 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int AcbJump(CpuContext ctx)
     {
+        // (acb, cachePolicy, target, sizeDwords): an ACB jump always chains, so unlike
+        // sceAgcDcbJump it takes no mode argument.
         var acb = ctx[CpuRegister.Rdi];
         var cachePolicy = (uint)ctx[CpuRegister.Rsi];
         var target = ctx[CpuRegister.Rdx];
@@ -294,7 +296,7 @@ public static partial class AgcExports
 
         const uint chainMode = 1;
         var control = 0x0F20_0000u |
-                      (cachePolicy << 28) |
+                      ((cachePolicy & 0x3u) << 28) |
                       (chainMode << 20) |
                       (sizeDwords & 0xFFFFFu);
         if (!TryAllocateCommandDwords(ctx, acb, 4, out var cmd) ||

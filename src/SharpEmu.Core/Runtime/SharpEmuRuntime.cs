@@ -209,6 +209,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         SaveDataExports.ConfigureApplicationInfo(image.TitleId);
         NpEntitlementAccessExports.ConfigureApplicationInfo(image.TitleId);
         SystemServiceExports.ConfigureApplicationInfo(image.TitleId, _systemLanguage);
+        VideoOutExports.StartPresenter();
         _ = RegisterLoadedModule(normalizedEbootPath, image, isMain: true, isSystemModule: false);
         KernelRuntimeCompatExports.ConfigureProcessProcParamAddress(image.ProcParamAddress);
         Console.Error.WriteLine($"[RUNTIME] Entry: 0x{image.EntryPoint:X16}");
@@ -1590,6 +1591,16 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         _aprSession?.Dispose();
+
+        if (HostSessionControl.IsShutdownRequested)
+        {
+            // A host shutdown tears the presentation down on its own thread, which still returns pages to their guest
+            // protection and downloads GPU results into guest memory; the process exits after it. Releasing the page
+            // guard or unmapping the guest space here would race that teardown.
+            Console.Error.WriteLine(
+                "[RUNTIME] Host shutdown: the presentation tears down guest GPU memory; keeping the guest address space mapped.");
+            return;
+        }
 
         if (_gpuMemory != null && _gpuMemory.HasActiveWatches())
         {

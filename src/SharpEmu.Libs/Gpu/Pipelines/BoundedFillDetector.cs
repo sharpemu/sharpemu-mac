@@ -50,7 +50,30 @@ public static class BoundedFillDetector
         "BufferLoadFormatX", "BufferStoreFormatX", "SEndpgm",
     ];
 
-    public static BoundedCopy? DetectCopy(Gen5ShaderProgram program) => DetectModuloCopy(program) ?? DetectMaskedCopy(program);
+    private const ulong DemonsSoulsPatternCopyShader = 0xEB7456322124ECC7UL;
+    private const uint PatternCopyGroupRegister = 12;
+    private const uint PatternCopyParameters = 8;
+
+    // The structural matchers run first; upstream's hash-keyed Demon's Souls pattern copy only
+    // answers for a program neither of them recognizes.
+    public static BoundedCopy? DetectCopy(Gen5ShaderProgram program, ulong hash = 0) =>
+        DetectModuloCopy(program) ?? DetectMaskedCopy(program) ?? DetectPatternCopy(hash);
+
+    private static BoundedCopy? DetectPatternCopy(ulong hash)
+    {
+        if (hash != DemonsSoulsPatternCopyShader)
+        {
+            return null;
+        }
+
+        static FillWord UserWord(uint register) => new(FillWordSource.UserData, register, 0, 0);
+        return new BoundedCopy(
+            PatternCopyGroupRegister,
+            new FillWord(FillWordSource.BufferResource, PatternCopyParameters, 0, 0),
+            new FillWord(FillWordSource.BufferResource, PatternCopyParameters, 0, sizeof(uint)),
+            [.. Enumerable.Range(0, 4).Select(word => UserWord((uint)word))],
+            [.. Enumerable.Range(4, 4).Select(word => UserWord((uint)word))]);
+    }
 
     private static BoundedCopy? DetectModuloCopy(Gen5ShaderProgram program)
     {

@@ -39,11 +39,15 @@ public enum AgcPacketStubWordKind : byte
 /// <summary>
 /// One register location an indirect draw's modifier (the low 32 bits of <paramref name="Register"/>)
 /// selects, shifted left by <paramref name="ShiftLeft"/>: when <c>modifier &amp; EnableMask</c> is
-/// clear, <paramref name="Disabled"/>; else, for <paramref name="FieldShift"/> -1, the flag 1;
-/// else the stage's user-SGPR base (0x10C for stages 3 and 5 in bits 29..31, 0x8C otherwise) plus
-/// <c>(modifier &gt;&gt; FieldShift) &amp; 0x1F</c>.
+/// clear or <c>modifier &amp; DisableMask</c> is not, <paramref name="Disabled"/>; else, for
+/// <paramref name="FieldShift"/> -1, the flag 1; else the stage's user-SGPR base (0x10C for stages
+/// 3 and 5 in bits 29..31, 0x8C otherwise) plus <c>(modifier &gt;&gt; FieldShift) &amp; 0x1F</c>.
 /// </summary>
-public readonly record struct AgcModifierSgprSlot(AgcStubRegister Register, uint EnableMask, int FieldShift, uint Disabled, int ShiftLeft);
+public readonly record struct AgcModifierSgprSlot(AgcStubRegister Register, uint EnableMask, int FieldShift, uint Disabled, int ShiftLeft)
+{
+    /// <summary>Modifier bits that, when any is set, disable the slot (the user-VGPR bit 4).</summary>
+    public uint DisableMask { get; init; }
+}
 
 public sealed record AgcPacketStubWord(uint Constant, AgcPacketStubPart[] Parts, AgcPacketStubWordKind Kind = AgcPacketStubWordKind.Parts)
 {
@@ -88,12 +92,13 @@ public static partial class AgcExports
     private static AgcPacketStubWord Slots(params AgcModifierSgprSlot[] slots) =>
         new(0, [], AgcPacketStubWordKind.ModifierSgprSlots) { Slots = slots };
 
-    // The modifier slots of IndexIndirectRegisterLocations (rdx = modifier): base vertex (bit 0),
-    // draw index (bit 1, high half of the low dword), first instance (bit 2) and the bit-59 flag.
-    private static readonly AgcModifierSgprSlot BaseVertexSlot = new(AgcStubRegister.Rdx, 1, 9, 0x280, 0);
-    private static readonly AgcModifierSgprSlot DrawIndexSlot = new(AgcStubRegister.Rdx, 2, 14, 0, 16);
-    private static readonly AgcModifierSgprSlot FirstInstanceSlot = new(AgcStubRegister.Rdx, 4, 19, 0x280, 0);
-    private static readonly AgcModifierSgprSlot DrawIndexFlagSlot = new(AgcStubRegister.Rdx, 2, -1, 0, 59 - 32);
+    // The modifier slots of IndexIndirectRegisterLocations (rdx = modifier): base vertex (bit 0) and
+    // first instance (bit 2), each none (0x280) when the modifier passes the values in VGPRs (bit 4).
+    // A single draw has no draw-index slot.
+    private static readonly AgcModifierSgprSlot BaseVertexSlot =
+        new(AgcStubRegister.Rdx, DrawModifierStartVertex, 9, 0x280, 0) { DisableMask = DrawModifierUserVgprs };
+    private static readonly AgcModifierSgprSlot FirstInstanceSlot =
+        new(AgcStubRegister.Rdx, DrawModifierStartInstance, 19, 0x280, 0) { DisableMask = DrawModifierUserVgprs };
 
     // IndirectDrawInitiator of rdx.
     private static AgcPacketStubWord IndirectDrawInitiatorOfRdx() =>
@@ -140,7 +145,7 @@ public static partial class AgcExports
         ["t1vNu082-jM"] = new(5, 0,                                                                  // sceAgcDcbDrawIndexIndirect
         [
             Const(Pm4(5, ItDrawIndexIndirect, 0)), Arg(AgcStubRegister.Rsi),
-            Slots(BaseVertexSlot, DrawIndexSlot), Slots(FirstInstanceSlot, DrawIndexFlagSlot), IndirectDrawInitiatorOfRdx(),
+            Slots(BaseVertexSlot), Slots(FirstInstanceSlot), IndirectDrawInitiatorOfRdx(),
         ]),
         ["1q1titRBL6o"] = new(5, 0,                                                                  // sceAgcDcbDrawIndirect
         [

@@ -20,6 +20,9 @@ public sealed class NpOfflineServiceExportsTests : IDisposable
     private const int CallbackNotRegistered = unchecked((int)0x80550009);
     private const int RequestNotFound = unchecked((int)0x80550014);
     private const int EntitlementParameter = unchecked((int)0x817D0002);
+    // libSceNpEntitlementAccess reports a signed-out profile with its own code (upstream's error model).
+    private const int EntitlementSignedOut = unchecked((int)0x817D0014);
+    private const int EntitlementRequestNotFound = unchecked((int)0x817D0015);
     private readonly FakeCpuMemory _memory = new(MemoryBase, 0x1_0000);
     private readonly CpuContext _ctx;
 
@@ -186,18 +189,15 @@ public sealed class NpOfflineServiceExportsTests : IDisposable
     [Fact]
     public void EntitlementRequests_FailSignedOutAtTheRequestStageAndPollReportsTheSame()
     {
+        // The requests whose request-id argument no reference or title pins create no request.
         var calls = new Func<CpuContext, int>[]
         {
             NpEntitlementAccessExports.NpEntitlementAccessRequestServiceEntitlementInfo,
-            NpEntitlementAccessExports.NpEntitlementAccessRequestServiceEntitlementInfoList,
             NpEntitlementAccessExports.NpEntitlementAccessRequestUnifiedEntitlementInfo,
-            NpEntitlementAccessExports.NpEntitlementAccessRequestUnifiedEntitlementInfoList,
             NpEntitlementAccessExports.NpEntitlementAccessRequestConsumeServiceEntitlement,
             NpEntitlementAccessExports.NpEntitlementAccessRequestConsumeUnifiedEntitlement,
             NpEntitlementAccessExports.NpEntitlementAccessPollServiceEntitlementInfo,
-            NpEntitlementAccessExports.NpEntitlementAccessPollServiceEntitlementInfoList,
             NpEntitlementAccessExports.NpEntitlementAccessPollUnifiedEntitlementInfo,
-            NpEntitlementAccessExports.NpEntitlementAccessPollUnifiedEntitlementInfoList,
             NpEntitlementAccessExports.NpEntitlementAccessPollConsumeEntitlement,
         };
         var output = MemoryBase + 0x100;
@@ -205,20 +205,47 @@ public sealed class NpOfflineServiceExportsTests : IDisposable
         foreach (var call in calls)
         {
             Args(1, 2, output, 4);
-            Assert.Equal(SignedOut, call(_ctx));
-            Assert.Equal(unchecked((ulong)SignedOut), _ctx[CpuRegister.Rax]);
+            Assert.Equal(EntitlementSignedOut, call(_ctx));
+            Assert.Equal(unchecked((ulong)EntitlementSignedOut), _ctx[CpuRegister.Rax]);
         }
 
         Assert.All(Read(output, 4), b => Assert.Equal(0x7E, b));
     }
 
+    // The unified entitlement list request and its poll keep upstream's request lifecycle
+    // (NpEntitlementAccessExportsTests): abort and delete name a request, and one never made is not found.
     [Fact]
-    public void EntitlementRequestLifecycle_AbortAndDeleteSucceedWithNoRequestsOutstanding()
+    public void EntitlementRequestLifecycle_AbortAndDeleteReportARequestNeverMade()
     {
-        Args(1);
-        Assert.Equal(0, NpEntitlementAccessExports.NpEntitlementAccessAbortRequest(_ctx));
+        Args(0x7FFF_FFFF_0000);
+        Assert.Equal(EntitlementRequestNotFound, NpEntitlementAccessExports.NpEntitlementAccessAbortRequest(_ctx));
+        Assert.Equal(EntitlementRequestNotFound, NpEntitlementAccessExports.NpEntitlementAccessDeleteRequest(_ctx));
+    }
+
+    // The service entitlement list request follows the unified list's lifecycle (Silent Hill: The Short Message
+    // calls both pairs with the same arguments): it finishes at once, signed out, with no entitlements.
+    [Fact]
+    public void ServiceEntitlementListRequest_FinishesSignedOutUntilDeleted()
+    {
+        var requestIdAddress = MemoryBase + 0x300;
+        Args(0x1000_0000, 0, 0, 0, MemoryBase + 0x380, requestIdAddress);
+        Assert.Equal(0, NpEntitlementAccessExports.NpEntitlementAccessRequestServiceEntitlementInfoList(_ctx));
+        var requestId = BinaryPrimitives.ReadUInt64LittleEndian(Read(requestIdAddress, 8));
+        Assert.NotEqual(0UL, requestId);
+
+        var result = MemoryBase + 0x400;
+        _memory.TryWrite(result, Enumerable.Repeat((byte)0xA5, 12).ToArray());
+        Args(requestId, result, MemoryBase + 0x500, 100, result + 4, result + 8);
+        Assert.Equal(0, NpEntitlementAccessExports.NpEntitlementAccessPollServiceEntitlementInfoList(_ctx));
+        var written = Read(result, 12);
+        Assert.Equal(EntitlementSignedOut, BinaryPrimitives.ReadInt32LittleEndian(written));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(written.AsSpan(4)));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(written.AsSpan(8)));
+
+        Args(requestId);
         Assert.Equal(0, NpEntitlementAccessExports.NpEntitlementAccessDeleteRequest(_ctx));
-        Assert.Equal(0, NpEntitlementAccessExports.NpEntitlementAccessDeleteRequest(_ctx));
+        Args(requestId, result);
+        Assert.Equal(EntitlementRequestNotFound, NpEntitlementAccessExports.NpEntitlementAccessPollServiceEntitlementInfoList(_ctx));
     }
 
     [Fact]
@@ -227,7 +254,7 @@ public sealed class NpOfflineServiceExportsTests : IDisposable
         Args(0);
         Assert.Equal(EntitlementParameter, NpEntitlementAccessExports.NpEntitlementAccessGenerateTransactionId(_ctx));
         Args(MemoryBase + 0x100);
-        Assert.Equal(SignedOut, NpEntitlementAccessExports.NpEntitlementAccessGenerateTransactionId(_ctx));
+        Assert.Equal(EntitlementSignedOut, NpEntitlementAccessExports.NpEntitlementAccessGenerateTransactionId(_ctx));
 
         var flag = MemoryBase + 0x200;
         _memory.TryWrite(flag, [0xFF, 0xFF, 0xFF, 0xFF]);

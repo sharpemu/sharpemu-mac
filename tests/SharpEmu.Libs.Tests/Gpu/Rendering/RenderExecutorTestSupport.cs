@@ -245,6 +245,7 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void AwaitProgramsBeforePreparation(ShaderProgram first, ShaderProgram second) => Calls.Add("await_programs");
     public DrawScopeToken Scope { get; set; }
+    public bool EndScopeOnBindingCommit { get; set; }
 
     public DrawScopeToken DrawScope => Scope;
 
@@ -371,8 +372,14 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void BindResources(IPreparedBindings prepared) => Calls.Add($"bind_resources {((RecordedBindings)prepared).Id}");
 
-    public void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages) =>
+    public void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
+    {
         Calls.Add($"commit {bindPoint} {pipeline.Pipeline:X} [{string.Join(",", stages.ToArray().Select(s => ((RecordedBindings)s).Id))}]");
+        if (EndScopeOnBindingCommit)
+        {
+            Scope = default;
+        }
+    }
 
     public void SetDynamicState(in DynamicDrawState state)
     {
@@ -787,6 +794,13 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         CompletionRequested?.Invoke();
         return PendingComputeCompletion;
     }
+
+    public HashSet<ulong> SlowLinkedPrograms { get; } = [];
+    public List<(ulong Hash, bool Slow)> RecordedLinkedCompiles { get; } = [];
+
+    public bool IsSlowLinkedCompile(ulong hash) => SlowLinkedPrograms.Contains(hash);
+
+    public void RecordLinkedCompile(ulong hash, bool slow, long milliseconds) => RecordedLinkedCompiles.Add((hash, slow));
 
     public bool TryCreateComputePipeline(ComputeInputInfo input, ShaderProgram program, out PipelineHandle handle)
     {

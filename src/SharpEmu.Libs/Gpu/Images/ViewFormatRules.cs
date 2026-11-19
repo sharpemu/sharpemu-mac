@@ -284,20 +284,28 @@ public static class ViewFormatRules
 
     public static bool IsSupportedSampledDepthView(GpuFormat imageFormat, GpuFormat viewFormat, uint swizzle)
     {
-        if (!IsSupportedSampledDepthFormat(imageFormat, viewFormat))
+        if (!IsSupportedSampledDepthFormat(imageFormat, viewFormat) || (swizzle & ~0xfffu) != 0)
         {
             return false;
         }
 
         // A depth view has one channel: the hardware reads its missing green and blue as 0 and
         // alpha as 1, so the identity select samples exactly as (X, 0, 0, 1) does.
-        var single = swizzle;
         if (swizzle == PackDestinationSelect(4, 5, 6, 7))
         {
-            single = PackDestinationSelect(4, 0, 0, 1);
+            return true;
         }
 
-        return single == PackDestinationSelect(4, 4, 4, 4) || single == PackDestinationSelect(4, 0, 0, 0) || single == PackDestinationSelect(4, 0, 0, 1);
+        // Otherwise the swizzle may repeat the one channel and fill the others with 0 or 1.
+        for (uint channel = 0; channel < 4; channel++)
+        {
+            if (DestinationSelect(swizzle, channel) is not (0 or 1 or 4))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public static uint SelectSampledDepthView(GpuFormat imageFormat, GpuFormat viewFormat, uint swizzle) =>

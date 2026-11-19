@@ -175,7 +175,9 @@ public sealed class HttpOfflineLifecycleTests
 {
     private const ulong MemoryBase = 0x1_0000_0000;
     private const int ErrorBeforeInit = unchecked((int)0x80431001);
-    private const int ErrorNetwork = unchecked((int)0x80431063);
+    // Offline, a send fails because the host name never resolves, and no response exists to query.
+    private const int ErrorResolverNoDns = unchecked((int)0x80436002);
+    private const int ErrorBeforeSend = unchecked((int)0x80431065);
     private const int ErrorAborted = unchecked((int)0x80431080);
     private const int ErrorInvalidId = unchecked((int)0x80431100);
     private const int ErrorInvalidValue = unchecked((int)0x804311FE);
@@ -302,7 +304,9 @@ public sealed class HttpOfflineLifecycleTests
     public void Creation_ValidatesArguments()
     {
         var context = Init();
-        Assert.Equal(ErrorInvalidValue, Call(HttpExports.HttpCreateTemplate, unchecked((uint)context), 0, 2));
+        // A null user agent is accepted (upstream's libSceHttp does the same); a bad version is not.
+        Assert.Equal(0, Call(HttpExports.HttpCreateTemplate, unchecked((uint)context), 0, 2));
+        Assert.NotEqual(0UL, _ctx[CpuRegister.Rax]);
         Assert.Equal(ErrorInvalidValue, Call(HttpExports.HttpCreateTemplate, unchecked((uint)context), Str(0, "a"), 9));
         var template = Template(context);
 
@@ -326,16 +330,16 @@ public sealed class HttpOfflineLifecycleTests
         var request = Request(Connection(Template(context)));
 
         Assert.Equal(ErrorInvalidValue, Call(HttpExports.HttpSendRequest, unchecked((uint)request), 0, 5));
-        Assert.Equal(ErrorNetwork, Call(HttpExports.HttpSendRequest, unchecked((uint)request)));
+        Assert.Equal(ErrorResolverNoDns, Call(HttpExports.HttpSendRequest, unchecked((uint)request)));
 
         _memory.TryWrite(MemoryBase, [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
-        Assert.Equal(ErrorNetwork, Call(HttpExports.HttpGetStatusCode, unchecked((uint)request), MemoryBase));
-        Assert.Equal(ErrorNetwork, Call(HttpExports.HttpGetResponseContentLength, unchecked((uint)request), MemoryBase + 4, MemoryBase + 0x10));
+        Assert.Equal(ErrorBeforeSend, Call(HttpExports.HttpGetStatusCode, unchecked((uint)request), MemoryBase));
+        Assert.Equal(ErrorBeforeSend, Call(HttpExports.HttpGetResponseContentLength, unchecked((uint)request), MemoryBase + 4, MemoryBase + 0x10));
         Span<byte> bytes = stackalloc byte[8];
         Assert.True(_memory.TryRead(MemoryBase, bytes[..4]));
         Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(bytes));
-        Assert.Equal(ErrorNetwork, Call(HttpExports.HttpReadData, unchecked((uint)request), MemoryBase, 16));
-        Assert.Equal(ErrorNetwork, Call(HttpExports.HttpGetAllResponseHeaders, unchecked((uint)request), MemoryBase, MemoryBase + 8));
+        Assert.Equal(ErrorBeforeSend, Call(HttpExports.HttpReadData, unchecked((uint)request), MemoryBase, 16));
+        Assert.Equal(ErrorBeforeSend, Call(HttpExports.HttpGetAllResponseHeaders, unchecked((uint)request), MemoryBase, MemoryBase + 8));
 
         _memory.TryWrite(MemoryBase, [5, 5, 5, 5]);
         Assert.Equal(0, Call(HttpExports.HttpGetLastErrno, unchecked((uint)request), MemoryBase));

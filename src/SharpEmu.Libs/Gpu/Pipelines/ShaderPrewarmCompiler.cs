@@ -12,9 +12,10 @@ public static class ShaderPrewarmCompiler
     public static bool TryCompilePrewarm(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
         bool sharedInt64Atomics, bool execGuardElision, bool signedZeroInfNanPreserve, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error,
         bool hostWave64Supported = false, bool hostComputeSubgroup32 = false, bool imageInt64Atomics = false, bool tableBlocks = false,
-        Func<ulong, IShaderFrontend?>? frontendOf = null) =>
+        Func<ulong, IShaderFrontend?>? frontendOf = null, bool runtimeImageSwizzles = false) =>
         ShaderProgramCache.TryCompilePrewarm(record, code, compiler, sharedInt64Atomics, execGuardElision, signedZeroInfNanPreserve, out compiled, out layout, out error,
-            hostWave64Supported, hostComputeSubgroup32, imageInt64Atomics, tableBlocks, frontendOf);
+            hostWave64Supported, hostComputeSubgroup32, imageInt64Atomics, tableBlocks: tableBlocks, frontendOf: frontendOf,
+            runtimeImageSwizzles: runtimeImageSwizzles);
 
     /// <summary>
     /// Translates a recorded graphics program through the shared plan, layout and request builders

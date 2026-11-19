@@ -244,6 +244,9 @@ internal static unsafe partial class VulkanVideoPresenter
             public long Sequence;
             public ResolveReadLog Reads = null!;
             public CleanReadPages? CleanReads;
+            public ulong DirectPage = ulong.MaxValue;
+            public nint DirectAlias;
+            public object? DirectSnapshot;
         }
 
         [ThreadStatic]
@@ -266,6 +269,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             worker.Sequence = sequence;
             worker.Reads = reads;
+            worker.DirectPage = ulong.MaxValue;
             reads.Version = _bufferCache.GpuModifiedVersion;
             reads.Publications = _guestPublications.Ordinal;
         }
@@ -357,7 +361,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (IsPendingForWorker(address, size))
             {
-                throw new SerialResolveRequiredException("pending write read");
+                throw new SerialResolveRequiredException(PendingReadReason(address, size, worker.Sequence));
             }
 
             if (!_commandThread!.ReadOverlayBefore(address, destination, worker.Sequence))
@@ -392,6 +396,24 @@ internal static unsafe partial class VulkanVideoPresenter
 
             AgcExports.NoteWorkerShadowRead((int)shadowSource);
             return true;
+        }
+
+        private static readonly string[] PendingReadReasons =
+            [.. Enum.GetNames<SharpEmu.Libs.Gpu.Rendering.PendingWriteKind>().Select(static name => "pending write read " + name.ToLowerInvariant())];
+
+        private string PendingReadReason(ulong address, ulong size, long sequence)
+        {
+            if (!RenderPhaseProfile.Enabled)
+            {
+                return "pending write read";
+            }
+
+            if (_translation.PendingWrites is { } pending && pending.KindBetween(address, size, pending.Released, sequence) is { } kind)
+            {
+                return PendingReadReasons[(int)kind];
+            }
+
+            return "pending write read shadow";
         }
 
         private bool IsGpuOwnedForWorkerRead(ulong address, ulong size) => _bufferCache.HasGpuDirtyBytes(address, size);
@@ -595,6 +617,11 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             RenderPhaseProfile.RecordCleanRead(hit: false);
+            if (!_guestMemory.CanRead(address, size))
+            {
+                return false;
+            }
+
             var thread = _commandThread!;
             if (thread.TryReadShadow(address, destination, out var shadowSequence, out var shadowSource) &&
                 !NewerPendingWrite(address, size, shadowSequence) && !thread.HasPendingRangeAfter(address, size, shadowSequence))
@@ -1011,6 +1038,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 default:
                     throw SubmissionScheduler.Fatal($"The end-of-pipe write kind is unknown: kind={write.Kind}.");
             }
+
+            // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the release completes with the recording it is in now; batching is unchanged.
+            write.Landing?.Recorded(_scheduler.CurrentTick);
         }
 
         public void TriggerInterrupt(int eventId, uint contextId)

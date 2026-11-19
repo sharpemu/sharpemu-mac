@@ -364,6 +364,7 @@ public static class KernelExports
     {
         var value = ctx[CpuRegister.Rdi];
         // Run cleanup on the still-executable thread before unwinding it.
+        // C++ thread_local destructors first, then the pthread key destructors and thread dtors.
         KernelPthreadBarrierCancelCompatExports.RunThreadExitDestructors(ctx);
         GuestThreadExecution.RequestCurrentEntryExit("scePthreadExit", value);
         ctx[CpuRegister.Rax] = value;
@@ -378,6 +379,7 @@ public static class KernelExports
     public static int PosixPthreadExit(CpuContext ctx)
     {
         var value = ctx[CpuRegister.Rdi];
+        // C++ thread_local destructors first, then the pthread key destructors and thread dtors.
         KernelPthreadBarrierCancelCompatExports.RunThreadExitDestructors(ctx);
         GuestThreadExecution.RequestCurrentEntryExit("pthread_exit", value);
         ctx[CpuRegister.Rax] = value;
