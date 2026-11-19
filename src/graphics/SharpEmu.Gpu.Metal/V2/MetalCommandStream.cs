@@ -1483,11 +1483,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // Reads overlapping this queued write wait until the worker installed
             // its overlay. Unrelated packets can continue; prefetch's non-draw gate
             // still orders future resource reads after the write.
-            _commandThread!.PostWrite(() => RecordCommandProcessorWrite(address, queued, kind, causal), address, queued, UngatedWrites);
+            _commandThread!.PostWrite(() => RecordCommandProcessorWrite(address, queued, kind, causal, queued), address, queued, UngatedWrites);
         }
         else
         {
-            RunTagged(() => RecordCommandProcessorWrite(address, queued, kind, causal), nameof(RecordCommandProcessorWrite));
+            RunTagged(() => RecordCommandProcessorWrite(address, queued, kind, causal, queued), nameof(RecordCommandProcessorWrite));
         }
     }
 
@@ -1495,7 +1495,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind) =>
         RecordCommandProcessorWrite(address, source, kind, causal: true);
 
-    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal)
+    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal) =>
+        RecordCommandProcessorWrite(address, source, kind, causal, owned: null);
+
+    // owned: source's own array, which the caller hands over (the command thread's queued copy): a write the GPU
+    // cannot make lands from it, not from another copy (upstream b13a98086, "Post owned store data without copying it
+    // again").
+    private void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal, byte[]? owned)
     {
         if (OnCommandThread)
         {
@@ -1534,7 +1540,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         Interlocked.Increment(ref _hostCommandProcessorWrites);
-        var bytes = source.ToArray();
+        var bytes = owned is not null && owned.Length == source.Length ? owned : source.ToArray();
         var landedKind = CommandProcessorWriteHistory.Enabled ? "landed:" + kind : null;
         var lazy = RidesNextCommit(clock: false);
         Interlocked.Increment(ref _owedHostLabels);
