@@ -574,6 +574,43 @@ public static partial class Gen5MslTranslator
         /// functions only for kernel and fragment functions (MSL spec 6.10) and gives a
         /// vertex function no [[thread_index_in_simdgroup]], so there is no supported
         /// lane index to shuffle or ballot against.</summary>
+        /// <summary>The draw parameters of a vertex program (SupportsDrawParameters, as the SPIR-V
+        /// translator reads them): the guest's instance index counts from 0 and the draw's start
+        /// instance reaches it only through the user data an indirect packet names
+        /// (StartInstanceUserData); the vertex index counts from the draw's base vertex when an
+        /// indirect packet names user data for that (BaseVertexUserData), which then holds it.
+        /// Metal's vertex_id and instance_id include the draw's base vertex and base instance.
+        /// A domain program is a post-tessellation function with a launch of its own.</summary>
+        private bool UsesDrawParameters =>
+            _request.SupportsDrawParameters &&
+            _stage is Gen5MslStage.Vertex or Gen5MslStage.Mesh &&
+            _request.Tessellation is not { Role: Gen5TessellationRole.Domain };
+
+        private bool StoresBaseVertex => UsesDrawParameters && _request.BaseVertexUserData >= 0;
+
+        private bool StoresStartInstance => UsesDrawParameters && _request.StartInstanceUserData >= 0;
+
+        // The user-data SGPR an indirect packet names, as the SPIR-V translator stores it
+        // (UserDataBase + index); one past the register file has nowhere to go.
+        private string? DrawParameterScalar(int userData)
+        {
+            var register = _request.UserDataBase + (uint)userData;
+            return register < ScalarRegisterFileCount ? $"s[{register}]" : null;
+        }
+
+        private void EmitDrawParameterStores(StringBuilder source, string baseVertex, string baseInstance)
+        {
+            if (StoresBaseVertex && DrawParameterScalar(_request.BaseVertexUserData) is { } vertexScalar)
+            {
+                source.AppendLine($"    {vertexScalar} = {baseVertex};");
+            }
+
+            if (StoresStartInstance && DrawParameterScalar(_request.StartInstanceUserData) is { } instanceScalar)
+            {
+                source.AppendLine($"    {instanceScalar} = {baseInstance};");
+            }
+        }
+
         private bool HasRealWaveLanes =>
             _stage is Gen5MslStage.Compute or Gen5MslStage.Mesh ||
             (_stage == Gen5MslStage.Pixel && _request.EnableGraphicsSubgroupOperations);
@@ -1063,6 +1100,15 @@ public static partial class Gen5MslTranslator
             {
                 source.AppendLine("    uint sharpemu_vertex_id [[vertex_id]],");
                 source.AppendLine("    uint sharpemu_instance_id [[instance_id]],");
+                if (StoresBaseVertex)
+                {
+                    source.AppendLine("    uint sharpemu_base_vertex [[base_vertex]],");
+                }
+
+                if (UsesDrawParameters)
+                {
+                    source.AppendLine("    uint sharpemu_base_instance [[base_instance]],");
+                }
             }
             else if (_stage == Gen5MslStage.Compute && IsWave64)
             {
@@ -1668,9 +1714,16 @@ public static partial class Gen5MslTranslator
             }
             else if (_stage == Gen5MslStage.Vertex)
             {
-                // Hardware-selected VGPRs for the vertex and instance indices.
-                source.AppendLine("    v[5] = sharpemu_vertex_id;");
-                source.AppendLine("    v[8] = sharpemu_instance_id;");
+                // Hardware-selected VGPRs for the vertex and instance indices. With draw
+                // parameters they count from the draw's base vertex (when user data holds it)
+                // and base instance, as Gen5SpirvTranslator's vertex entry does.
+                source.AppendLine(StoresBaseVertex
+                    ? "    v[5] = sharpemu_vertex_id - sharpemu_base_vertex;"
+                    : "    v[5] = sharpemu_vertex_id;");
+                source.AppendLine(UsesDrawParameters
+                    ? "    v[8] = sharpemu_instance_id - sharpemu_base_instance;"
+                    : "    v[8] = sharpemu_instance_id;");
+                EmitDrawParameterStores(source, "sharpemu_base_vertex", "sharpemu_base_instance");
             }
             else if (_stage == Gen5MslStage.Mesh)
             {

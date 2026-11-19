@@ -703,9 +703,12 @@ public static partial class Gen5MslTranslator
                     "    const uint sharpemu_mesh_prim_slot = sharpemu_meshlets_on ? sharpemu_ml.z + sharpemu_tg_index : " +
                     $"sharpemu_mesh_subgroup * {MeshDrawInfoName}.primitives_per_subgroup + sharpemu_tg_index;");
             }
+            // With the base vertex in user data (BaseVertexUserData) the guest index counts
+            // from it and the user data holds it, as on the vertex path.
+            var baseVertexTerm = StoresBaseVertex ? string.Empty : $" + {MeshDrawInfoName}.base_vertex";
             var plainVertexIndex =
                 $"(uint)((int)sharpemu_mesh_index({MeshIndexBufferName}, " +
-                $"{MeshDrawInfoName}, sharpemu_mesh_vertex_slot) + {MeshDrawInfoName}.base_vertex)";
+                $"{MeshDrawInfoName}, sharpemu_mesh_vertex_slot){baseVertexTerm})";
             if (!mesh.HasGeometryHalf && !mesh.Amplified)
             {
                 // A meshlet lists its vertices' raw index values; the lane past the meshlet's
@@ -715,7 +718,7 @@ public static partial class Gen5MslTranslator
                 source.AppendLine(
                     "        ? (sharpemu_tg_index < (sharpemu_ml.w & 0xFFFFu)");
                 source.AppendLine(
-                    $"            ? (uint)((int){MeshletBufferName}[{MeshDrawInfoName}.meshlet_vertex_base + sharpemu_ml.x + sharpemu_tg_index] + {MeshDrawInfoName}.base_vertex)");
+                    $"            ? (uint)((int){MeshletBufferName}[{MeshDrawInfoName}.meshlet_vertex_base + sharpemu_ml.x + sharpemu_tg_index]{baseVertexTerm})");
                 source.AppendLine("            : 0u)");
                 source.AppendLine($"        : {plainVertexIndex};");
             }
@@ -723,8 +726,10 @@ public static partial class Gen5MslTranslator
             {
                 source.AppendLine($"    const uint sharpemu_mesh_vertex_index = {plainVertexIndex};");
             }
-            source.AppendLine(
-                $"    const uint sharpemu_mesh_instance_index = {MeshDrawInfoName}.first_instance + sharpemu_mesh_instance;");
+            source.AppendLine(UsesDrawParameters
+                ? "    const uint sharpemu_mesh_instance_index = sharpemu_mesh_instance;"
+                : $"    const uint sharpemu_mesh_instance_index = {MeshDrawInfoName}.first_instance + sharpemu_mesh_instance;");
+            EmitDrawParameterStores(source, $"(uint){MeshDrawInfoName}.base_vertex", $"{MeshDrawInfoName}.first_instance");
             source.AppendLine();
 
             // Merged wave info: this wave's ES vertex count in bits 0-7, its GS primitive

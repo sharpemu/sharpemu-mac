@@ -144,7 +144,7 @@ public static class Gen5MslMeshLaunch
 
     /// <summary>
     /// The parameters of one non-indexed rectangle-list slot: the kernel writes Gen5RectDraw
-    /// (vertex_base = firstVertex) and MTLDrawPatchIndirectArguments with one patch per
+    /// (vertex_base = base_vertex = firstVertex) and MTLDrawPatchIndirectArguments with one patch per
     /// rectangle, as the CPU draw does.
     /// </summary>
     public static void WriteRectangleParameters(Span<uint> parameters, ulong argumentsOffset, ulong maxThreadgroups)
@@ -198,7 +198,7 @@ public static class Gen5MslMeshLaunch
             const ulong limit = ulong(p.max_threadgroups_low) | (ulong(p.max_threadgroups_high) << 32);
 
             // A non-indexed rectangle list: Gen5RectDraw (vertex_base, vertex_offset,
-            // index_type, first_index), then (patchCount, instanceCount, patchStart,
+            // index_type, first_index, base_vertex), then (patchCount, instanceCount, patchStart,
             // baseInstance), one patch per {{Gen5MslRectangleList.VerticesPerRectangle}} vertices.
             if (p.rectangle_list != 0u)
             {
@@ -207,6 +207,7 @@ public static class Gen5MslMeshLaunch
                 block[1] = 0u;
                 block[2] = 0u;
                 block[3] = 0u;
+                block[4] = arguments[2];
                 grid[0] = ulong(patches) * ulong(arguments[1]) > limit ? 0u : patches;
                 grid[1] = arguments[1];
                 grid[2] = 0u;

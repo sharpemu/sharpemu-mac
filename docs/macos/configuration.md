@@ -65,6 +65,7 @@ them for measurements or to isolate a problem.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `SHARPEMU_METAL_MESH_SHADERS` | on | `0` disables mesh pipelines for primitive-shader draws. |
+| `SHARPEMU_METAL_DRAW_PARAMETERS` | on | `0` turns off draw parameters in translated vertex programs. By default a vertex program's instance index counts from the draw's base instance, and when an indirect draw names a user-data register for its base vertex or start instance, the program counts its vertex index from the base vertex and stores both bases there (the command processor no longer writes those registers). `0` gives the program Metal's ids, which include both bases, and stores nothing. |
 | `SHARPEMU_METAL_MESHLETS` | on | `0` disables the meshlet cache. |
 | `SHARPEMU_METAL_V2_BINARY_ARCHIVE` | on | `0` disables the on-disk library and pipeline archives. |
 | `SHARPEMU_METAL_V2_BINARY_ARCHIVE_BUDGET_MB` | `8192` | Size bound of the archives on disk. |

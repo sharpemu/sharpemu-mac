@@ -34,8 +34,10 @@ public static partial class Gen5MslRectangleList
     public const int IndexBufferIndex = 29;
 
     /// <summary>Byte size of the per-draw block: vertex_base, vertex_offset, index_type
-    /// (0 none, 1 16-bit, 2 32-bit) and first_index, one dword each.</summary>
-    public const uint DrawInfoByteSize = 16;
+    /// (0 none, 1 16-bit, 2 32-bit), first_index and base_vertex (the draw's base vertex as
+    /// a vertex function's [[base_vertex]] gives it: the first vertex of an automatic draw,
+    /// the vertex offset of an indexed one), one dword each.</summary>
+    public const uint DrawInfoByteSize = 20;
 
     /// <summary>Guest vertices per rectangle.</summary>
     public const uint VerticesPerRectangle = 3;
@@ -105,6 +107,14 @@ public static partial class Gen5MslRectangleList
             if (parameter.Contains("[[vertex_id]]", StringComparison.Ordinal))
             {
                 arguments.Add("sharpemu_rect_vertex_id(sharpemu_rect_draw, sharpemu_rect_indices, sharpemu_rect_patch, corner)");
+                continue;
+            }
+
+            // A post-tessellation function has no [[base_vertex]]; the draw block holds the
+            // base the vertex ids above count from.
+            if (parameter.Contains("[[base_vertex]]", StringComparison.Ordinal))
+            {
+                arguments.Add("sharpemu_rect_base_vertex(sharpemu_rect_draw)");
                 continue;
             }
 
@@ -231,6 +241,7 @@ public static partial class Gen5MslRectangleList
                 int vertex_offset;
                 uint index_type;
                 uint first_index;
+                uint base_vertex;
             };
 
             // The guest vertex index of one corner of a rectangle: consecutive vertices from
@@ -249,6 +260,14 @@ public static partial class Gen5MslRectangleList
                     ? (indices[offset >> 1u] >> ((offset & 1u) * 16u)) & 0xFFFFu
                     : indices[offset];
                 return index + (uint)draw.vertex_offset;
+            }
+
+            // The base vertex the draw's vertex ids count from. The block carries it apart from
+            // vertex_offset: an indirect draw rebased on the GPU folds its offset into the
+            // indices it hands over.
+            static inline uint sharpemu_rect_base_vertex(constant Gen5RectDraw& draw)
+            {
+                return draw.base_vertex;
             }
 
             // The corner the rectangle's two edges leave at right angles: it shares x with one

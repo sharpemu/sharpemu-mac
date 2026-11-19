@@ -886,7 +886,8 @@ internal static class Gen5ComputeFixtures
         bool pixelStencilExportEnable = false, bool pixelSampleMaskExportEnable = false,
         uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true, bool pixelGuestWave32 = false,
         uint meshPerVertexParameterMask = 0, IReadOnlyList<uint>? vertexInterpolants = null,
-        Gen5TessellationLaunch? tessellation = null, bool pixelEarlyDepth = false)
+        Gen5TessellationLaunch? tessellation = null, bool pixelEarlyDepth = false, bool supportsDrawParameters = false,
+        int baseVertexUserData = -1, int startInstanceUserData = -1)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
             excludedUserDataRegisters: excludedUserDataRegisters);
@@ -930,6 +931,9 @@ internal static class Gen5ComputeFixtures
             PixelSampleMaskExportEnable = pixelSampleMaskExportEnable,
             PixelEarlyDepth = pixelEarlyDepth,
             Tessellation = tessellation,
+            SupportsDrawParameters = supportsDrawParameters,
+            BaseVertexUserData = baseVertexUserData,
+            StartInstanceUserData = startInstanceUserData,
         };
     }
 

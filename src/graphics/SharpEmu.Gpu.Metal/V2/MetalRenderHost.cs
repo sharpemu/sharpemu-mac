@@ -316,6 +316,17 @@ internal sealed partial class MetalRenderHost :
     // Tessellated draws are emulated (hull kernel + post-tessellation vertex function), never native stages.
     public bool TessellationStagesSupported => false;
 
+    // A vertex function has [[base_vertex]] and [[base_instance]] on every Apple GPU, so the
+    // translator counts the guest's vertex and instance indices from the draw's base and stores
+    // the base an indirect packet names in user data there (ShaderCompileRequest.BaseVertexUserData,
+    // StartInstanceUserData), which the command processor then leaves unwritten.
+    // SHARPEMU_METAL_DRAW_PARAMETERS=0 keeps Metal's ids (which include both bases) and stores
+    // neither, as before.
+    public bool ShaderDrawParametersSupported => DrawParameters;
+
+    internal static readonly bool DrawParameters =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_DRAW_PARAMETERS") != "0";
+
     public GpuSampleCount NoAttachmentSampleCounts => GpuSampleCount.Count1Bit;
 
     // Per-vertex pixel inputs are MSL 4.0's metal::vertex_value (macOS 26). The feature set
