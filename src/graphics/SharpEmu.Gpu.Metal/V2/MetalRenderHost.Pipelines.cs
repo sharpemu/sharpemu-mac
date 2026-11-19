@@ -839,6 +839,45 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
+    // SHARPEMU_METAL_V2_GRAPHICS_WAIT_OFF_CACHE=0 builds the pipeline of a draw that may not be left out under the
+    // pipeline cache's lock again (CreateGraphicsPipeline).
+    private static readonly bool GraphicsWaitsOffCacheDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GRAPHICS_WAIT_OFF_CACHE") != "0";
+
+    /// <summary>Whether a draw that must have its pipeline waits for it outside the pipeline cache's lock; tests set it.</summary>
+    internal bool GraphicsWaitsOffCache { get; set; } = GraphicsWaitsOffCacheDefault;
+
+    /// <summary>
+    /// A draw that may not be left out waits for its pipeline outside the pipeline cache's lock (upstream's graphics
+    /// pipeline compiles off the cache lock): the cache starts the compile with TryCreateGraphicsPipeline, waits here
+    /// without the lock, and asks again with the description that started it, which finds the compile by its
+    /// GraphicsCompileKey and registers the states on the worker as before. Meanwhile the programs of later draws
+    /// resolve on the prefetch threads instead of queueing behind the lock for the whole compile. Only with the
+    /// compiler threads (AsynchronousGraphics): without them TryCreateGraphicsPipeline builds in place.
+    /// </summary>
+    public bool WaitsForGraphicsPipelines => GraphicsWaitsOffCache && AsynchronousGraphics;
+
+    /// <summary>
+    /// Waits for the compile TryCreateGraphicsPipeline started for this description, as CreateGraphicsPipeline would:
+    /// a compile no compiler thread took yet is built on this thread, one a compiler thread runs is waited for. Inside
+    /// the draw's preparation, as the blocking build was: the store requests are not served here (the draw's
+    /// programs were waited for, serving them, in AwaitProgramsBeforePreparation).
+    /// </summary>
+    public void WaitForGraphicsPipeline(GraphicsPipelineDescription description)
+    {
+        // TryCreateGraphicsPipeline counted the draw as left out; it waits instead.
+        Interlocked.Decrement(ref _drawsSkippedCompiling);
+        Interlocked.Increment(ref _pipelineWaitsBlocking);
+        Interlocked.Increment(ref _graphicsWaitsOffCache);
+        NoteBlockingBuild();
+        Compiler.WaitFor(GraphicsCompileKey(description));
+    }
+
+    private long _graphicsWaitsOffCache;
+
+    /// <summary>Pipelines a draw waited for outside the pipeline cache's lock.</summary>
+    internal long GraphicsWaitsOffCacheCount => Interlocked.Read(ref _graphicsWaitsOffCache);
+
     // What identifies a graphics compile: the parts of the description its states are built from.
     private static GraphicsPipelineKey GraphicsCompileKey(GraphicsPipelineDescription description) => new()
     {
@@ -1815,15 +1854,16 @@ internal sealed partial class MetalRenderHost
 
             if (stencilEnabled)
             {
+                var (front, back) = StencilOperationsOf(entry.StaticParameters, in state);
                 ConfigureStencil(
                     descriptor,
                     MetalNative.Selector("setFrontFaceStencil:"),
-                    parameters!.StencilFront,
+                    front,
                     state.FrontStencil);
                 ConfigureStencil(
                     descriptor,
                     MetalNative.Selector("setBackFaceStencil:"),
-                    parameters.StencilBack,
+                    back,
                     state.BackStencil);
             }
 
@@ -1885,6 +1925,23 @@ internal sealed partial class MetalRenderHost
         }
     }
 
+    // The draw's stencil operations, as the shared recorder resolved them into its dynamic state (upstream keeps them
+    // dynamic and sets them with vkCmdSetStencilOp; here they go into the depth/stencil state). The pipeline's static
+    // parameters carry the same operations for the draw the pipeline was resolved for; the dynamic state is the
+    // draw's own. SHARPEMU_METAL_V2_DYNAMIC_STENCIL_OPS=0 reads the pipeline's again.
+    internal static (StencilOperations Front, StencilOperations Back) StencilOperationsOf(
+        PipelineStaticParameters? pipeline, in DynamicDrawState state) =>
+        DynamicStencilOperations || pipeline is null
+            ? (state.FrontStencilOperations, state.BackStencilOperations)
+            : (pipeline.StencilFront, pipeline.StencilBack);
+
+    // The depth/stencil state a draw with this pipeline state and dynamic state gets (tests).
+    internal nint DepthStencilStateForTest(bool hasDepth, bool hasStencil, PipelineStaticParameters parameters, in DynamicDrawState state) =>
+        GetDepthStencilState(new MetalPipelineEntry { HasDepth = hasDepth, HasStencil = hasStencil, StaticParameters = parameters }, in state);
+
+    private static readonly bool DynamicStencilOperations =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DYNAMIC_STENCIL_OPS") != "0";
+
     private static ulong MixDepthStencilKey(MetalPipelineEntry entry, in DynamicDrawState state, bool stencilEnabled)
     {
         var hash = 14695981039346656037UL;
@@ -1896,16 +1953,17 @@ internal sealed partial class MetalRenderHost
         Mix(MetalV2Diagnostics.LoosensEqualFor(entry.VertexHash) ? 1UL : 0UL);
         Mix(MetalV2Diagnostics.PassesDepthFor(entry.VertexHash) ? 1UL : 0UL);
         Mix(stencilEnabled ? 1UL : 0UL);
-        if (stencilEnabled && entry.StaticParameters is { } parameters)
+        if (stencilEnabled && entry.StaticParameters is not null)
         {
-            Mix((ulong)parameters.StencilFront.Compare);
-            Mix((ulong)parameters.StencilFront.FailOperation);
-            Mix((ulong)parameters.StencilFront.PassOperation);
-            Mix((ulong)parameters.StencilFront.DepthFailOperation);
-            Mix((ulong)parameters.StencilBack.Compare);
-            Mix((ulong)parameters.StencilBack.FailOperation);
-            Mix((ulong)parameters.StencilBack.PassOperation);
-            Mix((ulong)parameters.StencilBack.DepthFailOperation);
+            var (front, back) = StencilOperationsOf(entry.StaticParameters, in state);
+            Mix((ulong)front.Compare);
+            Mix((ulong)front.FailOperation);
+            Mix((ulong)front.PassOperation);
+            Mix((ulong)front.DepthFailOperation);
+            Mix((ulong)back.Compare);
+            Mix((ulong)back.FailOperation);
+            Mix((ulong)back.PassOperation);
+            Mix((ulong)back.DepthFailOperation);
             Mix(state.FrontStencil.CompareMask | ((ulong)state.FrontStencil.WriteMask << 32));
             Mix(state.BackStencil.CompareMask | ((ulong)state.BackStencil.WriteMask << 32));
         }

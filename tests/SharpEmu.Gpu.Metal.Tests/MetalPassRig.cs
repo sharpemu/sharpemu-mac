@@ -105,6 +105,12 @@ internal sealed unsafe class MetalPassRig : IDisposable
     /// fragments it holds for.
     public PipelineHandle Pipeline(
         GpuFormat[] formats, string[] outputs, float left = -1f, float right = 1f, bool knownPositions = false, bool mesh = false,
+        string? discardWhen = null) =>
+        Host.CreateGraphicsPipeline(PipelineDescription(formats, outputs, left, right, knownPositions, mesh, discardWhen));
+
+    /// <summary>The description <see cref="Pipeline"/> creates, with its programs' modules made.</summary>
+    public GraphicsPipelineDescription PipelineDescription(
+        GpuFormat[] formats, string[] outputs, float left = -1f, float right = 1f, bool knownPositions = false, bool mesh = false,
         string? discardWhen = null)
     {
         var id = _nextProgram;
@@ -241,7 +247,7 @@ internal sealed unsafe class MetalPassRig : IDisposable
             PixelStage = new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, Hash = id + 1 },
             StaticParameters = parameters,
         };
-        return Host.CreateGraphicsPipeline(description);
+        return description;
 
         static string F(float value) => value.ToString("F4", CultureInfo.InvariantCulture) + "f";
     }

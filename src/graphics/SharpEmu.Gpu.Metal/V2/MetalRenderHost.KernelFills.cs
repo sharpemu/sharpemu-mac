@@ -217,7 +217,7 @@ internal sealed partial class MetalRenderHost
             }
         }
 
-        return builder.Append(']').Append(TakeHostKernelCopyCounters()).ToString();
+        return builder.Append(']').Append(TakeHostKernelCopyCounters()).Append(TakePostedWordCopyCounters()).ToString();
     }
 
     // Whether a refused kernel's result is already in memory: every destination word holds

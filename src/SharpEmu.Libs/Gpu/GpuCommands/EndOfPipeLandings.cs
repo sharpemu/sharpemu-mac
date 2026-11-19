@@ -42,7 +42,8 @@ public sealed class EndOfPipeLanding
 
     // Render thread: the release is in the recording that Submit gives this tick (SubmissionScheduler reserves timeline
     // ticks only there, in order, so the current recording's tick is CurrentTick; QueueCompletionAction relies on the same).
-    internal void Recorded(ulong tick) => Volatile.Write(ref _tick, (long)tick);
+    // Public for hosts outside this assembly (the Metal host).
+    public void Recorded(ulong tick) => Volatile.Write(ref _tick, (long)tick);
 
     internal void Consume() => Volatile.Write(ref _consumed, 1);
 

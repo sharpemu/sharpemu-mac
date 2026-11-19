@@ -77,6 +77,8 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         // What kind of item this is, for the draws its gate holds (ParallelProgramPrefetch.NoteGateItem).
         public ParallelProgramPrefetch.GateItemKind GateKind;
         public bool Sync;
+        // The item's place in the queue among the indexed ones (DeferredCommandThread.PageIndex).
+        public long PostOrder;
         public volatile bool Done;
         public Exception? Failure;
     }
@@ -295,16 +297,20 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         return result;
     }
 
-    public void PostWrite(ulong address, ReadOnlySpan<byte> data)
+    public void PostWrite(ulong address, ReadOnlySpan<byte> data) => PostOwnedWrite(address, data.ToArray());
+
+    // A store whose bytes the caller hands over: they are queued as they are, not copied again.
+    public void PostOwnedWrite(ulong address, byte[] data)
     {
         var item = RentAsyncItem(Kind.Write);
         item.Address = address;
-        item.Data = data.ToArray();
+        item.Data = data;
         item.GateKind = ParallelProgramPrefetch.GateItemKind.CommandProcessorWrite;
         lock (_writeLock)
         {
             _pendingWrites.Enqueue(item);
             _pendingWriteCount = _pendingWrites.Count;
+            IndexPending(item, add: true);
         }
 
         Enqueue(item);
@@ -330,6 +336,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 _pendingRanges.Add(item);
                 _pendingRangeCount = _pendingRanges.Count;
                 PublishUngatedRange(item, add: true);
+                IndexPending(item, add: true);
             }
         }
 
@@ -355,6 +362,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 _pendingRanges.Add(item);
                 _pendingRangeCount = _pendingRanges.Count;
                 PublishUngatedRange(item, add: true);
+                IndexPending(item, add: true);
             }
         }
 
@@ -381,6 +389,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 _pendingRanges.Add(item);
                 _pendingRangeCount = _pendingRanges.Count;
                 PublishUngatedRange(item, add: true);
+                IndexPending(item, add: true);
             }
         }
 
@@ -424,6 +433,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 _pendingRanges.Add(item);
                 _pendingRangeCount = _pendingRanges.Count;
                 PublishUngatedRange(item, add: true);
+                IndexPending(item, add: true);
             }
         }
 
@@ -485,14 +495,34 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         }
 
         var size = (ulong)destination.Length;
+        if (!MayHavePendingItem(address, size))
+        {
+            return false;
+        }
+
         lock (_writeLock)
         {
+            var onPage = PendingOnPage(address, size);
             Item? last = null;
-            foreach (var pending in _pendingRanges)
+            foreach (var pending in onPage ?? _pendingRanges)
             {
-                if (!pending.IsLabel && address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                if (pending.Kind != Kind.Write && !pending.IsLabel && address < pending.Address + pending.RangeSize &&
+                    pending.Address < address + size)
                 {
                     last = pending;
+                }
+            }
+
+            if (onPage is not null)
+            {
+                // A wide item queued after the page's last one decides the bytes instead.
+                foreach (var pending in _widePending)
+                {
+                    if (pending.Kind != Kind.Write && address < pending.Address + pending.RangeSize &&
+                        pending.Address < address + size && (last is null || pending.PostOrder > last.PostOrder))
+                    {
+                        last = pending;
+                    }
                 }
             }
 
@@ -502,12 +532,9 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                 return false;
             }
 
-            foreach (var write in _pendingWrites)
+            if (OverlapsQueuedStoreLocked(onPage, address, size))
             {
-                if (address < write.Address + (ulong)write.Data!.Length && write.Address < address + size)
-                {
-                    return false;
-                }
+                return false;
             }
 
             // The last item over the bytes stores every one of them, so it alone decides them; a byte
@@ -618,13 +645,31 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
     private bool OverlapsPendingRange(ulong address, ulong size)
     {
+        if (!MayHavePendingItem(address, size))
+        {
+            return false;
+        }
+
         lock (_writeLock)
         {
-            foreach (var pending in _pendingRanges)
+            var onPage = PendingOnPage(address, size);
+            foreach (var pending in onPage ?? _pendingRanges)
             {
-                if (!pending.IsLabel && address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                if (pending.Kind != Kind.Write && !pending.IsLabel && address < pending.Address + pending.RangeSize &&
+                    pending.Address < address + size)
                 {
                     return true;
+                }
+            }
+
+            if (onPage is not null)
+            {
+                foreach (var pending in _widePending)
+                {
+                    if (pending.Kind != Kind.Write && address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                    {
+                        return true;
+                    }
                 }
             }
 
@@ -632,11 +677,52 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
         }
     }
 
+    // Under _writeLock: whether a queued store overlaps the range; onPage is PendingOnPage's answer.
+    private bool OverlapsQueuedStoreLocked(List<Item>? onPage, ulong address, ulong size)
+    {
+        if (_pendingWrites.Count == 0)
+        {
+            return false;
+        }
+
+        if (onPage is not null)
+        {
+            foreach (var write in onPage)
+            {
+                if (write.Kind == Kind.Write && address < write.Address + (ulong)write.Data!.Length && write.Address < address + size)
+                {
+                    return true;
+                }
+            }
+
+            foreach (var write in _widePending)
+            {
+                if (write.Kind == Kind.Write && address < write.Address + (ulong)write.Data!.Length && write.Address < address + size)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        foreach (var write in _pendingWrites)
+        {
+            if (address < write.Address + (ulong)write.Data!.Length && write.Address < address + size)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // Guest memory as the stream sees it: with its own stores applied, queued or not.
     public bool ReadOverlay(ulong address, Span<byte> destination)
     {
         WaitForPendingRange(address, (ulong)destination.Length);
-        if (_pendingWriteCount == 0)
+        // No queued store on the read's pages: memory is what the stream wrote, read without the lock.
+        if (_pendingWriteCount == 0 || !MayHavePendingItem(address, (ulong)destination.Length))
         {
             return _memory.TryRead(address, destination);
         }
@@ -649,22 +735,42 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
             }
 
             var end = address + (ulong)destination.Length;
-            foreach (var write in _pendingWrites)
+            var onPage = PendingOnPage(address, (ulong)destination.Length);
+            if (onPage is null || _widePendingCount != 0)
             {
-                var writeEnd = write.Address + (ulong)write.Data!.Length;
-                if (write.Address >= end || writeEnd <= address)
+                // Every queued store, oldest first: a wide one interleaves with the page's in queue order.
+                foreach (var write in _pendingWrites)
                 {
-                    continue;
+                    ApplyQueuedStore(write, address, end, destination);
                 }
 
-                var start = Math.Max(address, write.Address);
-                var stop = Math.Min(end, writeEnd);
-                write.Data.AsSpan((int)(start - write.Address), (int)(stop - start))
-                    .CopyTo(destination[(int)(start - address)..]);
+                return true;
+            }
+
+            foreach (var write in onPage)
+            {
+                if (write.Kind == Kind.Write)
+                {
+                    ApplyQueuedStore(write, address, end, destination);
+                }
             }
 
             return true;
         }
+    }
+
+    private static void ApplyQueuedStore(Item write, ulong address, ulong end, Span<byte> destination)
+    {
+        var writeEnd = write.Address + (ulong)write.Data!.Length;
+        if (write.Address >= end || writeEnd <= address)
+        {
+            return;
+        }
+
+        var start = Math.Max(address, write.Address);
+        var stop = Math.Min(end, writeEnd);
+        write.Data.AsSpan((int)(start - write.Address), (int)(stop - start))
+            .CopyTo(destination[(int)(start - address)..]);
     }
 
     // SHARPEMU_CT_ITEM_KINDS=1 (diagnostic): every two seconds, the non-draw items the stream handed over, by kind and
@@ -924,6 +1030,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
                     _pendingRanges.Remove(item);
                     _pendingRangeCount = _pendingRanges.Count;
                     PublishUngatedRange(item, add: false);
+                    IndexPending(item, add: false);
                 }
             }
 
@@ -951,6 +1058,7 @@ public sealed partial class DeferredCommandThread : AgcExports.IDeferredWorkSink
 
             _pendingWrites.Dequeue();
             _pendingWriteCount = _pendingWrites.Count;
+            IndexPending(item, add: false);
             if (!written)
             {
                 throw GpuFatal.Fatal(
