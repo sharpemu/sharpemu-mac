@@ -216,6 +216,27 @@ internal sealed class MetalPipelineCompiler : IDisposable
         return TryTakeFinished(key, pending, out result);
     }
 
+    /// <summary>
+    /// Blocks until the compile started for this key is done, leaving its result for TryTake: built here and now
+    /// when no compiler thread has started it, waited for when one has. Nothing to wait for when there is none.
+    /// The pipeline cache waits here outside its lock and then asks again (IShaderPipelineHost.WaitForGraphicsPipeline).
+    /// </summary>
+    public void WaitFor(object key)
+    {
+        if (!_pending.TryGetValue(key, out var pending))
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref pending.Claimed, 1, 0) == 0)
+        {
+            Build(pending);
+            return;
+        }
+
+        ((IAsyncResult)pending.Work).AsyncWaitHandle.WaitOne();
+    }
+
     // The finished result, if this caller removed it: one dropped as abandoned meanwhile was
     // released and is not handed out.
     private bool TryTakeFinished(object key, Pending pending, out Result? result)
